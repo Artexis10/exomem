@@ -33,6 +33,8 @@ from . import held_fs, media_types, originals, reserved_paths, semantic_contract
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
+from .vault_store import availability as store_availability
+from .vault_store import targets as store_targets
 from .vault import (
     VaultPathError,
     batch_atomic_write,
@@ -133,13 +135,19 @@ def _delete_file_local(
             ),
         )
 
+    # None in file mode. A store-mode vault holds its pages in the store, so the page is looked up
+    # there, and the trash move commits to the store as one transaction.
+    store_writer = store_availability.page_writer(Path(vault_root))
     evicted_original = None
     try:
-        abs_path, rel_path = resolve_under_vault(
-            vault_root, path, must_exist=True, must_be_file=True, refuse_withheld=True
-        )
+        if store_writer is None:
+            abs_path, rel_path = resolve_under_vault(
+                vault_root, path, must_exist=True, must_be_file=True, refuse_withheld=True
+            )
+        else:
+            abs_path, rel_path = store_targets.resolve_existing(vault_root, path)
     except VaultPathError as e:
-        if e.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
+        if store_writer is not None or e.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
             raise DeleteFileError(code=e.code, reason=e.reason) from e
         try:
             abs_path, rel_path = resolve_under_vault(vault_root, path, must_be_file=True)
@@ -152,7 +160,8 @@ def _delete_file_local(
         if evicted_original.state != "evicted" or (visible is not None and not visible(rel_path)):
             raise DeleteFileError(code=e.code, reason=e.reason) from e
     try:
-        if evicted_original is None:
+        # A stored page has no file to acquire; its spelling is checked when its bytes are read below.
+        if evicted_original is None and store_writer is None:
             reserved_paths.inspect_generic_file(vault_root, rel_path)
     except reserved_paths.ReservedPathLeafError as error:
         if error.code in {
@@ -265,6 +274,11 @@ def _delete_file_local(
         except UnicodeDecodeError:
             pass
 
+    if store_writer is not None:
+        refusal = _store_form_gap(vault_root, rel_path, fm)
+        if refusal is not None:
+            raise store_availability.unrouted("delete_file", refusal)
+
     # Normalize expected_dead_inbound for filtering.
     expected_set: set[str] = set()
     if expected_dead_inbound:
@@ -330,6 +344,8 @@ def _delete_file_local(
 
     def trash_destination_exists(candidate: Path) -> bool:
         relative = candidate.relative_to(vault_root).as_posix()
+        if store_writer is not None:
+            return store_targets.holds(vault_root, relative)
         try:
             reserved_paths.inspect_generic_path(vault_root, relative)
         except reserved_paths.ReservedPathLeafError as error:
@@ -397,6 +413,11 @@ def _delete_file_local(
             source_hash,
         )
 
+    metadata_bytes = _trash_metadata_bytes(
+        rel_path, now, inbound_all, inbound_ignored, inbound,
+        fm=fm, force_orphan=force_orphan, force_superseded=force_superseded,
+        allow_curated=bool(curated and allow_curated),
+    )
     today_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     log_body = (
@@ -448,6 +469,18 @@ def _delete_file_local(
             code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
             reason=str(error),
         ) from error
+    if store_writer is not None:
+        if catalog_target is not None:
+            raise store_availability.unrouted(
+                "delete_file", "the vault's active catalog publication has no store form"
+            )
+        assert catalog_before_hash is not None  # a page that reaches here is Markdown and was read
+        return _trash_in_store(
+            store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
+            metadata_bytes=metadata_bytes, source_hash=catalog_before_hash,
+            log_entry=(today_iso, rel_no_ext, log_body), inbound=len(inbound),
+            inbound_ignored=len(inbound_ignored), warnings=warnings,
+        )
     from .media_store import local_originals
 
     originals_context.enter_context(local_originals(vault_root, (rel_path,)))
@@ -515,19 +548,6 @@ def _delete_file_local(
         except Exception:  # noqa: BLE001 — suppression is best-effort
             log.debug("self-delete suppression registration failed", exc_info=True)
 
-    meta = {
-        "original_path": rel_path,
-        "trashed_at": now.isoformat(),
-        "deleted_by": "exomem",
-        "inbound_link_count_at_trash": len(inbound_all),
-        "inbound_ignored_at_trash": [m.as_dict() for m in inbound_ignored],
-        "inbound_remaining_at_trash": [m.as_dict() for m in inbound],
-        "force_orphan_used": bool(force_orphan and inbound),
-        "force_superseded_used": bool(force_superseded and fm.get("superseded_by")),
-        "allow_curated_used": bool(curated and allow_curated),
-        "frontmatter_snapshot": _make_json_safe(fm),
-    }
-    metadata_bytes = json.dumps(meta, indent=2, default=str).encode("utf-8")
     binary_placement_required = stored_original is not None and any(
         item.source_path == rel_path and item.content_hash == stored_original.binary_sha256
         and item.size == stored_original.binary_size for item in lifecycle_operation.manifest
@@ -715,6 +735,107 @@ def _delete_file_local(
         inbound_ignored_count=len(inbound_ignored),
         warnings=warnings,
         index=index_feedback,
+    )
+
+
+def _trash_metadata_bytes(
+    rel_path: str,
+    now: dt.datetime,
+    inbound_all: list,
+    inbound_ignored: list,
+    inbound: list,
+    *,
+    fm: dict,
+    force_orphan: bool,
+    force_superseded: bool,
+    allow_curated: bool,
+) -> bytes:
+    """The `.meta.json` sidecar that records where a trashed file came from and which flags it used."""
+    meta = {
+        "original_path": rel_path,
+        "trashed_at": now.isoformat(),
+        "deleted_by": "exomem",
+        "inbound_link_count_at_trash": len(inbound_all),
+        "inbound_ignored_at_trash": [m.as_dict() for m in inbound_ignored],
+        "inbound_remaining_at_trash": [m.as_dict() for m in inbound],
+        "force_orphan_used": bool(force_orphan and inbound),
+        "force_superseded_used": bool(force_superseded and fm.get("superseded_by")),
+        "allow_curated_used": allow_curated,
+        "frontmatter_snapshot": _make_json_safe(fm),
+    }
+    return json.dumps(meta, indent=2, default=str).encode("utf-8")
+
+
+def _store_form_gap(vault_root: Path, rel_path: str, fm: dict) -> str | None:
+    """Why a store-mode vault cannot trash this file yet, or None when it has a store form.
+
+    The store form is one page moved to the trash, with its sidecar beside it. Each case below has a
+    file-mode step that the store has no form for, so the delete refuses before it changes anything.
+    """
+    from . import extraction_parts
+
+    # `.md` fixes the page format; any other file is a binary whose bytes stay on disk.
+    if not rel_path.lower().endswith(".md"):
+        return "only a Markdown page is held by the store, and a file's bytes stay on disk"
+    if lifecycle.policy_governs_anything(vault_root):
+        return "a governance policy is declared, and its tombstones and receipts are written to files"
+    parts_folder = Path(vault_root) / extraction_parts.folder_for(Path(rel_path))
+    if "stored_object" in fm or extraction_parts.count_of(fm) > 1 or parts_folder.is_dir():
+        return "its stored original or its part pages move with it, and they have no store form"
+    return None
+
+
+def _trash_in_store(
+    writer,
+    vault_root: Path,
+    *,
+    rel_path: str,
+    trash_rel: str,
+    meta_rel: str,
+    metadata_bytes: bytes,
+    source_hash: str,
+    log_entry: tuple[str, str, str],
+    inbound: int,
+    inbound_ignored: int,
+    warnings: list[str],
+) -> DeleteFileResult:
+    """Move one stored page to the trash in a single store transaction.
+
+    The page keeps its bytes at the trash path and loses its rows at the old one, and the sidecar
+    lands on disk inside the same rollback window. A stale page refuses the whole commit with
+    nothing changed. No Markdown is written: the projector moves the file afterwards.
+    """
+    from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
+    from .vault_store import batch as store_batch
+    from .vault_store.write import Expect, PageMove, StoreConflict
+
+    root = Path(vault_root)
+    sidecar = PlannedWrite(root / meta_rel, metadata_bytes.decode("utf-8"), create_only=True)
+    moves = store_batch.Lifecycle(
+        moves=(PageMove(rel_path, trash_rel),), expect={rel_path: Expect(sha256=source_hash)}
+    )
+    try:
+        store_batch.commit_batch(writer, [sidecar], vault_root=root, lifecycle=moves)
+    except StoreConflict as conflict:
+        if conflict.path == rel_path:
+            raise DeleteFileError("STALE_DELETE", "delete source changed since it was read") from conflict
+        raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from conflict
+    except (CreateOnlyConflict, PathGuardError, OSError) as error:
+        raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from error
+    today_iso, rel_no_ext, body = log_entry
+    log_warning = write_log_entry(
+        root, date_iso=today_iso, op="delete_file (trash)", rel_path_no_ext=rel_no_ext, body=body
+    )
+    if log_warning:
+        warnings.append(log_warning)
+    return DeleteFileResult(
+        path=rel_path,
+        trash_path=trash_rel,
+        trash_meta_path=meta_rel,
+        inbound_link_count=inbound,
+        inbound_ignored_count=inbound_ignored,
+        warnings=warnings,
+        index=store_batch.row_report("delete", [rel_path]).as_dict(),
     )
 
 

@@ -23,6 +23,7 @@ NOT_SERVED = "VAULT_STORE_NOT_SERVED"
 OFF_THREAD = "VAULT_STORE_OFF_THREAD"
 SERVICE_REQUIRED = "VAULT_STORE_SERVICE_REQUIRED"
 PAGES_AT_RISK = "VAULT_STORE_PAGES_AT_RISK"
+WRITER_UNROUTED = "VAULT_STORE_WRITER_UNROUTED"
 
 ROLLBACK = "`exomem store-mode rollback`"
 
@@ -156,3 +157,20 @@ def refuse_page_loss(vault_root: Path, operation: str) -> None:
             PAGES_AT_RISK,
             f"{operation} would replace this vault's collection store with a copy that holds no pages: "
             f"run {ROLLBACK} first")
+
+
+def unrouted(operation: str, why: str):
+    """The refusal of a governed write that has no store form yet, raised before it changes anything.
+
+    It prevents a write that would put bytes on disk where the store holds the pages: the importer
+    would then adopt them as an outside edit, and the store and the files would disagree. A false
+    refusal costs the owner one rollback to run that single operation on files, and the message
+    names the operation and the reason so the owner can tell a gap from a mistake.
+    """
+    from ..cli_ops import OpError
+
+    return OpError(
+        WRITER_UNROUTED,
+        f"{operation} cannot change a store-mode vault yet: {why}",
+        f"Run {ROLLBACK} to return the pages to files, repeat {operation}, then migrate again.",
+    )

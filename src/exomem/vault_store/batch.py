@@ -16,8 +16,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,17 @@ from ..cli_ops import OpError
 from ..collection_store.writer import CollectionWriter
 from . import ownership, read
 from . import write as store_write
-from .write import BinaryRecord, Expect, Origin, PagePut, StoreChange, StoreConflict
+from .write import (
+    BinaryDelete,
+    BinaryRecord,
+    Expect,
+    Origin,
+    PageDelete,
+    PageMove,
+    PagePut,
+    StoreChange,
+    StoreConflict,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +57,21 @@ class _Held:
     kind: int
 
 
+@dataclass(frozen=True, slots=True)
+class Lifecycle:
+    """The page moves and removals that delete, move and recover commit with their batch's writes.
+
+    They join the batch's one store transaction, so a page never leaves its path without the rows
+    and the other pages that go with it. ``expect`` holds what each named path must still be when
+    the commit runs: a stale source refuses the whole commit with its ``StoreConflict``.
+    """
+
+    moves: tuple[PageMove, ...] = ()
+    deletes: tuple[PageDelete, ...] = ()
+    binary_deletes: tuple[BinaryDelete, ...] = ()
+    expect: Mapping[str, Expect] = field(default_factory=dict)
+
+
 def commit_batch(
     writer: CollectionWriter,
     writes: Iterable[vault.PlannedWrite],
@@ -61,6 +86,7 @@ def commit_batch(
     vocabulary_auxiliaries: Any | None = None,
     validate_prepared_bindings: Callable[[], None] | None = None,
     prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
+    lifecycle: Lifecycle | None = None,
 ) -> list[Path]:
     """Commit one batch to the store of ``vault_root`` in place of the file-mode flip.
 
@@ -68,6 +94,10 @@ def commit_batch(
     ``create_only`` path and a stale guard raise the error that file mode raises, so each caller's
     handling of them holds. The transaction derives each page's parent state from the page's own
     bytes, so the caller's ``semantic_states`` are not taken.
+
+    ``lifecycle`` adds a delete, move or recover's page moves and removals to the same transaction.
+    A stale expectation of it raises the ``StoreConflict`` itself, which the lifecycle writer maps
+    to its own error, since file mode has no such guard to name.
     """
     root = Path(vault_root)
     if defer_graph_completion:
@@ -93,10 +123,15 @@ def commit_batch(
                 vocabulary_auxiliaries,
                 prepare,
             )
-    if not caller_writes:
+    if not caller_writes and lifecycle is None:
         return []
-    augmented, witness = curation_witness.augment_batch(
-        caller_writes, vault_root=root, planned_write=vault.PlannedWrite
+    # A lifecycle commit with no page to write carries no curation witness: it has no write to witness.
+    augmented, witness = (
+        curation_witness.augment_batch(
+            caller_writes, vault_root=root, planned_write=vault.PlannedWrite
+        )
+        if caller_writes
+        else ([], None)
     )
     heat = working_set_heat.begin_commit(root, (write.path for write in caller_writes))
     try:
@@ -110,6 +145,7 @@ def commit_batch(
             validate_prepared_bindings,
             commit_point,
             curation_witness.publication_hook(witness),
+            lifecycle,
         )
     except BaseException:
         working_set_heat.abandon_commit(heat)
@@ -150,8 +186,10 @@ class _Plan:
         writes: list[vault.PlannedWrite],
         required_guards: Iterable[vault.PathGuard | vault.DirectoryCensusGuard],
         completion_guards: Iterable[vault.PathGuard],
+        lifecycle: Lifecycle | None = None,
     ) -> None:
         self.root = root
+        self.lifecycle = lifecycle or Lifecycle()
         self.pages: list[tuple[str, vault.PlannedWrite]] = []
         self.files: list[vault.PlannedWrite] = []
         self.binaries: list[tuple[str, vault.PlannedWrite]] = []
@@ -232,7 +270,7 @@ class _Plan:
             # Two claims that cannot both hold were already refused by the check before the commit.
             if have is None or held.expect.absent or have == Expect():
                 merged[held.rel] = held.expect
-        return merged
+        return {**merged, **self.lifecycle.expect}
 
 
 def _relative(root: Path, path: Path) -> str | None:
@@ -267,6 +305,8 @@ def _check_held(plan: _Plan) -> None:
     none of them.
     """
     with read.snapshot(plan.root) as view:
+        # A lifecycle source is checked as the commit checks it, and its conflict reaches the writer.
+        store_write.check(view.connection, plan.lifecycle.expect)
         for held in plan.held:
             try:
                 store_write.check(view.connection, {held.rel: held.expect})
@@ -325,6 +365,7 @@ def _commit(
     validate_prepared_bindings: Callable[[], None] | None,
     commit_point: bool,
     before_publication: Callable[[], None] | None,
+    lifecycle: Lifecycle | None = None,
 ) -> _Plan:
     from ..writer_lease import (
         log_active_mutation_phase,
@@ -334,7 +375,7 @@ def _commit(
 
     vault._require_distinct_destinations(writes)
     _validate(root, writes, vocabulary_auxiliaries, final=False)
-    plan = _Plan(root, writes, required_guards, completion_guards)
+    plan = _Plan(root, writes, required_guards, completion_guards, lifecycle)
     # Before any file is published, so a stale expectation leaves no file behind. The commit checks
     # again inside its transaction, and that check is the one that binds.
     _check_held(plan)
@@ -356,14 +397,17 @@ def _commit(
             origin=Origin.GOVERNED,
             reason=_reason(),
             puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
+            deletes=plan.lifecycle.deletes,
+            moves=plan.lifecycle.moves,
             binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
+            binary_deletes=plan.lifecycle.binary_deletes,
             refresh=tuple(plan.refresh),
             expect=plan.expectations(),
         )
         try:
             store_write.commit(writer, change)
         except StoreConflict as conflict:
-            if conflict.path not in change.expect:
+            if conflict.path not in change.expect or conflict.path in plan.lifecycle.expect:
                 raise
             # The store changed after the check above ran: the batch is stale as a guard says it is.
             raise vault.PathGuardError(
@@ -430,6 +474,30 @@ def _record(rel: str, write: vault.PlannedWrite) -> BinaryRecord:
     return BinaryRecord(rel, hashlib.sha256(raw).hexdigest(), len(raw))
 
 
+def _row_components() -> list[Any]:
+    """The outcomes of the derived rows that a store commit makes current in its own transaction."""
+    from .. import index_sync
+
+    return [
+        index_sync.IndexComponentOutcome(name, "completed", "store_commit")
+        for name in ("memory_refs", "lexstore", "epistemic_graph")
+    ]
+
+
+def row_report(operation: str, paths: Iterable[str]) -> Any:
+    """The fan-out report of a lifecycle commit: its lexical, graph and identity rows came with it.
+
+    It names no embeddings outcome, because the vector sidecar follows the store in a later task:
+    a report must not say that work is done which no code did.
+    """
+    from .. import index_sync
+
+    requested, truncated = index_sync._bounded_paths(list(paths))
+    return index_sync.IndexSyncReport(
+        operation, requested, requested, tuple(_row_components()), truncated
+    )
+
+
 def _after_commit(root: Path, plan: _Plan, index_reports: list[Any] | None) -> None:
     """What lives outside the store, run after the commit: the drain's handoff and the report.
 
@@ -439,10 +507,7 @@ def _after_commit(root: Path, plan: _Plan, index_reports: list[Any] | None) -> N
     from .. import index_sync, semantic_drain
 
     rels = [*(rel for rel, _write in plan.pages), *plan.refresh]
-    components = [
-        index_sync.IndexComponentOutcome(name, "completed", "store_commit")
-        for name in ("memory_refs", "lexstore", "epistemic_graph")
-    ]
+    components = _row_components()
     if mode.service_profile_enabled() and rels:
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             components.append(
