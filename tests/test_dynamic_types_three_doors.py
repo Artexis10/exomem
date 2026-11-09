@@ -121,7 +121,7 @@ def doors(
 
 
 def _create(summary: str, **args: Any) -> dict[str, Any]:
-    return {"operation": "create-entity", "summary": summary, **args}
+    return {"operation": "create-entity", "summary": summary, "response_detail": "full", **args}
 
 
 def _identity(candidate: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -143,9 +143,10 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
             "operation": "save-entity-types",
             "proposal": REGISTRY,
             "why": "Synthetic equipment family and physical sites for the loop cohort.",
+            "response_detail": "full",
         },
     )
-    assert registered["state"] == "committed", registered
+    assert registered["diagnostics"]["operational"]["state"] == "committed", registered
     assert (vault / "Knowledge Base/_Schema/entity-types.yaml").is_file()
     # The save's batch carries its `log.md` entry, so the graph converges on the
     # new types in the background; let it finish before each door builds a server.
@@ -197,21 +198,23 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
         "rest": f"Knowledge Base/Entities/Equipment/{PUMP}.md",
         "cli": f"Knowledge Base/Entities/Milking Machines/{PARLOUR}.md",
     }
-    envelope = {"ok", "state", "status", "terminal", "mutated", "path", "request_id", "receipt_id"}
+    envelope = {"ok", "state", "status", "terminal", "mutated", "request_id", "receipt_id"}
     for door, receipt in created.items():
-        assert receipt["state"] == "committed", (door, receipt)
-        assert receipt["mutated"] is True, door
         assert receipt["path"] == expected_paths[door], door
+        # `full` carries the operational receipt fields under `diagnostics`.
+        operational = receipt["diagnostics"]["operational"]
+        assert operational["state"] == "committed", (door, receipt)
+        assert operational["mutated"] is True, door
         page = yaml.safe_load((vault / receipt["path"]).read_text(encoding="utf-8").split("---")[1])
         assert page["type"] == "entity"
         assert page["entity_type"] in {"site", "equipment", "milking-machine"}
         # The same receipt contract on every door, graph publication included.
-        assert envelope <= set(receipt), (door, sorted(receipt))
+        assert envelope <= set(operational), (door, sorted(operational))
         # Publication is reported as it stands: durable, graph still pending.
-        assert receipt["graph_sync"] in {"pending", "completed"}, (door, receipt)
-        if receipt["graph_sync"] == "pending":
+        assert operational["graph_sync"] in {"pending", "completed"}, (door, receipt)
+        if operational["graph_sync"] == "pending":
             # A rebuild in flight or a queued repair: both are durable-and-behind.
-            assert receipt["graph_sync_code"] in {
+            assert operational["graph_sync_code"] in {
                 "GRAPH_SYNC_REBUILD_IN_PROGRESS",
                 "GRAPH_SYNC_REPAIR_QUEUED",
             }, door

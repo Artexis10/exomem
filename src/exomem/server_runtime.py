@@ -142,6 +142,7 @@ class LocalRuntimeActivation:
         self._thread: threading.Thread | None = None
         self.media_worker: Any | None = None
         self.file_watcher: Any | None = None
+        self.vault_projector: Any | None = None
         self.derived_drain: Any | None = None
         self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
@@ -210,6 +211,10 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._start_component("file watcher", self._start_file_watcher)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("vault projector", self._start_vault_projector)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
@@ -382,6 +387,7 @@ class LocalRuntimeActivation:
             ("derived drain", self.derived_drain),
             ("media", self.media_worker),
             ("file watcher", self.file_watcher),
+            ("vault projector", self.vault_projector),
         ):
             stop = getattr(worker, "stop", None)
             if not callable(stop):
@@ -538,6 +544,9 @@ class LocalRuntimeActivation:
 
     def _start_file_watcher(self, vault_root: Path) -> None:
         self.file_watcher = _start_file_watcher(vault_root)
+
+    def _start_vault_projector(self, vault_root: Path) -> None:
+        self.vault_projector = _start_vault_projector(vault_root)
 
     def _start_dreamer(self, vault_root: Path) -> None:
         self.dreamer = _start_dreamer(vault_root)
@@ -1155,6 +1164,22 @@ def _start_file_watcher(vault_root: Path) -> Any | None:
         log.warning("file watcher start failed: %s", exc)
         return None
     return watcher
+
+
+def _start_vault_projector(vault_root: Path) -> Any | None:
+    """Start the projector that writes a store-mode vault's committed pages to disk.
+
+    A file-mode vault, and a vault whose mode records disagree, starts nothing: its files stand.
+    """
+    from .vault_store import mode
+
+    if not mode.store_mode_active(vault_root):
+        return None
+    from .vault_store import projector
+
+    worker = projector.Projector(vault_root)
+    worker.start()
+    return worker
 
 
 def _create_file_watcher(vault_root: Path) -> Any | None:

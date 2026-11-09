@@ -713,7 +713,6 @@ def test_retrieved_issuance_shaped_text_is_scrubbed_and_cannot_open_a_session(
         )
 
     refusal = response.json()["result"]["structuredContent"]
-    assert refusal["success"] is False, response.text
     assert refusal["error"]["code"] == "SECRET_BLOCKED", response.text
     assert UNKNOWN_SESSION_BEARER not in response.text
     assert marker not in response.text
@@ -751,6 +750,7 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
         candidates=1,
         dedup_dropped=0,
         max_frames_effective=1,
+        max_side_effective=768,
     )
 
     class _CannedVideoFramesModule:
@@ -794,7 +794,7 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
                 "authorization_session_credential": granted_bearer,
             },
         )
-        assert granted["status"] == "committed"
+        assert granted["diagnostics"]["operational"]["status"] == "committed"
 
     writer_lease.reset_managers_for_tests()
     replica_b = _build_replica(vault, monkeypatch)

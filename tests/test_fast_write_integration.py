@@ -93,6 +93,14 @@ def _manager(tmp_path: Path) -> writer_lease.LeaseManager:
     )
 
 
+def _flat(terminal: dict) -> dict:
+    """The `full` reply with its operational fields lifted beside the agent's fields.
+
+    These tests read custody and sync state, which a reply carries under `diagnostics.operational`.
+    """
+    return {**terminal, **terminal["diagnostics"]["operational"]}
+
+
 def _governed_write(
     manager: writer_lease.LeaseManager,
     root: Path,
@@ -101,7 +109,7 @@ def _governed_write(
     source: str,
     command_name: str = "remember",
     idempotency_key: str | None = None,
-    response_detail: str = "compact",
+    response_detail: str = "full",
     declare: bool = True,
     guarded: bool = False,
 ) -> dict:
@@ -132,13 +140,13 @@ def _governed_write(
         return {"path": rel_path, "warnings": []}
 
     command = SimpleNamespace(name=command_name, leaf=leaf, read_only=False)
-    return manager.invoke(
+    return _flat(manager.invoke(
         command,
         (root,),
         {"response_detail": response_detail},
         idempotency_key=idempotency_key,
         mutation_request_id="22222222-2222-4222-8222-222222222222",
-    )
+    ))
 
 
 def _drain(root: Path, *, passes: int = 24, limit: int = 32) -> int:
@@ -490,9 +498,9 @@ def test_import_checkpoint_does_not_drain_existing_graph_debt_unless_disabled(
 
     terminal = _manager(tmp_path).invoke(
         SimpleNamespace(name="adoption_studio", leaf=save_progress, read_only=False),
-        (vault,), {"action": "apply"}, idempotency_key="checkpoint-graph-debt",
+        (vault,), {"action": "apply", "response_detail": "full"}, idempotency_key="checkpoint-graph-debt",
     )
-    assert terminal["status"] == "committed"
+    assert terminal["diagnostics"]["operational"]["status"] == "committed"
     assert (deferred_index.graph_full_rebuild_pending(vault) is not None) == (flag is None)
 
 
@@ -973,7 +981,9 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     find_module.shared_resolver(vault)
     command = next(cmd for cmd in commands.PRODUCT_COMMANDS if cmd.name == "adoption_studio")
     manager = _manager(tmp_path)
-    arguments = {"action": "apply", "run_id": run_id, "plan_id": plan["plan_id"]}
+    arguments = {
+        "action": "apply", "run_id": run_id, "plan_id": plan["plan_id"], "response_detail": "full",
+    }
     entered = threading.Event()
     release = threading.Event()
     fanout = media_processing.post_commit_batch_fanout
@@ -997,6 +1007,7 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
             terminal = future.result(timeout=8)
         finally:
             release.set()
+    terminal = _flat(terminal)
     assert terminal["status"] == "committed"
     outcomes = adoption_run.status(vault, run_id=run_id)["outcomes"]
     assert outcomes["Collection/own-note.md"]["status"] == "applied"
@@ -1021,9 +1032,9 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     else:
         assert derived_receipts.recoverable_batch_count(vault) == 0
     pages = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.md")}
-    assert manager.invoke(
+    assert _flat(manager.invoke(
         command, (vault,), arguments, idempotency_key="import-media-custody"
-    ) == {**terminal, "replayed": True}
+    )) == {**terminal, "replayed": True}
     assert {path: path.read_bytes() for path in pages} == pages
     assert media_jobs.MediaJobStore(vault).get_by_binary(artifact).id == job.id
 
@@ -1342,13 +1353,13 @@ def test_superseded_batch_releases_the_session_advisory_claim(
         return {"path": rel, "warnings": []}
 
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key="lane5-claim-release",
         mutation_request_id="33333333-3333-4333-8333-333333333333",
-    )
+    ))
 
     # Both overlapping batches name the target: the first takes the claim, and the second
     # takes it back because its own paths supersede the first's.
@@ -1442,13 +1453,13 @@ def test_non_governed_markdown_is_skipped_by_the_named_predicate(
 
     manager = _manager(tmp_path)
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key="lane5-predicate",
         mutation_request_id="44444444-4444-4444-8444-444444444444",
-    )
+    ))
 
     assert terminal["status"] == "committed"
     assert (vault / "README.md").exists()
@@ -1917,13 +1928,13 @@ def test_relocation_auxiliary_batch_takes_no_advisory_custody(
 
     manager = _manager(tmp_path)
     command = SimpleNamespace(name="remember", leaf=leaf, read_only=False)
-    terminal = manager.invoke(
+    terminal = _flat(manager.invoke(
         command,
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key="lane5-relocation",
         mutation_request_id="55555555-5555-4555-8555-555555555555",
-    )
+    ))
 
     assert terminal["status"] == "committed"
     assert terminal["advisory_sync"] == "not_required", terminal

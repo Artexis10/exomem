@@ -25,14 +25,10 @@ def fresh_due_advice_session():
 
 
 @pytest.mark.parametrize("detail", ["compact", "full"])
-@pytest.mark.parametrize("scope", [None, "affected_paths", "unsupported"])
-def test_due_advice_scope_survives_terminal_without_changing_commit(
-    detail, scope, fresh_due_advice_session,
-) -> None:
+def test_due_advice_never_reaches_a_write_reply(detail, fresh_due_advice_session) -> None:
+    """The due-state block lives in the review queue, bootstrap and recall, not in a write reply."""
     module = _terminal_module()
-    advice = {"total": 1, "categories": {"prediction_window": 1}, "top": []}
-    if scope is not None:
-        advice["scope"] = scope
+    advice = {"total": 1, "categories": {"prediction_window": 1}, "top": [], "scope": "affected_paths"}
     terminal = module.committed_terminal(
         {"path": "Knowledge Base/Notes/Insights/example.md", "due_state": advice},
         request_id="11111111-1111-4111-8111-111111111111",
@@ -42,11 +38,8 @@ def test_due_advice_scope_survives_terminal_without_changing_commit(
 
     projected = module.project_terminal(terminal, detail)
 
-    assert projected["state"] == "committed"
-    if scope == "unsupported":
-        assert "due_state" not in projected
-    else:
-        assert projected["due_state"] == advice
+    assert "due_state" not in projected
+    assert projected["path"] == "Knowledge Base/Notes/Insights/example.md"
 
 
 def _fast_ack_terminal(
@@ -96,19 +89,22 @@ def _fast_ack_terminal(
     return terminal, raw
 
 
-def test_fast_ack_compact_projection_separates_derived_graph_and_advisory() -> None:
+def test_fast_ack_reply_keeps_sync_state_out_of_the_agent_view() -> None:
     mutation_terminal = _terminal_module()
     terminal, _raw = _fast_ack_terminal()
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
+    operational = mutation_terminal.project_terminal(terminal, "full")["diagnostics"]["operational"]
 
-    assert compact["derived_sync"] == "pending"
-    assert compact["derived_sync_components"] == ["claims", "embeddings"]
-    assert compact["graph_sync"] == "failed"
-    assert compact["advisory_sync"] == "pending"
-    assert compact["advisory_result_ref"].startswith(
-        "exomem://write-advisory-result/"
-    )
+    # A pending background update is normal, so the agent view stays silent about it. The graph
+    # update failed here, and the agent view says so in one sentence.
+    assert set(compact) == {"path", "notice"}
+    assert compact["notice"].startswith("Saved, but a background update failed")
+    assert operational["derived_sync"] == "pending"
+    assert operational["derived_sync_components"] == ["claims", "embeddings"]
+    assert operational["graph_sync"] == "failed"
+    assert operational["advisory_sync"] == "pending"
+    assert operational["advisory_result_ref"].startswith("exomem://write-advisory-result/")
 
 
 def test_fast_ack_full_projection_adds_diagnostics_without_changing_terminal() -> None:
@@ -173,50 +169,53 @@ def test_exact_retry_replays_original_fast_ack_terminal_byte_for_byte(tmp_path) 
     assert replay["advisory_result_ref"]
 
 
+def _operational(terminal) -> dict:
+    """The operational keys a write reply carries only under `response_detail="full"`."""
+    mutation_terminal = _terminal_module()
+    return mutation_terminal.project_terminal(terminal, "full")["diagnostics"]["operational"]
+
+
 @pytest.mark.parametrize("state", ("completed", "pending", "failed"))
 def test_applicable_advisory_states_keep_stable_result_ref(state: str) -> None:
-    mutation_terminal = _terminal_module()
     terminal, _raw = _fast_ack_terminal(advisory_sync=state)
 
-    compact = mutation_terminal.project_terminal(terminal)
+    operational = _operational(terminal)
 
-    assert compact["advisory_sync"] == state
-    assert compact["advisory_result_ref"] == (
+    assert operational["advisory_sync"] == state
+    assert operational["advisory_result_ref"] == (
         "exomem://write-advisory-result/" + "a" * 32
     )
 
 
 def test_not_required_advisory_omits_result_ref() -> None:
-    mutation_terminal = _terminal_module()
     terminal, _raw = _fast_ack_terminal(
         advisory_sync="not_required", advisory_result_ref=None
     )
 
-    compact = mutation_terminal.project_terminal(terminal)
+    operational = _operational(terminal)
 
-    assert compact["advisory_sync"] == "not_required"
-    assert "advisory_result_ref" not in compact
+    assert operational["advisory_sync"] == "not_required"
+    assert "advisory_result_ref" not in operational
 
 
 def test_failed_component_uses_closed_code_and_fixed_next_action() -> None:
-    mutation_terminal = _terminal_module()
     terminal, _raw = _fast_ack_terminal(
         derived_sync="failed", advisory_sync="failed"
     )
 
-    compact = mutation_terminal.project_terminal(terminal)
+    operational = _operational(terminal)
 
-    assert compact["derived_sync_code"] == "DERIVED_COMPONENT_FAILED"
-    assert compact["derived_sync_next_action"] == (
+    assert operational["derived_sync_code"] == "DERIVED_COMPONENT_FAILED"
+    assert operational["derived_sync_next_action"] == (
         "Run reconcile to repair derived state."
     )
-    assert compact["advisory_sync_code"] == "WRITE_ADVISORY_FAILED"
-    assert compact["advisory_sync_next_action"] == (
+    assert operational["advisory_sync_code"] == "WRITE_ADVISORY_FAILED"
+    assert operational["advisory_sync_next_action"] == (
         "Query the advisory result or retry reconciliation."
     )
 
 
-def test_compact_projection_leads_with_decisive_commit_fields() -> None:
+def test_compact_reply_carries_the_result_and_full_carries_the_commit_identity() -> None:
     mutation_terminal = _terminal_module()
     raw = {
         "path": "Knowledge Base/Notes/Insights/decisive.md",
@@ -231,17 +230,19 @@ def test_compact_projection_leads_with_decisive_commit_fields() -> None:
     )
 
     assert mutation_terminal.project_terminal(terminal, "compact") == {
+        "path": "Knowledge Base/Notes/Insights/decisive.md",
+        "warnings": ["review a link"],
+    }
+    assert _operational(terminal) == {
         "ok": True,
         "state": "committed",
         "terminal": True,
         "status": "committed",
         "mutated": True,
-        "path": "Knowledge Base/Notes/Insights/decisive.md",
         "request_id": "11111111-1111-4111-8111-111111111111",
         "receipt_id": "receipt-1",
         "idempotency_key": "public-key",
         "warnings_count": 1,
-        "warnings": ["review a link"],
     }
 
 
@@ -279,8 +280,126 @@ def test_compact_omits_warnings_when_the_leaf_did_not_warn() -> None:
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
-    assert compact["warnings_count"] == 0
     assert "warnings" not in compact
+    assert "warnings_count" not in compact
+
+
+_REQUEST_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _full_loses_nothing_the_old_compact_reply_carried(old_keys: set[str], terminal) -> None:
+    full = _terminal_module().project_terminal(terminal, "full")
+    reachable = (set(full) - {"diagnostics", "user_summary", "notice", "next_action"}) | set(
+        full["diagnostics"]["operational"]
+    )
+    assert reachable == old_keys
+
+
+def test_full_keeps_every_key_the_old_fast_ack_compact_reply_carried() -> None:
+    terminal, _raw = _fast_ack_terminal()
+
+    _full_loses_nothing_the_old_compact_reply_carried(
+        {
+            "advisory_result_ref", "advisory_sync", "derived_sync", "derived_sync_components",
+            "graph_sync", "graph_sync_code", "graph_sync_remediation", "idempotency_key",
+            "mutated", "ok", "path", "receipt_id", "request_id", "state", "status", "terminal",
+            "warnings_count",
+        },
+        terminal,
+    )
+
+
+def test_full_keeps_every_key_the_old_plain_commit_compact_reply_carried() -> None:
+    terminal = _terminal_module().committed_terminal(
+        {
+            "path": "Knowledge Base/Notes/a.md",
+            "warnings": ["w"],
+            "before_hash": "a" * 64,
+            "after_hash": "b" * 64,
+            "unit_ref": "exomem://memory/11111111-1111-4111-8111-111111111111#obs",
+        },
+        request_id=_REQUEST_ID,
+        receipt_id="receipt-1",
+        idempotency_key="public-key",
+    )
+
+    _full_loses_nothing_the_old_compact_reply_carried(
+        {
+            "after_hash", "before_hash", "idempotency_key", "mutated", "ok", "path", "receipt_id",
+            "request_id", "state", "status", "terminal", "unit_ref", "warnings", "warnings_count",
+        },
+        terminal,
+    )
+
+
+def test_full_keeps_every_key_the_old_failed_graph_compact_reply_carried() -> None:
+    terminal = _terminal_module().committed_terminal(
+        {
+            "graph_sync": "failed",
+            "graph_sync_code": "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
+            "graph_sync_checkpoint": "a" * 64,
+            "graph_sync_remediation": "Run reconcile to recover the derived graph.",
+        },
+        request_id=_REQUEST_ID,
+        receipt_id="receipt-1",
+        idempotency_key="public-key",
+    )
+
+    _full_loses_nothing_the_old_compact_reply_carried(
+        {
+            "graph_sync", "graph_sync_checkpoint", "graph_sync_code", "graph_sync_remediation",
+            "idempotency_key", "mutated", "ok", "paths", "receipt_id", "request_id", "state",
+            "status", "terminal", "warnings_count",
+        },
+        terminal,
+    )
+
+
+def test_full_keeps_every_key_the_old_replayed_record_compact_reply_carried() -> None:
+    receipt = {
+        "_record_receipt": "exomem.records-mutation",
+        "receipt_version": 1,
+        "operation": "append",
+        "collection_id": _REQUEST_ID,
+        "item_key": "22222222-2222-4222-8222-222222222222",
+        "before_item_hash": "a" * 64,
+        "after_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
+        "after_container_hash": "b" * 64,
+        "affected_paths": ["Knowledge Base/Records/log.md"],
+        "payload_hash": "c" * 64,
+        "outcome": "replayed",
+        "audit_correlation": "d" * 24,
+    }
+    terminal = _terminal_module().replayed_terminal(
+        receipt, request_id=_REQUEST_ID, receipt_id="receipt-1", idempotency_key="same-call"
+    )
+
+    _full_loses_nothing_the_old_compact_reply_carried(
+        {
+            "affected_paths", "after_container_hash", "after_item_hash", "audit_correlation",
+            "before_container_hash", "before_item_hash", "collection_id", "idempotency_key",
+            "item_key", "mutated", "ok", "operation", "outcome", "paths", "payload_hash",
+            "receipt_id", "replayed", "request_id", "status", "warnings_count",
+        },
+        terminal,
+    )
+
+
+def test_an_episode_pass_keeps_its_own_status_and_full_keeps_the_terminals() -> None:
+    """The pass reports `status` as its own result, so the shared operational split must not drop it."""
+    mutation_terminal = _terminal_module()
+    terminal = mutation_terminal.committed_terminal(
+        {"operation": "episode_workflow", "action": "resume", "status": "stale", "candidates": []},
+        request_id=_REQUEST_ID, receipt_id="receipt-1", idempotency_key="episode-pass",
+    )
+
+    compact = mutation_terminal.project_terminal(terminal)
+    full = mutation_terminal.project_terminal(terminal, "full")
+
+    assert compact["status"] == "stale"
+    assert full["status"] == "stale"
+    assert full["diagnostics"]["operational"]["status"] == "committed"
 
 
 def test_compact_projection_preserves_only_valid_bounded_media_results() -> None:
@@ -368,7 +487,7 @@ def test_compact_projection_preserves_legacy_single_media_fields() -> None:
     assert compact["operation"] == "process"
     assert compact["path"] == "Knowledge Base/Evidence/Audio/interview.m4a"
     assert compact["media_type"] == "audio"
-    assert compact["state"] == "committed"
+    assert "state" not in compact
     assert compact["media_state"] == "pending"
     assert compact["sidecar_path"] == "Knowledge Base/Evidence/Audio/interview.m4a.md"
     assert compact["job_id"] == 9
@@ -403,9 +522,9 @@ def test_compact_does_not_repeat_artifact_receipt_warnings_at_the_top_level() ->
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
-    assert compact["warnings_count"] == 1
     assert compact["files"][0]["warnings"] == ["text layer missing"]
     assert "warnings" not in compact
+    assert "warnings_count" not in compact
 
 
 def _artifact_batch_terminal():
@@ -531,7 +650,7 @@ def test_compact_artifact_row_with_an_unknown_state_is_invalid() -> None:
     }
 
 
-def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
+def test_full_terminal_retains_completed_graph_sync_fields() -> None:
     mutation_terminal = _terminal_module()
     terminal = mutation_terminal.committed_terminal(
         {
@@ -545,12 +664,13 @@ def test_compact_terminal_retains_completed_graph_sync_fields() -> None:
         idempotency_key=None,
     )
 
-    projected = mutation_terminal.project_terminal(terminal)
+    operational = _operational(terminal)
 
-    assert projected["graph_sync"] == "failed"
-    assert projected["graph_sync_code"] == "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
-    assert projected["graph_sync_checkpoint"] == "a" * 64
-    assert projected["graph_sync_remediation"] == "Run reconcile to recover the derived graph."
+    assert operational["graph_sync"] == "failed"
+    assert operational["graph_sync_code"] == "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
+    assert operational["graph_sync_checkpoint"] == "a" * 64
+    assert operational["graph_sync_remediation"] == "Run reconcile to recover the derived graph."
+    assert not any(key.startswith("graph_sync") for key in mutation_terminal.project_terminal(terminal))
 
 
 def test_compact_terminal_retains_finalized_graph_rebuild_fields() -> None:
@@ -616,16 +736,20 @@ def test_full_projection_adds_the_complete_leaf_result_only_under_diagnostics() 
     projected = mutation_terminal.project_terminal(terminal, "full")
 
     assert projected == {
-        "ok": True,
-        "state": "committed",
-        "terminal": True,
-        "status": "committed",
-        "mutated": True,
         "paths": ["Knowledge Base/one.md", "Knowledge Base/two.md"],
-        "request_id": "11111111-1111-4111-8111-111111111111",
-        "receipt_id": None,
-        "warnings_count": 0,
-        "diagnostics": raw,
+        "diagnostics": {
+            "operational": {
+                "ok": True,
+                "state": "committed",
+                "terminal": True,
+                "status": "committed",
+                "mutated": True,
+                "request_id": "11111111-1111-4111-8111-111111111111",
+                "receipt_id": None,
+                "warnings_count": 0,
+            },
+            **raw,
+        },
     }
     assert "semantic" not in {key for key in projected if key != "diagnostics"}
 
@@ -689,30 +813,32 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
     )
 
     assert mutation_terminal.project_terminal(terminal) == {
-        "ok": True,
-        "status": "replayed",
-        "mutated": False,
         "replayed": True,
         "paths": ["Knowledge Base/Records/log.md"],
-        "request_id": "11111111-1111-4111-8111-111111111111",
-        "receipt_id": "receipt-1",
-        "idempotency_key": "same-call",
         "operation": "append",
         "collection_id": "11111111-1111-4111-8111-111111111111",
         "item_key": "22222222-2222-4222-8222-222222222222",
-        "before_item_hash": "a" * 64,
         "after_item_hash": "a" * 64,
-        "before_container_hash": "b" * 64,
         "after_container_hash": "b" * 64,
+        "outcome": "replayed",
+    }
+    assert _operational(terminal) == {
+        "ok": True,
+        "status": "replayed",
+        "mutated": False,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "receipt_id": "receipt-1",
+        "idempotency_key": "same-call",
+        "before_item_hash": "a" * 64,
+        "before_container_hash": "b" * 64,
         "affected_paths": ["Knowledge Base/Records/log.md"],
         "payload_hash": "c" * 64,
-        "outcome": "replayed",
         "audit_correlation": "d" * 24,
         "warnings_count": 0,
     }
 
 
-def test_compact_lifecycle_record_receipt_retains_its_closed_receipt_fields() -> None:
+def test_lifecycle_record_receipt_keeps_the_next_guard_hashes_and_moves_the_audit_fields() -> None:
     mutation_terminal = _terminal_module()
     receipt = {
         "_record_receipt": "exomem.records-mutation",
@@ -737,46 +863,32 @@ def test_compact_lifecycle_record_receipt_retains_its_closed_receipt_fields() ->
         "minimum_reader_version": 2,
     }
 
-    projected = mutation_terminal.project_terminal(
-        mutation_terminal.committed_terminal(
-            receipt,
-            request_id="11111111-1111-4111-8111-111111111111",
-            receipt_id="receipt-1",
-            idempotency_key="same-call",
-        )
+    terminal = mutation_terminal.committed_terminal(
+        receipt,
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id="receipt-1",
+        idempotency_key="same-call",
     )
 
-    assert projected == {
-        "ok": True,
-        "state": "committed",
-        "terminal": True,
-        "status": "committed",
-        "mutated": True,
+    assert mutation_terminal.project_terminal(terminal) == {
         "paths": ["Knowledge Base/Records/log/_collection.md"],
-        "request_id": "11111111-1111-4111-8111-111111111111",
-        "receipt_id": "receipt-1",
-        "idempotency_key": "same-call",
-        "_record_receipt": "exomem.records-mutation",
-        "receipt_version": 2,
         "operation": "revise",
         "collection_id": "11111111-1111-4111-8111-111111111111",
         "item_key": None,
-        "before_item_hash": None,
         "after_item_hash": None,
-        "before_manifest_hash": "a" * 64,
         "after_manifest_hash": "b" * 64,
-        "before_container_hash": "c" * 64,
         "after_container_hash": "d" * 64,
-        "affected_paths": ["Knowledge Base/Records/log/_collection.md"],
-        "payload_hash": "e" * 64,
         "outcome": "committed",
-        "audit_correlation": "f" * 24,
-        "continuity": True,
-        "acknowledged_gap_codes": [],
-        "gap_fingerprint": None,
-        "checkpoint_snapshot_hash": None,
-        "minimum_reader_version": 2,
-        "warnings_count": 0,
+    }
+    operational = _operational(terminal)
+    assert operational["_record_receipt"] == "exomem.records-mutation"
+    assert operational["receipt_version"] == 2
+    assert {key: operational[key] for key in receipt if key in operational} == {
+        key: value
+        for key, value in receipt.items()
+        if key
+        not in {"operation", "collection_id", "item_key", "after_item_hash", "after_manifest_hash",
+                "after_container_hash", "outcome"}
     }
 
 
@@ -821,7 +933,14 @@ def test_compound_source_result_uses_its_explicit_nested_path_and_warnings() -> 
     )
 
     assert projected["path"] == "Knowledge Base/Sources/Other/source.md"
-    assert projected["warnings_count"] == 1
+    assert _operational(
+        mutation_terminal.committed_terminal(
+            raw,
+            request_id="11111111-1111-4111-8111-111111111111",
+            receipt_id=None,
+            idempotency_key=None,
+        )
+    )["warnings_count"] == 1
 
 
 def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
@@ -844,19 +963,19 @@ def test_compact_record_receipt_uses_the_content_free_whitelist() -> None:
         "values": {"secret": "canonical item value"},
     }
 
-    projected = mutation_terminal.project_terminal(
-        mutation_terminal.committed_terminal(
-            raw,
-            request_id="11111111-1111-4111-8111-111111111111",
-            receipt_id=None,
-            idempotency_key=None,
-        )
+    terminal = mutation_terminal.committed_terminal(
+        raw,
+        request_id="11111111-1111-4111-8111-111111111111",
+        receipt_id=None,
+        idempotency_key=None,
     )
+    projected = mutation_terminal.project_terminal(terminal)
 
     assert projected["collection_id"] == raw["collection_id"]
     assert projected["after_item_hash"] == raw["after_item_hash"]
-    assert "why" not in projected
-    assert "values" not in projected
+    for reply in (projected, _operational(terminal)):
+        assert "why" not in reply
+        assert "values" not in reply
 
 
 def test_compact_record_receipt_rejects_manifest_only_create_without_audit_claim() -> None:
@@ -1102,13 +1221,16 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
         idempotency_principal_scope="principal:one",
     )
 
-    assert compact["request_id"] == first_request_id
-    assert compact["receipt_id"]
-    assert compact["idempotency_key"] == "same-public-key"
-    assert compact["warnings_count"] == 1
-    assert full == {**compact, "diagnostics": raw, "replayed": True}
-    assert legacy == raw
+    operational = full["diagnostics"]["operational"]
+    assert compact == {"path": raw["path"], "warnings": ["one warning"]}
+    assert operational["request_id"] == first_request_id
+    assert operational["receipt_id"]
+    assert operational["idempotency_key"] == "same-public-key"
+    assert operational["warnings_count"] == 1
+    assert full == {**compact, "diagnostics": {"operational": operational, **raw}, "replayed": True}
     assert "replayed" not in compact
+    assert legacy == raw
+    assert "replayed" not in operational
     assert calls == 1
 
 
@@ -1136,14 +1258,15 @@ def test_internal_replay_key_is_separate_from_public_terminal_identity(
     terminal = manager.invoke(
         command,
         (vault,),
-        {},
+        {"response_detail": "full"},
         idempotency_key=internal_key,
         public_idempotency_key=public_key,
     )
 
-    assert terminal.get("idempotency_key") == expected_key
+    operational = terminal["diagnostics"]["operational"]
+    assert operational.get("idempotency_key") == expected_key
     if expected_key is None:
-        assert "idempotency_key" not in terminal
+        assert "idempotency_key" not in operational
     assert internal_key not in repr(terminal)
 
 
@@ -1227,8 +1350,8 @@ def test_acknowledgement_loss_replays_the_persisted_original_terminal(
         mutation_request_id="22222222-2222-4222-8222-222222222222",
     )
 
-    assert replay["request_id"] == first_request_id
-    assert replay["diagnostics"] == raw
+    assert replay["diagnostics"]["operational"]["request_id"] == first_request_id
+    assert replay["diagnostics"]["path"] == raw["path"]
     assert calls == 1
 
 
@@ -1450,7 +1573,8 @@ def test_capture_sweep_is_lifted_from_every_write_container(container) -> None:
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
-    assert compact["capture_sweep"] == CAPTURE_SWEEP_LEAF
+    assert compact["next_action"] == mutation_terminal.CAPTURE_SWEEP_NEXT
+    assert "capture_sweep" not in compact
 
 
 def test_capture_sweep_is_absent_rather_than_null_when_the_leaf_has_none() -> None:
@@ -1461,6 +1585,7 @@ def test_capture_sweep_is_absent_rather_than_null_when_the_leaf_has_none() -> No
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
     assert "capture_sweep" not in compact
+    assert "next_action" not in compact
 
 
 def test_capture_sweep_is_stripped_from_the_legacy_detail() -> None:
@@ -1499,9 +1624,10 @@ def test_an_out_of_bounds_capture_sweep_is_dropped_rather_than_widening_the_wire
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
     assert "capture_sweep" not in compact
+    assert "next_action" not in compact
 
 
-def test_capture_sweep_is_not_a_key_a_client_branches_on() -> None:
+def test_capture_sweep_only_adds_its_next_sentence_and_the_names_without_pages() -> None:
     mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
 
     with_block = mutation_terminal.project_terminal(terminal, "compact")
@@ -1514,23 +1640,39 @@ def test_capture_sweep_is_not_a_key_a_client_branches_on() -> None:
     plain_terminal["warnings_count"] = 0
     without_block = mutation_terminal.project_terminal(plain_terminal, "compact")
 
-    assert {k: v for k, v in with_block.items() if k != "capture_sweep"} == without_block
+    assert {
+        k: v for k, v in with_block.items() if k not in ("next_action", "unpaged_mentions")
+    } == without_block
+    assert with_block["next_action"] == mutation_terminal.CAPTURE_SWEEP_NEXT
+    assert with_block["unpaged_mentions"] == CAPTURE_SWEEP_LEAF["unpaged_mentions"]
 
 
-def test_one_invocation_carries_at_most_one_capture_sweep_block() -> None:
-    """A leaf that somehow carries the block twice still projects one, and the
-    container precedence is the one every other advisory already uses."""
-    mutation_terminal, terminal = _committed_terminal_with_leaf(
-        {
-            "path": "Knowledge Base/Notes/Insights/sweep.md",
-            "warnings": [],
-            "mutated": True,
-            "capture_sweep": CAPTURE_SWEEP_LEAF,
-            "semantic": {"capture_sweep": {**CAPTURE_SWEEP_LEAF, "unpaged_mentions": ["Other"]}},
-        }
-    )
+def test_a_write_with_its_own_next_step_carries_the_sweep_ask_after_it() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+    terminal["next_action"] = "Review the draft first."
 
     compact = mutation_terminal.project_terminal(terminal, "compact")
 
-    assert isinstance(compact["capture_sweep"], dict)
-    assert compact["capture_sweep"]["unpaged_mentions"] == ["Other"]
+    assert compact["next_action"] == (
+        f"Review the draft first. {mutation_terminal.CAPTURE_SWEEP_NEXT}"
+    )
+    assert compact["unpaged_mentions"] == CAPTURE_SWEEP_LEAF["unpaged_mentions"]
+
+
+def test_a_closed_next_step_value_keeps_its_value_and_the_sweep_ask_sits_beside_it() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+    terminal["next_action"] = "resume"
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["next_action"] == "resume"
+    assert compact["capture_next"] == mutation_terminal.CAPTURE_SWEEP_NEXT
+
+
+def test_full_detail_carries_the_producers_capture_sweep_block() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+
+    full = mutation_terminal.project_terminal(terminal, "full")
+
+    assert full["diagnostics"]["capture_sweep"] == CAPTURE_SWEEP_LEAF
+    assert "capture_sweep" not in full

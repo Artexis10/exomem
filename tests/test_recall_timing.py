@@ -181,13 +181,13 @@ def test_open_intervals_are_a_broken_instrument() -> None:
         trace.result({})
 
 
-@pytest.mark.parametrize("unavailable", [False, True])
-def test_recall_reads_role_state_once_when_source_evidence_changes(
-    monkeypatch, tmp_path: Path, warm_managed_cell, unavailable: bool,
+def test_search_reads_no_role_state_and_carries_no_due_state(
+    monkeypatch, tmp_path: Path, warm_managed_cell,
 ) -> None:
+    """Search no longer computes the due-state block, so it opens no role-state store."""
     import sqlite3
 
-    from test_artifact_role_projection import ORIGIN, method, write
+    from test_artifact_role_projection import method, write
 
     from exomem import artifact_role_state, command_surface, commands, due_state
     from exomem.governance import principal
@@ -198,43 +198,21 @@ def test_recall_reads_role_state_once_when_source_evidence_changes(
         warm_managed_cell(tmp_path)
     command = command_surface.resolve_command("ask_memory", commands.PRODUCT_COMMANDS)
     ask_memory = command_surface.bind_vault(command.leaf, tmp_path, command=command)
+    connections: list[str] = []
+    connect = sqlite3.connect
+
+    def counted(database, *args, **kwargs):
+        if str(artifact_role_state.store_path(tmp_path)) in str(database):
+            connections.append(str(database))
+        return connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counted)
     with principal.request_scope(principal.owner_principal(surface="library")):
         with principal.invocation_scope():
-            first = ask_memory(query="stir", mode="keyword", include_timings=True)
-        assert first["due_state"]["total"] == 1
-        served = artifact_role_state.served
-        failed_reads: list[bool] = []
-        if unavailable:
-            def broken(*_args, **_kwargs):
-                failed_reads.append(True)
-                raise OSError("role store unavailable")
-
-            monkeypatch.setattr(artifact_role_state, "served", broken)
-        else:
-            page = tmp_path / ORIGIN
-            page.write_text(page.read_text().replace("stir twice", "stir three times"))
-        connections: list[str] = []
-        connect = sqlite3.connect
-
-        def counted(database, *args, **kwargs):
-            if str(artifact_role_state.store_path(tmp_path)) in str(database):
-                connections.append(str(database))
-            return connect(database, *args, **kwargs)
-
-        monkeypatch.setattr(sqlite3, "connect", counted)
-        due_state.reset_emission_state()
-        with principal.invocation_scope():
-            changed = ask_memory(query="stir", mode="keyword", include_timings=True)
-        assert "due_state" not in changed
-        assert len(connections) == (0 if unavailable else 1)
-        if unavailable:
-            assert len(failed_reads) == 1
-            monkeypatch.setattr(artifact_role_state, "served", served)
-            due_state.reset_emission_state()
-            with principal.invocation_scope():
-                recovered = ask_memory(query="stir", mode="keyword", include_timings=True)
-            assert recovered["due_state"] == first["due_state"]
-            assert len(connections) == 1
+            reply = ask_memory(query="stir", mode="keyword", include_timings=True)
+    assert reply["hits"]
+    assert "due_state" not in reply
+    assert connections == []
 
 
 def test_private_adapter_observes_real_owner_and_admitted_calls_without_disclosing(
@@ -265,13 +243,13 @@ def test_private_adapter_observes_real_owner_and_admitted_calls_without_disclosi
                 result = ask_memory(query="topic", mode="keyword", include_timings=True)
             assert find_types.FindTimings is timing_type
             assert collectors and all(type(item) is timing_type for item in collectors)
-            observed = trace.result({"keyword": ["keyword"], "due_state": ["due_state"]})
+            observed = trace.result({"keyword": ["keyword"]})
             assert observed["total_ms"] > 0
             if caller.audience_id != principal.OWNER_AUDIENCE:
                 assert result["timings_suppressed"] == {"status": "release_restricted"}
                 assert "timings" not in result
             else:
-                assert any(item.name == "due_state" for item in trace.intervals)
+                assert any(item.name == "keyword" for item in trace.intervals)
                 assert result["timings"]["runqueue_ms"] is not None or sys.platform != "linux"
 
 
@@ -312,18 +290,21 @@ def test_whole_call_timing_includes_tail_after_find(monkeypatch, tmp_path: Path)
     def find(*args, **kwargs):
         return {"hits": [], "timings": {"total_ms": 0.0, "stages": {}}}
 
-    def tail(root, result, **kwargs):
-        with call_spans.span("recall.due_state"):
-            result["tail_complete"] = True
-        return result
+    shape = commands._agent_search_reply
+
+    def tail(result, **kwargs):
+        with call_spans.span("recall.serialize"):
+            reply = shape(result, **kwargs)
+            reply["tail_complete"] = True
+        return reply
 
     monkeypatch.setattr(commands, "op_find", find)
-    monkeypatch.setattr(commands, "_with_due_state", tail)
+    monkeypatch.setattr(commands, "_agent_search_reply", tail)
     with principal.library_scope():
         result = commands.op_ask_memory(tmp_path, query="topic", include_timings=True)
     assert result["tail_complete"] is True
     assert result["timings"]["total_ms"] > 0.0
-    assert result["timings"]["stage_rows"]["governed-stage-due_state"]["ms"] > 0.0
+    assert result["timings"]["stage_rows"]["governed-stage-hydration"]["ms"] > 0.0
 
 
 @pytest.mark.parametrize("status", ["release_restricted", "governed_projection"])

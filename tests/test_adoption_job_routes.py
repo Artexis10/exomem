@@ -71,9 +71,9 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
             result = await _call(client, "import_memory", {
                 "operation": {"kind": kind, **fields}, "response_detail": "full",
             })
-            if "ok" in result:
-                assert result["ok"] is True, result
+            if "diagnostics" in result:
                 diagnostics = result["diagnostics"]
+                assert diagnostics["operational"]["ok"] is True, result
                 return diagnostics.get("leaf_result", diagnostics)
             # A cursor replay makes no mutation and retains the source's leaf-only reply.
             assert "run_id" in result, result
@@ -84,8 +84,7 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
         fields = {"run_id": run_id, "include": [{"path": "Legacy", "source_kind": "book", "domain": "media"}]}
         first = await _call(client, "import_memory", {"operation": {"kind": "select", **fields}}, key="adoption-select")
         retry = await _call(client, "adoption_studio", {"action": "select", **fields}, key="adoption-select")
-        assert first["ok"] is True
-        assert retry == {**first, "replayed": True}
+        assert "error" not in first and retry == {**first, "replayed": True}
 
         planned = await change("plan", run_id=run_id)
         assert planned["continuation"]

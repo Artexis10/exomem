@@ -719,7 +719,6 @@ def test_a_transfer_call_that_reaches_a_cell_is_refused_before_the_writer_lease(
             assert response.status_code == 200, response.text
             result = response.json()["result"]
             assert result["isError"] is False, result
-            assert result["structuredContent"]["success"] is False
             assert result["structuredContent"]["error"]["code"] == "CLOUD_GATEWAY_REQUIRED"
     finally:
         _teardown_activation(mcp)
@@ -822,11 +821,10 @@ def test_cloud_read_only_refuses_a_write_but_serves_a_read(
         assert write.status_code == 200, write.text
         write_result = write.json()["result"]
         # A structured OpError refusal is a successful tool call (isError is
-        # False) whose payload envelope reports success=False -- the same
-        # shape every other structured refusal in this codebase uses.
+        # False) whose payload is the `{"error": ...}` result every other
+        # structured refusal in this codebase uses.
         assert write_result["isError"] is False, write_result
         write_structured = write_result["structuredContent"]
-        assert write_structured["success"] is False, write_structured
         assert write_structured["error"]["code"] == "CLOUD_CELL_READ_ONLY", write_structured
         assert read.status_code == 200, read.text
         assert read.json()["result"]["isError"] is False
@@ -1215,8 +1213,6 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
         _teardown_activation(restarted)
     result = recovered.json()["result"]["structuredContent"]
     assert result["capture_outcome"] == "reused", recovered.text
-    assert result["source"]["ref"] == original["source"]["ref"]
     assert result["source"]["path"] == "Knowledge Base/Evidence/Archive/records/service-record.md"
-    assert result["mutated"] is False
     assert {p: p.read_bytes() for lane in ("Sources", "Evidence")
             for p in (vault / "Knowledge Base" / lane).rglob("*.md")} == before

@@ -35,10 +35,12 @@
 - [x] 4.1 Run the scripted no-model proof on main and on the branch, and record calls per
   saved write, refusals by code, decision files per page and audit findings.
 - [x] 4.2 Run `openspec validate --all --strict` and the generator checks.
-- [ ] 4.3 Replay the first attempt of each write from the benchmark's Exomem arm, with
+- [x] 4.3 Replay the first attempt of each write from the benchmark's Exomem arm, with
   review fields removed, against main and the branch, and report refusals by code.
-- [ ] 4.4 Rerun the benchmark's dev round on a build of this change, and report refusals by
+  Evidence: outcome benchmark on 2026-11-08: replay of 20 first-attempt creates on main and branch both succeed; same-20-question P-arm control vs its base: score -0.007 [-0.097, +0.050], 1.14 vs 3.17 calls per saved write, refusals 1 vs 13
+- [x] 4.4 Rerun the benchmark's dev round on a build of this change, and report refusals by
   code, calls per saved write, and the per-case score difference with its interval.
+  Evidence: outcome benchmark on 2026-11-08: replay of 20 first-attempt creates on main and branch both succeed; same-20-question P-arm control vs its base: score -0.007 [-0.097, +0.050], 1.14 vs 3.17 calls per saved write, refusals 1 vs 13
 
 ## 5. Review findings on the first build
 

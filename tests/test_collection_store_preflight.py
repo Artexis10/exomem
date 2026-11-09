@@ -186,7 +186,7 @@ def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch)
     assert report.structured_content["verdict"] == "blocked"
     assert report.structured_content["blocked"] == [BROKEN]
     # The cursor reaches the inventory, which names the remedy, rather than failing the tool's schema.
-    assert "cursor is not a next_cursor" in foreign.content[0].text
+    assert "cursor is not a next_cursor" in foreign.content[0].text.lower()
 
 
 def test_an_item_stamped_with_its_note_identity_stays_importable_and_is_counted(tmp_path):

@@ -9,22 +9,29 @@ so the client never needs an HTTP fetch (openspec capability: video-frames).
 
 from __future__ import annotations
 
+import dataclasses
 import io
-import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
 import numpy as np
 
-from . import access, embeddings, reserved_paths
+from . import access, embeddings, mode, reserved_paths
 from .extract import media_type_for
 from .vault import VaultPathError, resolve_under_vault
 
 DEFAULT_TOOL_FRAMES = 8
-MAX_TOOL_FRAMES = 16  # hard cap per call (EXOMEM_VIDEO_FRAMES_TOOL_CAP overrides)
+# Settings, read like image view's (`EXOMEM_<NAME>`, else the machine's config key, else the
+# default): the frames one call may return, and the long side a frame gets when the call names
+# none ("original" keeps the video's own size). What a model can take changes with the model.
+FRAMES_CAP_SETTING = "video_frames_tool_cap"
+DEFAULT_FRAMES_CAP = 16
+MAX_SIDE_SETTING = "video_frames_max_side"
+DEFAULT_MAX_SIDE = 768
+# The Cloud frames worker sizes its allocation ceiling and memory admission from this edge, so
+# Cloud frames keep it whatever the call asks and report it as the effective side.
+CLOUD_MAX_SIDE = 768
 CANDIDATE_MULTIPLIER = 2  # sample 2x the requested frames so dedup has headroom
-FRAME_JPEG_MAX_EDGE = 768  # longest side of returned JPEGs — server policy, not a param
 FRAME_JPEG_QUALITY = 80
 
 
@@ -35,13 +42,13 @@ class VideoFramesError(Exception):
         super().__init__(reason)
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class Frame:
     timestamp_sec: float
     jpeg: bytes
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class FramesResult:
     path: str  # resolved vault-relative posix path
     duration_sec: float | None
@@ -49,18 +56,23 @@ class FramesResult:
     candidates: int  # sampled before dedup/cap
     dedup_dropped: int
     max_frames_effective: int
+    max_side_effective: int | None  # None: the video's own size
+    # Timestamps of frames left out because the call reached its byte limit.
+    not_shown: tuple[float, ...] = ()
 
 
 def _tool_frames_cap() -> int:
-    raw = os.environ.get("EXOMEM_VIDEO_FRAMES_TOOL_CAP")
-    if raw:
-        try:
-            v = int(raw)
-            if v > 0:
-                return v
-        except ValueError:
-            pass
-    return MAX_TOOL_FRAMES
+    return mode.int_setting(FRAMES_CAP_SETTING, DEFAULT_FRAMES_CAP)
+
+
+def resolve_side(max_side: int | str | None) -> int | None:
+    """The frame long side in pixels, or None for the video's own size."""
+    from . import image_view
+
+    try:
+        return image_view.resolve_side(max_side, setting=MAX_SIDE_SETTING, default=DEFAULT_MAX_SIDE)
+    except image_view.ImageViewError as error:
+        raise VideoFramesError(error.code, error.reason) from error
 
 
 def _probe_duration(source: Path | BinaryIO) -> float | None:
@@ -81,14 +93,15 @@ def _probe_duration(source: Path | BinaryIO) -> float | None:
     return None
 
 
-def _encode_jpeg(img) -> bytes:
-    """Bounded JPEG encode of a PIL image: longest side ≤ FRAME_JPEG_MAX_EDGE."""
+def _encode_jpeg(img, max_side: int | None) -> bytes:
+    """JPEG encode of a PIL image, its longest side at most `max_side` (None keeps its size)."""
     try:
         from PIL import Image  # noqa: F401 — decoded frames are PIL images
     except ImportError as e:
         raise embeddings.ClipUnavailable(f"Pillow not installed: {e}") from e
     out = img.convert("RGB")
-    out.thumbnail((FRAME_JPEG_MAX_EDGE, FRAME_JPEG_MAX_EDGE))
+    if max_side is not None:
+        out.thumbnail((max_side, max_side))
     buf = io.BytesIO()
     out.save(buf, format="JPEG", quality=FRAME_JPEG_QUALITY)
     return buf.getvalue()
@@ -97,26 +110,28 @@ def _encode_jpeg(img) -> bytes:
 def get_frames(
     vault_root: Path, path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
     start_sec: float | None = None, end_sec: float | None = None,
+    max_side: int | str | None = None,
 ) -> FramesResult:
     from . import cloud_cell, originals
 
+    side = resolve_side(max_side)  # refused alike on Cloud, which then keeps its own edge
     if cloud_cell.cloud_mode_enabled():
         from .video_frames_worker import get_frames as cloud_frames
 
-        return cloud_frames(vault_root, path, max_frames=max_frames,
-                            start_sec=start_sec, end_sec=end_sec)
+        return _within_call_bytes(cloud_frames(vault_root, path, max_frames=max_frames,
+                                               start_sec=start_sec, end_sec=end_sec))
     from .media_store import open_original
 
     if originals.binding_for(vault_root) is None:
-        return _get_frames_local(vault_root, path, max_frames=max_frames,
-                                 start_sec=start_sec, end_sec=end_sec)
+        return _within_call_bytes(_get_frames_local(vault_root, path, max_frames=max_frames,
+                                                    start_sec=start_sec, end_sec=end_sec, max_side=side))
     try:
         target, relative = resolve_under_vault(vault_root, path)
         if access.refuse_if_excluded(vault_root, relative):
             raise VideoFramesError("NOT_FOUND", "video does not exist")
         with open_original(vault_root, target):
-            return _get_frames_local(vault_root, path, max_frames=max_frames,
-                                     start_sec=start_sec, end_sec=end_sec)
+            return _within_call_bytes(_get_frames_local(vault_root, path, max_frames=max_frames,
+                                                        start_sec=start_sec, end_sec=end_sec, max_side=side))
     except VaultPathError as error:
         raise VideoFramesError(error.code, error.reason) from error
     except reserved_paths.ReservedPathLeafError as error:
@@ -130,6 +145,7 @@ def _get_frames_local(
     max_frames: int = DEFAULT_TOOL_FRAMES,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    max_side: int | None = DEFAULT_MAX_SIDE,
 ) -> FramesResult:
     """Sample, dedup, bound, and JPEG-encode keyframes for a vault video.
 
@@ -168,15 +184,18 @@ def _get_frames_local(
         raise VideoFramesError("NOT_A_VIDEO", f"not a video file: {rel_path}")
 
     return sample_stream(io.BytesIO(snapshot.data), rel_path, max_frames=max_frames,
-                         start_sec=start_sec, end_sec=end_sec)
+                         start_sec=start_sec, end_sec=end_sec, max_side=max_side)
 
 
 def sample_stream(
     source: BinaryIO, rel_path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
     start_sec: float | None = None, end_sec: float | None = None,
-    resize_candidates: bool = False,
+    resize_candidates: bool = False, max_side: int | None = DEFAULT_MAX_SIDE,
 ) -> FramesResult:
-    """Sample one retained seekable stream; the caller owns custody and disclosure."""
+    """Sample one retained seekable stream; the caller owns custody and disclosure.
+
+    `resize_candidates` shrinks each candidate to `max_side` as it decodes, so it needs a size.
+    """
     if start_sec is not None and start_sec < 0:
         raise VideoFramesError("BAD_RANGE", "start_sec must be >= 0")
     if end_sec is not None and end_sec <= (start_sec or 0.0):
@@ -184,7 +203,7 @@ def sample_stream(
     effective = max(1, min(max_frames, _tool_frames_cap()))
     windowed = start_sec is not None or end_sec is not None
     hashes = [] if resize_candidates else None
-    options = {"max_edge": FRAME_JPEG_MAX_EDGE, "hashes": hashes} if resize_candidates else {}
+    options = {"max_edge": max_side, "hashes": hashes} if resize_candidates else {}
     try:
         duration = _probe_duration(source)
         if duration is not None and duration > 0:
@@ -235,10 +254,7 @@ def sample_stream(
         idx = sorted(set(np.linspace(0, len(kept) - 1, effective).round().astype(int).tolist()))
         kept = [kept[i] for i in idx]
     try:
-        frames = [
-            Frame(timestamp_sec=round(float(ts), 3), jpeg=_encode_jpeg(img))
-            for ts, img in kept
-        ]
+        frames = [Frame(timestamp_sec=round(float(ts), 3), jpeg=_encode_jpeg(img, max_side)) for ts, img in kept]
     except embeddings.ClipUnavailable as e:
         raise VideoFramesError(
             "VIDEO_DEPS_MISSING", f"{e} — install the media extra to encode frames"
@@ -250,4 +266,33 @@ def sample_stream(
         candidates=len(candidates),
         dedup_dropped=dropped,
         max_frames_effective=effective,
+        max_side_effective=max_side,
     )
+
+
+def _within_call_bytes(result: FramesResult) -> FramesResult:
+    """`result` cut to the frames that fit image view's inline and per-call byte settings.
+
+    Applied once, in the process that answers the call, after the local or Cloud read. Frames keep
+    time order; once one does not fit, it and every later frame are listed in `not_shown`, so the
+    shown frames are the start of the sample and a later window can ask for the rest. When not
+    even the first frame fits, the call is refused with the size to lower, never answered empty.
+    """
+    from . import image_view
+
+    inline = mode.int_setting(image_view.INLINE_BYTES_SETTING, image_view.DEFAULT_INLINE_BYTES)
+    budget = mode.int_setting(image_view.CALL_BYTES_SETTING, image_view.DEFAULT_CALL_BYTES)
+    used = 0
+    for index, frame in enumerate(result.frames):
+        size = image_view.wire_bytes(frame.jpeg)
+        if size > inline or used + size > budget:
+            if index == 0:
+                raise VideoFramesError(
+                    "FRAME_TOO_LARGE",
+                    "one frame at this size is larger than a call can carry; ask for a smaller max_side, "
+                    "or raise the image_view_max_call_bytes setting",
+                )
+            return dataclasses.replace(result, frames=list(result.frames[:index]),
+                                       not_shown=tuple(left.timestamp_sec for left in result.frames[index:]))
+        used += size
+    return result

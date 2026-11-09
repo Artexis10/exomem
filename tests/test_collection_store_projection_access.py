@@ -280,9 +280,7 @@ def test_mcp_query_refreshes_the_whole_read_after_an_adopted_view_edit(
         result = bound(action="query", collection=CID, view="recent", include_agent_history=include_history)
     assert reads == 2
     if keeps_changing:
-        assert result["success"] is False
         assert result["error"]["code"] == "COLLECTION_STORE_BUSY"
-        assert result["error"]["committed"] is False
     else:
         assert result["rows"][0]["title"] == "Two"
         assert result["total_matched"] == 1

@@ -357,7 +357,8 @@ def test_one_notice_is_projected_on_compact_and_replay(tmp_path):
         compact = mutation_terminal.project_terminal(result)
         assert mutation_terminal.project_terminal(replay) == {**compact, "replayed": True}
     assert calls == 1
-    assert compact["state"] == "committed"
+    full = mutation_terminal.project_terminal(result, "full")
+    assert full["diagnostics"]["operational"]["state"] == "committed"
     assert compact["vocabulary_advisory"]["ref"].startswith("exomem://review/vocabulary/")
     assert len(json.dumps(compact["vocabulary_advisory"]).encode()) <= 1024
     assert str(tmp_path) not in json.dumps(compact)

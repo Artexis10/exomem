@@ -278,7 +278,8 @@ class Tap:
                 "name": "ask_memory",
                 # A nonempty, case-independent query exercises ranked recall.
                 # No reranker or case ref is needed to prove its admission.
-                "arguments": {"query": "readiness probe", "limit": 1, "rerank": False},
+                # Timings keep the raw `warming` components; the agent reply folds them into a `notice`.
+                "arguments": {"query": "readiness probe", "limit": 1, "rerank": False, "include_timings": True},
             }
             if "_meta" in params:
                 probe_params["_meta"] = params["_meta"]

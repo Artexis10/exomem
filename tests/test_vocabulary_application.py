@@ -480,6 +480,7 @@ def test_committed_terminal_recovers_an_uncertain_direct_application(tmp_path, m
         "summary": "A durable organization identity.",
         "vocabulary_ref": item.ref,
         "vocabulary_fingerprint": item.fingerprint,
+        "response_detail": "full",
     }
     real_commit = vocabulary_application.commit
     monkeypatch.setattr(
@@ -489,7 +490,7 @@ def test_committed_terminal_recovers_an_uncertain_direct_application(tmp_path, m
     )
     with library_scope():
         first = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="uncertain-direct")
-    assert first["state"] == "committed"
+    assert first["diagnostics"]["operational"]["state"] == "committed"
     assert VocabularyState(tmp_path).get(item.ref)["decision"]["application"]["state"] == "uncertain"
     monkeypatch.setattr(vocabulary_application, "commit", real_commit)
     with library_scope():

@@ -57,10 +57,11 @@ def _mcp_error(vault: Path) -> dict:
         surface_descriptor=descriptor,
     )
     with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
-        result = wrapped(**BODY)
-    assert result["success"] is False
-    assert result["mutated"] is False
-    return result["error"]
+        result = wrapped(**BODY, response_detail="full")
+    # The compact MCP refusal is the agent's own shape; `full` keeps the shared public block.
+    assert result["diagnostics"]["success"] is False
+    assert result["diagnostics"]["mutated"] is False
+    return result["diagnostics"]["error"]
 
 
 def _rest_client(

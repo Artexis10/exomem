@@ -663,7 +663,7 @@ def ended(pid):
     """Gone, or a zombie that no longer runs."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[0] == "Z"
-    except FileNotFoundError:
+    except OSError:  # ENOENT, or ESRCH when the process exits mid-read
         return True
 
 

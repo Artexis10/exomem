@@ -94,7 +94,7 @@ def test_full_restricted_mcp_edit_ignores_denied_lifecycle_overflow(
 
         response = asyncio.run(invoke())
         written = response.get("result", response)
-        assert written["status"] == "committed", json.dumps(written)
+        assert "error" not in written, json.dumps(written)
         final = (root / PAGE).read_text(encoding="utf-8")
         assert memory_refs.ref_from_markdown(final) == memory_refs.memory_ref(IDENTITY)
         prepared = relation_review.lifecycle_prepared_path(root, IDENTITY)

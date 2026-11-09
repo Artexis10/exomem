@@ -412,8 +412,9 @@ def test_confirmed_apply_rewrites_minority_tags_and_is_idempotent(tmp_path):
         apply=True,
         plan_id=preview["plan_id"],
         why="Reconcile plural variants.",
+        response_detail="full",
     )
-    assert applied["state"] == "committed"
+    assert applied["diagnostics"]["operational"]["state"] == "committed"
     for index in range(2):
         path = tmp_path / f"Knowledge Base/Notes/variant-{index}.md"
         fm, body, _ = vault.parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -701,8 +702,9 @@ def test_remote_surface_admits_the_plan_gated_mode(tmp_path):
         applied = writer_lease.invoke_command(
             command, tmp_path, idempotency_key="remote-apply", mode="tag-variants",
             apply=True, plan_id=preview["plan_id"], why="Reconcile from a remote client.",
+            response_detail="full",
         )
-    assert applied["state"] == "committed"
+    assert applied["diagnostics"]["operational"]["state"] == "committed"
     assert len(applied["paths"]) == 2
 
 
@@ -843,9 +845,9 @@ def test_served_apply_plans_outside_the_writer_lock(tmp_path, monkeypatch):
     events = _track_guards(monkeypatch)
     applied = _maintain(
         tmp_path, "apply", mode="tag-variants", apply=True,
-        plan_id=preview["plan_id"], why="Served.",
+        plan_id=preview["plan_id"], why="Served.", response_detail="full",
     )
-    assert applied["state"] == "committed"
+    assert applied["diagnostics"]["operational"]["state"] == "committed"
     plans = [event for event in events if event.startswith("plan@")]
     assert plans == ["plan@0"]
     assert "enter:maintain_memory" not in events
@@ -869,8 +871,9 @@ def test_excluding_a_group_applies_the_rest(tmp_path):
     applied = _maintain(
         tmp_path, "apply-some", mode="tag-variants", apply=True,
         plan_id=partial["plan_id"], why="Keep failure apart.", exclude_groups=["failures"],
+        response_detail="full",
     )
-    assert applied["state"] == "committed"
+    assert applied["diagnostics"]["operational"]["state"] == "committed"
     for index in range(2):
         path = tmp_path / f"Knowledge Base/Notes/variant-{index}.md"
         assert vault.parse_frontmatter(path.read_text(encoding="utf-8"))[0]["tags"] == [
@@ -938,7 +941,7 @@ def _edit_tags(root: Path, key: str, tags: list[str]) -> dict:
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "edit_memory")
     return writer_lease.invoke_command(
         command, root, idempotency_key=key, path="Knowledge Base/Notes/target.md",
-        why="retag", operation={"kind": "replace_tags", "tags": tags},
+        why="retag", operation={"kind": "replace_tags", "tags": tags}, response_detail="full",
     )
 
 
@@ -985,7 +988,7 @@ def test_a_restricted_write_builds_its_tag_index_once(tmp_path, tmp_path_factory
     )
     with request_scope(writer("external")):
         result = _edit_tags(tmp_path, f"restricted-{level}", ["failure", "keep"])
-    assert result["state"] == "committed"
+    assert result["diagnostics"]["operational"]["state"] == "committed"
     assert len(builds) == 1
 
 

@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Prompt MCP retries replay successful mutations
-The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window, and SHALL return the original result without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit, because the terminal is persisted before that acknowledgement. A replayed reply SHALL carry `replayed: true`, and its `mutated`, `request_id` and `receipt_id` SHALL be those of the commit it replays, so the reply says the commit happened earlier. A reply that is not a replay SHALL carry no `replayed` key.
+The system SHALL detect a successful mutation repeated through MCP by the same authenticated principal with the same command and canonical arguments within a bounded retry window, and SHALL return the original result without executing the mutation leaf again. Replay SHALL resolve the persisted terminal even when the original call's derived-state acknowledgement failed after the commit, because the terminal is persisted before that acknowledgement. A replayed reply SHALL carry `replayed: true` in the compact projection and in `full`, and its `mutated`, `request_id` and `receipt_id` SHALL be those of the commit it replays, so the reply says the commit happened earlier. A reply that is not a replay SHALL carry no `replayed` key.
 
 #### Scenario: Lost save acknowledgement is retried
 - **WHEN** an authenticated MCP client repeats an identical successful additive save within the retry window

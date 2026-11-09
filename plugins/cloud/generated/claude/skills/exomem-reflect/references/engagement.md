@@ -159,10 +159,11 @@ or state change, a stable preference, a method or parameter, an entity facet, an
 operational or vendor quirk, evidence worth preserving, a relation, a planning
 implication, a record implication. That list is examples rather than a boundary.
 Do not repeat a completed review after every destination write. Never re-write
-what a write response lists as written recently, and stay silent when nothing
-qualifies. A write response may carry a
-`capture_sweep` block saying this is the first write after a quiet interval; it
-prompts a pass if one has not already been completed for that episode, never a
+what you already wrote in this episode, and stay silent when nothing
+qualifies. A write reply may carry a `next_action` sentence that asks for one pass over
+the conversation, with `unpaged_mentions` naming references that have no page. It
+means this is the first write after a quiet interval and arrives once per episode;
+it prompts a pass if one has not already been completed for that episode, never a
 demand that something be written.
 
 **Close the session: record the conversation, then cite it.** At a decision or

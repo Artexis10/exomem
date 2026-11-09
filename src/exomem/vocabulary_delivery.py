@@ -19,7 +19,6 @@ from . import (
     mutation_terminal,
     tag_variants,
     topic_carrier_considerations,
-    vocabulary_delta,
     vocabulary_notifications,
     vocabulary_projection,
     vocabulary_recovery,
@@ -161,8 +160,7 @@ def after_commit(vault_root: Path, result: Any) -> Any:
         # A tag variant outranks a carrier: the carrier fills the slot only when the tag notice left it free.
         guided = _with_tag_advisory(guided, _tag_advisory(vault_root, path))
         guided = _with_carrier_advisory(vault_root, guided, path)
-    # A registry save writes no page, so the broadcast of new vocabulary has its own, page-free seam.
-    return vocabulary_delta.with_pending(vault_root, guided)
+    return guided
 
 
 def _after_commit(vault_root: Path, result: Any) -> Any:

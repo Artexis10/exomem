@@ -155,7 +155,7 @@ async def _tool(client, name, arguments, origin):
     assert response.status_code == 200, response.text
     result = response.json()["result"]
     payload = result.get("structuredContent") or json.loads(result["content"][0]["text"])
-    return payload.get("result", payload) if payload.get("success", True) else payload
+    return payload if "error" in payload else payload.get("result", payload)
 
 
 def _prepare_arguments(lane="source"):
@@ -379,7 +379,7 @@ def test_a_proof_without_a_route_capsule_binds_the_login_and_publishes_no_handof
     assert [record.fields for record in _credential_events(caplog)] == [
         {"credential": "both", "proof": "valid", "verdict": "pass", "cell_id": CELL_ID}] * 2
     # Refused as an unavailable handoff, not as a missing login: the proof bound the origin, and no ticket was issued.
-    assert "no usable upload handoff" in json.dumps(handoff) and "no verified gateway origin" not in json.dumps(handoff)
+    assert "UPLOAD_HANDOFF_UNAVAILABLE" in json.dumps(handoff) and "no verified gateway origin" not in json.dumps(handoff)
     assert cloud_origin.verify_request(proof_only) == cloud_origin.RequestOrigin(cloud_origin.Origin(**LOGIN_A), None)
 
 

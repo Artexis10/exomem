@@ -21,13 +21,13 @@ env:
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
   # Each pinned release comes with its published wheel's SHA-256 (scripts/ci_install_release.py).
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.165.0"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "61cab7c3284e0e85c426e331a1e086605097863e3cc58e6b81dda54515cbac09"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.166.0"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "090c6275c01b98964d4e3a865268eb660ba483b7b4949260702ae1320a43d099"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: ""
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: ""
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.167.0"
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: "ed569d487b5b84cfc2b07c91e32416e38f32ecbe1036c004f692219945a09e43"
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 
@@ -79,9 +79,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: python3 scripts/ci_change_scope.py "serial timing checks on a docs-only change"
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: &setup-uv-inputs
           enable-cache: true
+          # v10 no longer prunes by default; keep v5's small, pruned uv cache in the shared cache budget.
+          prune-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
       # Workers can finish while the headroom check still reads the scheduling baseline.
@@ -202,9 +204,8 @@ jobs:
         timeout-minutes: 5
         run: scripts/ci-install-age.sh
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Install the pinned older readers for the collection-store gate
@@ -289,9 +290,8 @@ jobs:
         run: python3 scripts/ci_change_scope.py "structural recall on a docs-only change"
       - name: Install uv
         if: steps.scope.outputs.docs_only != 'true'
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify reference interpreter and SQLite
         if: steps.scope.outputs.docs_only != 'true'
         run: |
@@ -346,9 +346,8 @@ jobs:
           bwrap --unshare-all --new-session --die-with-parent \
             --ro-bind / / -- /usr/bin/true
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Prepare bytecode for installed hook commands
@@ -408,9 +407,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Require NTFS and 8.3 aliases
@@ -513,9 +511,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: TUI suite (Pilot interaction + committed SVG goldens)
         # The lean matrix skips tests/tui (no `tui` extra there); this job
         # opts in. Goldens render only from the deterministic FakeBackend —
@@ -546,9 +543,8 @@ jobs:
         run: python3 scripts/ci_change_scope.py "the installed journey"
       - name: Install uv
         if: steps.scope.outputs.docs_only != 'true'
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Install the pinned older reader for the installed launcher proof
         if: steps.scope.outputs.docs_only != 'true'
         timeout-minutes: 5
@@ -635,9 +631,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       # Cache the downloaded models between runs, with the served bge-m3 int8
       # artefact the activation acceptance loads (fetched or host-built into
       # ~/.cache/huggingface/exomem-artifacts). The first run downloads them;
@@ -674,9 +669,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - *prepare-duration-snapshot
       - name: Per-lane latency ceiling gate (2000-note synthetic vault, model-free)
         env:
@@ -725,9 +719,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify the latency instrument once before fan-out
         env:
           UV_PYTHON: /usr/bin/python3
@@ -767,9 +760,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Resolve the served encoder digest
         id: recall-encoder
         env:
@@ -828,9 +820,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Download raw attempts into separate artifact directories
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -877,9 +868,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Characterize exact-capacity hidden-corpus actual-wire routes
@@ -908,9 +898,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Cache the certified BGE vector model
         uses: actions/cache@v4
         with:
@@ -946,9 +935,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: FTS5 read-after-write visibility regression
         run: uv run --frozen python -m pytest tests/test_read_after_write_visibility.py -q
       - name: Semantic validate and commit latency scaling gate (2k and 8k)
@@ -966,9 +954,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Graph converges under sustained concurrent writes
         # The property eight PRs of graph work never had a gate for: with a
         # writer running continuously, repair queued off the write path must
@@ -994,9 +981,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Wheel-only time-to-value gate
         # Proves the onboarding path works from the built wheel alone — the
         # packaged sample vault ships, `exomem demo` has no repo dependency,
@@ -1069,9 +1055,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Validate public build inputs before packaging
@@ -1105,9 +1090,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Check generated capabilities doc
         run: uv run --frozen python scripts/generate-capabilities.py --check
 
@@ -1118,7 +1102,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: *setup-uv-inputs
       - name: Ruff correctness baseline (required)
         run: uvx ruff check . --select F
       - name: Full Ruff gate for new memory contracts

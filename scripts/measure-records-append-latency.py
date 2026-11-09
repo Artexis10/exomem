@@ -113,6 +113,14 @@ Synthetic collection for latency measurement.
 """
 
 
+
+def _committed(result: dict) -> bool:
+    """A write reply's commit state: top level on legacy replies, under diagnostics on full ones."""
+    diagnostics = result.get("diagnostics")
+    operational = diagnostics.get("operational") if isinstance(diagnostics, dict) else None
+    operational = operational if isinstance(operational, dict) else {}
+    return "committed" in (result.get("state"), operational.get("state"))
+
 def _item(index: int) -> dict[str, object]:
     day = dt.date(1990, 1, 1) + dt.timedelta(days=index)
     return {
@@ -575,7 +583,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             stages.last_sample = stages.sample(wall, cpu, spans, error_code)
         # The public mutation protocol supplies guards only after a committed write.
         if fixture is not None and isinstance(result, dict) and (
-            result.get("outcome") == "committed" or result.get("state") == "committed"
+            result.get("outcome") == "committed" or _committed(result)
         ):
             # Full terminals carry the original acknowledgement in diagnostics.
             acknowledgement = result if "after_container_hash" in result else result.get("diagnostics")
@@ -583,7 +591,23 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
             if not isinstance(acknowledged, str):
                 raise RuntimeError("committed mutation omitted its public container guard")
             expected = kwargs.get("expected_container_hash")
-            if expected is not None and acknowledgement.get("before_container_hash") != expected:
+            # The compact reply keeps only the guard the next call takes; the before side is diagnostic.
+            diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+            operational = diagnostics.get("operational")
+            operational = operational if isinstance(operational, dict) else {}
+            before = next(
+                (
+                    value
+                    for value in (
+                        acknowledgement.get("before_container_hash"),
+                        diagnostics.get("before_container_hash"),
+                        operational.get("before_container_hash"),
+                    )
+                    if value is not None
+                ),
+                None,
+            )
+            if expected is not None and before != expected:
                 raise RuntimeError("committed mutation did not retain its supplied container guard")
             phase_guard = acknowledged
         if kwargs.get("action") == "inspect":
@@ -912,7 +936,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
         bulk_stages = dict(stages.total)
         bulk_stage_calls = dict(stages.calls)
         bulk_budget_sample = stages.last_sample
-        if not isinstance(bulk, dict) or bulk.get("state") != "committed":
+        if not isinstance(bulk, dict) or not _committed(bulk):
             raise RuntimeError(f"bulk diagnostic did not commit: {str(bulk)[:500]}")
         stored_delta = handle.connection.execute("SELECT count(*) FROM items").fetchone()[0] - after["rows"]
         if stored_delta != 500:
