@@ -4614,6 +4614,17 @@ def page_content_hashes(vault_root: Path, rel_paths: Iterable[str]) -> dict[str,
 #: The two derived-column lookups of the duplicate-handling index, oldest filing first.
 _PAYLOAD_PATHS_SQL = "SELECT path FROM pages WHERE payload_hash = ? ORDER BY mtime_ns, path"
 _SOURCE_URL_PATHS_SQL = "SELECT path FROM pages WHERE source_url = ? ORDER BY mtime_ns, path"
+#: The same two columns as groups: every value that more than one page holds, with the pages that hold it.
+_PAYLOAD_GROUPS_SQL = (
+    "SELECT payload_hash, path FROM pages WHERE payload_hash IN "
+    "(SELECT payload_hash FROM pages WHERE payload_hash IS NOT NULL GROUP BY payload_hash HAVING COUNT(*) > 1) "
+    "ORDER BY payload_hash, mtime_ns, path"
+)
+_SOURCE_URL_GROUPS_SQL = (
+    "SELECT source_url, path FROM pages WHERE source_url IN "
+    "(SELECT source_url FROM pages WHERE source_url IS NOT NULL GROUP BY source_url HAVING COUNT(*) > 1) "
+    "ORDER BY source_url, mtime_ns, path"
+)
 
 
 def _duplicate_index_store(vault_root: Path) -> LexicalStore | None:
@@ -4655,6 +4666,21 @@ def source_url_candidates(vault_root: Path, canonical_url: str) -> tuple[str, ..
     store = _duplicate_index_store(vault_root)
     found = None if store is None else store.paths_where(_SOURCE_URL_PATHS_SQL, canonical_url)
     return None if found is None else tuple(found)
+
+
+def payload_groups(vault_root: Path) -> dict[str, tuple[str, ...]] | None:
+    """Each payload hash that two or more indexed pages share, with their paths oldest first; None when the index cannot answer.
+
+    The audit's one enumeration of candidate groups. Like every lookup here it only proposes: the audit re-derives each member.
+    """
+    store = _duplicate_index_store(vault_root)
+    return None if store is None else store.groups_where(_PAYLOAD_GROUPS_SQL)
+
+
+def source_url_groups(vault_root: Path) -> dict[str, tuple[str, ...]] | None:
+    """Each canonical URL that two or more indexed Sources share, with their paths oldest first; None when the index cannot answer."""
+    store = _duplicate_index_store(vault_root)
+    return None if store is None else store.groups_where(_SOURCE_URL_GROUPS_SQL)
 
 
 def record_payload_commit(vault_root: Path, rel_paths: Iterable[str]) -> bool:
@@ -11310,6 +11336,25 @@ class LexicalStore:
                 if not self._schema_is_current(conn):
                     return None
                 return [row[0] for row in conn.execute(sql, (value,))]
+        except sqlite3.Error as error:
+            self._note_query_failure(error, "lexical duplicate-index probe declined (%s)")
+            return None
+
+    def groups_where(self, sql: str) -> dict[str, tuple[str, ...]] | None:
+        """The `(derived value, path)` rows one of this module's group statements returns, grouped by value; None when the catalogue cannot answer.
+
+        Read-only and non-walking. `sql` is one of the two constants above, so no caller text reaches the statement.
+        """
+        if self._failed or not self.path.exists():
+            return None
+        try:
+            with self._query_connection() as conn:
+                if not self._schema_is_current(conn):
+                    return None
+                grouped: dict[str, list[str]] = {}
+                for value, path in conn.execute(sql):
+                    grouped.setdefault(value, []).append(path)
+                return {value: tuple(paths) for value, paths in grouped.items()}
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical duplicate-index probe declined (%s)")
             return None

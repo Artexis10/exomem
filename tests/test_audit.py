@@ -3,6 +3,7 @@ parent-vault wikilinks must resolve (SKILL.md rule 1 allows them)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -810,3 +811,102 @@ def test_a_link_inside_an_origin_carrier_does_not_adopt_an_orphan_entity(tmp_pat
     findings = audit_module.audit(tmp_path, categories=["orphan_entity"]).findings
 
     assert [finding.path for finding in findings] == [entity.relative_to(tmp_path).as_posix()]
+
+
+# ---------------------------------------------------------------- duplicate_content and duplicate_source_url
+
+
+def _duplicate_audit(vault: Path, *categories: str) -> dict:
+    with library_scope():
+        return commands.op_audit(vault, categories=list(categories))
+
+
+def _three_photos(vault: Path) -> list[str]:
+    from duplicate_fixtures import evidence_filing
+
+    data = b"\x89PNG photo of the notice"
+    # Filed in this order, so the oldest filing is the one whose folder sorts last.
+    return [
+        evidence_filing(vault, "Case", "letters", "notice.png", data, filed=dt.date(2026, 1, 1)),
+        evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data, filed=dt.date(2026, 2, 1)),
+        evidence_filing(vault, "Case", "annexes", "annex-a.png", data, filed=dt.date(2026, 3, 1)),
+    ]
+
+
+def test_three_identical_photos_give_one_finding_with_two_fold_steps(vault: Path) -> None:
+    """One group, the oldest filing by capture date as canonical, and one step per copy."""
+    pages = _three_photos(vault)
+
+    result = _duplicate_audit(vault, "duplicate_content")
+
+    [finding] = result["findings"]
+    assert finding["category"] == "duplicate_content" and finding["path"] == pages[0]
+    assert finding["meta"]["suggested_canonical"] == pages[0]
+    assert [step["args"]["copy"]["path"] for step in finding["meta"]["steps"]] == pages[1:]
+    assert {step["args"]["canonical"]["path"] for step in finding["meta"]["steps"]} == {pages[0]}
+    assert [family["category"] for family in finding["meta"]["members"][0]["families"]] == ["letters"]
+    assert finding["meta"]["bytes_freed"] == 2 * len(b"\x89PNG photo of the notice")
+    assert result["metadata"]["duplicates"]["content"] == {"Evidence": {"groups": 1, "copies": 2, "verified": "re-hashed"}}
+    assert result["metadata"]["coverage"]["duplicate_content"] == "complete"
+
+
+def test_a_stale_index_entry_gives_no_finding(vault: Path) -> None:
+    """The index only proposes a group: when one original no longer hashes to its page, the audit stays silent."""
+    pages = _three_photos(vault)
+    assert len(_duplicate_audit(vault, "duplicate_content")["findings"]) == 1
+
+    (vault / pages[1].removesuffix(".md")).write_bytes(b"\x89PNG a different picture")
+    (vault / pages[2].removesuffix(".md")).write_bytes(b"\x89PNG another different picture")
+
+    after = _duplicate_audit(vault, "duplicate_content")
+    assert after["findings"] == []
+    assert after["metadata"]["duplicates"]["stale_index_groups"] == 1
+
+
+def test_one_url_with_different_text_gives_one_finding_and_no_fold(vault: Path) -> None:
+    """Two captures of one address that differ are not duplicates: the audit names both and offers no step."""
+    from duplicate_fixtures import source_filing
+
+    first = source_filing(vault, "capture-one", "The page said one thing.", url="https://Example.org/page#top", captured="2026-01-01")
+    second = source_filing(vault, "capture-two", "The page said another thing.", url="https://example.org/page", captured="2026-02-01")
+
+    result = _duplicate_audit(vault, "duplicate_content", "duplicate_source_url")
+
+    [finding] = result["findings"]
+    assert finding["category"] == "duplicate_source_url"
+    assert finding["paths"] == [first, second]
+    assert finding["meta"]["no_fold"] and "steps" not in finding["meta"]
+    assert result["metadata"]["duplicates"]["source_url"] == {"groups": 1, "sources": 2, "verified": "re-hashed"}
+
+
+@pytest.mark.parametrize("setup", ["across both lanes", "raw-protected"])
+def test_a_group_that_must_not_fold_is_reported_with_its_reason_and_no_step(vault: Path, owner_scope, setup: str) -> None:  # noqa: ANN001
+    """The audit still counts the group, and says why no step is offered."""
+    from duplicate_fixtures import evidence_filing, source_filing
+
+    data = b"\x89PNG photo of the notice"
+    protected = setup == "raw-protected"
+    evidence_filing(vault, "Case", "letters", "notice.png", data, protected=protected)
+    if protected:
+        evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data, protected=True)
+    else:
+        source_filing(vault, "same-bytes", "A captured passage.", original=data)
+
+    [finding] = _duplicate_audit(vault, "duplicate_content")["findings"]
+
+    assert finding["meta"]["steps"] == []
+    assert finding["meta"]["no_fold"]
+    assert ("both lanes" in finding["meta"]["no_fold"]) == (setup == "across both lanes")
+
+
+def test_an_index_that_cannot_answer_reads_as_unchecked_never_as_zero(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import lexstore
+
+    _three_photos(vault)
+    monkeypatch.setattr(lexstore, "payload_groups", lambda _root: None)
+
+    result = _duplicate_audit(vault, "duplicate_content")
+
+    assert result["findings"] == []
+    assert result["metadata"]["duplicates"] == {"index": "unchecked"}
+    assert result["metadata"]["coverage"]["duplicate_content"] == "unknown"
