@@ -33,7 +33,7 @@ from . import (
 from . import compile_proposal as compile_proposal_module
 from . import overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
-from .source_coverage import CAPTURE_HEADING
+from .source_coverage import CAPTURE_HEADING, fence_for, fenced_capture
 from .vault import (
     MISSING_CONTENT_HASH,
     LogEntry,
@@ -350,13 +350,6 @@ def _save_manifest(
     return {"path": rel, "ref": context_refs.manifest_ref(rel), "warnings": warnings}
 
 
-def _fence_for(text: str) -> str:
-    run = 3
-    while "`" * run in text:
-        run += 1
-    return "`" * run
-
-
 def _clean_inline(value: str) -> str:
     """A value for an inline-code span: no backtick or line break can end it early."""
     return " ".join(value.replace("`", "'").split())
@@ -459,30 +452,11 @@ def render_text_source(
         CAPTURE_HEADING,
         "",
     ]
-    fence = _fence_for(text)
+    fence = fence_for(text)
     return "\n".join([*lines, fence, text, fence, ""])
 
 
-def text_source_body(page: str) -> str | None:
-    """The original text that `render_text_source` fenced in a page, or None when the page is not in that format.
-
-    The inverse of our own page format. The page ends with the closing fence, a run of backticks that the text
-    cannot hold, so the text cannot hold the opening line (`## Capture`, a blank line, the fence) either: the last
-    opening line before the closing fence is the real one. A page that later back-references changed in its front
-    matter still parses, because the text sits after it. Nothing is trimmed, so a CRLF, a missing final newline and an
-    empty text come back exactly.
-    """
-    if not page.endswith("\n"):
-        return None
-    head = page[:-1]
-    fence = head[len(head.rstrip("`")):]
-    if len(fence) < 3 or not head[: -len(fence)].endswith("\n"):
-        return None
-    head = head[: -len(fence) - 1]
-    opening = f"\n{CAPTURE_HEADING}\n\n{fence}\n"
-    at = head.rfind(opening)
-    text = None if at == -1 else head[at + len(opening):]
-    return text if text is not None and _fence_for(text) == fence else None
+text_source_body = fenced_capture  # the name that callers and tests read from here
 
 
 def render_artifact_source(
@@ -814,8 +788,10 @@ def plan_import_items(
 
     Returns ``(items, skipped)``. ``skipped`` carries per-path refusals
     (``UNSUPPORTED_IMPORT_TYPE``, ``ALREADY_GOVERNED``, vault-path errors,
-    ``NOT_VALID_UTF8``) and an ``ALREADY_IMPORTED`` row, with the earlier
-    Source's ref, for a file whose bytes an earlier import already holds.
+    ``NOT_VALID_UTF8``), an ``ALREADY_IMPORTED`` row, with the earlier
+    Source's ref, for a file whose bytes the vault already stores, and a
+    ``DUPLICATE_IN_SELECTION`` row for a file whose bytes an earlier selected
+    file holds. This stateless copy records no import mapping on the Source.
     """
     from . import client_artifacts
 
@@ -828,6 +804,7 @@ def plan_import_items(
     ceiling = client_artifacts.fetch_budget().max_file_bytes
     planned: list[dict] = []
     texts: dict[str, str] = {}
+    seen: dict[tuple[str, bool], dict] = {}
 
     for raw in selected_paths or []:
         resolved = _resolve_selected_text_file(root, raw)
@@ -838,7 +815,7 @@ def plan_import_items(
         result = adoption_plan.plan_item(
             root, rel, collection=None, collection_root="", classification=None,
             taxonomy=None, text_hint=True, date_iso=date_iso, destinations=destinations,
-            index=index, notes=notes, ceiling=ceiling,
+            index=index, notes=notes, ceiling=ceiling, seen=seen,
         )
         if isinstance(result, dict):
             skipped.append(result)
@@ -857,14 +834,18 @@ def plan_import_items(
     adoption_plan.resolve_links(planned, index, collection=None)
     items: list[ImportItem] = []
     for item in planned:
-        if item["action"] == "already-imported":
+        if item["action"] != "copy-as-source":
+            repeated = item["action"] == "duplicate-of"
             skipped.append(
                 {
                     "path": item["original_path"],
-                    "code": "ALREADY_IMPORTED",
-                    "reason": "an earlier import already holds these bytes",
+                    "code": "DUPLICATE_IN_SELECTION" if repeated else "ALREADY_IMPORTED",
+                    "reason": (
+                        f"{item['duplicate_of']} in this selection holds these bytes"
+                        if repeated else "the vault already stores these bytes"
+                    ),
                     "source_path": item["target_path"],
-                    "source_ref": item["existing_ref"],
+                    "source_ref": item["target_ref"],
                     "original_sha256": item["original_sha256"],
                     "original_bytes": item["original_bytes"],
                 }

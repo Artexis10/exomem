@@ -159,23 +159,25 @@ def _stored(root, conn, cid):
 
 
 def _conversion_blocker(root, conn, row):
-    """What stops this collection's conversion that a preview can see, or None.
+    """What stops this collection's conversion that a preview can see, or None, and the warnings it carries.
 
     ``conn`` is the live store, or the proof import for a file collection, which has no views yet.
     The manifest checks and the disclosure check are the conversion's own (``conversion.summary_form``).
+    A warning is a saved view that the collection already cannot serve; the conversion keeps it as it is.
     """
     cid, path = row["collection_id"], row["path"]
     if row["authority"] == inventory.STORE and _unsettled(root, conn, cid):
         return _blocker("COLLECTION_CONVERSION_OUTSTANDING", f"a view of the collection is not settled; {_SETTLE}",
-                        path)
+                        path), []
     operation = governance.OperationAuthorization(root, conn, mutation=False)
     try:
-        conversion.summary_form(root, operation, *_stored(root, conn, cid))
+        _, proposed = conversion.summary_form(root, operation, *_stored(root, conn, cid))
     except (collections.CollectionError, types.CollectionTypeError) as error:
-        return _blocker(error.code, error.reason, path)
+        return _blocker(error.code, error.reason, path), []
     finally:
         operation.close()
-    return None
+    return None, [{"code": found.code, "reason": found.reason, "location": found.location}
+                  for found in proposed.view_diagnostics]
 
 
 def _vault_blockers(root, steps):
@@ -216,15 +218,16 @@ def _sealed(root, proof, rows, staging):
             live = stack.enter_context(connection.reader_snapshot(connection.store_path(root)))
         for row in rows:
             steps, blocker = _steps(row)
+            warnings = []
             # A file collection's rows are in the proof import; a store collection's in the live store.
             held = staging if row["authority"] == inventory.FILE else live
             if blocker is None and steps and row["conversion"] is None:
-                blocker = _conversion_blocker(root, held, row)
+                blocker, warnings = _conversion_blocker(root, held, row)
             if blocker is not None:
                 blockers.append(blocker)
             planned.append({name: row[name] for name in (
                 "path", "collection_id", "authority", "storage_strategy", "view_mode", "rows", "conversion")}
-                | {"steps": steps if blocker is None else [], "blocker": blocker,
+                | {"steps": steps if blocker is None else [], "blocker": blocker, "warnings": warnings,
                    "bodies": _bodies(held, row["collection_id"])})
     work = {step for row in planned for step in row["steps"]}
     if work:
@@ -243,7 +246,10 @@ def _outcome(sealed):
                 "Fix them, then preview again.")
     if not moving:
         return "Every structured collection is already in SQLite-only storage, or stays in files; nothing to do."
-    return (f"{moving} collection(s) would move to SQLite-only storage. The owner applies this plan_id on the "
+    carried = sum(len(row["warnings"]) for row in sealed["collections"])
+    warned = (f" {carried} saved view(s) that already cannot be served move unchanged; each collection's warnings "
+              "name them, so revise them after the cutover." if carried else "")
+    return (f"{moving} collection(s) would move to SQLite-only storage.{warned} The owner applies this plan_id on the "
             f"host: {APPLY}.")
 
 

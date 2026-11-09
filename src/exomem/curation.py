@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
-from . import capabilities, held_fs
+from . import capabilities, held_fs, vault
 from .collection_profiles import PLANNING_PROFILE
 from .kbdir import kb_dirname
 from .vault import (
@@ -33,6 +33,7 @@ from .vault import (
     PathGuardError,
     PlannedWrite,
     batch_atomic_write,
+    read_guarded_bytes,
     read_guarded_text,
 )
 from .vault import content_hash as text_content_hash
@@ -51,6 +52,7 @@ CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "revert",
 )
 READ_ONLY_ACTIONS: Final[frozenset[str]] = frozenset({"work-item", "preview", "status"})
+# nosemgrep: ep-word-set -- the closed step kinds this module implements, each with its own handler.
 STEP_KINDS: Final[tuple[str, ...]] = (
     "create-note",
     "create-entity",
@@ -60,7 +62,33 @@ STEP_KINDS: Final[tuple[str, ...]] = (
     "move",
     "delete",
     "recover",
+    "fold-recap-revisions",
+    "fold-duplicate",
 )
+#: The recap fold (add-first-class-duplicate-handling A7): an episode's superseded recap revisions
+#: move into compiled history. It is public, and with its undo it is the only step that retires a
+#: Source: `move`, `delete` and `recover` keep refusing, because the fold trashes a file only after
+#: it re-reads identical bytes held elsewhere (`fold_leaf`), so it needs no relocation lineage.
+FOLD_RECAP_STEP_KIND: Final[str] = "fold-recap-revisions"
+#: The fold's inverse. It is internal: `STEP_KINDS` lacks it, and only a compensation plan that
+#: `propose_compensation` derives from a fold's sealed manifest may carry it.
+UNFOLD_RECAP_STEP_KIND: Final[str] = "unfold-recap-revisions"
+#: The duplicate fold (add-first-class-duplicate-handling C2): a copy of a Source or Evidence page folds
+#: into the canonical page that holds identical bytes. It is public. `move`, `delete` and `supersede`
+#: keep refusing Sources and Evidence, and this fold alone retires a copy, after it re-proves the identity.
+FOLD_DUPLICATE_STEP_KIND: Final[str] = "fold-duplicate"
+#: The duplicate fold's inverse. It is internal, like the recap fold's: only a compensation plan may carry it.
+UNFOLD_DUPLICATE_STEP_KIND: Final[str] = "unfold-duplicate"
+# nosemgrep: ep-word-set -- the four fold step kinds this module defines, a closed set.
+FOLD_STEP_KINDS: Final[frozenset[str]] = frozenset(
+    {FOLD_RECAP_STEP_KIND, UNFOLD_RECAP_STEP_KIND, FOLD_DUPLICATE_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND}
+)
+#: The step kinds of the duplicate fold. They share one chained plan state (`duplicate_fold.Projection`).
+# nosemgrep: ep-word-set -- the two duplicate-fold step kinds this module defines, a closed set.
+_DUPLICATE_FOLD_KINDS: Final[frozenset[str]] = frozenset({FOLD_DUPLICATE_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND})
+#: The protected trees a fold may name: the Sources tree its revisions live in, and the Evidence tree.
+#: The trash is named too.
+_FOLD_TREES: Final[frozenset[str]] = frozenset(name.casefold() for name in vault.APPEND_ONLY_KB_SUBPATHS)
 #: The episode Records leaf (close-memory-loop 3.5). It is not a general
 #: curation kind: only a plan the episode `records` route seals may carry it
 #: (`propose(..., allow_records=True)`, alone in its plan), so no curation door
@@ -266,7 +294,17 @@ _PRESERVE_EVIDENCE_FIELDS = frozenset({"original", "scope", "category", "filenam
 _ADD_PLAN_FIELDS = frozenset({"collection", "item", "plan_id", "expected_container_hash", "body", "why"})
 _UPDATE_PLAN_FIELDS = frozenset({"collection", "plan_id", "changes", "body", "expected_container_hash", "expected_item_version", "why"})
 _TRIAGE_PLAN_FIELDS = frozenset({"collection", "plan_id", "transition", "expected_container_hash", "expected_item_version", "why"})
+# nosemgrep: ep-word-set -- the fold step's argument names, fixed by its schema.
+_FOLD_RECAP_FIELDS = frozenset({"head", "revisions"})
+# nosemgrep: ep-word-set -- the duplicate fold step's argument names, fixed by its schema.
+_FOLD_DUPLICATE_FIELDS = frozenset({"canonical", "copy", "why"})
+# nosemgrep: ep-word-set -- the unfold steps' one argument name, fixed by their schemas.
+_UNFOLD_FIELDS = frozenset({"fold"})
 _ARG_FIELDS = {
+    FOLD_RECAP_STEP_KIND: _FOLD_RECAP_FIELDS,
+    UNFOLD_RECAP_STEP_KIND: frozenset({"fold"}),
+    FOLD_DUPLICATE_STEP_KIND: _FOLD_DUPLICATE_FIELDS,
+    UNFOLD_DUPLICATE_STEP_KIND: _UNFOLD_FIELDS,
     "capture-source": _CAPTURE_SOURCE_FIELDS,
     "preserve-evidence": _PRESERVE_EVIDENCE_FIELDS,
     "add-plan": _ADD_PLAN_FIELDS, "update-plan": _UPDATE_PLAN_FIELDS, "triage-plan": _TRIAGE_PLAN_FIELDS,
@@ -285,6 +323,10 @@ _ARG_FIELDS = {
     "update-record": _UPDATE_RECORD_FIELDS,
 }
 _REQUIRED_FIELDS = {
+    FOLD_RECAP_STEP_KIND: _FOLD_RECAP_FIELDS,
+    UNFOLD_RECAP_STEP_KIND: frozenset({"fold"}),
+    FOLD_DUPLICATE_STEP_KIND: _FOLD_DUPLICATE_FIELDS,
+    UNFOLD_DUPLICATE_STEP_KIND: _UNFOLD_FIELDS,
     "capture-source": frozenset({"original", "title", "source_type"}),
     "preserve-evidence": frozenset({"original", "scope", "category", "filename"}),
     "add-plan": frozenset({"collection", "item", "expected_container_hash", "why"}),
@@ -466,13 +508,14 @@ def _folded_segment(part: str) -> str:
 
 
 def normalize_target_path(
-    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
+    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, allow_fold: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
 ) -> str:
     """A confined governed path. `allow_records` is the Records leaf's alone:
     it admits the Records tree, spelled exactly as the Records layer is, and
     nothing else, so that leaf can neither leave the tree nor open it to any
     other kind. Every other kind compares folded segments, so a spelling the
-    filesystem folds onto a protected tree is that tree."""
+    filesystem folds onto a protected tree is that tree. `allow_fold` is the fold
+    steps' alone: it admits the Sources tree and the trash, and no other protected tree."""
     if _planning_identity is not None:
         from . import structured_collections
 
@@ -508,9 +551,11 @@ def normalize_target_path(
         if parts[0] != "Records" or len(parts) < 2:
             raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside Records")
         return raw
-    if first in PROTECTED_TREES or compact.startswith("workflow-contract/"):
+    if (first in PROTECTED_TREES and not (allow_fold and first in _FOLD_TREES)) or compact.startswith(
+        "workflow-contract/"
+    ):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} belongs to another typed owner")
-    if first == "_trash" and not allow_trash:
+    if first == "_trash" and not (allow_trash or allow_fold):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} targets trash internals")
     return raw
 
@@ -524,7 +569,16 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
     if missing:
         raise _error("INVALID_CURATION_PLAN", f"steps[{ordinal}].args misses {missing}")
 
-    if kind in PRESERVATION_STEP_KINDS:
+    if kind in FOLD_STEP_KINDS:
+        from . import duplicate_fold, episode_fold
+
+        args = {
+            FOLD_RECAP_STEP_KIND: episode_fold.validate_args,
+            UNFOLD_RECAP_STEP_KIND: episode_fold.validate_unfold_args,
+            FOLD_DUPLICATE_STEP_KIND: duplicate_fold.validate_args,
+            UNFOLD_DUPLICATE_STEP_KIND: duplicate_fold.validate_unfold_args,
+        }[kind](args, ordinal)
+    elif kind in PRESERVATION_STEP_KINDS:
         from . import provenance
 
         args["original"] = provenance._origin_payload(  # noqa: SLF001
@@ -774,14 +828,16 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
     }
 
 
-def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str, Any]:
+def validate_forward_plan(raw: Any, *, allow_records: bool = False, allow_fold_inverse: bool = False) -> dict[str, Any]:
     """A closed forward plan. The compatibility flag `allow_records` admits
     the private leaves (the episode leaves and the promotion revert's
-    `remove-relation`); only their sealers and sealed plans pass it."""
+    `remove-relation`); only their sealers and sealed plans pass it.
+    `allow_fold_inverse` admits the two unfold steps, which only a
+    compensation derivation and a plan it sealed may carry."""
     kinds = (
-        (*STEP_KINDS, *_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND)
-        if allow_records
-        else STEP_KINDS
+        *STEP_KINDS,
+        *((*_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND) if allow_records else ()),
+        *((UNFOLD_RECAP_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND) if allow_fold_inverse else ()),
     )
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
@@ -840,7 +896,7 @@ def _validate_sealed_plan(raw: Any) -> dict[str, Any]:
     base = {key: value for key, value in raw.items() if key in _PLAN_FIELDS}
     # A stored plan was admitted by `propose`, which alone decides whether a
     # Records leaf may be sealed.
-    normalized = validate_forward_plan(base, allow_records=True)
+    normalized = validate_forward_plan(base, allow_records=True, allow_fold_inverse=True)
     _unknown_fields(dict(raw), _PLAN_FIELDS | _SEALED_FIELDS, "stored plan")
     manifest = raw.get("binding_manifest", [])
     registries = raw.get("registry_ids", {})
@@ -987,6 +1043,25 @@ def _guarded_text(vault_root: Path, path: str, *, stale: bool) -> tuple[str, str
         code = "CURATION_BINDING_STALE" if stale else "CURATION_TARGET_NOT_FOUND"
         raise _error(code, f"target {path!r} is unavailable") from error
     return source, text_content_hash(source)
+
+
+def _guarded_digest(vault_root: Path, path: str, *, stale: bool) -> str:
+    """SHA-256 of a vault file's bytes, read through the same no-follow guard as `_guarded_text`.
+
+    A binary original has no text form, and for a text page this equals `text_content_hash` of its text.
+    """
+    try:
+        PathGuard.capture(vault_root, path, leaf_policy="stable")
+        raw, _guard = read_guarded_bytes(vault_root, vault_root / path)
+    except PathGuardError as error:
+        if error.code in {"PATH_GUARD_INVALID", "PATH_GUARD_ROOT", "PATH_GUARD_UNSAFE"}:
+            raise _error("CURATION_PATH_UNSAFE", f"target {path!r} crosses an unsafe path") from error
+        code = "CURATION_BINDING_STALE" if stale else "CURATION_TARGET_UNREADABLE"
+        raise _error(code, f"target {path!r} is unavailable") from error
+    except OSError as error:
+        code = "CURATION_BINDING_STALE" if stale else "CURATION_TARGET_NOT_FOUND"
+        raise _error(code, f"target {path!r} is unavailable") from error
+    return hashlib.sha256(raw).hexdigest()
 
 
 def _guarded_absent(vault_root: Path, path: str) -> bool:
@@ -1408,7 +1483,15 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
     """Use native custody and native publication, with one sealed core allocation."""
     from dataclasses import replace
 
-    from . import add, artifact_recovery, memory_refs, preserve, retained_inputs, schema
+    from . import (
+        add,
+        artifact_recovery,
+        evidence_reuse,
+        memory_refs,
+        preserve,
+        retained_inputs,
+        schema,
+    )
     from .governance.principal import effective_principal
     from .vault import PreparedBinaryContent, _NativePrepared
 
@@ -1420,8 +1503,7 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
         if held.size != original["size"] or held.held is None:
             raise artifact_recovery.RecoveryUnavailable
         if prepared is None and kind == "preserve-evidence":
-            duplicate = preserve.find_duplicate_artifact(vault_root, scope=values["scope"], category=values["category"], sha256=held.sha256, raw_protection=values.get("raw_protection", False))
-            if duplicate is not None:
+            if evidence_reuse.already_in_family(vault_root, scope=values["scope"], category=values["category"], sha256=held.sha256, protected=values.get("raw_protection", False)):
                 raise _error("EPISODE_PRIOR_PRESERVATION", "original already preserved at this native destination")
         with memory_refs._allocated_ids(prepared["memory_ids"] if prepared is not None else None) as identities:
             def validate_inputs() -> None:
@@ -1460,7 +1542,12 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
 
 
 def _prepare_step(
-    vault_root: Path, step: Mapping[str, Any], ordinal: int, *, relation_pending: bool = False
+    vault_root: Path,
+    step: Mapping[str, Any],
+    ordinal: int,
+    *,
+    relation_pending: bool = False,
+    projection: Any = None,
 ) -> dict[str, Any]:
     """Run the existing leaf's read-only preparation or exact structural guards."""
     from . import (
@@ -1784,6 +1871,18 @@ def _prepare_step(
             # its hash stands for the whole collection as reviewed.
             effect_before.append({"path": manifest_path, "content_hash": manifest_hash})
             effect_after = [{"path": path, "exists": True}]
+        elif kind in FOLD_STEP_KINDS:
+            from . import duplicate_fold, episode_fold
+
+            folded = {
+                FOLD_RECAP_STEP_KIND: lambda: episode_fold.prepare(vault_root, args),
+                UNFOLD_RECAP_STEP_KIND: lambda: episode_fold.prepare_unfold(vault_root, args),
+                FOLD_DUPLICATE_STEP_KIND: lambda: duplicate_fold.prepare(vault_root, args, projection),
+                UNFOLD_DUPLICATE_STEP_KIND: lambda: duplicate_fold.prepare_unfold(vault_root, args),
+            }[kind]()
+            path, before_hash, after_hash = folded["path"], folded["before_hash"], folded["after_hash"]
+            prepared = folded["prepared"]
+            effect_before, effect_after = folded["effect_before"], folded["effect_after"]
         elif kind == "move":
             validation = move_module.move_file(vault_root, validate_only=True, **args)
             if not isinstance(validation, move_module.MoveFileValidation):
@@ -1885,12 +1984,17 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     is refused too (`_refuse_blocked`). Relocation steps, which remove pages, are
     refused before any step runs (`_require_plan_relocation_history`).
     """
+    from . import duplicate_fold
     from . import find as find_module
 
     manifest: list[dict[str, Any]] = []
     created: list[tuple[str, str | None]] = []
     superseded: list[tuple[str, str | None]] = []
     written: set[str] = set()
+    # The pages that earlier duplicate folds of this plan rewrite: a later fold of the same canonical
+    # page reads them through `projection`, which proves each one's whole chain of hashes.
+    chained: set[str] = set()
+    projection = duplicate_fold.Projection()
     for ordinal, step in enumerate(steps):
         args = step["args"]
         retired = _planned_link_targets(vault_root, args, superseded)
@@ -1912,10 +2016,12 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 "creates; that link is its relation, so it takes no relation disposition",
             )
         with find_module.planned_pages(vault_root, created):
-            item = _prepare_step(vault_root, step, ordinal, relation_pending=bool(related))
-        conflicts = sorted(
-            {str(expected["path"]) for expected in _binding_expectations(item)} & written
-        )
+            item = _prepare_step(
+                vault_root, step, ordinal, relation_pending=bool(related), projection=projection
+            )
+        duplicate = step["kind"] in _DUPLICATE_FOLD_KINDS
+        expected_paths = {str(expected["path"]) for expected in _binding_expectations(item)}
+        conflicts = sorted((expected_paths - chained if duplicate else expected_paths) & written)
         if conflicts:
             raise _error(
                 "CURATION_STEP_CONFLICT",
@@ -1924,7 +2030,12 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
             )
         manifest.append(item)
         after = {str(entry["path"]) for entry in item["effect_after"]}
-        written |= after
+        if duplicate:
+            # Only the rows a step changes count as written: the canonical original a fold reads stays as sealed.
+            chained |= duplicate_fold.changed_paths(item)
+            written |= duplicate_fold.changed_paths(item)
+        else:
+            written |= after
         title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
         title = args.get(title_argument) if title_argument else None
         created.extend(
@@ -1940,6 +2051,12 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
             superseded.append(
                 (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
             )
+    duplicate_fold.seal_chains(manifest, projection)
+    if duplicate_fold.sealed_size(manifest) > duplicate_fold.MANIFEST_BUDGET:
+        raise _error(
+            "CURATION_PLAN_TOO_LARGE",
+            "the undo of these folds would not fit in one compensation plan; fold fewer copies at once",
+        )
     return manifest
 
 
@@ -2207,6 +2324,17 @@ def _binding_blockers(
         if index in store_owned:
             # Its bound files are the store's generated views; the store blocker says why it cannot run.
             continue
+        if item.get("kind") in FOLD_STEP_KINDS:
+            from . import duplicate_fold, episode_fold
+
+            # A fold may stand half done, so its files are judged by live state, not by one hash each.
+            judge = (
+                duplicate_fold.binding_blockers
+                if item["kind"] in _DUPLICATE_FOLD_KINDS
+                else episode_fold.binding_blockers
+            )
+            blockers.extend(judge(vault_root, item))
+            continue
         for expected_item in _binding_expectations(item):
             path = str(expected_item.get("path") or "")
             if expected_item.get("absent") is True:
@@ -2382,6 +2510,11 @@ def compensation_kind(kind: str) -> str:
         "move": "move",
         "delete": "recover",
         "recover": "delete",
+        FOLD_RECAP_STEP_KIND: UNFOLD_RECAP_STEP_KIND,
+        # An undone fold is folded again by a new reviewed plan, never by undoing the undo.
+        UNFOLD_RECAP_STEP_KIND: "unavailable",
+        FOLD_DUPLICATE_STEP_KIND: UNFOLD_DUPLICATE_STEP_KIND,
+        UNFOLD_DUPLICATE_STEP_KIND: "unavailable",
         # Records history is corrected by a later Records transition, never
         # by removing the one that happened.
         RECORDS_STEP_KIND: "unavailable",
@@ -2456,6 +2589,10 @@ def _witness_basis(
         "move": "manage_memory_file:move",
         "delete": "manage_memory_file:delete",
         "recover": "manage_memory_file:recover",
+        FOLD_RECAP_STEP_KIND: "maintain_memory:fold-recap-revisions",
+        UNFOLD_RECAP_STEP_KIND: "maintain_memory:unfold-recap-revisions",
+        FOLD_DUPLICATE_STEP_KIND: "maintain_memory:fold-duplicate",
+        UNFOLD_DUPLICATE_STEP_KIND: "maintain_memory:unfold-duplicate",
         RECORDS_STEP_KIND: "record_memory:append",
         "update-record": "record_memory:update",
         OBSERVE_UNIT_STEP_KIND: "observe_memory:update",
@@ -2526,6 +2663,13 @@ def _finalize_witness_batch(
             raise _error("CURATION_BINDING_STALE", "native core changed after preparation")
         return curation_witness.render_with_after(content, binding["effect_after"])
     kind = str(step["kind"])
+    if kind in FOLD_STEP_KINDS:
+        # The fold's own files are moved by held writers, never by this batch: its witness is
+        # committed alone and last, once `pending.ready` says the whole effect stands.
+        pending = curation_witness.pending_for(vault_root)
+        if pending is None or not pending.ready:
+            return None
+        return curation_witness.render_with_after(content, binding["effect_after"])
     source = str(binding["path"])
     destination = str(binding.get("postcondition", {}).get("path") or source)
     prior_hash = binding.get("before_hash")
@@ -2660,6 +2804,7 @@ def _validate_witness(
                 item.get("path"),
                 field="witness.after.path",
                 allow_trash=kind in {"delete", "recover"},
+                allow_fold=kind in FOLD_STEP_KINDS,
                 allow_records=kind in RECORDS_STEP_KINDS,
                 _planning_tree=kind in PLANNING_STEP_KINDS,
                 _planning_identity=(binding["prepared"]["collection_id"], binding["prepared"]["item_key"]) if kind in PLANNING_STEP_KINDS and binding["prepared"].get("store") is not None else None,
@@ -2924,12 +3069,22 @@ def _verify_records_receipt(
     return False
 
 
+def _chained_states(step: Mapping[str, Any], binding: Mapping[str, Any]) -> dict[str, frozenset[str]] | None:
+    """The hashes each page of a duplicate fold may hold while its plan runs, or None for any other step."""
+    if step.get("kind") not in _DUPLICATE_FOLD_KINDS:
+        return None
+    from . import duplicate_fold
+
+    return duplicate_fold.live_states(binding)
+
+
 def _verify_live_postcondition(
     vault_root: Path,
     witness: Mapping[str, Any],
     *,
     step: Mapping[str, Any] | None = None,
     binding: Mapping[str, Any] | None = None,
+    accepted: Mapping[str, frozenset[str]] | None = None,
 ) -> None:
     if step is not None and step.get("kind") in PRESERVATION_STEP_KINDS:
         from dataclasses import replace
@@ -2983,12 +3138,13 @@ def _verify_live_postcondition(
         expected = item.get("content_hash")
         if expected is not None:
             try:
-                _source, actual = _read_target(vault_root, relative)
+                actual = _guarded_digest(vault_root, relative, stale=True)
             except CurationError as error:
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target is unreadable"
                 ) from error
-            if actual != expected:
+            # A page that a later step of the same plan rewrote again holds one of its chained hashes.
+            if actual != expected and actual not in (accepted or {}).get(relative, ()):
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness and live postcondition disagree"
                 )
@@ -3006,6 +3162,15 @@ def _dispatch_step(
     kind = str(step["kind"])
     args = json.loads(canonical_json(step["args"]))
     prepared = dict(binding.get("prepared") or {})
+    if kind in FOLD_STEP_KINDS:
+        from . import duplicate_fold, episode_fold
+
+        return {
+            FOLD_RECAP_STEP_KIND: episode_fold.fold,
+            UNFOLD_RECAP_STEP_KIND: episode_fold.unfold,
+            FOLD_DUPLICATE_STEP_KIND: duplicate_fold.fold,
+            UNFOLD_DUPLICATE_STEP_KIND: duplicate_fold.unfold,
+        }[kind](vault_root, binding)
     if kind in PRESERVATION_STEP_KINDS:
         return _preservation_call(vault_root, kind, args, prepared=prepared)
     if kind == "create-note":
@@ -3420,7 +3585,9 @@ def _validated_operation_witness(
         parent_compensation_plan_id=plan_identity if compensation else None,
     )
     if live:
-        _verify_live_postcondition(store.vault_root, witness, step=step, binding=binding)
+        _verify_live_postcondition(
+            store.vault_root, witness, step=step, binding=binding, accepted=_chained_states(step, binding)
+        )
     return witness
 
 
@@ -3958,7 +4125,13 @@ def _execute_next(
             binding=execution_binding,
             parent_compensation_plan_id=plan_identity if compensation else None,
         )
-        _verify_live_postcondition(vault_root, witness, step=step, binding=execution_binding)
+        _verify_live_postcondition(
+            vault_root,
+            witness,
+            step=step,
+            binding=execution_binding,
+            accepted=_chained_states(step, execution_binding),
+        )
     except DefiniteNoEffect as error:
         if invocation is None or step["kind"] not in PRESERVATION_STEP_KINDS:
             raise
@@ -5071,6 +5244,9 @@ def _compensation_args(
             "CURATION_COMPENSATION_UNAVAILABLE",
             "a removed edge is authored again as a new write, which is a new promotion",
         )
+    if kind in {FOLD_RECAP_STEP_KIND, FOLD_DUPLICATE_STEP_KIND}:
+        # The undo is derived from the sealed manifest alone: every identity it needs was sealed.
+        return inverse, {"fold": binding["prepared"]}
     effect = dict(receipt.get("effect") or {})
     if kind in {"create-note", "create-entity"}:
         path = str(effect.get("path") or binding["postcondition"]["path"])
@@ -5157,7 +5333,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             raise _error(
                 "CURATION_OUTCOME_UNCERTAIN", "forward receipt no longer matches its witness"
             )
-        _verify_live_postcondition(root, witness)
+        _verify_live_postcondition(root, witness, accepted=_chained_states(forward_step, binding))
         inverse, args = _compensation_args(forward_step, binding, receipt)
         steps.append(
             {
@@ -5171,7 +5347,9 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "version": 1,
             "title": f"Compensation for {run_id}",
             "steps": steps,
-        }
+        },
+        # Only this derivation may carry the private inverse of a fold.
+        allow_fold_inverse=True,
     )
     manifest = _prepare_manifest(root, plan["steps"])
     _require_plan_relocation_history(root, plan)

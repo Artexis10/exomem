@@ -524,7 +524,7 @@ def test_a_refused_rename_leaves_no_new_folder_behind(stored, writer, projecting
     projecting.run_pass()
     moved_to = f"{NOTES}/Fresh/Drifter.md"
     commit(writer, moves=(write.PageMove(MOVE_FROM, moved_to),))
-    observe = projector._observe
+    observe = projector.observe
 
     def a_person_replaces_the_file_after_it_was_judged(filesystem, rel, **options):
         seen = observe(filesystem, rel, **options)
@@ -533,7 +533,7 @@ def test_a_refused_rename_leaves_no_new_folder_behind(stored, writer, projecting
             (stored / MOVE_FROM).write_bytes(PERSON)
         return seen
 
-    monkeypatch.setattr(projector, "_observe", a_person_replaces_the_file_after_it_was_judged)
+    monkeypatch.setattr(projector, "observe", a_person_replaces_the_file_after_it_was_judged)
 
     report = projecting.run_pass()
 
