@@ -67,6 +67,34 @@ def hold(root, writer, kind, *, body=True, exomem=EXOMEM, mine=MINE):
     return revision
 
 
+def hold_a_binary(root, writer):
+    """A person changed the file of a binary that the store records but does not hold."""
+    sha, revision = rows(
+        root, "SELECT sha256, revision FROM store_binaries WHERE path = ?", DIAGRAM
+    )[0]
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_held(path, kind, store_revision, sha256, detected_at) "
+            "VALUES (?, 'edit', ?, ?, ?)",
+            (DIAGRAM, revision, sha, "2026-11-09T09:00:00Z"),
+        )
+
+
+def hold_after_store_delete(root, writer, *, mine=MINE):
+    """Exomem deleted ALPHA's page while a person edited its file, which stays with no page."""
+    manifest = rows(root, "SELECT revision FROM store_manifest WHERE path = ?", ALPHA)[0][0]
+    write.commit(
+        writer, write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(ALPHA),))
+    )
+    (root / ALPHA).write_bytes(mine)
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_held(path, kind, base_revision, sha256, detected_at) "
+            "VALUES (?, 'edit', ?, ?, ?)",
+            (ALPHA, manifest, digest(mine), "2026-11-09T09:00:00Z"),
+        )
+
+
 def hold_through_the_projector(root, writer, kind):
     """A person changed ALPHA's file while Exomem changed its page; the real projector held it."""
     if kind == "edit":
@@ -158,15 +186,7 @@ def test_the_list_offers_only_the_choices_that_a_resolve_takes(stored, writer, m
 def test_a_held_binary_is_listed_as_not_resolvable_and_refuses_both_choices(stored, writer):
     """A held binary that offers choices it cannot take, or whose refusal sends an agent to
     rollback commands that the person never asked for."""
-    sha, revision = rows(
-        stored, "SELECT sha256, revision FROM store_binaries WHERE path = ?", DIAGRAM
-    )[0]
-    with writer.handle.transaction() as tx:
-        tx.execute(
-            "INSERT INTO store_held(path, kind, store_revision, sha256, detected_at) "
-            "VALUES (?, 'edit', ?, ?, ?)",
-            (DIAGRAM, revision, sha, "2026-11-09T09:00:00Z"),
-        )
+    hold_a_binary(stored, writer)
     (item,) = held.list_held(stored)
     assert (item.resolvable, item.keep_mine_possible, item.choices) == (False, False, ())
     for choice in held.CHOICES:
@@ -338,17 +358,7 @@ def test_keep_store_on_an_edit_of_a_page_the_store_deleted_removes_the_file_afte
 ):
     """A person's edit that raced Exomem's delete: keep-store must queue the file's removal, and the
     person's bytes must be saved first."""
-    manifest = rows(stored, "SELECT revision FROM store_manifest WHERE path = ?", ALPHA)[0][0]
-    write.commit(
-        writer, write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(ALPHA),))
-    )
-    (stored / ALPHA).write_bytes(MINE)
-    with writer.handle.transaction() as tx:
-        tx.execute(
-            "INSERT INTO store_held(path, kind, base_revision, sha256, detected_at) "
-            "VALUES (?, 'edit', ?, ?, ?)",
-            (ALPHA, manifest, digest(MINE), "2026-11-09T09:00:00Z"),
-        )
+    hold_after_store_delete(stored, writer)
     resolve(stored, writer, held.KEEP_STORE)
     assert [digest(path.read_bytes()) for path in exports(stored)] == [digest(MINE)]
     assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", ALPHA) == []

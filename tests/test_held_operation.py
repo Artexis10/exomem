@@ -22,6 +22,8 @@ from test_vault_store_held import (  # noqa: F401
     digest,
     exports,
     hold,
+    hold_a_binary,
+    hold_after_store_delete,
     queue,
     stored_page,
 )
@@ -43,6 +45,23 @@ WHY = "the owner asked"
 
 def tagged(body):
     return body.replace(b"type: note\n", b"type: note\ntags: [restricted]\n")
+
+
+def restrict_by_tag(root):
+    """An external audience may not read a page that carries the tag `restricted`."""
+    scope = _gov_dir(root) / "scopes" / "patterns.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Restricted\ntags: [restricted]\n",
+        encoding="utf-8",
+    )
+    write_rule(root, ceiling=egress.LEVEL_NONE)
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+
+
+OUTSIDER = principal.RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
 
 
 @pytest.fixture
@@ -94,15 +113,7 @@ def test_the_review_tool_lists_each_item_with_what_the_store_lists_and_a_sentenc
 
 def test_the_review_tool_offers_no_choice_for_a_held_binary_and_says_it_stays_held(stored, writer):
     """A sentence that promises the person a choice that the store cannot take yet."""
-    sha, revision = rows(
-        stored, "SELECT sha256, revision FROM store_binaries WHERE path = ?", DIAGRAM
-    )[0]
-    with writer.handle.transaction() as tx:
-        tx.execute(
-            "INSERT INTO store_held(path, kind, store_revision, sha256, detected_at) "
-            "VALUES (?, 'edit', ?, ?, ?)",
-            (DIAGRAM, revision, sha, "2026-11-09T09:00:00Z"),
-        )
+    hold_a_binary(stored, writer)
     answer = listed(stored)
     (row,) = answer["items"]
     assert (row["resolvable"], row["keep_mine_possible"], row["choices"]) == (False, False, [])
@@ -195,19 +206,57 @@ def test_a_tag_scope_hides_a_held_item_from_an_outside_caller_only_when_the_stor
         mine=MINE if stored_page_is_tagged else tagged(MINE),
     )
     version = held.list_held(stored)[0].item_version
-    scope = _gov_dir(stored) / "scopes" / "patterns.yaml"
-    scope.parent.mkdir(parents=True, exist_ok=True)
-    scope.write_text(
-        f"governance_version: 1\nid: {SCOPE_ID}\nname: Restricted\ntags: [restricted]\n",
-        encoding="utf-8",
-    )
-    write_rule(stored, ceiling=egress.LEVEL_NONE)
-    policy._CACHE.clear()
-    membership.clear_memo()
-    egress.clear_decision_memo()
-    outsider = principal.RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
-    with principal.request_scope(outsider):
+    restrict_by_tag(stored)
+    with principal.request_scope(OUTSIDER):
         assert len(listed(stored)["items"]) == (0 if stored_page_is_tagged else 1)
     assert len(listed(stored)["items"]) == 1
     assert repair(stored, held.KEEP_MINE, item_version=version)["choice"] == held.KEEP_MINE
     assert held.list_held(stored) == []
+
+
+def test_a_held_edit_of_a_page_the_store_deleted_is_seen_and_resolved_by_the_owner_only(
+    stored, writer, served
+):
+    """The store holds no page there, so a decision on its bytes has nothing to read. The item
+    still belongs to the owner, who must see and resolve it, and a path scope must still hide it
+    from a caller outside that policy."""
+    hold_after_store_delete(stored, writer)
+    version = held.list_held(stored)[0].item_version
+    write_scope(stored, paths="Notes/**")
+    write_rule(stored, ceiling=0)
+    policy._CACHE.clear()
+    egress.clear_decision_memo()
+    with principal.request_scope(OUTSIDER):
+        answer = listed(stored)
+        assert answer["items"] == [] and answer["outcome"].startswith("Nothing is held")
+        with pytest.raises(write.StoreConflict):
+            repair(stored, held.KEEP_STORE, item_version=version)
+    assert [row["path"] for row in listed(stored)["items"]] == [ALPHA]
+    assert repair(stored, held.KEEP_STORE, item_version=version)["choice"] == held.KEEP_STORE
+    assert held.list_held(stored) == []
+
+
+@pytest.mark.parametrize("file_is_tagged", [True, False])
+def test_a_tag_scope_judges_an_item_with_no_stored_page_on_the_persons_file_for_an_outside_caller(
+    stored, writer, file_is_tagged
+):
+    """With no stored page the person's file is the only bytes of the page, and the owner sees it
+    either way."""
+    hold_after_store_delete(stored, writer, mine=tagged(MINE) if file_is_tagged else MINE)
+    restrict_by_tag(stored)
+    with principal.request_scope(OUTSIDER):
+        assert len(listed(stored)["items"]) == (0 if file_is_tagged else 1)
+    assert len(listed(stored)["items"]) == 1
+
+
+def test_a_held_binary_stays_listed_for_the_owner_under_a_tag_scope_and_not_for_an_outside_caller(
+    stored, writer
+):
+    """A binary has no stored page and no Markdown to read: only the owner's access settles it."""
+    hold_a_binary(stored, writer)
+    restrict_by_tag(stored)
+    with principal.request_scope(OUTSIDER):
+        assert listed(stored)["items"] == []
+    (row,) = listed(stored)["items"]
+    assert (row["path"], row["resolvable"], row["choices"]) == (DIAGRAM, False, [])
+    assert row["not_resolvable_because"] == held.BINARY_BLOCK

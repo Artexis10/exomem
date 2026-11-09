@@ -153,6 +153,12 @@ def list_held(vault_root: Path) -> list[HeldItem]:
     return [_item(row, disks[row[0]].file, stored[row[0]]) for row in rows]
 
 
+def person_file_bytes(vault_root: Path, rel: str) -> bytes | None:
+    """The person's file at ``rel`` as it is now, or None when it is absent, unreadable or above
+    the projector's body limit. It is read through handles that refuse a symlink."""
+    return _observe(Path(vault_root), [rel], keep_body=True)[rel].body
+
+
 def resolve_held(
     vault_root: Path,
     rel: str,

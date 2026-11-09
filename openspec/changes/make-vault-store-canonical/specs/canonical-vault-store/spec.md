@@ -70,7 +70,7 @@ In store mode, a file the store owns whose hash differs from the projection mani
 - **THEN** the store keeps the page and records a held deletion for review
 
 ### Requirement: A held item is resolved by an explicit choice
-In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that from the stored page's bytes, not from the file or the path alone. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.
+In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that in one order. The owner with unrestricted access sees every held item. Any other caller is judged on the stored page's bytes, not on the person's file or the path alone. When the store holds no page, the person's file is judged the same way. When neither exists, and for a binary, the path alone decides. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.
 
 #### Scenario: Keep mine adopts the person's file
 - **WHEN** an agent resolves a held edit with keep-mine and the store page is still at the revision the hold saw
@@ -105,10 +105,16 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 - **THEN** the owner and a caller outside that policy both see the item and the owner can resolve it
 - **AND** when the stored bytes carry the tag, the caller outside the policy sees nothing and the owner still sees and resolves the item
 
+#### Scenario: A held edit of a page that the store deleted is the owner's
+- **WHEN** Exomem deleted a page while the person's edit of its file stayed, and a policy restricts the page's folder
+- **THEN** the owner sees the item and resolves it with keep-store
+- **AND** a caller outside the policy sees nothing, and under a tag scope that caller sees the item exactly when the person's file does not carry the tag
+
 #### Scenario: A held binary is not resolved yet
 - **WHEN** a held item is a binary and an agent lists or resolves it
 - **THEN** the list marks it not yet resolvable and offers no choice
 - **AND** a resolve refuses and says that binaries stay held until a later release resolves them
+- **AND** under a tag scope the owner still sees the held binary, and a caller outside the policy does not
 
 #### Scenario: A held file that is too large is not resolved
 - **WHEN** a held file is above 64 MiB and an agent lists or resolves it
