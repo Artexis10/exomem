@@ -753,3 +753,176 @@ def test_an_unquoted_norwegian_tag_is_refused_with_the_quoting_fix() -> None:
     [finding] = registry.findings
     assert finding["code"] == "invalid_label"
     assert "quote the tag" in finding["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Dimensions: the label-registry mechanism plus members and display behaviours
+# ---------------------------------------------------------------------------
+
+
+def _regulation(**fields):
+    entry = {
+        "labels": {"en": "Regulation"},
+        "description": "What the rules require",
+        "members": {"kinds": ["constraint", "requirement"]},
+        **fields,
+    }
+    return _proposal() | {"dimensions": {"regulation": entry}}
+
+
+def test_every_shipped_dimension_member_names_an_existing_family_kind_or_key() -> None:
+    """Catches a renamed relation family or kind that silently empties a shipped dimension."""
+    from exomem import relation_registry, semantic_blocks
+
+    exists = {
+        "families": relation_registry.core_registry().core_families,
+        "kinds": set(language_registry.core_registry().core_kinds) | {semantic_labels.ALL_KINDS},
+        "keys": set(semantic_blocks.GOVERNED_UNIT_METADATA_KEYS),
+    }
+    shipped = language_registry.core_registry().label_definitions(semantic_labels.DIMENSIONS)
+
+    assert len(shipped) == 12
+    missing = [
+        (key, name, value)
+        for key, entry in shipped.items()
+        for name, values in entry.members
+        for value in values
+        if value not in exists[name]
+    ]
+    assert missing == []
+
+
+def test_a_vault_adds_a_dimension_that_resolves_by_key_and_label() -> None:
+    registry = language_registry.load_registry(proposal=_regulation(display=["show_origin"]))
+
+    assert registry.findings == ()
+    regulation = registry.label_definitions(semantic_labels.DIMENSIONS)["regulation"]
+    assert regulation.members_of("kinds") == ("constraint", "requirement")
+    assert regulation.display == ("show_origin",)
+    assert registry.resolve_label(semantic_labels.DIMENSIONS, " REGULATION ") == "regulation"
+
+
+def test_an_undeclared_display_behaviour_is_refused_naming_the_dimension_and_value() -> None:
+    registry = language_registry.load_registry(
+        proposal=_regulation(display=["show_origin", "hide_refuted"])
+    )
+
+    [finding] = registry.findings
+    assert finding["code"] == "undeclared_display_behaviour"
+    assert finding["severity"] == "error"
+    assert "'regulation'" in finding["detail"]
+    assert "'hide_refuted'" in finding["detail"]
+    # The shipped dimensions keep resolving while the vault's wait for a clean registry.
+    assert "regulation" not in registry.label_keys(semantic_labels.DIMENSIONS)
+
+
+@pytest.mark.parametrize(
+    ("members", "named"),
+    [
+        ({"kinds": ["constraint", "rule"]}, "rule"),
+        ({"families": ["supersession", "overruling"]}, "overruling"),
+        ({"keys": ["verdict", "severity"]}, "severity"),
+    ],
+    ids=["kind", "family", "key"],
+)
+def test_a_member_that_names_nothing_that_exists_is_refused(members, named: str) -> None:
+    """Catches a typo that would give a dimension a member no unit can ever match."""
+    registry = language_registry.load_registry(proposal=_regulation(members=members))
+
+    [finding] = registry.findings
+    assert finding["code"] == "unknown_dimension_member"
+    assert "'regulation'" in finding["detail"]
+    assert f"'{named}'" in finding["detail"]
+
+
+def test_a_dimension_may_name_a_kind_that_the_same_save_adds() -> None:
+    registry = language_registry.load_registry(
+        proposal={
+            **_regulation(members={"kinds": ["policy"]}),
+            "kinds": {"policy": {"description": "A rule the vault sets"}},
+        }
+    )
+
+    assert registry.findings == ()
+
+
+@pytest.mark.parametrize(
+    ("fields", "code"),
+    [
+        ({"members": {"families": ["*"]}}, "invalid_members"),
+        ({"members": {"colours": ["red"]}}, "invalid_members"),
+        ({"members": {"kinds": "constraint"}}, "invalid_members"),
+        ({"members": ["constraint"]}, "invalid_members"),
+        ({"display": "show_origin"}, "invalid_display"),
+    ],
+    ids=["wildcard-outside-kinds", "unknown-list", "list-not-a-list", "members-not-a-map",
+         "display-not-a-list"],
+)
+def test_a_malformed_dimension_is_refused(fields, code: str) -> None:
+    registry = language_registry.load_registry(proposal=_regulation(**fields))
+
+    assert code in [item["code"] for item in registry.findings]
+
+
+def test_a_new_dimension_without_members_is_refused() -> None:
+    """Catches a dimension that groups nothing and so filters every unit out."""
+    proposal = _regulation()
+    del proposal["dimensions"]["regulation"]["members"]
+
+    registry = language_registry.load_registry(proposal=proposal)
+
+    assert [item["code"] for item in registry.findings] == ["missing_members"]
+
+
+def test_the_kind_wildcard_is_stored_as_written() -> None:
+    registry = language_registry.load_registry(proposal=_regulation(members={"kinds": ["*"]}))
+
+    assert registry.findings == ()
+    assert registry.label_definitions(semantic_labels.DIMENSIONS)["regulation"].members_of(
+        "kinds"
+    ) == ("*",)
+
+
+def test_a_vault_cannot_rewrite_a_shipped_dimension_but_can_label_it() -> None:
+    """Catches a vault entry that quietly changes what `currency` groups for every reader."""
+    proposal = _proposal() | {
+        "dimensions": {
+            "currency": {
+                "labels": {"fi": "Ajantasaisuus"},
+                "members": {"families": ["support"]},
+                "display": [],
+            },
+            "scope": {"labels": {"fi": "Ala"}},
+        }
+    }
+    registry = language_registry.load_registry(proposal=proposal)
+    shipped = language_registry.core_registry().label_definitions(semantic_labels.DIMENSIONS)
+
+    assert [(item["code"], item["severity"]) for item in registry.findings] == [
+        ("core_dimension_shadowed", "warning")
+    ]
+    effective = registry.label_definitions(semantic_labels.DIMENSIONS)
+    assert effective["currency"] == shipped["currency"]
+    assert effective["scope"].members == shipped["scope"].members
+    assert registry.resolve_label(semantic_labels.DIMENSIONS, "ala") == "scope"
+    assert registry.resolve_label(semantic_labels.DIMENSIONS, "ajantasaisuus") is None
+
+
+def test_a_saved_vault_dimension_keeps_its_members_and_display(tmp_path: Path) -> None:
+    proposal = _regulation(display=["show_origin"])
+
+    language_registry.save_registry(tmp_path, proposal)
+
+    reloaded = language_registry.load_registry(tmp_path)
+    assert reloaded.findings == ()
+    assert language_registry.registry_proposal(reloaded) == proposal
+
+
+def test_a_save_that_drops_a_vault_dimension_is_flagged() -> None:
+    current = language_registry.load_registry(proposal=_regulation())
+    candidate = language_registry.load_registry(proposal=_proposal())
+
+    dropped = language_registry.dropped_label_findings(current, candidate)
+
+    assert [finding["code"] for _labels, finding in dropped] == ["dimensions_dropped"]
+    assert "regulation" in dropped[0][1]["detail"]

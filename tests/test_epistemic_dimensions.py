@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from exomem import semantic_labels, structured_filters
 from exomem import semantic_language_registry as language_registry
-from exomem import structured_filters
 
 
 def _proposal(**sections) -> dict:
@@ -31,9 +31,8 @@ def test_a_dimensions_section_in_the_vault_registry() -> None:
         )
     )
 
-    codes = [(item["code"], item["path"]) for item in registry.findings]
-    assert codes == [("unknown_field", "dimensions")]  # FLIPS slice5a: was [("unknown_field", "dimensions")]
-    assert [item["severity"] for item in registry.findings] == ["error"]  # FLIPS slice5a: was ["error"]
+    assert registry.findings == ()  # FLIPS slice5a: was [("unknown_field", "dimensions")] as an error
+    assert "regulation" in registry.label_keys(semantic_labels.DIMENSIONS)  # FLIPS slice5a: was unavailable
 
 
 def test_the_filter_field_unit_dimension() -> None:

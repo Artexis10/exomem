@@ -212,6 +212,24 @@ class RelationRegistry:
         return frozenset(item.family for item in (*self.core.values(), *self.extensions.values()))
 
     @cached_property
+    def core_families(self) -> frozenset[str]:
+        """The families of the shipped relations: the only families a vault can name, because an
+        extension inherits its parent's family."""
+        return frozenset(item.family for item in self.core.values())
+
+    def family_of(self, key: str) -> str | None:
+        """The family of the relation `key`: a core key's own, an extension's parent's. Never read
+        through a saved family, so a grandfathered extension whose family differs from its
+        parent's follows the parent, as `behaviours_of` does. An unregistered key has none."""
+        definition = self.definition(key)
+        if definition is None:
+            return None
+        if definition.core:
+            return definition.family
+        parent = self.core.get(definition.parent or "")
+        return parent.family if parent is not None else None
+
+    @cached_property
     def generic_key(self) -> str:
         """The key of the one generic relation; the core pack guarantees exactly one."""
         return next(key for key, definition in self.core.items() if definition.generic)

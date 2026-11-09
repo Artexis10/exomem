@@ -5,7 +5,9 @@ language, and no behaviour. Each registry ships as data in its own pack, and a v
 or labels in the section of `_Schema/semantic-language-registry.yaml` that has the
 registry's name. This leaf module reads each pack once, so `semantic_language_registry`
 (which governs the vault's entries) and the bootstrap vocabulary (which teaches the shipped
-entries) read one source.
+entries) read one source. The dimension registry is the one label registry whose entries also
+list members and display behaviours; those two fields change what a key groups, never what
+code does with a word.
 """
 
 from __future__ import annotations
@@ -25,11 +27,18 @@ from .vocabulary import registry as vocabulary_registry
 class LabelRegistry:
     """One label registry. `section` names its pack file and its vault section; `noun`
     names one of its entries in a finding or an error code. `beside_probabilities` marks a
-    registry whose row also takes a probability, so none of its labels may look like one."""
+    registry whose row also takes a probability, so none of its labels may look like one.
+    `has_members` marks a registry whose entries also list `members` and `display`."""
 
     section: str
     noun: str
     beside_probabilities: bool = False
+    has_members: bool = False
+
+    @property
+    def entry_fields(self) -> frozenset[str]:
+        """The fields one entry of this registry takes."""
+        return ENTRY_FIELDS | MEMBER_FIELDS if self.has_members else ENTRY_FIELDS
 
     @property
     def pack_file(self) -> str:
@@ -50,12 +59,28 @@ VERDICTS = LabelRegistry("verdicts", "verdict")
 BELIEF_LEVELS = LabelRegistry("belief_levels", "belief_level", beside_probabilities=True)
 MODALITIES = LabelRegistry("modalities", "modality")
 INFERENCE_MODES = LabelRegistry("inference_modes", "inference_mode")
+DIMENSIONS = LabelRegistry("dimensions", "dimension", has_members=True)
 # The label registries the language implements. Code reads each one for its own unit-metadata
-# key, so this set is fixed by the code; the entries of each registry are data.
-REGISTRIES = (VERDICTS, BELIEF_LEVELS, MODALITIES, INFERENCE_MODES)
+# key or its own filter field, so this set is fixed by the code; the entries of each registry
+# are data.
+REGISTRIES = (VERDICTS, BELIEF_LEVELS, MODALITIES, INFERENCE_MODES, DIMENSIONS)
 
 # nosemgrep: ep-word-set -- an entry's own field names, fixed by the registry schema
 ENTRY_FIELDS = frozenset({"labels", "description"})
+# nosemgrep: ep-word-set -- the extra field names of a dimension entry, fixed by the registry schema
+MEMBER_FIELDS = frozenset({"members", "display"})
+# The three lists a dimension's `members` takes: relation families, unit kinds and governed
+# unit-metadata keys. The schema fixes them; each list's entries are data.
+# nosemgrep: ep-word-set -- the member lists, fixed by the registry schema
+MEMBER_LISTS = ("families", "kinds", "keys")
+# The one wildcard a member list takes, and only `kinds` takes it: every kind in the page's
+# registry, so a vault kind joins the dimension without a registry save.
+ALL_KINDS = "*"
+# The closed display-behaviour set. Each is something compiled context does within one
+# dimension's group; a display behaviour changes only the order and annotation of the context.
+# Adding one is a code change and a schema change, as for a kind trait.
+# nosemgrep: ep-word-set -- the closed set this schema declares and code implements, not text
+DISPLAY_BEHAVIOURS = frozenset(("lead_with_current", "show_origin", "flag_open", "order_in_time"))
 # The shape a key has: lower-case letters, digits and underscores.
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 # The shape of a label's language tag after casefolding, such as `en`, `fi` or `pt-br`: a short
@@ -88,6 +113,14 @@ class LabelDefinition:
     labels: tuple[tuple[str, str], ...]
     description: str
     core: bool = False
+    # A dimension's member lists, as (list name, values) pairs in `MEMBER_LISTS` order, and its
+    # display behaviours. Both are empty on an entry of any other registry.
+    members: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    display: tuple[str, ...] = ()
+
+    def members_of(self, list_name: str) -> tuple[str, ...]:
+        """The values of one member list, or none when the entry does not carry it."""
+        return next((values for name, values in self.members if name == list_name), ())
 
     @property
     def spellings(self) -> tuple[str, ...]:
@@ -98,6 +131,10 @@ class LabelDefinition:
         out: dict[str, Any] = {
             "key": self.key, "labels": dict(self.labels), "description": self.description,
         }
+        if self.members:
+            out["members"] = {name: list(values) for name, values in self.members}
+        if self.display:
+            out["display"] = list(self.display)
         if self.core:
             out["core"] = True
         return out
@@ -131,6 +168,57 @@ def read_labels(raw: object) -> tuple[tuple[tuple[str, str], ...], list[tuple[st
     return tuple(sorted(labels.items())), problems
 
 
+def read_members(
+    raw: object,
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], list[tuple[str, str]]] | None:
+    """The valid member lists of one dimension, and a (list name, problem) pair for each invalid
+    one. None when `raw` is no mapping at all.
+
+    This checks shape only: that each list is a list of well-formed keys and that only `kinds`
+    takes the wildcard. Whether a name exists as a family, kind or key is the registry's check,
+    because it needs the page's registries. The pack loader and the vault parser both read
+    members through here.
+    """
+    if not isinstance(raw, dict):
+        return None
+    lists: dict[str, tuple[str, ...]] = {}
+    problems: list[tuple[str, str]] = []
+    for name, values in raw.items():
+        if name not in MEMBER_LISTS:
+            problems.append(
+                (str(name), f"is not a member list; use {', '.join(MEMBER_LISTS)}")
+            )
+            continue
+        bad = (
+            not isinstance(values, list)
+            or not values
+            or any(not isinstance(value, str) for value in values)
+            or any(
+                value != ALL_KINDS and not KEY_RE.match(value)
+                for value in values
+                if isinstance(value, str)
+            )
+        )
+        if bad:
+            problems.append(
+                (name, "must be a non-empty list of keys: lower-case letters, digits and underscores")
+            )
+        elif name != "kinds" and ALL_KINDS in values:
+            problems.append((name, f"takes no {ALL_KINDS!r}; only `kinds` does"))
+        else:
+            lists[name] = tuple(dict.fromkeys(values))
+    return tuple((name, lists[name]) for name in MEMBER_LISTS if name in lists), problems
+
+
+def read_display(raw: object) -> tuple[tuple[str, ...], list[str]] | None:
+    """The declared display behaviours of one dimension in order, and each value that the closed
+    set does not declare. None when `raw` is no list of strings."""
+    if not isinstance(raw, list) or any(not isinstance(value, str) for value in raw):
+        return None
+    declared = tuple(dict.fromkeys(value for value in raw if value in DISPLAY_BEHAVIOURS))
+    return declared, [value for value in dict.fromkeys(raw) if value not in DISPLAY_BEHAVIOURS]
+
+
 def _label_problem(language: object, text: object) -> str | None:
     """Why `language: text` is no valid label entry, or None when it is one."""
     if isinstance(language, bool):
@@ -159,18 +247,21 @@ def _from_pack(registry: LabelRegistry, text: str) -> dict[str, LabelDefinition]
     where = f"shipped {registry.section_words} pack"
     entries: dict[str, LabelDefinition] = {}
     spellings: dict[str, str] = {}
+    required = (ENTRY_FIELDS | {"members"}) if registry.has_members else ENTRY_FIELDS
     for key, value in data[registry.section].items():
-        unknown = sorted(set(value) - ENTRY_FIELDS)
-        if unknown or key in entries or not KEY_RE.match(key) or set(value) != ENTRY_FIELDS:
+        unknown = sorted(set(value) - registry.entry_fields)
+        if unknown or key in entries or not KEY_RE.match(key) or not required <= set(value):
             raise RuntimeError(
-                f"{where}: {key!r} is a repeated or malformed key, lacks labels or a "
-                f"description, or has unknown fields {unknown}"
+                f"{where}: {key!r} is a repeated or malformed key, lacks labels, a "
+                f"description or members, or has unknown fields {unknown}"
             )
         read = read_labels(value["labels"])
         if read is None or read[1] or not read[0]:
             raise RuntimeError(f"{where}: {key!r} needs labels that map a language tag to a label")
+        members, display = _pack_members(where, key, value) if registry.has_members else ((), ())
         entry = LabelDefinition(
-            key=key, labels=read[0], description=str(value["description"]), core=True
+            key=key, labels=read[0], description=str(value["description"]), core=True,
+            members=members, display=display,
         )
         for spelling in {fold(spelling) for spelling in entry.spellings}:
             if spellings.setdefault(spelling, key) != key:
@@ -179,3 +270,19 @@ def _from_pack(registry: LabelRegistry, text: str) -> dict[str, LabelDefinition]
                 )
         entries[key] = entry
     return entries
+
+
+def _pack_members(
+    where: str, key: str, value: dict[str, Any]
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[str, ...]]:
+    """The members and display behaviours of one shipped dimension. A malformed pack is a build
+    defect, so every problem raises."""
+    members = read_members(value["members"])
+    if members is None or members[1] or not members[0]:
+        raise RuntimeError(f"{where}: {key!r} needs members with valid lists: {members}")
+    display = read_display(value.get("display", []))
+    if display is None or display[1]:
+        raise RuntimeError(
+            f"{where}: {key!r} display must name only {sorted(DISPLAY_BEHAVIOURS)}"
+        )
+    return members[0], display[0]

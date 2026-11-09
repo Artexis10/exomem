@@ -1192,6 +1192,12 @@ def infer_category_registry(
                     "labels": dict(definition.labels),
                     "description": definition.description,
                     "shipped": definition.core,
+                    # A dimension also lists what makes a unit belong to it and how context shows it.
+                    **{
+                        field: value
+                        for field, value in definition.as_dict().items()
+                        if field in semantic_labels.MEMBER_FIELDS
+                    },
                 }
                 for definition in registry.label_definitions(labels).values()
             ]
