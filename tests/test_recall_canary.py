@@ -326,6 +326,7 @@ def test_mcp_fast_typed_refusal_fails_and_stops_the_series(tmp_path, caplog):
         ({"ok": True, "hits": [{"ref": "private-reference", "text": "  "}]}, "missing-material"),
         ({"ok": True}, "missing-reference"),
         ({"success": False}, "unexpected-outcome"),
+        ({"error": {"code": "RETRIEVAL_INDEX_WARMING", "message": "Warming."}}, "unexpected-outcome"),
     ],
 )
 def test_mcp_positive_cases_require_source_truth_and_material(tmp_path, response, reason):
