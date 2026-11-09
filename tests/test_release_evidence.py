@@ -464,7 +464,7 @@ def test_land_merges_only_the_head_a_release_intent_named(monkeypatch, intent_he
 
 
 def test_land_waits_for_the_gate_check_that_appears_only_when_ci_finishes(tmp_path, monkeypatch):
-    """Right after a re-run, gh lists the title check alone; landing must not take that as green."""
+    """Before CI exists or finishes, gh lists the title check alone; landing must not take that as green."""
     intent = tmp_path / "release-intent.json"
     intent.write_text(json.dumps({"pr": 42, "expected_base": BASE, "expected_head": HEAD}))
     polls = {"count": 0}
@@ -474,9 +474,13 @@ def test_land_waits_for_the_gate_check_that_appears_only_when_ci_finishes(tmp_pa
             return [RELEASE]
         if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
             polls["count"] += 1
-            return [
-                {"workflow_runs": [_ci_run("in_progress" if polls["count"] < 3 else "completed")]}
-            ]
+            # Poll 1: GitHub has not created the CI run yet; poll 2: it is running.
+            ci = (
+                []
+                if polls["count"] == 1
+                else [_ci_run("in_progress" if polls["count"] < 3 else "completed")]
+            )
+            return [{"workflow_runs": ci}]
         if path == "commits/main":
             return {"sha": BASE}
         if path == "pulls/42":
@@ -541,3 +545,19 @@ def test_land_leaves_the_release_unmerged_when_a_required_check_fails(tmp_path, 
         evidence.land("example/project", intent, "app-token")
 
     assert not any(args[:3] == ("gh", "pr", "merge") for args in calls)
+
+
+def test_a_failed_check_read_raises_with_the_gh_error(tmp_path, monkeypatch):
+    """A failed read must name gh's error; reporting it as checks still running hides the cause."""
+    gh = tmp_path / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.write('HTTP 403: Resource not accessible by integration')\n"
+        "sys.exit(1)\n"
+    )
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+
+    with pytest.raises(ValueError, match="Resource not accessible by integration"):
+        evidence.required_checks(42)

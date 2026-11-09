@@ -372,27 +372,29 @@ def intended_release(repository: str, intent_path: Path | None) -> dict | None:
 
 
 def required_checks(number: int) -> list[dict]:
-    # With --json gh exits 0 and lists only the checks that exist so far; a new head prints nothing.
+    """The required checks gh reports for the PR head; a failed or empty read raises with gh's error."""
     result = subprocess.run(
         ("gh", "pr", "checks", str(number), "--required", "--json", "name,bucket"),
         capture_output=True,
         check=False,
     )
-    return json.loads(result.stdout) if result.stdout.strip() else []
+    if result.returncode != 0 or not result.stdout.strip():
+        reason = result.stderr.decode(errors="replace").strip() or "gh listed no required checks"
+        raise ValueError(f"could not read the required checks of release PR #{number}: {reason}")
+    return json.loads(result.stdout)
 
 
 def settled_checks(pr: dict) -> list[dict] | None:
-    """The head's required checks once every CI run on it has finished; None until then."""
+    """The head's required checks once its CI run exists and has finished; None until then."""
     head = pr["head"]["sha"]
-    # The gate's check run appears only when the jobs it needs finish, so an open run means "not yet".
-    if any(
-        run["event"] == "pull_request" and run["head_sha"] == head and run["status"] != "completed"
-        for run in runs(head)
-    ):
+    ci = [run for run in runs(head) if run["event"] == "pull_request" and run["head_sha"] == head]
+    # gh lists only checks that exist, and the gate's check appears only when the jobs it needs
+    # finish, so wait for the CI run itself before reading the list.
+    if not ci or any(run["status"] != "completed" for run in ci):
         return None
     checks = required_checks(pr["number"])
     # gh's documented bucket values: pass, fail, pending, skipping, cancel.
-    if not checks or any(check["bucket"] == "pending" for check in checks):
+    if any(check["bucket"] == "pending" for check in checks):
         return None
     return checks
 
@@ -410,8 +412,8 @@ def land(repository: str, intent_path: Path | None, token: str) -> None:
             break
     else:
         raise ValueError(
-            f"required checks were still running after {CHECK_POLLS * CHECK_POLL_SECONDS // 60} "
-            f"minutes; release PR #{number} was not merged"
+            f"no completed CI run with settled required checks on {head} after "
+            f"{CHECK_POLLS * CHECK_POLL_SECONDS // 60} minutes; release PR #{number} was not merged"
         )
     failed = [check["name"] for check in checks if check["bucket"] in ("fail", "cancel")]
     if failed:
