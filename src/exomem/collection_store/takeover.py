@@ -375,7 +375,7 @@ def _restamp(conn, staged, token):
         conn.execute("DELETE FROM store_meta WHERE key=?", (key,))
     from ..vault_store import marker
 
-    # A takeover neither invents nor drops the store-mode marker: the tenure publishes what the replica said.
+    # A takeover never decides the store-mode marker: the tenure publishes the replica's.
     marker.carry(conn, meta)
     return meta[schema.META_STORE_ID], instance
 

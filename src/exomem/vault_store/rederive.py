@@ -175,7 +175,7 @@ def settle(root: Path, writer) -> str:
                 "SELECT value FROM store_meta WHERE key = ?", (OVERLAY_REVISION,)
             ).fetchone()
             if overlay is not None and _revision(overlay[0]) is None:
-                # Every page now reflects the overlay at ``target``, which replaces the unreadable record.
+                # Every page reflects the overlay at ``target``, so it replaces the damaged record.
                 _set(tx, OVERLAY_REVISION, str(target))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE

@@ -997,8 +997,9 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
     here would write Markdown beside pages that the store owns. A crash during activation or
     rollback leaves the manifest recording store mode beside a store that does not hold it; the
     vault serves from files, so that warns. A store-mode root warns while the replica does not say
-    store, since a file-mode service elsewhere would start. A vault that records no store mode and
-    has no such replica has nothing to report.
+    store, since a file-mode service elsewhere would start. A replica that cannot be read warns in
+    either mode, as the state it is: neither mode can tell what it says. A vault that records no
+    store mode and has no such replica has nothing to report.
     """
     if vault_root is None or not vault_root.is_dir():
         return None
@@ -1009,7 +1010,7 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
         inconsistency = availability.marker_inconsistency(vault_root)
         in_store_mode = mode.store_mode_active(vault_root)
         elsewhere = None if in_store_mode else marker.conflict(vault_root)
-        unpublished = in_store_mode and marker.read_replica(vault_root).state != marker.STORE
+        found = marker.read_replica(vault_root)
     except state_migration.StateMigrationManifestError as error:
         # The manifest decides whether this vault is in store mode, and a write refuses while it is unreadable.
         return _check(
@@ -1026,13 +1027,27 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
             details={"vault_marker": elsewhere.state})
     if inconsistency is not None:
         return _check("vault_store_records", "warn", inconsistency, f"Run {availability.ROLLBACK}.")
-    if unpublished:
+    if found.state == marker.UNREADABLE:
+        consequence = (
+            "a file-mode service on another state root cannot see that this vault is in store mode."
+            if in_store_mode
+            else "this root cannot tell whether another state root holds this vault in store mode."
+        )
+        return _check(
+            "vault_store_records", "warn",
+            f"The vault replica cannot be read ({found.reason}), so {consequence}",
+            "A replica that is still syncing becomes readable when the sync finishes. Run the "
+            "check again then.",
+            details={"vault_marker": found.state})
+    if in_store_mode and found.state != marker.STORE:
         return _check(
             "vault_store_records", "warn",
             "This vault is in store mode but its replica does not say so yet, so a file-mode "
             "service on another state root would start on it.",
-            "The next hand-back of the writer lease copies the replica. Until then, keep services "
-            "on other state roots stopped.")
+            "This root copies the replica when it next hands back the writer lease, at the end of "
+            "its next `--apply` step of `exomem store-mode` or `exomem collections`. Until then, "
+            "keep services on other state roots stopped.",
+            details={"vault_marker": found.state})
     return None
 
 

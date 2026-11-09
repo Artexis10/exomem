@@ -234,9 +234,7 @@ def test_a_root_that_adopted_the_marker_does_not_keep_it_after_the_owner_rolls_b
     availability.require_servable(vault)
 
 
-def test_a_takeover_copies_the_replicas_marker_but_never_over_the_record_of_the_root_that_decided_it(
-    tmp_path,
-):
+def test_a_takeover_copies_the_replicas_marker_but_not_over_the_root_that_decided_it(tmp_path):
     """A migrated root whose marker was not published yet and that loses it to the next takeover,
     which leaves a store-mode vault with a replica that says file."""
     says_store = {marker.KEY: marker.ACTIVE}
@@ -264,3 +262,22 @@ def test_a_takeover_copies_the_replicas_marker_but_never_over_the_record_of_the_
         with handle.transaction() as tx:
             marker.carry(tx, {})
         assert stored_marker() == (marker.ACTIVE,), "the root that migrated keeps its own record"
+
+
+def test_the_doctor_reports_an_unreadable_replica_as_its_own_state_in_both_modes(
+    vault, other_state_root, monkeypatch  # noqa: F811
+):
+    """A half-synced replica that the doctor passes as clean on a file-mode root, or that it
+    describes as a replica that does not say store yet on the root that holds the store."""
+    assert migrate_apply(vault) == 0
+    replica.replica_path(vault).write_bytes(b"half of a database file")
+
+    holder = doctor._check_vault_store_records(vault)
+    on_state_root(monkeypatch, other_state_root)
+    other = doctor._check_vault_store_records(vault)
+
+    assert holder.status == other.status == "warn"
+    assert "cannot be read" in holder.message
+    assert "see that this vault is in store mode" in holder.message
+    assert "cannot be read" in other.message
+    assert "cannot tell whether" in other.message

@@ -6,7 +6,8 @@ folder, sees none of them and would write Markdown beside pages that the store o
 therefore holds one ``store_meta`` key. Activation writes it in the transaction that records store
 mode and rollback removes it in the transaction that records file mode. The lease handback copies
 ``store_meta`` into the replica under the vault, so the key travels with the vault. A file-mode
-start reads it there.
+start reads it there. A takeover carries the replica's key forward (``carry``), so only the root
+that migrated or rolled back decides it.
 
 Only a readable replica that says store refuses. An absent or unreadable replica starts the vault,
 because the replica arrives by sync and a half-arrived copy is a normal state, not a sign that the

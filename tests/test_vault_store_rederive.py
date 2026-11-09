@@ -477,7 +477,7 @@ def served_store(tmp_path, monkeypatch):
             for key in (rederive.OVERLAY_REVISION, rederive.REGISTRY_REVISION):
                 tx.execute("INSERT INTO store_meta(key, value) VALUES (?, '5')", (key,))
     monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
-    # The state manifest of a real migration is the other suite's subject; this one needs the answer.
+    # The state manifest of a real migration is another suite's subject; this one needs the answer.
     monkeypatch.setattr(mode, "store_mode_for_reads", lambda _root: True)
     thread = SimpleNamespace(
         root=root,
