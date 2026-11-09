@@ -38,7 +38,7 @@ A type or collection SHALL declare scalar fields as filterable/sortable and opti
 - **THEN** validation refuses before the declaration or any physical schema is changed
 
 #### Scenario: Removing a required lookup is refused
-- **WHEN** a revision drops an index needed by a declared relation or enabled saved view without revising that dependency
+- **WHEN** a revision drops an index needed by its own declared reference or one of its own enabled saved views without revising that dependency
 - **THEN** validation reports that dependency and preserves the current declaration
 
 ### Requirement: Index maintenance preserves canonical writes and write budgets

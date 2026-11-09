@@ -59,7 +59,7 @@ A withheld target is indistinguishable from a missing one, the same rule as CQ4.
 
 ### D5. One query: expand, filter and total
 
-A row query gains two things. `related` names declared references to expand into each row. A dotted path through a single-valued reference, such as `site.name`, works in select, filter and grouping, as the amended CQ4 states. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the release-qualified visible-state basis of the source and of each target collection, and refuses once any of them changed. A write that only hidden rows see never invalidates a restricted caller's cursor.
+A row query gains two things. `related` names declared references to expand into each row. A dotted path through a single-valued reference, such as `site.name`, works in select, filter and grouping, as the amended CQ4 states. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the release-qualified visible-state basis of the source and of each target collection, and refuses once any of them changed. A change to rows hidden from the caller never invalidates that caller's cursor.
 
 Totals need two things that do not exist today: reductions with a filter, and a result that carries rows and totals together. `combined` forces the base-row path, never the rollup. It reports three counts:
 

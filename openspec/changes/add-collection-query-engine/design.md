@@ -20,7 +20,7 @@ The owner and orchestrator rulings under **Rulings** settle the design choices a
 
 Add one optional `query` object to collection-mode requests. Its version is `1`; unknown keys, operators and field paths fail closed with field-addressed findings. Legacy arguments remain accepted when `query` is absent. Mixing the object with legacy query-shaping arguments is `QUERY_ARGUMENT_CONFLICT`, rather than silently choosing one. Collection/path and saved-view selectors remain outside the object.
 
-The collection query grammar comprises `where` (`all`, `any`, `not`, or a field/operator/value leaf), `order_by`, `select`, `page`, `group_by`, named `aggregates`, `having`, `joins`, `text` and `as_of`. It admits data, enumerated operations and typed references only: no SQL fragments, expression strings, user functions, collation names or JSON-path syntax. Dotted fields resolve against declared field paths; aggregate aliases and join aliases are validated identifiers, never SQL identifiers.
+The collection query grammar comprises `where` (`all`, `any`, `not`, or a field/operator/value leaf), `order_by`, `select`, `page`, `group_by`, named `aggregates`, `having`, `text` and `as_of`. It admits data, enumerated operations and typed references only: no SQL fragments, expression strings, user functions, collation names or JSON-path syntax. Dotted paths resolve against declared field paths, then through declared single-valued references; aggregate aliases are validated identifiers, never SQL identifiers.
 
 An invented row query:
 
