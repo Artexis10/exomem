@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -82,7 +82,17 @@ class PagePut:
 
 @dataclass(frozen=True, slots=True)
 class PageDelete:
+    """A page removed from the store.
+
+    ``on_disk`` says that its file is already gone: the commit drops the file's manifest entry and
+    queues nothing. ``absent_ok`` says that the store may already hold no page there, so that the
+    commit then only settles the path's file: it queues the file's removal, or nothing with
+    ``on_disk``.
+    """
+
     rel: str
+    on_disk: bool = False
+    absent_ok: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,9 +166,10 @@ class CommitResult:
 class StoreConflict(OpError):
     """A path did not hold what the change expected; nothing was committed."""
 
-    def __init__(self, path: str, reason: str) -> None:
-        super().__init__(CONFLICT, f"{path}: {reason}")
+    def __init__(self, path: str, reason: str, remediation: str | None = None) -> None:
+        super().__init__(CONFLICT, f"{path}: {reason}", remediation)
         self.path = path
+        self.reason = reason
 
 
 def frontmatter_json(body: bytes) -> str | None:
@@ -184,14 +195,21 @@ def _text_keyed(value):
     return value
 
 
-def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
+def commit(
+    writer: CollectionWriter,
+    change: StoreChange,
+    *,
+    settle: Callable[[Connection, int], None] | None = None,
+) -> CommitResult:
     """Apply ``change`` in one transaction on the store thread's writer, and return its revision.
 
     The statements run in this order, so that a kill at any point leaves the old state whole: the
     expectations, the pages, the binary records and the manifest, one audit row per file, the
-    projection intents, and last the revision. One intent stands for each path, and the oldest
-    queue time stays. A move queues one ``move`` intent under its destination path, with the old
-    path in ``from_path``.
+    projection intents, the caller's ``settle`` and last the revision. One intent stands for each
+    path, and the oldest queue time stays. A move queues one ``move`` intent under its destination
+    path, with the old path in ``from_path``. ``settle(tx, revision)`` runs in the commit's own
+    transaction with the revision that the commit makes, so a caller's bookkeeping stands or falls
+    with the change; an exception from it rolls the whole commit back.
     """
     _require_owned(change)
     with writer.handle.transaction() as tx:
@@ -206,7 +224,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for put in change.puts:
             _put_page(tx, put, revision, audit)
         for page in change.deletes:
-            _delete_page(tx, page.rel, audit)
+            _delete_page(tx, page, audit)
         for move in change.moves:
             _move_page(tx, move, revision, audit)
         for record in change.binaries:
@@ -214,6 +232,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for binary in change.binary_deletes:
             _delete_binary(tx, binary.rel, audit)
         _enqueue(tx, audit.intents, revision, now)
+        if settle is not None:
+            settle(tx, revision)
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
@@ -241,6 +261,19 @@ def _require_owned(change: StoreChange) -> None:
 
 def _timestamp() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_manifest(
+    tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int
+) -> None:
+    """Record that the file at ``rel`` holds these bytes: the one write of a manifest row."""
+    tx.execute(
+        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
+        "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
+        (rel, sha256, size, mtime_ns, revision),
+    )
 
 
 def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
@@ -314,7 +347,7 @@ class _Trail:
         if queue:
             self.intents[rel] = ("write", None)
 
-    def removed(self, rel: str, sha256: str, *, queue: bool = True) -> None:
+    def removed(self, rel: str, sha256: str | None, *, queue: bool = True) -> None:
         self.record(rel, "delete", sha256)
         self.deleted.append(rel)
         if queue:
@@ -334,7 +367,7 @@ class _Trail:
 def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> None:
     digest = hashlib.sha256(put.body).hexdigest()
     on_disk = put.on_disk_mtime_ns is not None
-    mtime_ns = put.on_disk_mtime_ns if on_disk else time.time_ns()
+    mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
     tx.execute(
         "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision, mtime_ns) "
         "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET body = excluded.body, "
@@ -344,13 +377,7 @@ def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> Non
         (put.rel, put.body, digest, len(put.body), frontmatter_json(put.body), revision, mtime_ns),
     )
     if on_disk:
-        tx.execute(
-            "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
-            "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
-            (put.rel, digest, len(put.body), mtime_ns, revision),
-        )
+        record_manifest(tx, put.rel, digest, len(put.body), mtime_ns, revision)
         _clear_queued(tx, put.rel)
     audit.wrote(put.rel, digest, queue=not on_disk)
 
@@ -360,12 +387,18 @@ def _clear_queued(tx: Connection, *paths: str) -> None:
     tx.executemany("DELETE FROM store_projection_queue WHERE path = ?", [(path,) for path in paths])
 
 
-def _delete_page(tx: Connection, rel: str, audit: _Trail) -> None:
+def _delete_page(tx: Connection, page: PageDelete, audit: _Trail) -> None:
+    rel = page.rel
     row = tx.execute("SELECT sha256 FROM store_pages WHERE path = ?", (rel,)).fetchone()
-    if row is None:
+    if row is None and not page.absent_ok:
         raise StoreConflict(rel, "the store holds no page to delete")
     tx.execute("DELETE FROM store_pages WHERE path = ?", (rel,))
-    audit.removed(rel, row[0])
+    if page.on_disk:
+        # The file is already gone, so nothing records it and nothing is left to project.
+        tx.execute("DELETE FROM store_manifest WHERE path = ?", (rel,))
+        _clear_queued(tx, rel)
+    # A path with no page leaves a trail row without a hash: only its file's removal was queued.
+    audit.removed(rel, None if row is None else row[0], queue=not page.on_disk)
 
 
 def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> None:

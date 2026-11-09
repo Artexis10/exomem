@@ -118,6 +118,11 @@ The watcher stays, but its job shrinks to one question: does a file's hash diffe
 - An outside delete becomes a held deletion.
 - A rename arrives as a delete plus a new file. When the new file's hash equals the deleted file's manifest hash in the same sweep, it imports as a governed move; otherwise both halves follow the rules above.
 
+**Resolving a held item.** An agent lists held items with the review tool and resolves each one with the repair tool, on the person's request. The list shows the person's file as it is now and the store's current revision. It gives each item a version that covers both. A resolve names the choice and that version, and it refuses with a conflict when the item, the file or the store page changed since the list.
+- *Keep mine* makes the person's current file the stored page, as an outside-editor write that is checked against the store revision the hold saw and queues no projection. A held delete removes the page from the store the same way. A page that the store changed since the hold stays held, so keep-mine never overwrites a newer Exomem change.
+- *Keep store* first saves the person's file, byte for byte and flushed to disk, under a dated folder in the vault's state folder, outside the vault, and never over an earlier copy. It then deletes the held record and queues the store's version for projection. The manifest takes the file's facts at that commit, so the projector does not hold the same file again.
+- Each resolution adds one audit row, and the choice is its reason. The resolve never reads the held record's stored body, because a very large held edit keeps no body.
+
 Exomem's own projections match the manifest, so self-write echo suppression disappears. The spike's reconcile pass implements this check. Over today's production logs, edits from outside Exomem cannot be counted, because the watcher records them only in memory and at debug level. Store mode makes them auditable.
 
 ### D6. The graph stays, on the same rows
