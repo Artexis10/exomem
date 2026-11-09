@@ -1,4 +1,4 @@
-"""The doubling retry delay that every persistent retry loop shares.
+"""A doubling retry delay that cannot overflow, for retry loops that count failures.
 
 A leaf module: the derived-receipt drain, the graph quarantine and the media
 worker each count failures their own way, and all of them need the same
@@ -11,7 +11,7 @@ import math
 
 
 def capped_doubling(base: float, maximum: float, doublings: int) -> float:
-    """`base` doubled `doublings` times, never more than `maximum`.
+    """`base` doubled `doublings` times, never more than `maximum`; expects `0 < base <= maximum`.
 
     The exponent stops at the first doubling that reaches `maximum`: an uncapped
     power overflows the float multiply after about a thousand doublings, and a

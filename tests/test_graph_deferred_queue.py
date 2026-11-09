@@ -2462,8 +2462,10 @@ def test_a_page_quarantined_for_thousands_of_attempts_still_waits_for_its_retry(
         (vault / PAGE_A).write_text(_page("A", "A is edited out of band."), encoding="utf-8")
         _seed_live_freshness(vault)
 
+        # The backoff has reached its cap: halfway through it the edited page still waits.
+        _age_graph_failures(vault, epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS / 2)
         assert index_sync.requeue_quarantined_graph_paths(vault) == 0
-        _age_graph_failures(vault, epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS)
+        _age_graph_failures(vault, epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS / 2)
         assert index_sync.requeue_quarantined_graph_paths(vault) == 1
 
 
