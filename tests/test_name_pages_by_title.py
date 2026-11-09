@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import FIXTURE_VAULT, initialize_vault_state_offline
 from fastmcp import Client
 from test_derived_identifier_egress import (
     _WITHHELD_TARGET,
@@ -23,6 +25,7 @@ from test_derived_identifier_egress import (
     _materialize,
     _page,
     _principal,
+    _reset,
     _write_door_fixture,
 )
 from test_mcp_schema_fidelity import TOOL_SURFACE_CONTRACT_PATH, _tool_surface_sha256
@@ -30,6 +33,7 @@ from test_mcp_schema_fidelity import TOOL_SURFACE_CONTRACT_PATH, _tool_surface_s
 from exomem import call_ledger, command_surface, find, page_names, writer_lease
 from exomem import server as server_module
 from exomem import vault as vault_module
+from exomem.governance.principal import request_scope
 
 _ID = re.compile(r"[a-z2-7]{7}\.[a-z2-7]{4}")
 _STANDALONE = {"relation_disposition": "reviewed_none", "relation_review_reason": "standalone"}
@@ -220,6 +224,68 @@ def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
     assert answers["with"]["Secret plan"].keys() == answers["with"]["Nonexistent plan"].keys()
 
 
+def test_a_restricted_mcp_caller_gets_named_replies_as_if_the_withheld_pages_were_absent(
+    build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    open_pages = {
+        f"{NOTES}/shared.md": _page("Shared plan", "Visible twin.", type="insight"),
+        f"{NOTES}/open.md": _page("Open plan", "Visible text.", type="insight"),
+    }
+    withheld_pages = {
+        f"{WITHHELD_DIR}/shared.md": _page("Shared plan", "Withheld twin.", type="insight"),
+        f"{WITHHELD_DIR}/secret.md": _page("Secret plan", "Withheld text.", type="insight"),
+    }
+
+    def server_vault(name: str, files: dict[str, str]) -> Path:
+        # The server needs a real vault (schema and state), which the bare twin vaults above lack.
+        root = tmp_path / name / "vault"
+        shutil.copytree(FIXTURE_VAULT, root)
+        initialize_vault_state_offline(root, source="restricted caller twin vault")
+        return _materialize(root, files, "external")
+
+    vaults = {
+        "without": server_vault("without", dict(open_pages)),
+        "with": server_vault("with", {**open_pages, **withheld_pages}),
+    }
+
+    async def tool(mcp, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await mcp.call_tool(name, arguments, run_middleware=False)
+        assert result.structured_content is not None
+        return result.structured_content
+
+    async def ask(mcp) -> dict[str, Any]:
+        return {
+            "read": {
+                title: await tool(mcp, "read_memory", {"path": title})
+                for title in ("Secret plan", "Shared plan", "Nonexistent plan")
+            },
+            "search": await tool(mcp, "ask_memory", {"query": "plan", "limit": 20}),
+        }
+
+    answers = {}
+    for name, vault in vaults.items():
+        monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+        writer_lease.reset_managers_for_tests()
+        _reset()
+        # `run_middleware=False` skips the token check an in-process caller has no token for, and the
+        # tool wrapper then runs the command, the egress release and the naming pass as this principal.
+        with request_scope(_principal("external")):
+            answers[name] = asyncio.run(ask(build()))
+
+    # The naming pass runs after egress, so it must not name a page the filter dropped.
+    assert answers["with"]["read"] == answers["without"]["read"]
+    assert "Visible twin." in answers["with"]["read"]["Shared plan"]["body"]
+    assert _ID.fullmatch(answers["with"]["read"]["Shared plan"]["id"])
+    assert answers["with"]["read"]["Secret plan"].keys() == answers["with"]["read"]["Nonexistent plan"].keys()
+    hits = answers["with"]["search"]["result"]["hits"]
+    # Corpus statistics reorder hits between the twins, so compare the hits and not their order.
+    by_id = {hit["id"]: hit for hit in hits}
+    assert by_id == {hit["id"]: hit for hit in answers["without"]["search"]["result"]["hits"]}
+    assert "Withheld" not in json.dumps(hits)
+    assert {"Shared plan", "Open plan"} <= {hit["title"] for hit in hits}
+    assert all(_ID.fullmatch(hit["id"]) and "path" not in hit for hit in hits)
+
+
 def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(build) -> None:
     async def call(client: Client, name: str, arguments: dict[str, Any], key: str) -> dict[str, Any]:
         meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: key}
@@ -339,6 +405,26 @@ def test_a_visible_page_titled_like_a_withheld_path_is_no_oracle_for_that_path(
 
     assert answers["with"] == answers["without"]
     assert "Visible text." in answers["with"]["body"]
+
+
+def test_a_reply_that_lists_pages_by_path_keeps_one_form_throughout(tmp_path: Path) -> None:
+    root = _materialize(
+        tmp_path / "vault",
+        {
+            f"{NOTES}/alpha.md": _page("Alpha", "First page.", type="insight"),
+            f"{NOTES}/beta.md": _page("Beta", "Second page.", type="insight"),
+        },
+        "external",
+    )
+    alpha, beta = f"{NOTES}/alpha.md", f"{NOTES}/beta.md"
+    # The shape an accepted relation returns: the source page, the target, and the edit it made.
+    accepted = {"accepted": True, "path": alpha, "from": alpha, "to": beta, "edit": {"path": alpha}}
+    # A write that holds nothing else names its page by title and id.
+    saved = {"user_summary": f"Saved -> {alpha}", "path": alpha, "after_hash": "0" * 64}
+
+    assert page_names.name_released_reply(root, accepted) == accepted
+    named = page_names.name_released_reply(root, saved)
+    assert named["title"] == "Alpha" and "path" not in named
 
 
 def test_a_path_a_title_and_a_short_id_name_pages_in_that_order(tmp_path: Path) -> None:
