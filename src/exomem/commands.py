@@ -1588,9 +1588,9 @@ def op_bootstrap(
             ),
             # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
             "vault_verdicts": (
-                "A vault may add verdicts or give one a label. "
+                "A vault may add verdicts. "
                 f"{call_text('schema_memory', {'subject': 'categories', 'operation': 'infer'})} "
-                "lists every verdict this vault accepts under `verdicts`."
+                "lists every accepted verdict under `verdicts`."
             ),
             "check_by": (
                 "One exact ISO calendar date (YYYY-MM-DD) naming the day to revisit "

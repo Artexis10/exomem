@@ -17,9 +17,9 @@
 
 ## 3. Kinds and verdicts
 
-- [ ] 3.1 Record the kind mapping in design.md: the kind-trait table and the kind debt.
-- [ ] 3.2 Move the 27 built-in kinds, their aliases and the compact `observation` kind into the shipped pack. Declare the traits `assertion`, `page_claim`, `procedure`, `outcome` and `question`. Replace the kind reads with trait reads, and prove identical output on the fixture vault in design.md ("Fixture").
-- [ ] 3.3 Move the verdicts into a registry with labels. Update the verdict remediation, bootstrap's taught verdicts and the experiment `outcome:` check.
+- [x] 3.1 Record the kind mapping in design.md: the kind-trait table and the kind debt.
+- [x] 3.2 Move the 27 built-in kinds, their aliases and the compact `observation` kind into the shipped pack. Declare the traits `assertion`, `page_claim`, `procedure`, `outcome` and `question`. Replace the kind reads with trait reads, and prove identical output on the fixture vault in design.md ("Fixture").
+- [x] 3.3 Move the verdicts into a registry with labels. Update the verdict remediation, bootstrap's taught verdicts and the experiment `outcome:` check.
 
 ## 4. Belief and the new keys
 
