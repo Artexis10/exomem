@@ -281,6 +281,29 @@ def partition_state_descriptor_ids(
     return recorded - optional, recorded & optional
 
 
+def unrecognized_compatibility_ids(vault_root: Path) -> tuple[str, ...]:
+    """Optional format IDs the vault's state manifest records that this release does not recognize.
+
+    A release records an optional format ID in ``descriptors`` with no ``families`` entry. A release
+    older than that ID reads it as a physical family, so its validation refuses a complete manifest
+    as having incomplete families. Read before validation, an ID without an entry that this release
+    knows neither as optional nor as one of its families says that this release is older than the
+    state. An absent, unparsable or unfinished manifest has none.
+    """
+
+    try:
+        payload = json.loads(_read_manifest_bytes(_manifest_path(state_paths.vault_state_dir(vault_root))))
+    except (OSError, ValueError):
+        return ()
+    if not isinstance(payload, dict) or payload.get("state") != "complete":
+        return ()
+    descriptors, families = payload.get("descriptors"), payload.get("families")
+    if not isinstance(descriptors, list) or not isinstance(families, dict):
+        return ()
+    physical, _ = partition_state_descriptor_ids(entry for entry in descriptors if isinstance(entry, str))
+    return tuple(sorted(physical - set(families) - set(_descriptor_ids())))
+
+
 def _require_supported_compatibility(optional: frozenset[str]) -> None:
     if optional - set(supported_state_compatibility_ids()):
         raise StateCompatibilityUnsupported()

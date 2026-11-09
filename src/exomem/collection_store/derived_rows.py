@@ -968,6 +968,23 @@ def snapshot(store_path: Path, destination: Path) -> dict[str, Any] | None:
     return {"path": str(destination), "sha256": digest, "size_bytes": destination.stat().st_size}
 
 
+def fingerprint(store_path: Path) -> dict[str, Any] | None:
+    """The derived file beside ``store_path`` by path, size and sha256, read in place; None when there is none.
+
+    It copies nothing and runs no integrity check, so a large file costs one read. It names the file
+    that stood beside a store backup that excludes it: the rows rebuild from that store's import log.
+    """
+    import hashlib
+
+    found = path(store_path)
+    if not found.is_file():
+        return None
+    with open(found, "rb") as file:
+        digest = hashlib.file_digest(file, "sha256").hexdigest()
+        size = os.fstat(file.fileno()).st_size
+    return {"path": str(found), "size_bytes": size, "sha256": digest}
+
+
 # Rebuild
 
 

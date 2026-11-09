@@ -1025,12 +1025,18 @@ def require_owner(root, operation):
         raise CollectionStoreError("COLLECTION_STORE_OWNER_REQUIRED", f"{operation} is owner-only")
 
 
+#: Seconds the offline owner's hand-back has to drain views and publish the replica of the whole store.
+#: One mutation's timeout (5 s by default) is too short for a large store; this matches a backup's bound.
+OFFLINE_HANDBACK_SECONDS = 300.0
+
+
 def _offline_owner(root, operation, work, *, operator=True, drain_views=True, committed=False):
     """Run ``work(session, manager, fence_client)`` as the owner's offline store step.
 
     It refuses while any service holds the lease, then holds its own producer session and
-    lease, which it hands back with the flushed head. ``operator=False`` is for a step
-    that only reads the fence: its client carries the writer credential, not the operator's.
+    lease, which it hands back with the flushed head within ``OFFLINE_HANDBACK_SECONDS``.
+    ``operator=False`` is for a step that only reads the fence: its client carries the writer
+    credential, not the operator's.
     ``committed`` is for a step whose result is already durable when it returns: a failed hand-back
     is reported on that result, never raised over it.
     """
@@ -1047,17 +1053,21 @@ def _offline_owner(root, operation, work, *, operator=True, drain_views=True, co
                      preferred_writer=False, idle_release_seconds=0)
     with production_session(root) as session:
         manager = writer_lease.LeaseManager(config)
-        close_options = {} if drain_views else {"drain_views": False}
+
+        def close():
+            manager.close(deadline=time.monotonic() + OFFLINE_HANDBACK_SECONDS,
+                          **({} if drain_views else {"drain_views": False}))
+
         try:
             try:
                 result = work(session, manager, fence_client)
             except BaseException:
                 # The refusal is the answer; an unadmitted token keeps its lease until it expires.
                 with suppress(Exception):
-                    manager.close(**close_options)
+                    close()
                 raise
             try:
-                manager.close(**close_options)
+                close()
             except OpError as error:
                 if committed:
                     result = {**result, "lease": "expires", "lease_reason": error.code}

@@ -9,12 +9,18 @@ the file back. A wikilink that names a retired path resolves through ``link_targ
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from .. import collection_profiles
 from .. import structured_collections as collections
 from .connection import CollectionStoreError
 from .preview import bound_writer, canonical_read
 from .summary import SUMMARY
 
+#: Set while ``link_target`` reads a row. That read's query checks the row's own links, and a link
+#: there to another retired path is left unresolved: the check answers only whether the row is
+#: released, so this bounds the nesting at one row, even where rows link to each other.
+_CHECKING_LINK = ContextVar("exomem_retired_link_check", default=False)
 #: The row of a summary collection that keeps ``path`` as its retired alias.
 _RETIRED = ("SELECT i.collection_id,i.item_key FROM items i JOIN collections c ON c.collection_id=i.collection_id "
             "WHERE i.view_path=? AND c.view_mode=?")
@@ -84,9 +90,14 @@ def link_target(vault_root, target):
     """
     from ..cli_ops import OpError
 
+    if _CHECKING_LINK.get():
+        return None
+    checking = _CHECKING_LINK.set(True)
     try:
         row = read_named(vault_root, target)
     except (OpError, CollectionStoreError):
         # A store that this process cannot reach leaves the link a forward reference, as before conversion.
         return None
+    finally:
+        _CHECKING_LINK.reset(checking)
     return None if row is None else row["path"]
