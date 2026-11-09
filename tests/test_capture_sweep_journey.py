@@ -201,8 +201,8 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
         slug="booking-lead-time",
         key="journey-quirk",
     )
-    assert meeting_replay == {**meeting, "replayed": True, "mutated": False}
-    assert quirk_replay == {**quirk, "replayed": True, "mutated": False}
+    assert meeting_replay == {**meeting, "replayed": True}
+    assert quirk_replay == {**quirk, "replayed": True}
     assert "capture_sweep" not in quirk_replay
 
     notes = sorted(

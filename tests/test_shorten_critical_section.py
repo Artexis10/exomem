@@ -540,7 +540,7 @@ def test_a_write_whose_navigation_changed_while_it_waited_commits_once_without_a
     assert log.count(marker) == 1
     assert "race.bin" in log
     attempted = len(attempts)
-    assert run() == {**outcome[0], "replayed": True, "mutated": False}
+    assert run() == {**outcome[0], "replayed": True}
     assert len(attempts) == attempted, "the resend ran the write again instead of replaying"
     assert (vault / "Knowledge Base" / "log.md").read_text(encoding="utf-8").count(marker) == 1
 

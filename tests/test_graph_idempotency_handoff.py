@@ -387,11 +387,11 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
         "idempotency_key",
         "warnings_count",
     } <= compact.keys()
-    assert full == {**compact, "diagnostics": legacy, "replayed": True, "mutated": False}
+    assert full == {**compact, "diagnostics": legacy, "replayed": True}
     assert compact["vocabulary_resolution"] == resolution
     assert full["vocabulary_resolution"] == resolution
     assert isinstance(legacy, dict)
-    assert compact_replay == {**compact, "replayed": True, "mutated": False}
+    assert compact_replay == {**compact, "replayed": True}
     assert "private_leaf_value" not in json.dumps(full)
     assert "private warning" not in json.dumps(full)
     assert calls == 1
@@ -538,7 +538,7 @@ def test_lease_manager_receipt_recovery_returns_graph_failure_after_rebuild_erro
     assert recovered["status"] == "committed"
     assert recovered["graph_sync"] == "failed"
     assert recovered["graph_sync_code"] == "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
-    assert replay == {**recovered, "replayed": True, "mutated": False}
+    assert replay == {**recovered, "replayed": True}
     assert calls == 1
 
 
@@ -817,7 +817,7 @@ def test_lease_manager_outer_upsert_failure_registers_graph_failure_before_guard
     assert result["graph_sync"] == "failed"
     assert result["graph_sync_code"] == "GRAPH_SYNC_FANOUT_FAILED"
     assert result["graph_sync_checkpoint"] == checkpoint.checkpoint_sha256
-    assert replay == {**result, "replayed": True, "mutated": False}
+    assert replay == {**result, "replayed": True}
     assert calls == 1
 
 
@@ -931,7 +931,7 @@ def test_lease_manager_preserves_real_wait_path_graph_failure_code(
     # The write no longer waits for the builder (#576/#588): the rebuild runs on
     # its own daemon thread, so at response time the honest outcome is `pending`.
     assert result["graph_sync"] == "pending"
-    assert replay == {**result, "replayed": True, "mutated": False}
+    assert replay == {**result, "replayed": True}
     assert calls == 1
 
     # The three properties this test defends are unchanged; they are now
@@ -995,7 +995,7 @@ def test_lease_manager_preserves_graph_thread_start_failure(
     assert result["graph_sync_remediation"] == (
         graph_sync._RETRY_OR_RECONCILE
     )
-    assert replay == {**result, "replayed": True, "mutated": False}
+    assert replay == {**result, "replayed": True}
     assert calls == 1
 
 

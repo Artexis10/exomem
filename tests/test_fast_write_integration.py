@@ -534,7 +534,7 @@ def test_expired_acknowledgement_does_not_wait_for_status_io(
     assert "deadlineprobe" in (vault / arguments["rel_path"]).read_text()
     assert arguments["rel_path"] in _keyword(vault, "deadlineprobe")
     assert _governed_write(manager, vault, **arguments, idempotency_key="expired-status") == {
-        **terminal, "replayed": True, "mutated": False
+        **terminal, "replayed": True
     }
     assert _drain(vault) > 0
 
@@ -598,7 +598,7 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
         terminal = manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}")
         assert clock["now"] - began <= request_budget.MCP_REQUEST_BUDGET_SECONDS
         assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == {
-            **terminal, "replayed": True, "mutated": False
+            **terminal, "replayed": True
         }
         continuation = results[-1].get("continuation")
         if not continuation:
@@ -1023,7 +1023,7 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     pages = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.md")}
     assert manager.invoke(
         command, (vault,), arguments, idempotency_key="import-media-custody"
-    ) == {**terminal, "replayed": True, "mutated": False}
+    ) == {**terminal, "replayed": True}
     assert {path: path.read_bytes() for path in pages} == pages
     assert media_jobs.MediaJobStore(vault).get_by_binary(artifact).id == job.id
 
@@ -1198,7 +1198,7 @@ def test_exact_replay_returns_the_original_terminal(
     second = _governed_write(
         manager, vault, rel_path=rel, source=source, idempotency_key="lane5-replay"
     )
-    assert second == {**first, "replayed": True, "mutated": False}
+    assert second == {**first, "replayed": True}
 
 
 # --------------------------------------------------------------------------- #

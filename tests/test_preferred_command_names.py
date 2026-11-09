@@ -135,7 +135,7 @@ def test_rest_cross_spelling_retry_replays_one_edit(vault, monkeypatch) -> None:
     written = (vault / relative).stat().st_mtime_ns
     retry = client.post("/api/edit_note", json=arguments, headers=headers)
     assert first.status_code == retry.status_code == 200, (first.text, retry.text)
-    assert retry.json()["data"] == {**first.json()["data"], "replayed": True, "mutated": False}
+    assert retry.json() == {**first.json(), "data": {**first.json()["data"], "replayed": True}}
     assert (vault / relative).stat().st_mtime_ns == written
     assert (vault / relative).read_text(encoding="utf-8").count("After") == 1
 

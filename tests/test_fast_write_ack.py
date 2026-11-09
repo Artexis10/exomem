@@ -482,7 +482,7 @@ def test_background_completion_never_mutates_original_terminal(
     replay, _target = _invoke_batch(tmp_path, idempotency_key="immutable")
 
     assert first["derived_sync"] == "pending"
-    replayed = {**json.loads(original), "replayed": True, "mutated": False}
+    replayed = {**json.loads(original), "replayed": True}
     assert json.dumps(replay, sort_keys=True, separators=(",", ":")) == json.dumps(
         replayed, sort_keys=True, separators=(",", ":")
     )

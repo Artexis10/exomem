@@ -226,6 +226,21 @@ def test_a_confined_observation_ack_and_exact_unit_read_keep_their_parent(confin
     assert "Keep an independent observation." not in (vault / OWN_NOTE).read_text()
 
 
+def test_a_confined_observation_retried_under_its_key_replays_with_its_unit_reference(confined, vault):
+    """The replay names the unit the first commit wrote, as the parent binding of a confined reply needs."""
+    _, authenticate = confined
+    writer = authenticate("writer")
+    request = dict(path=OWN_NOTE, operation="add", category="finding",
+                   content="Keep a retried observation.", idempotency_key="retried-observation")
+
+    first = _call(vault, writer, "observe_memory", **request)
+    retry = _call(vault, writer, "observe_memory", **request)
+
+    assert isinstance(first, dict) and first.get("state") == "committed" and first.get("unit_ref"), first
+    assert retry.get("replayed") is True and retry.get("unit_ref") == first["unit_ref"], retry
+    assert (vault / OWN_NOTE).read_text().count("Keep a retried observation.") == 1
+
+
 def _committed_unit_reply(path, source, reference):
     """The public committed-terminal protocol, without unrelated producer diagnostics."""
     from exomem import vault as vault_module

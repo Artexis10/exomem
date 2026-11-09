@@ -1987,14 +1987,15 @@ def with_fast_acknowledgement(
 
 
 def as_replay(terminal: Any) -> Any:
-    """Mark a stored terminal that answers a retry, so the reply says no write happened now.
+    """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
 
-    `request_id` and `receipt_id` stay those of the commit it replays. Anything that is not a
-    terminal passes through, because only a terminal has a `mutated` outcome to correct.
+    `mutated`, `request_id` and `receipt_id` stay those of the commit it replays: the egress
+    filter binds a unit write's parent on `mutated`, so a replay must not change it. Anything that
+    is not a terminal passes through.
     """
     if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
         return terminal
-    return {**terminal, "replayed": True, "mutated": False}
+    return {**terminal, "replayed": True}
 
 
 def replayed_terminal(

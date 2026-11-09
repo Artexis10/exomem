@@ -1853,9 +1853,9 @@ def test_bound_remember_replays_after_terminal_acknowledgement_loss(
         vault / replay["path"]
     ]
     # The agent lost the first reply, so this reply is the only one it reads. It must say that
-    # this call wrote nothing and that the commit it names happened earlier.
+    # the commit it names happened earlier; `mutated` stays that commit's outcome.
     assert replay["replayed"] is True
-    assert replay["mutated"] is False
+    assert replay["mutated"] is True
     assert replay["state"] == "committed"
     assert replay["receipt_id"]
 

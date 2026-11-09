@@ -7040,9 +7040,7 @@ class LeaseManager:
             receipt=receipt,
             outcome=(
                 "replayed"
-                if isinstance(result, Mapping)
-                and result.get("status") == "replayed"
-                and result.get("mutated") is False
+                if isinstance(result, Mapping) and result.get("replayed") is True
                 else "committed"
             ),
             error_code=None,

@@ -1396,7 +1396,7 @@ def test_a_byte_identical_retry_replays_instead_of_capturing_twice(
         files=files, idempotency_key="retry-key",
     )
 
-    assert replay == {**first, "replayed": True, "mutated": False}
+    assert replay == {**first, "replayed": True}
     assert staged == ["f1"], "the retry re-fetched the handle"
     stored = [
         path
