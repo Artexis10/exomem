@@ -587,13 +587,18 @@ class QueryRecords(Wire):
 _QUERY_HANDLED = frozenset({"collection", "filters", "columns", "sort_by", "descending", "limit", "continuation", "action"})
 
 
-def _query_collection(command: str, tool: str):
+def _query_collection(command: str, tool: str, key: str):
+    """`key` is the column that names a row: it and the row version make the row id the reply carries."""
+
     def translate(wire: dict[str, Any], ctx: Context) -> Translated:
         options = _bag(wire, "options", ctx, command, _QUERY_HANDLED, tool)
         if wire.get("collection") is None:
             return command, {"action": "inspect"}
+        columns = wire.get("columns")
+        if columns is not None:
+            columns = [*columns, *(name for name in (key, "item_version") if name not in columns)]
         leaf = _given({
-            "collection": wire["collection"], "filters": wire.get("filters"), "columns": wire.get("columns"),
+            "collection": wire["collection"], "filters": wire.get("filters"), "columns": columns,
             "sort_by": wire.get("sort_by"), "descending": wire.get("descending"), "limit": wire.get("limit"),
             "continuation": wire.get("more"),
         })
@@ -811,7 +816,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
                  inverse={"artifacts": "pages", "artifact": "pages", "response_detail": "detail"})]),
     _tool("query_records", "Query records",
           "Read the person's Records. Without `collection`, list the collections and their fields; with one, filter and sort its rows.",
-          QueryRecords, "read", _query_collection("record_memory", "query_records"),
+          QueryRecords, "read", _query_collection("record_memory", "query_records", "record_id"),
           [Route("record_memory", when={"action": "query"}, inverse={"continuation": "more"}, bag="options"),
            Route("record_memory", when={"action": "inspect"})], idempotent=True,
           example={"collection": "Workouts", "filters": [{"column": "type", "op": "eq", "value": "run"}], "sort_by": "date", "descending": True, "limit": 20},
@@ -832,7 +837,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("record_memory", "update"),)),
     _tool("query_plan_items", "Query plan items",
           "Read the person's Planning. Without `collection`, list the plan collections; with one, filter its items.",
-          QueryPlanItems, "read", _query_collection("plan_memory", "query_plan_items"),
+          QueryPlanItems, "read", _query_collection("plan_memory", "query_plan_items", "plan_id"),
           [Route("plan_memory", when={"action": "query"}, inverse={"continuation": "more"}, bag="options"),
            Route("plan_memory", when={"action": "inspect"})], idempotent=True,
           claims=(("plan_memory", "query"), ("plan_memory", "inspect"))),

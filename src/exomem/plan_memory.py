@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import operation_entries, planning
+from . import collection_refs, operation_entries, planning
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
 from .structured_collections import CollectionError, collection_remediation
@@ -81,6 +81,7 @@ def plan_memory(
     changes: dict[str, Any] | None = None,
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
+    item_id: str | None = None,
 ) -> dict[str, Any]:
     """Manage intent; record_memory holds outcomes.
 
@@ -95,11 +96,24 @@ def plan_memory(
         expected_item_version: row item_version.
         changes: Update.
         transition: Triage.
+        item_id: update and triage: the item `id` a query returned. It stands for plan_id,
+            expected_item_version and expected_container_hash, which the call reads under
+            the writer lease. A stale id is refused with the current one.
     """
+    collection = collection_refs.resolve_collection(vault_root, collection, profile="planning")
+    guards = _bound_item(
+        vault_root, action, collection, item_id, (plan_id, expected_container_hash, expected_item_version)
+    )
     values = locals().copy()
-    values.pop("vault_root")
-    values.pop("action")
+    for name in ("vault_root", "action", "item_id", "guards"):
+        values.pop(name)
+    values.update(guards)
+    plan_id = values["plan_id"]
     _validate_arguments(action, values)
+    if action in {"update", "triage"} and None in (
+        values["plan_id"], values["expected_container_hash"], values["expected_item_version"]
+    ):
+        _invalid_arguments("update and triage need item_id, or plan_id with expected_container_hash and expected_item_version")
     try:
         # nosemgrep: ep-word-membership -- plan_memory's closed write actions (see ACTIONS).
         if action in {"add", "update", "triage"}:
@@ -112,7 +126,7 @@ def plan_memory(
 
         selected, result = preview.dispatch(vault_root, "planning", action, values)
         if selected:
-            return result
+            return collection_refs.mark_rows(result, profile="planning") if action == "query" else result
         if action == "inspect":
             assert collection is not None
             return planning.inspect(vault_root, collection)
@@ -158,7 +172,7 @@ def plan_memory(
             )
         if action == "query":
             assert collection is not None
-            return planning.query(
+            return collection_refs.mark_rows(planning.query(
                 vault_root,
                 collection,
                 view=view,
@@ -180,7 +194,7 @@ def plan_memory(
                 include_agent_history=(
                     False if include_agent_history is None else include_agent_history
                 ),
-            )
+            ), profile="planning")
         if action == "revise":
             assert collection is not None and manifest_text is not None
             assert expected_manifest_hash is not None and expected_container_hash is not None
@@ -215,6 +229,25 @@ def plan_memory(
             _public_error_message(code, error.reason),
             collection_remediation(error),
         ) from error
+
+
+def _bound_item(
+    vault_root: Path, action: str, collection: str | None, item_id: str | None,
+    given: tuple[str | None, ...],
+) -> dict[str, str]:
+    """The plan id and guards that `item_id` stands for, read through this command's own query."""
+    if item_id is None:
+        return {}
+    if action not in {"update", "triage"} or any(value is not None for value in given):
+        _invalid_arguments("item_id applies to update and triage and replaces plan_id and both guards")
+    bound = collection_refs.bind_item(
+        lambda **kw: plan_memory(vault_root, "query", lifecycle="all", **kw),
+        collection=str(collection), item_id=item_id, profile="planning",
+    )
+    return {
+        "plan_id": bound["item_key"], "expected_item_version": bound["expected_item_version"],
+        "expected_container_hash": bound["expected_container_hash"],
+    }
 
 
 def validate_arguments(action: object, arguments: Mapping[str, Any]) -> None:

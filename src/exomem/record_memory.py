@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Never
 
 from . import (
+    collection_refs,
     operation_entries,
     query_data,
     record_governance,
@@ -97,6 +98,7 @@ def record_memory(
     on_reject: Literal["abort", "skip"] | None = None,
     import_request: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
+    item_id: str | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, bulk_upsert, update, revise, rebaseline, discard or import Records.
 
@@ -158,7 +160,21 @@ def record_memory(
         query: query only, for a store-routed collection: a typed v1 query object
             instead of the legacy shaping arguments; store-mode `describe` names its
             grammar route.
+        item_id: update only: the row `id` a query returned. It stands for item_key,
+            expected_item_version and expected_container_hash, which the call reads under
+            the writer lease. A stale id is refused with the current one.
     """
+    collection = collection_refs.resolve_collection(vault_root, collection, profile="records")
+    if item_id is not None:
+        if action != "update" or any(v is not None for v in (item_key, expected_container_hash, expected_item_version)):
+            _invalid_arguments("item_id applies to update and replaces item_key and both guards")
+        bound = collection_refs.bind_item(
+            lambda **kw: record_memory(vault_root, "query", **kw),
+            collection=str(collection), item_id=item_id, profile="records",
+        )
+        item_key, expected_item_version, expected_container_hash = (
+            bound["item_key"], bound["expected_item_version"], bound["expected_container_hash"],
+        )
     values = {
         "collection": collection,
         "manifest_path": manifest_path,
@@ -199,6 +215,8 @@ def record_memory(
         "query": query,
     }
     _validate_arguments(action, values)
+    if action == "update" and None in (item_key, expected_container_hash, expected_item_version):
+        _invalid_arguments("update requires item_id, or item_key with expected_container_hash and expected_item_version")
     from .query_engine.errors import QueryError
 
     try:
@@ -206,7 +224,7 @@ def record_memory(
 
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
-            return result
+            return collection_refs.mark_rows(result, profile="records") if action == "query" else result
         if action == "import" or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
@@ -293,12 +311,12 @@ def record_memory(
                     manifest,
                     authorize_path=record_governance.full_release_filter(vault_root),
                 )
-            return record_governance.project_query_result(
+            return collection_refs.mark_rows(record_governance.project_query_result(
                 result,
                 manifest,
                 output_format="json" if output_format is None else output_format,
                 agent_history=history,
-            )
+            ), profile="records")
         if action == "history":
             assert collection is not None and item_key is not None
             return record_history.read(

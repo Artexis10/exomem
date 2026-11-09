@@ -417,10 +417,11 @@ RECORDS = CommandOperations(
         _entry(
             "update", CHANGE_RECORDS,
             (
-                "collection", "item_key", "changes", "expected_container_hash",
+                "collection", "item_id", "item_key", "changes", "expected_container_hash",
                 "expected_item_version", "why", "refresh_presentation", "held", "hold",
             ),
-            ("collection", "item_key", "expected_container_hash", "expected_item_version", "why"),
+            # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
+            ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
@@ -465,6 +466,9 @@ _PLAN_QUERY_FIELDS = (
 _PLAN_GUARDED_FIELDS = (
     "collection", "plan_id", "expected_container_hash", "expected_item_version", "why",
 )
+# `item_id` stands for the plan id and both guards; the leaf asks for them when it is absent.
+_PLAN_ITEM_FIELDS = (*_PLAN_GUARDED_FIELDS, "item_id")
+_PLAN_ITEM_REQUIRED = ("collection", "why")
 
 PLANS = CommandOperations(
     command="plan_memory",
@@ -515,12 +519,12 @@ PLANS = CommandOperations(
         ),
         _entry(
             "update", CHANGE_PLANS,
-            (*_PLAN_GUARDED_FIELDS, "changes", "body"), _PLAN_GUARDED_FIELDS,
+            (*_PLAN_ITEM_FIELDS, "changes", "body"), _PLAN_ITEM_REQUIRED,
             effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
-            "triage", CHANGE_PLANS, (*_PLAN_GUARDED_FIELDS, "transition"),
-            (*_PLAN_GUARDED_FIELDS, "transition"), effect="write", destructive=True,
+            "triage", CHANGE_PLANS, (*_PLAN_ITEM_FIELDS, "transition"),
+            (*_PLAN_ITEM_REQUIRED, "transition"), effect="write", destructive=True,
             outcome_verb="updated",
         ),
         _entry(
