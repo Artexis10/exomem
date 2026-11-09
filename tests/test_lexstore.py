@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import duplicates, lexstore
+from exomem import duplicates, find_corpus, lexstore
 from exomem import find as find_module
 
 pytestmark = pytest.mark.skipif(
@@ -2183,6 +2183,24 @@ def test_a_committed_payload_hash_is_visible_while_search_indexing_lags(tmp_path
 
     assert lexstore.record_payload_commit(tmp_path, [second])
     assert lexstore.payload_candidates(tmp_path, digest) == (second,)
+
+
+def test_a_store_catalogue_made_at_schema_16_takes_a_page_write_without_the_duplicate_columns(tmp_path):
+    """A store that the released code created has no `payload_hash` or `source_url`, and its commits must not fail."""
+    raw = b"# Alpha\n\nAn early page.\n"
+    rel = "Knowledge Base/Notes/alpha.md"
+    page = find_corpus.parse_page(tmp_path / rel, 0.0, tmp_path, content=raw, resolved_relative=rel)
+    rows = lexstore.page_rows(tmp_path, rel, raw, page=page, state=None, mtime_ns=7, in_kb=True, in_vault=True)
+    with closing(sqlite3.connect(":memory:")) as catalogue:
+        lexstore.create_catalogue_schema(catalogue)
+        catalogue.execute("DROP INDEX pages_payload_hash")
+        catalogue.execute("DROP INDEX pages_source_url")
+        catalogue.execute("ALTER TABLE pages DROP COLUMN payload_hash")
+        catalogue.execute("ALTER TABLE pages DROP COLUMN source_url")
+
+        lexstore.write_page_rows(catalogue, rows)
+
+        assert catalogue.execute("SELECT path, title FROM pages").fetchall() == [(rel, "Alpha")]
 
 
 @pytest.mark.parametrize(

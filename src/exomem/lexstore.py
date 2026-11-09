@@ -5269,9 +5269,30 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
     return cur.lastrowid
 
 
+#: The columns that schema 17 added to `pages`; a store that the released code created at schema 16 lacks them.
+_SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
+
+
+def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
+    """`columns` without the schema 17 columns that this connection's `pages` table does not have yet.
+
+    No door reads a store's own `pages` table (the duplicate index is the sidecar, which a schema 16 build
+    reads as not current and answers "unchecked"), so a page written without these values leaves nothing
+    to mislead. Any other missing column still fails the insert, because that is a store that is wrong.
+    """
+    present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+    if all(name in present for name in _SCHEMA_17_PAGE_COLUMNS):
+        return columns
+    return {
+        name: value
+        for name, value in columns.items()
+        if name in present or name not in _SCHEMA_17_PAGE_COLUMNS
+    }
+
+
 def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
     """Insert one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
-    rowid = _insert_row(conn, "pages", rows.columns)
+    rowid = _insert_row(conn, "pages", _page_columns_of_table(conn, rows.columns))
     if fts5_available():
         conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, rows.stemmed))
         conn.execute(
