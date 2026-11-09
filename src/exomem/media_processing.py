@@ -928,7 +928,8 @@ def _capture_owned_shape_is_valid(frontmatter: dict[str, object]) -> bool:
         if isinstance(captured, dt.date):
             captured.isoformat()
         else:
-            dt.date.fromisoformat(str(captured))
+            # A frontmatter rewrite, such as offload's, stores a read timestamp as quoted text with a time.
+            dt.datetime.fromisoformat(str(captured))
     except (TypeError, ValueError):
         return False
     title = frontmatter.get("title")
