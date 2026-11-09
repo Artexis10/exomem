@@ -96,6 +96,7 @@ from . import (
 )
 from . import freshness as freshness_module
 from . import get_page as get_page_module
+from . import held_operation as held_operation_module
 from . import import_windows as import_windows_module
 from . import knowledge_packs as knowledge_packs_module
 from . import lifecycle_statuses as lifecycle_statuses_module
@@ -10039,6 +10040,8 @@ def op_review_memory(
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
     if mode == "procedure_approvals":
         return procedure_approval_operation_module.listing(vault_root, limit)
+    if mode == held_operation_module.LIST_MODE:
+        return held_operation_module.listing(vault_root, limit)
     if mode == "dispositions":
         return _dispositions_view(vault_root, window_days)
     if mode == "audit":
@@ -10089,7 +10092,7 @@ def op_review_memory(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
         "unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, "
-        "plan-progress, procedure_approvals, vocabulary, or write-advisory-result"
+        "plan-progress, procedure_approvals, held, vocabulary, or write-advisory-result"
     )
 
 
@@ -11519,6 +11522,7 @@ def op_maintain_memory(
         "collections-store-adopt-local",
         "collections-store-export",
         "collections-cutover",
+        "held-resolve",
     ] = "audit",
     categories: list[str] | None = None,
     dry_run: bool | None = None,
@@ -11555,6 +11559,9 @@ def op_maintain_memory(
     exclude_groups: list[str] | None = None,
     acknowledge_skipped: bool | None = None,
     cursor: str | None = None,
+    path: str | None = None,
+    choice: str | None = None,
+    item_version: str | None = None,
 ) -> dict:
     """Maintain vault health; several modes write.
 
@@ -11569,6 +11576,8 @@ def op_maintain_memory(
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
     collections-cutover only previews the move of every collection to SQLite-only storage;
     the owner applies its plan_id with `exomem collections cutover` on the host.
+    held-resolve settles one held item from read_review mode held: path, choice keep-mine or
+    keep-store, that item's item_version and why.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -11601,11 +11610,16 @@ def op_maintain_memory(
         exclude_groups: Tag-variant groups to skip; part of plan_id.
         acknowledge_skipped: Adopt-local reconcile apply: acknowledge changes it cannot hold.
         cursor: The next_cursor of the previous page.
+        path: held-resolve: the held item's path.
+        choice: held-resolve: keep-mine or keep-store.
+        item_version: held-resolve: the item's item_version from the held list.
     """
     _validate_vocabulary_binding(
         vocabulary_ref, vocabulary_fingerprint,
         supported=mode == "curation" and curation_action in {"apply", "resume"},
     )
+    if mode == held_operation_module.RESOLVE_MODE:
+        return held_operation_module.resolve(vault_root, path, choice, item_version, why)
     if rebuild_graph and mode != "reconcile":
         raise ValueError("INVALID_MODE: rebuild_graph is valid only for reconcile")
     if exclude_groups is not None and mode != "tag-variants":
@@ -11986,7 +12000,7 @@ def op_maintain_memory(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
         "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
-        "collections-store-export, or collections-cutover"
+        "collections-store-export, collections-cutover, or held-resolve"
     )
 
 
