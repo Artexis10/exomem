@@ -173,3 +173,27 @@ def test_a_note_type_overlay_that_only_the_store_holds_reaches_the_registry_load
     assert "harbour-log" not in pack.entries
     assert served.content_hash != pack.content_hash
     assert vault_module.read_bytes_without_pinning(stored / rel, stored) == document
+
+
+def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A session that starts the file warm-up in a store-mode vault builds its catalogue and drain
+    queues from files that the vault does not have, and its home screen counts a note that only the
+    store holds as none."""
+    from exomem.tui.backend import ExomemBackend
+
+    started = []
+    monkeypatch.setattr(warmup, "start_background", lambda vault: started.append(vault))
+    # The lean fallback sets process-wide environment variables, which this test must not leak.
+    monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
+    backend = ExomemBackend(str(stored))
+    assert backend.resolve_vault().initialized
+    notes = backend.corpus_size()["notes"]
+
+    write.commit(writer, put(NEW, EDITED))
+    backend.start_runtime()
+
+    assert not (stored / NEW).exists()
+    assert backend.corpus_size() == {**backend.corpus_size(), "notes": notes + 1, "known": True}
+    assert started == []
