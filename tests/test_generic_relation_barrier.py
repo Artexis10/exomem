@@ -17,6 +17,7 @@ import pytest
 from test_relation_endpoints import _entity, _extension, _save_extension, _served
 
 from exomem import (
+    agent_refusal,
     note,
     relation_barrier,
     relation_registry,
@@ -120,6 +121,14 @@ def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_thre
     assert routes["propose"]["propose"]["args"]["operation"]["kind"] == "propose-relation"
     assert routes["propose"]["save"]["args"]["operation"]["kind"] == "save-relations"
     assert not (vault / "Knowledge Base/Notes/Insights/crane.md").exists()
+
+
+def test_the_plain_link_is_named_once_and_keeps_the_last_candidate_slot() -> None:
+    ranked = [{"key": key} for key in ("supports", "links_to", "refines", "extends", "cites", "informs")]
+
+    candidates = agent_refusal.ranked_with_link(ranked, "links_to")
+
+    assert candidates == ["supports", "refines", "extends", "cites", "links_to"]
 
 
 def test_a_generic_edge_inside_a_unit_without_an_anchor_is_refused(

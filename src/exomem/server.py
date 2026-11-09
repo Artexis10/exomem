@@ -195,7 +195,13 @@ class RenderedRefusalMiddleware(Middleware):
         tool = await context.fastmcp_context.fastmcp.get_tool(context.message.name)
         return tool.convert_result(
             agent_refusal_result(
-                refusal, error, context.message.name, context.message.arguments or {}, (), write=writes
+                refusal,
+                error,
+                context.message.name,
+                context.message.arguments or {},
+                (),
+                write=writes,
+                default_detail=getattr(getattr(error, "command", None), "response_detail", None),
             )
         )
 

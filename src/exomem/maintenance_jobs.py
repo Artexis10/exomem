@@ -664,10 +664,15 @@ def _claim(
             if running:
                 raise OpError(
                     "MAINTENANCE_JOB_ACTIVE",
-                    # The run id is what the agent reads the job with, and a compact refusal carries only the message.
-                    f"another maintenance job is running (run {running[0]['run_id']})",
+                    "another maintenance job is running",
                     "Read it with mode maintenance-job, wait for it to finish, or cancel it, then start again.",
-                    details={"status": "terminal", "committed": False, "run_id": running[0]["run_id"]},
+                    details={
+                        "status": "terminal",
+                        "committed": False,
+                        "run_id": running[0]["run_id"],
+                        # The call that reads the running job: the agent learns its run id from this call alone.
+                        "retry_call": {"mode": MODE_STATUS, "run_id": running[0]["run_id"]},
+                    },
                 )
             _prune(conn)
             conn.execute(

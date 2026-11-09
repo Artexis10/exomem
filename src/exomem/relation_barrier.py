@@ -25,8 +25,7 @@ CODE = "GENERIC_RELATION_REFUSED"
 REMEDIATION = (
     "A generic relation says two pages are related and nothing more, so a write cannot add "
     "one. Retry with one of the listed specific relations; when none fits, propose a new "
-    "relation type; as a last resort, write a plain link. `routes` holds the exact edge for "
-    "each, and `options` ranks the specific relations for these pages."
+    "relation type; as a last resort, write a plain link."
 )
 
 
@@ -52,11 +51,7 @@ class Refusal:
             "edge": {"relation": self.relation, "target": self.target},
             "refused_edges": self.count,
             "routes": self._routes(),
-            # The agent sees at most `MAX_CANDIDATES` names, so the plain link keeps the last slot.
-            "candidates": [
-                *(option["key"] for option in self.options[: agent_refusal.MAX_CANDIDATES - 1]),
-                self.link,
-            ],
+            "candidates": agent_refusal.ranked_with_link(self.options, self.link),
         }
 
     @property

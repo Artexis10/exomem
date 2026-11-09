@@ -858,21 +858,23 @@ def agent_refusal_result(
     parameters: Iterable[str],
     *,
     write: bool,
+    default_detail: str | None = None,
 ) -> dict[str, typing.Any]:
-    """The MCP error result for a refusal: what happened, and the exact retry."""
+    """The MCP error result for a refusal: what happened, and the exact retry.
+
+    `default_detail` is the command's own `response_detail` default, which an omitted argument means.
+    """
     from . import agent_refusal, cli_ops
 
-    try:
-        tool = capabilities.active_spell_call(command_name, arguments)[0]
-    except Exception:  # noqa: BLE001 - a retry spelled by the command name still names a real route
-        tool = command_name
+    detail = arguments.get("response_detail") or default_detail
     return agent_refusal.reply(
         refusal,
         error if error is not None else ValueError(refusal.get("message")),
-        tool=tool,
+        command=command_name,
+        called=arguments,
         parameters=set(parameters),
         write=write,
-        full=arguments.get("response_detail") == "full",
+        full=detail == "full",
         envelope=cli_ops.envelope(False, error=dict(refusal)),
     )
 
@@ -931,7 +933,13 @@ def bind_vault(
                 from . import cli_ops
 
                 return agent_refusal_result(
-                    refusal, None, command.name, kwargs, (p.name for p in visible), write=False
+                    refusal,
+                    None,
+                    command.name,
+                    kwargs,
+                    (p.name for p in visible),
+                    write=False,
+                    default_detail=command.response_detail,
                 )
             from .commands import invocation_is_read_only
             from .governance.egress import SelectorCoverageError
@@ -1074,6 +1082,7 @@ def bind_vault(
                     kwargs,
                     (p.name for p in visible),
                     write=not invocation_read_only,
+                    default_detail=command.response_detail,
                 )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]

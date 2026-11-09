@@ -284,7 +284,7 @@ class RelationFit:
 #: What the agent does when the queue will not write the generic relation for a pair.
 RELATION_CHOICE_REMEDIATION = (
     "Accept again with requested_relation set to one of the offered relations. When none "
-    "fits, set it to the plain_link relation, or dismiss the candidate."
+    "fits, set it to the plain link relation, the last candidate, or dismiss the candidate."
 )
 
 #: What the agent does when a candidate offers no relation to choose and one is requested anyway.
@@ -335,11 +335,7 @@ def require_relation_choice(
             details={
                 "options": options,
                 "plain_link": registry.link_key,
-                # The agent sees at most `MAX_CANDIDATES` names, so the plain link keeps the last slot.
-                "candidates": [
-                    *(option["key"] for option in options[: agent_refusal.MAX_CANDIDATES - 1]),
-                    registry.link_key,
-                ],
+                "candidates": agent_refusal.ranked_with_link(options, registry.link_key),
                 "mutated": False,
             },
         )

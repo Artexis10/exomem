@@ -454,6 +454,14 @@ def test_a_page_edited_while_the_job_waits_for_the_boundary_keeps_its_edit(serve
     assert _page_ids(vault)[edited.relative_to(vault).as_posix()] is None
 
 
+def _read_job_retry(run_id: str) -> dict:
+    """The call that reads the running job: the refusal's only carrier of its run id."""
+    return {
+        "tool": "check_memory",
+        "arguments": {"operation": {"kind": "maintenance-job", "run_id": run_id}},
+    }
+
+
 def test_a_different_start_while_a_job_runs_is_refused_with_the_running_job(server, vault) -> None:
     async def scenario(client):
         preview = await _preview(client)
@@ -467,7 +475,7 @@ def test_a_different_start_while_a_job_runs_is_refused_with_the_running_job(serv
     running, refused, _ = _session(server, scenario)
 
     assert refused["error"]["code"] == "MAINTENANCE_JOB_ACTIVE"
-    assert running["run_id"] in refused["error"]["message"]
+    assert refused["error"]["retry"] == _read_job_retry(running["run_id"])
 
 
 def test_the_same_start_while_a_job_runs_returns_that_job(server, vault) -> None:
@@ -1297,7 +1305,7 @@ def test_an_identical_running_preview_returns_its_handle_and_a_write_start_is_re
     assert again["run_id"] == first["run_id"]
     assert [job["run_id"] for job in _jobs(listed)] == [first["run_id"]]
     assert refused["error"]["code"] == "MAINTENANCE_JOB_ACTIVE"
-    assert first["run_id"] in refused["error"]["message"]
+    assert refused["error"]["retry"] == _read_job_retry(first["run_id"])
     assert final["state"] == "completed"
 
 

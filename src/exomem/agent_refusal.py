@@ -6,12 +6,18 @@ keep that block. An MCP agent needs less: what happened to its data, and the exa
 succeed. This module turns the public block into that, once, for every tool.
 
 Compact result: `{"error": {"code", "message", "retry"?, "candidates"?}}`.
-`message` says what was refused. When there is no `retry`, it carries the first sentence of the
-remediation next, because that sentence is the only fix the agent gets. A refused write ends it
-with what happened to the data.
-`retry.arguments` holds only the arguments to add or change; the rest of the call is unchanged.
-`retry` is absent when no retry can succeed. With `response_detail="full"` the old envelope
-(umbrella code, remediation prose, ids, `committed`, waits) rides beside it under `diagnostics`.
+`message` says what was refused. When there is no `retry`, it carries the whole remediation next,
+because that text is the only fix the agent gets. A refused write ends it with what happened to the
+data.
+`retry` is the call that can succeed, spelled for the serving surface. For the tool that was called,
+`retry.arguments` holds only the arguments to add or change, and `null` clears one; for another
+tool it holds the whole call. `retry` is absent when no retry can succeed. With
+`response_detail="full"` the old envelope (umbrella code, remediation prose, ids, `committed`,
+waits) rides beside it under `diagnostics`.
+
+A producer states its next call and its outcome in its own details, in command terms, so that this
+module keeps no knowledge of any producer: `retry_with` (arguments to change on the call that was
+refused), `retry_call` (the whole of a different call) and `fate` (what happened to the data).
 """
 
 from __future__ import annotations
@@ -20,7 +26,10 @@ import math
 from collections.abc import Collection, Mapping
 from typing import Any
 
+from . import capabilities
+
 MAX_CANDIDATES = 5
+MAX_FIELDS = 3
 
 #: The code the semantic contract uses when it blocks a write; the finding it blocked on is the
 #: specific code. Both names belong to the contract, not to a vault.
@@ -55,17 +64,13 @@ def _sentence(text: object) -> str:
     return value if value[-1] in ".!?" else f"{value}."
 
 
-def _fix(refusal: Mapping[str, Any]) -> str:
-    """The first sentence of the remediation: the step that clears the refusal.
+def ranked_with_link(options: Collection[Mapping[str, Any]], link: str) -> list[str]:
+    """The ranked option keys, then the plain link; the agent sees at most `MAX_CANDIDATES` names.
 
-    Two sentences meet at an end mark, a space and a capital letter. "e.g." is followed by a
-    lower-case word, so it does not split.
+    The link keeps the last slot, and the ranking may list it too, so it is named once.
     """
-    text = " ".join(str(refusal.get("remediation") or "").split())
-    for index in range(len(text) - 2):
-        if text[index] in ".!?" and text[index + 1] == " " and text[index + 2].isupper():
-            return text[: index + 1]
-    return _sentence(text)
+    keys = [str(option["key"]) for option in options if option["key"] != link]
+    return [*keys[: MAX_CANDIDATES - 1], link]
 
 
 def _candidates(refusal: Mapping[str, Any]) -> list[str]:
@@ -147,40 +152,162 @@ def _busy_message(refusal: Mapping[str, Any]) -> str:
     return f"{held}, so this was not saved. Retry the same call."
 
 
-def _relation_retry(tool: str, parameters: Collection[str]) -> dict[str, Any] | None:
-    """The call that records a reviewed-none decision, placed where this tool takes it."""
+def _relation_decision(parameters: Collection[str], called: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The arguments that record a reviewed-none decision, in the terms of the command that was called.
+
+    The command's own signature says where it takes the decision: a flat argument, or inside the
+    `operation` object of a call that carries one. A command that takes neither has no such retry.
+    """
     decision = {"relation_disposition": "reviewed_none", "relation_review_reason": _UNLINKED_REASON}
     if "relation_disposition" in parameters:
-        return {"tool": tool, "arguments": decision}
-    if "operation" in parameters:
-        return {"tool": tool, "arguments": {"operation": decision}}
+        return decision
+    if isinstance(called.get("operation"), Mapping):
+        return {"operation": decision}
     return None
+
+
+def _merged(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """`patch` laid over `base`, key by key and through nested objects; a `null` stays a `null`."""
+    merged = dict(base)
+    for key, value in patch.items():
+        current = merged.get(key)
+        merged[key] = (
+            _merged(current, value)
+            if isinstance(value, Mapping) and isinstance(current, Mapping)
+            else value
+        )
+    return merged
+
+
+def _changes(base: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
+    """What turns `base` into `new`: changed and added values, and `null` for each key `new` drops."""
+    changes: dict[str, Any] = {}
+    for key, value in new.items():
+        if key not in base:
+            if value is not None:
+                changes[key] = value
+        elif value != base[key]:
+            current = base[key]
+            both_objects = isinstance(value, Mapping) and isinstance(current, Mapping)
+            changes[key] = _changes(current, value) if both_objects else value
+    for key in sorted(set(base) - set(new)):
+        changes[key] = None
+    return changes
+
+
+def _without_nulls(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _without_nulls(item) for key, item in value.items() if item is not None}
+    return value
+
+
+def _retry_call(
+    command: str,
+    called: Mapping[str, Any],
+    *,
+    patch: Mapping[str, Any] | None,
+    call: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The retry for a producer's next call, spelled for the serving surface.
+
+    `patch` changes the arguments of the call that was refused; `call` is the whole of another
+    call. Both are in command terms and go through `active_spell_call`, so the tool and the
+    placement of every argument are the ones this surface takes. A call that no rendering carries
+    has no retry: guidance for a tool that this surface cannot call is worse than none.
+    """
+    new = dict(call) if call is not None else _merged(called, patch or {})
+    try:
+        base_tool, base = capabilities.active_spell_call(command, called)
+        tool, spelled = capabilities.active_spell_call(command, new)
+    except ValueError:
+        return None
+    if tool != base_tool:
+        return {"tool": tool, "arguments": _without_nulls(spelled)}
+    changes = _changes(base, spelled)
+    # A call with nothing to change is the call that was refused, and it cannot succeed.
+    return {"tool": tool, "arguments": changes} if changes else None
+
+
+def _called_tool(command: str, called: Mapping[str, Any]) -> str:
+    try:
+        return capabilities.active_spell_call(command, called)[0]
+    except ValueError:
+        # A call that no rendering carries was refused before it ran; the command's own name still names a real route.
+        return command
+
+
+def _plain(value: Any) -> Any:
+    """A call's arguments as plain data: the models a command validated, dumped without their unset fields."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items() if item is not None}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+def _mapping(value: object) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
+
+
+def _at_fault(message: str, refusal: Mapping[str, Any]) -> str:
+    """The fields a producer found at fault, up to `MAX_FIELDS`, when the message does not name them.
+
+    A refusal that fails several fields reports them in `issues`, and its message says only that
+    the item failed; the agent cannot correct a field it is not told.
+    """
+    issues = refusal.get("issues")
+    if not isinstance(issues, (list, tuple)):
+        return ""
+    names = list(
+        dict.fromkeys(
+            str(issue["field"]) for issue in issues if isinstance(issue, Mapping) and issue.get("field")
+        )
+    )
+    shown = names[:MAX_FIELDS]
+    if not shown or all(name in message for name in shown):
+        return ""
+    more = len(names) - len(shown)
+    listed = ", ".join(shown) + (f" and {more} more" if more else "")
+    return f"{'Field' if len(names) == 1 else 'Fields'} at fault: {listed}."
 
 
 def reply(
     refusal: Mapping[str, Any],
     error: BaseException,
     *,
-    tool: str,
+    command: str,
+    called: Mapping[str, Any],
     parameters: Collection[str],
     write: bool,
     full: bool,
     envelope: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Shape the public refusal block for an MCP agent; `envelope` is the old reply, for `full`."""
+    """Shape the public refusal block for an MCP agent; `envelope` is the old reply, for `full`.
+
+    `command` and `called` are the refused command and the arguments it was called with, in
+    command terms: every call this reply names is spelled from them for the serving surface.
+    """
+    called = _plain(called)
     code = str(refusal.get("code") or "OP_ERROR")
     message = _located(_sentence(refusal.get("message")), refusal)
-    retry: dict[str, Any] | None = None
-    fate = _fate(refusal, write=write)
-    fix = _fix(refusal)
+    patch, call = _mapping(refusal.get("retry_with")), _mapping(refusal.get("retry_call"))
     if code == _UMBRELLA_CODE and (finding := _blocking_finding(error)) is not None:
         code = str(finding.code)
         message = _sentence(finding.detail) or message
         if code in _RELATION_DECISION_MESSAGES:
             message = _RELATION_DECISION_MESSAGES[code]
-            retry = _relation_retry(tool, parameters)
+            patch = _relation_decision(parameters, called)
+    fate = _sentence(refusal.get("fate")) or _fate(refusal, write=write)
+    fix = _sentence(refusal.get("remediation"))
     if code == _BUSY_CODE:
         message, fate, fix = _busy_message(refusal), None, ""
+    retry = (
+        _retry_call(command, called, patch=patch, call=call)
+        if patch is not None or call is not None
+        else None
+    )
     after = _after_seconds(refusal)
     if retry is None and (
         refusal.get("status") == "retryable" or refusal.get("retryable") is True or after is not None
@@ -188,13 +315,14 @@ def reply(
         # A refusal that advises a wait (`retry_after_ms`) is retryable by definition: warming
         # recall carries one without the `retryable` status. `retryable` is the query engine's
         # own flag for the same fact.
-        retry = {"tool": tool}
+        retry = {"tool": _called_tool(command, called)}
         if after is not None:
             retry["after_s"] = after
     if retry is not None or fix.casefold() in message.casefold():
-        # A structured retry is the fix; a repair that the message already carries is not said twice.
+        # A structured retry is the fix; a remediation that the message already carries is not said twice.
         fix = ""
-    body: dict[str, Any] = {"code": code, "message": " ".join(filter(None, (message, fix, fate)))}
+    sentences = (message, _at_fault(message, refusal), fix, fate)
+    body: dict[str, Any] = {"code": code, "message": " ".join(filter(None, sentences))}
     if retry is not None:
         body["retry"] = retry
     if candidates := _candidates(refusal):
