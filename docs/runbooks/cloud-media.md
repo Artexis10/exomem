@@ -333,6 +333,15 @@ OCR still requires the selected OCR engine; image embeddings keep their existing
 Distributed packages retain upstream notices and corresponding-source links under `exomem/_licenses/pillow-heif-1.8.1/`.
 Those software licence terms do not establish patent clearance.
 
+
+## Camera raw photos
+
+The `image-codecs` extra installs `rawpy`, which bundles LibRaw, on every platform except Intel macOS, where no wheel exists.
+Image view, OCR, the visual index and the caption decode `.dng` through it: the full sensor image with the camera's white balance, turned upright by the camera's orientation.
+A raw whose sensor image exceeds the caller's pixel ceiling is refused before it is demosaiced; a 12 MP phone raw decodes in under a second.
+The Cloud image gate includes a synthetic portrait DNG with known text.
+Distributed packages retain the upstream notices under `exomem/_licenses/rawpy-0.28.0/`.
+Raw images report no capture time: the decoder does not read the raw file's EXIF.
 ## Notes for a new engine
 
 - The media child sets `OPENBLAS_NUM_THREADS=1` under the brakes. Without it, numpy's OpenBLAS reserves data segment for one thread per host CPU (about 40 MiB each), so the child's VmData follows the node instead of the engine. On a 20-CPU host, the child's baseline VmData was 855 MiB instead of 97 MiB.

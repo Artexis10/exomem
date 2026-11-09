@@ -31,6 +31,6 @@ Out of scope: camera raw formats other than DNG, and the ChatGPT connector refre
 
 ## Impact
 
-- Code: `src/exomem/image_view.py`, `src/exomem/download_links.py`, `src/exomem/commands.py`, `src/exomem/operation_entries.py`, `src/exomem/artifact_recovery.py`, `src/exomem/server_transfer.py`, `src/exomem/image_codecs.py`, `src/exomem/video_frames.py`, `src/exomem/video_frames_worker.py`.
+- Code: `src/exomem/image_view.py`, `src/exomem/download_links.py`, `src/exomem/commands.py`, `src/exomem/operation_entries.py`, `src/exomem/artifact_recovery.py`, `src/exomem/server_transfer.py`, `src/exomem/image_codecs.py`, `src/exomem/video_frames.py`, `src/exomem/video_frames_worker.py`, `src/exomem/media_types.py`, `src/exomem/extract.py`; `rawpy` joins the `image-codecs` extra (no Intel macOS wheel, so those Macs keep raw undecodable).
 - Tool surface: `read_media` adds the `image` kind (+334 B of schema) and `max_side` on the video kind (+43 B); the ChatGPT connector needs a refresh to see them.
 - Undo: revert the release. Old long links keep working because a full grant still resolves.

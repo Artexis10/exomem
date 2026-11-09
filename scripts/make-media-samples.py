@@ -115,9 +115,9 @@ def _dng(source: Path, target: Path) -> None:
     colour filter at 12 bits; orientation 6 tells a decoder to turn it back upright.
     """
     import numpy as np
-    from PIL import Image
     from pidng.core import RAW2DNG, DNGTags, Tag
     from pidng.defs import CalibrationIlluminant, CFAPattern, DNGVersion, PhotometricInterpretation
+    from PIL import Image
 
     with Image.open(source) as image:
         rgb = np.asarray(image.convert("RGB").rotate(90, expand=True), dtype=np.uint16)
