@@ -142,7 +142,8 @@ def test_agent_and_cli_writes_commit_while_an_import_apply_runs(
     assert [row for row in _journal(logs) if row["error_code"] == "MUTATION_BUSY"] == []
     assert _busy_total() == busy_before
 
-    assert "error" not in note and note.get("path"), note
+    assert "error" not in note and note.get("id"), note
+    assert note["title"] == "Agent write beside the import", note
     assert cli.returncode == 0, (cli_out, cli_err)
     assert json.loads(cli_out)["success"] is True, cli_out
     for name in ("Agent write beside the import", "Cli write beside the import"):

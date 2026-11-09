@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, semantic_index, semantic_unit_read
+from exomem import commands, page_ids, semantic_index, semantic_unit_read
 from exomem import vault as vault_module
 from exomem.get_page import GetResult
 
@@ -198,10 +198,11 @@ def test_read_memory_marks_exact_unit_on_superseded_parent(vault: Path) -> None:
 def test_read_memory_default_page_contract_is_unchanged(vault: Path) -> None:
     _write_page(vault, "- [config] Session TTL is 30 minutes ^session-ttl\n")
 
-    assert commands.op_read_memory(vault, path=_REL) == commands.op_get(
-        vault,
-        path=_REL,
-    )
+    read = commands.op_read_memory(vault, path=_REL)
+
+    # A page read names the page's short id beside everything `get` returns.
+    assert page_ids.is_page_id(read.pop("id"))
+    assert read == commands.op_get(vault, path=_REL)
 
 
 def test_exact_unit_read_rejects_unbounded_page_expansion(vault: Path) -> None:

@@ -1051,6 +1051,8 @@ class CreationCommit:
     vocabulary_resolution: dict[str, str] | None = None
     #: Review fields the commit dropped because the page needs no relation review.
     ignored_review_fields: tuple[str, ...] = ()
+    #: The hash of the page as this commit wrote it, as `ExistingCommit.after_hash` is for an edit.
+    after_hash: str | None = None
 
     def review_field_warnings(self) -> list[str]:
         """The one warning a commit owes for the review fields it dropped, if any."""
@@ -1086,6 +1088,8 @@ class CreationCommit:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.vocabulary_resolution is not None:
             value["vocabulary_resolution"] = self.vocabulary_resolution
+        if self.after_hash is not None:
+            value["after_hash"] = self.after_hash
         return value
 
 
@@ -5071,6 +5075,7 @@ def _creation_post_commit(
     context = _relation_advisory_context(vault_root, preflight.semantic_state)
     return replace(
         committed,
+        after_hash=vault.content_hash(preflight.source),
         structure_suggestion=suggestion,
         records_routing=delivered_routing,
         due_state=due,

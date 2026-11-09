@@ -1154,7 +1154,7 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
     import socket
     import time
 
-    from exomem import command_surface, writer_lease
+    from exomem import command_surface, page_names, writer_lease
 
     monkeypatch.setattr(socket.socket, "connect", lambda *_a, **_k: pytest.fail("outbound network access"))
     for name in ("EXOMEM_DISABLE_EMBEDDINGS", "EXOMEM_DISABLE_MEDIA_EXTRACTION", "EXOMEM_DISABLE_CLIP"):
@@ -1162,6 +1162,7 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
     inputs = {
         "title": "Service record", "content": "An immutable source body", "source_kind": "session",
         "source_identity": {"system": "archive", "record_id": "item-4", "revision": "r2"},
+        "response_detail": "full",
     }
     mcp, _ = _build_cloud_server(monkeypatch, previous_token=PREVIOUS_TOKEN)
 
@@ -1182,7 +1183,9 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
                                            metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
                 promoted = await _call_tool(
                     client, token=TOKEN, name="manage_memory_file", request_id=5,
-                    arguments={"operation": "move", "old_path": first.json()["result"]["structuredContent"]["source"]["path"],
+                    arguments={"operation": "move",
+                               "old_path": first.json()["result"]["structuredContent"]
+                               ["diagnostics"]["operational"]["source_path"],
                                "new_path": "Knowledge Base/Evidence/Archive/records/service-record.md",
                                "promotion_reason": "The captured record now supports a documented claim.",
                                "response_detail": "legacy"},
@@ -1200,7 +1203,7 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
     assert replay["capture_outcome"] == "created"
     assert "IDEMPOTENCY_KEY_REUSED" in changed.text
     assert promoted.json()["result"]["structuredContent"]["new_path"] == "Knowledge Base/Evidence/Archive/records/service-record.md", promoted.text
-    assert not (vault / original["source"]["path"]).exists()
+    assert not (vault / original["diagnostics"]["operational"]["source_path"]).exists()
     before = {p: p.read_bytes() for lane in ("Sources", "Evidence")
               for p in (vault / "Knowledge Base" / lane).rglob("*.md")}
 
@@ -1213,6 +1216,9 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
         _teardown_activation(restarted)
     result = recovered.json()["result"]["structuredContent"]
     assert result["capture_outcome"] == "reused", recovered.text
-    assert result["source"]["path"] == "Knowledge Base/Evidence/Archive/records/service-record.md"
+    promoted_page = page_names.read_identity(
+        vault, "Knowledge Base/Evidence/Archive/records/service-record.md"
+    )
+    assert result["source"]["id"] == promoted_page.id
     assert {p: p.read_bytes() for lane in ("Sources", "Evidence")
             for p in (vault / "Knowledge Base" / lane).rglob("*.md")} == before

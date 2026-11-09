@@ -503,8 +503,13 @@ def _read_your_write(vault_root: Path, marker: str, rel_path: str) -> str:
     return "exact" if any(hit.path == rel_path for hit in hits) else "stale"
 
 
-def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
-    """Check a fresh marker through public recall and the selected page read."""
+def _connector_read_your_write(client: Any, marker: str, page_id: str) -> str:
+    """Check a fresh marker through public recall and the selected page read.
+
+    An MCP write reply names its page by title and short id, so the page is matched by that id:
+    the search hit (asked at `detail="full"`) and the page read both carry the id of the version
+    they show.
+    """
     try:
         _, result = client.call("ask_memory", {
             "query": marker, "scope": "kb-only", "mode": "keyword", "limit": 5,
@@ -527,13 +532,13 @@ def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
             hits, warming = result, False
         if not isinstance(hits, list):
             return "unknown"
-        hit = next((hit for hit in hits if hit.get("path") == rel_path), None)
+        hit = next((hit for hit in hits if hit.get("id") == page_id), None)
         if hit is None:
             return "warming" if warming else "stale"
         _, page = client.call("read_memory", {"path": hit.get("ref") or hit["path"]})
         if not isinstance(page, dict) or page.get("error") or page.get("success") is False:
             return "unknown"
-        if page.get("path") != rel_path or not isinstance(page.get("body"), str) or marker not in page["body"]:
+        if page.get("id") != page_id or not isinstance(page.get("body"), str) or marker not in page["body"]:
             return "stale"
         return "exact"
     except (Exception, SystemExit):  # noqa: BLE001 - a failed public read proves no visibility
@@ -555,9 +560,10 @@ def _connector_relation_target(client: Any) -> str:
         "content": _remember_content("Acceptance anchor", marker, None),
         "note_type": "insight", "suggestions": False, "response_detail": "compact",
     })
-    if seeded.get("outcome") in ("held", "refused") or not seeded.get("path"):
+    if seeded.get("outcome") in ("held", "refused") or not seeded.get("title"):
         raise RuntimeError("the public fixture call did not create a compiled relation anchor")
-    return str(seeded["path"]).removesuffix(".md")
+    # A compact MCP reply names the page by title, and a wikilink resolves a title.
+    return str(seeded["title"])
 
 
 def _readonly_receipt_connection(vault_root: Path) -> sqlite3.Connection:
@@ -1020,25 +1026,28 @@ def measure(
                 skipped("edit_memory", index)
                 outcomes["unknown"] += 2
             else:
-                rel_path = str(result["path"])
-                if not rel_path.endswith(".md"):
-                    rel_path += ".md"
-                relation_target = relation_target or rel_path.removesuffix(".md")
                 if transport == "connector":
-                    outcomes[_connector_read_your_write(client, create_marker, rel_path)] += 1
+                    # A compact MCP reply names the page by title and id, and each page tool takes either.
+                    page = str(result["id"])
+                    relation_target = relation_target or str(result["title"])
+                    outcomes[_connector_read_your_write(client, create_marker, page)] += 1
                 else:
-                    outcomes[_read_your_write(root, create_marker, rel_path)] += 1
+                    page = str(result["path"])
+                    if not page.endswith(".md"):
+                        page += ".md"
+                    relation_target = relation_target or page.removesuffix(".md")
+                    outcomes[_read_your_write(root, create_marker, page)] += 1
                 edit_marker = f"acceptanceedit{uuid.uuid4().hex}" if transport == "connector" else f"acceptanceedit{index:04d}"
                 edited = measured_call("edit_memory", {
-                    "path": rel_path, "why": "correct disposable acceptance observation",
+                    "path": page, "why": "correct disposable acceptance observation",
                     "operation": {"kind": "replace_string", "old_string": create_marker, "new_string": edit_marker},
                 }, index)
                 if edited is None:
                     outcomes["unknown"] += 1
                 elif transport == "connector":
-                    outcomes[_connector_read_your_write(client, edit_marker, str(edited.get("path") or rel_path))] += 1
+                    outcomes[_connector_read_your_write(client, edit_marker, str(edited["id"]))] += 1
                 else:
-                    outcomes[_read_your_write(root, edit_marker, rel_path)] += 1
+                    outcomes[_read_your_write(root, edit_marker, page)] += 1
 
             record_marker = f"acceptancerecord{index:04d}"
             try:

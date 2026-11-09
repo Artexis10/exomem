@@ -292,6 +292,16 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
     }
 )
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+
+
+def is_scan_skipped_runtime_name(name: str) -> bool:
+    """Whether a scan skips this entry at any depth as runtime scratch, not content.
+
+    Batch workspaces, and the entries a held-filesystem capability probe briefly
+    creates (symlink aliases included) in a root it tests, which can lie inside the
+    Knowledge Base. `reserved_paths` refuses writes under the probe's names.
+    """
+    return name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES) or held_fs.is_probe_entry(name)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
 _GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
     r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"
@@ -410,9 +420,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     ):
         return True
     for segment in segments:
-        if segment in VAULT_SCAN_SKIP_DIRS or segment.startswith(
-            VAULT_SCAN_SKIP_DIR_PREFIXES
-        ):
+        if segment in VAULT_SCAN_SKIP_DIRS or is_scan_skipped_runtime_name(segment):
             return True
     return False
 
@@ -721,6 +729,16 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
     return stem or str(path)
 
 
+def title_key(title: str) -> str:
+    """The key a page is found under by its title: NFC, stripped, lower-cased.
+
+    One spelling for every producer and every lookup of the title map, so a title typed
+    decomposed (or padded) finds the page whose title is stored composed. It does not
+    case-fold: folding merges titles that differ (`ß` and `ss`).
+    """
+    return unicodedata.normalize("NFC", title).strip().lower()
+
+
 def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     """The wikilink resolver's lower-cased display title of a page's bytes, as a file read gives it.
 
@@ -734,7 +752,7 @@ def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     # A text-mode read translates newlines before it parses; the bytes path parses the same text.
     fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
     title = resolve_display_title(fm, body, path)
-    return title.lower() if title else None
+    return title_key(title) if title else None
 
 
 def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
@@ -8525,7 +8543,7 @@ class WikilinkResolver:
         normalized = sorted(
             (
                 str(rel_path).replace("\\", "/").lstrip("/"),
-                str(title).strip().lower() if title and str(title).strip() else None,
+                title_key(str(title)) if title and str(title).strip() else None,
             )
             for rel_path, title in entries
         )
@@ -8763,7 +8781,7 @@ class WikilinkResolver:
             return str(rel).replace("\\", "/").lstrip("/")
 
         changed = {
-            _path(rel): (str(title).strip().lower() if title and str(title).strip() else None)
+            _path(rel): (title_key(str(title)) if title and str(title).strip() else None)
             for rel, title in entries
         }
         deleted = {_path(rel) for rel in deleted_rels}
@@ -8779,7 +8797,7 @@ class WikilinkResolver:
         note's path) resolve before the file lands on disk.
         """
         no_ext = no_ext_path.removesuffix(".md").lstrip("/")
-        self._add_entry(no_ext + ".md", title.strip().lower() if title and title.strip() else None)
+        self._add_entry(no_ext + ".md", title_key(title) if title and title.strip() else None)
 
 
 def _strip_wikilink_brackets(s: str) -> str:
@@ -8969,7 +8987,7 @@ def _normalize_wikilink(
         if stem_matches:
             return _selected(stem_matches, "stem")
         title_matches = _matches(
-            resolver.titles.get(cleaned.lower(), ()), title_key=cleaned.lower()
+            resolver.titles.get(title_key(cleaned), ()), title_key=title_key(cleaned)
         )
         if title_matches:
             return _selected(title_matches, "title")

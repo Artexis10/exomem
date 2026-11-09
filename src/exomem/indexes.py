@@ -24,10 +24,10 @@ from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
-    VAULT_SCAN_SKIP_DIR_PREFIXES,
     PlannedWrite,
     document_newline,
     escape_wikilinks_for_log,
+    is_scan_skipped_runtime_name,
     kb_root,
     read_guarded_text,
     render_wikilinks_for_vault,
@@ -215,9 +215,9 @@ def _count_sources(
         on_error(error)
         return out
     for sub in entries:
-        # A batch workspace is another write in flight, not a source type; it can vanish
-        # between the listing and the stat below.
-        if sub.name.startswith("_") or sub.name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES):
+        # A batch workspace or a capability probe's scratch is runtime state, not a source
+        # type; it can vanish between the listing and the stat below.
+        if sub.name.startswith("_") or is_scan_skipped_runtime_name(sub.name):
             continue
         try:
             if not stat.S_ISDIR(sub.stat().st_mode):
@@ -655,9 +655,9 @@ def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
         return out
     for type_folder in notes_dir.iterdir():
         name = type_folder.name
-        # A batch workspace (a publish of `Notes/index.md` in flight) is not a note type, and
-        # it can vanish between the checks below.
-        if name.startswith("_") or name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES):
+        # A batch workspace (a publish of `Notes/index.md` in flight) or a capability probe's
+        # scratch is not a note type, and it can vanish between the checks below.
+        if name.startswith("_") or is_scan_skipped_runtime_name(name):
             continue
         if not type_folder.is_dir():
             continue
