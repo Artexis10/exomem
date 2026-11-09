@@ -5571,7 +5571,7 @@ def test_supervisor_start_requeues_work_whose_engine_appeared(
         blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
     )
     installed = {"pdf": False}
-    monkeypatch.setattr(extract, "dependencies_present", lambda media_type, path=None: installed[media_type])
+    monkeypatch.setattr(extract, "dependencies_present", lambda media_type: installed[media_type])
 
     for engine_present in (False, True):
         installed["pdf"] = engine_present
@@ -5590,9 +5590,16 @@ def test_a_camera_raw_parked_for_its_codec_returns_only_once_the_codec_is_instal
     """OCR being installed is not enough: a DNG needs rawpy, or every start requeues it to fail again."""
     import importlib.machinery
     import importlib.util
+    import sys
+    import types
 
-    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    pillow = types.ModuleType("PIL")
+    pillow.Image = types.ModuleType("PIL.Image")
+    monkeypatch.setitem(sys.modules, "PIL", pillow)
+    monkeypatch.setitem(sys.modules, "rawpy", None)
     result = _preserve_media_stub(vault, filename="portrait.dng")
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
@@ -5602,14 +5609,14 @@ def test_a_camera_raw_parked_for_its_codec_returns_only_once_the_codec_is_instal
             media_type="image",
         )
     )
-    claimed = store.claim_next()
-    assert claimed is not None
-    store.mark(
-        claimed,
-        media_jobs.BLOCKED,
-        "ExtractionUnavailable: Camera raw decoding requires rawpy; install exomem[image-codecs]",
-        blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
-    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "rawpy" in status["next_action"]
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
     real_find_spec = importlib.util.find_spec
     installed = {"PIL": True, "rawpy": False}
 
@@ -5629,6 +5636,95 @@ def test_a_camera_raw_parked_for_its_codec_returns_only_once_the_codec_is_instal
         finally:
             worker.stop()
         assert requeued is codec_present
+
+
+def test_a_document_parked_for_a_missing_converter_dependency_returns_only_once_that_module_is_found(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MarkItDown is installed but its docx converter needs mammoth; only mammoth's arrival requeues."""
+    import importlib.machinery
+    import importlib.util
+    import sys
+    import types
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setitem(sys.modules, "mammoth", None)
+
+    markitdown = types.ModuleType("markitdown")
+
+    class FileConversionException(Exception):
+        def __init__(self, message=None, attempts=None):
+            super().__init__(message)
+            self.attempts = attempts
+
+    class MissingDependencyException(Exception):
+        pass
+
+    class FailedConversionAttempt:
+        def __init__(self, converter, exc_info):
+            self.converter = converter
+            self.exc_info = exc_info
+
+    class MarkItDown:
+        def __init__(self, enable_plugins=False):
+            self.enable_plugins = enable_plugins
+
+        def convert(self, path):
+            try:
+                import mammoth  # noqa: F401
+            except ImportError as error:
+                try:
+                    raise MissingDependencyException(
+                        "mammoth is required to read .docx files"
+                    ) from error
+                except MissingDependencyException:
+                    attempt = FailedConversionAttempt(converter=self, exc_info=sys.exc_info())
+            raise FileConversionException(attempts=[attempt])
+
+    markitdown.FileConversionException = FileConversionException
+    markitdown.MissingDependencyException = MissingDependencyException
+    markitdown.FailedConversionAttempt = FailedConversionAttempt
+    markitdown.MarkItDown = MarkItDown
+    monkeypatch.setitem(sys.modules, "markitdown", markitdown)
+
+    result = _preserve_media_stub(vault, filename="minutes.docx")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type=extract.media_type_for(result.path),
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "mammoth" in status["next_action"]
+    assert "mammoth" in _parsed_frontmatter(vault / result.sidecar_path)["processing_next_action"]
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
+    real_find_spec = importlib.util.find_spec
+    installed = {"markitdown": True, "mammoth": False}
+
+    def find_spec(name, *args, **kwargs):
+        if name in installed:
+            return importlib.machinery.ModuleSpec(name, None) if installed[name] else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+    for converter_present in (False, True):
+        installed["mammoth"] = converter_present
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        worker.start()
+        try:
+            requeued = _wait_until(lambda: store.next_pending() is not None, seconds=2.0)
+        finally:
+            worker.stop()
+        assert requeued is converter_present
 
 
 def test_supervisor_start_drops_work_whose_engine_is_switched_off(

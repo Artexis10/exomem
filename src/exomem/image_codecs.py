@@ -41,26 +41,6 @@ def open_image(path: Path | BinaryIO, *, suffix: str | None = None, max_pixels: 
     return Image.open(path, formats=_image_formats())
 
 
-def decoder_present(suffix: str) -> bool:
-    """Whether this install can decode an image with this extension. Imports nothing.
-
-    Mirrors the optional codecs `open_image` imports, so a job parked for a missing codec
-    returns only once that codec is installed.
-    """
-    from importlib.util import find_spec
-
-    from .media_types import RAW_EXTS
-
-    if find_spec("PIL") is None:
-        return False
-    extension = suffix.lower()
-    if extension in RAW_EXTS:
-        return find_spec("rawpy") is not None
-    if extension == ".heic":
-        return find_spec("pillow_heif") is not None
-    return True
-
-
 def _image_formats() -> list[str]:
     from PIL import Image
 

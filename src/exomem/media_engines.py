@@ -17,7 +17,6 @@ import os
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from pathlib import Path
 
 from . import cloud_cell, media_types
 
@@ -91,11 +90,11 @@ def stage_enabled(media_type: str | None, env: Mapping[str, str] | None = None) 
     return engine is None or engine in enabled_engines(env)
 
 
-def stage_available(media_type: str | None, path: Path | None = None) -> bool:
-    """Enabled, and the extractor's dependencies for this file are installed. Loads no model."""
+def stage_available(media_type: str | None) -> bool:
+    """Enabled, and the extractor's dependencies are installed. Loads no model."""
     from . import extract
 
-    return stage_enabled(media_type) and extract.dependencies_present(media_type, path)
+    return stage_enabled(media_type) and extract.dependencies_present(media_type)
 
 
 def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -123,7 +122,7 @@ def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
     return out
 
 
-def unavailable_next_action() -> str:
+def unavailable_next_action(module: str | None = None) -> str:
     """The next action of a job whose engine cannot load.
 
     A Cloud tenant cannot install software, so a Cloud cell reports the engine as
@@ -131,4 +130,6 @@ def unavailable_next_action() -> str:
     """
     if cloud_cell.cloud_mode_enabled():
         return "wait: this media engine is unavailable on this deployment until the operator restores it"
+    if module is not None:
+        return f"install the media dependency that provides the {module} module, then retry"
     return "install the required media dependency, then retry"

@@ -147,6 +147,11 @@ class ExtractResult:
 class ExtractionUnavailable(Exception):
     """No engine is installed/importable for this media type (soft-fail signal)."""
 
+    @property
+    def missing_module(self) -> str | None:
+        """The top-level module whose import failed anywhere in the cause chain, else None."""
+        return _missing_module(self)
+
 
 class UnsupportedLanguage(Exception):
     """The language asked for, by a caller or by configuration, is not one the speech model publishes.
@@ -273,12 +278,11 @@ def extract_text(
     raise ExtractionUnavailable(f"no extractor for media_type={mt!r} (path {p.name!r})")
 
 
-def dependencies_present(media_type: str | None, path: Path | None = None) -> bool:
+def dependencies_present(media_type: str | None) -> bool:
     """Whether the extractor for `media_type` has what it imports. Loads nothing.
 
     Mirrors the imports of the extractors below; the media worker uses it to requeue
-    work that waited for a missing engine once that engine is installed. With `path`,
-    an image also needs the codec for its extension.
+    work that waited for a missing engine once that engine is installed.
     """
     from importlib.util import find_spec
 
@@ -290,10 +294,7 @@ def dependencies_present(media_type: str | None, path: Path | None = None) -> bo
             or (find_spec("onnx_asr") is not None and find_spec("av") is not None)
         )
     if media_type == "image":
-        from . import image_codecs
-
-        suffix = "" if path is None else Path(path).suffix
-        return image_codecs.decoder_present(suffix) and resolve_tesseract_cmd() is not None
+        return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
     if media_type == "pdf":
         return find_spec("fitz") is not None
     if media_type in _DOC_READERS:
@@ -1556,6 +1557,33 @@ def _extract_document(path: Path, media_type: str) -> ExtractResult:
         raise
     text = (getattr(result, "text_content", "") or "").strip()
     return ExtractResult(text=text, media_type=media_type, engine="markitdown")
+
+
+def _missing_module(error: BaseException) -> str | None:
+    """The top-level package of the first named failed import in `error`'s cause graph.
+
+    Walks `__cause__`, then `__context__`, then the exceptions inside each
+    MarkItDown-style `attempts` entry, breadth-first. A cut to the top-level name
+    keeps `find_spec` from importing a parent package.
+    """
+    seen: set[int] = set()
+    queue: list[BaseException] = [error]
+    while queue:
+        node = queue.pop(0)
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, ImportError) and node.name:
+            return node.name.partition(".")[0]
+        if node.__cause__ is not None:
+            queue.append(node.__cause__)
+        if node.__context__ is not None:
+            queue.append(node.__context__)
+        for attempt in getattr(node, "attempts", None) or ():
+            exc_info = getattr(attempt, "exc_info", None)
+            if exc_info is not None and exc_info[1] is not None:
+                queue.append(exc_info[1])
+    return None
 
 
 def _markitdown_attempt_types(error: BaseException) -> list[type]:

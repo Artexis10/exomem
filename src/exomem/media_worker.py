@@ -17,6 +17,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import hashlib
+import importlib.util
 import inspect
 import logging
 import os
@@ -253,6 +254,16 @@ def _ledger_busy(error: BaseException) -> bool:
     from . import lexstore
 
     return isinstance(error, sqlite3.Error) and lexstore.classify_sqlite_error(error) == "transient"
+
+
+def _module_findable(name: str | None) -> bool:
+    """Whether `name` resolves without importing it; an unnamed wait keeps the old check."""
+    if not name:
+        return True
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _writer_authority_available() -> bool:
@@ -793,6 +804,7 @@ class MediaWorker:
         except extract.ExtractionUnavailable as e:
             error = f"{type(e).__name__}: {e}"
             log.warning("extraction unavailable for %s: %s", job.binary_path.name, e)
+            module = e.missing_module
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,
@@ -800,8 +812,9 @@ class MediaWorker:
                 expected_binary=expected_binary,
                 state=BLOCKED,
                 error=error,
-                next_action=media_engines.unavailable_next_action(),
+                next_action=media_engines.unavailable_next_action(module),
                 blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
+                blocked_context=module,
             )
             return self._publication_outcome(committed, BLOCKED, error)
         except extract.EngineDisabled as e:
@@ -1065,7 +1078,8 @@ class MediaWorker:
         """Converge engine-blocked jobs (`engine_waits`) with this start's engines.
 
         A job whose engine is now available, or whose wait for a disabled engine has
-        ended, returns to pending. A job blocked on an engine the deployment switched
+        ended, returns to pending; one parked for a missing module returns once that
+        module is found. A job blocked on an engine the deployment switched
         off loses that stage: its sidecar is first shown as pending again, so no old
         install instruction stays, and its media waits with no job until the engine
         is enabled.
@@ -1080,7 +1094,7 @@ class MediaWorker:
             elif not media_engines.stage_enabled(job.media_type):
                 if self._present_pending(job):
                     dropped += self._store.drop_extraction_stage(job)
-            elif media_engines.stage_available(job.media_type, job.binary_path):
+            elif _module_findable(job.blocked_context) and media_engines.stage_available(job.media_type):
                 requeued += self._store.requeue_engine_wait(job)
         if requeued or dropped:
             log.info(
