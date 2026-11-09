@@ -106,7 +106,7 @@ Hydration classifies only backend open and read errors as transport failures; lo
 - `media_protections_original_object`: the protection check by original and object searches the covering index. The upload-name lookup searches the index by original, then sorts that original's rows by creation time.
 - `media_cache_candidates`: the eviction batch and the eligible-bytes sum search the index by `evicted` and the size range. Their job subqueries search `jobs_binary_rel`. The batch sorts in a temporary B-tree, so each pass reads every row in that index range. The evicted-bytes sum and the too-large count read only the index. The drain row searches the index and sorts only the last term of its order.
 - `jobs_hydrated_claims`: the count of hydrated claims reads only the partial index.
-- `media_access_hydrating`: no query uses it. Since offload reservations (task 5.4.13), the reservation query reads `temporary_bytes > 0 OR hydrating = 1`, and SQLite scans `media_access` for it. That table holds only live pins and reservations, so the scan grows with the current reads, not with the vault.
+- `media_access_hydrating`: no query used it, so the ledger now drops it, also from a ledger that an older release created. Since offload reservations (task 5.4.13), the reservation query reads `temporary_bytes > 0 OR hydrating = 1`, and SQLite scans `media_access` for it. That table holds only live pins and reservations, so the scan grows with the current reads, not with the vault. Every other query on `media_access` searches the token key or `media_access_binary_rel`, or reads all rows.
 
 **Amendment, 2026-10-30 (task 5.4): eviction runs during an import.**
 
