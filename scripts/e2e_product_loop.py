@@ -362,6 +362,25 @@ async def _call(client, name: str, arguments: dict[str, Any], timeout: float) ->
     return _result_data(result)
 
 
+def _released_mutation_diagnostics(result: Any, *, operation: str) -> Any:
+    """Validate a full committed terminal from a released build and return its diagnostics.
+
+    The compatible-application step runs a released wheel that predates the nested
+    ``diagnostics.operational`` reply: it answers with ``ok``, ``status`` and ``mutated`` at the top.
+    """
+    if (
+        not isinstance(result, dict)
+        or result.get("ok") is not True
+        or result.get("status") != "committed"
+        or result.get("mutated") is not True
+        or not isinstance(result.get("diagnostics"), dict)
+    ):
+        raise RuntimeError(
+            f"{operation} mutation did not return a committed full terminal: {result!r}"
+        )
+    return result["diagnostics"]
+
+
 def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
     """Validate a full committed terminal and return its leaf diagnostics."""
     diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
