@@ -3,14 +3,14 @@
  "title": "Clear the residual, vague request",
  "prompt": "My import finished and some files were discarded, not filed. Just clear those.",
  "served_tools": [
-  "import_memory",
-  "read_import",
+  "manage_memory",
+  "inspect_memory",
   "observe_transfer",
   "transfer_memory"
  ],
  "builtin_tools": [],
  "replies": {
-  "read_import.status": {
+  "inspect_memory.imports.status": {
    "$status": {
     "windows": [
      {
@@ -49,8 +49,8 @@
  "checks": [
   {
    "type": "never_called",
-   "tool": "import_memory",
-   "kind": "acknowledge"
+   "tool": "manage_memory",
+   "kind": "imports.acknowledge"
   },
   {
    "type": "only_scripted_tools"

@@ -789,9 +789,9 @@ def test_legacy_edit_reports_identity_backfill_before_review_replay(tmp_path: Pa
         item for item in result.blocking_findings if item.code == "RELATION_DISPOSITION_MISSING"
     )
     assert "maintain_memory(mode='backfill-ids')" in finding.remediation
-    assert "confirmation" in finding.remediation
+    assert "confirm" in finding.remediation
     assert "plan_id" in finding.remediation
-    assert finding.remediation.index("identity issues") < finding.remediation.index("confirmation")
+    assert finding.remediation.index("identity issues") < finding.remediation.index("confirm")
     assert "re-read and validate" in finding.remediation
     assert "transition_token" not in finding.remediation
     assert len(finding.remediation.encode("utf-8")) <= 224

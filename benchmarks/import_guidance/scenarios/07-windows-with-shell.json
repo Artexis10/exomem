@@ -3,8 +3,8 @@
  "title": "Windows with a shell",
  "prompt": "Import the `Archive` folder in the current directory into my Exomem Cloud memory. You have a shell, and `exomem` is installed and signed in.",
  "served_tools": [
-  "import_memory",
-  "read_import",
+  "manage_memory",
+  "inspect_memory",
   "observe_transfer",
   "transfer_memory"
  ],
@@ -12,7 +12,7 @@
   "Bash"
  ],
  "replies": {
-  "read_import.status": {
+  "inspect_memory.imports.status": {
    "$status": {
     "windows": [
      {
@@ -52,27 +52,27 @@
     ]
    }
   },
-  "import_memory.start": {
+  "manage_memory.imports.start": {
    "run_id": "run-1",
    "path": "_Imports/5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
    "next_after": null,
    "files": 1
   },
-  "import_memory.select": {
+  "manage_memory.imports.select": {
    "run_id": "run-1",
    "selected": 1
   },
-  "import_memory.plan": {
+  "manage_memory.imports.plan": {
    "run_id": "run-1",
    "plan_id": "plan-1",
    "items": 1
   },
-  "import_memory.apply": {
+  "manage_memory.imports.apply": {
    "run_id": "run-1",
    "applied": 1,
    "continuation": null
   },
-  "import_memory.finish": {
+  "manage_memory.imports.finish": {
    "run_id": "run-1",
    "coverage": {
     "filed": 1

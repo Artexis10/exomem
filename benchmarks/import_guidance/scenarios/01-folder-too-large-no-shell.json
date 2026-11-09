@@ -3,14 +3,14 @@
   "title": "Folder too large, no shell",
   "prompt": "Please import my ~/Archive folder into my memory. It is about 120 GB.",
   "served_tools": [
-    "import_memory",
-    "read_import",
+    "manage_memory",
+    "inspect_memory",
     "observe_transfer",
     "transfer_memory"
   ],
   "builtin_tools": [],
   "replies": {
-    "read_import.status": {
+    "inspect_memory.imports.status": {
       "$status": {}
     },
     "observe_transfer.import_handoff": {

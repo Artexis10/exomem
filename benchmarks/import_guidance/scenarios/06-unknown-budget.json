@@ -3,14 +3,14 @@
  "title": "Unknown budget",
  "prompt": "Before I send it: will a 12 GB video file fit in my memory?",
  "served_tools": [
-  "import_memory",
-  "read_import",
+  "manage_memory",
+  "inspect_memory",
   "observe_transfer",
   "transfer_memory"
  ],
  "builtin_tools": [],
  "replies": {
-  "read_import.status": {
+  "inspect_memory.imports.status": {
    "$status": {
     "budget": {
      "reachable_budget": {
