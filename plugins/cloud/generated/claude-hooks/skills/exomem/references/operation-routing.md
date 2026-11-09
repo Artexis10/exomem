@@ -211,8 +211,11 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   preceded by per-frame timestamps. The comprehension companion to visual search:
   `search_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
   overview call first, then zoom with `start_sec`/`end_sec` around that timestamp.
-  Bounded and read-only (default 8 frames, hard cap 16, JPEG ≤768px); soft-fails
-  with a clear code when the server lacks the media extra.
+  Read-only, with defaults from settings (8 frames, at most 16, long side 768 px).
+  `max_side` sets the frame long side, or `"original"`, as for images; for detail,
+  narrow the window rather than raise the size. Frames past the call's byte limit
+  are listed in `not_shown`. Exomem Cloud keeps 768 px and reports it in
+  `max_side_effective`. Soft-fails with a clear code when the server lacks the media extra.
 - **Read-only / excluded subtrees are write-protected.** Mark a subtree `readonly:`
   or `excluded:` in `Knowledge Base/_access.yaml` (see `write-scope.md` §
   Per-subtree access overrides): `readonly` stays searchable but refuses **every**

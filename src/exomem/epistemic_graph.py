@@ -442,7 +442,7 @@ class GraphNeighbor:
 
     @property
     def typed(self) -> bool:
-        """A registered relation that is not a plain link; it ranks before plain links."""
+        """A relation with a type that does not carry `plain_link`; it ranks before plain links."""
         return bool(self.relation_type) and not self.plain_link
 
 
@@ -8618,8 +8618,8 @@ class EpistemicGraphIndex:
             positioned = _neighbor_rows(
                 None if keep is None else view, seed_rel_by_key, batches
             )
-            # Each edge takes its authoring page's selected meaning before any
-            # family is reported; a candidate no page emits is no neighbour.
+            # Each edge takes its authoring page's selected meaning before its
+            # behaviours are read; a candidate no page emits is no neighbour.
             for direction, batch in positioned.items():
                 for position, seed_key, other_path, stored in batch:
                     seed_rel = seed_rel_by_key.get(seed_key)

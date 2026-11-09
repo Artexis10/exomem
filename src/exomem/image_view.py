@@ -117,10 +117,15 @@ def _setting(name: str, default: int, *, original: bool = False) -> int | None:
     return mode.int_setting(name, default)
 
 
-def resolve_side(max_side: int | str | None) -> int | None:
-    """The long side in pixels, or None to keep the original resolution."""
+def resolve_side(
+    max_side: int | str | None, *, setting: str = MAX_SIDE_SETTING, default: int = DEFAULT_MAX_SIDE,
+) -> int | None:
+    """The long side in pixels, or None to keep the original resolution.
+
+    A call that names no size gets `setting`, else `default`.
+    """
     if max_side is None:
-        return _setting(MAX_SIDE_SETTING, DEFAULT_MAX_SIDE, original=True)
+        return _setting(setting, default, original=True)
     if isinstance(max_side, str) and max_side.strip().lower() == ORIGINAL:
         return None
     if isinstance(max_side, bool) or not isinstance(max_side, int) or max_side < 1:

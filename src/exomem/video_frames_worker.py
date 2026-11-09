@@ -218,11 +218,11 @@ def _group_running(group: int) -> bool:
 
 
 def _payload_limits(max_frames: int) -> tuple[int, int]:
-    from .video_frames import FRAME_JPEG_MAX_EDGE
+    from .video_frames import CLOUD_MAX_SIDE
 
     # The protocol reserves RGB-sized storage and metadata per configured frame.
     # This allocation ceiling is defensive: a larger encoded JPEG refuses the read.
-    frame_bytes = FRAME_JPEG_MAX_EDGE ** 2 * 3 + _HEADER_BYTES
+    frame_bytes = CLOUD_MAX_SIDE ** 2 * 3 + _HEADER_BYTES
     return frame_bytes, max_frames * frame_bytes
 
 
@@ -232,7 +232,13 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
     from .extract import media_type_for
     from .governance import egress, policy
     from .vault import VaultPathError, resolve_under_vault
-    from .video_frames import Frame, FramesResult, VideoFramesError, _tool_frames_cap
+    from .video_frames import (
+        CLOUD_MAX_SIDE,
+        Frame,
+        FramesResult,
+        VideoFramesError,
+        _tool_frames_cap,
+    )
 
     if media_engines.FRAMES not in media_engines.enabled_engines():
         _fail("VIDEO_UNAVAILABLE", "the frame engine is disabled on this cell")
@@ -329,7 +335,7 @@ def get_frames(vault_root: Path, path: str, *, max_frames: int = 8,
             _fail("VIDEO_PROTOCOL", "the frame worker did not complete its read")
         authorize(held)
         return FramesResult(relative, result.duration_sec, frames, result.candidates,
-                            result.dedup_dropped, effective)
+                            result.dedup_dropped, effective, max_side_effective=CLOUD_MAX_SIDE)
     except (reserved_paths.ReservedPathLeafError, OSError):
         _fail("NOT_FOUND", "video does not exist")
     finally:
@@ -361,7 +367,7 @@ def _child(vault: Path) -> int:
         if media_brakes.enabled():
             config = media_brakes.settings(cell=media_brakes.read_cell())
             media_brakes.apply_hard_limit(config.budget_for(media_engines.FRAMES), config)
-        from .video_frames import VideoFramesError, sample_stream
+        from .video_frames import CLOUD_MAX_SIDE, VideoFramesError, sample_stream
 
         # Admission depends on the cell and lock, before any original-specific work.
         sys.stdout.buffer.write(_wire(_Admitted(kind="admitted")))
@@ -385,7 +391,7 @@ def _child(vault: Path) -> int:
                 held.held.stream.seek(0)
                 result = sample_stream(held.held.stream, relative, max_frames=request.max_frames,
                                        start_sec=request.start_sec, end_sec=request.end_sec,
-                                       resize_candidates=True)
+                                       resize_candidates=True, max_side=CLOUD_MAX_SIDE)
                 reserved_paths.require_current_generic_copy(held)
                 per_frame, total = _payload_limits(request.max_frames)
                 if (any(len(frame.jpeg) > per_frame for frame in result.frames)
