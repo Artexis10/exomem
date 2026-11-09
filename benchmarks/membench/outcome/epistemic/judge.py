@@ -17,16 +17,14 @@ from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from . import layout
-from .cases import BEHAVIOURS, STORE_NAMES, is_stable
+from .cases import BEHAVIOURS, holds_store_name, is_stable
 
 SEED = 20261108
 STORE_MARK = "[store]"
-#: One whole token around a store name: a path such as notes/memory/web.md or a tool name such as
-#: mcp__exomem__recall_context becomes one bare mark, so the mark keeps no path or tool shape.
-_STORE_TOKENS = [
-    re.compile(r"[\w./\\-]*" + re.escape(name) + r"[\w./\\-]*", re.IGNORECASE)
-    for name in STORE_NAMES
-]
+#: One whole token: a path such as notes/memory/web.md or a tool name such as
+#: mcp__exomem__recall_context. A token that holds a store name becomes one bare mark, so the mark
+#: keeps no path or tool shape. One character class with no name inside it matches in linear time.
+_TOKEN = re.compile(r"[\w./\\-]+")
 JUDGE_TIMEOUT_SECONDS = 600
 #: The label of an answer given with the whole history in its prompt (the solvable gate).
 HISTORY_ARM = "N-history"
@@ -158,7 +156,8 @@ def items(
     if items_file.exists():
         if items_file.read_text() != "".join(lines):
             raise SystemExit(
-                f"{items_file} was pooled from different answers; move {judge_run} aside to judge again"
+                f"{items_file} was pooled from different answers or by an older mask; "
+                f"move {judge_run} aside to judge again"
             )
         return
     (judge_run / "judge").mkdir(parents=True)
@@ -175,10 +174,18 @@ def items(
 
 
 def hide_store_names(text: str) -> str:
-    """``text`` with each whole token that holds a store name (``STORE_NAMES``) replaced by ``STORE_MARK``."""
-    for token in _STORE_TOKENS:
-        text = token.sub(STORE_MARK, text)
-    return text
+    """``text`` with each whole token that holds a store name (``holds_store_name``) replaced by ``STORE_MARK``.
+
+    A sentence's closing full stop stays outside the mark."""
+
+    def mask(match: re.Match[str]) -> str:
+        token = match.group()
+        body = token.rstrip(".")
+        if holds_store_name(body):
+            return STORE_MARK + token[len(body):]
+        return token
+
+    return _TOKEN.sub(mask, text)
 
 
 def build_prompt(item: dict) -> str:
