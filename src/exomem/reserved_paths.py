@@ -731,6 +731,15 @@ _REGISTRY = (
         leaf_patterns=(_HELD_PUBLICATION_RE,),
     ),
     InternalStateDescriptor(
+        "held-probe",
+        "held_fs",
+        StatePlacement.TARGET_ADJACENT,
+        # A capability probe's scratch in the root it tests, which can lie inside the
+        # Knowledge Base; it exists only while the probe runs. Every vault scan skips these
+        # names, so they are reserved at any depth and no write can place content there.
+        component_tree_patterns=(held_fs.PROBE_ENTRY_RE,),
+    ),
+    InternalStateDescriptor(
         "collection-publication",
         "collection_store.views",
         StatePlacement.TARGET_ADJACENT,
