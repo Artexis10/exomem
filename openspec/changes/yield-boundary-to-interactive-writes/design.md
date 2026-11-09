@@ -14,13 +14,13 @@ The one-chunk minimum is the progress floor: under a stream of writes, each call
 
 ### D2. A waiter counts only when it is interactive
 
-`waiter_count()` counts threads of the process that wait with an interactive holder kind, plus the keyed writes queued behind the head of the capture line, plus a waiter in another process. Machine holder kinds and `maintenance-job` waiters are excluded, so background work does not yield to other background work. A borrower of a lent boundary waits for a loan and is excluded. Only an interactive waiter raises the cross-process signal.
+`waiter_count()` counts threads of the process that wait with an interactive holder kind, plus the keyed writes queued behind the head of the capture line, plus a waiter in another process. Machine holder kinds and `maintenance-job` waiters are excluded, so background work does not yield to other background work. A borrower of a lent boundary waits for a loan and is excluded. The thread that polls the boundary's lock file raises the cross-process signal while it is interactive or while an interactive writer waits behind it in the process, re-evaluated at each poll, so a writer queued behind a local machine poller is still seen by a holder in another process.
 
 The head ticket of the capture line stays in the line while its write runs, so the count starts behind the head. The head's own gaps between attempts are not visible to the count; its attempts already poll the boundary every 50 ms.
 
 ### D3. A hold that ended for a waiter hands the boundary over
 
-A writer polls for the boundary every 25 ms. A holder that asks again at once wins the race. After a hold that ended while a writer waited, `hand_over()` waits while `waiter_count() > 0`, polling at the writer's rate, and returns at the cap of `foreground_priority.MAX_YIELD_SECONDS`, or earlier at the pass's progress share. A thread that holds a boundary or runs foreground work never waits. A thread inside `ending_waits`, the collection store thread, skips the wait, because its waiter may need it.
+A writer polls for the boundary every 25 ms. A holder that asks again at once wins the race. After a hold that ended while a writer waited, `hand_over()` waits while `waiter_count() > 0`, polling at the writer's rate, and returns at the cap of `foreground_priority.MAX_YIELD_SECONDS`, or earlier at the pass's progress share. A thread that holds a boundary never waits. A foreground thread does wait, because the wait is on a writer, not on itself, and the cap bounds it. A thread inside `ending_waits`, the collection store thread, skips the wait, because its waiter may need it.
 
 The wait holds no lock. It can lengthen a job by at most the cap per hold; it cannot lengthen any writer's wait.
 
