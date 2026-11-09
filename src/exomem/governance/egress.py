@@ -1063,7 +1063,7 @@ def direct_text_references_verdict(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
-    resolved_here: Mapping[str, tuple[str, ...]] | None = None,
+    resolved_here: Callable[[str], tuple[str, ...]] | None = None,
 ) -> str:
     """Prove every wikilink in returned direct-read text remains releasable.
 
@@ -1075,9 +1075,9 @@ def direct_text_references_verdict(
     Answers `TEXT_LOOKUP_STALE` when only a stale name lookup refused the text,
     so a caller can tell a refusal a retry may lift from a permanent one.
 
-    `resolved_here` maps a normalized name (`working_set_index.normalize`) to the
-    paths the caller proved it names, for a page the index no longer lists. Such a
-    path is still decided like any other, so it must name a page that exists.
+    `resolved_here` answers, for a name as the text wrote it that the index does not
+    resolve, the paths the caller proved it names (a page the index no longer lists).
+    Such a path is still decided like any other, so it must name a page that exists.
     """
     root = Path(vault_root)
     policy = policy_module.load(root)
@@ -1125,11 +1125,9 @@ def direct_text_references_verdict(
             resolved = _resolved_prose_names(root, names)
         except WorkingSetResolutionUnavailable:
             return TEXT_REFUSED
-        if resolved_here:
-            from .. import working_set_index
-
+        if resolved_here is not None:
             for name in names:
-                if name not in resolved and (paths_here := resolved_here.get(working_set_index.normalize(name))):
+                if name not in resolved and (paths_here := resolved_here(name)):
                     resolved[name] = paths_here
         if any(name not in resolved for name in names):
             return TEXT_REFUSED

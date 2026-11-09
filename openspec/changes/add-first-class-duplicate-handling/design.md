@@ -114,6 +114,8 @@ A recap revision that changes the Decided lines clears the head's `ingested_into
 
 Proposal computes the pinned set from `sources:` citations, `ingested_into` back-references and links of every live page outside the episode, whatever its lifecycle class and regardless of what the caller can see. It refuses to run without whole-namespace content authority. Why: a caller that sees fewer pages could retire a revision that a hidden page cites. In the measured vault this keeps 36 revisions as files and moves about 4,254 to history. Pinned revisions stay as files with their mark, so every one of the 44 citations resolves to the text it cited, before, during and after a fold.
 
+The memory-reference part of that census keeps what each page cited, by the page's freshness-registry signature, and rereads only a page whose signature moved. Why: the first version read every page of the vault on each call, and an apply holds the mutation boundary through that read; the inbound-link index already works this way, and the census trusts the registry as that index does. It reads every page when the registry is not live or an external change waits unpublished. The shared resolver replaces a per-call resolver for the same reason.
+
 A history entry holds the exact stored bytes of a revision, not a derived form. Why: the entry is the only copy once the file moves to the trash, and byte equality is the check that lets the move happen.
 
 ### D15. The audit categories are opt-in

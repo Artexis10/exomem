@@ -191,3 +191,17 @@ The refusal of `move`, `delete` and `recover` for unprovable relocation history 
 
 - **WHEN** a plan contains `delete` or `move`
 - **THEN** the executor still refuses it with `CURATION_RENAME_HISTORY_UNPROVABLE`
+
+### Requirement: A fold reads references without a pass over the vault while the freshness registry is live
+
+A fold SHALL find the pages that cite a revision or a copy by a wikilink or by a memory reference to its identity, over every page the vault walk yields and with no caller filter. While the vault's freshness registry is live and holds no unpublished external change, the memory-reference part of that census SHALL read only the pages whose registry signature moved since their last read, so that sealing and applying a fold hold the vault mutation boundary for a time that does not grow with the number of pages. Without a live registry, or while an external change is unpublished, the census SHALL read every page. A step that resolves `ingested_into` entries SHALL use the writers' shared resolver and SHALL NOT build a resolver of its own.
+
+#### Scenario: A repeat census reads only what changed
+
+- **WHEN** a live registry exists and a fold step runs its census a second time after one page was edited
+- **THEN** the second census reads that one page and no other
+
+#### Scenario: A citation added after the proposal still pins
+
+- **WHEN** a page cites a revision by memory reference between the proposal and the apply, with the registry live or not
+- **THEN** apply refuses with `CURATION_BINDING_STALE` and moves nothing

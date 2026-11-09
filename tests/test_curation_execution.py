@@ -847,14 +847,25 @@ def test_fold_moves_unreferenced_recap_revisions_and_keeps_the_cited_one(
     assert "Recap number" not in witness and "Step number" not in witness
 
 
+@pytest.mark.parametrize("obsidian_root", [False, True], ids=["vault-relative-links", "knowledge-base-relative-links"])
 def test_a_folded_head_still_reads_back_every_history_entry_under_an_access_policy(
-    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+    vault: Path, earlier_episode, monkeypatch, obsidian_root: bool  # noqa: ANN001
 ) -> None:
-    """Each revision links to a sibling that the same fold moved to trash; the policy gate must still release it."""
+    """Each revision links to a sibling that the same fold moved to trash; the policy gate must still release it.
+
+    The recorder writes that link without the knowledge-base folder when Obsidian opens that folder as its vault.
+    """
     from test_episode_recovery import _write_source_rule
     from test_latency_gate import _seed_freshness_live
 
+    from exomem import vault as vault_module
+
+    if obsidian_root:
+        (vault_module.kb_root(vault) / ".obsidian").mkdir()
     pages = earlier_episode(4)
+    named = pages[1].removesuffix(".md")
+    written = vault_module.parse_frontmatter((vault / pages[0]).read_text(encoding="utf-8"))[0]["superseded_by"]
+    assert written == [f"[[{named.removeprefix(vault_module.kb_prefix()) if obsidian_root else named}]]"]
     # Only a governed vault runs the gate's name lookup: an ungoverned one returns before it.
     _write_source_rule(vault, ceiling=6)
     _apply(vault, _propose(vault, _fold_step(pages, vault)))
@@ -1059,6 +1070,88 @@ def test_fold_refuses_a_revision_that_a_page_cited_after_the_proposal(vault: Pat
     assert [(vault / path).read_bytes() for path in pages] == [before[path] for path in pages]
     history = commands.op_read_memory(vault, path=pages[-1], include_history=True)["revision_history"]
     assert history["revisions"] == []
+
+
+def _identity(vault: Path, path: str) -> str:
+    from exomem import memory_refs
+    from exomem import vault as vault_module
+
+    fields = vault_module.parse_frontmatter((vault / path).read_text(encoding="utf-8"))[0]
+    identity = memory_refs.normalize_id(fields.get(memory_refs.ID_FIELD))
+    assert identity is not None
+    return identity
+
+
+@pytest.mark.parametrize("live", [False, True], ids=["full-read", "live-registry"])
+def test_fold_refuses_a_revision_that_a_page_cited_by_memory_reference_after_the_proposal(
+    vault: Path, earlier_episode, live: bool  # noqa: ANN001
+) -> None:
+    """The reference census follows a write made after the proposal: a live registry never hides a new citer."""
+    from test_latency_gate import _seed_freshness_live
+
+    from exomem import curation, freshness, memory_refs
+
+    pages = earlier_episode(3)
+    note = _seed_note(vault, "curation-fold-late-ref")
+    if live:
+        _seed_freshness_live(vault)
+    else:
+        freshness.clear()  # the episode fixture leaves the registry live; a process without one reads every page
+    proposed = _propose(vault, _fold_step(pages, vault))
+    commands.op_edit(
+        vault, path=note, why="Cite the earlier recap.", old_string="Keep old text.",
+        new_string=f"Keep old text, as {memory_refs.memory_ref(_identity(vault, pages[0]))} recorded.",
+    )
+
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert all((vault / path).is_file() for path in pages)
+
+
+def test_a_live_registry_lets_a_repeat_census_read_only_the_pages_that_changed(
+    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+) -> None:
+    """A fold step holds the mutation boundary for a time that does not grow with the vault: a repeat census reads no unchanged page."""
+    from test_latency_gate import _seed_freshness_live
+
+    from exomem import fold_leaf, freshness, memory_refs
+    from exomem import vault as vault_module
+
+    pages = earlier_episode(2)
+    notes = [_seed_note(vault, f"curation-census-{number}") for number in range(3)]
+    _seed_freshness_live(vault)
+    targets = {pages[0]: _identity(vault, pages[0])}
+    read: list[str] = []
+    read_text = Path.read_text
+
+    def recording(self: Path, *args, **kwargs):  # noqa: ANN002, ANN003
+        read.append(self.relative_to(vault).as_posix() if self.is_relative_to(vault) else str(self))
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", recording)
+
+    first = fold_leaf.referencing_pages(vault, targets, frozenset())
+    assert sorted(read) == sorted(page.relative_to(vault).as_posix() for page in vault_module.walk_vault_md(vault))
+    read.clear()
+    assert fold_leaf.referencing_pages(vault, targets, frozenset()) == first
+    assert read == []
+
+    signatures = {page: freshness.stat_signature(page) for page in vault_module.walk_vault_md(vault)}
+    commands.op_edit(
+        vault, path=notes[1], why="Cite the earlier recap.", old_string="Keep old text.",
+        new_string=f"Keep old text, as {memory_refs.memory_ref(targets[pages[0]])} recorded.",
+    )
+    edited = sorted(
+        page.relative_to(vault).as_posix()
+        for page in vault_module.walk_vault_md(vault)
+        if signatures.get(page) != freshness.stat_signature(page)
+    )
+    assert notes[1] in edited
+    read.clear()
+
+    assert notes[1] in fold_leaf.referencing_pages(vault, targets, frozenset())[pages[0]]
+    assert sorted(read) == edited
 
 
 # ---------------------------------------------------------------- fold-duplicate

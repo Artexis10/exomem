@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
-from . import find_corpus, memory_refs, originals, vault
+from . import find_corpus, freshness, memory_refs, originals, vault
 
 IN_PLACE: Final = "in-place"
 MOVED: Final = "moved"
@@ -208,14 +209,91 @@ def is_navigation(path: str) -> bool:
     return PurePosixPath(path).name.lower() in find_corpus.NAVIGATION_BASENAMES
 
 
+def listings_of(vault_root: Path, paths: Collection[str]) -> dict[str, list[str]]:
+    """Each of `paths` mapped to the generated listings that name it, from one read of the inbound links.
+
+    A trash move leaves a listing's row to age out of the capped list. Read every path before the first
+    move: a process without a live registry rebuilds its inbound index whenever a page moves.
+    """
+    inbound = vault.find_inbound_wikilinks_many(vault_root, list(paths))
+    return {path: sorted({link.path for link in links if is_navigation(link.path)}) for path, links in inbound.items()}
+
+
 def listing_pages(vault_root: Path, path: str) -> list[str]:
-    """The generated listings that name `path`; a trash move leaves their row to age out of the capped list."""
-    return sorted({link.path for link in vault.find_inbound_wikilinks(vault_root, path) if is_navigation(link.path)})
+    """The generated listings that name `path`."""
+    return listings_of(vault_root, [path])[path]
 
 
 #: The closed form of a memory reference, as the reference scheme fixes it.
 # Sound under C6: it checks the shape of a protocol token (scheme prefix plus a UUID), not what anyone meant.
 MEMORY_REFERENCE = re.compile(re.escape(memory_refs.REF_PREFIX) + r"([0-9a-fA-F-]{36})")
+
+
+#: What each vault page cited when it was last read, by page and the registry signature it was read at.
+#: A live registry already holds a signature for every page the vault walk yields, so a repeat call reads
+#: only the pages whose signature moved and holds the vault mutation boundary for a time that does not
+#: grow with the vault. Without a live registry nothing is cached, and every call reads every page.
+_CITED: dict[str, dict[str, tuple[freshness.FileSignature, frozenset[str]]]] = {}
+_CITED_LOCK = threading.Lock()
+
+
+def _identities_in(page: Path) -> frozenset[str] | None:
+    """The memory identities a page cites, or None when it cannot be read as text."""
+    try:
+        text = page.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return frozenset(
+        identity
+        for match in MEMORY_REFERENCE.finditer(text)
+        if (identity := memory_refs.normalize_id(match.group(1)))
+    )
+
+
+def _live_citations(vault_root: Path, live: Mapping[str, freshness.FileSignature]) -> Iterator[tuple[str, frozenset[str]]]:
+    """Each live page and what it cites, reading only a page whose registry signature moved since its last read.
+
+    The signature is read before the bytes, so the bytes are never older than the signature they are
+    held under. A page that cannot be read is answered as citing nothing and never held, so a transient
+    failure cannot hide a citation until the page changes.
+    """
+    root = str(Path(vault_root).resolve())
+    with _CITED_LOCK:
+        known = _CITED.get(root, {})
+    held: dict[str, tuple[freshness.FileSignature, frozenset[str]]] = {}
+    for location, signature in live.items():
+        entry = known.get(location)
+        if entry is None or entry[0] != signature:
+            cited = _identities_in(Path(location))
+            if cited is None:
+                yield location, frozenset()
+                continue
+            entry = (signature, cited)
+        held[location] = entry
+        yield location, entry[1]
+    with _CITED_LOCK:
+        _CITED[root] = held
+
+
+def _citations(vault_root: Path) -> Iterator[tuple[str, frozenset[str]]]:
+    """Each vault page, as a path string, and the memory identities it cites, over the whole vault."""
+    # An external edit the watcher saw but has not published leaves the registry behind the disk.
+    live = None if freshness.external_pending(vault_root) else freshness.live_entries(vault_root, "vault")
+    if live is not None:
+        yield from _live_citations(vault_root, live)
+        return
+    for page in vault.walk_vault_md(vault_root):
+        yield str(page), _identities_in(page) or frozenset()
+
+
+def _pages_citing(vault_root: Path, identities: Collection[str]) -> dict[str, set[str]]:
+    """Each memory identity mapped to the vault-relative pages that cite it, whatever their caller or class."""
+    citing: dict[str, set[str]] = {identity: set() for identity in identities}
+    for location, cited in _citations(vault_root):
+        for identity in cited & citing.keys():
+            if (relative := freshness.registry_rel(vault_root, location)) is not None:
+                citing[identity].add(relative)
+    return citing
 
 
 def referencing_pages(
@@ -235,18 +313,8 @@ def referencing_pages(
         identity: target for target, ref in targets.items() if (identity := memory_refs.normalize_id(ref))
     }
     if identities:
-        for page in vault.walk_vault_md(vault_root):
-            relative = page.relative_to(vault_root).as_posix()
-            if relative in own:
-                continue
-            try:
-                text = page.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            for match in MEMORY_REFERENCE.finditer(text):
-                target = identities.get(memory_refs.normalize_id(match.group(1)) or "")
-                if target is not None:
-                    named[target].add(relative)
+        for identity, pages in _pages_citing(vault_root, identities).items():
+            named[identities[identity]].update(page for page in pages if page not in own)
     return {target: sorted(pages) for target, pages in named.items()}
 
 

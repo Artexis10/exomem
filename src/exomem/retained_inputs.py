@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -205,7 +205,7 @@ def resolve_retained_input(
 
 @reader
 def exact_text_verdict(
-    vault_root: Path, value: str, *, resolved_here: Mapping[str, tuple[str, ...]] | None = None
+    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None
 ) -> str:
     """Check an exact selected representation without recording unreturned targets.
 
@@ -230,7 +230,7 @@ def exact_text_verdict(
 
 
 def exact_text_visible(
-    vault_root: Path, value: str, *, resolved_here: Mapping[str, tuple[str, ...]] | None = None
+    vault_root: Path, value: str, *, resolved_here: Callable[[str], tuple[str, ...]] | None = None
 ) -> bool:
     """Whether an exact selected representation is released unchanged."""
     return exact_text_verdict(vault_root, value, resolved_here=resolved_here) == egress.TEXT_RELEASED

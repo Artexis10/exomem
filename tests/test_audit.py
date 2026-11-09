@@ -1006,7 +1006,7 @@ def test_a_text_source_and_a_source_with_an_original_hold_identical_bytes_but_ne
 
     assert sorted(finding["paths"]) == sorted([as_text, as_file])
     assert finding["meta"]["steps"] == []
-    assert "identical bytes" in finding["meta"]["no_fold"]
+    assert "as text and the other as an original file" in finding["meta"]["no_fold"]
 
 
 def test_an_evidence_page_outside_the_family_folders_gives_a_finding_with_no_step_and_a_reason(vault: Path) -> None:

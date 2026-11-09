@@ -35,6 +35,7 @@ from . import (
     source_taxonomy,
     vault,
 )
+from . import find as find_module
 from .curation import CurationError
 
 # nosemgrep: ep-word-set -- the sealed manifest's own field names, validated on every read.
@@ -148,9 +149,12 @@ def _live_references(
         own,
     )
     named = {path: pages[0] for path, pages in cited.items() if pages}
-    resolver = vault.WikilinkResolver(vault_root)
+    resolver = None
     for path, fields in revisions:
         for entry in fold_leaf.ingested_entries(fields.get("ingested_into")):
+            if resolver is None:
+                # The writers' shared resolver: a fresh `WikilinkResolver` reads every page's title.
+                resolver = find_module.shared_resolver(vault_root)
             located = source_closure.locate(vault_root, entry, resolver=resolver)
             if located is not None and located not in own and (vault_root / located).is_file():
                 named.setdefault(path, located)
@@ -465,6 +469,7 @@ def fold(vault_root: Path, binding: Mapping[str, Any]) -> dict[str, Any]:
     for revision in movable:
         _verify_entry(vault_root, revision)
     moved: list[str] = []
+    listings = fold_leaf.listings_of(vault_root, [revision["path"] for revision in movable])
     for revision in movable:
         if fold_leaf.move_to_trash(
             vault_root,
@@ -473,7 +478,7 @@ def fold(vault_root: Path, binding: Mapping[str, Any]) -> dict[str, Any]:
             expected_hash=revision["hash"],
             verify=lambda revision=revision: _verify_entry(vault_root, revision),
             now=now,
-            expected_dead_inbound=sorted(own | set(fold_leaf.listing_pages(vault_root, revision["path"]))),
+            expected_dead_inbound=sorted(own | set(listings[revision["path"]])),
         ):
             moved.append(revision["path"])
         curation._fault_barrier("fold-after-move")  # noqa: SLF001

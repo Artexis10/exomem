@@ -238,8 +238,10 @@ def _identical(
     kept, retired = _payload(*canonical), _payload(*copy)
     if kept.lane != retired.lane:
         raise fold_leaf.refuse(code, "a Source and an Evidence page never fold into each other")
-    if kept.sha256 != retired.sha256 or (kept.artifact_path is None) != (retired.artifact_path is None):
+    if kept.sha256 != retired.sha256:
         raise fold_leaf.refuse(code, "the two pages do not hold identical bytes")
+    if (kept.artifact_path is None) != (retired.artifact_path is None):
+        raise fold_leaf.refuse(code, "one page keeps the payload as text and the other as an original file")
     return kept, retired
 
 

@@ -342,16 +342,15 @@ def _folded_revision(root: Path, source: str, path: str, head_episode: Any) -> b
 
 def _folded_siblings(
     root: Path, directory: str, names: list[str], head: str, head_episode: Any
-) -> dict[str, tuple[str, ...]]:
-    """Each way a wikilink can name a revision that the fold of `head` moved to trash, mapped to `head`.
+) -> Callable[[str], tuple[str, ...]]:
+    """Answer, for a wikilink name, `head` when it names a revision that the fold of `head` moved to trash.
 
     The revision's own page is gone, so the gate cannot decide it. It is the head's history, and the caller
     has read the head, so the name resolves to the head and is decided under the head's own admission. Only a
-    revision that `_folded_revision` binds to the head's episode counts, as in `_admitted_entry`.
+    revision that `_folded_revision` binds to the head's episode counts, as in `_admitted_entry`. The name
+    resolves as every wikilink in the vault does, over the folded paths alone, so it needs no list of spellings.
     """
-    from .working_set_index import normalize
-
-    named: dict[str, tuple[str, ...]] = {}
+    revisions: list[tuple[str, str | None]] = []
     for name in names:
         try:
             entry = json.loads(registry_history.read_kept(root, directory, name) or "")
@@ -360,15 +359,19 @@ def _folded_siblings(
                 continue
         except (AttributeError, KeyError, TypeError, ValueError):
             continue
-        bare = revision.removesuffix(".md")
-        for spelling in (revision, bare, bare.rpartition("/")[2]):
-            named.setdefault(normalize(spelling), (head,))
-    return named
+        revisions.append((revision, None))
+    resolver = vault.WikilinkResolver.from_entries(root, revisions)
+
+    def resolve(target: str) -> tuple[str, ...]:
+        resolved, warning = vault.normalize_wikilink(target, root, resolver=resolver)
+        return (head,) if warning is None and vault.split_wikilink_target(resolved)[0] in resolver.full_paths else ()
+
+    return resolve
 
 
 def _admitted_entry(
     root: Path, text: str | None, *, path: str, parent_ref: str, head_episode: Any = None,
-    siblings: Callable[[], dict[str, tuple[str, ...]]] | None = None,
+    siblings: Callable[[], Callable[[str], tuple[str, ...]]] | None = None,
 ) -> dict | None:
     try:
         entry = json.loads(text) if text is not None else None
@@ -465,9 +468,9 @@ def read(
     directory = history_dir(parent_ref)
     names = registry_history.kept_names(root, directory, suffix=".json") or []
     cap = _scan_cap(size)
-    folded: dict[str, tuple[str, ...]] | None = None
+    folded: Callable[[str], tuple[str, ...]] | None = None
 
-    def siblings() -> dict[str, tuple[str, ...]]:
+    def siblings() -> Callable[[str], tuple[str, ...]]:
         nonlocal folded
         if folded is None:
             folded = _folded_siblings(root, directory, names, canonical, current["frontmatter"].get("episode"))
