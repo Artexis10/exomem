@@ -48,7 +48,7 @@ Three gaps cause this:
 ## Impact
 
 - Code: `add.py`, `episode_memory.py`, `episode_capture.py`, `episode_coverage.py`, `compiled_history.py`, `preserve.py`, `client_artifacts.py`, `adoption_plan.py`, `adoption_run.py`, `audit.py`, `curation.py`, `lexstore.py` (one derived column) and the scaffold skill references.
-- No new tool. Results gain optional fields: `duplicate_of`, `same_url`, `families`, `family_added`, `mapped` and `duplicate_check_unavailable`. Frontmatter gains `families`, `also_imported_from` and `duplicate_of`.
+- No new tool. Results gain optional fields: `duplicate_of`, `same_url`, `families`, `family_added`, `mapped`, `duplicate_check_unavailable` and `skipped_duplicates`. Frontmatter gains `families`, `also_imported_from` and `duplicate_of`.
 - Behaviour change: a repeated text capture no longer creates a second file. A repeated recap no longer creates a second file.
 - Not in scope: merging near-duplicates, cross-vault consolidation (`add-governed-vault-consolidation`), retitling compiled notes that share a title, folding duplicate own-notes, and archive member pools.
 - Live folds of a real vault stay separate operations. Each batch needs a disposable-copy check, the owner's confirmation and a kept undo manifest.

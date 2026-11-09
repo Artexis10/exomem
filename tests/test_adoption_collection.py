@@ -1052,6 +1052,42 @@ def test_a_plan_names_the_other_root_that_earlier_imports_of_the_collection_came
     assert warning["roots"] == ["_Imports/first/Coll"]
 
 
+def test_a_plan_warning_reaches_the_warning_count_of_the_plan_and_apply_replies(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.testclient import TestClient
+
+    from exomem import server
+
+    for root in ("first", "second"):
+        (vault / "_Imports" / root / "Coll").mkdir(parents=True)
+        (vault / "_Imports" / root / "Coll" / "a.md").write_text("# A\n", encoding="utf-8")
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "studio-key")
+    monkeypatch.delenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", raising=False)
+    monkeypatch.delenv("EXOMEM_CF_ACCESS_AUD", raising=False)
+    client = TestClient(server.build_server(require_auth=False).http_app())
+
+    def call(body: dict) -> dict:
+        response = client.post(
+            "/api/adoption_studio", json=body, headers={"Authorization": "Bearer studio-key"}
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    run_id = call({"action": "start", "path": "_Imports/second"})["run_id"]
+    call({"action": "select", "run_id": run_id, "include": ["_Imports/second"]})
+    planned = call({"action": "plan", "run_id": run_id})
+    applied = call({"action": "apply", "run_id": run_id, "plan_id": planned["plan_id"]})
+
+    for reply in (planned, applied):
+        assert reply["warnings_count"] == 1
+        [warning] = reply["warnings"]
+        assert warning.startswith("EARLIER_IMPORT_FROM_OTHER_ROOT")
+
+
 def test_the_recall_question_asks_about_the_largest_text_note_not_a_larger_media_file(
     tmp_path: Path,
 ) -> None:
@@ -1408,6 +1444,7 @@ def test_two_identical_photos_plan_one_write_and_apply_stores_one_original_with_
     assert [outcome["status"] for outcome in outcomes] == ["applied", "already-applied"]
     assert outcomes[1]["mapped"] is True
     assert first["apply_result"]["duplicates"]["mapped"] == 1
+    assert first["apply_result"]["skipped_duplicates"] == 1
     assert outcomes[1]["source_ref"] == outcomes[0]["source_ref"]
     [stored] = _stored_photos(vault)
     assert stored.read_bytes() == PHOTO
@@ -1432,6 +1469,8 @@ def test_two_identical_photos_plan_one_write_and_apply_stores_one_original_with_
         assert not any(outcome.get("mapped") for outcome in rerun["outcomes"].values())
         # No mapping was recorded, so this call reports none and the snapshot below shows no write.
         assert rerun["apply_result"]["duplicates"]["mapped"] == 0
+        # Every item of the re-run found its bytes stored: the two photos and the note.
+        assert rerun["apply_result"]["skipped_duplicates"] == 3
     assert _kept_files(vault) == before
 
 
@@ -1460,6 +1499,45 @@ def test_a_photo_the_vault_stores_under_another_collection_plans_no_write_and_re
     assert _stored_photos(vault) == [vault / held["artifact_path"]]
     frontmatter, _body = _page(vault, held["target_path"])
     assert frontmatter["also_imported_from"] == [item["mapping"]]
+    assert second["apply_result"]["skipped_duplicates"] == 1
+
+
+def test_a_tree_with_internal_duplicates_imported_under_a_second_collection_stores_each_original_once(
+    tmp_path: Path, tiny_budget: None
+) -> None:
+    other = b"\x89PNG\r\n\x1a\n" + b"other pixels" * 20
+    layout = {
+        "a/one.png": PHOTO, "b/one copy.png": PHOTO,
+        "c/two.png": other, "d/two again.png": other, "d/two third.png": other,
+    }
+    vault = _vault(tmp_path, {f"{tree}/{rel}": data for tree in ("TreeA", "TreeB") for rel, data in layout.items()})
+    run_id, planned = _import(vault, path="TreeA", include=["TreeA"])
+    first, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    assert [path.read_bytes() for path in _stored_photos(vault)].count(PHOTO) == 1
+    assert sorted(path.read_bytes() for path in _stored_photos(vault)) == sorted([PHOTO, other])
+    assert first["apply_result"]["skipped_duplicates"] == 3
+
+    run_id, planned = _import(vault, path="TreeB", include=["TreeB"])
+    second, calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert {item["action"] for item in planned["plan"]["items"]} == {"already-imported"}
+    assert planned["plan"]["total_bytes"] == 0
+    assert sorted(path.read_bytes() for path in _stored_photos(vault)) == sorted([PHOTO, other])
+    mapped = [outcome for path, outcome in second["outcomes"].items() if path.startswith("TreeB/")]
+    assert len(mapped) == len(layout)
+    assert {(outcome["status"], outcome["mapped"]) for outcome in mapped} == {("already-applied", True)}
+    # The last of several calls still reports the whole run's count.
+    assert calls > 1
+    assert second["apply_result"]["skipped_duplicates"] == len(layout)
+    recorded = set()
+    for original in first["outcomes"].values():
+        frontmatter, _body = _page(vault, original["target_path"])
+        recorded |= {
+            entry["collection_path"]
+            for entry in frontmatter.get("also_imported_from", [])
+            if entry["import_collection"] == "TreeB"
+        }
+    assert recorded == set(layout)
 
 
 def test_a_renamed_file_in_an_imported_collection_records_its_new_path_and_the_next_run_writes_nothing(

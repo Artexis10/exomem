@@ -868,6 +868,10 @@ def _present(root: Path, run: dict, **extra) -> dict:
         # The run stores the spelling of the surface that started it; serve this surface's.
         out["pack_suggestions"] = knowledge_packs.rendered_suggestions(run["pack_suggestions"] or [])
     out["next_actions"] = _next_actions(run)
+    # The plan keeps each warning as a record; the top-level list is what a caller's warning count reads.
+    plan = run.get("plan") or {}
+    if plan.get("warnings"):
+        out["warnings"] = [f"{warning['code']}: {warning['reason']}" for warning in plan["warnings"]]
     cursor = _open_cursor(run, "after")
     if cursor:
         out["next_after"] = f"{run['run_id']}:{cursor}"
@@ -3284,6 +3288,7 @@ def apply(
                     "mapped": stats["mapped"],
                     "check_unavailable": stats["duplicate_check_unavailable"],
                 },
+                "skipped_duplicates": _skipped_duplicates(outcomes),
             },
             "progress": _progress(run),
         }
@@ -3321,6 +3326,17 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
         run["phase"] = "cancelled"
         store.save(run)
     return _present(root, run)
+
+
+def _skipped_duplicates(outcomes: dict) -> int:
+    """The run's items that were not stored because a Source already held their bytes.
+
+    Only `_already_applied` records the Source it found as `existing_ref`. An item the run stored, then a repeat
+    call re-marked `already-applied`, keeps no such key, so the count holds across the calls of one run.
+    """
+    return sum(
+        1 for outcome in outcomes.values() if outcome.get("status") == "already-applied" and "existing_ref" in outcome
+    )
 
 
 def _recompute_phase(outcomes: dict, plan_items: list[dict], budget_stopped: bool) -> str:
