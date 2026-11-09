@@ -580,11 +580,11 @@ class OffloadBatch:
 
     The batch never holds the mutation boundary, so other writes run between two members. It rests
     on offload being the only writer that binds a version the census has not seen while the runtime
-    serves (task 5.4.9 lists the others). `charge` adds each version that a member publishes. `end`
-    drops the census so that the next member reads it again, and `failed` does so only for a member
-    that reached `charge`: a refused member bound nothing, so the next one reuses the census. A stale
-    census can wrongly refuse a member, which the next scan releases, because refusals are read again
-    from a fresh census.
+    serves; design.md D10 lists every writer of a stored reference (task 5.4.9). `charge` adds each
+    version that a member publishes. `end` drops the census so that the next member reads it again,
+    and `failed` does so only for a member that reached `charge`: a refused member bound nothing, so
+    the next one reuses the census. A stale census can wrongly refuse a member, which the next scan
+    releases, because refusals are read again from a fresh census.
     """
 
     def __init__(self, vault: Path) -> None:
