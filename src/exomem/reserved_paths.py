@@ -1887,6 +1887,40 @@ def _note_census(
     artifact_census.note_touched(vault_root, removed)
 
 
+def _refuse_stored_pages(
+    vault_root: Path, operation: str, *values: object, folder: bool = False
+) -> None:
+    """Refuse a publish, unlink or move that would change a page that store mode owns.
+
+    These writers put bytes on disk or take them away, and a stored page changes only through a
+    store commit: a file written there is an outside edit that the importer adopts, so the store
+    and the files disagree. A binary, such as a metadata sidecar, is disk-first by design and
+    passes, as does any path the store does not own. A caller that routes the change through the
+    store never reaches this check, and a wrong refusal costs the owner a rollback to run that one
+    operation on files.
+    A path that is not a valid spelling passes: the writer's own check names that error.
+    """
+    from .vault_store import availability, mode, ownership
+
+    for value in values:
+        try:
+            parent, leaf = _leaf_spelling(value)
+        except ReservedPathLeafError:
+            continue
+        rel = leaf if parent == "." else f"{parent}/{leaf}"
+        owned = (
+            ownership.owns_folder(rel)
+            if folder
+            else ownership.classify(rel) is ownership.Ownership.PAGE
+        )
+        if owned and mode.store_mode_active(vault_root):
+            raise availability.unrouted(
+                operation,
+                f"it would write to or remove {rel}, which the store holds and only a store "
+                "commit may change",
+            )
+
+
 def publish_generic_bytes(
     vault_root: Path,
     value: object,
@@ -1906,6 +1940,7 @@ def publish_generic_bytes(
 
     if not isinstance(data, bytes):
         raise TypeError("generic byte publication requires bytes")
+    _refuse_stored_pages(vault_root, "publish_generic_bytes", value)
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
@@ -2008,6 +2043,7 @@ def unlink_generic_file(
 ) -> None:
     """Remove one exact ordinary file through its retained parent and leaf."""
 
+    _refuse_stored_pages(vault_root, "unlink_generic_file", value)
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
@@ -2118,6 +2154,9 @@ def move_generic_path(
     ordinary NFKC spelling.
     """
 
+    _refuse_stored_pages(
+        vault_root, "move_generic_path", source, destination, folder=source_kind == "directory"
+    )
     with _generic_identity_catalogue_scope(
         vault_root, source, destination, identities=identities
     ) as current:

@@ -40,7 +40,9 @@ from typing import Any, TypeVar
 
 from . import audit as audit_module
 from . import indexes, maintenance_jobs, originals, relation_review, semantic_index, semantic_writes
+from .cli_ops import OpError
 from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root
+from .vault_store import availability as store_availability
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +65,9 @@ class ReconcileReport:
     semantic_unit_orphans_removed: int = 0
     clip_orphans_removed: int = 0
     frame_orphans_removed: int = 0
+    #: Frame folders of a missing video that a store-mode vault holds as pages, which this run left
+    #: in place because no store form clears them yet.
+    frame_orphans_kept: list[str] = field(default_factory=list)
     part_orphans_removed: int = 0
     parts_rebuilt: int = 0
     parts_missing: list[str] = field(default_factory=list)
@@ -129,6 +134,7 @@ class ReconcileReport:
             "semantic_unit_orphans_removed": self.semantic_unit_orphans_removed,
             "clip_orphans_removed": self.clip_orphans_removed,
             "frame_orphans_removed": self.frame_orphans_removed,
+            "frame_orphans_kept": self.frame_orphans_kept,
             "part_orphans_removed": self.part_orphans_removed,
             "parts_rebuilt": self.parts_rebuilt,
             "parts_missing": self.parts_missing,
@@ -271,7 +277,6 @@ def _run_lock(vault_root: Path, *, dry_run: bool) -> Iterator[None]:
     from filelock import FileLock, Timeout
 
     from . import mutation_lock, private_state
-    from .cli_ops import OpError
     from .writer_lease import active_mutation_request_id
 
     if dry_run or active_mutation_request_id() is None:
@@ -1175,12 +1180,22 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
                 )
             if clip_orphans:
                 embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)
+            cleared: list[tuple[Path, Path]] = []
             for frame_dir, video_path in frame_orphans:
-                scene_frames.clear_scene_frames(vault_root, video_path)
+                try:
+                    scene_frames.clear_scene_frames(vault_root, video_path)
+                except OpError as refusal:
+                    if refusal.code != store_availability.WRITER_UNROUTED:
+                        raise
+                    # A store-mode vault holds the sidecars as pages; the run goes on without them.
+                    report.frame_orphans_kept.append(_rel(frame_dir, vault_root))
+                    continue
+                cleared.append((frame_dir, video_path))
                 try:
                     frame_dir.rmdir()
                 except OSError:
                     pass
+            frame_orphans = cleared
             if swept.removed or swept.missing:
                 # The sweep reads every part again under this hold before it removes or writes one.
                 swept = extraction_parts.sweep(vault_root, dry_run=False)
@@ -1309,6 +1324,7 @@ def _job_summary(report: ReconcileReport) -> dict[str, Any]:
         "references_refreshed": report.references_refreshed,
         "clip_orphans_removed": report.clip_orphans_removed,
         "frame_orphans_removed": report.frame_orphans_removed,
+        "frame_orphans_kept": len(report.frame_orphans_kept),
         "part_orphans_removed": report.part_orphans_removed,
         "parts_missing": len(report.parts_missing),
         "parts_unowned": len(report.parts_unowned),
