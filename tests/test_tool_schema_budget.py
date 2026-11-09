@@ -75,12 +75,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # so their ceilings round to 3,350 B, 2,800 B and 3,400 B. The complete local wire measures 168,761 B, so
 # the budget rises 200 B.
 # With both sets of changes above, the complete local wire measures 169,044 B, so the budget is 169,050 B.
-TOTAL_BUDGET = 169_050
+# The owner-only approve_procedure tool (approve, revoke and quarantine) measures 1,748 B, and its
+# procedure_approvals listing kind adds 148 B to read_review, which measures 7,591 B. Their ceilings
+# round to 1,750 B and 7,600 B.
+# With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
+TOTAL_BUDGET = 170_950
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
     "adopt_vault": 1350,
     "adoption_studio": 3800,
+    "approve_procedure": 1750,
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3400,
@@ -122,7 +127,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_memory": 3450,
     "read_plans": 2800,
     "read_records": 3350,
-    "read_review": 7550,
+    "read_review": 7600,
     "read_schema": 16700,
     "recall_context": 2950,
     "record_episode": 5500,

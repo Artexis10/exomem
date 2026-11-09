@@ -2267,6 +2267,18 @@ def _user_summary(
     return _lead(head, names)
 
 
+def _stated_outcome(leaf: Any) -> str | None:
+    """The sentence an approval leaf states itself.
+
+    An approval has no page `path` for `_user_summary` to name, and its outcome (approved, already
+    approved, revoked, moved aside) depends on the ledger's state, so the leaf carries the sentence.
+    """
+    if not isinstance(leaf, Mapping) or leaf.get("operation") != "approve_procedure":
+        return None
+    sentence = leaf.get("outcome")
+    return sentence if isinstance(sentence, str) and sentence else None
+
+
 def project_terminal(
     result: Any, detail: ResponseDetail = "compact", *, outcome_verb: OutcomeVerb | None = None
 ) -> Any:
@@ -2317,6 +2329,9 @@ def project_terminal(
             result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
         )
     )
+    stated_outcome = _stated_outcome(leaf)
+    if user_summary is not None and stated_outcome is not None:
+        user_summary = stated_outcome
     if user_summary is not None:
         # Named at render time from the deployment, so a replay of the stored terminal reads the
         # same. Two connectors can present one display name; the sentence says which store it was.
@@ -2378,6 +2393,12 @@ def project_terminal(
         # The recording agent needs the key back to record the next revision,
         # and every field here is bounded by `episode_capture`'s own caps.
         compact.update({key: leaf[key] for key in _EPISODE_RECEIPT_FIELDS if key in leaf})
+    elif stated_outcome is not None:
+        # The owner reads the sentence in `user_summary`; the change shown for an approve and the
+        # entry ids and versions stay in the bounded `changes` and `diagnostics` parts.
+        compact.update({key: value for key, value in leaf.items() if key != "outcome"})
+        if user_summary is None:
+            compact["outcome"] = stated_outcome
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
         # The configuration contract is metadata-only and bounded by the
         # canonical prominence vocabulary. Keep the newly effective contract

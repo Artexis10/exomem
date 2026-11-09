@@ -757,6 +757,9 @@ def main(argv: list[str] | None = None) -> int:
                 current = control(args.runtime_dir, {"command": "status"})
                 if current.get("phase") != "ready":
                     raise RuntimeError("managed service is not ready; inspect --status or use --resume")
+                # A supervisor older than this field reports none, and its upgrade refuses after staging instead.
+                if current.get("upgrade_blocker"):
+                    raise RuntimeError(str(current["upgrade_blocker"]))
                 target = stage(
                     args.runtime_dir,
                     str(current.get("launcher_python", "")),

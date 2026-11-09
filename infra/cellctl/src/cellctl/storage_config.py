@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+GIB = 1024**3
+
 # The Hetzner Cloud Volume class every cell used before local storage.
 LEGACY_CLASS = "exomem-cloud-encrypted"
 # move-cloud-cells-to-local-storage D10: a local cell grows once its backup

@@ -14,10 +14,13 @@ from typing import Any
 import pytest
 import yaml
 
+from cellctl.capacity import GIB
+from cellctl.exports import PACK, PAUSE, UPLOAD, VERIFY, ExportRow, export_size
 from cellctl.manifests import (
     MEDIA_EDGE_ACCESS_LABEL,
     render_backup_job,
     render_cell_manifests,
+    render_export_job,
     render_restore_job,
 )
 
@@ -146,6 +149,9 @@ def test_the_edge_admits_cellctl_the_runtimes_cellctl_labels_and_backups_and_rea
                                "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
          "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell"},
                          "matchExpressions": [{"key": "exomem.io/cell-job", "operator": "DoesNotExist"}]}},
+        {"namespaceSelector": {"matchLabels": {MEDIA_EDGE_ACCESS_LABEL: "true"},
+                               "matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
+         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell-job": "export-pack"}}},
         {"namespaceSelector": {"matchExpressions": [{"key": "exomem.io/cloud-cell", "operator": "Exists"}]},
          "podSelector": {"matchLabels": {"app.kubernetes.io/name": "exomem-cell", "exomem.io/cell-job": "backup"}}},
     ]
@@ -206,6 +212,24 @@ def test_the_edge_admits_a_retained_cells_backup_job_and_none_of_its_other_pods(
         _selects(peer["namespaceSelector"], namespace) and _selects(peer["podSelector"], pod)
         for peer in _ingress_peers(documents) if "namespaceSelector" in peer)}
     assert admitted == {"backup"}
+
+
+def test_the_edge_admits_a_served_cells_export_pack_and_none_of_its_other_export_steps() -> None:
+    # add-cloud-media-store D8: only the pack reads evicted originals. The upload, which has public
+    # egress, and the pause beside the stopped vault never reach the edge.
+    documents = _helm_template(*EDGE)
+    spec = _spec(hold_kind="export", hold_started_at="2026-01-01T00:00:00+00:00")
+    namespace = next(m for m in render_cell_manifests(spec) if m["kind"] == "Namespace")["metadata"]["labels"]
+    item = ExportRow("00000000-0000-4000-8000-000000000001", spec.cell_id, "requested", None,
+                     archive_bytes=1, archive_sha256="0" * 64, archive_version_id="v")
+    pods = {step: render_export_job(spec, item, step, deadline_seconds=60, size=export_size(GIB),
+                                    part_urls=["https://storage.example/part"])["spec"]["template"]["metadata"]["labels"]
+            for step in (PAUSE, PACK, UPLOAD, VERIFY)}
+
+    admitted = {step for step, pod in pods.items() if any(
+        _selects(peer["namespaceSelector"], namespace) and _selects(peer["podSelector"], pod)
+        for peer in _ingress_peers(documents) if "namespaceSelector" in peer)}
+    assert admitted == {PACK}
 
 
 def test_the_fleet_switch_selects_every_cell_beside_the_canary_list_and_leaves_the_network_wall() -> None:

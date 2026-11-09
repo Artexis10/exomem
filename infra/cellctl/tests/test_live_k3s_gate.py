@@ -39,6 +39,8 @@ LIVE_PATHS = {
     "infra/cellctl/tests/test_export_storage.py",
     "infra/cellctl/src/cellctl/exports.py",
     "src/exomem/cloud_export.py",
+    # The export Jobs run this step module, which the real export test drives.
+    "src/exomem/cloud_export_steps.py",
     ".github/actions/free-runner-disk/action.yml",
 }
 

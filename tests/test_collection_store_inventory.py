@@ -118,6 +118,8 @@ def test_the_inventory_reports_every_store_and_file_collection_with_its_counts(
         assert [row["path"] for row in rows] == sorted(found)
         # The fields current callers read keep their meaning: file collections only.
         assert report["verdict"] == "migratable" and report["blocked"] == []
+        # The serving process releases every row, so its answer withholds none.
+        assert "outcome" not in report
         assert [row["path"] for row in report["collections"]] == sorted([DATASET, KEPT_PATH])
 
         # A small page walks the same rows; a cursor from elsewhere is refused with its remedy.
@@ -128,3 +130,17 @@ def test_the_inventory_reports_every_store_and_file_collection_with_its_counts(
     finally:
         service.stop()
 
+
+
+def test_an_inventory_from_a_process_without_the_store_says_why_it_lists_no_store_row(
+        env):  # noqa: F811 - the imported fixture, by name
+    """Defect: the owner's CLI inventory counts each store collection in its total but lists none and
+    says nothing, so the owner reads a vault whose store looks empty."""
+    root = legacy_vault(env)
+    assert migrate(root, "prepare", operator=False) == 0 and migrate(root, "apply") == 0
+    report = call(root, "maintain_memory", mode="collections-store")
+    listed = report["inventory"]["collections"]
+    # The migration moved four collections into the store; the dataset stays in files.
+    assert report["inventory"]["total"] == 5 and [row["path"] for row in listed] == [DATASET]
+    assert "4 store collection" in report["outcome"], report.get("outcome")
+    assert "exomem collections migrate --dry-run" in report["outcome"]

@@ -240,7 +240,7 @@ For the full read-only / writeable path map see `write-scope.md`.
 
 ## Page types
 
-Eight page types under `Knowledge Base/`, each with a required frontmatter shape,
+Nine page types under `Knowledge Base/`, each with a required frontmatter shape,
 naming rule, and location. **Full per-type spec: `page-types.md`;
 frontmatter: `frontmatter.md`.** The behaviorally-load-bearing
 distinctions:
@@ -256,6 +256,7 @@ distinctions:
 - **failure** — failure mode, `Notes/Failures/`.
 - **pattern** — reusable pattern, `Notes/Patterns/`. Use `projects:` (plural) when
   it spans projects.
+- **procedure** — reusable way of working, with when to use it and when not to, `Notes/Procedures/`.
 - **experiment** — hypothesis + protocol + primary data, `Notes/Experiments/<domain>/`.
 - **production-log** — creative artifact + production knowledge, `Notes/Productions/<medium>/`.
 - **entity** — typed node under the folder resolved by the stable entity registry

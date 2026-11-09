@@ -1404,7 +1404,7 @@ class _SelectedUnits:
                     yield row, unit
 
     def contributions(
-        self, column: str, parents: Sequence[str],
+        self, column: str, parents: Sequence[str], settled: dict[str, tuple[_UnitContribution, ...]] | None = None,
     ) -> tuple[dict[str, tuple[_UnitContribution, ...]], set[str]]:
         """Each of `parents`' referable units, as ranking statistics count it, by parent, and the parents read.
 
@@ -1414,6 +1414,10 @@ class _SelectedUnits:
         shared ref stands for it. A parent with no unit has no entry. The set
         names every parent that had a stored row and so was interpreted, even
         when its interpretation emitted no unit.
+
+        An empty `settled` receives each parent, with its units (none, for a parent that emitted none), at the
+        end of the batch in which a later parent's row arrives: rows come in parent order. A read that raises, as when the request budget stops it, leaves there
+        every parent it finished and never the one it was in the middle of.
         """
         if not parents:
             return {}, set()
@@ -1433,14 +1437,25 @@ class _SelectedUnits:
                     call_spans.measure(call_spans.UNIT_PARENTS_INTERPRETED)
                 yield row
 
-        grouped: dict[str, list[_UnitContribution]] = {}
-        for row, unit in self.served(counted()):
-            grouped.setdefault(str(row[1]), []).append(_UnitContribution(
-                int(row[3]), str(row[0]), str(unit.unit_ref),
-                # Interned: the units of a base share each distinct token.
-                tuple(map(sys.intern, str(row[2]).split())),
-            ))
-        return {path: tuple(units) for path, units in grouped.items()}, interpreted
+        settled = {} if settled is None else settled
+        # Each parent read and not yet settled, with the units interpreted so far.
+        reading: dict[str, list[_UnitContribution]] = {}
+        stream = counted()
+        while batch := list(itertools.islice(stream, _OCCURRENCE_TRANSPORT_BATCH)):
+            for row in batch:
+                reading.setdefault(str(row[1]), [])
+            for row, unit in self.served(batch):
+                reading[str(row[1])].append(_UnitContribution(
+                    int(row[3]), str(row[0]), str(unit.unit_ref),
+                    # Interned: the units of a base share each distinct token.
+                    tuple(map(sys.intern, str(row[2]).split())),
+                ))
+            # Rows come in parent order: only the batch's last parent can continue into the next batch.
+            last = str(batch[-1][1])
+            for path in [path for path in reading if path != last]:
+                settled[path] = tuple(reading.pop(path))
+        settled.update((path, tuple(units)) for path, units in reading.items())
+        return {path: units for path, units in settled.items() if units}, interpreted
 
 
 @dataclass(frozen=True, slots=True)
@@ -2621,6 +2636,12 @@ def _schedule_repair(
     a full pass is already active are one level-triggered observation and are
     coalesced into that pass instead of creating an unbounded rebuild chain.
     """
+    from . import service_standby
+
+    if service_standby.in_standby():
+        # The serving worker is the one repair owner, and a standby's read can find the catalogue
+        # one publication ahead of its unwatched registry. A rebuild here would be a publication.
+        return False
     # Pending-only callers already hold the resolved key; idle recovery must
     # inspect only process-local claims, without even resolving a path again.
     key = vault_root if pending_only else vault_root.resolve()
@@ -3189,6 +3210,20 @@ class _AdmittedBase:
 _UNIT_BASE_BYTES_MAX = 64 << 20
 _UNIT_BYTES = 370
 _TOKEN_BYTES = 8
+
+
+def _keeps_interpretation(view: Any, path: str) -> bool:
+    """Whether a parent's interpretation may enter the shared unit base: only a public instance's.
+
+    An owner-only instance's interpretation belongs to its caller, so every request interprets it again.
+    """
+    from .vocabulary.registry import PUBLIC_INSTANCE
+
+    return view.instance(path) == PUBLIC_INSTANCE
+
+
+def _units_bytes(units: Iterable[_UnitContribution]) -> int:
+    return sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in units)
 
 
 class _UnitContribution(NamedTuple):
@@ -10611,9 +10646,9 @@ class LexicalStore:
         interpretation's inputs are unchanged. Otherwise a parent is interpreted again only
         if it moved or the public-instance base lacks it, and every parent's units are then
         merged in `(parent path, rowid)` order, which gives the figures of a build from nothing.
+        A build that the request budget stops keeps no figures, but keeps the parents it finished.
         """
         from . import bm25 as bm25_module
-        from .vocabulary.registry import PUBLIC_INSTANCE
 
         admitted = {path for path in parents if view.parents.allowed(path)}
         digest = hashlib.blake2b(
@@ -10662,10 +10697,17 @@ class LexicalStore:
             with self._term_frequency_cache_lock:
                 base = self._unit_bases.get(scope)
             held = base.parents if base is not None and base.key == base_key else {}
-            fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
-                path for path, revision in revisions.items()
-                if (kept := held.get(path)) is None or kept.revision != revision
-            ])
+            finished: dict[str, tuple[_UnitContribution, ...]] = {}
+            try:
+                fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
+                    path for path, revision in revisions.items()
+                    if (kept := held.get(path)) is None or kept.revision != revision
+                ], finished)
+            except sqlite3.Error:
+                # The read stopped, as the request budget does (`stopping_at_budget`). Statistics over a part of the
+                # corpus would be wrong, so none are kept; the parents it finished are, so the next build resumes.
+                self._keep_unit_parents(scope, base_key, view, revisions, finished)
+                raise
             view.require_complete()
             corpus: dict[str, tuple[str, ...]] = {}
             representatives: dict[int, str] = {}
@@ -10681,7 +10723,7 @@ class LexicalStore:
                     # Only a parent with no stored row holds no interpretation at all.
                     parent = (
                         _ParentUnits(revision, units)
-                        if path not in interpreted or view.instance(path) == PUBLIC_INSTANCE else None
+                        if path not in interpreted or _keeps_interpretation(view, path) else None
                     )
                 else:
                     units = parent.units
@@ -10692,26 +10734,22 @@ class LexicalStore:
                     # Retain identities without text; ambiguous hit precedence still
                     # belongs to the original candidate SQL traversal.
                     occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
-                    if parent is not None:
-                        kept_bytes += _UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens)
                 if parent is not None:
                     kept_parents[path] = parent
+                    kept_bytes += _units_bytes(units)
             # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
             # parents this build did not read. Each is used again only at its own revision; a deleted or
             # renamed page's entry stays until the byte bound drops the base.
             for path, parent in held.items():
                 if path not in revisions:
                     kept_parents[path] = parent
-                    kept_bytes += sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in parent.units)
+                    kept_bytes += _units_bytes(parent.units)
             entry = _AdmittedStatisticsEntry(
                 current_fingerprint, bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
                 MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
             )
             with self._term_frequency_cache_lock:
-                if kept_bytes <= _UNIT_BASE_BYTES_MAX:
-                    self._unit_bases[scope] = _UnitBase(base_key, kept_parents)
-                else:
-                    self._unit_bases.pop(scope, None)
+                self._store_unit_base(scope, base_key, kept_parents, kept_bytes)
         with self._term_frequency_cache_lock:
             # Equivalent snapshot aliases must not evict another admitted corpus.
             for retained_key, other in tuple(self._admitted_statistics.items()):
@@ -10721,6 +10759,41 @@ class LexicalStore:
                 self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
             self._admitted_statistics[key] = entry
         return entry
+
+    def _keep_unit_parents(
+        self, scope: str, base_key: tuple, view: _SelectedUnits, revisions: Mapping[str, str],
+        finished: Mapping[str, tuple[_UnitContribution, ...]],
+    ) -> None:
+        """Merge the parents a stopped build finished into the scope's unit base, so the next build resumes.
+
+        The same rule as a completed build's: a parent of an owner-only instance is never kept, nor one
+        whose coverage is incomplete, and a base of another key is replaced, not merged. The base keeps
+        every parent it held, each used again only at its own revision.
+        """
+        # A finished parent was resolved by the read, so `instance` answers from the view's memory.
+        kept = {
+            path: _ParentUnits(revisions[path], units) for path, units in finished.items()
+            if path not in view.parents.unavailable and _keeps_interpretation(view, path)
+        }
+        if not kept:
+            return
+        # One critical section: a build that stored in between would otherwise lose its parents.
+        with self._term_frequency_cache_lock:
+            base = self._unit_bases.get(scope)
+            merged = dict(base.parents) if base is not None and base.key == base_key else {}
+            merged.update(kept)
+            self._store_unit_base(
+                scope, base_key, merged, sum(_units_bytes(parent.units) for parent in merged.values())
+            )
+
+    def _store_unit_base(
+        self, scope: str, base_key: tuple, parents: dict[str, _ParentUnits], kept_bytes: int
+    ) -> None:
+        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock."""
+        if kept_bytes <= _UNIT_BASE_BYTES_MAX:
+            self._unit_bases[scope] = _UnitBase(base_key, parents)
+        else:
+            self._unit_bases.pop(scope, None)
 
     @staticmethod
     def _frequency_revision(conn: sqlite3.Connection) -> str:

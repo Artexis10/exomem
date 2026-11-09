@@ -932,6 +932,40 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     return frozenset(carried)
 
 
+def _warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
+    """Build the method-unit statistics the promoted worker's first task context would build. Reads only.
+
+    Without this the first task context after a handoff builds them, which took 41 s on a vault of about
+    four thousand pages and 6 s on the next one. The standby becomes the serving process, so what it holds
+    in memory before promotion is what that request reuses. The post-promotion request-path warm cannot
+    do it: its neutral turn raises no method query. Only over a proven live catalogue, because a detached
+    build's rows are replaced at promotion and statistics over them would be built for nothing.
+
+    ``deadline`` (absolute monotonic) bounds the build the way the request path bounds a method search: a
+    request budget that ends at it, stopped at by the catalogue query itself, so a build that reaches it
+    leaves no statistics rather than running on, though it keeps the parents it interpreted for the next
+    build. It builds nothing when warm-up is disabled or no time is left. Never raises.
+    """
+    if not warmup.warmup_enabled():
+        return
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        return
+    from . import lexstore, request_budget, working_set
+
+    began = time.monotonic()
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=seconds))
+    try:
+        with lexstore.stopping_at_budget():
+            outcome = working_set.warm_owner_method_units(vault_root)
+    except Exception:  # noqa: BLE001 - the first request builds them itself when this fails
+        log.info("standby method-unit statistics warm failed", exc_info=True)
+        return
+    finally:
+        request_budget.reset_current(token)
+    log.info("standby method-unit statistics warm: %s (%.1f s)", outcome, time.monotonic() - began)
+
+
 def warm(vault_root: Path) -> None:
     """Warm a standby to cutover readiness without owning any state.
 
@@ -951,6 +985,9 @@ def warm(vault_root: Path) -> None:
 
     vault_root = Path(vault_root)
     started = time.monotonic()
+    # The last warm steps stop here, which leaves the collections pre-import its margin inside the supervisor's budget.
+    optional_deadline = started + standby_warm_budget() - COLLECTIONS_PREIMPORT_MARGIN_SECONDS
+    catalogue_proven = False
     readiness.begin_warm()
     try:
         # Seed this process's recall registry before anything reads it. The
@@ -964,6 +1001,7 @@ def warm(vault_root: Path) -> None:
             log.warning("standby recall registry seed failed", exc_info=True)
         if prove_retrieval_catalog(vault_root):
             _warm_proven_catalogue(vault_root)
+            catalogue_proven = True
         elif prepare_detached_catalog(vault_root):
             # No caches are warmed over rows promotion replaces. The build took
             # up to a minute, during which this unwatched registry went stale;
@@ -976,6 +1014,7 @@ def warm(vault_root: Path) -> None:
             # A release-change build that ran and failed falls back to the
             # ordinary proof now, not at the next re-proof poll.
             _warm_proven_catalogue(vault_root)
+            catalogue_proven = True
         else:
             log.info(
                 "standby retrieval catalog is not current; awaiting a current "
@@ -991,16 +1030,18 @@ def warm(vault_root: Path) -> None:
         # corpus is what the gate that admits it waits for.
         build_semantic_corpus(vault_root)
         _preload_models()
+        # Inside the warm: during it the `collections_migration` component keeps the standby from cutover
+        # readiness, so the old worker serves while it builds. Only over a proven graph snapshot: a declined
+        # proof waits on `reprove_until_promoted`, which starts after `warm()`, and must not wait on this too.
+        if catalogue_proven and cutover_components().get("graph_snapshot") == "ready":
+            _warm_method_unit_statistics(vault_root, deadline=optional_deadline)
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)
     finally:
         try:
             # Last, so its staging is as close to the handoff as the warm allows, and after
             # a crashed warm too, so that its own component always settles.
-            prepare_collections_migration(
-                vault_root,
-                deadline=started + standby_warm_budget() - COLLECTIONS_PREIMPORT_MARGIN_SECONDS,
-            )
+            prepare_collections_migration(vault_root, deadline=optional_deadline)
         finally:
             readiness.finish_warm()
 

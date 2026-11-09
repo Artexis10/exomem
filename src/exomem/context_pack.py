@@ -362,6 +362,7 @@ def _parent_context(
             "type": _cap(page.page_type, 64) if page.page_type else None,
             "status": _cap(page.status or "active", 64),
             "updated": _cap(page.updated, 64),
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             "supersedes": supersedes,
             "superseded_by": superseded_by,
             "sources": sources,
@@ -667,6 +668,7 @@ def _supersession_edges(packed_pages: list[ParsedPage]) -> list[dict]:
     by_canon = {corpus_aware._canon(p.rel_path): p.rel_path for p in packed_pages}
     edges: list[dict] = []
     for page in packed_pages:
+        # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
         for raw in page.superseded_by:
             canon = corpus_aware._canon(_wikilink_target(raw))
             if canon in by_canon and by_canon[canon] != page.rel_path:

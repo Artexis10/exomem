@@ -6,14 +6,14 @@
 
 ## 2. Relation behaviours
 
-- [ ] 2.1 Record the inventory's mapping in design.md: the relation-behaviour table, the `frontmatter_fields` binding and the debt list.
-- [ ] 2.2 Declare the closed relation-behaviour set and the `behaviours` field on core entries. Resolve an extension's behaviours through its core parent in one registry accessor. Refuse `behaviours` on an extension.
-- [ ] 2.3 Add `frontmatter_fields` to the core pack, and derive the `frontmatter` origin from it. Make graph indexing, relation facts and activation read it, and delete the three copies.
-- [ ] 2.4 Replace each relation branch that the design table maps with a behaviour or binding read. SQL readers expand keys over the admitted instances through `relation_query_plan`. Give each remaining branch its debt reason in a code comment.
-- [ ] 2.5 Move the shipped traversal profiles into the core pack, in the vault overlay's grammar.
-- [ ] 2.6 Prove the cutover on the fixture vault in design.md ("Fixture"): core outputs identical, and each intended change in design.md shown by its own case.
-- [ ] 2.7 Update the AGENTS.md section "Vocabulary lives in registries": code branches on `behaviours`, `traits`, `role` and status `class`, never on a family value.
-- [ ] 2.8 Add `precedes` and `follows` with their opposite order behaviours, and order them in compiled context.
+- [x] 2.1 Record the inventory's mapping in design.md: the relation-behaviour table, the `frontmatter_fields` binding and the debt list.
+- [x] 2.2 Declare the closed relation-behaviour set and the `behaviours` field on core entries. Resolve an extension's behaviours through its core parent in one registry accessor. Refuse `behaviours` on an extension.
+- [x] 2.3 Add `frontmatter_fields` to the core pack, and derive the `frontmatter` origin from it. Make graph indexing, relation facts and activation read it, and delete the three copies.
+- [x] 2.4 Replace each relation branch that the design table maps with a behaviour or binding read. SQL readers ask `exomem_edge_behaves`, or expand keys over the admitted instances through `relation_query_plan`. Give each remaining branch its debt reason in a code comment.
+- [x] 2.5 Move the shipped traversal profiles into the core pack, in the vault overlay's grammar.
+- [x] 2.6 Prove the cutover on the fixture vault in design.md ("Fixture"): core outputs identical, and each intended change in design.md shown by its own case.
+- [x] 2.7 Update the AGENTS.md section "Vocabulary lives in registries": code branches on `behaviours`, `traits`, `role` and status `class`, never on a family value.
+- [ ] 2.8 Add `precedes` and `follows` with their opposite order behaviours, and order them in compiled context. The relations and their `earlier_than_target` and `later_than_target` behaviours are in the core pack. The ordering lands with `order_in_time` in slice 5.
 
 ## 3. Kinds and verdicts
 

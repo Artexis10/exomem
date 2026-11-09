@@ -1,6 +1,6 @@
 # Page Types
 
-Eight page types in the Knowledge Base. Each has a required location, naming
+Nine page types in the Knowledge Base. Each has a required location, naming
 convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
 For every active compiled-note type below, the fenced content shape includes a
@@ -241,6 +241,50 @@ Conditions where it's a regression.
 ## Relations
 
 - mitigates [[...]]
+```
+
+## procedure
+
+**Location:** `Notes/Procedures/`
+**Naming:** `<procedure-name>.md`
+**Required frontmatter:** `type: procedure`, `status`, `created`, `updated`, `tags`. Optional: `summary`, `sources`, `projects`.
+
+A procedure is a reusable way of working that you write once and follow again.
+Write `summary` as one line that says when to use it. Put each distinct way of
+working in its own `## Procedure` block, so that the block reads on its own, and
+state in a "Not for" section when the procedure does not apply.
+
+**Content shape:**
+
+```markdown
+---
+type: procedure
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+summary: Use when preparing a release candidate for a library.
+projects: [project-alpha]
+tags: [...]
+---
+
+# <Procedure name>
+
+## Procedure
+
+1. First step, with the check that shows it worked.
+2. Second step.
+
+## Not for
+
+Situations where this procedure does not apply, such as a hotfix.
+
+## Observations
+
+- [technique] Run the full checks before tagging #release
+
+## Relations
+
+- depends_on [[...]]
 ```
 
 ## experiment
@@ -610,7 +654,7 @@ attempt language-aware transliteration, and it never renames existing pages on
 upgrade or reconcile.
 
 - Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
-- Notes (research, insight, failure, pattern): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
+- Notes (research, insight, failure, pattern, procedure): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
 - Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
 - Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-launch-recap.md`
 - Entities: the Unicode canonical name is stored in `title:` and the H1; an

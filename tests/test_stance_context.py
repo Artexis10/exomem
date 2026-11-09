@@ -471,13 +471,18 @@ def test_served_task_routes_keep_identities_without_retrieved_prose(stance_vault
     """The owner can audit task methods and read routes without retaining their content or prompts."""
     route = {"ref": "method.md#unit", "source_ref": "method.md", "source_version": "version", "read_ref": "method.md"}
     packet = {**_packet(), "task_context": {
-        "state": "ready", "candidates": [{**route, "title": "Private source title", "reason": "Private task details"}],
+        "state": "ready", "candidates": [{
+            **route, "title": "Private source title", "reason": "Private task details",
+            "links": [{"relation": "evidenced_by", "target_ref": "report.md", "title": "Private report title"}],
+            "links_omitted": 2,
+        }],
         "methods": {"reset": False, "items": [{**route, "content": "Private method text"}]},
     }}
     identifier = served_context.append(stance_vault, packet)
     record = served_context.read(stance_vault, served_context_id=identifier)
+    offered = {**route, "links": [{"relation": "evidenced_by", "target_ref": "report.md"}], "links_omitted": 2}
     assert record["record"]["task_context"] == {
-        "state": "ready", "candidates": [route], "methods": {"reset": False, "items": [route]},
+        "state": "ready", "candidates": [offered], "methods": {"reset": False, "items": [route]},
     }
     assert "Private" not in json.dumps(record)
     assert sum(item["ref"] == "method.md" for item in record["current_resolution"]) == 2

@@ -64,6 +64,7 @@ from . import (
     context_roles,
     freshness,
     lifecycle_statuses,
+    procedure_approval,
     sidecar_store,
     view_lag,
     working_set,
@@ -604,7 +605,13 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
                 isinstance(item.get(key), str) and item[key] and len(item[key]) <= CONTINUITY_MAX_CHARS
                 for key in ("ref", "source_ref", "source_version")
             ):
-                decoded["method_versions"].append({key: item[key] for key in ("ref", "source_ref", "source_version")})
+                hint = {key: item[key] for key in ("ref", "source_ref", "source_version")}
+                # Only `approved` and `stale` ride a hint. A token from before approvals, or one naming a value this
+                # server never writes, carries none, and the absence reads unapproved.
+                held = item.get("approval")
+                if held in (procedure_approval.APPROVED, procedure_approval.STALE):
+                    hint["approval"] = held
+                decoded["method_versions"].append(hint)
     return decoded
 
 

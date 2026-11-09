@@ -771,6 +771,35 @@ def test_unsupported_optional_state_never_stops_the_serving_worker(
     asyncio.run(scenario())
 
 
+def test_a_supervisor_older_than_the_vault_state_names_the_launcher_fix_before_touching_the_worker(
+    tmp_path, monkeypatch,
+):
+    from exomem import state_migration, state_paths
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    state_migration.require_vault_state_ready(vault)
+    # A newer worker recorded an optional format that this supervisor's release predates.
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["descriptors"] = sorted([*payload["descriptors"], "sample-format-v9"])
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        assert "sample-format-v9" in manager.status()["upgrade_blocker"]
+        result = await manager.upgrade(target)
+        assert not result["ok"]
+        assert "sample-format-v9" in result["error"]
+        assert "docs/managed-service-upgrades.md" in result["error"]
+        assert runtime.events == []
+        assert ingress.events == []
+        assert manager.records.pending() is None
+
+    asyncio.run(scenario())
+
+
 @pytest.fixture
 def candidate_runtime(tmp_path, monkeypatch):
     from exomem import state_migration
