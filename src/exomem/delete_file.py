@@ -315,7 +315,9 @@ def _delete_file_local(
         find_inbound_wikilinks(vault_root, rel_path) if stored_check is None else stored_check.links
     )
     inbound_all = [match for match in linked if visible is None or visible(match.path)]
-    if stored_check is not None:
+    # An unimported file has no policy, and the store's filter withholds it from every reader, so
+    # to a restricted caller it is absent: no count, no path. The owner's audit reports the orphan.
+    if stored_check is not None and egress.file_mode_restricted_caller(vault_root, None) is None:
         inbound_all += stored_check.unimported
     inbound_ignored = [m for m in inbound_all if m.path in expected_set]
     inbound = [m for m in inbound_all if m.path not in expected_set]

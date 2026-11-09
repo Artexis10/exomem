@@ -64,7 +64,7 @@ class InboundCheck(NamedTuple):
 
     ``unimported`` holds the links from files in the Knowledge Base that the store has no page
     for. No policy covers such a file yet, so the publication filter would hide it from every
-    caller; the caller counts it without that filter.
+    caller. The caller decides whether to count it, and must not name it to a restricted one.
     """
 
     links: list[vault.InboundLink]
@@ -117,9 +117,14 @@ def inbound_links(vault_root: Path, rel: str) -> InboundCheck:
                 and view.page_meta(source) is None
             ):
                 try:
-                    unimported.extend(matching(source, path.read_text("utf-8", errors="replace")))
-                except OSError:
+                    # The descriptor read refuses a symlink, which a file swapped after the walk
+                    # could be; `read_guarded_text` would look for the file in the store instead.
+                    raw, _guard = vault._read_bounded_guarded_snapshot(
+                        Path(vault_root), source, path.lstat().st_size
+                    )
+                except (OSError, vault.PathGuardError):
                     continue
+                unimported.extend(matching(source, raw.decode("utf-8", errors="replace")))
     shown = {link.path for link in links}
     links.extend(vault.InboundLink(source, 0, "", "") for source in sorted(sources - shown))
     return InboundCheck(links, unimported, frozenset(sources))

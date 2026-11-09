@@ -9,6 +9,7 @@ runs its pass by hand: nothing writes a stored page to disk, so each answer come
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import sys
@@ -49,7 +50,12 @@ from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance import catalog_publication, membership, policy
-from exomem.governance.principal import owner_principal
+from exomem.governance.principal import (
+    library_scope,
+    most_restrictive_principal,
+    owner_principal,
+    request_scope,
+)
 from exomem.governance.tool import op_govern_memory
 from exomem.vault_store import availability, batch, projection, read, verify, write
 
@@ -203,21 +209,39 @@ def test_delete_of_a_page_that_a_note_outside_the_knowledge_base_links_to_refuse
     assert tree(served) == before
 
 
+def unimported_note(root):
+    """A note that a person wrote on disk in the Knowledge Base, which nothing has imported."""
+    mine = root / "Knowledge Base/Notes/Mine.md"
+    mine.write_text("---\ntitle: Mine\ntype: note\n---\n\nSee [[Gamma]].\n", encoding="utf-8")
+
+
 def test_delete_of_a_page_that_a_note_on_disk_in_the_knowledge_base_links_to_refuses(served):
     """A store delete that ignores a note in the Knowledge Base that nothing has imported yet."""
     store_gamma(served)
-    mine = served / "Knowledge Base/Notes/Mine.md"
-    mine.write_text("---\ntitle: Mine\ntype: note\n---\n\nSee [[Gamma]].\n", encoding="utf-8")
+    unimported_note(served)
     before = tree(served)
     start = revision(served)
 
-    with pytest.raises(delete_file.DeleteFileError) as refused:
+    with library_scope(), pytest.raises(delete_file.DeleteFileError) as refused:
         delete_file.delete_file(served, path=GAMMA, confirm=True)
 
     assert refused.value.code == "INBOUND_LINKS"
     assert "Knowledge Base/Notes/Mine.md:6" in refused.value.reason
     assert revision(served) == start
     assert tree(served) == before
+
+
+def test_a_restricted_writers_delete_neither_counts_nor_names_an_unimported_note(served):
+    """A refusal that tells a restricted caller the path of a file that no policy covers yet."""
+    store_gamma(served)
+    unimported_note(served)
+
+    with request_scope(most_restrictive_principal(surface="rest")):
+        result = delete_file.delete_file(served, path=GAMMA, confirm=True)
+
+    assert result.inbound_link_count == 0
+    assert "Mine" not in json.dumps(result.as_dict())
+    assert "Mine" not in (served / result.trash_meta_path).read_text(encoding="utf-8")
 
 
 def test_a_note_outside_the_knowledge_base_that_a_batch_committed_counts_once(served):
