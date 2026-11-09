@@ -254,7 +254,11 @@ def test_serving_open_edge_notices_builds_the_vault_link_index_once(
     served = promotions.served_rows(vault)
 
     assert served, "the open notices are still served"
-    assert len(builds) == 1
+    assert len(builds) <= 1
+    # The next recall reuses the process-shared index: no page walk while the vault is unchanged.
+    builds.clear()
+    assert promotions.served_rows(vault) == served
+    assert builds == []
 
 
 def test_a_registry_save_adds_one_entry_for_all_the_keys_it_adds(
