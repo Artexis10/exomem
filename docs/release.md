@@ -266,19 +266,33 @@ Record the ready PR/head event and its source in the release handoff. Measure
 ready-to-all-green CI and ready-to-qualified artifacts separately, including queue
 time and retries. Retain the earlier Python qualification time separately.
 
-4. Request evidence for the selected source; expect reuse or one Full fallback dispatch.
+4. Request evidence for the selected source and reviewed head; expect reuse or one Full fallback dispatch.
 
 ```bash
-gh workflow run release-evidence-automation.yml --ref main -f release_pr="$release_pr" -f expected_base="$source_commit"
+gh workflow run release-evidence-automation.yml --ref main -f release_pr="$release_pr" -f expected_base="$source_commit" -f expected_head="$reviewed_head"
 ```
 
 The evidence workflow refreshes failed release checks when complete proof
-arrives. It does not merge. Repeated intent reuses matching proof or an existing
-Full run. The release PR retains lint, build, specs, capabilities, image smoke,
+arrives. Repeated intent reuses matching proof or an existing Full run. The
+release PR retains lint, build, specs, capabilities, image smoke,
 release-file validation, and the wheel onboarding check.
 
-5. Wait for evidence and required checks; expect a green release PR.
-6. Run the guarded merge with the recorded inputs; expect the reviewed head to merge.
+5. Wait for evidence and required checks; expect the release PR to merge itself.
+
+With `expected_head`, the workflow lands the release: after evidence and every
+required check pass, it runs the guarded merge below for that exact source and
+head, with the release App token so that Release Please tags the merge. It
+merges nothing when main moved, the release head changed, a required check
+failed, or no intent named that head; a scheduled Full run alone never merges.
+Its run log names the reason. The repository variable `RELEASE_AUTO_MERGE=off`
+turns landing off for runs that start afterwards.
+
+An intent stays valid for one day while main and the release head stay
+unchanged, so a later Full run, such as the nightly, can still land it after a
+failed attempt. To hold a release, set `RELEASE_AUTO_MERGE` to `off` before the
+next evidence run.
+
+6. If the release PR is still open (intent without a head, landing off, or a failed landing), run the guarded merge with the recorded inputs; expect the reviewed head to merge.
 
 ```bash
 GH_REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" python3 scripts/release_evidence.py merge --pr "$release_pr" --expected-base "$source_commit" --expected-head "$reviewed_head"

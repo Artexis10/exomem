@@ -20,7 +20,7 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
-from exomem import bm25, commands, lexstore
+from exomem import bm25, commands, deferred_index, lexstore, mode
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview, runtime
@@ -97,9 +97,15 @@ def sha(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def test_create_note_is_searchable_and_linked_when_it_returns_and_writes_no_markdown(served):
+def test_create_note_is_searchable_and_linked_when_it_returns_and_writes_no_markdown(
+    served, monkeypatch
+):
     """A write acknowledged before its rows are: the note returns and a search misses it."""
+    # Under the service profile a write once queued a semantic receipt that no turn reads.
+    monkeypatch.setattr(mode, "service_profile_enabled", lambda: True)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     before = tree(served)
+    receipts = deferred_index.snapshot(served)
     result = commands.op_remember(
         served,
         title="Quokka census",
@@ -114,6 +120,7 @@ def test_create_note_is_searchable_and_linked_when_it_returns_and_writes_no_mark
     assert store_rows(served, "SELECT 1 FROM identities WHERE path = ?", created)
     assert tree(served) == before, "a store-mode write must change no Markdown byte on disk"
     assert not (served / created).exists()
+    assert deferred_index.snapshot(served) == receipts, "the drain follows audit rows, not receipts"
 
 
 def test_a_new_page_resolves_the_links_that_wait_for_its_title_and_a_delete_unresolves_them(

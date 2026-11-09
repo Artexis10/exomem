@@ -768,6 +768,31 @@ def test_expired_component_claim_is_reclaimable_after_restart(vault: Path) -> No
     assert reclaimed.claim_owner == "process-two"
 
 
+def test_a_component_that_failed_a_thousand_times_still_backs_off(vault: Path) -> None:
+    """A long-failing component must record its failure, or it retries on every drain pass."""
+    protocol = _protocol()
+    batch, target, _before, after = _prepare_one(vault, batch_id="stuck", now=1.0)
+    _commit_and_prove(vault, batch, target, after)
+    [claimed] = protocol.claim_ready_components(
+        vault, owner="worker", limit=1, lease_seconds=30.0, now=2.0
+    )
+    # A live batch reached this count; the next doubling past it overflowed a float.
+    connection = sqlite3.connect(deferred_index.store_path(vault))
+    with connection:
+        connection.execute(
+            "UPDATE derived_batch_components SET attempt_count = 1024 WHERE batch_id = 'stuck'"
+        )
+    connection.close()
+
+    failed = protocol.retry_component(
+        vault, claimed, failure_code="dispatch_failed", now=3.0,
+        base_backoff_seconds=5.0, max_backoff_seconds=120.0,
+    )
+
+    assert failed.attempt_count == 1025
+    assert failed.next_attempt_at == 123.0
+
+
 def test_retryable_failure_rotates_and_persists_bounded_backoff(vault: Path) -> None:
     protocol = _protocol()
     first, first_target, _before, first_after = _prepare_one(

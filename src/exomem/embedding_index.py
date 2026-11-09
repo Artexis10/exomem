@@ -22,7 +22,7 @@ from itertools import chain
 from operator import itemgetter
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NamedTuple, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, cast
 
 import numpy as np
 
@@ -39,6 +39,9 @@ from . import (
     vecstore,
 )
 from .vector_index_common import vec_gate
+
+if TYPE_CHECKING:
+    from .vault_store.vectors import Withheld
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +82,91 @@ _CONTENT_COLUMN = OCCURRENCE_COLUMNS.index("content")
 SEMANTIC_UNIT_GENERATION = "semantic_unit_generation"
 #: The tables holding this sidecar's vectors; the first row read for a legacy width.
 _VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
+#: The `meta` keys of a store-mode vault's change cursor: the store revision and the audit `seq` of
+#: the last audit row whose pages this sidecar has caught up with (see `vault_store.vectors`).
+STORE_CURSOR_REVISION = "store_revision_seen"
+STORE_CURSOR_SEQ = "store_audit_seq_seen"
+#: Paths per `IN (...)` read of the stamp table, under SQLite's bound-parameter limit.
+_STAMP_QUERY_PATHS = 500
+
+
+class StoreStamp(NamedTuple):
+    """Which store bytes one page's rows were computed from, written in the rows' own transaction.
+
+    ``owed`` marks a page whose attempt failed on exactly those bytes: its rows, kept only so a
+    retry can reuse their vectors, do not match the store, and no reader may serve them.
+    """
+
+    sha256: str
+    revision: int
+    owed: bool = False
+
+
+class StoreRecord:
+    """The store-mode record of one sidecar, read in one open transaction (see `store_record`)."""
+
+    def __init__(self, conn: sqlite3.Connection | None) -> None:
+        self._conn = conn
+        # A sidecar gets its stamp table with its first stamp: before that it holds none.
+        self._stamped = conn is not None and _has_store_stamps(conn)
+
+    def cursor(self) -> tuple[int, int] | None:
+        if self._conn is None:
+            return None
+        found = dict(
+            self._conn.execute(
+                "SELECT key, value FROM meta WHERE key IN (?, ?)",
+                (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ),
+            ).fetchall()
+        )
+        if STORE_CURSOR_REVISION in found and STORE_CURSOR_SEQ in found:
+            return int(found[STORE_CURSOR_REVISION]), int(found[STORE_CURSOR_SEQ])
+        return None
+
+    def stamps(
+        self, paths: Iterable[str] | None = None, *, with_owed: bool = False
+    ) -> dict[str, StoreStamp]:
+        if self._conn is None or not self._stamped:
+            return {}
+        columns = "SELECT file_path, sha256, revision, owed FROM store_page_vectors"
+        if paths is None:
+            rows = self._conn.execute(columns).fetchall()
+        else:
+            rows = self._conn.execute(f"{columns} WHERE owed = 1").fetchall() if with_owed else []
+            wanted = sorted(set(paths))
+            for start in range(0, len(wanted), _STAMP_QUERY_PATHS):
+                batch = wanted[start : start + _STAMP_QUERY_PATHS]
+                marks = ", ".join("?" for _ in batch)
+                rows += self._conn.execute(
+                    f"{columns} WHERE file_path IN ({marks})", batch
+                ).fetchall()
+        return {path: StoreStamp(sha, revision, bool(owed)) for path, sha, revision, owed in rows}
+
+    def owed_paths(self, limit: int) -> list[str]:
+        if self._conn is None or not self._stamped:
+            return []
+        return [
+            path
+            for (path,) in self._conn.execute(
+                "SELECT file_path FROM store_page_vectors WHERE owed = 1 "
+                "ORDER BY attempts, file_path LIMIT ?",
+                (limit,),
+            )
+        ]
+
+    def row_paths(self) -> set[str]:
+        if self._conn is None:
+            return set()
+        found = set(indexed_parent_paths(self._conn))
+        found.update(
+            path for (path,) in self._conn.execute("SELECT parent_path FROM semantic_unit_vectors")
+        )
+        if self._stamped:
+            found.update(
+                path for (path,) in self._conn.execute("SELECT file_path FROM store_page_vectors")
+            )
+        return found
+
 
 # Per-path change log for the read-side bounded catch-up (see sidecar_store's
 # "bounded catch-up" note). The table records the generation at which each
@@ -590,6 +678,72 @@ def _delete_coverage(conn: sqlite3.Connection, paths: list[str] | None = None) -
     conn.executemany("DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths))
 
 
+def _has_store_stamps(conn: sqlite3.Connection) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_page_vectors'"
+        ).fetchone()
+        is not None
+    )
+
+
+def _ensure_store_stamps(conn: sqlite3.Connection) -> None:
+    """The stamp table of a store-mode vault's rows, and the triggers that keep each stamp honest.
+
+    A stamp says which store bytes a page's chunk and unit rows were computed from. Any other write
+    of those rows (a file-mode upsert, a rebuild, a purge) leaves rows that the stamp no longer
+    describes, so each insert or delete on either table turns that page's existing stamp into an
+    owed one, which no reader serves; the stamping transaction writes its stamp last. A page that
+    has no stamp is not touched. A sidecar gets all of this inside its first stamping transaction,
+    so a file-mode vault never has the table, and never pays a lookup per row. The table is created,
+    never migrated: an older binary that shares this sidecar keeps working.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS store_page_vectors ("
+        "file_path TEXT PRIMARY KEY, sha256 TEXT NOT NULL, revision INTEGER NOT NULL, "
+        "owed INTEGER NOT NULL DEFAULT 0 CHECK(owed IN (0, 1)), "
+        "attempts INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS store_page_vectors_owed ON store_page_vectors(file_path) "
+        "WHERE owed = 1"
+    )
+    # Both pairs are closed sets that this schema fixes: the two row tables with the column that
+    # names each row's page, and the two row events that leave a stamp describing other rows.
+    for table, column in (("chunks", "file_path"), ("semantic_unit_vectors", "parent_path")):
+        for event, row in (("INSERT", "NEW"), ("DELETE", "OLD")):
+            conn.execute(
+                f"CREATE TRIGGER IF NOT EXISTS store_page_vectors_{table}_{event.lower()} "
+                f"AFTER {event} ON {table} BEGIN "
+                f"UPDATE store_page_vectors SET sha256 = '', owed = 1 "
+                f"WHERE file_path = {row}.{column}; END"
+            )
+
+
+def _write_store_stamps(conn: sqlite3.Connection, stamps: dict[str, StoreStamp]) -> None:
+    """Write the stamps, creating the table on the first. An owed stamp counts one more attempt."""
+    if not stamps:
+        return
+    _ensure_store_stamps(conn)
+    conn.executemany(
+        "INSERT INTO store_page_vectors(file_path, sha256, revision, owed, attempts) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT(file_path) DO UPDATE SET "
+        "sha256 = excluded.sha256, revision = excluded.revision, owed = excluded.owed, "
+        "attempts = CASE WHEN excluded.owed = 1 THEN store_page_vectors.attempts + 1 ELSE 0 END",
+        (
+            (path, stamp.sha256, stamp.revision, int(stamp.owed), int(stamp.owed))
+            for path, stamp in stamps.items()
+        ),
+    )
+
+
+def _clear_store_stamps(conn: sqlite3.Connection) -> None:
+    """Forget every stamp and the cursor: the drain then compares every stored page again."""
+    if _has_store_stamps(conn):
+        conn.execute("DELETE FROM store_page_vectors")
+    conn.execute("DELETE FROM meta WHERE key IN (?, ?)", (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ))
+
+
 def indexed_parent_paths(conn: sqlite3.Connection) -> list[str]:
     """Parents this sidecar holds chunks or an occurrence coverage record for."""
     return [
@@ -898,6 +1052,9 @@ class EmbeddingIndex:
                 "ON semantic_unit_vectors(parent_path, parent_generation)"
             )
             if not current_unit_schema:
+                # Dropping the table dropped its stamp trigger, so the stamps of rows it held go
+                # too: a stamp may only outlive its rows as the stamping write left them.
+                _clear_store_stamps(conn)
                 conn.execute(
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
@@ -1166,8 +1323,14 @@ class EmbeddingIndex:
         *,
         identity: recall_space.SpaceIdentity,
         validate: Callable[[], bool] | None = None,
+        store_stamps: dict[str, StoreStamp] | None = None,
     ) -> tuple[int, int, int, int] | None:
-        """Publish one bounded group of prepared parents, then release old caches."""
+        """Publish one bounded group of prepared parents, then release old caches.
+
+        ``store_stamps`` names, per replaced parent, the store bytes its rows were computed from.
+        They commit with the rows, after them, so a reader never meets rows and a stamp that
+        disagree.
+        """
         unit_replacements = unit_replacements or []
         if not replacements and not unit_replacements:
             return
@@ -1220,6 +1383,7 @@ class EmbeddingIndex:
                     )
                 if unit_replacements:
                     sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                _write_store_stamps(conn, store_stamps or {})
                 if validate is not None and not validate():
                     raise ValueError("embedding input drifted during publication")
                 own_token = self._build_token(conn)
@@ -1435,6 +1599,12 @@ class EmbeddingIndex:
                     _delete_coverage(conn, [rel_path])
                     removed += 1
                     removed_paths.append(rel_path)
+                # After the row deletes, whose triggers owe the stamp: a purged page has no stamp.
+                if _has_store_stamps(conn):
+                    conn.executemany(
+                        "DELETE FROM store_page_vectors WHERE file_path = ?",
+                        ((path,) for path in paths),
+                    )
                 if removed:
                     # ONE bump for the whole batch — hence the explicit path list:
                     # the generation delta alone could never say how many, or
@@ -1501,6 +1671,70 @@ class EmbeddingIndex:
                 else np.zeros((0, cached.matrix.shape[1]), dtype=np.float32),
                 cached.space,
             )
+
+    # ------------------------------------------------ store-mode change record
+    #
+    # What a store-mode vault's drain and readers share: the cursor, and the stamp of each page's
+    # rows (`vault_store.vectors` owns the meaning; this file only stores it).
+
+    @contextlib.contextmanager
+    def store_record(self) -> Iterator[StoreRecord]:
+        """The cursor and the stamps in one read transaction, so that they agree with each other.
+
+        A sidecar that is not there yet has no record, and this never creates it.
+        """
+        if not self.path.exists():
+            yield StoreRecord(None)
+            return
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            yield StoreRecord(conn)
+        finally:
+            conn.rollback()
+            conn.close()
+
+    def store_cursor(self) -> tuple[int, int] | None:
+        """`(store revision, audit seq)` this sidecar has caught up with; None before a pass."""
+        with self.store_record() as record:
+            return record.cursor()
+
+    def store_stamps(
+        self, paths: Iterable[str] | None = None, *, with_owed: bool = False
+    ) -> dict[str, StoreStamp]:
+        """The stamps of `paths`, or every stamp when None; `with_owed` adds every owed one."""
+        with self.store_record() as record:
+            return record.stamps(paths, with_owed=with_owed)
+
+    def store_owed_paths(self, limit: int) -> list[str]:
+        """Up to `limit` owed pages, the least tried first: a failed retry moves behind the rest."""
+        with self.store_record() as record:
+            return record.owed_paths(limit)
+
+    def row_paths(self) -> set[str]:
+        """Every path that this sidecar holds chunk rows, unit rows, coverage or a stamp for."""
+        with self.store_record() as record:
+            return record.row_paths()
+
+    def set_store_cursor(self, revision: int, seq: int) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    ((STORE_CURSOR_REVISION, revision), (STORE_CURSOR_SEQ, seq)),
+                )
+        finally:
+            conn.close()
+
+    def record_store_stamps(self, stamps: dict[str, StoreStamp]) -> None:
+        """Stamp pages whose rows are not rewritten: an examined page with none, or an owed one."""
+        conn = self._connect()
+        try:
+            with conn:
+                _write_store_stamps(conn, stamps)
+        finally:
+            conn.close()
 
     def upsert_semantic_units(
         self,
@@ -2242,16 +2476,18 @@ class EmbeddingIndex:
         allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE,
         defer_cold_load: bool = False,
+        incomplete_out: list[str] | None = None,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunks with eager text, preserving the ordinary search API."""
         return cast(list[tuple[str, int, str, float]], self._search(
             query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
-            defer_cold_load=defer_cold_load,
+            defer_cold_load=defer_cold_load, incomplete_out=incomplete_out,
         ))
 
     def select_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
+        incomplete_out: list[str] | None = None,
     ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Keep modern passages as references until final evidence selection.
 
@@ -2260,13 +2496,13 @@ class EmbeddingIndex:
         """
         return self._search(
             query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
-            defer_cold_load=defer_cold_load, defer_text=True,
+            defer_cold_load=defer_cold_load, defer_text=True, incomplete_out=incomplete_out,
         )
 
     def _search(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
-        defer_text: bool = False,
+        defer_text: bool = False, incomplete_out: list[str] | None = None,
     ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
@@ -2285,16 +2521,28 @@ class EmbeddingIndex:
         ineligible row scores `-inf` and `k_eff` is clamped to the eligible
         count, so `argpartition` provably cannot reach a masked row.
         """
+        withheld = self._withheld()
+        if withheld.everything:
+            if incomplete_out is not None:
+                # The unit lane's witness: an empty answer here proves nothing, so it is no miss.
+                incomplete_out.append(".")
+            return []
         if cloud_cell.resource_policy() == "service-v1":
             # SQLite row fetches release the GIL; cooperative bulk graph work
             # must yield during this read-only scan, which never waits on it.
             # Batched advisory scoring marks only its actual foreground caller.
             with foreground_priority.foreground():
                 return self._disk_score(
-                    [query_vec], k, admits=lambda path: allowed_paths is None or path in allowed_paths,
-                    encoded_for=encoded_for, hydrate=True, defer_text=defer_text,
+                    [query_vec],
+                    k,
+                    admits=lambda path: (
+                        path not in withheld and (allowed_paths is None or path in allowed_paths)
+                    ),
+                    encoded_for=encoded_for,
+                    hydrate=True,
+                    defer_text=defer_text,
                 )[0]
-        if allowed_paths is None:
+        if allowed_paths is None and not withheld:
             vec_hits = (
                 self._vec_search(query_vec, k, defer_text=True, encoded_for=encoded_for)
                 if defer_text else self._vec_search(query_vec, k)
@@ -2332,6 +2580,10 @@ class EmbeddingIndex:
             # since rewritten. Eligibility is a governance boundary, so those
             # rows score -inf exactly like an inadmissible path's.
             mask, k_ceiling = self._without_paths(metadata, mask, resident.stale_paths)
+        if withheld:
+            # A store-mode vault's store does not vouch for these pages' rows, so they score -inf
+            # exactly like the stale rows above (the vec0 scan cannot mask, so it was skipped).
+            mask, k_ceiling = self._without_paths(metadata, mask, withheld.paths)
         k_eff = min(k, k_ceiling)
         if k_eff <= 0:
             return []
@@ -2410,6 +2662,14 @@ class EmbeddingIndex:
         `defer_cold_load` behaves as in `search`: a cold matrix starts the one
         background load and raises `recall_space.CorpusMatrixCold`.
         """
+        withheld = self._withheld()
+        if withheld.everything:
+            return [[] for _ in range(len(np.atleast_2d(query_vecs)))]
+
+        def without_withheld(path: str) -> bool:
+            return path not in withheld and admits(path)
+
+        visible = without_withheld if withheld else admits
         if cloud_cell.resource_policy() == "service-v1":
             # An advisory may be inline in a save or receipt-owned background
             # work. Prioritize only this vault's foreground caller, and only
@@ -2421,7 +2681,9 @@ class EmbeddingIndex:
             ):
                 return [
                     [(path, chunk, score) for path, chunk, _text, score in hits]
-                    for hits in self._disk_score(query_vecs, k, admits=admits, encoded_for=encoded_for)
+                    for hits in self._disk_score(
+                        query_vecs, k, admits=visible, encoded_for=encoded_for
+                    )
                 ]
         resident = self.require_resident_matrix() if defer_cold_load else None
         metadata, matrix = (
@@ -2441,7 +2703,7 @@ class EmbeddingIndex:
             file_path = metadata[row][0]
             verdict = verdicts.get(file_path)
             if verdict is None:
-                verdict = verdicts[file_path] = file_path not in stale and bool(admits(file_path))
+                verdict = verdicts[file_path] = file_path not in stale and bool(visible(file_path))
             return verdict
 
         answers: list[list[tuple[str, int, float]]] = []
@@ -2693,6 +2955,13 @@ class EmbeddingIndex:
             return []
         if allowed_parent_paths is not None and not allowed_parent_paths:
             return []
+        withheld = self._withheld()
+        if withheld.everything:
+            if incomplete_out is not None:
+                # The store could not say which pages' rows to trust, so nothing was proved, and an
+                # empty answer must not read as a miss. "." is the vault itself, as a witness.
+                incomplete_out.append(".")
+            return []
         from .governance import egress
 
         refs = None if allowed_unit_refs is None else frozenset(allowed_unit_refs)
@@ -2701,10 +2970,15 @@ class EmbeddingIndex:
         keep = (egress.page_release_filter(self.vault_root, pages=paths)
                 if released is None else None)
 
+        def admitted(path: str) -> bool:
+            return (
+                (paths is None or path in paths)
+                and (released is None or path in released)
+                and (keep is None or bool(keep(path)))
+            )
+
         def allowed(path: str) -> bool:
-            return ((paths is None or path in paths)
-                    and (released is None or path in released)
-                    and (keep is None or bool(keep(path))))
+            return path not in withheld and admitted(path)
 
         filtered = refs is not None or paths is not None
         query = query_vec.astype(np.float32, copy=False)
@@ -2773,12 +3047,20 @@ class EmbeddingIndex:
                             for path in chain(sorted(unproved), unpublished)
                             if parents.allowed(path)
                         ),
+                        # A page the store does not vouch for is a gap in this lane, not a miss.
+                        (path for path in sorted(withheld.paths) if admitted(path)),
                     ),
                     None,
                 )
                 if witness is not None:
                     incomplete_out.append(witness)
         return ranked
+
+    def _withheld(self) -> Withheld:
+        """The pages whose rows the store does not vouch for: none unless in store mode."""
+        from .vault_store import vectors
+
+        return vectors.withheld(self.vault_root, self)
 
     def _coverage_owed(self) -> Callable[[str], bool]:
         """Whether a publication writes a page a record: the rebuild walk's own rules."""

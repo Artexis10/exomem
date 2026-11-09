@@ -78,6 +78,58 @@ In store mode, a file the store owns whose hash differs from the projection mani
 - **THEN** the store removes the binary's record in an audited import, and holds nothing
 - **AND** a binary renamed outside Exomem keeps its record under the new path, paired by its hash
 
+### Requirement: A held item is resolved by an explicit choice
+In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL need the same write authority as a governed write of the bytes it commits, and SHALL refuse with `WRITE_REFUSED`, before it saves or commits anything, when the caller lacks it. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that in one order. The owner with unrestricted access sees every held item. Any other caller is judged on the stored page's bytes, not on the person's file or the path alone. When the store holds no page, the person's file is judged the same way. When neither exists, and for a binary, the path alone decides. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.
+
+#### Scenario: Keep mine adopts the person's file
+- **WHEN** an agent resolves a held edit with keep-mine and the store page is still at the revision the hold saw
+- **THEN** the stored page equals the person's current file bytes and no write to the file is queued
+- **AND** the held record is gone and the audit row names the choice
+
+#### Scenario: Keep mine refuses after a newer Exomem change
+- **WHEN** the store page changed after the edit was held and an agent resolves it with keep-mine
+- **THEN** the resolve refuses with a conflict and the stored page keeps Exomem's newer bytes
+
+#### Scenario: Keep store saves the person's file first
+- **WHEN** an agent resolves a held edit with keep-store
+- **THEN** the person's exact bytes are saved under a dated folder in the vault's state folder before the store's page is queued for projection
+- **AND** a second resolve of the same path on the same day saves to a new name
+
+#### Scenario: A held item changed since it was listed
+- **WHEN** the person edits the file again after an agent listed the held item
+- **THEN** a resolve with the earlier listing refuses and names the list to read again
+
+#### Scenario: A held delete is resolved
+- **WHEN** an agent resolves a held deletion with keep-mine
+- **THEN** the page leaves the store with no write to the vault
+- **AND** a resolve with keep-store writes the store's page back to the file
+
+#### Scenario: A held item the caller may not read is not listed
+- **WHEN** a policy restricts the folder of a held page and a caller outside that policy lists the held items
+- **THEN** the list leaves the item out and gives no count of left-out items
+- **AND** a resolve by that caller refuses as if nothing were held for the path
+
+#### Scenario: A tag scope decides a held item on the stored page
+- **WHEN** a policy restricts pages by a tag, a held page's stored bytes carry no such tag and the person's file does
+- **THEN** the owner and a caller outside that policy both see the item and the owner can resolve it
+- **AND** when the stored bytes carry the tag, the caller outside the policy sees nothing and the owner still sees and resolves the item
+
+#### Scenario: A held edit of a page that the store deleted is the owner's
+- **WHEN** Exomem deleted a page while the person's edit of its file stayed, and a policy restricts the page's folder
+- **THEN** the owner sees the item and resolves it with keep-store
+- **AND** a caller outside the policy sees nothing, and under a tag scope that caller sees the item exactly when the person's file does not carry the tag
+
+#### Scenario: A held binary is not resolved yet
+- **WHEN** a held item is a binary and an agent lists or resolves it
+- **THEN** the list marks it not yet resolvable and offers no choice
+- **AND** a resolve refuses and says that binaries stay held until a later release resolves them
+- **AND** under a tag scope the owner still sees the held binary, and a caller outside the policy does not
+
+#### Scenario: A held file that is too large is not resolved
+- **WHEN** a held file is above 64 MiB and an agent lists or resolves it
+- **THEN** the list marks it not yet resolvable, offers no choice and says why
+- **AND** a resolve refuses with `VAULT_STORE_HELD_TOO_LARGE`
+
 ### Requirement: Semantic units are first-class store rows
 In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes and SHALL NOT write anchors into a page. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
 

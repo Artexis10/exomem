@@ -661,12 +661,6 @@ def _judge_write(facts: Facts, disk: OnDisk | None) -> Judgement:
 # -- store reads ----------------------------------------------------------------------------------
 
 
-def anchor(vault_root: Path) -> Path:
-    """The root that the held filesystem anchors to, which the importer's reads share."""
-    # Windows resolves a root junction before no-follow anchoring, as the store's own routes do.
-    return vault_root.resolve() if os.name == "nt" or vault_root.is_symlink() else vault_root
-
-
 def read_facts(vault_root: Path, rel: str) -> Facts:
     """What the store records about ``rel``, read in one snapshot; the importer reads it too."""
     with read.snapshot(vault_root) as view:
@@ -806,6 +800,12 @@ def _turn_into_write(tx: Connection, intent: Intent) -> None:
 
 
 # -- disk, through the held filesystem ------------------------------------------------------------
+
+
+def anchor(root: Path) -> Path:
+    """The vault root as the held filesystem anchors it: a symlinked root, and on Windows a root
+    junction, resolves first, as the store's own routes do."""
+    return root.resolve() if os.name == "nt" or root.is_symlink() else root
 
 
 def _missing(result: held_fs.HeldResult) -> bool:
