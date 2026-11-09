@@ -1430,7 +1430,7 @@ class MediaWorker:
                 return False
             assert isinstance(handoff, DeferredGraphCompletion)
         self._complete_deferred_graph_completion(handoff, receipts)
-        extraction_parts.retire(self._vault_root, surplus)
+        self._retire_surplus_parts(surplus)
         return True
 
     def _extraction_writes(
@@ -2557,10 +2557,16 @@ class MediaWorker:
             parent_receipted_handoff=True,
         ):
             return
-        extraction_parts.retire(self._vault_root, surplus)
+        self._retire_surplus_parts(surplus)
         self._store.finalize_result(
             result, requeue_remaining=result.kind in {"extraction", "pending"}
         )
+
+    def _retire_surplus_parts(self, surplus: tuple[Path, ...]) -> None:
+        """Retire the surplus part pages; a stored part that stays is logged, not raised."""
+        kept = extraction_parts.retire(self._vault_root, surplus)
+        if kept:
+            log.info("%s", extraction_parts.kept_note(kept))
 
     def _publish_pending_for_changed_binary(
         self, result: media_jobs.MediaJobResult, *, expected_sidecar: str | None
