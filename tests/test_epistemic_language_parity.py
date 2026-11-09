@@ -548,6 +548,36 @@ def test_a_page_relation_in_an_extension_of_derived_from_seeds_no_shared_source(
     )
 
 
+def test_shared_source_suggestions_interpret_a_bounded_number_of_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forty pages state `x.based_on` one Source; reading stops once ten are proposed.
+
+    A reader that interprets every incoming edge slows a page's suggestions by
+    the number of pages that share its Source.
+    """
+    root = tmp_path / "vault"
+    _write(root, "Knowledge Base/_Schema/relation-registry.yaml", OVERLAY)
+    source = _link(
+        _page(root, "big-src", "A document.", page_type="source", folder="Knowledge Base/Sources")
+    )
+    for number in range(40):
+        _page(root, f"big-{number:02d}", f"## Relations\n- x.based_on {source}\n")
+    build_graph(root)
+    interpreted: list[int] = []
+    interpret = epistemic_graph.GraphView.edge
+    monkeypatch.setattr(
+        epistemic_graph.GraphView,
+        "edge",
+        lambda self, edge: interpreted.append(1) or interpret(self, edge),
+    )
+
+    proposed = epistemic_graph._shared_source_candidates(root, f"{KB}/big-00.md")
+
+    assert len(proposed) == 10
+    assert len(interpreted) <= 12
+
+
 def test_the_review_batch_carries_the_lift_and_source_rows(fixture_vault: Path) -> None:
     index = build_graph(fixture_vault)
 

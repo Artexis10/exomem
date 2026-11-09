@@ -14327,24 +14327,47 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
         labels = sorted(_labels_of(view, [relation]))
         # Debt (drifted copy): the relation_queue copy reads the field only; a fold changes
         # suggestions.
-        # Every edge that states the Sources relation, whatever its origin. An extension of it
-        # is stored by its raw label, so the label list finds it and the authoring page's own
-        # registry decides what it means.
-        stated = conn.execute(
-            f"SELECT {EDGE_COLUMNS} FROM graph_edges e WHERE e.src_key LIKE 'file:%' "
-            f"AND (e.relation_type = ? OR e.raw_relation IN ({_marks(labels)})) "
-            "AND e.dst_key IN (SELECT dst_key FROM graph_edges WHERE src_key = ?)",
-            (relation, *labels, src_key),
-        ).fetchall()
-        view.prefetch(str(row[10]) for row in stated)
-        stating = [edge for edge in map(view.edge, map(_edge_row_to_dict, stated))
-                   if edge is not None and _is_relation(edge, relation)]
-        mine = [str(edge["dst_key"]) for edge in stating if edge["src_key"] == src_key]
-        rows = sorted(
-            (str(edge["src_key"]), shared) for edge in stating
-            if edge["src_key"] != src_key
-            for shared in mine if shared == edge["dst_key"]
-        )[:10]
+        # Every edge that states the Sources relation, whatever its origin. A stored core row
+        # means what its key says, so SQL joins and bounds those. An extension is stored as a
+        # candidate by its raw label, and only the authoring page's own registry says what it
+        # means, so each candidate row is interpreted.
+        mine = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT dst_key FROM graph_edges WHERE src_key = ? AND relation_type = ?",
+                (src_key, relation),
+            )
+        }
+        for row in conn.execute(
+            f"SELECT {EDGE_COLUMNS} FROM graph_edges e WHERE e.src_key = ? "
+            f"AND e.registry_status = ? AND e.raw_relation IN ({_marks(labels)})",
+            (src_key, CANDIDATE_STATUS, *labels),
+        ):
+            edge = view.edge(_edge_row_to_dict(row))
+            if edge is not None and _is_relation(edge, relation):
+                mine.add(str(edge["dst_key"]))
+        rows: list[tuple[str, str]] = []
+        if mine:
+            others = f"e.dst_key IN ({_marks(mine)}) AND e.src_key LIKE 'file:%' AND e.src_key != ?"
+            rows = conn.execute(
+                f"SELECT e.src_key, e.dst_key FROM graph_edges e WHERE e.relation_type = ? "
+                f"AND {others} ORDER BY e.src_key LIMIT 10",
+                (relation, *sorted(mine), src_key),
+            ).fetchall()
+            # Candidates arrive in source order, so ten that mean the relation end the reading.
+            accepted = 0
+            for row in conn.execute(
+                f"SELECT {EDGE_COLUMNS} FROM graph_edges e WHERE e.registry_status = ? "
+                f"AND e.raw_relation IN ({_marks(labels)}) AND {others} ORDER BY e.src_key",
+                (CANDIDATE_STATUS, *labels, *sorted(mine), src_key),
+            ):
+                edge = view.edge(_edge_row_to_dict(row))
+                if edge is not None and _is_relation(edge, relation):
+                    rows.append((str(edge["src_key"]), str(edge["dst_key"])))
+                    accepted += 1
+                if accepted == 10:
+                    break
+        rows = sorted(rows)[:10]
     finally:
         conn.close()
     out: list[dict[str, Any]] = []
