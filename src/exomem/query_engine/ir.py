@@ -75,6 +75,7 @@ class NamedAggregate:
     op: str
     field: Field | None = None
     p: float | None = None
+    where: Filter | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,12 @@ class Pattern:
 
 
 @dataclass(frozen=True, slots=True)
+class Related:
+    path: str
+    limit: int = 10
+
+
+@dataclass(frozen=True, slots=True)
 class Query:
     source: Source
     select: Project
@@ -166,3 +173,4 @@ class Query:
     mode: str = "execute"
     execution_profile: str = "interactive"
     version: int = 1
+    related: tuple[Related, ...] = ()

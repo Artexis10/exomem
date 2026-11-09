@@ -40,6 +40,7 @@ from .. import structured_collections as collections
 from ..governance import connector_boundary
 from ..governance.principal import effective_principal
 from ..planning_values import PlanningValues
+from ..query_engine import reference_report
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
     aliases,
@@ -606,7 +607,11 @@ class CollectionWriter:
                 authorize_path=self._operation.allows_file,
             )
             # Recipient inspection cannot publish full-state guards or import provenance; owners retain them below.
+            references = (reference_report.check_collection(self.root, self.handle.path,
+                                                          manifest.collection_id)
+                          if collections.declared_references(field_plan.manifest.schema) else [])
             return {"kind": "collection", "report_only": True,
+                    "references": references,
                     "contract": record_governance._inspection_contract(field_plan.manifest),
                     "snapshot": snapshot,
                     "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
@@ -726,8 +731,12 @@ class CollectionWriter:
                                     "migration": migration})
         guards = {"expected_manifest_hash": manifest.manifest_version.hash,
                   "expected_container_hash": self._container(row) if complete else visible_snapshot}
+        references = (reference_report.check_collection(self.root, self.handle.path,
+                                                        manifest.collection_id)
+                      if collections.declared_references(field_plan.manifest.schema) else [])
         payload = {
             "kind": "collection", "report_only": True,
+            "references": references,
             "contract": record_governance._inspection_contract(manifest),
             "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
@@ -2914,7 +2923,8 @@ class CollectionWriter:
             for key, values, _, path, before, _ in plans:
                 advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
                                                       values=values, previous=json.loads(before["values_json"]) if before else None)
-        return {"due_state": advisory, **result} if advisory else result
+        result = {"due_state": advisory, **result} if advisory else result
+        return self._reference_check(result, manifest, [values for _, values, *_ in plans])
 
     def _item_carriers(self, result, manifest, *, path, key, values, previous=None):
         """Refresh derived state only after a new item write has committed."""
@@ -2926,7 +2936,20 @@ class CollectionWriter:
         )
         sweep = records._capture_sweep_carrier(self.root, manifest, key=key)
         result = {"due_state": advisory, **result} if advisory else result
-        return {"capture_sweep": sweep, **result} if sweep else result
+        result = {"capture_sweep": sweep, **result} if sweep else result
+        return self._reference_check(result, manifest, [values] if values is not None else [])
+
+    def _reference_check(self, result, manifest, rows: list):
+        """Report unresolved declared references of the committed rows; never fails the write."""
+        if not collections.declared_references(manifest.schema):
+            return result
+        report = reference_report.check_values(self.root, self.handle.path,
+                                               manifest.collection_id, rows)
+        if report is None:
+            return result
+        result = {**result, "reference_check": report}
+        warns = reference_report.warnings(report)
+        return records._with_warnings(result, warns) if warns else result
 
     def append_record(
         self,
@@ -3442,6 +3465,26 @@ class CollectionWriter:
         if refused is not None:
             raise refused
         records._refuse_excluded_manifest_fields(proposed)
+        dropped_references = {d.dotted for d in collections.declared_references(current.schema)} - {
+            d.dotted for d in collections.declared_references(proposed.schema)}
+        if dropped_references:
+            # A view that still names a removed reference is the revise's problem, not the
+            # view's — the caller must drop both in the same revise.
+            offending = sorted(
+                diagnostic.location.split(".", 1)[-1]
+                for diagnostic in proposed.view_diagnostics
+                if diagnostic.code == "SAVED_VIEW_REFERENCE_UNDECLARED"
+                and any(f"'{name}'" in diagnostic.reason for name in dropped_references)
+            )
+            if offending:
+                name = sorted(dropped_references)[0]
+                raise collections.CollectionError(
+                    "REFERENCE_IN_USE",
+                    "a saved view uses this reference; remove or revise those views in the same revise",
+                    {"field": f"{offending[0]}.references", "views": offending,
+                     "expected": "no saved view naming the reference",
+                     "example": "drop the view or its site.* fields in the same revise"},
+                )
         if proposed.view_diagnostics:
             diagnostic = proposed.view_diagnostics[0]
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)

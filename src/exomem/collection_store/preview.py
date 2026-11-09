@@ -572,6 +572,35 @@ def dispatch(
         return True, writer.inspect_collection(args["collection"], facade_profile=profile)
     if action == "inspect":
         return True, writer.inspect_collection(args["collection"])
+    if action == "query" and "view" in args:
+        # A version-1 saved view runs on the query engine, on any facade profile.
+        from .. import structured_collections as _collections
+        from ..query_engine import route
+
+        with writer.read_collection(args["collection"], facade_profile=profile) as _manifest:
+            view = _collections.resolve_saved_view(_manifest, args["view"])
+        definition = view.definition
+        raw_view_query = definition.get("query") if isinstance(definition, Mapping) else None
+        if isinstance(raw_view_query, Mapping) and "version" in raw_view_query:
+            extras = set(args) - {"collection", "view", "query"}
+            paging = args.get("query")
+            if extras or (paging is not None and (
+                    not isinstance(paging, Mapping)
+                    or set(paging) - {"version", "page"}
+                    or (paging.get("page") is not None and (
+                        not isinstance(paging["page"], Mapping)
+                        or set(paging["page"]) - {"limit", "after"})))):
+                from ..structured_collections import CollectionError
+                raise CollectionError(
+                    "QUERY_ARGUMENT_CONFLICT",
+                    "a version-1 saved view accepts only query={version, page} alongside view")
+            merged = dict(raw_view_query)
+            if paging is not None:
+                merged["page"] = {**merged.get("page", {}), **(paging.get("page") or {})}
+            merged["version"] = 1
+            return True, route.run(writer, args["collection"], merged,
+                                   facade_profile=profile, view=view.name,
+                                   view_identity=view.identity)
     if action == "query" and "query" in args:
         from ..query_engine import route
 

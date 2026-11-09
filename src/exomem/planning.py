@@ -1197,6 +1197,7 @@ def inspect(vault_root: Path, collection: str | collections.CollectionManifest) 
             {"lifecycle_guards": result["lifecycle_guards"]} if "lifecycle_guards" in result else {}
         ),
         **({"presentation": result["presentation"]} if "presentation" in result else {}),
+        **({"references": result["references"]} if "references" in result else {}),
     }
     return _project_inspection(payload, manifest)
 
@@ -1418,7 +1419,7 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 #: The inspection keys a collection's shape adds: recipes in items mode, page bounds in summary mode.
-_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity")
+_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references")
 
 
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:

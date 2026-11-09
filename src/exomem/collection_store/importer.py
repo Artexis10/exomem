@@ -58,7 +58,7 @@ from .. import __version__, archive_members, auth_sessions, item_keys, records, 
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
-from ..query_engine import scalars
+from ..query_engine import reference_report, scalars
 from . import (
     connection,
     derived_rows,
@@ -2287,7 +2287,25 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "last_receipt": progress["last_receipt"],
         "rejections": rejections,
         "error": error,
+        **_reference_report(writer, job, state),
     }
+
+
+def _reference_report(writer, job: _Job, state: str) -> dict:
+    """On completion, a non-derived job reports its declared references' resolution.
+
+    The check reads under the caller's own admission and never fails the status call.
+    """
+    if state != "complete":
+        return {}
+    try:
+        _, manifest, _ = writer._collection(job.collection_id)
+    except collections.CollectionError:
+        return {}  # the status call itself reports a collection the caller can no longer read
+    if manifest.derived or not collections.declared_references(manifest.schema):
+        return {}
+    report = reference_report.check_collection(writer.root, writer.handle.path, job.collection_id)
+    return {"reference_check": report, "warnings": reference_report.warnings(report)}
 
 
 @contextmanager

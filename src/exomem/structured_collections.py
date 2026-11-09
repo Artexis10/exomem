@@ -133,6 +133,15 @@ _SAVED_VIEW_QUERY_KEYS = frozenset(
         "limit",
     }
 )
+# Version-1 query views: the query object is the same one the query engine's
+# route.run accepts, minus keys that are request- rather than view-scoped.
+_SAVED_VIEW_V1_MAX_BYTES = 16 * 1024
+_SAVED_VIEW_V1_QUERY_KEYS = frozenset(
+    {
+        "version", "where", "order_by", "select", "page", "group_by", "aggregates",
+        "having", "joins", "text", "as_of", "execution_profile", "graph", "related",
+    }
+)
 _SAVED_VIEW_SHARED_SYSTEM_FIELDS = frozenset(
     {"collection_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -2142,6 +2151,7 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
             manifest.semantic_profile,
         ),
         _saved_view_child_shapes(manifest.storage, manifest.child_tables),
+        frozenset(declaration.dotted for declaration in declared_references(manifest.schema)),
     )
     canonical = json.dumps(
         {
@@ -2188,7 +2198,8 @@ def _parse_saved_views(
             ):
                 raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
             normalized_view = _freeze_mapping(
-                _normalize_saved_view(definition, fields, child_shapes)
+                _normalize_saved_view(definition, fields, child_shapes,
+                                      frozenset(d.dotted for d in declared_references(schema)))
             )
             _validate_saved_view_literals(
                 normalized_view, schema, semantic_profile, planning_values
@@ -2312,10 +2323,110 @@ def _saved_view_selected_fields(
     )
 
 
+def _v1_view_field_names(query: Mapping) -> tuple[set[str], list[str]]:
+    """Every field name a version-1 view query uses: (names, related entries)."""
+
+    def leaves(node):
+        if isinstance(node, Mapping):
+            if type(node.get("field")) is str:
+                yield node["field"]
+            for key in ("all", "any", "not"):
+                yield from leaves(node.get(key))
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                yield from leaves(child)
+
+    names: set[str] = set()
+    for item in query.get("select") or ():
+        if type(item) is str:
+            names.add(item)
+    names.update(leaves(query.get("where")))
+    for key in ("order_by", "group_by"):
+        for item in query.get(key) or ():
+            if isinstance(item, Mapping) and type(item.get("field")) is str:
+                names.add(item["field"])
+    aggregates = query.get("aggregates")
+    if isinstance(aggregates, Mapping):
+        for spec in aggregates.values():
+            if not isinstance(spec, Mapping):
+                continue
+            if type(spec.get("field")) is str:
+                names.add(spec["field"])
+            names.update(leaves(spec.get("where")))
+    related = []
+    for entry in query.get("related") or ():
+        if type(entry) is str:
+            related.append(entry)
+        elif isinstance(entry, Mapping) and type(entry.get("field")) is str:
+            related.append(entry["field"])
+    return names, related
+
+
+def saved_view_references(definition: object) -> frozenset:
+    """The declared-reference names a version-1 saved view uses (empty for legacy views)."""
+    if not isinstance(definition, Mapping):
+        return frozenset()
+    query = definition.get("query")
+    if not isinstance(query, Mapping) or "version" not in query:
+        return frozenset()
+    names, related = _v1_view_field_names(query)
+    return frozenset(
+        {name.split(".", 1)[0] for name in names if "." in name} | set(related)
+    )
+
+
+def _normalize_saved_view_v1(
+    raw_query: Mapping,
+    fields: set[str],
+    reference_names: frozenset,
+) -> dict[str, Any]:
+    """Structural check of a version-1 query view: shape, grammar keys and reference heads.
+
+    Target-side fields are not checked — they belong to another collection's schema and
+    surface as SAVED_VIEW_STALE at run time.
+    """
+    try:
+        encoded = json.dumps(raw_query, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        raise CollectionError(
+            "INVALID_SAVED_VIEW", "saved view query is not JSON-encodable") from None
+    if len(encoded) > _SAVED_VIEW_V1_MAX_BYTES:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query exceeds 16 KiB")
+    if raw_query.get("version") != 1:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query version must be 1")
+    if not _mapping_has_only_keys(raw_query, _SAVED_VIEW_V1_QUERY_KEYS):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
+    page = raw_query.get("page")
+    if page is not None and (not isinstance(page, Mapping) or "after" in page):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query must not pin a page cursor")
+    names, related = _v1_view_field_names(raw_query)
+    for name in sorted(names):
+        if name in fields:
+            continue
+        if "." in name:
+            head = name.split(".", 1)[0]
+            if head in reference_names:
+                continue
+            raise CollectionError(
+                "SAVED_VIEW_REFERENCE_UNDECLARED",
+                f"saved view field '{name}' uses undeclared reference '{head}'",
+            )
+        raise CollectionError(
+            "INVALID_SAVED_VIEW", f"saved view field '{name}' is not declared")
+    for entry in related:
+        if entry not in reference_names:
+            raise CollectionError(
+                "SAVED_VIEW_REFERENCE_UNDECLARED",
+                f"saved view related entry '{entry}' uses undeclared reference '{entry}'",
+            )
+    return {"query": json.loads(encoded)}
+
+
 def _normalize_saved_view(
     value: object,
     fields: set[str],
     child_shapes: Mapping[str, frozenset[str]] = MappingProxyType({}),
+    reference_names: frozenset = frozenset(),
 ) -> dict[str, Any]:
     if (
         not isinstance(value, Mapping)
@@ -2326,6 +2437,12 @@ def _normalize_saved_view(
     raw_query = value.get("query", {})
     if not isinstance(raw_query, Mapping):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query is invalid")
+    if "version" in raw_query:
+        # A version-1 view is its engine query verbatim; sort/source_snapshot stay out.
+        if not _mapping_has_only_keys(value, {"query"}):
+            raise CollectionError(
+                "INVALID_SAVED_VIEW", "version-1 saved view takes only a query object")
+        return _normalize_saved_view_v1(raw_query, fields, reference_names)
     if not _mapping_has_only_keys(raw_query, _SAVED_VIEW_QUERY_KEYS):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
     expand_children = raw_query.get("expand_children")

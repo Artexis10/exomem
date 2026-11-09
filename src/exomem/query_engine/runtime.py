@@ -135,6 +135,7 @@ class LookupAdmission:
     uniform: bool  # whether every row is released whole, so no lookup needs a row decision
     source: derived_rows.RowSource
     layout: typed_storage.Layout | None
+    basis: object = None  # the subject basis `_manifest` yields (manifest hash, type, declaration)
 
 
 class ReadSession:
@@ -395,11 +396,12 @@ class ReadSession:
         self.check()
         found = self._lookups.get(collection_id)
         if found is None:
-            with self._manifest(collection_id) as (manifest, _, _, uniform):
+            with self._manifest(collection_id) as (manifest, basis, _, uniform):
                 plan = self._field_plans[collection_id]
             source = self.row_source(collection_id)
             layout = source.layout or self.typed_layout(collection_id)
-            found = self._lookups[collection_id] = LookupAdmission(collection_id, manifest, plan, uniform, source, layout)
+            found = self._lookups[collection_id] = LookupAdmission(
+                collection_id, manifest, plan, uniform, source, layout, basis)
         return found
 
     def charge_visits(self, count: int) -> None:

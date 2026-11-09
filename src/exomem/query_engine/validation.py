@@ -12,6 +12,7 @@ from typing import Any
 
 from ..structured_collections import CollectionError, FieldSpec, validate_field_value
 from .buckets import EXTREMES
+from .errors import QueryError
 from .ir import (
     Aggregate,
     Field,
@@ -24,6 +25,7 @@ from .ir import (
     Project,
     Query,
     Range,
+    Related,
     RelativeDate,
     Sort,
     SortKey,
@@ -49,6 +51,7 @@ _KEYS = frozenset(
         "mode",
         "execution_profile",
         "graph",
+        "related",
     }
 )
 _OPS = frozenset(
@@ -120,6 +123,9 @@ class Finding:
     allowed: tuple[str, ...]
     repair: str
     retryable: bool = False
+    #: True when the failure bound something on the reference target side
+    #: (second hop lookup or a missing/withheld target field) — route maps it to SAVED_VIEW_STALE in view mode.
+    target_side: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -150,9 +156,17 @@ class _Invalid(Exception):
 
 
 def _fail(
-    code: str, at: str, expected: str, allowed=(), repair="Revise the addressed query field."
+    code: str, at: str, expected: str, allowed=(), repair="Revise the addressed query field.",
+    target_side: bool = False,
 ):
-    raise _Invalid(Finding(code, at, expected, tuple(sorted(allowed)), repair))
+    raise _Invalid(Finding(code, at, expected, tuple(sorted(allowed)), repair,
+                           target_side=target_side))
+
+
+def _mark_target(finding: Finding) -> Finding:
+    """A finding becomes target-side: route maps it to SAVED_VIEW_STALE in view mode."""
+    return Finding(finding.code, finding.at, finding.expected, finding.allowed,
+                   finding.repair, finding.retryable, target_side=True)
 
 
 def _object(value: Any, at: str, allowed, required=()) -> Mapping:
@@ -249,12 +263,95 @@ def _value(value: Any, field: Field, at: str) -> Any:
 
 
 class _Binder:
-    def __init__(self, source: Source, declarations: Mapping):
+    def __init__(self, source: Source, declarations: Mapping, references=None):
         self.source = source
         self.declarations = declarations
+        self.references = references
+        self.used_references = False
         self.aliases: dict[str, Source] = {}
         self.reduction_fields: dict[str, Field] | None = None
         self.leaves = 0
+
+    def reference(self, source_cid: str, dotted: str, at: str) -> Mapping:
+        """Bind one declared reference through the session's resolver, keeping its refusal shape."""
+        try:
+            info = self.references(source_cid, dotted)
+        except QueryError as error:
+            repair = ("Remove the reference from the query; describe the collection for its fields."
+                      if error.code == "COLLECTION_NOT_FOUND"
+                      else "Describe the admitted collection fields.")
+            _fail(error.code, at, error.message, (), repair)
+        self.used_references = True
+        return info
+
+    def _finish(self, source: Source, alias: str | None, path: str, fields: Mapping, at: str,
+                *, evaluated: bool, implicit: bool) -> Field:
+        if fields[path].get("withheld") and not implicit:
+            # The key spells a field this caller cannot see; it is refused exactly as that field is.
+            _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (), "Describe the admitted collection fields.")
+        if evaluated and fields[path].get("projected"):
+            # Each caller sees this field's values only after projection, so a filter, sort or join
+            # on the stored values would reveal what a row omits, to the owner as to anyone else.
+            _fail("QUERY_FIELD_UNAVAILABLE", at, "a field stored as each caller sees it", (),
+                  "Select, aggregate or group the field; filter and sort on another field.")
+        kind = fields[path].get("type")
+        enum = tuple(fields[path].get("enum", ()))
+        if kind == "enum":
+            scalar_types = {str: "string", int: "number", float: "number", bool: "boolean"}
+            kinds = {scalar_types.get(type(value)) for value in enum}
+            if len(kinds) != 1 or None in kinds:
+                _fail("QUERY_UNSUPPORTED", at, "one declared scalar type for enum values")
+            kind = next(iter(kinds))
+        if kind not in _SCALARS | {"object", "array"}:
+            _fail("QUERY_UNSUPPORTED", at, "supported declared field type")
+        return Field(source, path, kind, alias, enum)
+
+    def _path_field(self, name: str, at: str, *, evaluated: bool) -> Field:
+        """Bind a dotted path through one or two single-valued declared references."""
+        seg0, rest = name.split(".", 1)
+        hop = self.reference(self.source.ref, seg0, at)
+        if hop["many"]:
+            _fail("QUERY_UNSUPPORTED", at, "a many-valued reference expands through related, not a path",
+                  (), "Expand the reference in related and filter on a field of the source.")
+        fields = hop["declaration"].get("fields", {})
+        if rest in fields:
+            target = Source("collections", hop["ref"], hop["type"])
+            try:
+                return self._finish(target, seg0, rest, fields, at, evaluated=evaluated, implicit=False)
+            except _Invalid as error:
+                raise _Invalid(_mark_target(error.finding)) from error
+        seg1, separator, leaf = rest.partition(".")
+        if not separator:
+            if hop["declaration"].get("field_admission"):
+                _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (),
+                      "Describe the admitted collection fields.", target_side=True)
+            _fail("QUERY_FIELD_UNKNOWN", at, "declared field path", fields,
+                  "Describe the source and choose a declared field.", target_side=True)
+        first, second = hop, None
+        try:
+            second = self.reference(hop["ref"], seg1, at)
+        except _Invalid as error:
+            raise _Invalid(_mark_target(error.finding)) from error
+        if second["many"]:
+            _fail("QUERY_UNSUPPORTED", at, "a many-valued reference expands through related, not a path",
+                  (), "Expand the reference in related and filter on a field of the source.")
+        if second["ref"] in {self.source.ref, first["ref"]}:
+            _fail("QUERY_UNSUPPORTED", at, "reference paths cannot revisit a collection")
+        if "." in leaf:
+            _fail("QUERY_INPUT_LIMIT", at, "at most 2 reference hops")
+        fields = second["declaration"].get("fields", {})
+        if leaf not in fields:
+            if second["declaration"].get("field_admission"):
+                _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (),
+                      "Describe the admitted collection fields.", target_side=True)
+            _fail("QUERY_FIELD_UNKNOWN", at, "declared field path", fields,
+                  "Describe the source and choose a declared field.", target_side=True)
+        target = Source("collections", second["ref"], second["type"])
+        try:
+            return self._finish(target, f"{seg0}.{seg1}", leaf, fields, at,
+                                evaluated=evaluated, implicit=False)
+        except _Invalid as error:
+            raise _Invalid(_mark_target(error.finding)) from error
 
     def field(self, name: Any, at: str, *, reduction=False, evaluated=False, implicit=False) -> Field:
         """Bind a declared field; ``evaluated`` marks a use that SQL evaluates on stored values."""
@@ -278,6 +375,9 @@ class _Binder:
                 source, alias, path = self.aliases[prefix], prefix, suffix
         fields = self.declarations[source.ref].get("fields", {})
         if not isinstance(path, str) or path not in fields:
+            if (self.references is not None and source is self.source and alias is None
+                    and isinstance(name, str) and "." in name):
+                return self._path_field(name, at, evaluated=evaluated)
             if self.declarations[source.ref].get("field_admission"):
                 _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (), "Describe the admitted collection fields.")
             allowed = list(self.declarations[self.source.ref].get("fields", {}))
@@ -293,25 +393,7 @@ class _Binder:
                 allowed,
                 "Describe the source and choose a declared field.",
             )
-        if fields[path].get("withheld") and not implicit:
-            # The key spells a field this caller cannot see; it is refused exactly as that field is.
-            _fail("QUERY_FIELD_UNAVAILABLE", at, "an admitted field", (), "Describe the admitted collection fields.")
-        if evaluated and fields[path].get("projected"):
-            # Each caller sees this field's values only after projection, so a filter, sort or join
-            # on the stored values would reveal what a row omits, to the owner as to anyone else.
-            _fail("QUERY_FIELD_UNAVAILABLE", at, "a field stored as each caller sees it", (),
-                  "Select, aggregate or group the field; filter and sort on another field.")
-        kind = fields[path].get("type")
-        enum = tuple(fields[path].get("enum", ()))
-        if kind == "enum":
-            scalar_types = {str: "string", int: "number", float: "number", bool: "boolean"}
-            kinds = {scalar_types.get(type(value)) for value in enum}
-            if len(kinds) != 1 or None in kinds:
-                _fail("QUERY_UNSUPPORTED", at, "one declared scalar type for enum values")
-            kind = next(iter(kinds))
-        if kind not in _SCALARS | {"object", "array"}:
-            _fail("QUERY_UNSUPPORTED", at, "supported declared field type")
-        return Field(source, path, kind, alias, enum)
+        return self._finish(source, alias, path, fields, at, evaluated=evaluated, implicit=implicit)
 
     def predicate(self, value: Any, at: str, depth=0, *, reduction=False) -> Filter:
         if depth > LIMITS["boolean_depth"]:
@@ -503,7 +585,7 @@ class _Binder:
             _name(name, at)
             if name in self.reduction_fields:
                 _fail("QUERY_VALUE_INVALID", at, "alias distinct from group keys")
-            raw = _object(value, at, {"op", "field", "p"}, {"op"})
+            raw = _object(value, at, {"op", "field", "p", "where"}, {"op"})
             op = _choice(raw["op"], f"{at}.op", AGGREGATE_OPS)
             field = self.field(raw["field"], f"{at}.field") if "field" in raw else None
             if field is None and op != "count":
@@ -534,8 +616,12 @@ class _Binder:
                 if op in EXTREMES
                 else "number"
             )
+            where = None
+            if "where" in raw:
+                # An aggregate's own filter runs over base and reference-path fields, never aliases.
+                where = self.predicate(raw["where"], f"{at}.where")
             self.reduction_fields[name] = Field(self.source, name, output_type)
-            aggregates.append(NamedAggregate(name, op, field, p))
+            aggregates.append(NamedAggregate(name, op, field, p, where))
         if not keys and not aggregates:
             _fail("QUERY_VALUE_INVALID", "aggregates", "nonempty grouping or aggregation")
         return Aggregate(tuple(keys), tuple(aggregates))
@@ -550,6 +636,7 @@ def normalize_query(
     allowed_types: tuple[str, ...] | None = None,
     legacy_arguments: Mapping | None = None,
     capabilities: frozenset[str] = frozenset(),
+    references=None,
 ) -> ValidationResult:
     """Bind trusted, already-disclosable declarations, never stored rows.
 
@@ -597,8 +684,31 @@ def normalize_query(
         source = Source(domain, ref, declaration["type"])
         mode = _choice(raw.get("mode", "execute"), "mode", MODES)
         profile = _choice(raw.get("execution_profile", "interactive"), "execution_profile", PROFILES)
-        binder = _Binder(source, declarations)
+        binder = _Binder(source, declarations, references)
         joins = binder.joins(raw.get("joins", []))
+        related = []
+        seen_related = set()
+        for i, entry in enumerate(_list(raw.get("related", []), "related", 8)):
+            at = f"related[{i}]"
+            if references is None:
+                _fail("QUERY_UNSUPPORTED", at, "a facade that binds declared references")
+            limit = 10
+            if isinstance(entry, str):
+                dotted = entry
+            else:
+                raw_entry = _object(entry, at, {"field", "limit"}, {"field"})
+                dotted = raw_entry["field"]
+                if not isinstance(dotted, str):
+                    _fail("QUERY_VALUE_INVALID", f"{at}.field", "declared reference name")
+                if "limit" in raw_entry:
+                    limit = _integer(raw_entry["limit"], f"{at}.limit", 1, 50)
+            if not isinstance(dotted, str) or not dotted:
+                _fail("QUERY_VALUE_INVALID", at, "declared reference name")
+            if dotted in seen_related:
+                _fail("QUERY_VALUE_INVALID", at, "unique reference entries")
+            seen_related.add(dotted)
+            binder.reference(source.ref, dotted, at)
+            related.append(Related(dotted, limit))
         where = binder.predicate(raw["where"], "where") if "where" in raw else None
         aggregate = (
             binder.aggregate(raw.get("group_by", []), raw.get("aggregates", {}))
@@ -662,6 +772,9 @@ def normalize_query(
             )
         if "graph" in raw:
             _fail("QUERY_UNSUPPORTED", "graph", "settled graph request grammar")
+        if binder.used_references and {"references", "related"} & set(declaration.get("fields", {})):
+            # Those two names are keys of every row that expands a reference.
+            _fail("QUERY_UNSUPPORTED", "related", "field name collides with a result key")
         return ValidationResult(
             Query(
                 source,
@@ -675,6 +788,7 @@ def normalize_query(
                 as_of=as_of,
                 mode=mode,
                 execution_profile=profile,
+                related=tuple(related),
             )
         )
     except _Invalid as error:

@@ -29,10 +29,14 @@ def _json(value):
 
 
 def _spec(spec):
-    return {"type": spec.type, "classification": spec.classification, "depends_on": list(spec.depends_on),
-            "offset": spec.offset,
-            "properties": {name: _spec(child) for name, child in spec.properties.items()},
-            "items": None if spec.items is None else _spec(spec.items)}
+    result = {"type": spec.type, "classification": spec.classification, "depends_on": list(spec.depends_on),
+              "offset": spec.offset,
+              "properties": {name: _spec(child) for name, child in spec.properties.items()},
+              "items": None if spec.items is None else _spec(spec.items)}
+    if spec.references is not None:
+        # A declaration change must stale every cursor that could resolve through it.
+        result["references"] = spec.references.collection
+    return result
 
 
 def _nested_classifications(spec):

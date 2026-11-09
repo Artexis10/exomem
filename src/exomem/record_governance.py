@@ -80,6 +80,7 @@ _INSPECTION_KEYS = frozenset(
         "presentation",
         "observed_values",
         "coverage",
+        "references",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -423,6 +424,48 @@ def _inspection_plan_join(value: Any) -> dict[str, str] | None:
     return join
 
 
+def _inspection_scalar(value: Any) -> bool:
+    return value is None or type(value) in (str, int, float, bool)
+
+
+def _inspection_references(value: Any) -> list[dict[str, Any]] | None:
+    """Bounded declared-reference report entries: scalars and one level of bounded containers."""
+    if not isinstance(value, list) or len(value) > 64:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or len(item) > 32:
+            return None
+        normalized: dict[str, Any] = {}
+        for key, entry in item.items():
+            if type(key) is not str or len(key.encode("utf-8")) > 64:
+                return None
+            if _inspection_scalar(entry):
+                if type(entry) is str and len(entry.encode("utf-8")) > 256:
+                    return None
+                normalized[key] = entry
+            elif isinstance(entry, Mapping) and len(entry) <= 16:
+                if any(type(k) is not str for k in entry):
+                    return None
+                nested = {}
+                for k2, v2 in entry.items():
+                    if _inspection_scalar(v2):
+                        nested[k2] = v2
+                    elif isinstance(v2, list) and len(v2) <= 64 and all(
+                        isinstance(v3, Mapping) and set(v3) - {"value", "rows", "reference"} == set()
+                        and all(_inspection_scalar(x) for x in v3.values())
+                        for v3 in v2
+                    ):
+                        nested[k2] = [dict(v3) for v3 in v2]
+                    else:
+                        return None
+                normalized[key] = nested
+            else:
+                return None
+        out.append(normalized)
+    return out
+
+
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Reconstruct the report-only inspection union before it reaches egress."""
     kind = payload.get("kind")
@@ -497,6 +540,10 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         return None
     normalized_views = [_inspection_saved_view(view) for view in views]
     if any(view is None for view in normalized_views):
+        return None
+    references = payload.get("references")
+    normalized_references = _inspection_references(references) if references is not None else None
+    if references is not None and normalized_references is None:
         return None
     presentation = payload.get("presentation")
     if presentation is not None and (
@@ -754,6 +801,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         **({"lifecycle_guards": dict(guards)} if guards is not None else {}),
         **({"observed_values": normalized_observed} if normalized_observed is not None else {}),
         **({"coverage": normalized_coverage} if normalized_coverage is not None else {}),
+        **({"references": normalized_references} if normalized_references is not None else {}),
     }
     return result
 
@@ -878,6 +926,7 @@ egress.register_projector(
         "presentation",
         "observed_values",
         "coverage",
+        "references",
     ),
     validator=_validate_record_inspection,
 )
@@ -1513,6 +1562,10 @@ def _authorize_saved_view(
     query = view.definition.get("query")
     if not isinstance(query, Mapping):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
+    if "version" in query:
+        raise collections.CollectionError(
+            "SAVED_VIEW_UNAVAILABLE",
+            "this saved view is a version-1 query; run it on a store-backed collection")
     child_requested = query.get("expand_children") is True or query.get("expand_child") is not None
     selected_child = _saved_view_child_selector(manifest, query)
     if child_requested and selected_child is None:
@@ -1727,6 +1780,9 @@ def inspect_collection(
                 "diagnostics": diagnostics,
                 "audit": _inspection_audit(audit),
                 "saved_views": saved_views,
+                # Store inspection lists declared-reference state; the file mode has no
+                # store database to report against, so it reports the empty list.
+                "references": [],
                 "lifecycle_guards": guards,
                 "coverage": _collection_coverage(
                     root,

@@ -77,6 +77,11 @@ class BoundReference:
         return self._target.collection_id
 
     @property
+    def basis(self):
+        """The subject basis of the target's admission: manifest hash, type and declaration."""
+        return self._target.basis
+
+    @property
     def manifest(self) -> collections.CollectionManifest:
         return self._target.manifest
 

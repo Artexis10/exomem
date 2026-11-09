@@ -10,7 +10,7 @@ from dataclasses import asdict, fields, is_dataclass, replace
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from ..collection_store import native_identity, query_freshness
+from ..collection_store import native_identity, query_freshness, typed_storage
 from ..collection_store.native_projections import NativeProjectionPlan
 from ..issued_cursor import issued_cursor
 from ..structured_collections import _MAX_ITEM_KEY_BYTES
@@ -89,15 +89,20 @@ def with_rows(session, collection_id: str, visible: str) -> str:
     return visible if position is None else _hash([visible, position])
 
 
-def _visible(admitted, dependencies):
-    plan = admitted.session._field_plans[admitted.query.source.ref]
-    if admitted.uniform and dependencies - {"item_key"} <= plan.whole_fields:
-        basis = query_freshness.uniform_basis(admitted.session.connection, admitted.query.source.ref, dependencies)
+def visible_basis(session, collection_id: str, *, uniform: bool, layout, dependencies) -> str:
+    """The release-qualified visible-state digest of ``dependencies`` on one collection.
+
+    Uniform release over whole fields binds the maintained freshness basis; anything else binds a
+    bounded digest of each released row's admitted dependency values, so a change to a row the caller
+    cannot read leaves the basis unchanged.
+    """
+    plan = session._field_plans[collection_id]
+    if uniform and dependencies - {"item_key"} <= plan.whole_fields:
+        basis = query_freshness.uniform_basis(session.connection, collection_id, dependencies)
         if basis is None:
             raise QueryError("QUERY_UNAVAILABLE")
         return _hash(basis)
-    session = admitted.session
-    base = session.admit(admitted.query.source.ref)
+    base = session.admit(collection_id)
     count = base.visible_count
     if count is None or count + session._estimated_visits > session.limits.max_row_visits:
         raise QueryError("QUERY_COST_LIMIT")
@@ -105,7 +110,7 @@ def _visible(admitted, dependencies):
     digest = hashlib.sha256(b"exomem.typed-visible-dependencies.v1\0")
     cursor = session.connection.execute(
         f"SELECT i.row_id,i.item_key FROM {base.items} i WHERE i.collection_id=? AND {base.membership_sql} "
-        "ORDER BY i.row_id", (admitted.query.source.ref,),
+        "ORDER BY i.row_id", (collection_id,),
     )
     with closing(session.fetch(cursor)) as batches:
         for batch in batches:
@@ -113,17 +118,24 @@ def _visible(admitted, dependencies):
                 session.check()
                 if key is None:
                     raise QueryError("QUERY_COST_LIMIT")
+                if layout is not None and layout.encoding == typed_storage.TYPED_V2 and type(key) is bytes:
+                    key = native_identity.decode(key, layout.identity)
                 try:
                     values = session.selected_values(
-                        row_id, admitted.layout, set(dependencies) - {"item_key"},
+                        row_id, layout, set(dependencies) - {"item_key"},
                         max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
                     )
                     selected = [(path, path in values, values.get(path)) for path in sorted(dependencies) if path != "item_key"]
-                    digest.update(_json([logical_item_key(admitted, key), selected]).encode() + b"\n")
+                    digest.update(_json([key, selected]).encode() + b"\n")
                 except (ValueError, TypeError, RecursionError) as error:
                     raise QueryError("QUERY_COST_LIMIT") from error
                 session.check()
     return digest.hexdigest()
+
+
+def _visible(admitted, dependencies):
+    return visible_basis(admitted.session, admitted.query.source.ref, uniform=admitted.uniform,
+                         layout=admitted.layout, dependencies=dependencies)
 
 
 def caller_binding(session, query) -> dict[str, str]:
@@ -135,6 +147,11 @@ def caller_binding(session, query) -> dict[str, str]:
     def collect(value):
         if isinstance(value, ir.Field):
             dependencies.add(value.path)
+            if value.alias is not None:
+                # A reference path depends on its first hop's source field.
+                dependencies.add(value.alias.split(".", 1)[0])
+        elif isinstance(value, ir.Related):
+            dependencies.add(value.path.split(".", 1)[0])
         elif is_dataclass(value):
             for field in fields(value):
                 collect(getattr(value, field.name))

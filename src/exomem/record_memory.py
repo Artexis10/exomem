@@ -636,10 +636,10 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
         _invalid_arguments("validate requires exactly one of: collection, manifest_path")
     if action == "validate" and values["collection"] is not None and values["scaffold"] is not None:
         _invalid_arguments("scaffold is not accepted when collection is supplied")
-    if action == "query" and values["query"] is not None and supplied - {"collection", "query"}:
+    if action == "query" and values["query"] is not None and supplied - {"collection", "query", "view"}:
         from .query_engine.validation import Finding
 
-        legacy = sorted(supplied - {"collection", "query"})
+        legacy = sorted(supplied - {"collection", "query", "view"})
         repair = "Remove " + ", ".join(legacy) + ", or omit query."
         raise OpError(
             "QUERY_ARGUMENT_CONFLICT",
