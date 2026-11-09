@@ -697,6 +697,8 @@ def _shared_source_candidates(
     if connection is None:
         return []
     try:
+        # Debt (drifted shared-source copy): reads the `sources` field's relation as a literal, while the graph's
+        # copy reads the binding from any origin; folding the two changes suggestions and needs its own evidence.
         rows = connection.execute(
             "SELECT e2.source_path, e1.dst_key "
             "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
