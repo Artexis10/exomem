@@ -958,8 +958,8 @@ def test_attach_refuses_a_source_lane_for_a_direct_evidence_preserve(tmp_path: P
         )
 
 
-def test_an_unknown_archive_mode_refuses_instead_of_keeping_the_zip_whole(vault: Path, lease) -> None:
-    """A CLI or HTTP caller skips the schema enum; a typo must not store the zip as one file."""
+def test_an_unknown_archive_mode_refuses_instead_of_being_read_as_members(vault: Path, lease) -> None:
+    """A CLI or HTTP caller skips the schema enum; a typo must not be preserved as members."""
     from exomem.cli_ops import OpError
 
     with _local_session("session-home"):
