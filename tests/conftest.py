@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import zlib
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -1195,6 +1196,20 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def duplicate_index(vault: Path) -> Path:
+    """The fixture vault with its duplicate index built, as the background repair leaves a live vault.
+
+    A storing door never builds the index itself, because that scan holds the writer lease for as long as the vault is
+    large: on a missing index it stores the content and says the check was unavailable. A test of reuse therefore
+    starts from a built index, which the door's own commits then keep current.
+    """
+    from exomem import lexstore
+
+    assert lexstore.get_store(vault).rebuild_atomic()
+    return vault
+
+
+@pytest.fixture
 def obligations_only(vault: Path) -> Path:
     """The fixture vault without its captured Sources.
 
@@ -1210,6 +1225,69 @@ def obligations_only(vault: Path) -> Path:
 @pytest.fixture
 def source_schema(vault: Path) -> schema_module.SourceSchema:
     return schema_module.load_source_schema(vault)
+
+
+@pytest.fixture
+def earlier_layout() -> Iterator[pytest.MonkeyPatch]:
+    """`episode_memory` `record` as releases before one-page episodes wrote it: a new page per changed recap, the live one superseded.
+
+    A vault upgraded from such a release keeps those files, so what reads them (recovery of a
+    retired page, coverage across several files) must keep working beside the recorder.
+    A test calls `.undo()` on the yielded patch to record as the shipped recorder does.
+    """
+    from exomem import add as add_module
+    from exomem import episode_capture, episode_memory
+
+    def write(vault_root, source_schema, recap, when, audience):
+        revisions = episode_memory._revisions(vault_root, recap.key, audience)  # noqa: SLF001
+        live = [item for item in revisions if item.live]
+        paths = [item.path for item in revisions]
+        if live and live[-1].frontmatter.get("episode_digest") == recap.digest:
+            return episode_memory._source(live[-1].path, live[-1].frontmatter), True, paths  # noqa: SLF001
+        order = episode_capture.order_token(when, after=revisions[-1].order if revisions else None)
+        result = add_module.add(
+            vault_root, source_schema, content=recap.body, title=recap.subject, source_type="episode",
+            slug=recap.slug_at(order), today=when.replace(microsecond=0), extra_frontmatter=recap.frontmatter,
+            supersede=tuple((item.path, item.hash) for item in live), defer_fanout_to_terminal=True,
+        )
+        return {"ref": result.ref, "path": result.path, "title": recap.subject}, False, [*paths, result.path]
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(episode_memory, "_write", write)
+        yield patch
+
+
+@pytest.fixture
+def owner_scope() -> Iterator[None]:
+    """Run the test as the vault owner, in process: the one caller who can read a raw-protected page."""
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        yield
+
+
+@pytest.fixture
+def earlier_episode(vault: Path, source_schema, earlier_layout) -> Iterator[Callable[..., list[str]]]:
+    """Build an episode as earlier releases kept it, as the local owner for the whole test.
+
+    The factory returns the episode's Sources pages oldest first: one page per recap
+    revision, only the last live. That is the shape a fold exists for, because the
+    shipped recorder keeps a single page per episode.
+    """
+    from exomem import commands
+    from exomem.governance.principal import owner_principal, request_scope
+
+    def build(revisions: int, key: str = "ep-" + "a1" * 16) -> list[str]:
+        return [
+            commands.op_episode_memory(
+                vault, source_schema, action="record", episode=key, subject="Fold fixture",
+                summary=f"Recap number {number}", worked_on=[f"Step number {number}"],
+            )["source"]["path"]
+            for number in range(1, revisions + 1)
+        ]
+
+    with request_scope(owner_principal()):
+        yield build
 
 
 class ScopeWalkSentinel:

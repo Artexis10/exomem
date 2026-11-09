@@ -50,22 +50,59 @@ def _due(vault: Path) -> list:
     return audit_module.audit(vault, categories=["uncompiled_episode"]).findings
 
 
-def test_a_cited_revision_keeps_its_lines_covered_when_a_later_revision_supersedes_it(vault: Path) -> None:
-    """A supersession that orphaned the citation would re-open every line the page covers."""
-    first = _record(vault, decided=["Buy the brass lamp", "Ship by rail"])["source"]["path"]
-    assert [(f.meta["decided"], f.meta["open"]) for f in _due(vault)] == [(2, 2)]
+def test_a_note_that_cited_changed_decided_lines_does_not_cover_the_new_ones(vault: Path) -> None:
+    """A revision reopens the page's lines: an old citation must not claim Decided lines it never held."""
+    path = _record(vault, decided=["Buy the brass lamp", "Ship by rail"])["source"]["path"]
+    _cite(vault, path)
+    find.shared_resolver(vault)  # the count borrows a warm resolver, as a running service keeps one
 
-    _cite(vault, first)
-    assert _due(vault) == []
+    revised = _record(vault, decided=["Buy the brass lamp", "Ship by rail", "Pay by card"])
 
-    _record(vault, decided=["Buy the brass lamp", "Ship by rail"], open=["Pick the paint"])
-    assert len(_episodes(vault)) == 2
-    assert _due(vault) == []
-
-    _record(vault, decided=["Buy the brass lamp", "Ship by rail", "Pay by card"], open=["Pick the paint"])
+    assert revised["source"]["path"] == path
+    assert (revised["compile"]["decided"], revised["compile"]["open"]) == (3, 3)
     (finding,) = _due(vault)
-    assert (finding.meta["decided"], finding.meta["open"]) == (3, 1)
+    assert (finding.meta["decided"], finding.meta["open"]) == (3, 3)
     assert finding.path == _episodes(vault)[-1].relative_to(vault).as_posix()
+
+    # Saving a compiled note that names the page restores its back-reference.
+    _cite(vault, path, title="Lamp pick, revised")
+    assert _due(vault) == []
+
+
+def test_a_note_that_cited_unchanged_decided_lines_still_covers_them(vault: Path) -> None:
+    """Only a change to the Decided lines reopens them: a revised summary or open item must not
+    send an agent back over items a note already compiled."""
+    path = _record(vault, decided=["Buy the brass lamp", "Ship by rail"])["source"]["path"]
+    _cite(vault, path)
+    find.shared_resolver(vault)
+
+    revised = _record(
+        vault, decided=["Buy the brass lamp", "Ship by rail"], open=["Pick the paint"],
+        summary="Chose the brass lamp; the paint is still open.",
+    )
+
+    assert revised["source"]["path"] == path
+    assert (revised["compile"]["decided"], revised["compile"]["open"]) == (2, 0)
+    assert _due(vault) == []
+
+
+def test_a_revision_file_an_earlier_release_left_still_counts_as_cited_text(
+    vault: Path, earlier_layout: pytest.MonkeyPatch
+) -> None:
+    """An unfolded episode keeps older files that notes cite. The count reads them with the
+    live page, or it re-opens lines that a note already holds."""
+    lines = ["Buy the brass lamp", "Ship by rail"]
+    first = _record(vault, decided=lines)["source"]["path"]
+    live = _record(vault, decided=lines, open=["Pick the paint"])["source"]["path"]
+    assert live != first
+    _cite(vault, first)
+    find.shared_resolver(vault)
+    earlier_layout.undo()
+
+    revised = _record(vault, decided=lines, open=["Pick the paint"], summary="The paint is still open.")
+
+    assert revised["source"]["path"] == live
+    assert (revised["compile"]["decided"], revised["compile"]["open"]) == (2, 0)
 
 
 def test_a_citing_page_the_caller_cannot_see_reads_as_no_citation(vault: Path) -> None:

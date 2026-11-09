@@ -152,8 +152,8 @@ def test_two_episodes_recorded_about_a_page_since_it_changed_make_one_fold_item(
     ]
     assert len(folds) == 1
 
-    # A new revision of episode A that no longer links the page supersedes the
-    # one that did: the superseded revision is not live, so one origin remains.
+    # A new recap of episode A that no longer links the page rewrites the page
+    # that did, so one origin remains.
     _record(vault, EPISODE_A, "Nothing further on the pump")
     _observed(vault, first)
     _quiet(vault)
