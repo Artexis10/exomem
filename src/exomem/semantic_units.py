@@ -1915,7 +1915,10 @@ def _assessment_problems(
         key in block.metadata for key in semantic_blocks.BELIEF_UNIT_METADATA_KEYS
     ):
         return []
-    if any("names_assessed_claim" in relations.behaviours_of_label(relation.kind) for relation in block.relations):
+    if any(
+        relations.has(relations.resolve(relation.kind).canonical or "", "names_assessed_claim")
+        for relation in block.relations
+    ):
         return []
     return [_RowProblem(
         "relations", "missing_rich_assessed_claim",
