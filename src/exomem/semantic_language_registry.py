@@ -1064,7 +1064,7 @@ def _check_label_spellings(
     findings: list[RegistryFinding],
 ) -> None:
     """Refuse a vault key or label that another entry of the same registry answers to, in any
-    language.
+    language, or that a row beside a probability would read as a probability.
 
     The shipped spellings the vault keeps own their entry first, so a finding always points at
     something the vault wrote.
@@ -1086,6 +1086,17 @@ def _check_label_spellings(
         written = [] if entry.core else [(span, key)]
         written += [(f"{span}.labels.{language}", text) for language, text in entry.labels]
         for where, spelling in written:
+            if labels.beside_probabilities and (
+                semantic_labels.is_probability(spelling.strip())
+                or semantic_labels.PERCENT_RE.match(spelling.strip())
+            ):
+                findings.append(_finding(
+                    f"{labels.noun}_label_probability",
+                    where,
+                    f"{spelling!r} reads as a probability, which the same row takes; name the "
+                    f"{labels.entry_words} in words",
+                ))
+                continue
             folded = semantic_labels.fold(spelling)
             if owners.setdefault(folded, key) != key:
                 findings.append(

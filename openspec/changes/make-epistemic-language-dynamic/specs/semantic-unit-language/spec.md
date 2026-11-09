@@ -65,7 +65,7 @@ An invalid value SHALL produce a deterministic source-addressed error that names
 - **THEN** the parsed unit's inference mode is `induction`
 
 ### Requirement: Registry labels are aliases in any language
-Every entry of the kind, verdict, modality, belief-level, inference-mode and dimension registries SHALL carry `labels` keyed by language. Parsing SHALL accept a label as an alias of its entry's key. The registry check SHALL refuse a label that collides with another entry's key or label in the same registry.
+Every entry of the kind, verdict, modality, belief-level, inference-mode and dimension registries SHALL carry `labels` keyed by language. Parsing SHALL accept a label as an alias of its entry's key. The registry check SHALL refuse a label that collides with another entry's key or label in the same registry. It SHALL also refuse a belief-level label shaped like a probability, a number from 0 to 1 or a percentage, because `credence` takes both and the label would hide the probability's basis rule.
 
 #### Scenario: A Finnish heading is the same kind
 - **WHEN** the kind `claim` carries the label `Väite` for Finnish, and a page contains `## Väite`

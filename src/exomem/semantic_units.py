@@ -1793,11 +1793,6 @@ def _rich_verdict(
     return verdict, None
 
 
-# The probability or number shape a governed row accepts: plain decimal notation, so `nan`,
-# `inf`, `1_000` and a percentage are refused. It checks a field's format, not its meaning.
-_DECIMAL = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
-_NUMBER_RE = re.compile(rf"^{_DECIMAL}(?:[eE][+-]?\d+)?$")
-_PERCENT_RE = re.compile(rf"^(?P<number>{_DECIMAL})\s*%$")
 # The shape of an ISO date and time, checked before the calendar parser: a field's format.
 _ISO_DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?$"
@@ -2022,7 +2017,7 @@ def _credence(
     level = language.resolve_label(semantic_labels.BELIEF_LEVELS, stated)
     if level is not None:
         return level, None
-    if _NUMBER_RE.match(stated) and 0 <= float(stated) <= 1:
+    if semantic_labels.is_probability(stated):
         if basis is None:
             return None, _RowProblem(
                 "credence_basis", "missing_rich_credence_basis",
@@ -2031,7 +2026,7 @@ def _credence(
                 f"level instead: {levels}.",
             )
         return stated, None
-    percent = _PERCENT_RE.match(stated)
+    percent = semantic_labels.PERCENT_RE.match(stated)
     fix = (
         f"Write the probability as a number from 0 to 1, such as "
         f"{_percent_as_probability(percent.group('number'))} for {stated}."
@@ -2047,7 +2042,7 @@ def _credence(
 def _number(raw: str) -> str | None:
     """A number as written, or None when the text is no plain decimal number."""
     stated = _row_text(raw)
-    return stated if stated is not None and _NUMBER_RE.match(stated) else None
+    return stated if stated is not None and semantic_labels.NUMBER_RE.match(stated) else None
 
 
 def _event_time(raw: str) -> str | None:

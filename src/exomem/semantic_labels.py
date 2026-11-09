@@ -24,10 +24,12 @@ from .vocabulary import registry as vocabulary_registry
 @dataclass(frozen=True, slots=True)
 class LabelRegistry:
     """One label registry. `section` names its pack file and its vault section; `noun`
-    names one of its entries in a finding or an error code."""
+    names one of its entries in a finding or an error code. `beside_probabilities` marks a
+    registry whose row also takes a probability, so none of its labels may look like one."""
 
     section: str
     noun: str
+    beside_probabilities: bool = False
 
     @property
     def pack_file(self) -> str:
@@ -45,7 +47,7 @@ class LabelRegistry:
 
 
 VERDICTS = LabelRegistry("verdicts", "verdict")
-BELIEF_LEVELS = LabelRegistry("belief_levels", "belief_level")
+BELIEF_LEVELS = LabelRegistry("belief_levels", "belief_level", beside_probabilities=True)
 MODALITIES = LabelRegistry("modalities", "modality")
 INFERENCE_MODES = LabelRegistry("inference_modes", "inference_mode")
 # The label registries the language implements. Code reads each one for its own unit-metadata
@@ -61,6 +63,16 @@ KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(-[a-z0-9]{2,8})*$")
 # The longest key or label an entry takes.
 MAX_SPELLING = 64
+# The probability or number shape a governed row accepts: plain decimal notation, so `nan`,
+# `inf`, `1_000` and a percentage are refused. It checks a field's format, not its meaning.
+_DECIMAL = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+NUMBER_RE = re.compile(rf"^{_DECIMAL}(?:[eE][+-]?\d+)?$")
+PERCENT_RE = re.compile(rf"^(?P<number>{_DECIMAL})\s*%$")
+
+
+def is_probability(text: str) -> bool:
+    """Whether `text` is a probability as a row states one: a plain number from 0 to 1."""
+    return bool(NUMBER_RE.match(text)) and 0 <= float(text) <= 1
 
 
 @dataclass(frozen=True, slots=True)

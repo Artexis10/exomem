@@ -692,6 +692,21 @@ def test_a_vault_extends_each_new_registry_and_a_collision_stays_inside_one_regi
     ]
 
 
+@pytest.mark.parametrize("label", ["0.7", "70 %"], ids=["number", "percentage"])
+def test_a_belief_level_labelled_like_a_probability_is_refused(label: str) -> None:
+    """Catches a level label that turns `- credence: 0.7` into a level, so it needs no basis."""
+    registry = language_registry.load_registry(
+        proposal={
+            **_proposal(),
+            "belief_levels": {"fair": {"labels": {"en": label}, "description": "Fairly sure"}},
+        }
+    )
+
+    assert [(item["code"], item["path"]) for item in registry.findings] == [
+        ("belief_level_label_probability", "belief_levels.fair.labels.en"),
+    ]
+
+
 def test_removing_an_entry_that_only_labels_a_shipped_key_is_no_drop() -> None:
     """Catches a save refused for dropping a Finnish label, when the shipped key still resolves."""
     current = language_registry.load_registry(
