@@ -16,6 +16,7 @@ import os
 import signal
 import sqlite3
 import sys
+import time
 import zlib
 from contextlib import closing
 from pathlib import Path
@@ -25,16 +26,28 @@ import numpy as np
 import pytest
 import test_vault_store_migration as migration
 import test_vault_store_read_write as read_write
+import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, BETA
 
-from exomem import embeddings, find, index_paths, lexstore, readiness, recall_space, semantic_drain
+from exomem import (
+    embeddings,
+    find,
+    find_candidates,
+    index_paths,
+    lexstore,
+    readiness,
+    recall_space,
+    semantic_drain,
+)
+from exomem import vault as vault_module
 from exomem.embedding_index import (
     STORE_CURSOR_REVISION,
     STORE_CURSOR_SEQ,
     EmbeddingIndex,
     StoreStamp,
 )
+from exomem.ranking_config import DEFAULT_RANKING
 from exomem.vault_store import mode, read, vectors, write
 
 # The store-mode vault and its writer are that suite's fixtures; a name here is how pytest finds
@@ -43,6 +56,7 @@ vault = migration.vault
 stored = read_write.stored
 writer = read_write.writer
 put = read_write.put
+served = write_path.served
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -624,3 +638,74 @@ def test_the_store_drain_embeds_the_pages_that_the_file_mode_walk_embeds(vault):
     }
 
     assert disagreements == {}
+
+
+def test_find_reports_the_chunk_lane_degraded_when_the_store_cannot_say_what_to_trust(
+    stored, encoder, monkeypatch
+):
+    """A store that cannot be read withholds every page's vectors, and the chunk lane then answers
+    with nothing: `find` must not report that as the lane searching and finding no match."""
+    catch_up(stored)
+
+    def lane(degraded: list[str]):
+        return find_candidates.collect_candidates(
+            stored, query="lighthouse keeper", query_norm="lighthouse keeper", limit=10,
+            scope="kb", mode="vector", graph=False, temporal=False, intent="conceptual",
+            prefer_compiled=False, prefer_active=False, prefer_used=False,
+            config=DEFAULT_RANKING, timings=None, snapshot=find.FreshnessSnapshot(stored),
+            page_of=lambda _path: None,
+            keyword_match_paths=lambda *_a, **_k: [],
+            outbound_wikilink_paths=lambda *_a, **_k: [],
+            get_query_resolver=lambda *_a, **_k: None, record_degradation=lambda _lane: None,
+            degraded_out=degraded, failed_out=[], recall_paths={ALPHA, BETA}, capture_trace=True,
+        )
+
+    readable = lane([])
+    assert readable.lane_statuses["vector"]["status"] == "participated"
+
+    monkeypatch.setattr(vectors, "in_store_mode", unreadable_mode)
+    degraded: list[str] = []
+    unproved = lane(degraded)
+
+    assert unproved.vector_ranking == []
+    assert unproved.lane_statuses["vector"]["status"] == "unavailable"
+    assert unproved.lane_statuses["vector"]["reason"] == "coverage_incomplete"
+    assert degraded == ["embeddings"]
+
+
+def wait_until(condition, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "the condition never held"
+        time.sleep(0.05)
+
+
+def test_a_committed_write_wakes_the_idle_drain_instead_of_waiting_for_its_poll(
+    served, encoder, monkeypatch
+):
+    """A write whose vectors wait out the drain's idle poll: until then the vector lane leaves the
+    page out. The poll is far longer than this test, so only a wake can bring the drain in."""
+    monkeypatch.setattr(semantic_drain, "IDLE_POLL_SECONDS", 600.0)
+    turns = []
+    drain_once = vectors.drain
+
+    def counted(*arguments, **keywords):
+        turns.append(drain_once(*arguments, **keywords))
+        return turns[-1]
+
+    monkeypatch.setattr(vectors, "drain", counted)
+    drain = semantic_drain.SemanticDrain(served).start()
+    try:
+        wait_until(lambda: turns and not turns[-1].more)  # the first pass is done: it sleeps now
+        # No fan-out, so the wake is the commit's own and not a receipt's.
+        vault_module.batch_atomic_write(
+            [write_path.planned(served, ALPHA, HARBOUR.decode())],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+        wait_until(
+            lambda: (stamp := index_of(served).store_stamps([ALPHA]).get(ALPHA)) is not None
+            and stamp.sha256 == hashlib.sha256(HARBOUR).hexdigest()
+        )
+    finally:
+        drain.stop()

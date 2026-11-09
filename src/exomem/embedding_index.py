@@ -2486,6 +2486,7 @@ class EmbeddingIndex:
     def select_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
+        incomplete_out: list[str] | None = None,
     ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Keep modern passages as references until final evidence selection.
 
@@ -2494,13 +2495,13 @@ class EmbeddingIndex:
         """
         return self._search(
             query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
-            defer_cold_load=defer_cold_load, defer_text=True,
+            defer_cold_load=defer_cold_load, defer_text=True, incomplete_out=incomplete_out,
         )
 
     def _search(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
-        defer_text: bool = False,
+        defer_text: bool = False, incomplete_out: list[str] | None = None,
     ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
@@ -2521,6 +2522,9 @@ class EmbeddingIndex:
         """
         withheld = self._withheld()
         if withheld.everything:
+            if incomplete_out is not None:
+                # The unit lane's witness: an empty answer here proves nothing, so it is no miss.
+                incomplete_out.append(".")
             return []
         if cloud_cell.resource_policy() == "service-v1":
             # SQLite row fetches release the GIL; cooperative bulk graph work

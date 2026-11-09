@@ -79,7 +79,7 @@ def commit_batch(
             "completion to defer",
         )
     _require_v1_authority(root)
-    from .. import curation_witness, vocabulary_gate, working_set_heat
+    from .. import curation_witness, semantic_drain, vocabulary_gate, working_set_heat
     from ..governance import artifact_census
 
     caller_writes = list(writes)
@@ -114,6 +114,10 @@ def commit_batch(
     except BaseException:
         working_set_heat.abandon_commit(heat)
         raise
+    # The commit is durable and write.commit's transaction is closed, so wake the semantic drain
+    # for the audit rows now, not at its idle poll. It runs for a caller that defers its fan-out
+    # too, which `_after_commit` does not reach. A hint creates no worker.
+    semantic_drain.signal(root)
     with call_spans.span("commit_tail.census"):
         # Before the write acknowledges, so the free-text census names the pages that no file holds.
         artifact_census.note_created(root, [write.path for _rel, write in plan.pages])
