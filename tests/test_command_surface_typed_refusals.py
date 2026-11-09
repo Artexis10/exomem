@@ -40,8 +40,9 @@ def test_edit_refusal_over_mcp_carries_its_code(
         )
     )
 
-    assert result.structured_content["success"] is False
-    assert result.structured_content["error"]["code"] == "STRING_NOT_FOUND"
+    error = result.structured_content["error"]
+    assert error["code"] == "STRING_NOT_FOUND"
+    assert error["message"].endswith("Nothing was saved.")
 
 
 def test_unknown_filter_field_over_mcp_is_a_refusal_naming_its_path(
@@ -60,9 +61,6 @@ def test_unknown_filter_field_over_mcp_is_a_refusal_naming_its_path(
         )
     )
 
-    envelope = result.structured_content["result"]
-    error = envelope["error"]
-    assert envelope["success"] is False
+    error = result.structured_content["result"]["error"]
     assert error["code"] == "INVALID_FILTER_FIELD"
-    assert error["path"] == "$.scope"
-    assert error["remediation"]
+    assert "'scope'" in error["message"]

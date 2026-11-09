@@ -133,9 +133,11 @@ def test_record_replay_is_journaled_as_replayed(
     }
     command = SimpleNamespace(name="record_memory", read_only=False, leaf=lambda: receipt)
 
-    result = manager.invoke(command, (), {}, mutation_request_id="req-replayed")
+    result = manager.invoke(
+        command, (), {"response_detail": "full"}, mutation_request_id="req-replayed"
+    )
 
-    assert result["status"] == "replayed"
+    assert result["diagnostics"]["operational"]["status"] == "replayed"
     assert _read_journal(_journal_log_dir)[0]["outcome"] == "replayed"
 
 

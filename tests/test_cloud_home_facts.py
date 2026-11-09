@@ -110,7 +110,6 @@ def test_home_sets_the_chat_apps_level_that_a_chat_app_then_gets(cell):
     assert chat_app["context"] == "conversation"
     assert chat_app["engagement"]["level"] == "light"
     # A second writer holding the old revision cannot overwrite Home's choice.
-    assert stale["success"] is False
     assert stale["error"]["code"] == "PREFERENCE_CONFLICT"
     assert cleared["levels"]["conversation"] == {"level": "maximal", "source": "default"}
 

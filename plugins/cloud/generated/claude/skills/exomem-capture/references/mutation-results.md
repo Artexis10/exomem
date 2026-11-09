@@ -16,15 +16,20 @@ carry the codes and reasons. A result whose status is
 that took the write, such as `Saved -> <path> (personal Exomem)`; the bootstrap's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
-A refusal carries no `user_summary`; its `message` names the fix. The other fields
-are diagnostics for the agent: `ok: true`, `status: committed`, `mutated: true`,
-`path` or `paths`, `request_id`, `receipt_id`, and `warnings_count` (plus a caller-supplied
-`idempotency_key` when the surface supports one). A null receipt means that the
-surface supplied no replay identity; it does not weaken the committed status.
+A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
+your next call can take: `path` or `paths`, the hashes a guarded write takes, any
+`warnings`, and at most one `next` sentence (do it) and one `notice` sentence (tell the
+user). `notice` appears only when the change may be incomplete: for example a background
+update failed, or the call only checked a draft. Everything operational moves under
+`diagnostics.operational`, which only `response_detail="full"` returns: `ok`, `status`,
+`mutated`, `request_id`, `receipt_id`, `idempotency_key`, `before_hash`,
+`warnings_count`, and every `derived_sync*`, `advisory_sync*`, `graph_sync*` and
+`vocabulary_sync` field. A null receipt means that the surface supplied no replay
+identity; it does not weaken the committed status.
 When the write warned, `warnings` carries the texts — at most 8 entries of at
-most 300 characters. `warnings_count` remains authoritative, so fewer entries
-than the count means the rest were trimmed; ask for `response_detail="full"` to
-see them all. An upload receipt reports its warnings as per-file rows under
+most 300 characters. `warnings_count` appears beside them only when the list is
+shorter than the count: the rest were trimmed, and `response_detail="full"` shows
+them all. An upload receipt reports its warnings as per-file rows under
 `files` instead, and a mutation recovered from a portable receipt reports the
 count alone because it retains no leaf content. A corpus write advisory includes
 its review ref and complete 24-character signal fingerprint in its warning text;
@@ -53,20 +58,23 @@ completed. Inspect each item's state and error/remediation, and use the same
 identity for exact replay. A failed-subset retry is a new request containing
 only those failed paths.
 
-Committed observation responses retain bounded `before_hash`, `after_hash`,
-`unit_ref` and `removed_unit_ref` when their producer supplies them. Existing-page
-edits retain the exact `after_hash` of their committed bytes. These are mutation
-identities, not a promise that nobody has edited the page since: use the hash as
-the next supported `expected_hash` and honor any stale-write refusal. Portable
-receipt recovery may omit these fields; it never invents a missing identity.
+Committed observation responses carry `unit_ref` and `removed_unit_ref` when their
+producer supplies them. A committed page write carries `after_hash`, the exact hash of
+the committed bytes; the `before_hash` sits under `diagnostics.operational`. `after_hash`
+is a mutation identity, not a promise that nobody has edited the page since: pass it as
+the next `expected_hash` and honor any stale-write refusal. Portable receipt recovery may
+omit it; it never invents a missing identity.
 Do not reread solely to confirm a successful commit. Use one bounded final
 verification of the whole requested outcome, and extra reads only when content,
 warnings or missing concurrency guards actually require them.
 
 `graph_sync=pending` and `derived_sync=pending` describe asynchronous work, not a
-failed canonical write. Continue independent work and ordinary recall; do not
+failed canonical write. They appear under `diagnostics.operational` and in no
+other part of the reply. Continue independent work and ordinary recall; do not
 run maintenance merely to remove the pending label. A graph-dependent query can
-still require current edges and return an explicit freshness refusal.
+still require current edges and return an explicit freshness refusal. When a
+background update failed, the reply carries a `notice` that says the change may be
+missing from search results.
 
 Artifact preservation reports one terminal `state` per file: `stored` for bytes
 this call committed, `already_stored` when the same SHA-256 already exists under
@@ -95,9 +103,22 @@ committed and the same identity and payload are retried.
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
-following their remediation: wait before retrying a warming or busy call; retry a pending
+following their `retry`: wait before retrying a warming or busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
+
+## Refusals
+
+A refused call returns `{"error": {"code", "message", "retry"?, "candidates"?}}` and
+nothing else. `message` is one sentence, and for a write it ends with what happened to
+your data: `Nothing was saved.`, `The change was saved.` or `Whether it was saved is not
+known.` `code` is the specific code. `retry` is the exact next call. It holds the tool
+name and `arguments` that you merge, key by key and including nested objects, into the
+arguments you already sent; a value in angle brackets is for you to supply. `retry.after_s`
+is a wait in seconds. `retry` is absent when no repeat of the call can succeed.
+`candidates` lists at most five valid values or titles to choose from. With
+`response_detail="full"` a write also returns `diagnostics`: the complete envelope with
+the umbrella code, the remediation text, request identity and wait times.
 
 ## Relation choices and unlinked names on a write
 
@@ -136,8 +157,10 @@ for free and only disconnected material needs the explicit disposition.
 To commit an unrelated page, send `relation_disposition="reviewed_none"` and a
 `relation_review_reason` naming why nothing qualified with the creation itself;
 that one call commits and records the decision. Committing without them refuses
-with `SEMANTIC_CONTRACT_BLOCKED` and a `RELATION_DISPOSITION_MISSING` finding
-whose `remediation` restates this. A `validate_only=true` call reports the
+with `RELATION_DISPOSITION_MISSING`, and its `retry` is the call that records the
+decision; fill in the reason placeholder. The umbrella code
+`SEMANTIC_CONTRACT_BLOCKED` and its `remediation` text sit under `diagnostics`. A
+`validate_only=true` call reports the
 obligation first: it returns `relation_review_hash` alongside the draft fields
 and lists the finding under `blocking_findings`. Committing that validated
 draft sends its `draft_id`, `draft_hash` and `draft_token` and the
@@ -155,9 +178,9 @@ the named field and resume with `change_records(operation={"kind": "append" or "
 "held": ...})`, or `discard` it — never loop, and never preserve diagnostic
 breadcrumbs as Evidence.
 
-On MCP these expected refusals arrive as normal tool content with top-level
-`success: false`; inspect the structured `error` rather than treating it as a
-transport failure. A `receipt_id` is diagnostic and is not a transferable
+On MCP these expected refusals arrive as normal tool content with a top-level
+`error`; inspect it rather than treating it as a transport failure. A `receipt_id`
+is diagnostic and is not a transferable
 cross-session replay key. `bootstrap` probes this vault's local OS
 mutation boundary: `verified: true` binds the safe holder fields to the current
 lock generation, while `verified: false` means the external holder is real but

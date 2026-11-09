@@ -102,9 +102,10 @@ class RankingExplanation(TypedDict):
 class PageHit(TypedDict):
     path: str
     type: str | None
-    scope: str | None
     title: str
     updated: str
+    # `scope` and `ref` are internal labels: a search reply carries them only for `explain`.
+    scope: NotRequired[str | None]
     result_type: NotRequired[Literal["page"]]
     ref: NotRequired[str]
     excerpt: NotRequired[str]
@@ -135,11 +136,11 @@ class SemanticUnitHit(TypedDict):
     excerpt: NotRequired[str]
     source_anchor: str | None
     parent_path: str
-    parent_ref: str | None
     parent_title: str
     parent_type: str | None
     parent_status: str | None
     parent_updated: str
+    parent_ref: NotRequired[str | None]
     form: NotRequired[str]
     category_raw: NotRequired[str]
     category_key: NotRequired[str]
@@ -159,7 +160,12 @@ RetrievalHit: TypeAlias = PageHit | SemanticUnitHit
 
 
 class FindEnvelope(TypedDict):
+    # `search_memory` leads with the sentence the agent tells the user; `notice` is present only
+    # when the results may be incomplete.
+    user_summary: NotRequired[str]
+    notice: NotRequired[str]
     hits: list[RetrievalHit]
+    next_action: NotRequired[dict[str, Any]]
     continuation: NotRequired[str]
     pack: NotRequired[dict[str, Any]]
     timings: NotRequired[dict[str, Any]]
@@ -171,16 +177,14 @@ class FindEnvelope(TypedDict):
 class ToolFailureEnvelope(TypedDict):
     """A refusal or operation error returned as a normal tool result.
 
-    `cli_ops.envelope(False, ...)` is what the MCP command wrapper returns for a
-    structured `OpError` or semantic refusal, so a recall call can legitimately
-    answer with this instead of hits. It is declared so a schema-validating MCP
-    client accepts it rather than rejecting the whole response.
+    `agent_refusal.reply` is what the MCP command wrapper returns for a structured `OpError` or
+    semantic refusal, so a recall call can legitimately answer with this instead of hits. It is
+    declared so a schema-validating MCP client accepts it rather than rejecting the whole
+    response. `diagnostics` holds the shared envelope and appears only under `response_detail="full"`.
     """
 
-    success: Literal[False]
     error: dict[str, Any]
-    validation_state: NotRequired[Any]
-    mutated: NotRequired[Any]
+    diagnostics: NotRequired[dict[str, Any]]
 
 
 RecallResult: TypeAlias = list[RetrievalHit] | FindEnvelope | ToolFailureEnvelope

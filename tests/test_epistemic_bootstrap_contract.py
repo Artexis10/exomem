@@ -206,7 +206,7 @@ def test_compact_operating_instructions_and_simple_actions_precede_large_catalog
     for doctrine in ("simple_actions", "workflow", "vocabulary_workflow", "epistemic_contract"):
         for catalog in ("front_door_actions", "product_commands"):
             assert keys.index(doctrine) < keys.index(catalog)
-    assert any("vocabulary_sync" in step and "recovery" in step for step in payload["workflow"]["loop"])
+    assert any("user_summary" in step and "notice" in step for step in payload["workflow"]["loop"])
 
 
 @pytest.mark.parametrize(

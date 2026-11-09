@@ -316,7 +316,11 @@ def require_relation_choice(
             "RELATION_CHOICE_REQUIRED",
             "a specific relation fits these two pages, so the generic relation is not chosen for you",
             RELATION_CHOICE_REMEDIATION,
-            details={"options": options, "mutated": False},
+            details={
+                "options": options,
+                "candidates": [option["key"] for option in options],
+                "mutated": False,
+            },
         )
 
 
@@ -1273,7 +1277,11 @@ def _require_offered(
         "VOCABULARY_APPLICATION_INVALID",
         "a relation the candidate does not offer needs a recorded vocabulary choice",
         RELATION_NOT_OFFERED_REMEDIATION if offered else RELATION_NONE_OFFERED_REMEDIATION,
-        details={"options": offered, "mutated": False},
+        details={
+            "options": offered,
+            "candidates": [option["key"] for option in offered],
+            "mutated": False,
+        },
     )
 
 

@@ -119,7 +119,7 @@ def _retry(vault: Path, state: Path, marker: Path) -> object:
     return LeaseManager(LeaseConfig(state_dir=state)).invoke(
         SimpleNamespace(name="graph-crash-matrix", read_only=False, leaf=leaf),
         (vault,),
-        {},
+        {"response_detail": "full"},
         idempotency_key="graph-crash-matrix",
     )
 
@@ -207,8 +207,9 @@ def test_subprocess_receipt_cut_heals_only_the_matching_local_executing_row(
     assert child.returncode == 44, child.stderr
     result = _retry(vault, state, marker)
     assert isinstance(result, dict)
-    assert result["status"] == "committed"
-    assert result["graph_sync"] == "completed"
+    operational = result["diagnostics"]["operational"]
+    assert operational["status"] == "committed"
+    assert operational["graph_sync"] == "completed"
     assert graph_sync.status(vault)["state"] == "current"
     assert marker.read_text(encoding="utf-8").splitlines() == ["leaf"]
     with sqlite3.connect(next(state.glob("idempotency-*.sqlite"))) as connection:

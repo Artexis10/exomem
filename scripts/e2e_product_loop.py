@@ -364,17 +364,19 @@ async def _call(client, name: str, arguments: dict[str, Any], timeout: float) ->
 
 def _mutation_diagnostics(result: Any, *, operation: str) -> Any:
     """Validate a full committed terminal and return its leaf diagnostics."""
+    diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+    operational = diagnostics.get("operational") if isinstance(diagnostics, dict) else None
     if (
-        not isinstance(result, dict)
-        or result.get("ok") is not True
-        or result.get("status") != "committed"
-        or result.get("mutated") is not True
-        or "diagnostics" not in result
+        not isinstance(operational, dict)
+        or operational.get("ok") is not True
+        or operational.get("status") != "committed"
+        or operational.get("mutated") is not True
     ):
         raise RuntimeError(
             f"{operation} mutation did not return a committed full terminal: {result!r}"
         )
-    diagnostics = result["diagnostics"]
+    # A full reply carries the operational fields beside the leaf's own diagnostics.
+    diagnostics = {key: value for key, value in diagnostics.items() if key != "operational"}
     if isinstance(diagnostics, dict) and diagnostics.get("graph_sync") == "failed":
         code = diagnostics.get("graph_sync_code", "unspecified graph synchronization error")
         raise RuntimeError(f"{operation} graph synchronization failed: {code}")
@@ -396,8 +398,7 @@ def _single_affected_path(result: Any, *, operation: str) -> str:
 
 def _maintenance_diagnostics(result: Any, *, operation: str) -> Any:
     """Unwrap a tracked commit while preserving a raw no-op maintenance report."""
-    terminal_fields = {"ok", "status", "mutated", "diagnostics"}
-    if isinstance(result, dict) and terminal_fields.intersection(result):
+    if isinstance(result, dict) and isinstance(result.get("diagnostics"), dict):
         return _mutation_diagnostics(result, operation=operation)
     return result
 

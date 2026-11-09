@@ -211,7 +211,9 @@ def test_a_confined_observation_ack_and_exact_unit_read_keep_their_parent(confin
     observed = _call(vault, writer, "observe_memory", path=OWN_NOTE, operation="add", category="finding",
                      content="Keep an independent observation.", response_detail=detail)
 
-    assert isinstance(observed, dict) and observed.get("state") == "committed", observed
+    assert isinstance(observed, dict) and observed.get("unit_ref"), observed
+    if detail == "full":
+        assert observed["diagnostics"]["operational"]["state"] == "committed", observed
     assert "Keep an independent observation." in (vault / OWN_NOTE).read_text()
     current = _call(vault, writer, "read_memory", path=OWN_NOTE, unit_ref=observed["unit_ref"])
     assert isinstance(current, dict) and current.get("status") == "found", current
@@ -221,7 +223,9 @@ def test_a_confined_observation_ack_and_exact_unit_read_keep_their_parent(confin
     removed = _call(vault, writer, "observe_memory", path=OWN_NOTE, operation="remove",
                     unit_ref=observed["unit_ref"], expected_hash=current["parent"]["content_hash"],
                     expected_fingerprint=current["unit"]["fingerprint"], response_detail=detail)
-    assert isinstance(removed, dict) and removed.get("state") == "committed", removed
+    assert isinstance(removed, dict) and "removed_unit_ref" in removed, removed
+    if detail == "full":
+        assert removed["diagnostics"]["operational"]["state"] == "committed", removed
     assert removed["removed_unit_ref"] == observed["unit_ref"]
     assert "Keep an independent observation." not in (vault / OWN_NOTE).read_text()
 

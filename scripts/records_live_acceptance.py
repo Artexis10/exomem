@@ -66,6 +66,10 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         # that reason: which of an acceptance run's writes carries it is a fact
         # about the run's timing, not about the receipt.
         "capture_sweep",
+        # The envelope's conditional sentences: `next` when the agent must act (the capture
+        # nudge is one), `notice` when the result is partial, unknown or stale.
+        "next",
+        "notice",
     }
 )
 _COMPACT_V1_RECEIPT = frozenset(
@@ -293,6 +297,10 @@ class HttpOAuthRecordsTransport:
         request_arguments = dict(self._action_requests.get(action, {}))
         request_arguments.update(arguments or {})
         request_arguments.setdefault("action", action)
+        if action in _MUTATING_ACTIONS:
+            # The request and receipt ids this run records as evidence ride under `diagnostics`,
+            # which only `response_detail="full"` returns.
+            request_arguments.setdefault("response_detail", "full")
         return self._mcp_call("record_memory", request_arguments, timeout_seconds)
 
     def readback(self, *, collection: str | None = None, timeout_seconds: float) -> Mapping[str, Any]:
@@ -500,7 +508,9 @@ class RecordsLiveAcceptanceRunner:
                 if action in _READ_ONLY_ACTIONS
                 else _readback_digest(self._transport.readback(timeout_seconds=self._timeout_seconds))
             )
-            response = self._transport.invoke(action=action, timeout_seconds=self._timeout_seconds)
+            response = _operational_view(
+                self._transport.invoke(action=action, timeout_seconds=self._timeout_seconds)
+            )
             outcome = _validated_action_terminal(action, response)
             if action in _MUTATING_ACTIONS:
                 if before is None:
@@ -684,8 +694,10 @@ class RecordsLiveAcceptanceRunner:
         *,
         readback_collection: str | None = None,
     ) -> Mapping[str, Any]:
-        response = self._transport.invoke(
-            action=action, timeout_seconds=self._timeout_seconds, arguments=arguments
+        response = _operational_view(
+            self._transport.invoke(
+                action=action, timeout_seconds=self._timeout_seconds, arguments=arguments
+            )
         )
         _validated_action_terminal(action, response)
         collection = readback_collection or arguments.get("collection")
@@ -720,6 +732,19 @@ class RecordsLiveAcceptanceRunner:
 
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def _operational_view(response: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A `full` mutation reply with `diagnostics.operational` lifted beside the agent fields.
+
+    The closed-object checks below read the ids, hashes and states from that one flat view.
+    A reply without the block (a read, a refusal) passes through unchanged.
+    """
+    diagnostics = response.get("diagnostics")
+    operational = diagnostics.get("operational") if isinstance(diagnostics, Mapping) else None
+    if not isinstance(operational, Mapping):
+        return response
+    return {**{key: value for key, value in response.items() if key != "diagnostics"}, **operational}
 
 
 def _validated_action_terminal(action: str, response: Mapping[str, Any]) -> str:

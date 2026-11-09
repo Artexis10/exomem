@@ -850,6 +850,33 @@ def _published_parameters(
     return sig, visible, resolved
 
 
+def agent_refusal_result(
+    refusal: dict[str, typing.Any],
+    error: BaseException | None,
+    command_name: str,
+    arguments: dict[str, typing.Any],
+    parameters: Iterable[str],
+    *,
+    write: bool,
+) -> dict[str, typing.Any]:
+    """The MCP error result for a refusal: what happened, and the exact retry."""
+    from . import agent_refusal, cli_ops
+
+    try:
+        tool = capabilities.active_spell_call(command_name, arguments)[0]
+    except Exception:  # noqa: BLE001 - a retry spelled by the command name still names a real route
+        tool = command_name
+    return agent_refusal.reply(
+        refusal,
+        error if error is not None else ValueError(refusal.get("message")),
+        tool=tool,
+        parameters=set(parameters),
+        write=write,
+        full=arguments.get("response_detail") == "full",
+        envelope=cli_ops.envelope(False, error=dict(refusal)),
+    )
+
+
 def bind_vault(
     leaf: Callable,
     *injected: object,
@@ -903,7 +930,9 @@ def bind_vault(
                 )
                 from . import cli_ops
 
-                return cli_ops.envelope(False, error=refusal)
+                return agent_refusal_result(
+                    refusal, None, command.name, kwargs, (p.name for p in visible), write=False
+                )
             from .commands import invocation_is_read_only
             from .governance.egress import SelectorCoverageError
             from .writer_lease import invoke_command
@@ -1038,7 +1067,14 @@ def bind_vault(
                     message=str(refusal.get("message") or ""),
                     retry_scope=retry_scope,
                 )
-                return cli_ops.envelope(False, error=refusal)
+                return agent_refusal_result(
+                    refusal,
+                    error,
+                    command.name,
+                    kwargs,
+                    (p.name for p in visible),
+                    write=not invocation_read_only,
+                )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__

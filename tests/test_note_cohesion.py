@@ -67,6 +67,7 @@ def _grow_by_one(vault: Path, number: int) -> dict:
         category="decision",
         content=f"Booking rule {number}: hold the fare for trip {number} until the sale opens.",
         tags=["travel"],
+        response_detail="full",
     )
 
 
@@ -80,7 +81,7 @@ def test_a_write_that_reaches_the_base_step_asks_the_one_question(vault: Path) -
 
     result = _grow_by_one(vault, 9)
 
-    assert result["status"] == "committed"
+    assert result["diagnostics"]["operational"]["status"] == "committed"
     suggestion = result["structure_suggestion"]
     assert set(suggestion) == {
         "kind", "units", "step_units", "next_step_units", "ref", "fingerprint", "question",
@@ -99,7 +100,7 @@ def test_a_write_below_the_base_step_asks_nothing(vault: Path) -> None:
 
     result = _grow_by_one(vault, 8)
 
-    assert result["status"] == "committed"
+    assert result["diagnostics"]["operational"]["status"] == "committed"
     assert "structure_suggestion" not in result
 
 
@@ -193,7 +194,7 @@ def test_a_quiet_family_withholds_the_question_and_leaves_the_item_open(vault: P
 
     result = _grow_by_one(vault, 9)
 
-    assert result["status"] == "committed"
+    assert result["diagnostics"]["operational"]["status"] == "committed"
     assert "structure_suggestion" not in result
     assert _note_cohesion_findings(vault) == [PAGE]
 
@@ -206,8 +207,8 @@ def test_an_unreadable_review_state_omits_the_question_and_keeps_the_write(vault
 
     result = _grow_by_one(vault, 9)
 
-    assert result["status"] == "committed"
-    assert result["mutated"] is True
+    assert result["diagnostics"]["operational"]["status"] == "committed"
+    assert result["diagnostics"]["operational"]["mutated"] is True
     assert "structure_suggestion" not in result
 
 

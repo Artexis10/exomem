@@ -36,10 +36,11 @@ def test_workflow_save_and_refresh_use_the_writer_lease_mutation_envelope(tmp_pa
         proposal=_proposal(),
         why="reviewed",
         idempotency_key="workflow-contract-save",
+        response_detail="full",
     )
 
-    assert saved["state"] == "committed"
-    assert saved["receipt_id"]
+    assert saved["diagnostics"]["operational"]["state"] == "committed"
+    assert saved["diagnostics"]["operational"]["receipt_id"]
     current_hash = commands.op_schema_memory(
         tmp_path,
         subject="workflow-contracts",
@@ -55,9 +56,10 @@ def test_workflow_save_and_refresh_use_the_writer_lease_mutation_envelope(tmp_pa
         expected_hash=current_hash,
         why="refresh presentation",
         idempotency_key="workflow-contract-refresh",
+        response_detail="full",
     )
-    assert refreshed["state"] == "committed"
-    assert refreshed["receipt_id"]
+    assert refreshed["diagnostics"]["operational"]["state"] == "committed"
+    assert refreshed["diagnostics"]["operational"]["receipt_id"]
 
 
 def test_schema_memory_entity_type_save_dispatches_as_a_mutation_while_inventory_stays_lease_free(
@@ -95,7 +97,8 @@ def test_schema_memory_entity_type_save_dispatches_as_a_mutation_while_inventory
             proposal={"schema_version": 1, "entity_types": {}},
             why="Exercise the registered mutation selector.",
             idempotency_key="schema-memory-entity-types",
+            response_detail="full",
         )
 
-    assert saved["state"] == "committed"
+    assert saved["diagnostics"]["operational"]["state"] == "committed"
     assert (tmp_path / "Knowledge Base" / "_Schema" / "entity-types.yaml").is_file()

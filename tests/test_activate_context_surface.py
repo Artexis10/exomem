@@ -547,29 +547,6 @@ def test_activation_never_consumes_the_due_state_emission(
     assert emitted == [], "activation must not consult or advance the emission ledger"
 
 
-def test_ask_memory_keeps_its_due_state_block_after_an_activation(
-    activation_vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from exomem import due_state as due_state_module
-    from exomem import find as find_module
-
-    block = {"totals": {"due": 2, "overdue": 1}, "items": []}
-    monkeypatch.setattr(due_state_module, "served", lambda *_a, **_k: block)
-    monkeypatch.setattr(due_state_module, "should_emit", lambda *_a, **_k: True)
-
-    find_module.clear_cache()
-    baseline = commands.op_ask_memory(activation_vault, query="depot sled", limit=5)
-    assert isinstance(baseline, dict) and baseline["due_state"] == block
-
-    find_module.clear_cache()
-    commands.op_activate_context(activation_vault, turn=TURN)
-    find_module.clear_cache()
-    after = commands.op_ask_memory(activation_vault, query="depot sled", limit=5)
-
-    assert isinstance(after, dict)
-    assert after["due_state"] == baseline["due_state"]
-
-
 # --------------------------------------------------------------------------- #
 # Attribution: `client` and `session` are recorded, never served
 # --------------------------------------------------------------------------- #

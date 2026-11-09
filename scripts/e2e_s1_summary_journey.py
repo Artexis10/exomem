@@ -728,7 +728,7 @@ class Session:
             # Unwrap only the SDK envelope; discovery chapters contain their own result grammar.
             data = data["result"]
         error = data.get("error") if isinstance(data, dict) else None
-        if isinstance(data, dict) and data.get("success") is False and isinstance(error, dict):
+        if isinstance(data, dict) and isinstance(error, dict) and "code" in error:
             raise Refused(tool, str(error.get("code")), str(error.get("message")), error=error)
         return data
 

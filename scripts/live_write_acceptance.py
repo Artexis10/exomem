@@ -924,7 +924,12 @@ def measure(
         try:
             elapsed, result = client.call(name, arguments)
             # These are structured terminal fields, not inferred prose.
-            if result.get("outcome") in ("held", "refused") or result.get("ok") is False or result.get("success") is False:
+            if (
+                result.get("outcome") in ("held", "refused")
+                or "error" in result
+                or result.get("ok") is False
+                or result.get("success") is False
+            ):
                 terminal = "refused"
             else:
                 last_acknowledged = time.monotonic()

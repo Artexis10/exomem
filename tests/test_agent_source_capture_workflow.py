@@ -34,7 +34,7 @@ def test_mcp_handoff_cli_capture_and_original_recovery(upload_env, tmp_path, mon
         with principal.request_scope(who):
             result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
         payload = result.structured_content or json.loads(result.content[0].text)
-        assert payload.get("success", True), payload
+        assert "error" not in payload, payload
         return payload.get("result", payload)
 
     descriptor = call("transfer_artifact", {

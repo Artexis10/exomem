@@ -111,11 +111,20 @@ def classify(data: Any) -> tuple[str, Any, str | None, str | None]:
 
 
 def retry_hint_ms(data: Any) -> int | None:
-    """The wait a refusal asks for, read from its ``error`` object; None if it asks nothing."""
-    if isinstance(data, dict) and isinstance(data.get("error"), dict):
-        value = data["error"].get(RETRY_FIELD)
-        if isinstance(value, int | float):
-            return int(value)
+    """The wait a refusal asks for, read from its ``error`` object; None if it asks nothing.
+
+    A minimal refusal names the wait as ``retry.after_s``; an older one names ``retry_after_ms``.
+    """
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return None
+    value = error.get(RETRY_FIELD)
+    if isinstance(value, int | float):
+        return int(value)
+    retry = error.get("retry")
+    seconds = retry.get("after_s") if isinstance(retry, dict) else None
+    if isinstance(seconds, int | float):
+        return int(seconds * 1000)
     return None
 
 

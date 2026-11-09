@@ -52,28 +52,33 @@ def test_states_are_closed_and_terminality_is_explicit():
     assert "needs_review" not in mt.TERMINAL_STATES
 
 
+def _operational(env: dict) -> dict:
+    return env["diagnostics"]["operational"]
+
+
 def test_needs_review_is_not_a_failure():
     """The decisive property. `ok` stays true and `terminal` is explicitly false."""
-    env = mt.project_terminal(mt.needs_review_terminal(_precommit()))
-    assert env["ok"] is True
-    assert env["state"] == "needs_review"
-    assert env["terminal"] is False
-    assert env["mutated"] is False
-    assert "error_code" not in env
+    env = mt.project_terminal(mt.needs_review_terminal(_precommit()), "full")
+    operational = _operational(env)
+    assert operational["ok"] is True
+    assert operational["state"] == "needs_review"
+    assert operational["terminal"] is False
+    assert operational["mutated"] is False
+    assert "error_code" not in operational
 
 
 def test_needs_review_names_the_next_action_and_denies_failure():
     env = mt.project_terminal(mt.needs_review_terminal(_precommit()))
-    assert "not a failure" in env["next_action"]
-    assert "draft identity" in env["next_action"]
+    assert "not a failure" in env["next"]
+    assert "draft identity" in env["next"]
+    assert env["notice"]
 
 
 def test_uncommittable_draft_points_at_the_blockers_instead():
     env = mt.project_terminal(
         mt.needs_review_terminal(_precommit(committable_after_review=False))
     )
-    assert env["state"] == "needs_review"
-    assert "blocking findings" in env["next_action"]
+    assert "blocking findings" in env["next"]
 
 
 # ------------------------------------------------------------------- the correlation
@@ -81,14 +86,16 @@ def test_uncommittable_draft_points_at_the_blockers_instead():
 
 def test_both_halves_share_one_operation_id():
     """Without this, a client has nothing tying the refusal to the later success."""
-    first = mt.project_terminal(mt.needs_review_terminal(_precommit()))
-    second = mt.project_terminal(_committed())
-    assert first["operation_id"] == second["operation_id"] == DRAFT
+    first = mt.project_terminal(mt.needs_review_terminal(_precommit()), "full")
+    second = mt.project_terminal(_committed(), "full")
+    assert _operational(first)["operation_id"] == _operational(second)["operation_id"] == DRAFT
+    # The agent holding the refusal needs the same identity to finish the write.
+    assert mt.project_terminal(mt.needs_review_terminal(_precommit()))["operation_id"] == DRAFT
 
 
 def test_the_terminal_result_supersedes_the_nonterminal_one():
-    first = mt.project_terminal(mt.needs_review_terminal(_precommit()))
-    second = mt.project_terminal(_committed())
+    first = _operational(mt.project_terminal(mt.needs_review_terminal(_precommit()), "full"))
+    second = _operational(mt.project_terminal(_committed(), "full"))
     assert first["terminal"] is False and second["terminal"] is True
     assert second["state"] == "committed" and second["mutated"] is True
 
@@ -100,7 +107,7 @@ def test_operation_id_is_found_through_a_nested_commit_record():
         receipt_id=None,
         idempotency_key=None,
     )
-    assert mt.project_terminal(terminal)["operation_id"] == DRAFT
+    assert _operational(mt.project_terminal(terminal, "full"))["operation_id"] == DRAFT
 
 
 # ------------------------------------------------------------------------ narrowness
@@ -133,8 +140,8 @@ def test_a_committed_result_is_never_treated_as_precommit():
 
 
 def test_status_still_agrees_with_state_for_existing_consumers():
-    env = mt.project_terminal(_committed())
-    assert env["status"] == env["state"] == "committed"
+    operational = _operational(mt.project_terminal(_committed(), "full"))
+    assert operational["status"] == operational["state"] == "committed"
 
 
 def test_diagnostics_stay_behind_full_detail_on_both_states():
@@ -153,8 +160,8 @@ def test_legacy_detail_returns_the_untouched_leaf_for_both_states():
     assert mt.project_terminal(mt.needs_review_terminal(raw), "legacy") is raw
 
 
-def test_envelope_keys_lead_the_compact_projection():
-    """A client scanning the first keys must reach the decisive ones immediately."""
-    env = mt.project_terminal(_committed())
-    leading = list(env)[:4]
-    assert leading == ["ok", "state", "terminal", "status"]
+def test_the_compact_projection_leads_with_the_outcome_sentence():
+    """An agent reads the first key to learn what to tell the user."""
+    env = mt.project_terminal(_committed(), outcome_verb="saved")
+    assert list(env)[0] == "user_summary"
+    assert not {"ok", "state", "terminal", "status", "mutated"} & set(env)

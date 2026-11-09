@@ -159,6 +159,8 @@ class RelationReviewError(ValueError):
     reason: str
     #: The request fields the caller must add, for a refusal that names them.
     missing: tuple[str, ...] = ()
+    #: The contract findings that blocked the write, so a refusal can name the specific one.
+    validation_findings: tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
@@ -3832,6 +3834,7 @@ def _commit_plan(
         raise RelationReviewError(
             "SEMANTIC_CONTRACT_BLOCKED",
             semantic_contract.blocking_reason(validation.contract_result),
+            validation_findings=validation.contract_result.blocking_findings,
         )
     result = attempt.result
     record: RelationReviewRecord | None = None
@@ -3919,7 +3922,9 @@ def _commit_plan(
         )
     elif result.should_block:
         raise RelationReviewError(
-            "SEMANTIC_CONTRACT_BLOCKED", semantic_contract.blocking_reason(result)
+            "SEMANTIC_CONTRACT_BLOCKED",
+            semantic_contract.blocking_reason(result),
+            validation_findings=result.blocking_findings,
         )
     elif attempt.artifact is not None:
         raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
