@@ -8,13 +8,12 @@ file outside the Knowledge Base folder, a machine-local file), is published to d
 file-mode machinery, and the store commit runs inside that batch's rollback window as its last
 step: it records the binary or derives the rows of the file, and a failure of any part restores the
 published files. Only what lives outside the store runs after the commit: the free-text census
-note, the semantic drain's handoff and the heat projection.
+note, the semantic drain's wake and the heat projection.
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -27,8 +26,6 @@ from ..collection_store.writer import CollectionWriter
 from . import ownership, read
 from . import write as store_write
 from .write import BinaryRecord, Expect, Origin, PagePut, StoreChange, StoreConflict
-
-log = logging.getLogger(__name__)
 
 DEFERRED_GRAPH_UNSUPPORTED = "VAULT_STORE_DEFERRED_GRAPH_UNSUPPORTED"
 VOCABULARY_AUTHORITY_UNSUPPORTED = "VAULT_STORE_VOCABULARY_AUTHORITY_UNSUPPORTED"
@@ -79,7 +76,7 @@ def commit_batch(
             "completion to defer",
         )
     _require_v1_authority(root)
-    from .. import curation_witness, vocabulary_gate, working_set_heat
+    from .. import curation_witness, semantic_drain, vocabulary_gate, working_set_heat
     from ..governance import artifact_census
 
     caller_writes = list(writes)
@@ -114,6 +111,10 @@ def commit_batch(
     except BaseException:
         working_set_heat.abandon_commit(heat)
         raise
+    # The commit is durable and write.commit's transaction is closed, so wake the semantic drain
+    # for the audit rows now, not at its idle poll. It runs for a caller that defers its fan-out
+    # too, which `_after_commit` does not reach. A hint creates no worker.
+    semantic_drain.signal(root)
     with call_spans.span("commit_tail.census"):
         # Before the write acknowledges, so the free-text census names the pages that no file holds.
         artifact_census.note_created(root, [write.path for _rel, write in plan.pages])
@@ -121,7 +122,7 @@ def commit_batch(
     curation_witness.mark_consumed(witness)
     working_set_heat.persist_commit(observed)
     if post_commit_fanout:
-        _after_commit(root, plan, index_reports)
+        _after_commit(plan, index_reports)
     return [write.path for write in caller_writes]
 
 
@@ -430,13 +431,13 @@ def _record(rel: str, write: vault.PlannedWrite) -> BinaryRecord:
     return BinaryRecord(rel, hashlib.sha256(raw).hexdigest(), len(raw))
 
 
-def _after_commit(root: Path, plan: _Plan, index_reports: list[Any] | None) -> None:
-    """What lives outside the store, run after the commit: the drain's handoff and the report.
+def _after_commit(plan: _Plan, index_reports: list[Any] | None) -> None:
+    """What lives outside the store, run after the commit: the embeddings report.
 
-    The step is best effort, as the file-mode fan-out's is: the commit is durable, and a handoff
-    that fails leaves its own retry state (the drain's receipts) and never fails the write.
+    The commit is durable, so this step only reports; it never fails the write.
     """
-    from .. import index_sync, semantic_drain
+    from .. import index_sync
+    from . import vectors
 
     rels = [*(rel for rel, _write in plan.pages), *plan.refresh]
     components = [
@@ -449,23 +450,16 @@ def _after_commit(root: Path, plan: _Plan, index_reports: list[Any] | None) -> N
                 index_sync.IndexComponentOutcome("embeddings", "accepted", "embeddings_disabled")
             )
         else:
-            try:
-                queued = semantic_drain.request(root, [root / rel for rel in rels], edited=True)
-            except Exception:  # noqa: BLE001 - derived work retries from its own receipts
-                log.warning("semantic handoff failed after a store commit", exc_info=True)
-                components.append(
-                    index_sync.IndexComponentOutcome(
-                        "embeddings", "degraded", "durable_defer_failed"
-                    )
+            # No receipt: the drain follows the store's audit rows and `commit_batch` woke it, and a
+            # receipt that the store turn ignores would only pile up in the deferred index.
+            owed = any(vectors.embeddable(rel) for rel in rels)
+            components.append(
+                index_sync.IndexComponentOutcome(
+                    "embeddings",
+                    "deferred" if owed else "accepted",
+                    "store_audit" if owed else "no_eligible_paths",
                 )
-            else:
-                components.append(
-                    index_sync.IndexComponentOutcome(
-                        "embeddings",
-                        "deferred" if queued else "accepted",
-                        "deferred_durable" if queued else "no_eligible_paths",
-                    )
-                )
+            )
     if index_reports is not None:
         requested, truncated = index_sync._bounded_paths(rels)
         report = index_sync.IndexSyncReport(
