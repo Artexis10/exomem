@@ -95,7 +95,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import call_spans
+from . import call_spans, published_admission
 from . import promotions as promotions_module
 from . import review_state as review_state_module
 from .collection_store.preview import (
@@ -3451,6 +3451,7 @@ def _served_rows(
     A projection that could not be persisted is never cached,
     because a write then updates it in memory with no file to notice.
     """
+    from .collection_store import ownership
     from .governance import egress as egress_module
     from .governance import principal as principal_module
 
@@ -3524,7 +3525,10 @@ def _served_rows(
                 def keep(_path: str) -> bool:
                     return True
 
-            unchanged = all(keep(path) == verdict for path, verdict in hit["asked"].items())
+            # Naming the pages lets the store decide every store-owned one in one request, not one per page.
+            # Only a page under a collection placement can be store-owned, and routing each other page costs time.
+            with published_admission.deciding(path for path in hit["asked"] if ownership.relevant(path)):
+                unchanged = all(keep(path) == verdict for path, verdict in hit["asked"].items())
         if unchanged and hit["role_token"] is not None:
             with call_spans.span("recall.due_state.role", {}):
                 role_state = _read_role_state(vault_root, keep)

@@ -15,6 +15,7 @@ import os
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import threading
@@ -205,9 +206,14 @@ def _reference_key(reference: StoredObject) -> str:
     return json.dumps(reference.fields(), sort_keys=True, separators=(",", ":"))
 
 
+def _identity_text(device: int, inode: int, change_time_ns: int, mtime_ns: int, size: int) -> str:
+    """The cache identity that a row records: the file's device, inode, change time, modification time and size."""
+    return json.dumps((device, inode, change_time_ns, mtime_ns, size), separators=(",", ":"))
+
+
 def _version_identity(version: held_fs.FileVersion) -> str:
-    return json.dumps((version.identity.device, version.identity.inode, version.change_time_ns,
-                       version.mtime_ns, version.size), separators=(",", ":"))
+    return _identity_text(version.identity.device, version.identity.inode, version.change_time_ns,
+                          version.mtime_ns, version.size)
 
 
 def _source_identity(source: reserved_paths.GenericBinarySource) -> str:
@@ -574,11 +580,11 @@ class OffloadBatch:
 
     The batch never holds the mutation boundary, so other writes run between two members. It rests
     on offload being the only writer that binds a version the census has not seen while the runtime
-    serves (task 5.4.9 lists the others). `charge` adds each version that a member publishes. `end`
-    drops the census so that the next member reads it again, and `failed` does so only for a member
-    that reached `charge`: a refused member bound nothing, so the next one reuses the census. A stale
-    census can wrongly refuse a member, which the next scan releases, because refusals are read again
-    from a fresh census.
+    serves; design.md D10 lists every writer of a stored reference (task 5.4.9). `charge` adds each
+    version that a member publishes. `end` drops the census so that the next member reads it again,
+    and `failed` does so only for a member that reached `charge`: a refused member bound nothing, so
+    the next one reuses the census. A stale census can wrongly refuse a member, which the next scan
+    releases, because refusals are read again from a fresh census.
     """
 
     def __init__(self, vault: Path) -> None:
@@ -710,6 +716,55 @@ def _offload_admission(
                 reuse, reference = candidate, candidate_reference
                 break
         return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
+
+
+def upload_refusal(vault: Path, declared_bytes: int, filename: str, lane: str) -> str | None:
+    """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
+
+    Only an upload that offload would store charges the allowance. Preserve keeps an Evidence note or dataset
+    on the volume (design D1); the Source lane files every upload through `add` as an offloadable original,
+    whatever its name. An artifact too large to offload stays on the volume in either lane. The recorded
+    census decides first. Only a record that says the upload does not fit is confirmed by a census read now,
+    and only the confirmed figure refuses. No record, an unknown figure, or a configuration, volume or ledger
+    that cannot be read admits the upload: its original stays local with retryable offload demand, and offload
+    rechecks the allowance before publication. The declared size counts as a new version, because nothing
+    shows a duplicate of a stored version before the bytes arrive.
+    """
+    from . import source_inspection
+
+    vault = Path(vault).resolve()
+    try:
+        config = originals.configuration(vault)
+        if config is None or config.get("enabled") is not True:
+            return None
+        bounds = media_capacity.bounds_for(config, vault)
+        # `evidence` is the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
+        stays = lane == "evidence" and (originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))
+        if stays or (bounds is not None and bounds.classify(declared_bytes) != media_capacity.OFFLOADABLE):
+            return None
+        # The record, not a census read now, keeps a whole-vault walk under the consistency guard off each
+        # upload: the per-item census cost that task 5.4.9 removed from offload.
+        recorded = recorded_census(vault)
+        if recorded is None:
+            return None
+        decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
+        if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
+            decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
+    except (OSError, ValueError, TypeError, MediaStoreError) as error:  # An unreadable policy, volume or ledger.
+        log.warning("the upload allowance check admits an upload as unknown: %s", type(error).__name__)
+        return None
+    if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
+        return None
+    # The owner's used total stays out: D10 withholds global usage from restricted principals.
+    return (f"the upload's {declared_bytes:,} bytes exceed what remains of the media allowance of "
+            f"{decision.allowance_bytes:,} bytes; delete stored media and empty Trash, or raise the allowance")
+
+
+def _upload_decision(
+    census: RecordedCensus, declared_bytes: int, allowance_bytes: object,
+) -> media_allowance.AllowanceDecision:
+    projected = None if census.used_bytes is None else census.used_bytes + declared_bytes
+    return media_allowance.decide(census.used_bytes, projected, allowance_bytes, census.observed_at)
 
 
 def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None) -> None:
@@ -1245,6 +1300,16 @@ def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) 
     return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
 
 
+def _payload_path(companion: str, binary: originals.BinaryBinding) -> str:
+    """Where an original's bytes belong: a live original's bound path, or a Trash payload's path beside its companion.
+
+    A Trash companion of a deleted folder binds the path that the original had before the deletion.
+    """
+    if trash_metadata.is_trash_path(companion):
+        return (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix()
+    return binary.path
+
+
 def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tuple[str, originals.BinaryBinding, StoredObject]]:
     """Each original whose bytes are not on the volume and whose version the store holds, Trash included.
 
@@ -1259,9 +1324,7 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
     for companion, binary, reference in media_allowance.bound_references(
             vault, binding, unreadable=lambda path, _error: unreadable.add(path)):
         counted.add(ledger._relative(ledger.vault_root / binary.path))
-        # A Trash companion sits beside its payload, not at the path that it binds.
-        path = (PurePosixPath(companion).parent / PurePosixPath(binary.path).name).as_posix() \
-            if trash_metadata.is_trash_path(companion) else binary.path
+        path = _payload_path(companion, binary)
         if not _on_volume(vault, path):
             yield path, binary, reference
     if not unreadable:
@@ -1560,7 +1623,7 @@ def _volume_bytes(vault: Path, relatives, largest_offloadable: int) -> tuple[int
             size = os.lstat(vault / relative).st_size
         except FileNotFoundError:
             continue  # A moved or evicted original holds no byte on the volume.
-        if size <= largest_offloadable:
+        if media_capacity.classify(size, largest_offloadable) == media_capacity.OFFLOADABLE:
             count, total = count + 1, total + size
     return count, total
 
@@ -1603,46 +1666,34 @@ def cached_bytes(vault: Path) -> int:
     ledger = MediaJobStore(vault, create=False)
     if not ledger.path.exists():
         return 0
-    acquired = held_fs.acquire(vault)
-    if not acquired.ok:
-        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"the volume cannot be read: {acquired.error}")
     total = 0
     try:
-        with acquired.require() as filesystem, closing(ledger._connect(readonly=True)) as conn:
+        with closing(ledger._connect(readonly=True)) as conn:
             for relative, identity in conn.execute("SELECT binary_rel, identity FROM media_cache WHERE evicted = 0"):
-                total += _cached_allocation(vault, filesystem, relative, identity)
+                total += _cached_allocation(vault / relative, identity)
     except _LEDGER_UNREADABLE as error:
         raise MediaStoreError("MEDIA_LEDGER_UNREADABLE", f"the media ledger cannot be read: {error}") from error
     return total
 
 
-def _cached_allocation(vault: Path, filesystem: held_fs.HeldFilesystem, relative: str, identity: str) -> int:
+def _cached_allocation(path: Path, identity: str) -> int:
     """The bytes that the volume allocates to one cached row's file, or 0 when the file there is not the recorded one."""
-    # Status shows this text, so it names no path: a held refusal is content-free, an OSError is not.
-    unreadable = "a cached original cannot be read"
-    leaf = PurePosixPath(relative)
-    found = filesystem.parent(leaf.parent.as_posix())
-    if not found.ok:
-        if found.error is not None and found.error.code == "MISSING":
-            return 0  # A moved or deleted original holds no byte on the volume.
-        raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {found.error}")
-    with found.require() as parent:
-        held = filesystem.file(parent, leaf.name, access="identity")
-        if not held.ok:
-            if held.error is not None and held.error.code == "MISSING":
-                return 0
-            raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {held.error}")
-        with held.require() as file:
-            try:
-                version = file.version()
-                info = os.lstat(vault / relative)
-            except OSError as error:
-                raise MediaStoreError("MEDIA_CACHE_UNREADABLE", f"{unreadable}: {errno.errorcode.get(error.errno, 'OSError')}") from None
-    if _version_identity(version) != identity or (info.st_dev, info.st_ino) != (version.identity.device, version.identity.inode):
-        return 0  # Rewritten or replaced since the row was recorded: these are the vault's own bytes now.
+    try:
+        # A symlink leaf is not followed. A symlinked parent is, which is acceptable: the identity match still decides.
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return 0  # A moved or deleted original holds no byte on the volume.
+    except OSError as error:
+        # Status shows this text, so it names no path.
+        raise MediaStoreError("MEDIA_CACHE_UNREADABLE",
+                              f"a cached original cannot be read: {errno.errorcode.get(error.errno, 'OSError')}") from None
+    if not stat.S_ISREG(info.st_mode):
+        return 0  # A symlink, folder or device at the path is no cached original.
     blocks = getattr(info, "st_blocks", None)  # POSIX reports allocation in 512-byte units; Windows reports none.
     if blocks is None:
         raise MediaStoreError("MEDIA_CACHE_UNREADABLE", "this platform reports no allocated size for a file")
+    if _identity_text(info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size) != identity:
+        return 0  # Rewritten or replaced since the row was recorded: these are the vault's own bytes now.
     return blocks * 512
 
 
@@ -1917,17 +1968,14 @@ def _on_volume(vault: Path, relative: str) -> bool:
 def _evicted_originals(vault: Path, binding: originals.StoreBinding) -> dict[str, tuple[originals.BinaryBinding, StoredObject]]:
     """The originals whose companion binds a reference to the store and whose bytes are not on the volume.
 
+    Each is keyed by where its bytes belong, so an original in Trash is counted, and drained, at its Trash path.
     Raises when a companion or a path cannot be read: an incomplete census is unknown, never a lower count.
     """
     found: dict[str, tuple[originals.BinaryBinding, StoredObject]] = {}
     for companion, binary, reference in media_allowance.bound_references(vault, binding):
-        in_trash = trash_metadata.is_trash_path(companion)
-        # A Trash companion sits beside its payload, not at the path that it binds; task 5.5 places those originals.
-        if _on_volume(vault, companion.removesuffix(".md") if in_trash else binary.path):
-            continue
-        if in_trash:
-            raise ValueError("a stored reference in Trash has no original beside it")
-        found[binary.path] = (binary, reference)
+        path = _payload_path(companion, binary)
+        if not _on_volume(vault, path):
+            found[path] = (binary, reference)
     return found
 
 

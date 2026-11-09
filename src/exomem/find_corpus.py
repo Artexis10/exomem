@@ -45,15 +45,6 @@ EXCLUDED_DIR_NAMES = frozenset(
     }
 )
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
-
-
-def is_excluded_dir_name(name: str) -> bool:
-    """Whether a Knowledge Base walk skips the folder with this name: the one rule of every walk and
-    of the store corpus.
-    """
-    return name in EXCLUDED_DIR_NAMES or name.startswith(EXCLUDED_DIR_PREFIXES)
-
-
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 _DEFAULT_PAGE_CACHE_SIZE = 4096
@@ -562,11 +553,9 @@ def kb_walk_member(rel: str) -> bool:
     if not rel.startswith(prefix):
         return False
     parts = rel[len(prefix) :].split("/")
-    # A file extension is a closed set that the format fixes; it names the format, not the meaning.
     return (
-        parts[-1].lower().endswith(".md")
-        and not is_sync_conflict_copy(parts[-1])
-        and not any(is_excluded_dir_name(part) for part in parts[:-1])
+        walk_name_admits(parts[-1], directory=False)
+        and all(walk_name_admits(part, directory=True) for part in parts[:-1])
         and not classify_logical(rel).blocked
     )
 
@@ -644,16 +633,21 @@ def _classify_walk_entry(
         return None, None
     kind = entry_kind(child, info)
     if kind is EntryKind.DIRECTORY:
-        if is_excluded_dir_name(child.name):
-            return None, info
-        return "dir", info
-    if (
-        kind is EntryKind.REGULAR
-        and child.suffix.lower() == ".md"
-        and not is_sync_conflict_copy(child.name)
-    ):
+        return ("dir" if walk_name_admits(child.name, directory=True) else None), info
+    if kind is EntryKind.REGULAR and walk_name_admits(child.name, directory=False):
         return "md", info
     return None, info
+
+
+def walk_name_admits(name: str, *, directory: bool) -> bool:
+    """The walk's rule that reads an entry's name alone, for a folder to enter or a file to yield.
+
+    A folder is entered unless it is excluded by name; a file is yielded when it is Markdown and
+    not a sync conflict copy. The entry's kind and the reserved registry are the caller's to add.
+    """
+    if directory:
+        return name not in EXCLUDED_DIR_NAMES and not name.startswith(EXCLUDED_DIR_PREFIXES)
+    return Path(name).suffix.lower() == ".md" and not is_sync_conflict_copy(name)
 
 
 def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):

@@ -2445,6 +2445,30 @@ def test_a_page_that_keeps_changing_is_retried_no_faster_than_its_backoff(
         assert epistemic_graph.graph_lag(vault)["quarantined_paths"] == 1
 
 
+def test_a_page_quarantined_for_thousands_of_attempts_still_waits_for_its_retry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure count persists, so a long-quarantined page must not overflow its backoff.
+
+    Doubling the change backoff without a cap overflowed a float near attempt 1027, and the
+    drain's requeue check raised on every wake instead of waiting.
+    """
+    with monkeypatch.context() as locked:
+        _quarantine_unreadable_page_a(vault, monkeypatch, locked)
+        conn = sqlite3.connect(deferred_index.store_path(vault))
+        with conn:
+            conn.execute("UPDATE graph_failures SET attempts = 2000 WHERE rel_path = ?", (PAGE_A,))
+        conn.close()
+        (vault / PAGE_A).write_text(_page("A", "A is edited out of band."), encoding="utf-8")
+        _seed_live_freshness(vault)
+
+        # The backoff has reached its cap: halfway through it the edited page still waits.
+        _age_graph_failures(vault, epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS / 2)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 0
+        _age_graph_failures(vault, epistemic_graph.GRAPH_QUARANTINE_RETRY_SECONDS / 2)
+        assert index_sync.requeue_quarantined_graph_paths(vault) == 1
+
+
 def test_a_full_rebuild_that_derives_a_quarantined_page_clears_its_record(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

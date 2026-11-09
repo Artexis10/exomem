@@ -46,12 +46,12 @@ def upload_env(vault, tmp_path, monkeypatch):
     return vault, who, authority, bearer, app.http_app()
 
 
-def _prepare(env, data=b"exact original\n", **kwargs):
+def _prepare(env, data=b"exact original\n", *, lane="source", **kwargs):
     from exomem import upload_handoff
     vault, who, *_ = env
     with principal.request_scope(who):
         return upload_handoff.prepare_upload(
-            vault, lane="source", expected_sha256=hashlib.sha256(data).hexdigest(), **kwargs,
+            vault, lane=lane, expected_sha256=hashlib.sha256(data).hexdigest(), **kwargs,
         )
 
 

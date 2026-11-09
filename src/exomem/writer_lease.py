@@ -90,6 +90,7 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest"})
 # capability as the CLI. Closed set: the maintain_memory mode literal fixes it.
 REMOTE_WRITE_MAINTENANCE_MODES = frozenset({  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
     "structured-files", "tag-variants", "curation", "maintenance-job-cancel", "collections-store-adopt-local",
+    "held-resolve",
 })
 
 
