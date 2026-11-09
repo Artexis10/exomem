@@ -114,6 +114,8 @@ from . import mutation_terminal as mutation_terminal_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import overview as overview_module
+from . import page_ids as page_ids_module
+from . import page_names as page_names_module
 from . import plan_memory as plan_memory_module
 from . import plan_progress as plan_progress_module
 from . import procedure_approval_operation as procedure_approval_operation_module
@@ -2809,6 +2811,8 @@ def op_find(
     """
     if detail not in ("full", "compact"):
         raise ValueError(f"find: detail must be 'full' or 'compact', got {detail!r}")
+    if relation_of:
+        relation_of = page_names_module.resolve_page(vault_root, relation_of, field="relation_of")
     projection_runtime = projection_runtime_module.load_active_projection_runtime(vault_root)
     if continuation is not None and projection_runtime is None:
         raise projection_runtime_module.ProjectedContinuationUnavailable(
@@ -3233,25 +3237,9 @@ def _citation_url(_path: str) -> str:
     return ""
 
 
-def _resolve_memory_identifier(
-    vault_root: Path, value: str, *, serve_stale: bool = False
-) -> str:
-    """Resolve a path or memory reference to the page a caller may see.
-
-    A command that goes on to write from the answer keeps the default. A read
-    passes `serve_stale`, so the lookup answers from the identity projection
-    even while the watcher publishes an outside edit, rather than scanning
-    the vault.
-    """
-    try:
-        resolved = egress_module.resolve_visible_identifier(
-            vault_root, value, serve_stale=serve_stale
-        )
-    except memory_refs_module.ReferenceError as exc:
-        raise ValueError(f"{exc.code}: {exc.reason}") from exc
-    if reserved_paths_module.classify_logical(resolved).blocked:
-        raise ValueError("NOT_FOUND: memory identifier is unavailable")
-    return resolved
+#: Resolve a path or memory reference to the page a caller may see; defined with the other page
+#: naming in `page_names`, which this module's page parameters already go through.
+_resolve_memory_identifier = page_names_module.resolve_reference
 
 
 def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.GetResult:
@@ -4790,6 +4778,9 @@ def op_edit(
         FRONTMATTER_REQUIRED (a metadata operation targeted ordinary Markdown);
         UNREADABLE.
     """
+    path = page_names_module.resolve_page(
+        vault_root, path, prefer=page_names_module.prefer_editable, field="path"
+    )
     if new_body is not None and expected_hash is None:
         raise ValueError(
             "INVALID_EDIT: a whole-body edit requires `expected_hash`, the "
@@ -4806,7 +4797,6 @@ def op_edit(
     ]
     if len(active) > 1:
         raise ValueError(f"INVALID_EDIT: one edit mode at a time; got {', '.join(active)}")
-    path = _resolve_memory_identifier(vault_root, path)
     try:
         if edits is not None:
             result = multi_edit_module.multi_edit(
@@ -4899,6 +4889,12 @@ def op_edit(
         set_take_module.SetTakeError,
         set_frontmatter_field_module.SetFrontmatterError,
     ) as e:
+        if e.code == "STALE_EDIT" and page_ids_module.is_page_id(expected_hash):
+            refusal = page_names_module.stale_edit(
+                vault_root, path, path_field="path", guard_field=("operation", "expected_hash")
+            )
+            if refusal is not None:
+                raise refusal from e
         msg = _leaf_error_message(e)
         if getattr(e, "candidates", None):
             msg += f" (candidates: {e.candidates})"
@@ -4990,7 +4986,9 @@ def op_replace(
         supersedable type); OLD_NOT_FOUND; ALREADY_SUPERSEDED
         (old page is already marked superseded).
     """
-    old_path = _resolve_memory_identifier(vault_root, old_path)
+    old_path = page_names_module.resolve_page(
+        vault_root, old_path, prefer=page_names_module.prefer_editable, field="old_path"
+    )
     replace_kwargs = {
         "old_path": old_path,
         "reason": reason,
@@ -6786,8 +6784,9 @@ _SEARCH_NOTICE_DEGRADED = "One search method failed, so these results may miss r
 _SEARCH_NOTICE_BUDGET = (
     "Part of this search was skipped to stay within its time limit, so results may be incomplete."
 )
-#: Hit fields that label how the index stores a hit or repeat its unit's parent. A hit keeps `path`,
-#: `ref` and `unit_ref`: `record_episode` takes only refs in `about`, and `read_memory` takes either.
+#: Hit fields that label how the index stores a hit or repeat its unit's parent. A hit keeps `ref`
+#: and `unit_ref`: `record_episode` takes only refs in `about`. The MCP door names the page by `id`
+#: and `title`, and keeps `path` only for `detail="full"`.
 # nosemgrep: ep-word-set -- this module's own closed wire-field names, not a customer vocabulary.
 _SEARCH_HIT_DROPPED = ("scope", "parent_ref")
 
@@ -6857,6 +6856,23 @@ ACTIVATE_ANCHOR_REFUSAL = (
     "INVALID_ANCHOR: anchor must name an available anchor of this activation "
     "index or a visible compiled page"
 )
+
+
+def _anchor_named_page(vault_root: Path, anchor: str) -> str | None:
+    """The one page a title or short id names that an `anchor` may carry a packet from, else None.
+
+    More than one eligible page, none, or a page that cannot be carried all answer None: the caller
+    refuses with `ACTIVATE_ANCHOR_REFUSAL`, which names neither the cause nor any candidate.
+    """
+
+    def carries(path: str) -> bool:
+        return working_set_module._eligible_agent_page(vault_root, path) is not None
+
+    try:
+        named = page_names_module.resolve_page(vault_root, anchor, prefer=carries, field="anchor")
+    except (page_names_module.AmbiguousTitle, ValueError):
+        return None
+    return working_set_module._eligible_agent_page(vault_root, named)
 
 
 def _abstention_reason(packet: dict) -> str:
@@ -6969,6 +6985,14 @@ def op_activate_context(
             try:
                 with ownership.read_scope(vault_root, finalize=True):
                     bounded = working_set_conversation_module.bound(conversation)
+                    if bounded.refs:
+                        bounded = replace(
+                            bounded,
+                            refs=tuple(
+                                page_names_module.resolve_hint(vault_root, ref)
+                                for ref in bounded.refs
+                            ),
+                        )
                     # The dispatcher runs this as a foreground request, ahead of in-process
                     # bulk passes (`writer_lease._foreground_priority_request`).
                     with (
@@ -7309,6 +7333,11 @@ def _compile_guarded_activation(
                 # compile instead, the unknown classes took about 3 ms longer
                 # than a withheld page, which is its own answer.
                 agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
+                if agent_page is None:
+                    # A title or short id names the page when the value is no catalogue spelling.
+                    agent_page = _anchor_named_page(vault_root, anchor)
+                    if agent_page is not None:
+                        anchor = agent_page
                 if agent_page is None or not egress_module.quick_page_visible(
                     vault_root, agent_page, purpose=purpose
                 ):
@@ -8149,6 +8178,7 @@ def op_read_memory(
             )
     if continuation is not None:
         raise context_views_module.invalid_continuation()
+    path = page_names_module.resolve_page(vault_root, path, serve_stale=True)
     if unit_ref is not None:
         if frontmatter_only or links or include_raw or offset is not None:
             raise ValueError(
@@ -8250,6 +8280,9 @@ def op_read_memory(
         result["revision_history"] = compiled_history.read(
             vault_root, path=result["path"], limit=history_limit, continuation=history_continuation,
         )
+    if (named_id := page_names_module.id_of_read(result)) is not None:
+        # The id the page's own `title` or this one names for the next call, with the version read.
+        result["id"] = named_id
     return result
 
 
@@ -8607,6 +8640,10 @@ def op_observe_memory(
         raise ValueError(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
+    if not raw_path.lower().startswith("exomem://"):
+        path = page_names_module.resolve_page(
+            vault_root, path, prefer=page_names_module.prefer_editable, field="path"
+        )
     try:
         if raw_path.lower().startswith(
             memory_refs_module.REF_PREFIX
@@ -8658,6 +8695,12 @@ def op_observe_memory(
             )
         return result
     except observe_memory_module.ObserveMemoryError as error:
+        if error.code == "STALE_PARENT_HASH" and page_ids_module.is_page_id(expected_hash):
+            refusal = page_names_module.stale_edit(
+                vault_root, resolved_path, path_field="path", guard_field=("expected_hash",)
+            )
+            if refusal is not None:
+                raise refusal from error
         message = f"{error.code}: {error.reason}"
         if error.remediation:
             message += f" Remediation: {error.remediation}"
@@ -9207,7 +9250,14 @@ def op_approve_procedure(
         expected_version: The page's `content_hash`: required for approve, optional for revoke.
     """
     return procedure_approval_operation_module.run(
-        vault_root, action, ref=ref, expected_version=expected_version
+        vault_root,
+        action,
+        ref=(
+            page_names_module.resolve_ref(vault_root, ref, field="ref")
+            if ref is not None
+            else None
+        ),
+        expected_version=expected_version,
     )
 
 
@@ -9997,7 +10047,7 @@ def op_review_memory(
 
             return vocabulary_questions_module.submit(
                 vault_root,
-                path=path,
+                path=page_names_module.resolve_page(vault_root, path, field="path"),
                 query=query,
                 family=family,
                 **({"relation_ref": ref} if ref is not None else {}),
@@ -10038,7 +10088,7 @@ def op_review_memory(
         # is passed through before the page-oriented resolution below.
         return plan_progress_module.review(vault_root, collection=path, limit=limit)
     if path:
-        path = _resolve_memory_identifier(vault_root, path)
+        path = page_names_module.resolve_page(vault_root, path, field="path")
     if mode == "attention":
         return op_attention(vault_root, categories=categories, limit=limit, state=state)
     if mode == "activation":
@@ -11100,7 +11150,9 @@ def op_connect_memory(
             expected_hash=expected_hash,
             why=why,
             expected_fingerprint=expected_fingerprint,
-            source_path=path,
+            source_path=(
+                page_names_module.resolve_page(vault_root, path, field="path") if path else path
+            ),
             requested_relation=requested_relation,
             bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
             edit_memory=_accept_relations_edit,
@@ -11112,9 +11164,9 @@ def op_connect_memory(
         if refusal is not None:
             return refusal
     if path:
-        path = _resolve_memory_identifier(vault_root, path)
+        path = page_names_module.resolve_page(vault_root, path, field="path")
     if target:
-        target = _resolve_memory_identifier(vault_root, target)
+        target = page_names_module.resolve_page(vault_root, target, field="target")
     if operation == "suggest-links":
         return op_suggest_links(
             vault_root,
@@ -14293,6 +14345,13 @@ _COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingPro
     "capture_source": "saved", "preserve_evidence": "saved", "preserve_artifacts": "saved",
     "transfer_artifact": "saved", "transfer_memory": "saved",
 })
+#: The commands whose MCP reply names pages by title and short id (`Command.names_pages`): each
+#: reports pages that `read_memory`, `edit_note` and the other page tools take by title or id.
+# nosemgrep: ep-word-set -- the registry's own command names, not a customer vocabulary.
+_PAGE_NAMING_COMMANDS = frozenset({
+    "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
+    "capture_source", "ask_memory",
+})
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -15082,6 +15141,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 mcp_meta=MappingProxyType(dict(meta.get("mcp_meta", {}))),
                 executor=meta.get("executor", "cell"),
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
+                names_pages=name in _PAGE_NAMING_COMMANDS,
             )
         )
     return tuple(cmds)
