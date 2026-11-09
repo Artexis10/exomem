@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
-from cellctl.export_layout import STEPS, job_name, legacy_job_name, staging_claim_name
+from cellctl.export_layout import (
+    STEPS,
+    job_name,
+    legacy_job_name,
+    staging_claim_name,
+    verification_secret_name,
+)
 from cellctl.manifests import namespace_name
 
 from .infra import STAGING_BUCKET, docker_labels
@@ -46,14 +52,17 @@ print(json.dumps({'sha256': archive.archive_sha256, 'files': len(archive.manifes
 
 
 def export_leftovers(ctx: Context, cell_id: str, export_id: str) -> list[str]:
-    """The export's Jobs, their pods and its staging claim that remain in the
-    cell namespace. cellctl removes each of them once the export has ended."""
+    """The export's Jobs, their pods, its staging claim and its verification
+    Secret that remain in the cell namespace. cellctl removes each of them once
+    the export has ended."""
 
     namespace = namespace_name(cell_id)
     jobs = {legacy_job_name(export_id), *(job_name(export_id, step) for step in STEPS)}
 
-    def listed(kind: str) -> list[dict]:
-        return ctx.kube_json("get", kind, "--namespace", namespace)["items"]
+    def listed(kind: str, *selector: str) -> list[dict]:
+        return ctx.kube_json("get", kind, "--namespace", namespace, *selector)["items"]
+
+    secret = verification_secret_name(export_id)
 
     return [
         *(f"job/{job['metadata']['name']}" for job in listed("jobs") if job["metadata"]["name"] in jobs),
@@ -66,6 +75,12 @@ def export_leftovers(ctx: Context, cell_id: str, export_id: str) -> list[str]:
             f"persistentvolumeclaim/{claim['metadata']['name']}"
             for claim in listed("persistentvolumeclaims")
             if claim["metadata"]["name"] == staging_claim_name(export_id)
+        ),
+        # The selector reads only this Secret: the cell's other Secrets hold its keys.
+        *(
+            f"secret/{item['metadata']['name']}"
+            for item in listed("secrets", f"--field-selector=metadata.name={secret}")
+            if item["metadata"]["name"] == secret
         ),
     ]
 

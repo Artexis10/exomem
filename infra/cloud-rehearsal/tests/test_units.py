@@ -497,13 +497,19 @@ def test_owner_export_cannot_qualify_a_node() -> None:
     assert run.to_json()["outcome"]["gates_node"] is False
 
 
-@pytest.mark.parametrize("leftover", ["step job", "step pod", "staging claim", None])
+@pytest.mark.parametrize("leftover", ["step job", "step pod", "staging claim", "verification secret", None])
 def test_owner_export_names_each_object_a_completed_export_left(leftover) -> None:
-    """A step Job, its pod or the staging claim left after the export is named; the cell's own objects are not."""
+    """A step Job, its pod, the staging claim or the verification Secret left after the export is named; the cell's own objects are not."""
     import uuid
     from types import SimpleNamespace
 
-    from cellctl.export_layout import PACK, VERIFY, job_name, staging_claim_name
+    from cellctl.export_layout import (
+        PACK,
+        VERIFY,
+        job_name,
+        staging_claim_name,
+        verification_secret_name,
+    )
 
     from cloud_rehearsal import owner_export
 
@@ -516,12 +522,15 @@ def test_owner_export_names_each_object_a_completed_export_left(leftover) -> Non
             {"metadata": {"name": "other-pack", "labels": {"batch.kubernetes.io/job-name": job_name(other_export, PACK)}}},
         ],
         "persistentvolumeclaims": [{"metadata": {"name": "cell-data"}}, {"metadata": {"name": staging_claim_name(other_export)}}],
+        "secrets": [{"metadata": {"name": verification_secret_name(other_export)}}],
     }
     expected = {
         "step job": ("jobs", {"name": verify}, f"job/{verify}"),
         "step pod": ("pods", {"name": "verify-pod", "labels": {"batch.kubernetes.io/job-name": verify}}, "pod/verify-pod"),
         "staging claim": ("persistentvolumeclaims", {"name": staging_claim_name(export_id)},
                           f"persistentvolumeclaim/{staging_claim_name(export_id)}"),
+        "verification secret": ("secrets", {"name": verification_secret_name(export_id)},
+                                f"secret/{verification_secret_name(export_id)}"),
     }
     named = []
     if leftover is not None:
