@@ -10412,7 +10412,10 @@ def _matched_rows(
             matched.append((
                 0,
                 position,
-                (src_path, dst_path, relation_type, "relation_type", relation_type, symmetric, edge),
+                (
+                    src_path, dst_path, relation_type, "relation_type", relation_type,
+                    symmetric, edge,
+                ),
             ))
             continue
         instance = str((edge.get("metadata") or {}).get("registry_instance") or "core")
