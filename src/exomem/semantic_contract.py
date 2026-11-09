@@ -100,7 +100,7 @@ _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether an entry is runtime state rather than canonical Markdown."""
-    if name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES):
+    if vault.is_scan_skipped_runtime_name(name):
         return True
     if directory != kb:
         return False
@@ -2071,8 +2071,8 @@ def _resolve_reference_wikilink_from_context(
     matches.update(
         candidate.path for candidate in vault.wikilink_candidates(
             context.resolver_candidates_by_key,
-            context.resolver_titles.get(cleaned.lower(), ()),
-            title_key=cleaned.lower(), visible=visible,
+            context.resolver_titles.get(vault.title_key(cleaned), ()),
+            title_key=vault.title_key(cleaned), visible=visible,
         )
     )
     if len(matches) > 1:

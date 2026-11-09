@@ -146,6 +146,11 @@ def test_complete_census_refuses_an_ordinary_alias_instead_of_omitting_it(tmp_pa
             "Notes/.exomem-held-publish-0123456789abcdef0123456789abcdef",
             "held-publication",
         ),
+        (
+            "Knowledge Base/Notes/.exomem-held-probe-0123456789abcdef0123456789abcdef"
+            "-directory/new.md",
+            "held-probe",
+        ),
     ],
 )
 def test_closed_registry_reserves_exact_static_sqlite_temp_and_quarantine_families(
@@ -174,6 +179,7 @@ def test_closed_registry_reserves_exact_static_sqlite_temp_and_quarantine_famili
         ".graph-rebuild-user-copy.sqlite",
         ".graph-reset-" + "0" * 23,
         ".authorization-projections-user",
+        "Knowledge Base/.exomem-held-probe-notes/new.md",
     ],
 )
 def test_exact_shapes_do_not_reserve_lookalikes(raw: str) -> None:
@@ -270,6 +276,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "graph-store",
         "idempotency-store",
         "held-publication",
+        "held-probe",
         "lexical-quarantine",
         "lexical-rebuild",
         "lexical-store",

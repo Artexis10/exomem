@@ -200,12 +200,14 @@ def test_dynamic_types_register_create_resolve_and_traverse_on_three_doors(
     }
     envelope = {"ok", "state", "status", "terminal", "mutated", "request_id", "receipt_id"}
     for door, receipt in created.items():
-        assert receipt["path"] == expected_paths[door], door
         # `full` carries the operational receipt fields under `diagnostics`.
         operational = receipt["diagnostics"]["operational"]
+        # The MCP door names the page by title and id; its path sits beside the receipt fields.
+        written = operational["path"] if door == "mcp" else receipt["path"]
+        assert written == expected_paths[door], door
         assert operational["state"] == "committed", (door, receipt)
         assert operational["mutated"] is True, door
-        page = yaml.safe_load((vault / receipt["path"]).read_text(encoding="utf-8").split("---")[1])
+        page = yaml.safe_load((vault / written).read_text(encoding="utf-8").split("---")[1])
         assert page["type"] == "entity"
         assert page["entity_type"] in {"site", "equipment", "milking-machine"}
         # The same receipt contract on every door, graph publication included.

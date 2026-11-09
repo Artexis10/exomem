@@ -9,7 +9,7 @@ import pytest
 
 from exomem import call_spans, freshness, lexstore, recall_policy
 from exomem import find as find_module
-from exomem.vault import walk_vault_md
+from exomem.vault import title_key, walk_vault_md
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +91,7 @@ def test_sidecar_entries_match_walk_and_preserve_exact_title_bytes(tmp_path: Pat
     assert set(entries) == _expected_entries(root)
     assert ("Knowledge Base/Notes/Mixed.md", "MiXeD, punctuation: café ☃") in entries
     assert _resolver_entries(find_module.recall_resolver_snapshot(root)) == {
-        (path, title.lower() if title else None) for path, title in entries
+        (path, title_key(title) if title else None) for path, title in entries
     }
 
 
@@ -223,7 +223,8 @@ def test_unusable_sidecar_falls_back_to_complete_walk(
     assert reads > 0
     assert scheduled == []
     assert _resolver_entries(resolver) == {
-        (path, title.lower() if title else None) for path, title in _expected_entries(root)
+        (path, title_key(title) if title else None)
+        for path, title in _expected_entries(root)
     }
 
 
