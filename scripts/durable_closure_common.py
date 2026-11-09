@@ -1148,7 +1148,7 @@ async def _run_exomem(
         ),
         ack=True,
     )
-    completed = str(commit.get("path") or "")
+    completed = _written_path(commit)
     if not completed:
         raise AdapterFault("remember result omitted created path")
     await client.call(
@@ -1197,7 +1197,7 @@ async def _run_exomem(
         ),
         ack=True,
     )
-    capture_path = str(captured.get("path") or "")
+    capture_path = _written_path(captured)
     reads = [
         await client.call("read_memory", {"path": path})
         for path in (completed, tracker, stale, capture_path)
@@ -1212,6 +1212,12 @@ async def _run_exomem(
         "searches": searches,
         "fixture": fixture,
     }
+
+
+def _written_path(reply: Mapping[str, Any]) -> str:
+    """The vault path a full-detail MCP write reply holds; a compact reply names the page by title and id."""
+    operational = (reply.get("diagnostics") or {}).get("operational") or {}
+    return str(reply.get("path") or operational.get("path") or "")
 
 
 def _remember_commit_arguments(

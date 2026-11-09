@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from granted_writer import CLIENT, ISSUER, grant_writer
 from test_recent_promotions import _as, _log_entry
+from test_relation_endpoints import _page_path
 from test_vocabulary_registries import _served
 
 from exomem import capture_sweep, due_state, envelope, episode_workflow, epistemic_graph, graph_sync, prominence
@@ -64,13 +65,16 @@ def _committed(call, tool: str, arguments: dict, review_hash: str) -> dict:
     return written
 
 
-def _note(call, title: str, *names: str) -> dict:
-    """Commit one note that links these names, through the validate-then-commit door."""
+def _note(call, title: str, *names: str, full: bool = False) -> dict:
+    """Commit one note that links these names, through the validate-then-commit door.
+
+    `full` asks for the full-detail reply, the one that still names the page's vault path.
+    """
     arguments = {"title": title, "note_type": "insight", "content": _body(title, *names)}
     draft = call("remember", {**arguments, "validate_only": True})
     return _committed(call, "remember", {
         **arguments, "draft_id": draft["draft_id"], "draft_hash": draft["draft_hash"],
-        "draft_token": draft["draft_token"],
+        "draft_token": draft["draft_token"], **({"response_detail": "full"} if full else {}),
     }, draft["draft_hash"])
 
 
@@ -111,7 +115,9 @@ def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no
     })
     assert "error" not in made, made
 
-    written = _note(call, "Harbour review", "Kestrel", "Tidal Ledger", "Salt Ledger", "Quiet Ferry", "Amber Gate")
+    written = _note(
+        call, "Harbour review", "Kestrel", "Tidal Ledger", "Salt Ledger", "Quiet Ferry", "Amber Gate", full=True
+    )
 
     assert _listed(written) == ["Kestrel", "Salt Ledger", "Quiet Ferry"], (
         "an entity's name is not listed, and four unpaged names are cut to three"
@@ -119,7 +125,7 @@ def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no
     for item in written["undeclared_referents"]["names"]:
         assert item["route"] == {
             "tool": "change_connections",
-            "args": {"operation": {"kind": "create-entity", "name": item["name"], "ref": written["path"]}},
+            "args": {"operation": {"kind": "create-entity", "name": item["name"], "ref": _page_path(written)}},
         }
         assert item["review"].startswith("exomem://review/write-advisory/")
         assert re.fullmatch(r"[0-9a-f]{24}", item["fingerprint"])
@@ -128,10 +134,10 @@ def test_a_write_lists_up_to_three_names_it_newly_links_that_name_no_page_and_no
 def test_an_edit_lists_only_the_name_it_adds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     vault, call = _served(tmp_path, monkeypatch)
     _as(monkeypatch, "session-a")
-    first = _note(call, "Harbour review", "Kestrel")
+    first = _note(call, "Harbour review", "Kestrel", full=True)
     assert _listed(first) == ["Kestrel"]
 
-    edited = _edit(call, first["path"], "[[Kestrel]]", "[[Kestrel]] and [[Salt Ledger]]")
+    edited = _edit(call, _page_path(first), "[[Kestrel]]", "[[Kestrel]] and [[Salt Ledger]]")
 
     assert _listed(edited) == ["Salt Ledger"], "Kestrel was linked before this write"
 
@@ -256,8 +262,10 @@ def test_a_name_that_two_pages_of_one_batch_link_is_listed_once(
     assert kestrel["route"]["args"]["operation"]["ref"].endswith("first-episode-note.md"), "the first page to link it"
 
 
+# The last alternative is a page's short id: its first part comes from a random page id, so it differs per vault.
 VOLATILE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{64}|\d{4}-\d{2}-\d{2}T[0-9:.]+Z"
+    r"|\b[a-z2-7]{7}\.[a-z2-7]{4}\b"
 )
 SCOPE_ID, RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 
@@ -343,6 +351,7 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
             made = call("connect_memory", {
                 "operation": "create-entity", "entity_type": entity_type, "name": "Kestrel",
                 "summary": "A synthetic entity the restricted caller may not see.",
+                "response_detail": "full",
             })
             assert "error" not in made, made
         _withhold_from_external(vault, "Entities/**")
@@ -352,7 +361,7 @@ def test_a_restricted_caller_gets_the_same_receipt_and_activation_whether_a_same
             writer = _restricted_writer(vault, tmp_path / variant, restricted, inbox="Notes/Inbox/restricted")
             restricted.setattr(principal_module, "resolve_mcp_principal", lambda: writer)
             if entity_type is not None:
-                hidden = call("read_memory", {"path": made["path"]})
+                hidden = call("read_memory", {"path": _page_path(made)})
                 assert "error" in hidden, "the entity is withheld from the restricted caller"
             seen[variant] = {
                 "write": _note(call, "Harbour review", "Kestrel", "Salt Ledger"),
@@ -386,13 +395,13 @@ def test_an_entity_made_through_the_route_names_the_originating_write_path_and_o
 ) -> None:
     vault, call = _served(tmp_path, monkeypatch)
     _as(monkeypatch, "session-a")
-    written = _note(call, "Harbour review", "Kestrel")
+    written = _note(call, "Harbour review", "Kestrel", full=True)
 
     created = _promote(call, written["undeclared_referents"]["names"][0], response_detail="full")
 
-    entry = _log_entry(vault, created["path"])
-    note_operation = _logged_operation_id(vault, written["path"])
-    assert f"Origin: {written['path']}. Operation: {note_operation}." in entry
+    entry = _log_entry(vault, _page_path(created))
+    note_operation = _logged_operation_id(vault, _page_path(written))
+    assert f"Origin: {_page_path(written)}. Operation: {note_operation}." in entry
     assert created["diagnostics"]["operational"]["request_id"] not in entry, "the id is the note's write, not this creation's request"
 
 
@@ -402,7 +411,7 @@ def test_a_withheld_origin_and_a_missing_one_give_a_restricted_caller_the_same_r
     """The route's `ref` is the caller's to supply, so a probe can aim it at a page it may not read."""
     vault, call = _served(tmp_path, monkeypatch)
     _as(monkeypatch, "session-a")
-    withheld = _note(call, "Harbour review", "Kestrel")["path"]
+    withheld = _page_path(_note(call, "Harbour review", "Kestrel", full=True))
     missing = "Knowledge Base/Notes/Insights/a-page-that-was-never-written.md"
     _withhold_from_external(vault, "Notes/Insights/**")
     answers: dict[str, str] = {}
@@ -414,9 +423,9 @@ def test_a_withheld_origin_and_a_missing_one_give_a_restricted_caller_the_same_r
                 "kind": "create-entity", "name": name, "ref": ref, "entity_type": "concept",
                 "registry_scope": PUBLIC_INSTANCE,
                 "summary": "A synthetic concept used to compare origins.",
-            }})
+            }, "response_detail": "full"})
             assert "error" not in created, created
-            assert "Origin: unknown." in _log_entry(vault, created["path"])
+            assert "Origin: unknown." in _log_entry(vault, _page_path(created))
             answers[name] = _same_bytes_but_for_ids(created).replace(name, "<name>").replace(
                 name.lower().replace(" ", "-"), "<slug>",
             )
