@@ -70,15 +70,15 @@ def _read_cursor(continuation: str, *, kind: str, generation: str) -> dict[str, 
 
 
 def _source_rows(connection, path: str, after: str = ""):
-    # Debt (K14): the Sources binding's key and field by name, as in relation_queue; both convert together.
     # Debt (page-type keys): `source` and `evidence` are note-type keys; the note-type `role` states it.
+    field, relation = epistemic_graph.declared_sources_binding()
     rows = connection.execute(
         "SELECT DISTINCT t.path, t.source_hash, t.exomem_id, t.page_type "
         "FROM graph_edges e JOIN graph_nodes t ON t.node_key=e.dst_key "
-        "WHERE e.src_key=? AND e.relation_type='derived_from' "
-        "AND e.source_anchor='sources' AND t.kind='file' "
+        "WHERE e.src_key=? AND e.relation_type=? "
+        "AND e.source_anchor=? AND t.kind='file' "
         "AND t.page_type IN ('source', 'evidence') AND t.path > ? ORDER BY t.path LIMIT ?",
-        (epistemic_graph._file_key(path), after, SOURCE_PAGE + 1),
+        (epistemic_graph._file_key(path), relation, field, after, SOURCE_PAGE + 1),
     ).fetchall()
     for _, _, source_id, _ in rows[:SOURCE_PAGE]:
         if (

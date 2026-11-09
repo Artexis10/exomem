@@ -191,6 +191,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 |---|---|---|
 | F7 same-page epistemic flag | relation_census 76, 1460 | Census-only. It is family-keyed, so extensions already reach it. |
 | Projected graph lane tier (K16, change 6) | projection_runtime 1825 | A stored projection edge keeps its canonical key and no extension parent, so only a core plain link ranks last. An extension of `links_to` ranks as typed here until the producer stores the parent. |
+| Shared-source copy in the relation queue (K14 fold) | relation_queue 700 | It reads the frontmatter field's stored edges only, while the graph copy also reads page-level extensions. Folding the two changes suggestions and needs its own evidence. It reads the field and relation from the binding. |
 | F8 affiliation count | relation_census 1232 | One entity-census count for one family. |
 | K7 evidence-target check, with C8 `_EVIDENTIAL_KINDS` | relation_census 74, 1447 | Census-only. `target_kinds` cannot express it, because folders and Sources pages count. The kind list stays with the check. |
 | K8 answers-target check (relation side) | relation_census 1454 | Census-only. `settles` is wrong here, because a `resolves` target is often not a question. The target side reads the `question` trait. |
