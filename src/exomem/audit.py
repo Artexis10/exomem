@@ -140,6 +140,7 @@ from .collection_store.aliases import link_target as retired_link_target
 from .collection_store.preview import canonical_read, selected_writer
 from .kbdir import kb_dirname, kb_prefix
 from .planning_values import PlanningValues
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import (
     _mask_code_spans,
     content_hash,
@@ -3900,9 +3901,9 @@ def relation_debt_eligible(
     if access.access_tier(vault_root, path.as_posix()) != access.TIER_READ_WRITE:
         return False
     stem = path.stem.lower()
-    if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+    if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
         return False
-    return not bool(_STALE_SKIP_TAGS & set(tags))
+    return not bool(BREADTH_TAGS & set(tags))
 
 
 @call_spans.timed("audit.relation_debt")
@@ -4002,9 +4003,9 @@ def _check_missing_sources(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
             continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if BREADTH_TAGS & set(page.tags):
             continue
         if page.frontmatter.get("sources"):
             continue
@@ -4334,9 +4335,9 @@ def _check_derivation_double_counting(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
             continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if BREADTH_TAGS & set(page.tags):
             continue
         key = _relevance_canon(page.rel_path)
         directs = direct_sources.get(key, [])
@@ -6471,9 +6472,8 @@ def _multi_headed_chain_findings(
 # (The scaffold's "unfinished production lifecycles" entry is still an unbacked
 # claim; closing it is filed as a named follow-up in
 # `openspec/changes/close-experiment-lifecycle/design.md`.)
-# Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag.
-_STALE_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
-_STALE_SKIP_TAGS = frozenset({"hub", "snapshot"})
+# Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag
+# (`structure_promotion.BREADTH_TAGS` and `BREADTH_SLUG_SUFFIXES`).
 
 
 def _stale_thresholds() -> tuple[int, int, int]:
@@ -6681,9 +6681,9 @@ def _check_stale_review(
         if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
             continue
         stem = page.path.stem.lower()
-        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+        if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
             continue
-        if _STALE_SKIP_TAGS & set(page.tags):
+        if BREADTH_TAGS & set(page.tags):
             continue
 
         updated = _parse_fm_date(page.frontmatter.get("updated") or page.frontmatter.get("created"))

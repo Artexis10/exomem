@@ -18,7 +18,8 @@ The sample vault demonstrates the product layers in miniature:
 - `Evidence/` keeps proof artifacts for a case or claim.
 
 Typed relations follow the public governance loop: resolve with
-`connect_memory(operation="resolve-relation")`, reuse a specific truthful match,
-or choose an honest `relates_to`/no edge fallback. A durable recurring distinction
-is proposal-first through `propose-relation` and hash-guarded `save-relations`;
-meaning corrections create a new canonical key and deprecate the old one.
+`connect_memory(operation="resolve-relation")`, and reuse a specific truthful match.
+When none fits, propose a new relation type, or write a plain link as the last resort.
+A durable recurring distinction is proposal-first through `propose-relation` and
+hash-guarded `save-relations`; meaning corrections create a new canonical key and
+deprecate the old one.

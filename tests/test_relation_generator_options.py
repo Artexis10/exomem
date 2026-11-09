@@ -1,7 +1,8 @@
 """Generators leave the relation choice to the agent (`promote-referents-without-nudges` task 2.9).
 
-Where a specific relation fits both pages, a relation candidate carries those relations and
-queue acceptance needs the agent to name one. Where none fits, acceptance works as before.
+A relation candidate that could only say two pages are related, whatever their types, carries
+the ranked relations for the pair and the plain link, and queue acceptance needs the agent to
+name one of them.
 Cases go through the public MCP tools over an initialized vault. Naming one of the offered
 relations needs no further step: `suggest-relations` returns the accept fields and the accept
 follows. Naming a relation the candidate does not offer takes the agent's recorded vocabulary
@@ -112,7 +113,7 @@ def test_a_candidate_between_a_person_and_an_organization_offers_relations_and_n
 
     keys = [option["key"] for option in item["options"]]
     assert "member_of" in keys
-    assert len(keys) <= 4
+    assert len(keys) <= 8
     # The queue authors no relation for the agent: nothing to copy, only the options to choose from.
     assert item["bullet"] is None
 
@@ -306,7 +307,7 @@ def test_a_relation_the_candidate_does_not_offer_still_needs_a_recorded_choice(
 ) -> None:
     vault, call, person, organization = _person_and_organization(tmp_path, monkeypatch)
     candidate = _suggested_candidate(call, person, organization)
-    # `owns` is active and joins a person to an organization, but only four relations are offered.
+    # `owns` is active and joins a person to an organization, but only eight relations are offered.
     assert "owns" not in [option["key"] for option in candidate["options"]]
     before = (vault / person).read_bytes()
 
@@ -449,11 +450,7 @@ def test_a_pair_the_other_page_already_relates_specifically_is_not_suggested_as_
         "organization",
         "Birch Works",
         relations=[
-            {
-                "kind": "supplies",
-                "target": person.removesuffix(".md"),
-                "reason": "Birch Works supplies Ada Marsh with timber.",
-            }
+            {"kind": "supplies", "target": person.removesuffix(".md")}
         ],
     )
     assert typed["diagnostics"]["operational"]["state"] == "committed", typed
@@ -475,9 +472,8 @@ def test_a_pair_the_other_page_already_relates_specifically_is_not_suggested_as_
     assert typed["path"] not in shared
 
 
-def test_a_candidate_between_two_plain_notes_still_accepts_without_naming_a_relation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _two_plain_notes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Two notes that cite one source, and the queue's candidate between them."""
     vault, call = _served(tmp_path, monkeypatch)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     source = call(
@@ -495,60 +491,76 @@ def test_a_candidate_between_two_plain_notes_still_accepts_without_naming_a_rela
         pages.append(page)
     _rebuild(vault, monkeypatch)
     group, item = _shared_source_item(call, *pages)
+    return vault, call, pages, group, item
 
-    assert "options" not in item
-    accepted = _accept(call, group, item)
 
-    assert accepted["diagnostics"]["operational"]["mutated"] is True, accepted
-    assert f"- relates_to [[{pages[1].removesuffix('.md')}]]" in (vault / pages[0]).read_text(
+def _accept_requesting(call, group: dict[str, Any], item: dict[str, Any], relation: str | None):
+    operation = {
+        "kind": "accept-relation",
+        "ref": item["ref"],
+        "path": group["path"],
+        "expected_hash": group["content_hash"],
+        "expected_fingerprint": item["fingerprint"],
+        "why": "Reviewed the shared source.",
+    }
+    if relation is not None:
+        operation["requested_relation"] = relation
+    return call("change_connections", {"operation": operation})
+
+
+def test_a_candidate_between_two_plain_notes_offers_relations_and_the_plain_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, pages, group, item = _two_plain_notes(tmp_path, monkeypatch)
+    before = (vault / pages[0]).read_bytes()
+
+    assert 0 < len(item["options"]) <= 8
+    assert item["bullet"] is None
+    assert item["relation_type"] is None
+    assert item["plain_link"] == "links_to"
+    refused = _accept_requesting(call, group, item, None)
+
+    assert refused["error"]["code"] == "RELATION_CHOICE_REQUIRED", refused
+    assert refused["error"]["candidates"][-1] == item["plain_link"]
+    assert (vault / pages[0]).read_bytes() == before
+
+
+def test_an_offered_relation_between_two_plain_notes_is_accepted_without_a_recorded_choice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, pages, group, item = _two_plain_notes(tmp_path, monkeypatch)
+    chosen = item["options"][0]["key"]
+
+    accepted = _accept_requesting(call, group, item, chosen)
+
+    assert "error" not in accepted, accepted
+    assert f"- {chosen} [[{pages[1].removesuffix('.md')}]]" in (vault / pages[0]).read_text(
         encoding="utf-8"
     )
 
 
-def test_a_candidate_that_offers_no_relation_refuses_a_named_one_and_says_to_accept_it_as_is(
+def test_the_plain_link_between_two_plain_notes_is_accepted_as_the_last_resort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    vault, call = _served(tmp_path, monkeypatch)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    source = call(
-        "capture_source",
-        {"title": "Shared source", "source_kind": "session", "content": "Two notes cite this."},
-    )["path"]
-    pages = []
-    for title in ("Acorn notes", "Birch notes"):
-        page = f"{NOTES}/{title.lower().replace(' ', '-')}.md"
-        (vault / page).parent.mkdir(parents=True, exist_ok=True)
-        (vault / page).write_text(
-            f"---\ntype: insight\nstatus: active\nsources:\n  - {source}\n---\n# {title}\n\n"
-            f"{title} are an invented note.\n",
-            encoding="utf-8",
-        )
-        pages.append(page)
-    _rebuild(vault, monkeypatch)
-    group, item = _shared_source_item(call, *pages)
-    assert "options" not in item
-    before = (vault / pages[0]).read_bytes()
+    vault, call, pages, group, item = _two_plain_notes(tmp_path, monkeypatch)
 
-    refused = call(
-        "change_connections",
-        {
-            "operation": {
-                "kind": "accept-relation",
-                "ref": item["ref"],
-                "path": group["path"],
-                "expected_hash": group["content_hash"],
-                "expected_fingerprint": item["fingerprint"],
-                "why": "Reviewed the shared source.",
-                "requested_relation": "supports",
-            },
-            "response_detail": "full",
-        },
+    accepted = _accept_requesting(call, group, item, item["plain_link"])
+
+    assert "error" not in accepted, accepted
+    assert f"- links_to [[{pages[1].removesuffix('.md')}]]" in (vault / pages[0]).read_text(
+        encoding="utf-8"
     )
 
-    assert refused["error"]["code"] == "VOCABULARY_APPLICATION_INVALID", refused
-    remediation = refused["diagnostics"]["error"]["remediation"]
-    assert "without requested_relation" in remediation
-    assert "Choose one of the offered" not in remediation
+
+def test_naming_the_generic_relation_for_a_candidate_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault, call, pages, group, item = _two_plain_notes(tmp_path, monkeypatch)
+    before = (vault / pages[0]).read_bytes()
+
+    refused = _accept_requesting(call, group, item, "relates_to")
+
+    assert refused["error"]["code"] == "RELATION_CHOICE_REQUIRED", refused
     assert (vault / pages[0]).read_bytes() == before
 
 

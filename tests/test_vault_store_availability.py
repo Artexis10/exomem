@@ -21,8 +21,9 @@ from exomem.collection_store import (
     takeover,
 )
 from exomem.collection_store.connection import CollectionStoreError
+from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import availability
+from exomem.vault_store import availability, ownership, write
 
 AT = "2026-11-08T00:00:00Z"
 LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_CLOUD_CELL")
@@ -30,13 +31,23 @@ LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_
 
 @pytest.fixture
 def store_mode_vault(vault, monkeypatch):
-    """The fixture vault with both store-mode records written directly, as activation leaves them."""
+    """The fixture vault with both store-mode records and its pages in the store, as activation leaves them."""
     for name in LEASE_ENV:
         monkeypatch.delenv(name, raising=False)
-    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as writer:
-        with writer.transaction() as tx:
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
             tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
                        "VALUES (1, 'store', 1, ?, 'test')", (AT,))
+        # In store mode a page read answers from the store, so the pages must be there.
+        pages = tuple(
+            write.PagePut(owned.rel, (vault / owned.rel).read_bytes(), owned.stat.st_mtime_ns)
+            for owned in ownership.iter_owned(vault)
+            if owned.ownership is ownership.Ownership.PAGE
+        )
+        write.commit(
+            CollectionWriter(vault, handle),
+            write.StoreChange(write.Origin.MIGRATION, "test fixture", puts=pages),
+        )
     state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
     return vault
 

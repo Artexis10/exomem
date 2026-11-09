@@ -750,7 +750,7 @@ def rendering_annotations(rendering: operation_entries.Rendering) -> ToolAnnotat
         title=rendering.title,
         readOnlyHint=rendering.read_only,
         destructiveHint=False if rendering.read_only else rendering.destructive,
-        idempotentHint=rendering.read_only,
+        idempotentHint=rendering.idempotent,
         openWorldHint=False,
     )
 

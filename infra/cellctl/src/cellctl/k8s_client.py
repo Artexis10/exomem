@@ -20,7 +20,7 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
 
 from .backup_source import FAILURE_CODES as BACKUP_FAILURE_CODES
-from .backup_source import parse_media_census
+from .backup_source import parse_media_census, parse_media_collection
 from .capacity import (
     AttachmentReservation,
     CapacityObservation,
@@ -70,6 +70,7 @@ from .state import (
     SNAPSHOT_BACKUP,
     ClusterObservation,
     MediaCensus,
+    MediaCollection,
     PodPlacement,
 )
 from .storage.topolvm import FamilyRequest, LocalVolumeState, LogicalVolume
@@ -261,6 +262,16 @@ class ClusterClient:
 
         self._core.patch_persistent_volume(name, {"spec": {"persistentVolumeReclaimPolicy": "Retain"}})
 
+    def delete_export_staging(self, namespace: str, export_id: str) -> None:
+        """add-cloud-media-store D8: the export's staging claim, whose class deletes its volume with it."""
+        from .export_layout import staging_claim_name
+
+        try:
+            self._core.delete_namespaced_persistent_volume_claim(staging_claim_name(export_id), namespace)
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+
     def delete_claim(self, namespace: str) -> None:
         """D4: admission allows this only while the bound PV is Retain."""
 
@@ -365,11 +376,13 @@ class ClusterClient:
             result[phase] = ImportJob(job is not None, active, succeeded, failed, report, bool(pods))
         return result
 
-    def observe_export_job(self, namespace: str, export_id: str, *, verify: bool = False):
-        """C6: the export's one Job, its pods and its termination report."""
-        from .exports import ExportJob, job_name
+    def observe_export_job(self, namespace: str, export_id: str, *, step: str):
+        """C6: one step Job of the export, its pods, its termination report, and
+        when it was created and its container first ran (add-cloud-media-store D8)."""
+        from .export_layout import PAUSE, job_name, legacy_job_name
+        from .exports import ExportJob
 
-        name = job_name(export_id, verify=verify)
+        name = job_name(export_id, step)
         job = self._get_job(namespace, name)
         pods = self._core.list_namespaced_pod(namespace, label_selector=f"batch.kubernetes.io/job-name={name}").items
         # Terminating pods still hold the volume until Kubernetes removes them.
@@ -399,15 +412,21 @@ class ClusterClient:
             # The controller removes terminal Jobs; retain the private-safe reason before it does.
             logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None
+        started = [status_time for pod in pods for status in (pod.status.container_statuses or [])
+                   if status.state and (status_time := _parse_timestamp(
+                       (status.state.running and status.state.running.started_at)
+                       or (status.state.terminated and status.state.terminated.started_at)))]
         predecessor = None
-        if verify:
-            # The packing Job's Pod must release its volume before verification can finish the hold.
-            predecessor_name = job_name(export_id)
-            predecessor = self._get_job(namespace, predecessor_name)
+        if step == PAUSE:
+            # An export that a single-Job release started leaves that Job; its pod
+            # holds the cell volume like the pause's, until it drains.
+            predecessor = self._get_job(namespace, legacy_job_name(export_id))
             pods += self._core.list_namespaced_pod(namespace,
-                label_selector=f"batch.kubernetes.io/job-name={predecessor_name}").items
+                label_selector=f"batch.kubernetes.io/job-name={legacy_job_name(export_id)}").items
         return ExportJob(job is not None or predecessor is not None, active, succeeded, failed, report,
-                         bool(pods), finished_at)
+                         bool(pods), finished_at,
+                         created_at=_parse_timestamp(job.metadata.creation_timestamp) if job is not None else None,
+                         running_at=min(started, default=None))
 
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
@@ -716,7 +735,7 @@ class ClusterClient:
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
-        backup_media_census = None
+        backup_media_census = backup_media_collection = None
         snapshot_steps: dict[str, bool] = {}
         if backup_family_request or (started_raw and hold_kind == SNAPSHOT_BACKUP):
             snapshot_steps = self._snapshot_steps(namespace, started_raw, backup_family_request)
@@ -728,6 +747,7 @@ class ClusterClient:
                 report = self._job_pod_termination_message(namespace, backup_name)
                 backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(report)
                 backup_media_census = _media_census(report)
+                backup_media_collection = _media_collection(report)
             elif backup_job is not None and bool(backup_job.status.failed):
                 message = self._job_pod_termination_message(namespace, backup_name, succeeded=False)
                 backup_failure_code = message if message in BACKUP_FAILURE_CODES else None
@@ -799,6 +819,7 @@ class ClusterClient:
             backup_job_used_bytes=backup_used_bytes,
             backup_job_total_bytes=backup_total_bytes,
             backup_job_media_census=backup_media_census,
+            backup_job_media_collection=backup_media_collection,
             backup_job_failure_code=backup_failure_code,
             **_job_observation(restore_job, prefix="restore_job"),
             **snapshot_steps,
@@ -1316,11 +1337,31 @@ def _media_census(message: str | None) -> MediaCensus | None:
     """The census a backup Job reported, or None when it reported none that cellctl can read.
     None keeps a turned-off cell's key and egress, as no report does."""
 
-    parsed = parse_media_census((message or "").partition("\n")[2])
+    parsed = parse_media_census(_report_line(message, 1))
     if parsed is None:
         return None
     evicted, evicted_bytes, captured_at = parsed
     return MediaCensus(evicted=evicted, evicted_bytes=evicted_bytes, captured_at=captured_at)
+
+
+# collect-released-media D5: the third line is the collector's result, whose format backup_source.parse_media_collection
+# fixes.
+def _media_collection(message: str | None) -> MediaCollection | None:
+    """The collection a backup Job reported, or None when it ran none or reported a line that cellctl cannot read."""
+
+    line = _report_line(message, 2)
+    parsed = parse_media_collection(line)
+    if parsed is None and line:
+        # A cell image that writes another format would otherwise leave no trace that a collection ran. The line is
+        # not logged: only its parsed shape is known to carry no name.
+        logger.warning("cellctl: a backup Job reported a media collection line that does not parse (%d characters)",
+                       len(line))
+    return None if parsed is None else MediaCollection(*parsed)
+
+
+def _report_line(message: str | None, index: int) -> str:
+    lines = (message or "").split("\n")
+    return lines[index] if index < len(lines) else ""
 
 
 def _parse_timestamp(value) -> datetime | None:

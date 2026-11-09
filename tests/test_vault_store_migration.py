@@ -36,6 +36,7 @@ from exomem import (
     find,
     graph_sync,
     lexstore,
+    memory_refs,
     records,
     state_migration,
     state_paths,
@@ -103,10 +104,11 @@ def vault(tmp_path, monkeypatch, coordinator_url, capsys):  # noqa: F811
 
 
 def build_indexes(root):
-    """The owners' cold lexical and graph sidecars, as a service's first start leaves them."""
+    """The owners' cold lexical, graph and reference sidecars, as a service's first start leaves them."""
     graph_sync.await_active_rebuild(root)  # a write above starts one on its own thread
     lexstore.search_bm25(root, "lighthouse", 3, scope="kb", repair=True)
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    memory_refs.ReferenceIndex(root).rebuild_all()
 
 
 def store_mode(root, *arguments, operator=True):
@@ -177,6 +179,11 @@ def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_va
             assert table_rows(graph, "graph_edges"), (
                 "the graph must hold the link for this check to mean anything"
             )
+        with sidecar(memory_refs.sidecar_path(vault)) as references:
+            assert table_rows(store, "identities") == table_rows(references, "identities")
+            assert table_rows(references, "identities"), (
+                "the reference index must hold pages for this check to mean anything"
+            )
     assert vault_bytes(vault, outside=REPLICA_DIRECTORY) == before
     # The replica moves, so check what it carries: none of the pages, and none of the index objects that migration added.
     with closing(connection.open_reader(connection.store_path(vault))) as store:
@@ -209,6 +216,23 @@ def test_a_sidecar_row_that_no_longer_matches_its_file_refuses_the_migration_and
         state_migration.VAULT_STORE_COMPATIBILITY_ID
         not in state_migration.recorded_descriptor_ids(vault)
     )
+
+
+def test_an_identity_row_that_differs_from_its_page_refuses_the_migration_and_names_the_table(
+    vault, capsys
+):
+    """A migration that copies a reference index that no longer matches the pages and calls it proven."""
+    with closing(sqlite3.connect(memory_refs.sidecar_path(vault))) as references:
+        with references:
+            references.execute(
+                "UPDATE identities SET raw_id = 'planted' WHERE path = ?", (ALPHA,)
+            )
+    objects = store_objects(vault)
+    assert migrate_apply(vault) == 1
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_VERIFICATION_FAILED" in error and "identities" in error and ALPHA in error
+    assert store_objects(vault) == objects
+    assert not mode.store_mode_active(vault)
 
 
 def test_a_file_edited_between_staging_and_install_refuses_the_migration(
@@ -419,7 +443,7 @@ def test_a_rollback_exports_each_version_it_overwrites_when_the_importer_already
     assert (tmp_path / "export/held" / BETA).read_bytes() == held_then_changed
     assert (tmp_path / "export/on-disk" / BETA).read_bytes() == on_disk_beta
     assert not (tmp_path / "export/on-disk" / ALPHA).exists()
-    assert result["sidecars"] == {"lexical": "current", "graph": "rebuilt"}
+    assert result["sidecars"] == {"lexical": "current", "graph": "rebuilt", "references": "rebuilt"}
 
 
 def test_a_page_with_a_non_text_frontmatter_key_migrates(vault, capsys):

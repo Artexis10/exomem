@@ -568,7 +568,7 @@ def test_flat_edit_new_body_needs_expected_hash_and_succeeds_with_the_current_on
         # Keeps the page's own content and adds a relation so the semantic contract accepts it.
         "new_body": (
             f"{body.rstrip()}\n\n## Relations\n"
-            "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]\n"
+            "- supports [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]\n"
         ),
     }
 

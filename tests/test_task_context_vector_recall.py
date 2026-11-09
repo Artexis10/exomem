@@ -6,13 +6,14 @@ and the task-context lanes are real.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_activate_context_maps import _activate
 from test_activation_related_pages import _planted_vault, _random_unit, _toward_turn
 from test_context_catalogue import _built
 
-from exomem import embeddings, readiness
+from exomem import embeddings, lexstore, readiness
 
 BODY = "Bring the handheld gauge to the depot service desk for a calibration quote."
 PARAPHRASE = "Where do I take the pressure meter to get it recalibrated?"
@@ -44,6 +45,18 @@ def test_a_paraphrase_without_a_shared_term_finds_the_page_through_the_dense_rea
     block, refs = _task(vault, PARAPHRASE)
     assert planted in refs
     assert block["state"] == "ready"
+
+
+def test_a_stale_keyword_index_still_lets_the_dense_reading_find_the_page(
+    vault: Path, planted: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Right after a cutover the keyword index lags; recall must return what the dense reading finds, marked partial."""
+    stale = SimpleNamespace(value=None, readiness=SimpleNamespace(complete=False))
+    monkeypatch.setattr(lexstore, "search_bm25_result", lambda *args, **kwargs: stale)
+    block, refs = _task(vault, PARAPHRASE)
+    assert planted in refs
+    assert block["state"] == "partial"
+    assert {"role": "task_context", "reason": "lane_failed"} in block["missing"]
 
 
 def test_an_unrelated_turn_gets_no_dense_candidates(vault: Path, planted: str, monkeypatch: pytest.MonkeyPatch) -> None:

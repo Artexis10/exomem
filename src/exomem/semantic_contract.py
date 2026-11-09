@@ -47,6 +47,7 @@ from .cli_ops import OpError, relation_review_stable_id_remediation
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vocabulary import instances
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
@@ -85,12 +86,6 @@ _GRANDFATHERED_OPERATIONS = frozenset(
 )
 _SEMANTIC_UNIT_EXEMPT_PARTS = frozenset(
     {"sources", "evidence", "_trash", "trash", "_schema", "templates", "data"}
-)
-_SEMANTIC_UNIT_EXEMPT_TAGS = frozenset({"hub", "snapshot"})
-_SEMANTIC_UNIT_EXEMPT_SUFFIXES = (
-    "-architecture",
-    "-snapshot",
-    "-catalog-snapshot",
 )
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 
@@ -949,7 +944,7 @@ def _path_excluded_from_semantic_minimum(path: str) -> bool:
     parts = _path_parts(path)
     name = parts[-1] if parts else ""
     stem = PurePosixPath(name).stem
-    return any(stem.endswith(suffix) for suffix in _SEMANTIC_UNIT_EXEMPT_SUFFIXES)
+    return any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES)
 
 
 def _route_name(path: str) -> str | None:
@@ -1017,7 +1012,7 @@ def _frontmatter_tags(page: SemanticPageState) -> frozenset[str]:
 def _semantic_unit_explicitly_exempt(page: SemanticPageState) -> bool:
     return bool(
         _path_excluded_from_semantic_minimum(page.path)
-        or (_frontmatter_tags(page) & _SEMANTIC_UNIT_EXEMPT_TAGS)
+        or (_frontmatter_tags(page) & BREADTH_TAGS)
     )
 
 
@@ -5035,6 +5030,14 @@ def writer_view_relations(
     )
 
 
+def writer_visible(corpus: SemanticCorpusContext) -> Callable[[str], bool]:
+    """Whether the current writer may see a page; every page for the owner or an ungoverned vault."""
+    visible = corpus.writer_visibility
+    if visible is _DECIDE:
+        visible = vault.writer_link_visibility(corpus.vault_root)
+    return visible if callable(visible) else (lambda path: True)
+
+
 def writer_authored_facts(
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
@@ -5755,7 +5758,8 @@ def _disposition_finding(
             ("Add a qualifying typed relation. " + relation_review_stable_id_remediation())
             if existing and page.identity_kind == "path"
             else (
-                "Add a qualifying typed relation, or re-issue the same "
+                f"Link a related page (even with {relation_registry.link_relation_key()}), or "
+                "re-issue the same "
                 f"{'edit' if existing else 'creation'} with "
                 "relation_disposition=\"reviewed_none\" and relation_review_reason."
             )
@@ -5781,7 +5785,7 @@ _RELATION_QUALITY_ADVISORIES = MappingProxyType({
         "no qualifying specific relation names the relationship",
         "Optional. Review the source and registered vocabulary with "
         "`{inspect}`. Author a specific relation "
-        "only when supported; genuine generic relations or no edge remain valid. "
+        "only when supported; a plain link or no edge remains valid. "
         "Never author an edge merely to clear this warning.",
     ),
     "RELATION_AUTHORED_ALL_GENERIC": (
@@ -5789,8 +5793,9 @@ _RELATION_QUALITY_ADVISORIES = MappingProxyType({
         "generic associations; incoming specific relations may still qualify",
         "Optional. Review the source and registered vocabulary with "
         "`{inspect}`. Use governed authorship "
-        "for a supported specific relation; keep genuine generic relations or no "
-        "edge when appropriate. Never author an edge merely to clear this warning.",
+        "for a supported specific relation; where none fits, propose a relation, write a "
+        "plain link or leave no edge, because a write cannot add a generic relation. "
+        "Never author an edge merely to clear this warning.",
     ),
 })
 RELATION_QUALITY_CODES = frozenset(_RELATION_QUALITY_ADVISORIES)

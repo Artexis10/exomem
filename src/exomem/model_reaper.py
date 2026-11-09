@@ -1,10 +1,9 @@
 """Idle-unload reaper — reclaim model singletons that sit resident beyond a threshold.
 
-Only relevant for the GPU-opt-in path (`performance` mode) and `quiet` mode, where a
-model may load lazily and then idle. Started from `server.build_server` ONLY when
-`mode.release_when_idle()`. On a CPU-default normal-mode server it never runs — the
-models are cheap CPU-RAM and there is no CUDA context to reclaim anyway (that's the
-whole point of the CPU-default primary fix; this is the complement for GPU-opt-in).
+Started from the server runtime when `mode.release_when_idle()`, which holds in every
+mode by default. Models follow `mode.reap_models_when_idle()`. CPU caches are released on
+idle in quiet mode, only under memory pressure in normal mode, and never in performance
+mode, which retains them.
 
 One daemon thread; each tick it unloads any registered model that is loaded, not
 in-flight, and idle past the threshold, coordinating with the warm thread via
@@ -24,12 +23,16 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import accel, process_memory, readiness
+from . import accel, process_memory, readiness, runtime_resources
 
 log = logging.getLogger(__name__)
 
 DEFAULT_IDLE_SECONDS = 900.0  # 15 min
 TICK_SECONDS = 60.0
+#: The setting naming how little memory, in MiB, counts as pressure for an idle cache in normal
+#: mode. The default leaves the kernel room before it swaps on a desktop; a machine tunes it.
+CACHE_RELEASE_SETTING = "cache_release_available_mib"
+DEFAULT_CACHE_RELEASE_MIB = 2048
 
 _thread: threading.Thread | None = None
 _stop = threading.Event()
@@ -46,6 +49,8 @@ class ResourceSlot:
     #: Caches are always reclaimable: they rebuild locally and cheaply, whereas a reaped
     #: model is reloaded from the hub cache on whichever request arrives next.
     is_model: bool = False
+    #: True for a CPU cache slot, which normal mode releases only under memory pressure.
+    is_cpu_cache: bool = False
 
 
 def idle_seconds() -> float:
@@ -88,7 +93,13 @@ def _should_unload(slot: ResourceSlot, now: float, threshold: float) -> bool:
         return False
     if slot.inflight() > 0:
         return False
-    return (now - slot.last_activity()) >= threshold
+    if (now - slot.last_activity()) < threshold:
+        return False
+    if slot.is_cpu_cache and mode.release_idle_cpu_caches_only_under_pressure():
+        floor = mode.int_setting(CACHE_RELEASE_SETTING, DEFAULT_CACHE_RELEASE_MIB) * 1024 * 1024
+        # An unknown reading releases, as before: the change must never hold memory blind.
+        return runtime_resources.memory_short(floor) is not False
+    return True
 
 
 _UNSEEN = object()
@@ -148,6 +159,7 @@ def _quiet_cache_slot(
         inflight=lambda: 0,
         last_activity=lambda: max(state["last_empty"], state["last_used"]),
         unload=unload_and_restart,
+        is_cpu_cache=True,
     )
 
 

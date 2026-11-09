@@ -94,6 +94,12 @@ def build_reconcile_config() -> ReconcileConfig:
     concurrency_raw = os.environ.get("CELLCTL_BACKUP_CONCURRENCY")
     if concurrency_raw is not None:
         kwargs["backup_concurrency"] = int(concurrency_raw)
+    for field, variable in (("export_pause_copy_floor_mib", "CELLCTL_EXPORT_PAUSE_COPY_FLOOR_MIB"),
+                            ("export_concurrency_per_node", "CELLCTL_EXPORT_CONCURRENCY_PER_NODE")):
+        if variable in os.environ:
+            kwargs[field] = int(os.environ[variable])
+            if kwargs[field] <= 0:
+                raise ValueError(f"{variable} must be positive")
     for field, variable, unit in (
         ("import_deadline", "CELLCTL_IMPORT_DEADLINE_MINUTES", "minutes"),
         ("import_growth_deadline", "CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES", "minutes"),
@@ -205,6 +211,7 @@ def build_media_edge_config() -> MediaEdgeConfig | None:
         bucket=os.environ["CELLCTL_MEDIA_EDGE_BUCKET"],
         cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_CELL_IDS", "[]", list, "media edge cell IDs")),
         all_cells=_json_env("CELLCTL_MEDIA_EDGE_ALL_CELLS", "false", bool, "media edge all-cells switch"),
+        collect_cell_ids=tuple(_json_env("CELLCTL_MEDIA_EDGE_COLLECT_CELL_IDS", "[]", list, "media edge collect list")),
         credential_epochs=_json_env("CELLCTL_MEDIA_EDGE_CREDENTIAL_EPOCHS", "{}", dict, "media edge credential epochs"),
         store_policy=_json_env("CELLCTL_MEDIA_EDGE_STORE_POLICY", "{}", dict, "media store policy"),
         physical_headroom=float(os.environ["CELLCTL_MEDIA_PHYSICAL_HEADROOM"]),

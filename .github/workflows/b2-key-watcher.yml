@@ -47,4 +47,7 @@ jobs:
           B2_WATCHER_FOUNDER_KEY: ${{ secrets.B2_WATCHER_FOUNDER_KEY }}
           B2_WATCHER_CELL_DATA_KEY_ID: ${{ secrets.B2_WATCHER_CELL_DATA_KEY_ID }}
           B2_WATCHER_CELL_DATA_KEY: ${{ secrets.B2_WATCHER_CELL_DATA_KEY }}
+          # collect-released-media D4: the list-only media key that counts hide markers.
+          B2_WATCHER_MEDIA_KEY_ID: ${{ secrets.B2_WATCHER_MEDIA_KEY_ID }}
+          B2_WATCHER_MEDIA_KEY: ${{ secrets.B2_WATCHER_MEDIA_KEY }}
         run: python3 infra/scripts/b2_key_watcher.py

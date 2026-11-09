@@ -114,11 +114,7 @@ def _setting(name: str, default: int, *, original: bool = False) -> int | None:
     raw = os.environ.get(f"EXOMEM_{name.upper()}") or mode.read_config().get(name)
     if original and str(raw).strip().lower() == ORIGINAL:
         return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
+    return mode.int_setting(name, default)
 
 
 def resolve_side(max_side: int | str | None) -> int | None:

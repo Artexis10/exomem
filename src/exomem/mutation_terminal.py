@@ -925,8 +925,10 @@ _SOURCE_CLASSIFICATION_KIND = "source_classification_debt"
 _MAX_UNCLASSIFIED_FOLDERS = 4
 
 
-#: Longest question text a compiled write may carry. The text is one constant in
-#: `note_cohesion`; this bound only stops a malformed payload from widening the wire.
+#: Longest question text a compiled write may carry: `note_cohesion.QUESTION` plus the
+#: keep-whole call spelled for the serving surface. A longer question drops the whole
+#: advisory, so `tests/test_note_cohesion.py` writes it on every tool shape against
+#: this bound. It only stops a malformed payload from widening the wire.
 _MAX_COHESION_QUESTION_CHARS = 800
 
 
@@ -1562,21 +1564,8 @@ def _relation_advisory_context(leaf: Mapping[str, Any]) -> Mapping[str, Any] | N
     return None
 
 
-def _specific_options_projection(leaf: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The specific-relation options the semantic writer built for this committed write.
-
-    It has already bounded the list and shaped each entry.
-    """
-    context = _relation_advisory_context(leaf)
-    options = context.get("specific_options") if context is not None else None
-    if not isinstance(options, (list, tuple)):
-        return []
-    return [dict(option) for option in options if isinstance(option, Mapping)]
-
-
 def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
-    """Project just-parsed unregistered facts plus optional indexed recurrence, and the
-    specific relations a note-to-note generic edge could take.
+    """Project just-parsed unregistered facts plus optional indexed recurrence.
 
     The fact scan is bounded by the semantic feedback renderer. Recurrence is a
     point lookup against one already-current graph snapshot and is deliberately
@@ -1629,9 +1618,8 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
                 and len(normalized) <= _MAX_RELATION_ADVISORY_LABEL_CHARS
             ):
                 labels.add(normalized)
-    specific = _specific_options_projection(leaf)
     if not labels:
-        return {"specific_options": specific} if specific else None
+        return None
     ordered = sorted(labels)
     retained = ordered[:_MAX_RELATION_ADVISORY_LABELS]
     truncated = facts_truncated or len(ordered) > len(retained)
@@ -1716,8 +1704,6 @@ def _relation_advisory_projection(leaf: Any) -> dict[str, Any] | None:
             "args": {"operation": "resolve-relation"},
         },
     }
-    if specific:
-        advisory["specific_options"] = specific
     return advisory
 
 
@@ -2118,6 +2104,18 @@ def _user_summary(
     return _lead(head, names)
 
 
+def _stated_outcome(leaf: Any) -> str | None:
+    """The sentence an approval leaf states itself.
+
+    An approval has no page `path` for `_user_summary` to name, and its outcome (approved, already
+    approved, revoked, moved aside) depends on the ledger's state, so the leaf carries the sentence.
+    """
+    if not isinstance(leaf, Mapping) or leaf.get("operation") != "approve_procedure":
+        return None
+    sentence = leaf.get("outcome")
+    return sentence if isinstance(sentence, str) and sentence else None
+
+
 def project_terminal(
     result: Any, detail: ResponseDetail = "compact", *, outcome_verb: OutcomeVerb | None = None
 ) -> Any:
@@ -2171,6 +2169,9 @@ def project_terminal(
             result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
         )
     )
+    stated_outcome = _stated_outcome(leaf)
+    if user_summary is not None and stated_outcome is not None:
+        user_summary = stated_outcome
     if user_summary is not None:
         # Named at render time from the deployment, so a replay of the stored terminal reads the
         # same. Two connectors can present one display name; the sentence says which store it was.
@@ -2233,6 +2234,12 @@ def project_terminal(
         # The recording agent needs the key back to record the next revision,
         # and every field here is bounded by `episode_capture`'s own caps.
         compact.update({key: leaf[key] for key in _EPISODE_RECEIPT_FIELDS if key in leaf})
+    elif stated_outcome is not None:
+        # The owner reads the sentence in `user_summary`; the change shown for an approve and the
+        # entry ids and versions stay in the bounded `changes` and `diagnostics` parts.
+        compact.update({key: value for key, value in leaf.items() if key != "outcome"})
+        if user_summary is None:
+            compact["outcome"] = stated_outcome
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "configure_memory":
         # The configuration contract is metadata-only and bounded by the
         # canonical prominence vocabulary. Keep the newly effective contract

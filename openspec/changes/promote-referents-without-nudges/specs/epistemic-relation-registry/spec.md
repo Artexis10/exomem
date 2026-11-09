@@ -30,7 +30,7 @@ An extension SHALL inherit its parent's endpoints, and a narrower declaration SH
 The core pack SHALL mark exactly one active relation `generic: true`, and extensions SHALL NOT inherit the marker.
 Code SHALL read genericity and endpoints from these attributes and SHALL NOT compare relation keys for them.
 An endpoint mismatch SHALL remain a non-blocking finding.
-The generic-relation barrier SHALL use fitting endpoint declarations as specified by the relation-vocabulary requirement.
+The relation menu of the generic-relation refusal SHALL use fitting endpoint declarations as specified by `refuse-generic-relation-authoring`.
 
 #### Scenario: An extension narrows its parent's endpoints
 
@@ -46,41 +46,3 @@ The generic-relation barrier SHALL use fitting endpoint declarations as specifie
 
 - **WHEN** an agent authors an `owns` edge whose subject family is outside the declared subject families
 - **THEN** the edge is written and its receipt carries `endpoint_mismatch`
-
-### Requirement: New authored-edge cohorts report their provenance and coverage
-
-The census SHALL preserve its historical graph cohort and report a separate new authored-edge cohort split by endpoint class.
-The cohort SHALL use server UTC time and exact governed write additions from the existing atomic operation log, including rotation archives.
-Spelling-only edits, inherited predecessor edges, replay and graph rebuilds SHALL NOT create additions.
-Page creation dates and graph rebuild timestamps SHALL NOT substitute for edge authoring time.
-
-Every metric SHALL state its numerator, denominator, window, source and coverage.
-Metrics SHALL cover generic share, unreasoned generic edges, exact-normalized duplicate reasons, referent outcomes and placement by actual basis.
-A general mutation rationale SHALL NOT count as an edge-review reason.
-Missing history, unsupported writers or missing instrumentation SHALL remain partial or unavailable, never counted zero.
-Referent outcomes SHALL require correlated observations; a cleared review item SHALL NOT count as acted.
-
-The default review target SHALL be fifteen percent generic among new authored edges that touch an entity over thirty UTC days.
-The vault MAY configure the target and window; crossing the target SHALL emit only an audit or upkeep signal.
-Note-to-note edges SHALL have no target, and the census SHALL NOT refuse a write.
-
-#### Scenario: An edit and graph rebuild preserve event identity
-
-- **WHEN** a governed edit adds an edge to an old page, a replay repeats that edit, and the graph rebuilds
-- **THEN** the new cohort counts one authored addition and the historical graph cohort keeps its existing meaning
-
-#### Scenario: Rotation retains authored history
-
-- **WHEN** a recorded edge addition moves into a rotation archive within the selected window
-- **THEN** the census still includes it once with its recorded time and endpoint class
-
-#### Scenario: Uninstrumented history is unknown
-
-- **WHEN** retained history lacks the structured data required by a metric
-- **THEN** that metric reports partial or unavailable coverage with its source instead of a measured zero
-
-#### Scenario: The configured target creates an audit review item
-
-- **WHEN** the recorded generic share for edges that touch an entity exceeds the configured target
-- **THEN** the `relation_generic_share` audit check returns an informational review item with the measurement, window, source and coverage
-- **AND** raising the target above that share removes the item without changing any write permission

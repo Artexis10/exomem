@@ -91,8 +91,21 @@ def test_real_age_offload_and_verified_hydration_preserve_the_sidecar(vault: Pat
     assert not media_jobs.MediaJobStore(vault).has_binary(path)
 
 
-def test_offload_reuses_only_a_live_reference(vault: Path, selected_store):
+def _versions(selected_store, name: str) -> list[str]:
+    folder = Path(selected_store[0]["root"]) / name
+    return sorted(entry.name for entry in folder.iterdir()) if folder.exists() else []
 
+
+def _releases(vault: Path) -> list[str]:
+    from exomem import media_jobs
+
+    with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as captured:
+        return [row[0] for row in captured.execute("SELECT object FROM media_releases ORDER BY id")]
+
+
+def test_offload_reuses_only_a_live_reference_and_a_re_add_gets_a_new_name(vault: Path, selected_store):
+    """collect-released-media D1: a keyed name gave the re-added bytes a second version under the first name, so
+    the bucket rule would destroy the first version while a retained backup still pins it."""
     first = _preserved(vault, category="first")
     initial = _offload(vault, first)
     duplicate = _preserved(vault, category="second")
@@ -104,8 +117,78 @@ def test_offload_reuses_only_a_live_reference(vault: Path, selected_store):
     duplicate.with_name(duplicate.name + ".md").unlink()
     returned = _preserved(vault, category="third")
     latest = _offload(vault, returned)
-    assert latest.object == initial.object
-    assert latest.version != initial.version
+    assert latest.object != initial.object
+    assert _versions(selected_store, initial.object) == [initial.version]
+
+
+def test_a_retry_after_a_lost_upload_reply_reuses_the_records_name(vault: Path, selected_store, monkeypatch):
+    """A fresh name per attempt would leave the landed first attempt under a name that nothing releases."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    upload = media_store.FilesystemStore.upload
+    attempts: list[str] = []
+
+    def reply_lost(self, name, stream, *, size, sha256):
+        attempts.append(name)
+        upload(self, name, stream, size=size, sha256=sha256)
+        raise OSError("the reply was lost")
+
+    with monkeypatch.context() as lost:
+        lost.setattr(media_store.FilesystemStore, "upload", reply_lost)
+        with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+            media_store.offload(vault, path)
+    reference = media_store.offload(vault, path)
+    assert reference.object == attempts[0]
+    assert len(_versions(selected_store, reference.object)) == 2  # the lost attempt is a superseded duplicate
+
+
+def test_a_name_a_sidecar_carried_never_takes_another_upload(vault: Path, selected_store, monkeypatch):
+    """A crash after publication leaves the protection record. Reusing its name for the next upload of the same
+    path would supersede the published version, which a retained backup still pins."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    finish = media_store._finish_reference
+
+    def crashed(*args, **kwargs):
+        raise RuntimeError("stopped after publication")
+
+    with monkeypatch.context() as crash:
+        crash.setattr(media_store, "_finish_reference", crashed)
+        with pytest.raises(RuntimeError, match="stopped after publication"):
+            media_store.offload(vault, path)
+    published = originals.original_state(vault, path).reference
+    assert published is not None
+    media_store.forget_original(vault, path)
+    assert media_store._finish_reference is finish
+    again = media_store.offload(vault, path)
+    assert again.object != published.object
+    assert _versions(selected_store, published.object) == [published.version]
+
+
+def test_a_release_is_durable_before_the_reference_retires(vault: Path, selected_store, monkeypatch):
+    """A crash between the release and the unreference keeps the reference, so no hold can condemn a live name."""
+    from exomem import media_store
+
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    publish = media_store._publish_reference
+
+    def stopped(vault_root, snapshot, value):
+        if value is None:
+            raise RuntimeError("stopped before the unreference")
+        return publish(vault_root, snapshot, value)
+
+    with monkeypatch.context() as crash:
+        crash.setattr(media_store, "_publish_reference", stopped)
+        with pytest.raises(RuntimeError, match="stopped before the unreference"):
+            media_store.forget_original(vault, path)
+    assert originals.original_state(vault, path).reference == reference
+    assert _releases(vault) == [reference.object]
+    media_store.forget_original(vault, path)
+    assert originals.original_state(vault, path).reference is None
+    assert _releases(vault) == [reference.object, reference.object]
 
 
 def test_corrupt_ciphertext_never_places_an_original(vault: Path, selected_store):
@@ -521,7 +604,7 @@ def test_legacy_refusal_migration_preserves_measured_sizes_and_protections(vault
                            "ciphertext_size INTEGER NOT NULL, created_at REAL NOT NULL)")
         connection.execute("INSERT INTO media_offload_refusals VALUES (?, ?, ?, ?, ?)",
                            ("Knowledge Base/Evidence/sample.bin", "a" * 64, "MEDIA_OBJECT_TOO_LARGE", 2048, 1.0))
-        connection.execute("INSERT INTO media_protections VALUES (?, ?, ?, ?)",
+        connection.execute("INSERT INTO media_protections(token, binary_rel, object, created_at) VALUES (?, ?, ?, ?)",
                            ("protected", "Knowledge Base/Evidence/sample.bin", "b" * 64, 1.0))
     media_jobs.MediaJobStore(vault)
     with sqlite3.connect(ledger.path) as connection:

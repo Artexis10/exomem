@@ -95,7 +95,7 @@ Both update on every confirmed write.
 
 ## Audit (lint) checks
 
-The **read_review/triage_memory(mode="audit")** operation runs read-only checks and proposes fixes (never
+The audit operation, `read_review(operation={'kind': 'audit'})`, runs read-only checks and proposes fixes (never
 auto-fixes); every audit presentation remains read-only. The default
 `detail="actionable"` puts current blockers first, then malformed semantic units
 and unregistered relation work, then ordinary findings. Grandfathered relation-
@@ -202,4 +202,4 @@ Previews the move of every structured collection to SQLite-only storage. It is o
 
 ### Sidecar collapse (`fix`)
 
-`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.
+`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `read_review(operation={'kind': 'audit', 'categories': ['duplicated_sidecar']})`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.

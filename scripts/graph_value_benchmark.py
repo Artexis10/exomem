@@ -2151,7 +2151,7 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
         "policy-applicability-extension",
         "core-part-of-reuse",
         "alias-reuse-without-duplicate",
-        "honest-generic-relation",
+        "plain-link-last-resort",
         "topical-proximity-abstains",
         "extension-parent-rollup",
         "survivor-directed-replacement",
@@ -2324,20 +2324,22 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
     )
     alias_after = _lifecycle_registry_hash(primary)
 
+    plain_link = relation_registry.link_relation_key()
     generic_resolution = observed_connect(
-        ("honest-generic-relation",),
+        ("plain-link-last-resort",),
         primary,
         operation="resolve-relation",
-        query="a meaningful generic connection with no specific predicate",
-        requested_relation="relates_to",
+        query="a durable connection with no specific predicate",
+        requested_relation=plain_link,
     )
-    _scripted_author_relation(primary, generic_left, generic_right, "relates_to")
+    # A write refuses the generic relation, so the caller's last resort is the plain link.
+    _scripted_author_relation(primary, generic_left, generic_right, plain_link)
     generic_edges = _graph_relation_types(
         primary,
         generic_left,
         trace=helper_claims,
         connect=lambda vault_root, **arguments: observed_connect(
-            ("honest-generic-relation",), vault_root, **arguments
+            ("plain-link-last-resort",), vault_root, **arguments
         ),
     )
 
@@ -2571,6 +2573,7 @@ def collect_relation_lifecycle_observation(manifest: dict[str, Any], root: Path)
             "old_applicability": old_applicability,
             "tenant_a": tenant_a_relation,
             "tenant_b": tenant_b_relation,
+            "plain_link": plain_link,
         },
         "hashes": {
             "resolution_before": before_resolution,
@@ -2817,10 +2820,10 @@ def score_relation_lifecycle_observation(observation: dict[str, Any]) -> dict[st
             and str(part_edge.get("dst_key") or "").endswith(paths["part_parent"]),
         },
         "alias-reuse-without-duplicate": {},
-        "honest-generic-relation": {
+        "plain-link-last-resort": {
             "resolver_non_authoritative": resolutions["generic"].get("selected_relation") is None,
-            "caller_authored_raw": generic_edge.get("raw_relation") == "relates_to",
-            "caller_authored_canonical": generic_edge.get("relation_type") == "relates_to",
+            "caller_authored_raw": generic_edge.get("raw_relation") == relations["plain_link"],
+            "caller_authored_canonical": generic_edge.get("relation_type") == relations["plain_link"],
             "caller_authored_path": generic_edge.get("source_path") == paths["generic_left"]
             and str(generic_edge.get("dst_key") or "").endswith(paths["generic_right"]),
         },
@@ -3048,8 +3051,8 @@ def score_relation_lifecycle_observation(observation: dict[str, Any]) -> dict[st
         },
         "generic": {
             "operation": "resolve-relation",
-            "query": "a meaningful generic connection with no specific predicate",
-            "requested_relation": "relates_to",
+            "query": "a durable connection with no specific predicate",
+            "requested_relation": relations["plain_link"],
         },
         "topical": {
             "operation": "resolve-relation",
@@ -3137,13 +3140,13 @@ def score_relation_lifecycle_observation(observation: dict[str, Any]) -> dict[st
         "alias-reuse-without-duplicate": {
             "resolve": bound_resolve("alias", "primary", ("alias-reuse-without-duplicate",))
         },
-        "honest-generic-relation": {
-            "resolve": bound_resolve("generic", "primary", ("honest-generic-relation",)),
+        "plain-link-last-resort": {
+            "resolve": bound_resolve("generic", "primary", ("plain-link-last-resort",)),
             "graph": bound_graph(
                 "generic",
                 "primary",
                 paths["generic_left"],
-                ("honest-generic-relation",),
+                ("plain-link-last-resort",),
             ),
         },
         "topical-proximity-abstains": {
@@ -3453,7 +3456,7 @@ def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[
                 "## Observations\n\n"
                 "- [operating constraint] Keep retries bounded #reliability\n\n"
                 "## Relations\n"
-                f"- relates_to [[{corpus.id_to_path['common-target']}]]\n"
+                f"- supports [[{corpus.id_to_path['common-target']}]]\n"
             ),
             "note_type": "insight",
             "title": "Benchmark Created",
@@ -4060,7 +4063,7 @@ async def run_exomem_direct_probes(
     async def authoring() -> tuple[dict[str, bool], dict[str, Any]]:
         content = (
             "# Benchmark MCP Created\n\nBenchmark public write.\n\n## Relations\n"
-            f"- relates_to [[{corpus.id_to_path['common-target']}]]\n"
+            f"- supports [[{corpus.id_to_path['common-target']}]]\n"
         )
         arguments = {
             "content": content,

@@ -1500,13 +1500,14 @@ def task_candidates(
                 exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
             )
         if not result.readiness.complete:
+            # A lexical index still catching up after a cutover or a write must not also silence the dense reading.
             missing.append({"role": "task_context", "reason": "lane_failed"})
-            continue
-        hits = result.value or []
-        if len(hits) > limit:
-            missing.append({"role": "task_context", "reason": "lane_truncated"})
-        for path, _score in hits[:limit]:
-            add(path, origin)
+        else:
+            hits = result.value or []
+            if len(hits) > limit:
+                missing.append({"role": "task_context", "reason": "lane_truncated"})
+            for path, _score in hits[:limit]:
+                add(path, origin)
         if budget_exhausted("working_set.task_context_vector"):
             missing.append({"role": "task_context", "reason": "budget"})
             break
@@ -1528,11 +1529,20 @@ def task_candidates(
     method_seconds: float | None = None
     for origin, query_text in method_queries:
         # A second query (the focus) costs about what the first did, so the first's measured time is its reserve.
-        if budget_exhausted("working_set.task_context_methods", reserve=method_seconds):
+        # The leads already found must still be projected, so the search may spend only what that leaves.
+        kept = request_budget.task_projection_reserve(len(found))
+        reserve = kept + (
+            method_seconds if method_seconds is not None else request_budget.ACTIVATION_STAGE_RESERVE_SECONDS
+        )
+        if budget_exhausted("working_set.task_context_methods", reserve=reserve):
             missing.append({"role": "task_context", "reason": "budget"})
             break
         started = time.monotonic()
-        with find_types.timing_span(timings, "working_set.task_context_methods"):
+        with (
+            find_types.timing_span(timings, "working_set.task_context_methods"),
+            request_budget.leaving(kept),
+            lexstore.stopping_at_budget(),
+        ):
             methods = lexstore.get_store(vault_root).search_semantic_units_result(
                 [], limit + 1, categories, (), "kb", fresh,
                 allowed_parent_paths=allowed,
@@ -1544,6 +1554,12 @@ def task_candidates(
                 recall_checkpoint=checkpoint, allow_delta=False,
             )
         method_seconds = time.monotonic() - started
+        if methods.readiness.status == lexstore.DEADLINE_STATUS:
+            missing.append({"role": "task_context", "reason": "budget"})
+            budget = request_budget.current()
+            if budget is not None:
+                budget.note_truncated("working_set.task_context_methods")
+            break
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
         else:
@@ -2520,7 +2536,8 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     START a stage but never enough to finish one.
 
     `reserve` overrides that flat second for a stage whose cost this request
-    has already MEASURED. Nothing interrupts a stage once it has started, so
+    has already MEASURED. Nothing interrupts a started stage unless its queries run inside
+    `lexstore.stopping_at_budget`, so
     a flat reserve is only honest for stages that cost about the same every
     time; the carry's query is the same shape as the first lexical pass and
     costs about as much, so on a request where that pass took three seconds

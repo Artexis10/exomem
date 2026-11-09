@@ -14,7 +14,16 @@ from pathlib import Path
 import pytest
 
 from exomem import audit as audit_module
-from exomem import commands, due_state, mutation_terminal, note_cohesion, review_state, writer_lease
+from exomem import (
+    capabilities,
+    commands,
+    due_state,
+    mutation_terminal,
+    note_cohesion,
+    operation_entries,
+    review_state,
+    writer_lease,
+)
 
 TODAY = dt.date(2026, 8, 16)
 PAGE = "Knowledge Base/Notes/Research/Travel/seasonal-fare-scouting.md"
@@ -76,10 +85,20 @@ def _note_cohesion_findings(vault: Path) -> list[str]:
     return [finding.path for finding in report.findings if finding.category == "note_cohesion"]
 
 
-def test_a_write_that_reaches_the_base_step_asks_the_one_question(vault: Path) -> None:
+@pytest.mark.parametrize("tool_shape", operation_entries.TOOL_SHAPES)
+def test_a_write_that_reaches_the_base_step_asks_the_one_question(
+    vault: Path, tool_shape: str
+) -> None:
+    """On every tool shape: the keep-whole call is spelled per surface, and a question
+    longer than the response layer's bound would drop the advisory without a trace."""
     _put(vault, PAGE, _page(8))
+    surface = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(),
+        tool_shape=tool_shape,
+    )
 
-    result = _grow_by_one(vault, 9)
+    with capabilities.active_surface(surface):
+        result = _grow_by_one(vault, 9)
 
     assert result["diagnostics"]["operational"]["status"] == "committed"
     suggestion = result["structure_suggestion"]
@@ -93,6 +112,7 @@ def test_a_write_that_reaches_the_base_step_asks_the_one_question(vault: Path) -
     assert suggestion["ref"] in suggestion["question"]
     assert suggestion["fingerprint"] in suggestion["question"]
     assert suggestion["ref"].startswith("exomem://review/")
+    assert ("operation=" in suggestion["question"]) == (tool_shape == "nested")
 
 
 def test_a_write_below_the_base_step_asks_nothing(vault: Path) -> None:

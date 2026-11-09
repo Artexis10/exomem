@@ -200,7 +200,13 @@ def test_plan_memory_create_makes_a_summary_collection_whose_hierarchy_and_saved
     # One overview page and one page per saved view; no Items directory and no file per row.
     _until(lambda: "2 committed rows" in (root / ROADMAP_FOLDER / "Summary/_summary.md").read_text()
            if (root / ROADMAP_FOLDER / "Summary/_summary.md").exists() else False, 30)
-    pages = [path for path in files_under(root, ROADMAP_FOLDER) if path.startswith("Summary/")]
+    # Publication writes each page through a temporary aside file, so wait until only the pages remain.
+    def summary_pages():
+        return [path for path in files_under(root, ROADMAP_FOLDER) if path.startswith("Summary/")]
+
+    _until(lambda: len(summary_pages()) == 1 + len(inspected["saved_views"])
+           and not any(path.rsplit("/", 1)[-1].startswith(".") for path in summary_pages()), 30)
+    pages = summary_pages()
     assert len(pages) == 1 + len(inspected["saved_views"]) and len(pages) <= 16
     assert "Summary/_summary.md" in pages
     assert not (root / ROADMAP_FOLDER / "Items").exists()

@@ -609,6 +609,7 @@ def test_cloud_surface_exclusions_keep_live_transfer_and_video_sampling_unavaila
     assert set(commands_module.CLOUD_SURFACE_EXCLUSIONS) == {
         "transfer_artifact",
         "read_media",
+        "approve_procedure",
     }
     for exclusion in commands_module.CLOUD_SURFACE_EXCLUSIONS.values():
         assert exclusion.reason

@@ -51,7 +51,7 @@ def _remediation(*, existing: bool = True) -> str:
     )
     assert finding is not None
     text = finding.remediation
-    assert "qualifying typed relation" in text, "remediation text moved"
+    assert "Link a related page" in text, "remediation text moved"
     return text
 
 

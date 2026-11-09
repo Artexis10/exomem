@@ -203,7 +203,8 @@ class GenericFileSnapshot:
     """Bytes and metadata read from the exact retained generic leaf."""
 
     data: bytes
-    identity: held_fs.StableIdentity
+    #: The file's device, inode and link count; None for a page that the vault's store holds.
+    identity: held_fs.StableIdentity | None
     mtime: float
     #: (size, mtime_ns, ctime_ns) from the same handle after the read, or None when the producer has no handle.
     generation: tuple[int, int, int] | None = None
@@ -686,6 +687,24 @@ _REGISTRY = (
         "collection_store.replica",
         StatePlacement.VAULT_CANONICAL,
         trees=("_collections",),
+    ),
+    InternalStateDescriptor(
+        "procedure-approvals",
+        "procedure_approval.ledger",
+        StatePlacement.VAULT_CANONICAL,
+        # Only the owner-only `approve_procedure` operation writes this tree, so no
+        # generic, import, capture, move or recovery route can mint an approval.
+        "approve_procedure",
+        trees=("_approvals",),
+    ),
+    InternalStateDescriptor(
+        "procedure-approval-key",
+        "procedure_approval.key",
+        StatePlacement.EXTERNAL_CANONICAL,
+        # The per-owner HMAC key that makes ledger entries authentic. Canonical and
+        # outside the vault, so a copied vault carries entries that fail their MAC
+        # and nothing that resets, wipes or migrates machine-local state may touch it.
+        exact=("procedure-approval.key",),
     ),
     InternalStateDescriptor(
         "batch-workspace",
@@ -1227,6 +1246,8 @@ def mutation_remediation(descriptor_id: str | None) -> str:
         return "Use govern_memory's reviewed governance lifecycle."
     if descriptor is not None and descriptor.owning_command == "consolidate_memory":
         return "No public command owns consolidation state until consolidate_memory ships."
+    if descriptor is not None and descriptor.owning_command == "approve_procedure":
+        return "Only the owner approves a procedure, through approve_procedure. No file route writes approvals."
     return "Use the owning subsystem's bounded control operation."
 
 
@@ -1435,14 +1456,39 @@ def read_generic_bytes(
     macOS-origin NFD name and its NFKC form are different names, and only the
     walked one exists. Classification is unchanged -- it still reads the NFKC,
     case-folded form -- so a reserved name is refused under any spelling.
+
+    A page that the vault's store owns is read from the store, with no identity and no generation.
+    A reserved or unsafe spelling is refused first, on either path.
     """
 
+    stored = _read_stored_generic(vault_root, value, physical=physical)
+    if stored is not None:
+        return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
             vault_root, value, identities=current, physical=physical
         )
+
+
+def _read_stored_generic(
+    vault_root: Path, value: object, *, physical: bool
+) -> GenericFileSnapshot | None:
+    """The stored page as a snapshot when the store serves ``value``, else None: read the file.
+
+    A page that the store serves but lacks fails as a missing file does.
+    """
+    from .vault_store import read
+
+    parent, leaf = _leaf_spelling(value, physical=physical)
+    try:
+        page = read.owned_page(Path(vault_root), leaf if parent == "." else f"{parent}/{leaf}")
+    except FileNotFoundError as error:
+        raise ReservedPathLeafError("MISSING") from error
+    if page is None:
+        return None
+    return GenericFileSnapshot(page.body, None, page.meta.mtime_ns / 1e9)
 
 
 def _read_generic_bytes_held(

@@ -12,7 +12,8 @@ and runs the command against the real exomem package.
 
 The media census is the same kind of command: it names `exomem cell-media-census`
 in the cell image, which prints the record the cell wrote (tests/test_media_drain_record.py runs it,
-and checks that the cell's record parses here).
+and checks that the cell's record parses here). So are the media manifest and the collection of
+collect-released-media, which name `exomem cell-media-manifest` and `exomem cell-media-collect`.
 """
 
 import re
@@ -57,11 +58,64 @@ def media_census_command(captured_at: str) -> str:
     )
 
 
+# collect-released-media D5: each snapshot holds the media manifest at this path, outside the paths a restore writes.
+MEDIA_MANIFEST_PATH = "/tmp/media-manifest.json"
+# Unlike the census, the manifest walks every companion in the vault. One that does not finish in time is unknown,
+# so the collector condemns nothing while this snapshot is retained, and the backup goes on without it.
+MEDIA_MANIFEST_SECONDS = 180
+# The collector stops this long after the Job script started, well inside the backup's 900-second deadline, so a
+# collection never fails a backup. A pass cut short has condemned only names it would condemn anyway: the clock
+# decides when the pass stops, never which name it hides.
+MEDIA_COLLECT_BY_SECONDS = 720
+MEDIA_COLLECT_START = "{ COLLECT_START=$(date +%s) || true; }"
+
+
+def media_manifest_command() -> str:
+    """Write the media manifest of the backup's own source. Its failure leaves an unknown or empty manifest."""
+    return (f"{{ timeout {MEDIA_MANIFEST_SECONDS} exomem cell-media-manifest --vault /data/vault"
+            f" > {MEDIA_MANIFEST_PATH} || true; }}")
+
+
+# The line the Job reports when the collector printed none: it was killed, or the deadline passed before it started.
+MEDIA_COLLECTION_NO_RESULT = "stopped no-result ? ? ?"
+
+
+def media_collect_command() -> str:
+    """Condemn the released names that no retained snapshot reaches, and append the collector's result line to the
+    termination message, the third line after the census. Its failure, timeout or unknown answer leaves the backup
+    successful. The command substitution keeps even a shell error inside it."""
+    return (f"{{ collected=$( left=$((COLLECT_START + {MEDIA_COLLECT_BY_SECONDS} - $(date +%s))); "
+            f"[ \"$left\" -gt 0 ] && exec timeout \"$left\" exomem cell-media-collect --snapshot \"$SNAPSHOT_ID\" "
+            f"--manifest-path {MEDIA_MANIFEST_PATH} ); "
+            f"printf '\\n%s' \"${{collected:-{MEDIA_COLLECTION_NO_RESULT}}}\" >> /dev/termination-log; }} || true")
+
+
 # The report line is a closed protocol format that the cell writes (media_drain_record.format_line) and the Job copies:
 # "<evicted count> <evicted bytes> <census time>". MEDIA_CENSUS_UNKNOWN is an incomplete census. A line with one count
 # known and one unknown is no census, since a known 0 beside it would read as drained.
 _MEDIA_CENSUS = re.compile(
     rf"(?:(?P<evicted>[0-9]{{1,19}}) (?P<bytes>[0-9]{{1,19}})|{re.escape(MEDIA_CENSUS_UNKNOWN)}) (?P<captured>\S+)")
+
+
+# The collector's result line, a closed protocol format that the cell writes (media_collect.Result.line):
+# "<outcome> <reason> <hidden> <candidates> <skipped>", "?" for a count that the collector does not know. The outcomes
+# are the protocol's own; the reason is read by its shape alone, lowercase words, so that no name or path reaches
+# cellctl's log.
+MEDIA_COLLECTION_COMPLETE = "complete"
+_MEDIA_COLLECTION = re.compile(
+    rf"(?P<outcome>{MEDIA_COLLECTION_COMPLETE}|stopped|unknown-manifest) (?P<reason>-|[a-z]{{1,16}}(?:-[a-z]{{1,16}}){{0,3}})"
+    r" (?P<hidden>[0-9]{1,19}|\?) (?P<candidates>[0-9]{1,19}|\?) (?P<skipped>[0-9]{1,19}|\?)")
+
+
+def parse_media_collection(line: str) -> tuple[str, str, int | None, int | None, int | None] | None:
+    """The collection a result line reports as (outcome, reason, hidden, candidates, skipped), None for an unknown
+    count; None when the line is unreadable."""
+    match = _MEDIA_COLLECTION.fullmatch(line)
+    if match is None:
+        return None
+    hidden, candidates, skipped = (None if match[key] == "?" else int(match[key])
+                                   for key in ("hidden", "candidates", "skipped"))
+    return match["outcome"], match["reason"], hidden, candidates, skipped
 
 
 def parse_media_census(line: str) -> tuple[int | None, int | None, datetime] | None:
