@@ -1039,3 +1039,211 @@ def test_fold_refuses_a_revision_that_a_page_cited_after_the_proposal(vault: Pat
     assert [(vault / path).read_bytes() for path in pages] == [before[path] for path in pages]
     history = commands.op_read_memory(vault, path=pages[-1], include_history=True)["revision_history"]
     assert history["revisions"] == []
+
+
+# ---------------------------------------------------------------- fold-duplicate
+
+
+def _pinned(vault: Path, path: str) -> dict[str, str]:
+    return {"path": path, "expected_hash": content_hash((vault / path).read_text(encoding="utf-8"))}
+
+
+def _fold_duplicate_step(vault: Path, canonical: str, copy: str, *, step_id: str = "dedup") -> dict[str, object]:
+    return {
+        "step_id": step_id,
+        "kind": "fold-duplicate",
+        "args": {"canonical": _pinned(vault, canonical), "copy": _pinned(vault, copy), "why": "The same bytes are filed twice."},
+    }
+
+
+def test_a_copy_folds_into_the_oldest_filing_with_every_link_rewritten(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """Evidence filed under two families becomes one live page that lists both, and nothing still cites the copy."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import vault as vault_module
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    copy = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    citing = _seed_note(vault, "curation-dup-cites", sources=[copy.removesuffix(".md")])
+    proposed = _propose(vault, _fold_duplicate_step(vault, canonical, copy))
+
+    result = _apply(vault, proposed)
+
+    assert result["phase"] == "completed"
+    link = f"[[{canonical.removesuffix('.md')}]]"
+    assert not (vault / copy.removesuffix(".md")).exists()
+    assert (vault / canonical.removesuffix(".md")).read_bytes() == data
+    kept = vault_module.parse_frontmatter((vault / canonical).read_text(encoding="utf-8"))[0]
+    assert kept["families"] == [{"scope": "Case", "category": "letters"}, {"scope": "Case", "category": "exhibits"}]
+    retired = vault_module.parse_frontmatter((vault / copy).read_text(encoding="utf-8"))[0]
+    assert (retired["status"], retired["superseded_by"]) == ("superseded", [link])
+    cited = vault_module.parse_frontmatter((vault / citing).read_text(encoding="utf-8"))[0]["sources"]
+    assert cited == [link]
+    assert list((vault / "Knowledge Base/_trash").rglob("*exhibit-a.png")) and result["step"]["leaf_result"]["moved"]
+
+
+def test_a_page_changed_after_preview_stops_the_fold_with_nothing_moved(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """The reviewed hash binds the page: a later edit voids the approval and the copy stays whole."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    copy = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    proposed = _propose(vault, _fold_duplicate_step(vault, canonical, copy))
+    held = {path: (vault / path).read_bytes() for path in (canonical, copy, copy.removesuffix(".md"))}
+    page = vault / canonical
+    page.write_text(page.read_text(encoding="utf-8") + "\nA note added after the review.\n", encoding="utf-8")
+    held[canonical] = page.read_bytes()
+
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert {path: (vault / path).read_bytes() for path in held} == held
+
+
+def test_an_original_that_changed_after_preview_stops_the_fold_before_the_copy_leaves(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """The copy moves only while the canonical original still holds its bytes: otherwise the fold would retire content."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    copy = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    proposed = _propose(vault, _fold_duplicate_step(vault, canonical, copy))
+    (vault / canonical.removesuffix(".md")).write_bytes(b"\x89PNG a different picture")
+
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert (vault / copy.removesuffix(".md")).read_bytes() == data
+    assert "superseded" not in (vault / copy).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("kind", ["delete", "supersede"])
+@pytest.mark.parametrize("lane", ["source", "evidence"])
+def test_plain_delete_and_supersede_still_refuse_sources_and_evidence(vault: Path, owner_scope, kind: str, lane: str) -> None:  # noqa: ANN001
+    """Only the fold retires an original, because only it re-proves identical bytes first."""
+    from duplicate_fixtures import evidence_filing, source_filing
+
+    from exomem import curation
+
+    page = (
+        evidence_filing(vault, "Case", "letters", "notice.png", b"\x89PNG photo")
+        if lane == "evidence"
+        else source_filing(vault, "plain-source", "A captured passage.")
+    )
+    args = (
+        {"path": page, "confirm": True}
+        if kind == "delete"
+        else {"old_path": page, "content": "Replacement text.", "title": "Replacement"}
+    )
+
+    with pytest.raises(curation.CurationError, match="CURATION_TARGET_PROTECTED"):
+        _propose(vault, {"step_id": "plain", "kind": kind, "args": args})
+
+    assert (vault / page).is_file()
+
+
+def test_a_text_source_folds_and_carries_its_import_paths_and_back_references(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """A text Source has no original to move: its page stays as the marked copy, and the canonical page gains its paths."""
+    from duplicate_fixtures import source_filing
+
+    from exomem import vault as vault_module
+
+    canonical = source_filing(vault, "first-copy", "The same passage.", captured="2026-01-01", imported_from="/import/a/first.txt")
+    copy = source_filing(vault, "second-copy", "The same passage.", captured="2026-02-01", imported_from="/import/b/second.txt")
+    proposed = _propose(vault, _fold_duplicate_step(vault, canonical, copy))
+
+    result = _apply(vault, proposed)
+
+    assert result["phase"] == "completed" and result["step"]["leaf_result"]["moved"] == []
+    kept = vault_module.parse_frontmatter((vault / canonical).read_text(encoding="utf-8"))[0]
+    assert kept["imported_from"] == "/import/a/first.txt"
+    assert kept["also_imported_from"] == [{"imported_from": "/import/b/second.txt"}]
+    assert vault_module.parse_frontmatter((vault / copy).read_text(encoding="utf-8"))[0]["status"] == "superseded"
+
+
+def test_the_copy_stays_when_the_canonical_original_is_lost_between_the_page_rewrite_and_the_move(
+    vault: Path, owner_scope, monkeypatch  # noqa: ANN001
+) -> None:
+    """The identity is re-proved immediately before the move, so a loss after the pages changed retires nothing."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    copy = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    proposed = _propose(vault, _fold_duplicate_step(vault, canonical, copy))
+
+    def lose_the_canonical_original(name: str) -> None:
+        if name == "fold-duplicate-after-pages":
+            (vault / canonical.removesuffix(".md")).unlink()
+
+    monkeypatch.setattr(curation, "_fault_barrier", lose_the_canonical_original)
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        _apply(vault, proposed)
+
+    assert (vault / copy.removesuffix(".md")).read_bytes() == data
+
+
+def test_a_cut_between_the_page_rewrite_and_the_move_resumes_to_the_same_final_state(
+    vault: Path, owner_scope, monkeypatch  # noqa: ANN001
+) -> None:
+    """A stop after the pages changed leaves the copy in place; resume decides from live state and finishes the move."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    copy = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    proposed = _propose(vault, _fold_duplicate_step(vault, canonical, copy))
+
+    def cut(name: str) -> None:
+        if name == "fold-duplicate-after-pages":
+            raise _ProcessCut(name)
+
+    monkeypatch.setattr(curation, "_fault_barrier", cut)
+    with pytest.raises(_ProcessCut):
+        _apply(vault, proposed)
+    assert (vault / copy.removesuffix(".md")).read_bytes() == data
+
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    resumed = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+
+    assert resumed["phase"] == "completed"
+    assert not (vault / copy.removesuffix(".md")).exists()
+    assert list((vault / "Knowledge Base/_trash").rglob("*exhibit-a.png"))[0].read_bytes() == data
+
+
+def test_a_plan_folds_several_copies_of_one_original_and_the_canonical_lists_every_family(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """Both steps carry the canonical page as the review saw it, and both run in order."""
+    from duplicate_fixtures import evidence_filing
+
+    from exomem import curation
+    from exomem import vault as vault_module
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    first = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    second = evidence_filing(vault, "Case", "annexes", "annex-a.png", data)
+    proposed = _propose(
+        vault,
+        _fold_duplicate_step(vault, canonical, first, step_id="first"),
+        _fold_duplicate_step(vault, canonical, second, step_id="second"),
+    )
+
+    stopped = _apply(vault, proposed)
+    assert stopped["phase"] == "executing"
+    finished = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+
+    assert finished["phase"] == "completed"
+    kept = vault_module.parse_frontmatter((vault / canonical).read_text(encoding="utf-8"))[0]
+    assert [family["category"] for family in kept["families"]] == ["letters", "exhibits", "annexes"]
+    assert not (vault / first.removesuffix(".md")).exists() and not (vault / second.removesuffix(".md")).exists()
+    assert (vault / canonical.removesuffix(".md")).read_bytes() == data

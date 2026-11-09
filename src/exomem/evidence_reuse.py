@@ -28,7 +28,7 @@ class EvidenceLookup:
     available: bool = True
 
 
-def _same_family(left: Family, right: Family) -> bool:
+def same_family(left: Family, right: Family) -> bool:
     return tuple(map(vault_name_key, left)) == tuple(map(vault_name_key, right))
 
 
@@ -59,7 +59,7 @@ def listed_families(frontmatter: Mapping[str, object], home: Family) -> tuple[Fa
         if not (isinstance(scope, str) and scope and isinstance(category, str) and category):
             return None
         listed.append((scope, category))
-    return (home, *(pair for pair in listed if not _same_family(pair, home)))
+    return (home, *(pair for pair in listed if not same_family(pair, home)))
 
 
 def _add_family(vault_root: Path, page: str, families: tuple[Family, ...], added: Family) -> bool:
@@ -80,7 +80,7 @@ def _find(vault_root: Path, *, scope: str, category: str, sha256: str, protected
     def listed(hit: duplicates.Duplicate) -> bool:
         home = folder_family(vault_root, hit.path)
         families = None if home is None else listed_families(hit.payload.frontmatter, home)
-        return families is not None and any(_same_family(pair, wanted) for pair in families)
+        return families is not None and any(same_family(pair, wanted) for pair in families)
 
     lookup = duplicates.find_duplicate(
         vault_root, sha256=sha256, lane=duplicates.EVIDENCE, protected=protected, prefer=listed
@@ -98,7 +98,7 @@ def already_in_family(vault_root: Path, *, scope: str, category: str, sha256: st
     A read-only check for a door that refuses a repeat hand-over into the same family and writes nothing itself.
     """
     _lookup, hit, families, wanted = _find(vault_root, scope=scope, category=category, sha256=sha256, protected=protected)
-    return hit is not None and families is not None and any(_same_family(pair, wanted) for pair in families)
+    return hit is not None and families is not None and any(same_family(pair, wanted) for pair in families)
 
 
 def reuse(vault_root: Path, *, scope: str, category: str, sha256: str, protected: bool) -> EvidenceLookup:
@@ -121,7 +121,7 @@ def reuse(vault_root: Path, *, scope: str, category: str, sha256: str, protected
     duplicate = DuplicateArtifact(
         hash=sha256, path=hit.payload.artifact_path or "", sidecar_path=hit.path, ref=hit.ref, families=families
     )
-    if any(_same_family(pair, wanted) for pair in families):
+    if any(same_family(pair, wanted) for pair in families):
         return EvidenceLookup(duplicate)
     if protected or not connector_boundary.effect_admission(vault_root)(hit.path):
         return EvidenceLookup()

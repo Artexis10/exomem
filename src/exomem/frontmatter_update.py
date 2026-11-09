@@ -15,7 +15,7 @@ from . import vault
 from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
 
 
-def _updated_text(
+def updated_text(
     text: str, fields: Mapping[str, object], appended: Mapping[str, Sequence[str]]
 ) -> str:
     """`text` with `fields` set and `appended` list items present; the body and every other field stay as written."""
@@ -57,7 +57,7 @@ def update_page_frontmatter(
             fields = fields(vault.parse_frontmatter(text, strict=True)[0])
             if fields is None:
                 return False
-        updated = _updated_text(text, fields, appended)
+        updated = updated_text(text, fields, appended)
         intents: list[object] = []
         committed = preserve.commit_media_sidecar_writes(
             vault_root,

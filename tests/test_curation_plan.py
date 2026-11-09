@@ -217,6 +217,8 @@ def test_work_item_uses_recorded_pages_exact_hashes_and_discloses_truncation(
     assert set(item["step_schemas"]) == set(curation.STEP_KINDS)
     assert "fold-recap-revisions" in item["step_schemas"]
     assert "unfold-recap-revisions" not in item["step_schemas"]
+    assert "fold-duplicate" in item["step_schemas"]
+    assert "unfold-duplicate" not in item["step_schemas"]
     assert set(item["registry_ids"]) == {"entities", "relations", "schemas"}
 
 
@@ -484,3 +486,37 @@ def test_fold_proposal_needs_the_whole_namespace_content_authority(vault, earlie
     with request_scope(RequestPrincipal(audience_id="client-a", surface="mcp")):
         with pytest.raises(curation.CurationError, match="SOURCE_IDENTITY_FORBIDDEN"):
             curation.propose(vault, _plan(step))
+
+
+@pytest.mark.parametrize(
+    ("setup", "code"),
+    [
+        ("different bytes", "CURATION_STEP_INVALID"),
+        ("a Source and an Evidence page", "CURATION_STEP_INVALID"),
+        ("a protected copy", "CURATION_TARGET_PROTECTED"),
+        ("a protected canonical page", "CURATION_TARGET_PROTECTED"),
+        ("an append-only page citing the copy", "CURATION_TARGET_PROTECTED"),
+    ],
+)
+def test_duplicate_fold_proposal_refuses_what_could_retire_content_or_rewrite_what_it_must_not(
+    vault, owner_scope, setup: str, code: str  # noqa: ANN001
+) -> None:
+    """A fold names two pages that hold the same bytes, neither raw-protected, and no page it cannot rewrite cites the copy."""
+    from duplicate_fixtures import evidence_filing, source_filing
+    from test_curation_execution import _fold_duplicate_step
+
+    from exomem import curation
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data, protected=setup == "a protected canonical page")
+    copy = evidence_filing(
+        vault, "Case", "exhibits", "exhibit-a.png", b"\x89PNG another picture" if setup == "different bytes" else data,
+        protected=setup == "a protected copy",
+    )
+    if setup == "a Source and an Evidence page":
+        copy = source_filing(vault, "same-bytes", "A captured passage.", original=data)
+    if setup == "an append-only page citing the copy":
+        source_filing(vault, "citer", f"See [[{copy.removesuffix('.md')}]] for the photo.")
+
+    with pytest.raises(curation.CurationError, match=code):
+        curation.propose(vault, _plan(_fold_duplicate_step(vault, canonical, copy)))

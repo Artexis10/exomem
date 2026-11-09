@@ -4528,6 +4528,12 @@ def read_bounded_guarded_bytes_with_generation(
 
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
     """Read exact UTF-8 text; the returned guard binds the resolved vault root."""
+    raw, guard = read_guarded_bytes(vault_root, path)
+    return raw.decode("utf-8"), guard
+
+
+def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
+    """Read the exact bytes of a vault file; the returned guard binds the resolved vault root."""
     configured_root = Path(vault_root).absolute()
     root = configured_root.resolve()
     absolute = Path(path).absolute()
@@ -4555,8 +4561,7 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    raw, guard = read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
-    return raw.decode("utf-8"), guard
+    return read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
 
 
 @dataclass

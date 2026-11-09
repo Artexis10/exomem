@@ -351,3 +351,41 @@ def test_fold_compensation_cut_midway_resumes_to_the_same_restored_episode(
     assert resumed["phase"] == "compensated"
     assert {path: (vault / path).read_bytes() for path in pages} == episode_before
     assert {path: path.read_bytes() for path in history.rglob("*.json")} == history_before
+
+
+def test_duplicate_fold_compensation_restores_every_page_and_original_byte_for_byte(vault: Path, owner_scope) -> None:  # noqa: ANN001
+    """Undoing a plan that folded two copies returns both copies, the canonical page and the citing note to their exact bytes."""
+    from duplicate_fixtures import evidence_filing
+    from test_curation_execution import _fold_duplicate_step
+
+    data = b"\x89PNG photo of the notice"
+    canonical = evidence_filing(vault, "Case", "letters", "notice.png", data)
+    first = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data)
+    second = evidence_filing(vault, "Case", "annexes", "annex-a.png", data)
+    citing = _seed_note(vault, "compensation-dup-cites", sources=[first.removesuffix(".md")])
+    watched = [
+        canonical, first, second, citing,
+        *(page.removesuffix(".md") for page in (canonical, first, second)),
+    ]
+    before = {path: (vault / path).read_bytes() for path in watched}
+    proposed = _propose(
+        vault,
+        _fold_duplicate_step(vault, canonical, first, step_id="first"),
+        _fold_duplicate_step(vault, canonical, second, step_id="second"),
+    )
+    _apply(vault, proposed)
+    curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+    assert (vault / canonical).read_bytes() != before[canonical] and not (vault / first.removesuffix(".md")).exists()
+
+    compensation = curation.propose_compensation(vault, run_id=proposed["run_id"])
+    undone = curation.apply_compensation(
+        vault,
+        run_id=proposed["run_id"],
+        plan_id=compensation["plan_id"],
+        expected_plan_fingerprint=compensation["plan_fingerprint"],
+        why="Approved separate compensation plan.",
+    )
+    while undone["phase"] != "compensated":
+        undone = curation.resume(vault, run_id=proposed["run_id"], plan_id=compensation["plan_id"])
+
+    assert {path: (vault / path).read_bytes() for path in watched} == before

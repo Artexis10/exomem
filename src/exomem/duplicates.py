@@ -91,7 +91,8 @@ def derive_page_payload(rel: str, raw: bytes) -> PagePayload | None:
     One function decides it for the catalogue's column (every build and upsert) and for the lookup's
     re-derivation, so the two cannot drift. A text Source's payload is its captured text; an imported text
     file's is its fenced text exactly as stored, which equals the file's bytes; an original's is the digest
-    its page records, which `find_duplicate` re-hashes against the file itself.
+    its page records, which `find_duplicate` re-hashes against the file itself. A superseded page holds no
+    payload, because it is a retired copy.
     """
     lane = vault.in_append_only_tree(rel)
     if lane is None or not rel.lower().endswith(".md"):
@@ -102,6 +103,9 @@ def derive_page_payload(rel: str, raw: bytes) -> PagePayload | None:
     except (UnicodeDecodeError, vault.FrontmatterError):
         return None
     if marker is None:
+        return None
+    # A superseded page is a retired copy, so it is no payload holder (`duplicate_fold` retires copies this way).
+    if str(frontmatter.get("status") or "").casefold() == "superseded":
         return None
     protected = raw_protection.marked(rel)
     source_url = None
@@ -158,7 +162,7 @@ class DuplicateLookup:
     available: bool = True
 
 
-def _readable_page(vault_root, rel: str) -> PagePayload | None:
+def readable_page(vault_root, rel: str) -> PagePayload | None:
     """The payload of `rel` when the current caller may read the page in full, else None."""
     from .governance import egress
     from .governance.policy import DISCLOSURE_MAX
@@ -172,25 +176,34 @@ def _readable_page(vault_root, rel: str) -> PagePayload | None:
     return derive_page_payload(rel, raw)
 
 
-def _original_intact(vault_root, rel: str, payload: PagePayload) -> bool:
-    """Whether the original that the page at `rel` names still hashes to the payload it records."""
+def original_size(vault_root, rel: str, payload: PagePayload) -> int | None:
+    """The size of the original that the page at `rel` names when it still hashes to the payload it records, else None."""
     artifact = payload.artifact_path
     # The page is vault data. An original outside its own folder is some other file's bytes.
     if artifact is None or PurePosixPath(artifact).parent != PurePosixPath(rel).parent:
-        return False
+        return None
     if payload.protected:
         found = raw_protection.binding(vault_root, rel)
         if found is None:
-            return False
+            return None
         block, companion, _ = found
         if (companion != rel or block["original_ref"] != payload.ref
                 or block["artifact_path"] != artifact or block["artifact_sha256"] != payload.sha256):
-            return False
+            return None
     try:
         with reserved_paths.open_generic_binary(vault_root, artifact) as original:
-            return hashlib.file_digest(original.stream, "sha256").hexdigest() == payload.sha256
+            digest, size = hashlib.sha256(), 0
+            while chunk := original.stream.read(1 << 20):
+                digest.update(chunk)
+                size += len(chunk)
     except (OSError, reserved_paths.ReservedPathLeafError):
-        return False
+        return None
+    return size if digest.hexdigest() == payload.sha256 else None
+
+
+def original_intact(vault_root, rel: str, payload: PagePayload) -> bool:
+    """Whether the original that the page at `rel` names still hashes to the payload it records."""
+    return original_size(vault_root, rel, payload) is not None
 
 
 def find_duplicate(
@@ -221,13 +234,13 @@ def find_duplicate(
     for rel in candidates:
         if vault.in_append_only_tree(rel) != lane or raw_protection.marked(rel) != protected:
             continue
-        payload = _readable_page(vault_root, rel)
+        payload = readable_page(vault_root, rel)
         if (payload is None or payload.sha256 != sha256 or payload.lane != lane
                 or payload.protected != protected or payload.ref is None):
             continue
         if needs_original and payload.artifact_path is None:
             continue
-        if payload.artifact_path is not None and not _original_intact(vault_root, rel, payload):
+        if payload.artifact_path is not None and not original_intact(vault_root, rel, payload):
             continue
         hit = Duplicate(path=rel, ref=payload.ref, payload=payload)
         if prefer is None or prefer(hit):
@@ -268,7 +281,7 @@ def same_url_sources(vault_root, url: str, *, limit: int = 5) -> SameUrl | None:
     for rel in candidates or ():
         if vault.in_append_only_tree(rel) != SOURCES or raw_protection.marked(rel):
             continue
-        payload = _readable_page(vault_root, rel)
+        payload = readable_page(vault_root, rel)
         if payload is None or payload.source_url != canonical or payload.ref is None:
             continue
         found.append(Duplicate(path=rel, ref=payload.ref, payload=payload))

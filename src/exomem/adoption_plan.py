@@ -229,6 +229,12 @@ def _path_identity(entry: Mapping[str, Any]) -> tuple[str, ...]:
     return ("path", _text_field(entry.get("imported_from")) or "")
 
 
+def page_mappings(frontmatter: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Every path of its original that a Source page names: the first path, then each `also_imported_from` entry."""
+    first = {key: text for key in _PATH_FIELDS if (text := _text_field(frontmatter.get(key))) is not None}
+    return [*([first] if "imported_from" in first else []), *recorded_mappings(frontmatter)]
+
+
 def mapping_recorded(frontmatter: Mapping[str, Any], mapping: Mapping[str, str]) -> bool:
     """Whether the Source page already names this path of the original: as its first path or as a mapping."""
     first = {key: frontmatter.get(key) for key in _PATH_FIELDS}
