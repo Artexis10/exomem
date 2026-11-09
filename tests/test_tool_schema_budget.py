@@ -81,6 +81,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
 # The video kind of read_media takes `max_side` as the image kind does, so a caller chooses the frame
 # size: read_media measures 1,790 B and its ceiling rounds to 1,800 B. The total stays within budget.
+# The `archive` field on preserve_artifacts keeps a held zip as members that a collection import
+# reads: preserve_artifacts measures 2,405 B and its ceiling rounds to 2,450 B. The complete local
+# wire measures 170,945 B, so the total stays within budget.
 TOTAL_BUDGET = 170_950
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
@@ -117,7 +120,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "observe_memory": 5050,
     "plan_memory": 2700,
     "prepare_note": 5200,
-    "preserve_artifacts": 2300,
+    "preserve_artifacts": 2450,
     "preserve_evidence": 1350,
     "process_media": 1050,
     "query_dataset": 1550,

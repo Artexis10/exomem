@@ -363,3 +363,201 @@ def test_merge_cli_stops_when_current_main_moved(tmp_path):
     assert "main moved" in result.stderr
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert calls == [["api", "repos/example/project/commits/main"]]
+
+
+def _intent_archive(record: dict) -> bytes:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as files:
+        files.writestr(evidence.INTENT_FILE, json.dumps(record))
+    return archive.getvalue()
+
+
+BASE, HEAD = "a" * 40, "c" * 40
+RELEASE = {
+    "number": 42,
+    "state": "open",
+    "merged": False,
+    "base": {"ref": "main", "sha": BASE},
+    "head": {
+        "ref": evidence.RELEASE_BRANCH,
+        "sha": HEAD,
+        "repo": {"full_name": "example/project"},
+    },
+}
+
+
+def _ci_run(status: str) -> dict:
+    return {"event": "pull_request", "head_sha": HEAD, "status": status}
+
+
+@pytest.mark.parametrize(
+    "intent_head,merged",
+    [(HEAD, True), ("d" * 40, False), (None, False)],
+    ids=["intent-names-this-head", "head-changed-after-intent", "no-intent-nightly-full"],
+)
+def test_land_merges_only_the_head_a_release_intent_named(monkeypatch, intent_head, merged):
+    """A nightly Full or a stale intent must never release; the named head merges with the App token."""
+    intent_runs = (
+        [
+            {
+                "id": 7,
+                "path": evidence.AUTOMATION,
+                "event": "workflow_dispatch",
+                "head_branch": "main",
+                "conclusion": "success",
+                "head_repository": {"full_name": "example/project"},
+            }
+        ]
+        if intent_head
+        else []
+    )
+
+    def api(path, *, pages=False):
+        if path.startswith("pulls?state=open"):
+            return [RELEASE]
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"workflow_runs": intent_runs}
+        if path == "actions/runs/7/artifacts?name=release-intent":
+            return {"artifacts": [{"id": 70, "expired": False}]}
+        if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
+            return [{"workflow_runs": [_ci_run("completed")]}]
+        if path == "commits/main":
+            return {"sha": BASE}
+        if path == "pulls/42":
+            return RELEASE
+        raise AssertionError(path)
+
+    calls = []
+
+    def command(*args, env=None):
+        calls.append((args, (env or {}).get("GH_TOKEN")))
+        if args[:3] == ("gh", "api", "repos/example/project/actions/artifacts/70/zip"):
+            return _intent_archive({"pr": 42, "expected_base": BASE, "expected_head": intent_head})
+        return b""
+
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(evidence, "api", api)
+    monkeypatch.setattr(evidence, "command", command)
+    monkeypatch.setattr(
+        evidence,
+        "required_checks",
+        lambda number: [
+            {"name": "Conventional Commit title", "bucket": "pass"},
+            {"name": "required CI gate", "bucket": "pass"},
+        ],
+    )
+    monkeypatch.setattr(evidence, "check_release_files", lambda number: None)
+    monkeypatch.setattr(
+        evidence, "require_evidence", lambda source, repository: {"tested_commit": source}
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    evidence.land("example/project", None, "app-token")
+
+    merges = [(args, token) for args, token in calls if args[:3] == ("gh", "pr", "merge")]
+    if merged:
+        assert merges == [
+            (("gh", "pr", "merge", "42", "--squash", "--match-head-commit", HEAD), "app-token")
+        ]
+    else:
+        assert merges == []
+
+
+def test_land_waits_for_the_gate_check_that_appears_only_when_ci_finishes(tmp_path, monkeypatch):
+    """Before CI exists or finishes, gh lists the title check alone; landing must not take that as green."""
+    intent = tmp_path / "release-intent.json"
+    intent.write_text(json.dumps({"pr": 42, "expected_base": BASE, "expected_head": HEAD}))
+    polls = {"count": 0}
+
+    def api(path, *, pages=False):
+        if path.startswith("pulls?state=open"):
+            return [RELEASE]
+        if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
+            polls["count"] += 1
+            # Poll 1: GitHub has not created the CI run yet; poll 2: it is running.
+            ci = (
+                []
+                if polls["count"] == 1
+                else [_ci_run("in_progress" if polls["count"] < 3 else "completed")]
+            )
+            return [{"workflow_runs": ci}]
+        if path == "commits/main":
+            return {"sha": BASE}
+        if path == "pulls/42":
+            return RELEASE
+        raise AssertionError(path)
+
+    def required_checks(number):
+        listed = [{"name": "Conventional Commit title", "bucket": "pass"}]
+        if polls["count"] >= 3:
+            listed.append({"name": "required CI gate", "bucket": "pass"})
+        return listed
+
+    merges = []
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(evidence, "api", api)
+    monkeypatch.setattr(
+        evidence,
+        "command",
+        lambda *args, env=None: (
+            merges.append(polls["count"]) if args[:3] == ("gh", "pr", "merge") else b""
+        ),
+    )
+    monkeypatch.setattr(evidence, "required_checks", required_checks)
+    monkeypatch.setattr(evidence, "check_release_files", lambda number: None)
+    monkeypatch.setattr(
+        evidence, "require_evidence", lambda source, repository: {"tested_commit": source}
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    evidence.land("example/project", intent, "app-token")
+
+    assert merges == [3]
+
+
+def test_land_leaves_the_release_unmerged_when_a_required_check_fails(tmp_path, monkeypatch):
+    """A failed release check must stop the automated merge and turn its run red."""
+    intent = tmp_path / "release-intent.json"
+    intent.write_text(json.dumps({"pr": 42, "expected_base": BASE, "expected_head": HEAD}))
+
+    def api(path, *, pages=False):
+        if path.startswith("pulls?state=open"):
+            return [RELEASE]
+        if path.startswith(f"actions/workflows/ci.yml/runs?head_sha={HEAD}"):
+            return [{"workflow_runs": [_ci_run("completed")]}]
+        raise AssertionError(path)
+
+    calls = []
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(evidence, "api", api)
+    monkeypatch.setattr(evidence, "command", lambda *args, env=None: calls.append(args) or b"")
+    monkeypatch.setattr(
+        evidence,
+        "required_checks",
+        lambda number: [
+            {"name": "Conventional Commit title", "bucket": "pass"},
+            {"name": "required CI gate", "bucket": "fail"},
+        ],
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+
+    with pytest.raises(ValueError, match="required CI gate"):
+        evidence.land("example/project", intent, "app-token")
+
+    assert not any(args[:3] == ("gh", "pr", "merge") for args in calls)
+
+
+def test_a_failed_check_read_raises_with_the_gh_error(tmp_path, monkeypatch):
+    """A failed read must name gh's error; reporting it as checks still running hides the cause."""
+    gh = tmp_path / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.stderr.write('HTTP 403: Resource not accessible by integration')\n"
+        "sys.exit(1)\n"
+    )
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+
+    with pytest.raises(ValueError, match="Resource not accessible by integration"):
+        evidence.required_checks(42)

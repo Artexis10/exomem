@@ -48,6 +48,26 @@ def test_a_batch_write_completes_on_an_install_without_an_embedding_backend(
     assert vault_module.post_commit_batch_fanout(tmp_path, [target], None, None) is True
 
 
+def test_a_batch_that_writes_only_unindexed_paths_completes_and_queues_no_refresh(
+    tmp_path: Path,
+) -> None:
+    """A write no index reads owes the indexes nothing.
+
+    Semantic writes commit the activation manifest under `_Schema/` in a batch of
+    its own. Judging that batch incomplete logged a false failure on every such
+    write, and queued an index refresh for an excluded page such as a trashed one.
+    """
+    manifest = tmp_path / "Knowledge Base" / "_Schema" / "semantic-activation.yaml"
+    trashed = tmp_path / "Knowledge Base" / "_trash" / "old.md"
+    for path in (manifest, trashed):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x: 1\n", encoding="utf-8")
+    deferred_index.clear_full(tmp_path)
+
+    assert vault_module.post_commit_batch_fanout(tmp_path, [manifest, trashed], None, None) is True
+    assert deferred_index.full_status(tmp_path)["count"] == 0
+
+
 def test_embedding_upsert_status_distinguishes_disabled_and_warmup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

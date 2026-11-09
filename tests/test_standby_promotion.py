@@ -1057,6 +1057,26 @@ def test_a_standby_warm_builds_the_method_unit_statistics_the_first_request_woul
     assert _method_search(vault, pages - {"Knowledge Base/Notes/unit-2.md"}) == (1, 0)
 
 
+def test_a_cold_start_warm_builds_the_method_unit_statistics_the_first_request_would_pay_for(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """After a unit restart the first task context must not build the method-unit statistics itself.
+
+    A restarted service has no standby to warm them: its first activation after a launcher upgrade spent
+    25 s in the method lane. The cold start's background warm runs in the serving process.
+    """
+    from exomem import freshness, lexstore, warmup
+
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda *a: False)
+    lexstore.clear_stores()
+    freshness.clear()
+
+    warmup.warm_all(vault)
+
+    assert _method_search(vault, pages) == (0, 0)
+
+
 @pytest.mark.parametrize("limit", ["warm-up disabled", "warm budget spent"])
 def test_the_method_unit_statistics_warm_yields_to_the_disable_switch_and_the_warm_budget(
     tmp_path: Path, monkeypatch, limit: str
@@ -1144,7 +1164,7 @@ def test_a_method_unit_statistics_build_the_warm_budget_ends_leaves_no_statistic
     monkeypatch.setattr(lexstore.LexicalStore, "_admitted_unit_statistics", slow_start)
 
     service_standby.enter_standby()
-    service_standby._warm_method_unit_statistics(vault, deadline=time.monotonic() + 0.2)
+    service_standby.warmup.warm_method_unit_statistics(vault, deadline=time.monotonic() + 0.2)
 
     assert not delays, "the build never started, so this proved nothing about stopping it"
     assert _method_search(vault, pages) == (1, 3), "an interrupted build must leave no statistics behind"
