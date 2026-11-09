@@ -210,6 +210,8 @@ def plan(
                 rendered = raw_protection.protect(rendered, artifact_path=artifact, digest=member.sha256)
             binary_path = vault_root / artifact
             page_path = vault_root / page
+            # An evicted member counts as absent here: the container holds its bytes, so recovery rebuilds it from
+            # the container stream, with no store download, and keeps working during a store outage.
             if existing and binary_path.exists():
                 _require_identity(vault_root, artifact, member.sha256, member.size)
                 result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="content", expected_content_hash=member.sha256))

@@ -47,7 +47,7 @@ Non-goals:
 - Cross-vault consolidation (`add-governed-vault-consolidation`).
 - Retitling compiled notes that share a title. This change adds no title-collision audit. Ordinary curation handles them.
 - Folding duplicate own-notes that adoption of a collection creates. One draft per collection path stays.
-- Archive member pools. They stay per family.
+- Archive member pools. They stay per family, including a held zip that `preserve_artifacts` keeps with `archive: members`: it stores no original, so it never meets the lookup, and each blob is named by its member's hash inside one family's pool.
 - Live folds of a real vault. They are separate, owner-confirmed operations after release.
 
 ## Decisions

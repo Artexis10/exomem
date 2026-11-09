@@ -17,6 +17,7 @@ import re
 import shutil
 import stat
 import struct
+import zipfile
 import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -603,6 +604,62 @@ def test_a_failed_preserve_leaves_the_claimed_hold_redeemable(
     assert (vault / again["files"][0]["stored_path"]).read_bytes() == _png()
 
 
+def test_a_held_file_that_is_no_zip_is_refused_as_members_and_stays_redeemable(vault: Path, lease) -> None:
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        refused = _preserve(lease, vault, [handle], "png-as-members", archive="members")
+        kept = _preserve(lease, vault, [handle], "png-as-one-file")
+
+    assert refused["files"][0]["code"] == "ARCHIVE_INVALID", refused
+    assert kept["files"][0]["state"] == "stored", kept
+
+
+def test_a_members_replay_settles_unwritten_unless_it_restores_a_blob(vault: Path, lease) -> None:
+    """Defect: a replay that wrote nothing was committed with a receipt, and one that restored a blob read as a reuse."""
+    export = io.BytesIO()
+    with zipfile.ZipFile(export, "w") as archive:
+        archive.writestr("samples/one.json", '{"day": 1}')
+
+    def held() -> dict:
+        return _hold(vault, export.getvalue(), name="export.zip", content_type="application/zip")["file"]
+
+    def status_of(key: str) -> dict:
+        reply = _preserve(lease, vault, [held()], key, archive="members", response_detail="full")
+        return reply["diagnostics"]
+
+    with _local_session("session-home"):
+        commands.op_preserve_artifacts(vault, scope="Clinic", category="Appointments", files=[held()], archive="members")
+        replay = status_of("replay")
+        next(_evidence(vault).rglob("*.gz")).unlink()
+        restored = status_of("restore")
+
+    assert (replay["operational"]["status"], replay.get("capture_outcome")) == ("settled", "reused")
+    assert (restored["operational"]["status"], restored.get("capture_outcome")) == ("committed", None)
+
+
+def test_members_refuse_a_fetched_attachment_before_fetching_it(vault: Path, lease) -> None:
+    """A fetched attachment has no verified SHA-256, which the members manifest records."""
+    attachment = {"file_id": "chat-export", "download_url": "https://files.invalid/export.zip"}
+    refused = _preserve(lease, vault, [attachment], "fetched-as-members", archive="members")
+
+    assert refused["files"][0]["code"] == "INVALID_FILE", refused
+    assert "hold=true" in refused["files"][0]["reason"]
+
+
+def test_members_refuse_a_transcription_instead_of_dropping_it(vault: Path, lease) -> None:
+    from exomem.cli_ops import OpError
+
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        with pytest.raises(OpError) as refused:
+            commands.op_preserve_artifacts(
+                vault, scope="Clinic", category="Appointments", files=[handle], archive="members",
+                transcriptions=[{"file_id": handle["file_id"], "text": TRANSCRIPTION}],
+            )
+
+    assert (refused.value.code, refused.value.details["field"]) == ("INVALID_PRESERVE", "archive")
+
+
 def test_a_failed_capture_leaves_the_claimed_source_hold_redeemable(
     vault: Path, lease, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -925,3 +982,17 @@ def test_attach_refuses_a_source_lane_for_a_direct_evidence_preserve(tmp_path: P
                 "8764",
             ]
         )
+
+
+def test_an_unknown_archive_mode_refuses_instead_of_being_read_as_members(vault: Path, lease) -> None:
+    """A CLI or HTTP caller skips the schema enum; a typo must not be preserved as members."""
+    from exomem.cli_ops import OpError
+
+    with _local_session("session-home"):
+        handle = _hold(vault, _png())["file"]
+        with pytest.raises(OpError) as refused:
+            commands.op_preserve_artifacts(
+                vault, scope="Clinic", category="Appointments", files=[handle], archive="member",
+            )
+
+    assert (refused.value.code, refused.value.details["accepted_values"]) == ("INVALID_PRESERVE", ["members"])

@@ -767,16 +767,14 @@ def _sorted(members: list[Member]) -> list[Member]:
 
 
 def _classify(kept: import_selection.Kept, reading: Reading) -> Member:
-    """Classify by the cell's reported rule; the sender's own copy serves only where the cell reports none."""
+    """Classify by the one rule with the inputs that the cell reports; the sender's own inputs serve only where it reports none."""
     inline = reading.inline_text_limit
     if inline is None:
         text = adoption_run.reads_as_text(kept.rel, kept.size)
     else:  # The suffix rule alone; the cell's inline limit replaces the local size limit.
         text = adoption_run.has_text_suffix(kept.rel) and kept.size <= inline
-    if reading.largest_offloadable is None:
-        return Member(kept.rel, kept.size, kept.mtime_ns, reading.bounds.classify(kept.size, text=text))
-    klass = TEXT if text else OFFLOADABLE if kept.size <= reading.largest_offloadable else RESIDENT
-    return Member(kept.rel, kept.size, kept.mtime_ns, klass)
+    largest = reading.bounds.largest_offloadable() if reading.largest_offloadable is None else reading.largest_offloadable
+    return Member(kept.rel, kept.size, kept.mtime_ns, media_capacity.classify(kept.size, largest, text=text))
 
 
 async def import_folder(source: Path, config: CloudImportClientConfig, checkpoint: Path, *, cell: Cell, api, uploads=None,

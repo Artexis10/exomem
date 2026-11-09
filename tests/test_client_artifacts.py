@@ -88,6 +88,7 @@ def test_preserve_artifacts_has_openai_file_parameter_contract(
         "transcriptions",
         "response_detail",
         "raw_protection",
+        "archive",
     }
     vault_root = tmp_path / "vault"
     shutil.copytree(Path(__file__).resolve().parent / "fixtures", vault_root)
