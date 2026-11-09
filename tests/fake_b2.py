@@ -46,6 +46,7 @@ class FakeB2:
         self._counter = 0
         self.account_token, self._expired = "token-account", 0
         self.list_page = 1000
+        self.repeat_cursor_pages = 0  # a provider fault: this many pages ignore their cursor
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -216,6 +217,9 @@ class FakeB2:
     def _api_b2_list_file_versions(self, payload: dict) -> httpx.Response:
         if payload.get("bucketId") != self.bucket_id:
             return self._json(400, {"code": "bad_request"})
+        if self.repeat_cursor_pages:
+            self.repeat_cursor_pages -= 1
+            payload = {key: value for key, value in payload.items() if key not in ("startFileName", "startFileId")}
         prefix = payload.get("prefix", "")
         # By name, then newest first within a name; `files` holds the versions in upload order.
         ordered = sorted(((position, file_id, item) for position, (file_id, item) in enumerate(self.files.items())

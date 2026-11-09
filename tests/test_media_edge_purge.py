@@ -213,3 +213,32 @@ def test_a_restart_in_the_middle_of_a_purge_resumes_it_and_hides_each_name_once(
 
     assert deleted.hidden() == sorted(deleted.names)
     assert restarted.intents == {}
+
+
+def test_a_hide_that_never_landed_is_sent_again_and_the_purge_finishes(tmp_path: Path) -> None:
+    """Defect: the provider never applies one purge hide, the edge waits for it for ever, and the deleted
+    cell's media stays current."""
+    deleted = Deleted(tmp_path, stored=3)
+    deleted.relay(_grant(CELL_A))
+    deleted.fake.lose("b2_hide_file", "request")
+
+    deleted.run()
+    asyncio.run(deleted.edge.recover_pending())
+    deleted.run()
+
+    assert deleted.hidden() == sorted(deleted.names)
+    assert deleted.edge.intents == {}
+
+
+def test_a_listing_whose_cursor_repeats_hides_nothing(tmp_path: Path) -> None:
+    """Defect: a provider that returns the same cursor again holds the purge task in a listing that never
+    ends."""
+    deleted = Deleted(tmp_path, stored=2)
+    deleted.relay(_grant(CELL_A))
+    deleted.fake.list_page = 1
+    deleted.fake.repeat_cursor_pages = 20
+
+    deleted.run()
+
+    assert deleted.hidden() == []
+

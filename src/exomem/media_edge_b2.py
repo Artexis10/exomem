@@ -21,6 +21,11 @@ _INFO_HEADER = "x-bz-info-"
 _OCTET_STREAM = "application/octet-stream"
 
 
+# A listing that needs more pages than this fails, never stops short: 2.5 million versions, as the key
+# watcher's own listing.
+_MAX_LIST_PAGES = 2500
+
+
 class ProviderError(RuntimeError):
     def __init__(self, message: str, status: int | None = None):
         self.status = status
@@ -199,7 +204,8 @@ class B2:
         session = await self._authorized()
         entries: list[FileInfo] = []
         start: dict[str, str] = {}
-        while True:
+        seen: set[tuple[str, str]] = set()
+        for _ in range(_MAX_LIST_PAGES):
             payload = await self._post("b2_list_file_versions", {
                 "bucketId": session.bucket_id, "prefix": prefix, "maxFileCount": 1000, **start})
             with _shape():
@@ -207,7 +213,12 @@ class B2:
                                      str(item["action"]), dict(item.get("fileInfo") or {})) for item in payload["files"]]
                 if payload.get("nextFileName") is None:
                     return entries
-                start = {"startFileName": payload["nextFileName"], "startFileId": payload["nextFileId"]}
+                cursor = (str(payload["nextFileName"]), str(payload["nextFileId"]))
+            if cursor in seen:
+                raise ProviderUncertain("the provider repeated a listing cursor")
+            seen.add(cursor)
+            start = {"startFileName": cursor[0], "startFileId": cursor[1]}
+        raise ProviderUncertain("the provider listing did not end")
 
     async def file_info(self, file_id: str) -> FileInfo | None:
         try:

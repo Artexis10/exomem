@@ -238,9 +238,11 @@ prefix. The provider deletes each hidden version when the grace period ends, so 
 2. Read the edge's image: `kubectl -n exomem-cloud get deployment exomem-media-edge -o jsonpath='{.spec.template.spec.containers[0].image}'`
    Expect the reviewed digest that `artifactBroker.image` names.
 3. Read the edge's request log around the hide time:
-   `kubectl -n exomem-cloud logs deployment/exomem-media-edge --since=<hours>h | grep "condemn hid"`
+   `kubectl -n exomem-cloud logs deployment/exomem-media-edge --since=<hours>h | grep -e "condemn hid" -e "sent the hide"`
    Each hide that the edge made logs `condemn hid <name> for cell <cell>`. If the edge restarted, add `--previous`.
    A hide that the edge finished after a restart logs `settled write intent` for the cell instead.
+   A hide that the edge sent again logs `write recovery sent the hide of <name> for cell <cell> again`. That name
+   can carry two markers.
 4. List the hide markers of each cell in step 3, as in steps 1 to 4 of "Rescue a hidden version", with
    `prefix` set to `cells/<cell>/`.
 5. If a marker of the burst has no line in step 3, or the image differs, rescue every marker of the burst.

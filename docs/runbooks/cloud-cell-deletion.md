@@ -224,9 +224,11 @@ that explains the alert.
 6. Read the custodian's log: `kubectl -n exomem-key-custody logs deployment/key-custodian --since=24h | grep -e "<cell_id>" -e "deletion grants" -e "hold list" -e "done marks"`
    `deletion grants: <n> relayed entries refused` means that no pinned key verifies a grant. A line for the cell
    names the provider error. No line for the cell means that its namespace `exo-cell-<cell_id>` still exists.
-7. If the cell used the media store, read the edge's log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge --since=24h | grep -e "purge" -e "deletion grants" -e "stay pending"`
+7. If the cell used the media store, read the edge's log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge --since=24h | grep -e "purge" -e "deletion grants" -e "stay pending" -e "still unknown"`
    `the purge pass is off` means that the edge has no list key: create its Secret as [Cloud media edge](cloud-media-edge.md) says.
-   `write intents stay pending` with the cell means that a write for it is still unknown, so the edge waits.
+   `write intents stay pending` with the cell means that a write for it is still unknown, and the edge waits.
+   Every 15 seconds, the edge asks the provider again and sends again a hide that did not land. If the line
+   stays, the `is still unknown` lines for the cell name the provider error.
    No line for the cell means that the edge still admits it: read the active set as step 2 of
    "Turn the edge off" in that runbook says.
 8. If no step explains the alert, treat it as a possible compromise of an executor or its key. Keep the

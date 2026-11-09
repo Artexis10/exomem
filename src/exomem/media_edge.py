@@ -448,14 +448,21 @@ class MediaEdge:
             counts[intent.cell] = counts.get(intent.cell, 0) + 1
         return counts
 
-    async def _resolve(self, intent: Intent) -> Outcome:
-        """Ask the provider what became of a write. Anything short of an answer is unknown."""
+    async def _resolve(self, intent: Intent, *, resend: bool = False) -> Outcome:
+        """Ask the provider what became of a write. Anything short of an answer is unknown. With `resend`, a
+        hide whose name still shows is sent again."""
         try:
             if intent.kind == "hide":
                 # The name's writes and hides are serial, so a hidden name means that this hide landed.
                 if await self.provider.head_name(intent.key) is None:
                     return Outcome(True, intent.file_id)
-                return Outcome(False)  # a name that still shows does not prove that the hide will never land
+                if not resend:
+                    return Outcome(False)  # a name that still shows does not prove that the hide will never land
+                # The intent holds the name, so nothing else wrote to it. Only recovery sends again, after the
+                # first hide had time to land; one that lands even later adds a second marker and hides nothing.
+                await self.provider.hide_file(intent.key)
+                log.info("write recovery sent the hide of %s for cell %s again", intent.key, intent.cell)
+                return Outcome(True, intent.file_id)
             if intent.kind == "small":
                 # Writes to one name are serial, so the newest version is this write's or none of them.
                 head = await self.provider.head_name(intent.key)
@@ -489,7 +496,7 @@ class MediaEdge:
                 continue
             self._resolving.add(intent.id)
             try:
-                outcome = await self._resolve(intent)
+                outcome = await self._resolve(intent, resend=True)
                 if outcome.settled:
                     log.info("settled write intent %s for cell %s with version %s", intent.id, intent.cell, outcome.version)
                     await self._drop(intent)
