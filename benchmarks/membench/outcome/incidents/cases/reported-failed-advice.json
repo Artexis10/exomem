@@ -1,28 +1,28 @@
 {
-  "incident": "2026-11-09: an agent repeated stored advice after the user had reported that it did not work",
+  "incident": "2026-11-09: an agent repeated stored advice after the user had reported that it did not work. The cases reproduce the mechanism with an invented example.",
   "cases": [
     {
       "id": "capture-reported-failure",
       "about": "The user reports that stored advice failed. The note that holds the advice must be corrected in the session.",
       "seed": {
-        "title": "Freeing desktop RAM while gaming",
+        "title": "Speeding up git status in the monorepo",
         "note_type": "insight",
-        "content": "## Findings\n\n- [finding] When the desktop runs low on RAM during a gaming session, run `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` inside WSL to hand the page cache back to Windows.\n"
+        "content": "## Findings\n\n- [finding] When `git status` is slow in the monorepo, run `git config core.untrackedCache true` to cache the untracked-file scan.\n"
       },
-      "prompt": "fyi that drop_caches thing for freeing RAM on my desktop doesn't work. tried it three times while gaming tonight and free memory dropped right back within a minute",
+      "prompt": "fyi that untrackedCache setting for the slow git status in the monorepo doesn't help. tried it on three checkouts today and status still takes about 20 seconds",
       "pass": {
         "seed_body_changed": true
       }
     },
     {
       "id": "recall-before-advice",
-      "about": "The vault holds the corrected advice. An advice question about the user's own machine must recall first and must not repeat the failed step.",
+      "about": "The vault holds the corrected advice. An advice question about the user's own setup must recall first and must not repeat the failed step.",
       "seed": {
-        "title": "Freeing desktop RAM while gaming",
+        "title": "Speeding up git status in the monorepo",
         "note_type": "insight",
-        "content": "## Findings\n\n- [finding] When the desktop runs low on RAM during a gaming session, run `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'` inside WSL to hand the page cache back to Windows.\n\n## Correction (2026-11-08)\n\n- [finding] The `drop_caches` step does not work: tried three times while gaming, and the free memory fell back within a minute. Do not recommend it. What helped instead: `wsl --shutdown` before a session, and a memory cap in `.wslconfig`.\n"
+        "content": "## Findings\n\n- [finding] When `git status` is slow in the monorepo, run `git config core.untrackedCache true` to cache the untracked-file scan.\n\n## Correction (2026-11-08)\n\n- [finding] The `core.untrackedCache` setting does not help: tried on three checkouts, and status still took about 20 seconds. Do not recommend it. What helped instead: `git config core.fsmonitor true`, and a sparse checkout of the services in use.\n"
       },
-      "prompt": "my desktop RAM is low while gaming, what do I do?",
+      "prompt": "git status is really slow in my monorepo, what do I do?",
       "pass": {
         "called_any": [
           "recall_context",
@@ -33,22 +33,22 @@
           "schema": {
             "type": "object",
             "properties": {
-              "recommends_drop_caches": {
+              "recommends_untracked_cache": {
                 "type": "boolean",
-                "description": "True if the answer tells the user to drop or flush the Linux page cache (drop_caches or an equivalent) as a step to try."
+                "description": "True if the answer tells the user to enable git's untracked cache (core.untrackedCache or `git update-index --untracked-cache`) as a step to try."
               },
               "reason": {
                 "type": "string"
               }
             },
             "required": [
-              "recommends_drop_caches",
+              "recommends_untracked_cache",
               "reason"
             ],
             "additionalProperties": false
           },
           "require": {
-            "recommends_drop_caches": false
+            "recommends_untracked_cache": false
           }
         }
       }
