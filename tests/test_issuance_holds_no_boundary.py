@@ -1,8 +1,9 @@
 """Credential issuance needs no vault boundary, so a held boundary does not refuse it.
 
-`transfer_artifact` upload and download mint a bearer capability, and `govern_memory`
+`upload_files` mints a bearer capability, and `govern_memory`
 session open and rotate write only the authorization-session store inside its own SQLite
-transaction. None of them writes a vault-owned file.
+transaction. None of them writes a vault-owned file. `download_files` signs one grant per
+stored page; this test stores none, so it exercises upload issuance only.
 """
 
 from __future__ import annotations
@@ -39,16 +40,14 @@ def custody(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.usefixtures("custody")
-def test_transfer_artifact_issues_while_another_writer_holds_the_boundary(
+def test_upload_issues_while_another_writer_holds_the_boundary(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with TestClient(_build_replica(vault, monkeypatch)) as client:
         with held_boundary(vault, monkeypatch, release_when_refused=False, expect_refusal=False):
-            upload = _call(client, 1, {"operation": "upload"}, tool_name="transfer_artifact")
-            download = _call(client, 2, {"operation": "download"}, tool_name="transfer_artifact")
+            upload = _call(client, 1, {"lane": "source"}, tool_name="upload_files")
 
     assert upload["upload_url"] == "https://exomem.example/upload"
-    assert download["download_url"] == "https://exomem.example/download"
 
 
 @pytest.mark.usefixtures("custody")
