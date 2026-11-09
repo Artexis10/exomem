@@ -1,0 +1,118 @@
+"""Which epistemic dimensions a unit belongs to.
+
+A dimension is registry data (`semantic_labels.DIMENSIONS`): a key with members, which are
+relation families, unit kinds and governed unit-metadata keys. This module is the one place that
+applies the membership rule. Nothing here names a dimension, a family, a kind or a key; every
+word comes from the registries, so a vault dimension needs no code.
+
+A unit belongs to a dimension when its kind is a member, when it carries a member key, or when it
+is an endpoint of an edge whose relation family is a member. A family comes from the relation
+registry entry: a core key's own, a vault extension's parent's, never a saved family.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass
+
+from . import semantic_labels
+from .relation_registry import RelationRegistry
+from .semantic_language_registry import SemanticLanguageRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class DimensionMembership:
+    """The registries' dimensions folded into lookups, built once per request.
+
+    Building reads the registries; `of` reads only these lookups, so a request that tests many
+    units pays for the registries once.
+    """
+
+    relations: RelationRegistry
+    # Each member list inverted: the dimensions a kind, a metadata key or a family belongs to.
+    by_kind: Mapping[str, frozenset[str]]
+    by_key: Mapping[str, frozenset[str]]
+    by_family: Mapping[str, frozenset[str]]
+    # The dimensions whose `kinds` holds the wildcard, and the kinds the page's registry has.
+    every_kind: frozenset[str]
+    known_kinds: frozenset[str]
+
+    @property
+    def needs_edges(self) -> bool:
+        """Whether any dimension here has a family member, so a unit's edges can change its
+        membership. A reader that has no edges to give skips the edge read when this is false."""
+        return bool(self.by_family)
+
+    def of(
+        self,
+        *,
+        kind: str,
+        row_keys: Collection[str] = (),
+        edge_relations: Iterable[str] = (),
+    ) -> frozenset[str]:
+        """The dimensions a unit belongs to.
+
+        `kind` is the unit's resolved kind key, `row_keys` the keys of the rows it carries and
+        `edge_relations` the relation keys of every edge that has the unit as an endpoint. A unit
+        can belong to several dimensions, and to none.
+        """
+        found = set(self.by_kind.get(kind, ()))
+        if kind in self.known_kinds:
+            found |= self.every_kind
+        for key in row_keys:
+            found |= self.by_key.get(key, frozenset())
+        for relation in edge_relations:
+            family = self.relations.family_of(relation)
+            if family is not None:
+                found |= self.by_family.get(family, frozenset())
+        return frozenset(found)
+
+
+def membership(
+    language: SemanticLanguageRegistry,
+    relations: RelationRegistry,
+    *,
+    only: Collection[str] | None = None,
+) -> DimensionMembership:
+    """The membership lookups of the dimensions `language` has, or only those named in `only`."""
+    by: dict[str, dict[str, set[str]]] = {name: {} for name in semantic_labels.MEMBER_LISTS}
+    every_kind: set[str] = set()
+    for key, dimension in language.label_definitions(semantic_labels.DIMENSIONS).items():
+        if only is not None and key not in only:
+            continue
+        for list_name, values in dimension.members:
+            for value in values:
+                if list_name == "kinds" and value == semantic_labels.ALL_KINDS:
+                    every_kind.add(key)
+                else:
+                    by[list_name].setdefault(value, set()).add(key)
+    frozen = {
+        name: {value: frozenset(keys) for value, keys in lookup.items()}
+        for name, lookup in by.items()
+    }
+    return DimensionMembership(
+        relations=relations,
+        by_kind=frozen["kinds"],
+        by_key=frozen["keys"],
+        by_family=frozen["families"],
+        every_kind=frozenset(every_kind),
+        known_kinds=frozenset((*language.core_kinds, *language.kinds)),
+    )
+
+
+def dimensions_of(
+    unit: object,
+    *,
+    language: SemanticLanguageRegistry,
+    relations: RelationRegistry,
+    edge_relations: Iterable[str] = (),
+) -> frozenset[str]:
+    """`DimensionMembership.of` for one parsed unit, building the lookups for this call.
+
+    A reader that tests many units builds `membership` once instead.
+    """
+    return membership(language, relations).of(
+        kind=str(getattr(unit, "kind", "")),
+        row_keys=tuple(getattr(unit, "metadata", None) or ()),
+        edge_relations=edge_relations,
+    )
