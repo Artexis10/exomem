@@ -310,6 +310,21 @@ def _collector() -> DisclosureCollector | None:
     return _DISCLOSURE_COLLECTOR.get()
 
 
+@contextmanager
+def decide_without_receipt() -> Iterator[None]:
+    """Decide as the request would, but record no outcome and claim no path outcome.
+
+    For a lookup that releases nothing, such as resolving a title to a page. A receipt row claims its
+    path once, so a lookup's row would be the one kept and would hide the page's own, later release row
+    with its hash, size and ref.
+    """
+    token = _DISCLOSURE_COLLECTOR.set(None)
+    try:
+        yield
+    finally:
+        _DISCLOSURE_COLLECTOR.reset(token)
+
+
 def _record_outcome(value: Mapping[str, Any]) -> None:
     collector = _collector()
     if collector is None:

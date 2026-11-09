@@ -1861,7 +1861,6 @@ def test_bound_remember_replays_after_terminal_acknowledgement_loss(
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
     monkeypatch.setattr(command_surface, "mcp_retry_scope", lambda: "principal:test")
 
-    kwargs["response_detail"] = "full"
     with pytest.raises(asyncio.CancelledError):
         bound(**kwargs)
     replay = bound(**kwargs, response_detail="full")

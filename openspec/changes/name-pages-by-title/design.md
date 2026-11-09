@@ -12,7 +12,7 @@ Design basis: the team's primary-source roster, row "The model keeps misusing a 
 
 ### Disclosure comes first
 
-The visibility filter runs before anything is counted or read. A withheld duplicate never makes a title ambiguous and never appears as a candidate. A title that only withheld pages hold resolves to nothing, so it refuses exactly like an unknown title. For `anchor`, anything but exactly one eligible page becomes the one existing anchor refusal. Each hidden duplicate costs one more visibility call; the same class of timing difference is already accepted for refs.
+The visibility filter runs before anything is counted or read. A withheld duplicate never makes a title ambiguous and never appears as a candidate. A title that only withheld pages hold resolves to nothing, so it refuses exactly like an unknown title. For `anchor`, anything but exactly one eligible page becomes the one existing anchor refusal. Each hidden duplicate costs one more visibility call; the same class of timing difference is already accepted for refs. These lookup decisions record no disclosure receipt. A receipt row claims its path once, so a lookup row would hide the release row of the page the call then reads, and that row would lose its hash, size and ref.
 
 ### The id is a format, not a vocabulary
 

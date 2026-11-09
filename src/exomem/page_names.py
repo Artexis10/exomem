@@ -105,13 +105,14 @@ def _names_a_file(root: Path, raw: str, visible: Callable[[str], bool] | None) -
     would be in a vault without the file.
     """
     stem = raw.removesuffix(".md")
-    for base in ("", kb_prefix()):
-        for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
-            try:
-                if (root / candidate).is_file() and (visible is None or visible(candidate)):
-                    return True
-            except (OSError, ValueError):
-                return False
+    with egress.decide_without_receipt():
+        for base in ("", kb_prefix()):
+            for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
+                try:
+                    if (root / candidate).is_file() and (visible is None or visible(candidate)):
+                        return True
+                except (OSError, ValueError):
+                    return False
     return False
 
 
@@ -132,33 +133,34 @@ def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
     # they narrow the owners before each survivor is checked in full.
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
     paths: set[str] = set()
-    for owner in _identity_owners(root, serve_stale):
-        if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
-            continue
-        try:
-            paths.add(
-                egress.resolve_visible_identifier(
-                    root, memory_refs.memory_ref(owner), serve_stale=serve_stale
+    with egress.decide_without_receipt():
+        for owner in _identity_owners(root, serve_stale):
+            if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
+                continue
+            try:
+                paths.add(
+                    egress.resolve_visible_identifier(
+                        root, memory_refs.memory_ref(owner), serve_stale=serve_stale
+                    )
                 )
-            )
-        except memory_refs.ReferenceError as exc:
-            if exc.code == "AMBIGUOUS_REFERENCE":
-                raise ValueError(f"{exc.code}: {exc.reason}") from exc
-            # Held only by pages this caller may not see, or by none that exists now.
-            continue
-    if paths:
-        return sorted(paths)
-    # A page with no id of its own is named by a hash of its path.
-    resolver = find.shared_resolver(root)
-    visible = egress.visible_page_filter(root)
-    return sorted(
-        candidate.path
-        for candidates in resolver.candidates_by_key.values()
-        for candidate in candidates
-        if page_ids.id_head(None, candidate.path) == head
-        and (visible is None or visible(candidate.path))
-        and _carries_head(root, candidate.path, head)
-    )
+            except memory_refs.ReferenceError as exc:
+                if exc.code == "AMBIGUOUS_REFERENCE":
+                    raise ValueError(f"{exc.code}: {exc.reason}") from exc
+                # Held only by pages this caller may not see, or by none that exists now.
+                continue
+        if paths:
+            return sorted(paths)
+        # A page with no id of its own is named by a hash of its path.
+        resolver = find.shared_resolver(root)
+        visible = egress.visible_page_filter(root)
+        return sorted(
+            candidate.path
+            for candidates in resolver.candidates_by_key.values()
+            for candidate in candidates
+            if page_ids.id_head(None, candidate.path) == head
+            and (visible is None or visible(candidate.path))
+            and _carries_head(root, candidate.path, head)
+        )
 
 
 def _carries_head(root: Path, rel_path: str, head: str) -> bool:
@@ -240,12 +242,13 @@ def resolve_page(
         # No page holds that id: the value may still be a title of the same shape.
     key = vault.title_key(raw)
     resolver = find.shared_resolver(root)
-    matches = vault.wikilink_candidates(
-        resolver.candidates_by_key,
-        resolver.titles.get(key, ()),
-        title_key=key,
-        visible=visible,
-    )
+    with egress.decide_without_receipt():
+        matches = vault.wikilink_candidates(
+            resolver.candidates_by_key,
+            resolver.titles.get(key, ()),
+            title_key=key,
+            visible=visible,
+        )
     # A page the vault never serves is no page: it counts for nothing, as an unknown title does.
     paths = [
         match.path for match in matches if not reserved_paths.classify_logical(match.path).blocked
