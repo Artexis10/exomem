@@ -502,17 +502,15 @@ def stored_part(root, number):
     return rel
 
 
-def test_retiring_a_stored_part_page_refuses_by_name_and_changes_nothing(served):
-    """A retire that unlinks the projection of a part page and leaves the stored page behind."""
+def test_retiring_a_stored_part_page_keeps_it_and_names_it_without_raising(served):
+    """A retire after the parent commit that raises, or unlinks the file and keeps the page."""
     part = stored_part(served, 3)
     before = tree(served)
     start = revision(served)
 
-    with pytest.raises(OpError) as refused:
-        extraction_parts.retire(served, (served / part,))
+    kept = extraction_parts.retire(served, (served / part,))
 
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "part page retirement" in refused.value.message
+    assert kept == (part,)
     assert revision(served) == start
     assert tree(served) == before
     assert read.owned_bytes(served, part) == b"# Part 3\n"
