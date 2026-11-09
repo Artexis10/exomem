@@ -9457,7 +9457,8 @@ class EpistemicGraphIndex:
                 {
                     "from": str(source),
                     "to": target_rel,
-                    # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
+                    # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already
+                    # names the relation.
                     "relation_type": "links_to",
                     "method": "wikilink",
                     "evidence": evidence,
@@ -12470,7 +12471,8 @@ def _page_level_edges(
         edges.append(
             page_edge(
                 file_key,
-                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
+                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already
+                # names the relation.
                 _file_key(observation["target_path"]),
                 "links_to",
                 "wikilink",
@@ -14276,7 +14278,8 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
             {
                 "from": rel_path,
                 "to": _page_rel(canonical),
-                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
+                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already
+                # names the relation.
                 "relation_type": "links_to",
                 "method": "wikilink",
                 "evidence": {"source_path": rel_path, "target": target},
@@ -14322,7 +14325,8 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
         view = GraphView(vault_root, conn)
         _field, relation = declared_sources_binding()
         labels = sorted(_labels_of(view, [relation]))
-        # Debt (drifted copy): the relation_queue copy reads the field only; a fold changes suggestions.
+        # Debt (drifted copy): the relation_queue copy reads the field only; a fold changes
+        # suggestions.
         # Every edge that states the Sources relation, whatever its origin. An extension of it
         # is stored by its raw label, so the label list finds it and the authoring page's own
         # registry decides what it means.
@@ -15089,7 +15093,8 @@ def _draft_wikilink_candidates(
             {
                 "from": pseudo,
                 "to": _page_rel(canonical),
-                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
+                # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already
+                # names the relation.
                 "relation_type": "links_to",
                 "method": "wikilink",
                 "evidence": {"target": target},

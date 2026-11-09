@@ -132,7 +132,8 @@ def assemble_context(
             {
                 "path": page.rel_path,
                 "status": page.status,
-                # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
+                # Debt (K21): naming the field is sound; "a successor pointer means not current"
+                # repeats here.
                 "supersedes": _link_values(page.frontmatter.get("supersedes")),
                 "superseded_by": _link_values(page.frontmatter.get("superseded_by")),
             }

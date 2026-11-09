@@ -45,7 +45,8 @@ _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 #: that code reads it through `RelationRegistry.behaviours_of` and `keys_with`. Adding a member
 #: is a code change and a schema change, because a behaviour is a promise code keeps; the pack
 #: assigns members to core relations and a pack that names another fails the build.
-RELATION_BEHAVIOURS = frozenset(  # nosemgrep: ep-word-set -- the closed set this schema declares and code implements, not text to interpret
+# nosemgrep: ep-word-set -- the closed set this schema declares and code implements, not text
+RELATION_BEHAVIOURS = frozenset(
     (
         "lifts",
         "membership",
@@ -1554,7 +1555,8 @@ def _core_only_detail() -> str:
     """What to change when an extension sets a field only the shipped core pack sets."""
     return (
         f"only the shipped core pack sets {' and '.join(_CORE_ONLY_FIELDS)}; an extension takes "
-        "its parent's behaviours and binds no frontmatter field; remove the field from the extension"
+        "its parent's behaviours and binds no frontmatter field; remove the field from the "
+        "extension"
     )
 
 
