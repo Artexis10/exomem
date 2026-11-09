@@ -35,6 +35,7 @@ from . import (
     fold_leaf,
     frontmatter_update,
     memory_refs,
+    originals,
     preserve,
     provenance,
     semantic_writes,
@@ -91,10 +92,10 @@ def _page_row(value: Any, where: str) -> dict[str, Any]:
         raise fold_leaf.invalid(where, "has an invalid page row")
     chain, delta = value["chain"], value["delta"]
     if (
-        not fold_leaf.is_hex64(value["before"])
-        or not fold_leaf.is_hex64(value["after"])
+        not originals.is_sha256(value["before"])
+        or not originals.is_sha256(value["after"])
         or not isinstance(chain, list)
-        or not all(fold_leaf.is_hex64(item) for item in chain)
+        or not all(originals.is_sha256(item) for item in chain)
         or value["before"] not in chain
         or value["after"] not in chain
         or not isinstance(delta, list)
@@ -124,7 +125,7 @@ def _manifest(value: Any, where: str) -> dict[str, Any]:
     copy = curation.normalize_target_path(value["copy"], field=where, allow_fold=True)
     if [rows[0]["path"], rows[1]["path"]] != [canonical, copy]:
         raise fold_leaf.invalid(where, "does not list its canonical page and copy first")
-    if not fold_leaf.is_hex64(value["payload"]):
+    if not originals.is_sha256(value["payload"]):
         raise fold_leaf.invalid(where, "has an invalid payload hash")
     curation._require_string(value["lane"], f"{where}.lane")  # noqa: SLF001
     try:
@@ -133,7 +134,7 @@ def _manifest(value: Any, where: str) -> dict[str, Any]:
         raise fold_leaf.invalid(where, "has an invalid time") from error
     artifact = value["artifact"]
     if artifact is not None:
-        if not isinstance(artifact, Mapping) or set(artifact) != _ARTIFACT_FIELDS or not fold_leaf.is_hex64(artifact["hash"]):
+        if not isinstance(artifact, Mapping) or set(artifact) != _ARTIFACT_FIELDS or not originals.is_sha256(artifact["hash"]):
             raise fold_leaf.invalid(where, "has an invalid original")
         artifact = {
             **artifact,
@@ -230,6 +231,18 @@ def _payload(path: str, text: str) -> duplicates.PagePayload:
     return payload
 
 
+def _identical(
+    canonical: tuple[str, str], copy: tuple[str, str], *, code: str
+) -> tuple[duplicates.PagePayload, duplicates.PagePayload]:
+    """Both payloads, once they agree on lane, form and hash. `code` is how a mismatch refuses."""
+    kept, retired = _payload(*canonical), _payload(*copy)
+    if kept.lane != retired.lane:
+        raise fold_leaf.refuse(code, "a Source and an Evidence page never fold into each other")
+    if kept.sha256 != retired.sha256 or (kept.artifact_path is None) != (retired.artifact_path is None):
+        raise fold_leaf.refuse(code, "the two pages do not hold identical bytes")
+    return kept, retired
+
+
 def _pair(
     vault_root: Path, canonical: tuple[str, str], copy: tuple[str, str], *, code: str
 ) -> tuple[duplicates.PagePayload, duplicates.PagePayload]:
@@ -238,15 +251,26 @@ def _pair(
     `code` is how a mismatch refuses: a request that never held (`CURATION_STEP_INVALID`) or a sealed
     binding that stopped holding (`CURATION_BINDING_STALE`).
     """
-    kept, retired = _payload(*canonical), _payload(*copy)
-    if kept.lane != retired.lane:
-        raise fold_leaf.refuse(code, "a Source and an Evidence page never fold into each other")
-    if kept.sha256 != retired.sha256 or (kept.artifact_path is None) != (retired.artifact_path is None):
-        raise fold_leaf.refuse(code, "the two pages do not hold identical bytes")
+    kept, retired = _identical(canonical, copy, code=code)
     for path, payload in ((canonical[0], kept), (copy[0], retired)):
         if payload.artifact_path is not None and not duplicates.original_intact(vault_root, path, payload):
             raise fold_leaf.refuse(code, f"the original of {path!r} no longer hashes to the payload the page records")
     return kept, retired
+
+
+def pair_refusal(vault_root: Path, canonical: tuple[str, str], copy: tuple[str, str]) -> CurationError | None:
+    """Why `prepare` refuses these two pages whatever else cites them, or None when it may fold them.
+
+    The audit asks this for every step it suggests, so a finding never offers a step that proposal refuses. It runs
+    the checks of `prepare` that read the two pages alone (`_identical` and `_merge`), and leaves out the re-hash of
+    the originals, which the audit has already done.
+    """
+    try:
+        kept, _ = _identical(canonical, copy, code="CURATION_STEP_INVALID")
+        _merge(vault_root, lane=kept.lane, canonical=canonical, copy=copy)
+    except CurationError as error:
+        return error
+    return None
 
 
 # ---------------------------------------------------------------- the merge onto the canonical page

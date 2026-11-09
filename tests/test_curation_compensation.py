@@ -291,6 +291,7 @@ def test_fold_compensation_restores_every_episode_file_and_history_byte_for_byte
     episode_before = {path: (vault / path).read_bytes() for path in pages}
     history = vault / compiled_history.history_root()
     history_before = {path: path.read_bytes() for path in history.rglob("*.json")}
+    directories_before = {path for path in history.rglob("*") if path.is_dir()}
     proposed = _propose(vault, _fold_step(pages, vault))
     _apply(vault, proposed)
     assert len(list(history.rglob("*.json"))) == len(history_before) + 4
@@ -308,6 +309,8 @@ def test_fold_compensation_restores_every_episode_file_and_history_byte_for_byte
     assert undone["phase"] == "compensated"
     assert {path: (vault / path).read_bytes() for path in pages} == episode_before
     assert {path: path.read_bytes() for path in history.rglob("*.json")} == history_before
+    # The fold made the directory of each revision's history, and undo removes what ended empty.
+    assert {path for path in history.rglob("*") if path.is_dir()} == directories_before
     retired = [
         json.loads(path.read_text(encoding="utf-8"))
         for path in (vault / "Knowledge Base/_trash").rglob("*.json")
@@ -368,6 +371,10 @@ def test_duplicate_fold_compensation_restores_every_page_and_original_byte_for_b
         *(page.removesuffix(".md") for page in (canonical, first, second)),
     ]
     before = {path: (vault / path).read_bytes() for path in watched}
+    # The atomic writer stages a file at 0600; a vault's pages usually carry the mode their editor gave them.
+    for path in watched:
+        (vault / path).chmod(0o644)
+    modes_before = {path: (vault / path).stat().st_mode for path in watched}
     proposed = _propose(
         vault,
         _fold_duplicate_step(vault, canonical, first, step_id="first"),
@@ -389,3 +396,5 @@ def test_duplicate_fold_compensation_restores_every_page_and_original_byte_for_b
         undone = curation.resume(vault, run_id=proposed["run_id"], plan_id=compensation["plan_id"])
 
     assert {path: (vault / path).read_bytes() for path in watched} == before
+    # A guarded rewrite and its undo keep each file's permissions.
+    assert {path: (vault / path).stat().st_mode for path in watched} == modes_before

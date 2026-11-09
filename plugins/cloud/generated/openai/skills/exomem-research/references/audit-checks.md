@@ -86,16 +86,27 @@ again and re-hashes its original, so a stale index entry gives no finding.
   Evidence page or another owner's page) cites another member: that member is
   then the canonical page. `meta.canonical_because` says which rule applied.
 - A finding offers no step when `meta.no_fold` gives a reason: the group spans
-  lanes, the pages are raw-protected, or two or more members are cited by pages
-  the fold cannot rewrite. Raw-protected Evidence is never rewritten, because a
-  release grant binds to each page's content hash.
+  lanes, the pages are raw-protected, two or more members are cited by pages
+  the fold cannot rewrite, or the fold refuses a pair (a text Source beside a
+  Source with an original, or an Evidence page outside its family folders).
+  Raw-protected Evidence is never rewritten, because a release grant binds to
+  each page's content hash. A step appears only when proposal accepts it.
+- A caller who cannot read every page sees only the members it can read, gets
+  no step (a fold needs whole-namespace authority), and learns nothing about
+  which unreadable page cites a member: its answer equals that of a vault
+  without those pages.
 - `duplicate_source_url` reports one finding per group of Sources that share a
   canonical URL but hold different text. It names them and offers no fold: link
   the Sources or supersede one through the normal tools.
 
 The report counts groups and copies by lane and states that each count was
-re-hashed. An index that cannot answer reads as `unchecked` with coverage
-`unknown`, never as zero findings. Propose the steps of one finding as a single
+re-hashed. Before it counts, the audit reconciles the index with the pages and
+calls the index `complete` only after that succeeds. `stale_index_groups`
+counts groups whose entries no longer match their pages. `unverifiable_groups`
+counts groups of raw-protected pages that lack the binding which proves their
+original, with the reason in `unverifiable_because`. An index that cannot answer
+(a new or rebuilding index answers this way until its background rebuild
+lands) reads as `unchecked` with coverage `unknown`, never as zero findings. Propose the steps of one finding as a single
 curation plan, keep or change its canonical page, then preview and confirm the
 exact plan ([vault-care](vault-care.md#curation)).
 

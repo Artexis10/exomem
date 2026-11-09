@@ -936,11 +936,140 @@ def test_a_group_that_must_not_fold_is_reported_with_its_reason_and_no_step(vaul
     assert ("both lanes" in finding["meta"]["no_fold"]) == (setup == "across both lanes")
 
 
+def _external_caller_who_cannot_read_sources(vault: Path):
+    """A new request scope for an external caller who may read every page of a governed vault except the Sources lane."""
+    from test_governance_egress import EXTERNAL, write_rule, write_scope
+
+    from exomem.governance import egress, membership, policy
+    from exomem.governance.principal import RequestPrincipal, request_scope
+
+    write_scope(vault, paths="Sources/**", name="Sources")
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    return request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp"))
+
+
+def _restricted_duplicate_answer(vault: Path) -> tuple[list[dict], dict]:
+    from exomem import duplicate_audit
+
+    findings, report, _ = duplicate_audit.check(vault, {"duplicate_content"})
+    return [finding.as_dict() for finding in findings], report
+
+
+def test_a_page_the_caller_cannot_read_changes_nothing_in_a_restricted_audit(vault: Path) -> None:
+    """A withheld Source that cites a copy must not show: the restricted answer equals the answer of a vault without it."""
+    from duplicate_fixtures import source_filing
+
+    pages = _three_photos(vault)
+    with _external_caller_who_cannot_read_sources(vault):
+        without_the_source = _restricted_duplicate_answer(vault)
+    with library_scope():
+        source_filing(vault, "citer", f"See [[{pages[2].removesuffix('.md')}]] for the photo.")
+        owner = _duplicate_audit(vault, "duplicate_content")["findings"][0]["meta"]
+    with _external_caller_who_cannot_read_sources(vault):
+        with_the_source = _restricted_duplicate_answer(vault)
+
+    assert with_the_source == without_the_source
+    [finding] = with_the_source[0]
+    assert [member["path"] for member in finding["meta"]["members"]] == pages
+    assert finding["meta"]["steps"] == [] and "whole-namespace authority" in finding["meta"]["no_fold"]
+    assert owner["suggested_canonical"] == pages[2], "the owner does see the citation, so it is the withheld Source that the restricted answer hides"
+
+
+def test_a_restricted_audit_counts_only_the_copies_the_caller_can_read(vault: Path) -> None:
+    """One readable copy beside a withheld one is no group at all for that caller."""
+    from duplicate_fixtures import source_filing
+
+    data = b"the notice text"
+    source_filing(vault, "kept-readable", "Opening line.", original=data)
+    withheld = source_filing(vault, "kept-withheld", "Opening line.", original=data)
+    with library_scope():
+        assert len(_duplicate_audit(vault, "duplicate_content")["findings"]) == 1
+    with _external_caller_who_cannot_read_sources(vault):
+        findings, report = _restricted_duplicate_answer(vault)
+
+    assert findings == [] and withheld
+    assert report["content"] == {} and report["stale_index_groups"] == 0
+
+
+def test_a_text_source_and_a_source_with_an_original_hold_identical_bytes_but_never_fold(vault: Path) -> None:
+    """The fold refuses to merge the two forms, so the audit lists the group and offers no step."""
+    from duplicate_fixtures import source_filing
+
+    text = "The exact notice text."
+    as_text = source_filing(vault, "as-text", text, captured="2026-01-01")
+    as_file = source_filing(vault, "as-file", "A caption.", original=text.encode(), captured="2026-02-01")
+
+    [finding] = _duplicate_audit(vault, "duplicate_content")["findings"]
+
+    assert sorted(finding["paths"]) == sorted([as_text, as_file])
+    assert finding["meta"]["steps"] == []
+    assert "identical bytes" in finding["meta"]["no_fold"]
+
+
+def test_an_evidence_page_outside_the_family_folders_gives_a_finding_with_no_step_and_a_reason(vault: Path) -> None:
+    """A fold of two Evidence pages needs both in a family folder: the audit must not offer a step that proposal refuses."""
+    from exomem import lexstore
+
+    pages = _three_photos(vault)
+    family, loose = pages[2].rpartition("/")[0], "Knowledge Base/Evidence/Case"
+    for name in (pages[2], pages[2].removesuffix(".md")):
+        (vault / name).rename(vault / loose / name.rpartition("/")[2])
+    moved = vault / loose / pages[2].rpartition("/")[2]
+    moved.write_text(moved.read_text(encoding="utf-8").replace(family, loose), encoding="utf-8")
+    lexstore.clear_stores()  # the audit reconciles the index with the pages it finds
+
+    [finding] = _duplicate_audit(vault, "duplicate_content")["findings"]
+
+    assert finding["meta"]["steps"] == []
+    assert "family folders" in finding["meta"]["no_fold"]
+
+
+def test_a_row_lost_from_the_index_is_reconciled_before_the_audit_counts(vault: Path) -> None:
+    """The index only proposes groups, so a lost row must never read as a complete answer with a short count."""
+    import sqlite3
+    from contextlib import closing
+
+    from exomem import lexstore
+
+    pages = _three_photos(vault)
+    with closing(sqlite3.connect(lexstore.lexical_path(vault))) as conn:
+        conn.execute("DELETE FROM pages WHERE path = ?", (pages[2],))
+        conn.commit()
+    lexstore.clear_stores()  # a restarted process opens the catalogue with the row gone
+
+    result = _duplicate_audit(vault, "duplicate_content")
+
+    assert result["metadata"]["duplicates"]["index"] == "complete"
+    assert result["metadata"]["duplicates"]["content"] == {"Evidence": {"groups": 1, "copies": 2, "verified": "re-hashed"}}
+
+
+def test_a_protected_group_without_a_matching_binding_is_unverifiable_not_stale(vault: Path) -> None:
+    """The owner can read the pages but nothing proves their originals, which is not the index being out of date."""
+    from duplicate_fixtures import evidence_filing
+
+    data = b"\x89PNG photo of the notice"
+    with library_scope():
+        evidence_filing(vault, "Case", "letters", "notice.png", data, protected=True)
+        damaged = evidence_filing(vault, "Case", "exhibits", "exhibit-a.png", data, protected=True)
+    text = (vault / damaged).read_text(encoding="utf-8")
+    digest = text.split("artifact_sha256: ", 1)[1][:64]
+    # The protection block comes first in the page: only its digest stops matching the page's payload.
+    (vault / damaged).write_text(text.replace(digest, "0" * 64, 1), encoding="utf-8")
+
+    duplicates = _duplicate_audit(vault, "duplicate_content")["metadata"]["duplicates"]
+
+    assert duplicates["unverifiable_groups"] == 1 and duplicates["stale_index_groups"] == 0
+    assert "raw-protection binding" in duplicates["unverifiable_because"]
+
+
 def test_an_index_that_cannot_answer_reads_as_unchecked_never_as_zero(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import lexstore
 
     _three_photos(vault)
-    monkeypatch.setattr(lexstore, "payload_groups", lambda _root: None)
+    monkeypatch.setattr(lexstore, "duplicate_groups", lambda _root: None)
 
     result = _duplicate_audit(vault, "duplicate_content")
 

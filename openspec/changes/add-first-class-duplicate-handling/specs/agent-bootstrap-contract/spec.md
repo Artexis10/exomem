@@ -123,3 +123,14 @@ A vault whose episodes hold several revision files SHALL keep working after upgr
 
 - **WHEN** an owner applies a recap fold to an episode whose superseded revision a compiled note cites
 - **THEN** the citing note's reference still resolves to the cited text before, during and after the step
+
+#### Scenario: A folded episode reads back whole under an access policy
+
+- **WHEN** a caller who may read the live page reads its history after a recap fold, in a vault with an access policy
+- **THEN** every history entry that the fold wrote is released, even though each entry's `superseded_by` link names a revision that the fold moved to the trash
+- **AND** the entry bytes are exactly the bytes that were stored
+
+#### Scenario: Compensation leaves the tree as it found it
+
+- **WHEN** an owner compensates a fold
+- **THEN** each rewritten page keeps its file permissions, and each history directory that the fold created and that ends empty is removed

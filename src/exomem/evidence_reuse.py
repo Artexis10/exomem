@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import duplicates, frontmatter_update, preserve
 from .held_fs import vault_name_key
@@ -101,7 +101,37 @@ def already_in_family(vault_root: Path, *, scope: str, category: str, sha256: st
     return hit is not None and families is not None and any(same_family(pair, wanted) for pair in families)
 
 
-def reuse(vault_root: Path, *, scope: str, category: str, sha256: str, protected: bool) -> EvidenceLookup:
+def _stored_description(text: str) -> str | None:
+    """The caption that the page's `## Description` section holds, or None when it has none."""
+    marker = "\n## Description\n\n"
+    at = text.find(marker)
+    if at == -1:
+        return None
+    return text[at + len(marker):].partition("\n## ")[0].strip() or None
+
+
+def _not_applied(hit: duplicates.Duplicate, *, filename: str, description: str | None) -> tuple[dict[str, str | None], ...]:
+    """The caller-provided filename and description that the earlier page does not hold, in the shape capture reuse names them.
+
+    A field the caller omitted, or that equals the kept value, is not listed. The scope and category are
+    applied: the page lists that family.
+    """
+    kept_name = PurePosixPath(hit.payload.artifact_path or "").name
+    provided_name = preserve._sanitize_filename(filename)  # noqa: SLF001 - the stored name's own derivation
+    caption = description.strip() if description and description.strip() else None
+    return tuple(
+        {"field": name, "provided": provided, "kept": kept}
+        for name, provided, kept in (
+            ("filename", provided_name or None, kept_name or None),
+            ("description", caption, _stored_description(hit.payload.text)),
+        )
+        if provided is not None and provided != kept
+    )
+
+
+def reuse(
+    vault_root: Path, *, scope: str, category: str, sha256: str, protected: bool, filename: str, description: str | None = None
+) -> EvidenceLookup:
     """The Evidence page that already holds these bytes, with the requested family listed on it.
 
     Called under the door's mutation boundary hold, which also covers the store that follows a miss. The
@@ -119,7 +149,8 @@ def reuse(vault_root: Path, *, scope: str, category: str, sha256: str, protected
     if families is None:
         return EvidenceLookup()
     duplicate = DuplicateArtifact(
-        hash=sha256, path=hit.payload.artifact_path or "", sidecar_path=hit.path, ref=hit.ref, families=families
+        hash=sha256, path=hit.payload.artifact_path or "", sidecar_path=hit.path, ref=hit.ref, families=families,
+        fields_not_applied=_not_applied(hit, filename=filename, description=description),
     )
     if any(same_family(pair, wanted) for pair in families):
         return EvidenceLookup(duplicate)

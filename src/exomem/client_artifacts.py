@@ -1559,6 +1559,7 @@ def _preserve_evidence_adoption(
                     # another key, name or family, cannot both find nothing.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
+                        filename=artifact.filename,
                     )
                     duplicate = held.duplicate
                     if duplicate is None:
@@ -1884,6 +1885,7 @@ def preserve_artifacts(
                     # that stores a miss.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
+                        filename=artifact.filename,
                     )
                     if held.duplicate is None:
                         with artifact.path.open("rb") as stream:
@@ -1910,22 +1912,9 @@ def preserve_artifacts(
                 if _wrote(held.duplicate):
                     mark_active_mutation_committed()
                 if held.duplicate is not None:
-                    duplicate = held.duplicate
                     outcomes[index] = {
                         "file_id": artifact.file_id,
-                        "outcome": "stored",
-                        "state": "already_stored",
-                        "duplicate_of": {"path": duplicate.path, "ref": duplicate.ref},
-                        "stored_path": duplicate.path,
-                        "path": duplicate.path,
-                        "ref": duplicate.ref,
-                        "size": artifact.size,
-                        "hash": artifact.sha256,
-                        "hash_algorithm": "sha256",
-                        "media_id": f"sha256:{artifact.sha256}",
-                        "content_type": artifact.content_type,
-                        "warnings": [],
-                        **duplicate.family_fields(),
+                        **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
                     if index in transcribed:
                         outcomes[index]["transcription"] = {

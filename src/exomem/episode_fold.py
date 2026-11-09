@@ -29,6 +29,7 @@ from . import (
     episode_memory,
     fold_leaf,
     memory_refs,
+    originals,
     recap_folder,
     source_closure,
     source_taxonomy,
@@ -74,7 +75,7 @@ def _manifest(value: Any, where: str) -> dict[str, Any]:
         raise fold_leaf.invalid(where, "is not a sealed fold manifest")
     head, revisions = value["head"], value["revisions"]
     # nosemgrep: ep-word-set -- the sealed head's own field names, fixed by the manifest this module writes.
-    if not isinstance(head, Mapping) or set(head) != {"path", "hash"} or not fold_leaf.is_hex64(head["hash"]):
+    if not isinstance(head, Mapping) or set(head) != {"path", "hash"} or not originals.is_sha256(head["hash"]):
         raise fold_leaf.invalid(where, "has an invalid head")
     if not isinstance(revisions, list) or not revisions:
         raise fold_leaf.invalid(where, "has no revisions")
@@ -99,8 +100,8 @@ def _manifest(value: Any, where: str) -> dict[str, Any]:
         if (
             not isinstance(entry, Mapping)
             or set(entry) != _ENTRY_FIELDS
-            or not fold_leaf.is_hex64(item["hash"])
-            or not fold_leaf.is_hex64(entry["hash"])
+            or not originals.is_sha256(item["hash"])
+            or not originals.is_sha256(entry["hash"])
             or not isinstance(item["pinned"], bool)
             or not isinstance(item["order"], str)
             or (item["trash"] is None) != item["pinned"]

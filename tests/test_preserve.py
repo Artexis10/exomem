@@ -86,6 +86,7 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
 
 
 @pytest.mark.usefixtures("owner_scope")
+@pytest.mark.usefixtures("duplicate_index")
 def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: Path) -> None:
     """An exact-byte legacy duplicate must not undo the caller's protection opt-in."""
     from exomem import commands
@@ -118,6 +119,7 @@ def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: 
 
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_text_handed_into_a_second_family_is_one_page_that_lists_both(vault: Path) -> None:
     """Identical Evidence bytes are stored once; the page gains the second family and keeps everything else."""
     from exomem import commands
@@ -132,10 +134,16 @@ def test_text_handed_into_a_second_family_is_one_page_that_lists_both(vault: Pat
 
     second = commands.op_preserve_evidence(
         vault, scope="case", category="exhibits", filename="exhibit-a.txt", content=content,
+        description="The letter, filed as an exhibit.",
     )
 
     assert second["state"] == "already_stored"
     assert second["family_added"] is True
+    # The page keeps its own name and caption, so the outcome names what this caller passed and did not get.
+    assert second["fields_not_applied"] == [
+        {"field": "filename", "provided": "exhibit-a.txt", "kept": "letter.txt"},
+        {"field": "description", "provided": "The letter, filed as an exhibit.", "kept": None},
+    ]
     assert second["families"] == [
         {"scope": "Case", "category": "letters"},
         {"scope": "Case", "category": "exhibits"},
@@ -175,6 +183,7 @@ def test_a_protected_original_is_not_rewritten_to_add_a_family(vault: Path) -> N
 
 
 @pytest.mark.usefixtures("owner_scope")
+@pytest.mark.usefixtures("duplicate_index")
 def test_protected_dedup_requires_a_real_pair_and_matching_original_bytes(vault: Path) -> None:
     """Authored Markdown cannot substitute an unrelated or changed original for new bytes."""
     import hashlib
@@ -820,6 +829,7 @@ def test_preserve_refuses_oversized_stream_without_canonical_residue(
 
 
 @pytest.mark.timeout(300)
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_large_preserved_stream_is_never_held_whole_in_memory(vault: Path, tmp_path: Path, request) -> None:
     """An upload session commits a file of up to 2 GiB through `preserve_stream`. The
     vault's atomic publish read the staged file into memory, twice over, so one large

@@ -74,7 +74,7 @@ the vault — that outcome names the existing `path`, `page` and `ref`, and the
 batch summary counts it separately — and `failed` with a stable code and
 sanitized reason. An `already_stored` hand-over writes nothing, except that bytes
 handed over into another Evidence family add that family to the existing page
-(`family_added: true`, with `families` listing every family the page holds); the
+(`family_added: true`, with `families` listing every family the page holds, the first 64 and `families_total` beyond that); a caller field that the existing page did not take, such as a filename or description, is named in `fields_not_applied` as `{field, provided, kept}`; the
 page stays in its first folder, so browse a family by its tag filter. Raw-protected
 bytes keep one copy per family. `outcome`
 mirrors these for compatibility and reports `already_stored` as `stored` beside

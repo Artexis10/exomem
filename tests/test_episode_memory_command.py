@@ -39,6 +39,7 @@ from exomem import (
     query_data,
     registry_history,
     server,
+    temporal,
     working_set,
 )
 from exomem import schema as schema_module
@@ -346,13 +347,15 @@ def _history_files(vault: Path) -> list[Path]:
     return sorted((vault / compiled_history.history_root()).rglob("*.json"))
 
 
+def _prior_source(vault: Path, page_path: str) -> list[str]:
+    """The retained previous page texts, newest entry first."""
+    history = commands.op_read_memory(vault, path=page_path, include_history=True)["revision_history"]
+    return [entry["prior"]["source"] for entry in history["revisions"]]
+
+
 def _prior_summaries(vault: Path, page_path: str) -> list[str]:
     """The summary line of each retained previous page, newest entry first."""
-    history = commands.op_read_memory(vault, path=page_path, include_history=True)["revision_history"]
-    return [
-        next(line for line in entry["prior"]["source"].splitlines() if line.startswith("summary: "))
-        for entry in history["revisions"]
-    ]
+    return [next(line for line in text.splitlines() if line.startswith("summary: ")) for text in _prior_source(vault, page_path)]
 
 
 def test_three_recaps_keep_one_page_and_two_history_entries(
@@ -365,11 +368,25 @@ def test_three_recaps_keep_one_page_and_two_history_entries(
         "Chose the brass lamp; delivery booked for Friday.",
         "Chose the brass lamp; delivery moved to Monday.",
     ]
+    revised_at: list[dt.datetime] = []
+    real_revise = episode_memory.revise_page
+
+    def note_time(*args, when, **kwargs):  # noqa: ANN002, ANN003
+        revised_at.append(when)
+        return real_revise(*args, when=when, **kwargs)
+
+    monkeypatch.setattr(episode_memory, "revise_page", note_time)
     with request_scope(owner_principal(surface="mcp")):
         results = [_record(vault, summary=summary) for summary in summaries]
         page, = _episodes(vault)
         path = page.relative_to(vault).as_posix()
         assert {result["source"]["path"] for result in results} == {path}
+        # The page stays the first recap's filing, and says when it was last rewritten.
+        first_filed = next(
+            line for line in _prior_source(vault, path)[-1].splitlines() if line.startswith("captured: ")
+        )
+        assert first_filed in page.read_text(encoding="utf-8")
+        assert _frontmatter(page)["updated"] == temporal.stamp(revised_at[-1])
         assert len({result["source"]["ref"] for result in results}) == 1
         assert [result["revision"] for result in results] == [1, 2, 3]
         assert _frontmatter(page)["summary"] == summaries[2]

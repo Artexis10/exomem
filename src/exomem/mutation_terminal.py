@@ -221,6 +221,9 @@ def _without_graph_rebuild_handoff(result: Any) -> Any:
 #: for one release, reporting `already_stored` as `stored`, so a reader that
 #: needs to tell a fresh commit from a duplicate reads `state`.
 _ARTIFACT_STATES = frozenset({"stored", "already_stored", "failed"})
+#: How many families, and how many characters of a `fields_not_applied` value, one projected row carries.
+_FAMILIES_SHOWN = 64
+_NOT_APPLIED_CHARS = 300
 
 
 def _artifact_state(item: Any) -> Any:
@@ -699,10 +702,10 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         return {"path": value["path"], "ref": value["ref"]}
 
     def families(value: Any) -> list[dict[str, str]] | None:
-        """The bounded `(scope, category)` list an Evidence page carries."""
+        """The `(scope, category)` list an Evidence page carries, every pair checked."""
         if not (
             isinstance(value, (list, tuple))
-            and 1 <= len(value) <= 64
+            and value
             and all(
                 isinstance(pair, Mapping)
                 and set(pair) == {"scope", "category"}  # nosemgrep: ep-word-set -- the two field names of a family pair, a closed record shape.
@@ -713,6 +716,29 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         ):
             return None
         return [{"scope": pair["scope"], "category": pair["category"]} for pair in value]
+
+    def not_applied(value: Any) -> list[dict[str, str | None]] | None:
+        """The caller-provided fields the earlier copy did not take; a long value is cut, never a reason to drop the row."""
+        if not (
+            isinstance(value, (list, tuple))
+            and len(value) <= 8
+            and all(
+                isinstance(entry, Mapping)
+                and set(entry) == {"field", "provided", "kept"}  # nosemgrep: ep-word-set -- the three field names of a `fields_not_applied` row, a closed record shape.
+                and string(entry.get("field"), limit=64)
+                and all(isinstance(text, str) or text is None for text in (entry["provided"], entry["kept"]))
+                for entry in value
+            )
+        ):
+            return None
+
+        def clipped(text: str | None) -> str | None:
+            return None if text is None else text[:_NOT_APPLIED_CHARS]
+
+        return [
+            {"field": entry["field"], "provided": clipped(entry["provided"]), "kept": clipped(entry["kept"])}
+            for entry in value
+        ]
 
     def transcription(value: Any) -> dict[str, Any] | None:
         """Whether a client transcription was recorded with its original."""
@@ -792,8 +818,17 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 if listed is None or not isinstance(item.get("family_added"), bool):
                     projected.append(invalid_row(item, index))
                     continue
-                row["families"] = listed
+                # A page may list more families than a row carries: the first ones and the total, never an invalid row.
+                row["families"] = listed[:_FAMILIES_SHOWN]
+                if len(listed) > _FAMILIES_SHOWN:
+                    row["families_total"] = len(listed)
                 row["family_added"] = item["family_added"]
+            if "fields_not_applied" in item:
+                differing = not_applied(item["fields_not_applied"])
+                if differing is None:
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["fields_not_applied"] = differing
             if "transcription" in item:
                 recorded = transcription(item["transcription"])
                 if recorded is None:

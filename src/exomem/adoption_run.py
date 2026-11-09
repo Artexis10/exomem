@@ -1913,7 +1913,8 @@ def _settle_on_stored(
     filed since the plan decides, and a copy the plan named that has gone does not. `holder` is the Source the
     plan froze for the item; it is the one named while it still holds the bytes. The Source gains this
     item's path as one mapping, through a write that checks the page's content hash and touches no other
-    field. The outcome is `already-applied`, with `mapped: true` when this call recorded the mapping. A
+    field. The outcome is `already-applied`, with `mapped: true` when this call recorded the mapping, and
+    `mapping_not_recorded` (the reason) when the Source is raw-protected and so is never rewritten. A
     failed outcome means the mapping could not be recorded. None means no usable copy holds the bytes:
     the vault has none, the index cannot answer, or the caller cannot write the Source that holds them.
     """
@@ -1934,6 +1935,9 @@ def _settle_on_stored(
         planned["original_path"], collection=label, collection_path=planned["collection_path"]
     )
     mapped = not adoption_plan.mapping_recorded(hit.payload.frontmatter, mapping)
+    # A release grant binds to a protected page's content hash, so this import's path is not written onto it.
+    withheld = mapped and hit.payload.protected
+    mapped = mapped and not withheld
     if mapped and not frontmatter_update.update_page_frontmatter(
         root, hit.path, lambda frontmatter: adoption_plan.mapping_fields(frontmatter, mapping)
     ):
@@ -1944,6 +1948,10 @@ def _settle_on_stored(
     if mapped:
         outcome["mapped"] = True
         stats["mapped"] += 1
+    if withheld:
+        outcome["mapping_not_recorded"] = (
+            "the Source that holds these bytes is raw-protected, and a rewrite would revoke its release grant"
+        )
     return outcome
 
 

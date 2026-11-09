@@ -110,6 +110,21 @@ def test_plan_and_step_schemas_are_closed(mutate, code: str) -> None:  # noqa: A
         curation.validate_forward_plan(value)
 
 
+@pytest.mark.parametrize("kind", ["unfold-recap-revisions", "unfold-duplicate"])
+def test_a_fold_inverse_is_admitted_only_by_the_compensation_flag_never_by_the_records_one(kind: str) -> None:
+    """The episode recorder seals with the records flag: it must not be able to seal the undo of a fold."""
+    from exomem import curation
+
+    value = _plan()
+    value["steps"][0].update({"kind": kind})
+
+    with pytest.raises(curation.CurationError, match="INVALID_STEP_KIND"):
+        curation.validate_forward_plan(value, allow_records=True)
+    # The kind passes with the compensation flag, so the refusal is the edit arguments that the step carries.
+    with pytest.raises(curation.CurationError, match="CURATION_UNKNOWN_FIELD"):
+        curation.validate_forward_plan(value, allow_fold_inverse=True)
+
+
 @pytest.mark.parametrize(
     "path",
     [

@@ -21,6 +21,7 @@ from exomem import (
     find,
     held_fs,
     indexes,
+    lexstore,
     media_jobs,
     request_budget,
     reserved_paths,
@@ -52,6 +53,8 @@ def _vault(tmp_path: Path, files: dict[str, str | bytes]) -> Path:
         path = vault / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
+    # A live vault has its duplicate index built by the background repair; no door builds it inline.
+    assert lexstore.get_store(vault).rebuild_atomic()
     return vault
 
 
@@ -1317,6 +1320,51 @@ def _kept_files(vault: Path) -> dict[str, bytes]:
 
 def _stored_photos(vault: Path) -> list[Path]:
     return sorted((vault / SOURCES).rglob("*.png"))
+
+
+def test_a_text_file_and_an_original_with_the_same_bytes_are_each_stored_not_mapped_to_one_another(
+    tmp_path: Path,
+) -> None:
+    """A text Source holds no original file, so an original of identical bytes cannot be its mapped duplicate."""
+    same = b"identical bytes read as text and as a file"
+    vault = _vault(tmp_path, {"_Imports/first/Coll/a-notes.txt": same, "_Imports/first/Coll/b-scan.png": same})
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    items = {item["form"]: item for item in planned["plan"]["items"]}
+
+    assert sorted(items) == ["artifact", "text"]
+    assert items["text"]["action"] == "copy-as-source"
+    assert items["artifact"]["action"] == "copy-as-source"
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+    assert {outcome["status"] for outcome in applied["outcomes"].values()} == {"applied"}
+    [stored] = _stored_photos(vault)
+    assert stored.read_bytes() == same
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_raw_protected_source_is_not_rewritten_to_record_an_import_path(tmp_path: Path) -> None:
+    """A release grant binds to the protected page's content hash, so the import path stays off it and the outcome says so."""
+    from collections import Counter
+
+    from duplicate_fixtures import source_filing
+
+    from exomem import duplicates
+
+    vault = _vault(tmp_path, {})
+    text = "text that an owner keeps raw-protected"
+    page = source_filing(vault, "held", text, folder_name="__exomem_raw_v1__held")
+    before = (vault / page).read_bytes()
+    planned = {
+        "original_path": "_Imports/first/Coll/held.txt", "collection_path": "held.txt", "form": "text",
+        "original_sha256": duplicates.text_payload_sha256(text), "target_path": page,
+    }
+
+    outcome = adoption_run._settle_on_stored(vault, planned, label="Coll", holder=None, stats=Counter())
+
+    assert outcome["status"] == "already-applied"
+    assert outcome["target_path"] == page
+    assert "mapped" not in outcome
+    assert "raw-protected" in outcome["mapping_not_recorded"]
+    assert (vault / page).read_bytes() == before
 
 
 def test_two_identical_photos_plan_one_write_and_apply_stores_one_original_with_both_paths(

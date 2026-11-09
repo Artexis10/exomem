@@ -1196,6 +1196,20 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def duplicate_index(vault: Path) -> Path:
+    """The fixture vault with its duplicate index built, as the background repair leaves a live vault.
+
+    A storing door never builds the index itself, because that scan holds the writer lease for as long as the vault is
+    large: on a missing index it stores the content and says the check was unavailable. A test of reuse therefore
+    starts from a built index, which the door's own commits then keep current.
+    """
+    from exomem import lexstore
+
+    assert lexstore.get_store(vault).rebuild_atomic()
+    return vault
+
+
+@pytest.fixture
 def obligations_only(vault: Path) -> Path:
     """The fixture vault without its captured Sources.
 

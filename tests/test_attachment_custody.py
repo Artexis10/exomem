@@ -455,6 +455,7 @@ def test_a_transcription_is_written_nowhere_when_its_original_fails(vault: Path,
     assert not _vault_text_contains(vault, TRANSCRIPTION)
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, lease) -> None:
     original = _png()
     with _local_session("session-home"):
@@ -480,6 +481,7 @@ def test_an_already_stored_original_keeps_its_page_and_says_so(vault: Path, leas
 
 
 @pytest.mark.parametrize("replacement", ["changed_bytes", "symlink"])
+@pytest.mark.usefixtures("duplicate_index")
 def test_a_replaced_original_cannot_stand_for_a_duplicate(
     vault: Path, lease, replacement: str,
 ) -> None:

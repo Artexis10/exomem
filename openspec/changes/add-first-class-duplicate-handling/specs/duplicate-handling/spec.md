@@ -40,7 +40,7 @@ The system SHALL keep a derived, rebuildable index from payload SHA-256 to the l
 
 The commit that stores a new original or Source SHALL record its payload hash in the index before the mutation boundary of that commit is released. The next acquisition of the boundary SHALL see it, whatever other derived indexes have caught up. A Source page written before this capability SHALL be indexed from its stored payload and SHALL NOT gain a recorded hash field.
 
-When the index is missing or cannot be proven complete, the system SHALL rebuild it from canonical pages. While it cannot, lookup SHALL report unavailable. A write door SHALL then store the content as new and carry the warning `duplicate_check_unavailable`, and the audit SHALL report its duplicate categories as unchecked. Failing open is deliberate: a missed duplicate costs one extra copy that the audit reports, while a wrong hit would cost content. No door SHALL scan a content folder to find duplicates.
+When the index is missing or at an earlier schema, the system SHALL rebuild it from canonical pages in the background, and lookup SHALL report unavailable until that rebuild lands. A write door SHALL then store the content as new and carry the warning `duplicate_check_unavailable`, and the audit SHALL report its duplicate categories as unchecked. A door SHALL NOT wait for a rebuild, because a rebuild reads the whole vault and a door asks under the vault mutation boundary. The audit SHALL reconcile the index with the pages before it counts, and SHALL report the index as complete only after that succeeds. Failing open is deliberate: a missed duplicate costs one extra copy that the audit reports, while a wrong hit would cost content. No door SHALL scan a content folder to find duplicates.
 
 #### Scenario: An indexed original changed on disk
 
@@ -55,7 +55,8 @@ When the index is missing or cannot be proven complete, the system SHALL rebuild
 #### Scenario: The index is deleted
 
 - **WHEN** the index is removed and a capture of already stored bytes arrives
-- **THEN** the system rebuilds the index from canonical pages, finds the stored copy and reuses it
+- **THEN** the capture stores its content as new with `duplicate_check_unavailable`, and does not wait for a rebuild
+- **AND** the system rebuilds the index from canonical pages in the background, and a later capture of the same bytes finds the stored copy and reuses it
 - **AND** no page of the vault changes because of the deletion or the rebuild
 
 #### Scenario: The index cannot be completed
@@ -105,6 +106,28 @@ A `duplicate_content` finding SHALL name each member (ref, path, lane, families 
 
 - **WHEN** an index entry groups two pages whose bytes no longer match
 - **THEN** the audit returns no finding for them
+
+#### Scenario: A row is missing from the index
+
+- **WHEN** the index lost the row of one of three identical pages
+- **THEN** the audit reconciles the index with the pages and counts all three, or reports the index as unchecked
+- **AND** it never reports the index as complete with a short count
+
+#### Scenario: A protected group that cannot be verified
+
+- **WHEN** a raw-protected page has no raw-protection binding that matches its recorded original
+- **THEN** the audit counts the group as unverifiable and gives the reason, apart from groups whose index entries are stale
+
+#### Scenario: A restricted caller
+
+- **WHEN** a caller who cannot read some pages, and so lacks whole-namespace authority, runs the audit
+- **THEN** its answer equals the answer of a vault without the pages it cannot read, with each finding listing only readable members
+- **AND** no finding offers a fold step, and none reveals that an unreadable page cites a member
+
+#### Scenario: A pair that a fold refuses
+
+- **WHEN** two identical pages differ in form (a text Source and a Source with an original) or an Evidence page lies outside the family folders
+- **THEN** the finding lists the group, offers no fold step and gives the reason that the fold gives
 
 #### Scenario: One URL captured twice with different text
 

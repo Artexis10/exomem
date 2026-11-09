@@ -8,6 +8,7 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
 from test_agent_upload_handoff import _ASGISyncTransport
 from test_agent_upload_handoff import upload_env as upload_env
 
@@ -84,6 +85,7 @@ def test_published_read_follows_correction_and_can_read_history(vault, source_sc
     assert (vault / first["path"]).read_bytes() == historical
 
 
+@pytest.mark.usefixtures("duplicate_index")
 def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply(upload_env, monkeypatch):
     vault, who, *_ = upload_env
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)

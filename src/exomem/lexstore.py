@@ -1047,6 +1047,8 @@ class RepairCause(enum.StrEnum):
     # request, or the catalogue holds no rows for the checkpoint it names.
     RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
     RESOLVER_ENTRIES_UNAVAILABLE = "resolver_entries_unavailable"
+    # A duplicate lookup found no current catalogue, so a door stored unchecked while it rebuilds.
+    DUPLICATE_INDEX_NOT_CURRENT = "duplicate_index_not_current"
 
 
 class DeclineCause(enum.StrEnum):
@@ -4662,19 +4664,26 @@ _SOURCE_URL_GROUPS_SQL = (
 )
 
 
-def _duplicate_index_store(vault_root: Path) -> LexicalStore | None:
+def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> LexicalStore | None:
     """The store once its catalogue is current and in step with the commits of this process, else None.
 
-    A missing sidecar, a sidecar at an older schema and a store flagged by a failed
-    `record_payload_commit` are rebuilt or reconciled from canonical pages first. A rebuild writes no page.
-    None means the index cannot be proven complete, which a caller must carry as unavailable and never as empty.
+    A catalogue that is missing or at an older schema is rebuilt from canonical pages in the background
+    (`rebuild_atomic`) and reads as None until that lands: the rebuild is O(vault) and a storing door asks under
+    its mutation boundary (D5), so the door stores unchecked meanwhile. A store flagged by a failed
+    `record_payload_commit` is reconciled inline, which costs one pass over the pages. `verify` reconciles the
+    catalogue against the pages even when nothing flags it, because the audit counts every row and a row lost to
+    a failed upsert must not read as complete. None means the index cannot be proven complete, which a caller
+    must carry as unavailable and never as empty.
     """
     if not _catalog_usable():
         return None
     store = get_store(vault_root)
     if store._failed:
         return None
-    if store._payload_stale or not store.catalogue_current():
+    if not store.catalogue_current():
+        _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
+        return None
+    if store._payload_stale or verify:
         try:
             reconciled = store.ensure_fresh()
         except OSError as error:
@@ -4703,19 +4712,20 @@ def source_url_candidates(vault_root: Path, canonical_url: str) -> tuple[str, ..
     return None if found is None else tuple(found)
 
 
-def payload_groups(vault_root: Path) -> dict[str, tuple[str, ...]] | None:
-    """Each payload hash that two or more indexed pages share, with their paths oldest first; None when the index cannot answer.
+def duplicate_groups(
+    vault_root: Path,
+) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]] | None:
+    """The payload hashes and the canonical source URLs that two or more indexed pages share, or None when the index cannot answer.
 
-    The audit's one enumeration of candidate groups. Like every lookup here it only proposes: the audit re-derives each member.
+    Each maps to the paths that hold it, oldest first. This is the audit's one enumeration of candidate groups, and it
+    reconciles the catalogue with the pages first (`verify`), so a lost row never reads as a complete answer. Like every
+    lookup here it only proposes: the audit re-derives each member.
     """
-    store = _duplicate_index_store(vault_root)
-    return None if store is None else store.groups_where(_PAYLOAD_GROUPS_SQL)
-
-
-def source_url_groups(vault_root: Path) -> dict[str, tuple[str, ...]] | None:
-    """Each canonical URL that two or more indexed Sources share, with their paths oldest first; None when the index cannot answer."""
-    store = _duplicate_index_store(vault_root)
-    return None if store is None else store.groups_where(_SOURCE_URL_GROUPS_SQL)
+    store = _duplicate_index_store(vault_root, verify=True)
+    if store is None:
+        return None
+    payload, urls = store.groups_where(_PAYLOAD_GROUPS_SQL), store.groups_where(_SOURCE_URL_GROUPS_SQL)
+    return None if payload is None or urls is None else (payload, urls)
 
 
 def record_payload_commit(vault_root: Path, rel_paths: Iterable[str]) -> bool:

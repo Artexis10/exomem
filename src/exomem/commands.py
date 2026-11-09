@@ -5398,7 +5398,8 @@ def op_preserve(
 
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
     held = evidence_reuse.reuse(
-        vault_root, scope=scope, category=category, sha256=digest, protected=raw_protection
+        vault_root, scope=scope, category=category, sha256=digest, protected=raw_protection,
+        filename=filename, description=description,
     )
     duplicate = held.duplicate
     if duplicate is not None:

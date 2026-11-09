@@ -43,6 +43,7 @@ from . import (
     reserved_paths,
     source_coverage,
     source_taxonomy,
+    temporal,
     vocabulary_auxiliaries,
     working_set_heat,
     writer_lease,
@@ -207,9 +208,11 @@ def _not_revisable(reason: str) -> EpisodeError:
 
 
 def _revised_text(
-    before: str, current: dict[str, Any], body_before: str, recap: episode_capture.Recap
+    before: str, current: dict[str, Any], body_before: str, recap: episode_capture.Recap, when: dt.datetime
 ) -> str:
-    """`before` with the title, summary, digest, client and body of `recap`, every other byte kept.
+    """`before` with the title, summary, digest, client and body of `recap`, stamped `updated`, every other byte kept.
+
+    `captured` keeps the first recap's date: the page is the episode's one filing. `updated` is the revision time.
 
     The previous Decided lines decide whether the page's `ingested_into` is
     cleared: a note that cited other Decided lines has not ingested these.
@@ -219,8 +222,12 @@ def _revised_text(
         raise _not_revisable("the episode page has no frontmatter")
     newline = document_newline(before)
     changed = episode_coverage.decided_lines(with_newline(body_before, "\n")) != recap.decided
-    lines: dict[str, str | None] = {"title": f"title: {yaml_scalar(recap.subject)}"}
-    expected: dict[str, Any] = {**current, "title": recap.subject}
+    revised = temporal.stamp(when)
+    lines: dict[str, str | None] = {
+        "title": f"title: {yaml_scalar(recap.subject)}",
+        "updated": f"updated: {yaml_scalar(revised)}",
+    }
+    expected: dict[str, Any] = {**current, "title": recap.subject, "updated": revised}
     # The episode key is the page's identity and never changes; every other recap field follows.
     for name, _required in add_module.EPISODE_FRONTMATTER_FIELDS:
         if name == "episode":
@@ -289,7 +296,7 @@ def revise_page(
         or current.get("episode") != recap.key
     ):
         raise _not_revisable("only this episode's own recap page can be revised")
-    after = _revised_text(before, current, body, recap)
+    after = _revised_text(before, current, body, recap, when)
     primary = PlannedWrite(path=target, content=after, expected_hash=expected_hash, guard=guard)
     history = compiled_history.plan_episode_entry(root, path=path, before_source=before, after_source=after)
     manifest = vocabulary_auxiliaries.seal(

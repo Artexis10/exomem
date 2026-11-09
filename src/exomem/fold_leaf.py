@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
-from . import find_corpus, memory_refs, vault
+from . import find_corpus, memory_refs, originals, vault
 
 IN_PLACE: Final = "in-place"
 MOVED: Final = "moved"
@@ -154,12 +154,6 @@ def invalid(where: str, why: str):
     return refuse("INVALID_CURATION_PLAN", f"{where} {why}")
 
 
-def is_hex64(value: Any) -> bool:
-    from . import curation
-
-    return isinstance(value, str) and curation._HEX64.fullmatch(value) is not None  # noqa: SLF001
-
-
 def require_authority(vault_root: Path) -> None:
     """The whole-namespace content authority that source-identity lookup needs, as a curation refusal.
 
@@ -173,6 +167,17 @@ def require_authority(vault_root: Path) -> None:
     except source_capture.SourceCaptureError as error:
         code, _, reason = str(error).partition(": ")
         raise refuse(code, reason) from error
+
+
+def has_authority(vault_root: Path) -> bool:
+    """Whether the current caller holds the whole-namespace authority that `require_authority` demands."""
+    from . import curation
+
+    try:
+        require_authority(vault_root)
+    except curation.CurationError:
+        return False
+    return True
 
 
 def text_at(vault_root: Path, path: str, expected_hash: str) -> str:
@@ -192,7 +197,7 @@ def page_arg(value: Any, where: str) -> dict[str, str]:
     # nosemgrep: ep-word-set -- the fold steps' page argument fields, fixed by their schemas.
     if not isinstance(value, Mapping) or set(value) != {"path", "expected_hash"}:
         raise invalid(where, "must be an object of exactly path and expected_hash")
-    if not is_hex64(value["expected_hash"]):
+    if not originals.is_sha256(value["expected_hash"]):
         raise invalid(where, "needs the reviewed expected_hash")
     path = curation.normalize_target_path(value["path"], field=f"{where}.path", allow_fold=True)
     return {"path": path, "expected_hash": value["expected_hash"]}

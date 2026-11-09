@@ -258,11 +258,13 @@ class DuplicateArtifact:
     families: tuple[tuple[str, str], ...] = ()
     #: Whether this call added the requested family to the page.
     family_added: bool = False
+    #: The caller-provided fields the earlier page did not take, as `{field, provided, kept}` rows. Evidence only.
+    fields_not_applied: tuple[dict[str, str | None], ...] = ()
 
     def receipt(self, *, size: int | None, content_type: str | None) -> dict:
         """The `already_stored` outcome naming this artifact, with the stored outcome's fields."""
         return {
-            **self.family_fields(),
+            **self.evidence_fields(),
             "path": self.path,
             "stored_path": self.path,
             "sidecar_path": self.sidecar_path,
@@ -278,13 +280,14 @@ class DuplicateArtifact:
             "content_type": content_type,
         }
 
-    def family_fields(self) -> dict:
-        """`families` and `family_added` for an Evidence outcome; nothing for a Source."""
+    def evidence_fields(self) -> dict:
+        """`families`, `family_added` and `fields_not_applied` for an Evidence outcome; nothing for a Source."""
         if not self.families:
             return {}
         return {
             "families": [{"scope": scope, "category": category} for scope, category in self.families],
             "family_added": self.family_added,
+            "fields_not_applied": list(self.fields_not_applied),
         }
 
 
@@ -1926,6 +1929,29 @@ def _remove_frontmatter_fields(content: str, selected: Callable[[str], bool]) ->
     return original if updated == content else with_newline(updated, newline)
 
 
+def _file_modes(writes: tuple[PlannedWrite, ...]) -> dict[Path, int]:
+    """The permission bits of each regular file that `writes` replace. The batch writer stages a new file at 0600."""
+    modes: dict[Path, int] = {}
+    for write in writes:
+        try:
+            info = os.lstat(write.path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            modes[write.path] = stat.S_IMODE(info.st_mode)
+    return modes
+
+
+def _restore_modes(modes: dict[Path, int]) -> None:
+    """Give each replaced file its earlier permission bits back. Best effort: the page is committed whatever happens here."""
+    for path, mode in modes.items():
+        try:
+            if stat.S_IMODE(os.lstat(path).st_mode) != mode:
+                os.chmod(path, mode)
+        except OSError:
+            continue
+
+
 def commit_media_sidecar_writes(
     vault_root: Path,
     writes: tuple[PlannedWrite, ...],
@@ -1970,7 +1996,9 @@ def commit_media_sidecar_writes(
         writer_kwargs["required_guards"] = required_guards
     if publication_intents_out is not None:
         writer_kwargs["publication_intents_out"] = publication_intents_out
+    modes = _file_modes(writes)
     written = writer(list(writes), **writer_kwargs)
+    _restore_modes(modes)
     try:
         catalog_publication.publish_markdown_batch(prepared)
     except catalog_publication.CatalogPublicationError as error:

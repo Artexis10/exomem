@@ -14,13 +14,23 @@ from exomem import lexstore
 from exomem import preserve as preserve_module
 
 
+def index(vault: Path, *pages: str) -> None:
+    """Make `pages` visible to the duplicate index. A vault with no catalogue gets one built, as the background repair builds it."""
+    if lexstore.lexical_path(vault).exists():
+        assert lexstore.record_payload_commit(vault, pages)
+    else:
+        assert lexstore.get_store(vault).rebuild_atomic()
+
+
 def evidence_filing(
     vault: Path, scope: str, category: str, filename: str, data: bytes, *, protected: bool = False, filed: dt.date | None = None
 ) -> str:
     """One Evidence page with its original beside it, through the low-level writer that never reuses. Returns the page path."""
-    return preserve_module.preserve_bytes(
+    page = preserve_module.preserve_bytes(
         vault, scope=scope, category=category, filename=filename, data=data, raw_protection=protected, today=filed
     ).sidecar_path
+    index(vault, page)
+    return page
 
 
 def source_filing(
@@ -32,15 +42,17 @@ def source_filing(
     captured: str = "2026-01-01",
     url: str | None = None,
     imported_from: str | None = None,
+    folder_name: str = "Session",
 ) -> str:
     """A Source page of the shape `add` writes, with its original beside it when `original` is given. Returns the page path."""
-    folder = vault / "Knowledge Base" / "Sources" / "Session"
+    directory = f"Knowledge Base/Sources/{folder_name}"
+    folder = vault / directory
     folder.mkdir(parents=True, exist_ok=True)
     lines = [f"captured: {captured}"]
     if original is not None:
         (folder / f"{name}.bin").write_bytes(original)
         lines += [
-            f"evidence_file: Knowledge Base/Sources/Session/{name}.bin",
+            f"evidence_file: {directory}/{name}.bin",
             f"binary_sha256: {hashlib.sha256(original).hexdigest()}",
         ]
     if url is not None:
@@ -53,5 +65,5 @@ def source_filing(
         + f"\ningested_into: []\ntags: []\n---\n\n# {name}\n\n## Capture\n\n{text}\n",
         encoding="utf-8",
     )
-    lexstore.record_payload_commit(vault, [f"Knowledge Base/Sources/Session/{name}.md"])
-    return f"Knowledge Base/Sources/Session/{name}.md"
+    index(vault, f"{directory}/{name}.md")
+    return f"{directory}/{name}.md"

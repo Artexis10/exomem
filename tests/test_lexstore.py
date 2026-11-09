@@ -12,7 +12,10 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import threading
+import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -2163,8 +2166,14 @@ def _lookup(root: Path, sha256: str) -> duplicates.DuplicateLookup:
     return duplicates.find_duplicate(root, sha256=sha256, lane=duplicates.SOURCES, protected=False)
 
 
+def _built(root: Path) -> None:
+    """The catalogue as the background repair leaves it: no lookup builds one inline."""
+    assert lexstore.get_store(root).rebuild_atomic()
+
+
 def test_a_committed_payload_hash_is_visible_while_search_indexing_lags(tmp_path):
     first = _write_source(tmp_path, "first", "the first capture")
+    _built(tmp_path)
     assert lexstore.payload_candidates(tmp_path, duplicates.text_payload_sha256("the first capture")) == (first,)
 
     # A later capture commits while search indexing has not caught up: no `upsert_after_write` runs.
@@ -2176,10 +2185,18 @@ def test_a_committed_payload_hash_is_visible_while_search_indexing_lags(tmp_path
     assert lexstore.payload_candidates(tmp_path, digest) == (second,)
 
 
-def test_a_deleted_index_rebuilds_from_pages_and_changes_no_page(tmp_path):
+def test_a_catalogue_from_an_earlier_schema_answers_unavailable_at_once_and_is_rebuilt_behind_the_lookup(
+    tmp_path, monkeypatch
+):
+    """A lookup under a door's writer lease never waits for a vault-sized rebuild; the repair runs in the background."""
     kept = _write_source(tmp_path, "kept", "stored text", original=b"stored original")
     digest = hashlib.sha256(b"stored original").hexdigest()
+    _built(tmp_path)
     assert lexstore.payload_candidates(tmp_path, digest) == (kept,)
+    with closing(sqlite3.connect(lexstore.lexical_path(tmp_path))) as conn:
+        conn.execute("UPDATE meta SET value = '16' WHERE key = 'schema_version'")
+        conn.commit()
+    lexstore.clear_stores()  # a restarted process finds the earlier release's catalogue
 
     def tree() -> dict[str, tuple[bytes, int]]:
         return {
@@ -2188,17 +2205,35 @@ def test_a_deleted_index_rebuilds_from_pages_and_changes_no_page(tmp_path):
         }
 
     before = tree()
-    for sidecar in lexstore.lexical_path(tmp_path).parent.glob(".lexical.sqlite*"):
-        sidecar.unlink()
-    lexstore.clear_stores()  # a restarted process finds no index
+    started, release = threading.Event(), threading.Event()
+    rebuild = lexstore.LexicalStore.rebuild_atomic
 
-    assert lexstore.payload_candidates(tmp_path, digest) == (kept,)
+    def held_rebuild(self, *args, **kwargs):
+        started.set()
+        assert release.wait(timeout=30)
+        return rebuild(self, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "rebuild_atomic", held_rebuild)
+    asked = time.monotonic()
+    lookup = _lookup(tmp_path, digest)
+
+    # An inline rebuild would sit in `held_rebuild` for its whole timeout before this answer.
+    assert time.monotonic() - asked < 10
+    assert lookup == duplicates.DuplicateLookup(available=False)
+    assert started.wait(timeout=10), "the lookup scheduled the rebuild"
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "exomem-lexical-repair":
+            thread.join(timeout=60)
+
+    assert _lookup(tmp_path, digest).hit.path == kept
     assert tree() == before
 
 
 def test_an_unfinishable_rebuild_reports_unavailable_not_empty(tmp_path, monkeypatch):
     _write_source(tmp_path, "kept", "stored text")
     digest = duplicates.text_payload_sha256("stored text")
+    _built(tmp_path)
     assert lexstore.payload_candidates(tmp_path, "0" * 64) == (), "an answering index with no match is empty"
     for sidecar in lexstore.lexical_path(tmp_path).parent.glob(".lexical.sqlite*"):
         sidecar.unlink()
@@ -2218,6 +2253,7 @@ def test_an_unfinishable_rebuild_reports_unavailable_not_empty(tmp_path, monkeyp
 def test_an_indexed_original_edited_on_disk_is_not_reused(tmp_path):
     page = _write_source(tmp_path, "original", "a description", original=b"the original bytes")
     digest = hashlib.sha256(b"the original bytes").hexdigest()
+    _built(tmp_path)
     assert _lookup(tmp_path, digest).hit.path == page, "intact and indexed, it is the copy to reuse"
 
     (tmp_path / "Knowledge Base/Sources/Session/original.txt").write_bytes(b"edited behind the index")

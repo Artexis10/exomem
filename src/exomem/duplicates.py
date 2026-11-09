@@ -10,27 +10,18 @@ from __future__ import annotations
 
 import hashlib
 import http.client
-import re
 import urllib.parse
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from . import memory_refs, reserved_paths, vault
+from . import memory_refs, originals, reserved_paths, vault
 from .governance import raw_protection
 from .source_coverage import CAPTURE_HEADING, fenced_capture
 
 #: The two lanes that hold originals. The layout fixes them (`vault.APPEND_ONLY_KB_SUBPATHS`).
 SOURCES, EVIDENCE = vault.APPEND_ONLY_KB_SUBPATHS
-
-# A format check on a SHA-256 hex digest: it checks shape, not meaning.
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-
-
-def is_sha256(value: object) -> bool:
-    return isinstance(value, str) and _SHA256.fullmatch(value) is not None
-
 
 def text_payload_sha256(text: str) -> str:
     """The payload hash of captured text, exactly as `add` stores it: stripped, UTF-8, outside the page frame."""
@@ -137,7 +128,7 @@ def derive_page_payload(rel: str, raw: bytes) -> PagePayload | None:
                 sha256=payload_sha256, lane=lane, protected=protected, artifact_path=None,
                 source_url=source_url, ref=memory_refs.ref_from_markdown(text), frontmatter=frontmatter, text=text,
             )
-    if not (isinstance(artifact, str) and artifact and is_sha256(digest)):
+    if not (isinstance(artifact, str) and artifact and originals.is_sha256(digest)):
         return None
     return PagePayload(
         sha256=digest, lane=lane, protected=protected, artifact_path=artifact, source_url=source_url,
@@ -162,18 +153,44 @@ class DuplicateLookup:
     available: bool = True
 
 
-def readable_page(vault_root, rel: str) -> PagePayload | None:
-    """The payload of `rel` when the current caller may read the page in full, else None."""
+def withheld(vault_root, rel: str) -> bool:
+    """Whether the current caller may not read the page at `rel` in full."""
     from .governance import egress
     from .governance.policy import DISCLOSURE_MAX
 
-    if egress.release_level_for(vault_root, rel) != DISCLOSURE_MAX:
-        return None
+    return egress.release_level_for(vault_root, rel) != DISCLOSURE_MAX
+
+
+def stored_payload(vault_root, rel: str) -> PagePayload | None:
+    """The payload of the page at `rel` as it is stored, or None when it holds none. The caller has checked `withheld`."""
     try:
         raw = reserved_paths.read_generic_bytes(vault_root, rel).data
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
         return None
     return derive_page_payload(rel, raw)
+
+
+def readable_page(vault_root, rel: str) -> PagePayload | None:
+    """The payload of `rel` when the current caller may read the page in full, else None."""
+    return None if withheld(vault_root, rel) else stored_payload(vault_root, rel)
+
+
+def binding_unproven(vault_root, rel: str, payload: PagePayload) -> bool:
+    """Whether the page at `rel` is raw-protected and lacks the raw-protection binding that proves its original.
+
+    A release grant binds to the page's content hash, so a protected page whose binding is missing or names other
+    bytes cannot be verified, whatever the original on disk holds.
+    """
+    if not payload.protected:
+        return False
+    found = raw_protection.binding(vault_root, rel)
+    if found is None:
+        return True
+    block, companion, _ = found
+    return (
+        companion != rel or block["original_ref"] != payload.ref
+        or block["artifact_path"] != payload.artifact_path or block["artifact_sha256"] != payload.sha256
+    )
 
 
 def original_size(vault_root, rel: str, payload: PagePayload) -> int | None:
@@ -182,14 +199,8 @@ def original_size(vault_root, rel: str, payload: PagePayload) -> int | None:
     # The page is vault data. An original outside its own folder is some other file's bytes.
     if artifact is None or PurePosixPath(artifact).parent != PurePosixPath(rel).parent:
         return None
-    if payload.protected:
-        found = raw_protection.binding(vault_root, rel)
-        if found is None:
-            return None
-        block, companion, _ = found
-        if (companion != rel or block["original_ref"] != payload.ref
-                or block["artifact_path"] != artifact or block["artifact_sha256"] != payload.sha256):
-            return None
+    if binding_unproven(vault_root, rel, payload):
+        return None
     try:
         with reserved_paths.open_generic_binary(vault_root, artifact) as original:
             digest, size = hashlib.sha256(), 0
@@ -225,7 +236,7 @@ def find_duplicate(
     """
     from . import lexstore
 
-    if not is_sha256(sha256):
+    if not originals.is_sha256(sha256):
         return DuplicateLookup()
     candidates = lexstore.payload_candidates(vault_root, sha256)
     if candidates is None:

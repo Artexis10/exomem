@@ -847,6 +847,26 @@ def test_fold_moves_unreferenced_recap_revisions_and_keeps_the_cited_one(
     assert "Recap number" not in witness and "Step number" not in witness
 
 
+def test_a_folded_head_still_reads_back_every_history_entry_under_an_access_policy(
+    vault: Path, earlier_episode, monkeypatch  # noqa: ANN001
+) -> None:
+    """Each revision links to a sibling that the same fold moved to trash; the policy gate must still release it."""
+    from test_episode_recovery import _write_source_rule
+    from test_latency_gate import _seed_freshness_live
+
+    pages = earlier_episode(4)
+    # Only a governed vault runs the gate's name lookup: an ungoverned one returns before it.
+    _write_source_rule(vault, ceiling=6)
+    _apply(vault, _propose(vault, _fold_step(pages, vault)))
+    _seed_freshness_live(vault)
+    # A recall is the one stamped build that makes the policy gate's name lookup current.
+    commands.op_activate_context(vault, turn="Which recaps did this episode keep?")
+
+    history = commands.op_read_memory(vault, path=pages[-1], include_history=True)["revision_history"]
+
+    assert sorted(item["path"] for item in history["revisions"]) == sorted(pages[:-1])
+
+
 class _ProcessCut(BaseException):  # noqa: N818 - a process cut is not an error: nothing in the step may catch it
     """A stop that no `except Exception` in the step can turn into a recorded failure."""
 

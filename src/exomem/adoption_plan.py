@@ -947,15 +947,16 @@ def plan_item(
     notes: NoteIndex,
     ceiling: int,
     vouched: tuple[import_stage.Identity, str] | None = None,
-    seen: dict[tuple[str, bool], Mapping[str, Any]] | None = None,
+    seen: dict[tuple[str, bool, str], Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str | None] | dict[str, Any]:
     """Facts, identity and a frozen destination for one original; or a refusal dict.
 
     An original whose exact bytes are stored once already is not planned a second write. An earlier
     import of this path or the vault's duplicate index gives `already-imported` with the Source that holds
     them and, when the vault holds them under another path, the `mapping` that `apply` records on it.
-    `seen` holds the writes the plan has made so far, by digest and protection class (`seen_in_plan`);
-    an original that repeats one gives `duplicate-of` and the same mapping. A write this call plans joins `seen`.
+    `seen` holds the writes the plan has made so far, by digest, protection class and form (`seen_in_plan`);
+    an original that repeats one gives `duplicate-of` and the same mapping. A text file and a file kept as an
+    original are two forms, so neither is the other's duplicate. A write this call plans joins `seen`.
     """
     read = read_facts(root, original_path, ceiling=ceiling, text_hint=text_hint, vouched=vouched)
     if isinstance(read, dict):
@@ -1032,7 +1033,7 @@ def plan_item(
     mapping = import_mapping(
         original_path, collection=collection, collection_path=item["collection_path"]
     )
-    first = (seen or {}).get((item["original_sha256"], protected))
+    first = (seen or {}).get((item["original_sha256"], protected, item["form"]))
     if first is not None:
         item.update(
             action="duplicate-of", duplicate_of=first["original_path"], mapping=mapping,
@@ -1080,16 +1081,16 @@ def plan_item(
             return {"path": original_path, **planned_note}
         item["note"] = planned_note
     if seen is not None:
-        seen.setdefault((item["original_sha256"], protected), item)
+        seen.setdefault((item["original_sha256"], protected, item["form"]), item)
     return item, text
 
 
-def seen_in_plan(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, bool], Mapping[str, Any]]:
-    """The writes a plan holds, by the digest and protection class of what each stores (the first of each)."""
-    seen: dict[tuple[str, bool], Mapping[str, Any]] = {}
+def seen_in_plan(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, bool, str], Mapping[str, Any]]:
+    """The writes a plan holds, by the digest, protection class and form of what each stores (the first of each)."""
+    seen: dict[tuple[str, bool, str], Mapping[str, Any]] = {}
     for item in items:
         if item.get("action") == "copy-as-source":
-            seen.setdefault((item["original_sha256"], raw_protection.marked(item["target_path"])), item)
+            seen.setdefault((item["original_sha256"], raw_protection.marked(item["target_path"]), item["form"]), item)
     return seen
 
 

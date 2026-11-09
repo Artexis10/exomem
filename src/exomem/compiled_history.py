@@ -23,11 +23,13 @@ import datetime as dt
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import (
     context_refs,
+    held_fs,
     memory_refs,
     origin_bindings,
     provenance,
@@ -294,6 +296,22 @@ def retire_fold_entry(root: Path, *, path: str, trash_path: str) -> None:
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED: other bytes stand at the trash identity")
     with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
         reserved_paths._remove_owner_file(root, root / path, _DESCRIPTOR_ID)  # noqa: SLF001 - the owner seam
+    _remove_if_empty(root, path.rpartition("/")[0])
+
+
+def _remove_if_empty(root: Path, directory: str) -> None:
+    """Remove the history directory a fold created once its last entry is gone. A directory that holds anything stays.
+
+    The fold's undo is the only caller. Best effort: an empty directory left behind changes no byte of the vault.
+    """
+    acquired = held_fs.acquire(root)
+    if not acquired.ok:
+        return
+    with acquired.require() as filesystem:
+        found = filesystem.parent(directory, access="mutate")
+        if found.ok:
+            with found.require() as held:
+                filesystem.unlink_directory(held)
 
 
 def read_entry(root: Path, *, path: str) -> str | None:
@@ -322,8 +340,31 @@ def _folded_revision(root: Path, source: str, path: str, head_episode: Any) -> b
     )
 
 
+def _folded_siblings(root: Path, directory: str, names: list[str], head: str) -> dict[str, tuple[str, ...]]:
+    """Each way a wikilink can name a revision that the fold of `head` moved to trash, mapped to `head`.
+
+    The revision's own page is gone, so the gate cannot decide it. It is the head's history, and the caller
+    has read the head, so the name resolves to the head and is decided under the head's own admission.
+    """
+    from .working_set_index import normalize
+
+    named: dict[str, tuple[str, ...]] = {}
+    for name in names:
+        try:
+            entry = json.loads(registry_history.read_kept(root, directory, name) or "")
+        except ValueError:
+            continue
+        revision = entry.get("path") if isinstance(entry, dict) and entry.get("operation") == FOLD_OPERATION else None
+        if isinstance(revision, str):
+            bare = revision.removesuffix(".md")
+            for spelling in (revision, bare, bare.rpartition("/")[2]):
+                named.setdefault(normalize(spelling), (head,))
+    return named
+
+
 def _admitted_entry(
-    root: Path, text: str | None, *, path: str, parent_ref: str, head_episode: Any = None
+    root: Path, text: str | None, *, path: str, parent_ref: str, head_episode: Any = None,
+    siblings: Callable[[], dict[str, tuple[str, ...]]] | None = None,
 ) -> dict | None:
     try:
         entry = json.loads(text) if text is not None else None
@@ -362,7 +403,14 @@ def _admitted_entry(
         if metadata.payload is not None:
             for binding in metadata.payload["inputs"].values():
                 origin_bindings.resolve_origin_input(root, binding, disclosure=True)
-        if not retained_inputs.exact_text_visible(root, json.dumps(entry, ensure_ascii=False)):
+        shown = json.dumps(entry, ensure_ascii=False)
+        # A revision names its siblings, which the same fold moved to trash, so the index no longer lists them.
+        # Under the head's own admission a sibling that this history keeps counts as resolved.
+        if not retained_inputs.exact_text_visible(root, shown) and not (
+            entry.get("operation") == FOLD_OPERATION
+            and siblings is not None
+            and retained_inputs.exact_text_visible(root, shown, resolved_here=siblings())
+        ):
             return None
     except (KeyError, TypeError, ValueError, provenance.OriginError):
         return None
@@ -413,6 +461,14 @@ def read(
     directory = history_dir(parent_ref)
     names = registry_history.kept_names(root, directory, suffix=".json") or []
     cap = _scan_cap(size)
+    folded: dict[str, tuple[str, ...]] | None = None
+
+    def siblings() -> dict[str, tuple[str, ...]]:
+        nonlocal folded
+        if folded is None:
+            folded = _folded_siblings(root, directory, names, canonical)
+        return folded
+
     examined = 0
     consumed = None  # The last admitted version this read finished with, touching or not.
     page = []
@@ -429,6 +485,7 @@ def read(
             path=canonical,
             parent_ref=parent_ref,
             head_episode=current["frontmatter"].get("episode"),
+            siblings=siblings,
         )
         if entry is None:
             continue

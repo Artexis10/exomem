@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
-from . import capabilities, held_fs
+from . import capabilities, held_fs, vault
 from .collection_profiles import PLANNING_PROFILE
 from .kbdir import kb_dirname
 from .vault import (
@@ -87,8 +87,7 @@ FOLD_STEP_KINDS: Final[frozenset[str]] = frozenset(
 _DUPLICATE_FOLD_KINDS: Final[frozenset[str]] = frozenset({FOLD_DUPLICATE_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND})
 #: The protected trees a fold may name: the Sources tree its revisions live in, and the Evidence tree.
 #: The trash is named too.
-# nosemgrep: ep-word-set -- the protected-tree names `PROTECTED_TREES` fixes, a closed subset.
-_FOLD_TREES: Final[frozenset[str]] = frozenset({"sources", "evidence"})
+_FOLD_TREES: Final[frozenset[str]] = frozenset(name.casefold() for name in vault.APPEND_ONLY_KB_SUBPATHS)
 #: The episode Records leaf (close-memory-loop 3.5). It is not a general
 #: curation kind: only a plan the episode `records` route seals may carry it
 #: (`propose(..., allow_records=True)`, alone in its plan), so no curation door
@@ -828,14 +827,16 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
     }
 
 
-def validate_forward_plan(raw: Any, *, allow_records: bool = False) -> dict[str, Any]:
+def validate_forward_plan(raw: Any, *, allow_records: bool = False, allow_fold_inverse: bool = False) -> dict[str, Any]:
     """A closed forward plan. The compatibility flag `allow_records` admits
     the private leaves (the episode leaves and the promotion revert's
-    `remove-relation`); only their sealers and sealed plans pass it."""
+    `remove-relation`); only their sealers and sealed plans pass it.
+    `allow_fold_inverse` admits the two unfold steps, which only a
+    compensation derivation and a plan it sealed may carry."""
     kinds = (
-        (*STEP_KINDS, *_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND, UNFOLD_RECAP_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND)
-        if allow_records
-        else STEP_KINDS
+        *STEP_KINDS,
+        *((*_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND) if allow_records else ()),
+        *((UNFOLD_RECAP_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND) if allow_fold_inverse else ()),
     )
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
@@ -894,7 +895,7 @@ def _validate_sealed_plan(raw: Any) -> dict[str, Any]:
     base = {key: value for key, value in raw.items() if key in _PLAN_FIELDS}
     # A stored plan was admitted by `propose`, which alone decides whether a
     # Records leaf may be sealed.
-    normalized = validate_forward_plan(base, allow_records=True)
+    normalized = validate_forward_plan(base, allow_records=True, allow_fold_inverse=True)
     _unknown_fields(dict(raw), _PLAN_FIELDS | _SEALED_FIELDS, "stored plan")
     manifest = raw.get("binding_manifest", [])
     registries = raw.get("registry_ids", {})
@@ -5348,6 +5349,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         },
         # Only this derivation may carry the private inverse of a fold.
         allow_records=True,
+        allow_fold_inverse=True,
     )
     manifest = _prepare_manifest(root, plan["steps"])
     _require_plan_relocation_history(root, plan)
