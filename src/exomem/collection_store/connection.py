@@ -273,6 +273,9 @@ class WriterConnection:
         # starts with none.
         self.import_proofs: dict[str, Any] = {}
         self.import_blocked: dict[str, str] = {}
+        # Per blocked job whose login could not be checked: when this host may retry (monotonic) and
+        # how many checks in a row failed.
+        self.import_retry: dict[str, tuple[float, int]] = {}
         self.import_readers: dict[str, Any] = {}
         self.import_last_turn: tuple[str, str] | None = None
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
