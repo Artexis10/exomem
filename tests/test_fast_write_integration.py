@@ -1585,6 +1585,7 @@ def test_a_write_refused_at_the_commit_fence_retires_its_own_receipt(
             vault,
             rel_path=rel,
             source=_compiled_page("Fenced after prepare", "changed"),
+            guarded=True,
         )
 
     assert (vault / rel).read_text(encoding="utf-8") == original
@@ -1620,6 +1621,25 @@ def test_crash_cut_prepared_before_replacement_never_publishes(vault: Path) -> N
         vault, receipt, current_generation="generation-1", known_uncommitted=True
     )
     assert aborted.outcome == "aborted"
+
+
+def test_a_known_rollback_retires_a_batch_with_a_path_it_left_unchanged(vault: Path) -> None:
+    """An index the write rewrote with the same bytes reads as written, and must not keep the receipt."""
+    changed, unchanged = "Knowledge Base/Notes/rolled-back.md", "Knowledge Base/index.md"
+    _put(vault, changed, "before body\n")
+    _put(vault, unchanged, "index body\n")
+    receipt = _prepare_store_batch(
+        vault,
+        batch_id="rolled-back-with-unchanged-path",
+        generation="generation-1",
+        changes=((changed, "before body\n", "after body\n"), (unchanged, "index body\n", "index body\n")),
+    )
+
+    proof = derived_receipts.prove_committed(
+        vault, receipt, current_generation="generation-1", known_uncommitted=True
+    )
+
+    assert proof.outcome == "aborted", proof.outcome
 
 
 def test_crash_cut_partial_canonical_state_fails_closed(vault: Path) -> None:

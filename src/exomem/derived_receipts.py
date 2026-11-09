@@ -1553,7 +1553,11 @@ def _prove_committed_guarded(
                 observation_guards,
             )
             all_after = all(state == "after" for state in path_states)
-            all_before = all(state == "before" for state in path_states)
+            # A path the batch left unchanged reads as its after-state; it is its before-state too.
+            restored = all(
+                state == "before" or state == "after" and path.before_hash == path.after_hash
+                for path, state in zip(current.paths, path_states, strict=True)
+            )
             current = _receipt_from_connection(connection, batch_id)
             # Preserve a pre-upgrade batch's proof before re-proof can strand
             # it and erase the only surviving evidence of its old ready state.
@@ -1587,7 +1591,7 @@ def _prove_committed_guarded(
                 # for lineage and is still what completion binds against.
                 outcome = "ready"
                 _activate_proven_batch(connection, current.batch_id, now=observed_at)
-            elif all_before and known_uncommitted:
+            elif restored and known_uncommitted:
                 outcome = "aborted"
                 connection.execute(
                     "UPDATE derived_batch_components SET state = 'aborted', "
