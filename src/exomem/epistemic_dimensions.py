@@ -15,8 +15,9 @@ every edge its page is an endpoint of; the `relations` filter treats a unit the 
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from . import semantic_labels
@@ -126,10 +127,54 @@ def dimensions_of(
     )
 
 
-def family_relation_keys(relations: RelationRegistry, family: str) -> tuple[str, ...]:
-    """The shipped relation keys of `family`. A vault extension rolls up to one of them, so a
-    graph query on these keys also finds the extension's edges."""
-    return tuple(sorted(key for key, entry in relations.core.items() if entry.family == family))
+@dataclass(frozen=True, slots=True)
+class FamilyPages:
+    """The pages that an edge of each family touches, or why the graph could not say.
+
+    `status` is the graph's: "available" means `pages` is authoritative, where an empty set is
+    a real "no such edges"; any other value means the graph is missing, stale or off, and
+    `pages` is empty without meaning that no edge exists.
+    """
+
+    status: str
+    pages: Mapping[str, frozenset[str]]
+
+
+def read_family_pages(
+    vault_root: Path,
+    relations: RelationRegistry,
+    families: Collection[str],
+    *,
+    keep: Callable[[str], bool] | None = None,
+) -> FamilyPages:
+    """Read, in one graph query, the pages that an edge of each of `families` touches.
+
+    A vault extension rolls up to its parent's key, so the query on the shipped keys of each
+    family finds the extension's edges too. `keep` is the caller's admission: an edge counts only
+    when the caller may read both of its pages. It never scans the corpus and never reports an
+    unreadable graph as an empty one.
+    """
+    if not families:
+        return FamilyPages("available", {})
+    from . import epistemic_graph
+
+    keys = sorted(
+        key for key, entry in relations.core.items() if entry.family in set(families)
+    )
+    result = epistemic_graph.EpistemicGraphIndex(vault_root).relation_participants(
+        keys, keep=keep
+    )
+    if result.status != "available":
+        return FamilyPages(result.status, {})
+    found: dict[str, set[str]] = {family: set() for family in families}
+    for page, matched in result.matched_keys.items():
+        for key in matched:
+            # An edge authored with a deprecated key matched through its replacement, so it
+            # belongs to the replacement's family.
+            family = relations.family_of(relations.terminal_replacement(key) or key)
+            if family in found:
+                found[family].add(page)
+    return FamilyPages("available", {family: frozenset(pages) for family, pages in found.items()})
 
 
 @dataclass(frozen=True, slots=True)

@@ -157,11 +157,19 @@ with no code change.
 {"filters": {"unit.dimension": {"$eq": "currency"}}, "result_level": "unit"}
 ```
 
-A dimension with a family member reads the edge graph once per family for the
+A dimension with a family member reads the edge graph in one query for the
 whole request. While the graph sidecar is missing or stale the request raises
 the typed warming outcome and never answers as if no edge existed. A caller sees
 an edge only when it may see both of its pages. A served request refuses the
 field today; the offline CLI evaluates it.
+
+The category report (`schema_memory` with `operation="infer"` and `subject="categories"`, which counts units by category) lists every
+dimension with its members and display behaviours, and with `unit_count` and
+`page_count` for the units it scanned. Its `edges` value says how the count was
+made: `not_needed` when no edge decides the dimension, `counted` when the graph
+answered, and `unavailable` when it could not, where both counts are `null`
+instead of a number that leaves out the edges. A dimension a vault adds appears
+there with no code change.
 
 ## Explain ranking without inventing confidence
 

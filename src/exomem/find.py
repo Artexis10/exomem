@@ -4774,11 +4774,11 @@ def _resolve_dimension_source(
 ) -> epistemic_dimensions.UnitDimensions | None:
     """What answers a plan's `unit.dimension` predicates, or None when it names none.
 
-    Membership that depends on edges reads, for each family a named dimension has, the pages
-    that an edge of that family touches: one graph read per family for the whole candidate set,
-    never one per unit. `keep` is the caller's admission, so an edge to a page the caller cannot
-    see gives no membership. A missing or stale sidecar raises the typed warming outcome and
-    schedules a rebuild, as the relation filter does; an empty set from a current one is real.
+    Membership that depends on edges reads the pages that an edge of each family a named
+    dimension has touches: one graph query for the whole candidate set, never one per unit.
+    `keep` is the caller's admission, so an edge to a page the caller cannot see gives no
+    membership. A missing or stale sidecar raises the typed warming outcome and schedules a
+    rebuild, as the relation filter does; an empty set from a current one is real.
     """
     named = structured_filters.named_dimensions(plan)
     if not named:
@@ -4787,24 +4787,20 @@ def _resolve_dimension_source(
 
     relations = relation_registry.load_registry(vault_root)
     lookups = epistemic_dimensions.membership(language, relations, only=named)
-    participants: dict[str, frozenset[str]] = {}
-    if lookups.needs_edges:
-        graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
-        for family in sorted(lookups.by_family):
-            result = graph_index.relation_participants(
-                epistemic_dimensions.family_relation_keys(relations, family), keep=keep
-            )
-            if result.status == "temporarily_unavailable":
-                raise RetrievalIndexWarming(
-                    site="relation_graph", status="temporarily_unavailable"
-                )
-            if result.status == "warming":
-                epistemic_graph.schedule_background_rebuild(
-                    vault_root,
-                    mutation_coordinator=graph_index._canonical_mutation_coordinator(),
-                )
-                raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
-            participants[family] = result.paths
+    edges = epistemic_dimensions.read_family_pages(
+        vault_root, relations, lookups.by_family, keep=keep
+    )
+    if edges.status == "temporarily_unavailable":
+        raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
+    if edges.status == "warming":
+        epistemic_graph.schedule_background_rebuild(
+            vault_root,
+            mutation_coordinator=epistemic_graph.EpistemicGraphIndex(
+                vault_root
+            )._canonical_mutation_coordinator(),
+        )
+        raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
+    participants = edges.pages
     return epistemic_dimensions.UnitDimensions(lookups, participants)
 
 

@@ -15,6 +15,7 @@ import pytest
 from exomem import (
     epistemic_dimensions,
     epistemic_graph,
+    memory_schema,
     relation_registry,
     semantic_labels,
     semantic_units,
@@ -299,6 +300,28 @@ def test_recall_filters_units_by_the_edge_family_of_their_page(tmp_path: Path) -
     assert ("New outlook", "claim") not in others
 
 
+def test_a_vault_extension_edge_reaches_its_parents_dimension_through_the_graph(
+    tmp_path: Path,
+) -> None:
+    """Catches a graph read that asks only for shipped keys and so misses a vault's own relation."""
+    vault = _outlook_vault(tmp_path)
+    extensions = relation_registry.extension_registry_path(vault)
+    extensions.parent.mkdir(parents=True, exist_ok=True)
+    extensions.write_text(
+        "schema_version: 1\nextensions:\n"
+        "  x.overrules: {parent: supersedes, description: Overrules a decision}\n",
+        encoding="utf-8",
+    )
+    new = vault / NEW
+    new.write_text(new.read_text().replace("- supersedes [[", "- x.overrules [["), encoding="utf-8")
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    find_module.clear_cache()
+
+    current = _recall_units(vault, {"unit.dimension": {"$eq": "currency"}})
+
+    assert sorted(current) == [("New outlook", "claim"), ("Old outlook", "claim")]
+
+
 def test_a_dimension_that_needs_edges_never_answers_empty_from_a_missing_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -362,3 +385,52 @@ def test_a_served_reader_refuses_the_dimension_filter_by_field() -> None:
     eligibility = structured_filters.plan_index_eligibility(plan)
 
     assert "unit.dimension" in eligibility.unsupported_fields
+
+
+# ---------------------------------------------------------------------------
+# The per-dimension report row
+# ---------------------------------------------------------------------------
+
+
+def _report_row(vault: Path, key: str) -> dict:
+    report = memory_schema.infer_category_registry(vault)
+    return next(row for row in report["dimensions"] if row["key"] == key)
+
+
+def test_a_vault_dimension_has_a_report_row_that_agrees_with_its_filter(tmp_path: Path) -> None:
+    """The spec's `regulation` scenario: members, filter and report all come from the registry.
+
+    Catches a report that counts by its own rule, so the row says 2 while the filter returns 3.
+    """
+    vault = _outlook_vault(tmp_path)
+
+    row = _report_row(vault, "regulation")
+    hits = _recall_units(vault, {"unit.dimension": {"$eq": "regulation"}})
+
+    assert row["members"] == {"kinds": ["constraint", "requirement"]}
+    assert row["shipped"] is False
+    assert (row["unit_count"], row["page_count"], row["edges"]) == (2, 1, "not_needed")
+    assert row["unit_count"] == len(hits)
+
+
+def test_a_dimension_that_needs_edges_counts_the_units_on_the_pages_its_edges_touch(
+    tmp_path: Path,
+) -> None:
+    vault = _outlook_vault(tmp_path, graph=True)
+
+    row = _report_row(vault, "currency")
+
+    assert (row["unit_count"], row["page_count"], row["edges"]) == (2, 2, "counted")
+
+
+def test_a_dimension_that_needs_edges_reports_unknown_when_the_graph_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Catches a report that shows 0 units for 'currency' because the sidecar is not built yet."""
+    vault = _outlook_vault(tmp_path)
+
+    row = _report_row(vault, "currency")
+
+    assert (row["unit_count"], row["page_count"], row["edges"]) == (None, None, "unavailable")
+    # A dimension that edges do not decide still counts.
+    assert _report_row(vault, "regulation")["unit_count"] == 2

@@ -475,13 +475,16 @@ class RelationFilterResult:
     "no such edges"), "warming" (sidecar missing or stale — the caller raises the
     typed warming outcome and schedules a rebuild), or "temporarily_unavailable"
     (graph index disabled). `provenance` maps each participant path to its best
-    (lowest source-order) qualifying match.
+    (lowest source-order) qualifying match. `matched_keys` maps each participant path
+    to every registry key an admitted edge matched it by, so a query for several
+    keys can tell which of them each page took part in.
     """
 
     status: str
     paths: frozenset[str] = frozenset()
     provenance: dict[str, RelationMatch] = dataclass_field(default_factory=dict)
     reason: str | None = None
+    matched_keys: dict[str, frozenset[str]] = dataclass_field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -8892,6 +8895,7 @@ class EpistemicGraphIndex:
 
         paths: set[str] = set()
         provenance: dict[str, RelationMatch] = {}
+        matched_keys: dict[str, set[str]] = {}
 
         def _query_identity(
             matched_key: str | None, matched_via: str
@@ -8925,6 +8929,8 @@ class EpistemicGraphIndex:
             ):
                 return
             paths.add(page)
+            if matched_key is not None:
+                matched_keys.setdefault(page, set()).add(matched_key)
             if page in provenance:
                 return
             # The first admitted match owns page provenance.
@@ -8991,7 +8997,10 @@ class EpistemicGraphIndex:
                     )
 
         return RelationFilterResult(
-            status="available", paths=frozenset(paths), provenance=provenance
+            status="available",
+            paths=frozenset(paths),
+            provenance=provenance,
+            matched_keys={page: frozenset(keys) for page, keys in matched_keys.items()},
         )
 
     def relation_edges(

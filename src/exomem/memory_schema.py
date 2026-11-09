@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from . import (
+    epistemic_dimensions,
     epistemic_graph,
     relation_registry,
     relation_vocabulary,
@@ -1108,6 +1109,7 @@ def infer_category_registry(
         page_type=page_type,
         registry=registry,
     )
+    dimension_counts = _dimension_counts(vault_root, registry, observations)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in observations:
         grouped.setdefault(str(item["category_key"]), []).append(item)
@@ -1192,12 +1194,18 @@ def infer_category_registry(
                     "labels": dict(definition.labels),
                     "description": definition.description,
                     "shipped": definition.core,
-                    # A dimension also lists what makes a unit belong to it and how context shows it.
+                    # A dimension also lists what makes a unit belong to it, how context shows it
+                    # and how many units of this scan belong to it.
                     **{
                         field: value
                         for field, value in definition.as_dict().items()
                         if field in semantic_labels.MEMBER_FIELDS
                     },
+                    **(
+                        dimension_counts[definition.key]
+                        if labels is semantic_labels.DIMENSIONS
+                        else {}
+                    ),
                 }
                 for definition in registry.label_definitions(labels).values()
             ]
@@ -1207,6 +1215,47 @@ def infer_category_registry(
         "content_hash": registry.content_hash,
         "registry_findings": [item.as_dict() for item in registry.findings],
     }
+
+
+def _dimension_counts(
+    vault_root: Path,
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    observations: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """How many scanned units, and on how many pages, belong to each dimension of `registry`.
+
+    A dimension with a relation family as a member counts a unit through its page's edges, read
+    from the graph in one query. `edges` says how: "not_needed" for a dimension no edge decides,
+    "counted" when the graph answered, and "unavailable" when it could not, where the counts
+    are None because a count without the edges would present a part as the whole.
+    """
+    relations = relation_registry.load_registry(vault_root)
+    lookups = epistemic_dimensions.membership(registry, relations)
+    edges = epistemic_dimensions.read_family_pages(vault_root, relations, lookups.by_family)
+    answer = epistemic_dimensions.UnitDimensions(lookups, edges.pages)
+    units: Counter[str] = Counter()
+    pages: dict[str, set[str]] = {}
+    for item in observations:
+        belongs = answer(
+            {"path": item["path"]}, {"kind": item["kind"], "row_keys": item["row_keys"]}
+        )
+        for key in belongs:
+            units[key] += 1
+            pages.setdefault(key, set()).add(item["path"])
+    edge_dimensions = frozenset().union(*lookups.by_family.values())
+    counts: dict[str, dict[str, Any]] = {}
+    for key in registry.label_definitions(semantic_labels.DIMENSIONS):
+        if key not in edge_dimensions:
+            status = "not_needed"
+        else:
+            status = "counted" if edges.status == "available" else "unavailable"
+        counted = status != "unavailable"
+        counts[key] = {
+            "unit_count": units[key] if counted else None,
+            "page_count": len(pages.get(key, ())) if counted else None,
+            "edges": status,
+        }
+    return counts
 
 
 def category_observations(
@@ -1277,6 +1326,7 @@ def _scan_category_observations(
                     "excerpt_truncated": truncated,
                     "page_type": page.page_type,
                     "projects": projects,
+                    "row_keys": tuple(unit.metadata),
                     # A rich unit that omits ``- category:`` defaults its category
                     # to the governed kind; that is not an authored category
                     # choice and never seeds a registration candidate.
