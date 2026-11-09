@@ -103,6 +103,7 @@ def test_the_review_tool_offers_no_choice_for_a_held_binary_and_says_it_stays_he
     assert (row["resolvable"], row["keep_mine_possible"], row["choices"]) == (False, False, [])
     assert "wait" not in answer["outcome"]
     assert "stay held until a later release adds that" in answer["outcome"]
+    assert row["not_resolvable_because"] == held.BINARY_BLOCK
 
 
 def test_the_review_tool_says_when_the_vault_is_not_in_store_mode_instead_of_reporting_none_held(

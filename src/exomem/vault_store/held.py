@@ -50,6 +50,14 @@ _LIST_AGAIN = (
     f"after the edit was held, {KEEP_STORE} takes it and saves the person's file first. "
     "Then resolve with the new item_version."
 )
+#: Why an item cannot be resolved here, as a sentence an agent repeats: the list and the refusal
+#: of a resolve both say it. A held binary waits for a later release; a file above the projector's
+#: body limit cannot be read whole to save or adopt.
+BINARY_BLOCK = "Binaries cannot be resolved here yet and stay held until a later release adds that."
+LARGE_BLOCK = (
+    f"A file above {projector.HELD_BODY_LIMIT // 2**20} MiB cannot be saved or adopted here, "
+    "so it stays held."
+)
 _ITEM_COLUMNS = "path, kind, store_revision, sha256, detected_at"
 
 
@@ -91,10 +99,14 @@ class HeldItem:
     file: PersonFile
     store: StoreFacts | None
     item_version: str
-    #: False for a binary: only a page's held item can be resolved, for now.
-    resolvable: bool
+    #: The sentence that says why no choice resolves this item here, or None when one does.
+    blocked: str | None
     #: Whether keep-mine can still work: the store's page must be as it was when the edit was held.
     keep_mine_possible: bool
+
+    @property
+    def resolvable(self) -> bool:
+        return self.blocked is None
 
     @property
     def choices(self) -> tuple[str, ...]:
@@ -173,8 +185,7 @@ def resolve_held(
         raise OpError(
             write.NOT_OWNED,
             f"{rel}: a held binary cannot be resolved here yet",
-            "Leave it held. Binaries cannot be resolved here yet and stay held "
-            "until a later release adds that.",
+            f"Leave it held. {BINARY_BLOCK}",
         )
     writer = writer or _bound_writer(root)
     row, store, page = _read_store(root, rel, with_body=choice == KEEP_STORE)
@@ -186,13 +197,14 @@ def resolve_held(
             "Make the file a readable regular file, not a symlink or a folder, "
             "then list the held items again.",
         )
-    if disk.file.exists and disk.body is None:
+    item = _item(row, disk.file, store)
+    if item.blocked is not None:
         raise OpError(
             TOO_LARGE,
-            f"{rel}: the person's file is larger than {projector.HELD_BODY_LIMIT} bytes",
-            "Leave it held. A file that large cannot be saved or adopted here, so tell the person.",
+            f"{rel}: its file is too large to resolve here",
+            f"Leave it held. {item.blocked}",
         )
-    if _item(row, disk.file, store).item_version != seen:
+    if item.item_version != seen:
         raise write.StoreConflict(rel, "this held item changed after it was listed", _LIST_AGAIN)
     exported: tuple[Path | None, str | None] = (None, None)
     if choice == KEEP_MINE:
@@ -284,7 +296,12 @@ def _item(row: tuple, file: PersonFile, store: StoreFacts | None) -> HeldItem:
     if store is not None:
         witness += [store.revision, store.sha256]
     version = hashlib.sha256(json.dumps(witness).encode()).hexdigest()[:16]
-    resolvable = ownership.classify(rel) is ownership.Ownership.PAGE
+    if ownership.classify(rel) is not ownership.Ownership.PAGE:
+        blocked = BINARY_BLOCK
+    elif file.size is not None and file.size > projector.HELD_BODY_LIMIT:
+        blocked = LARGE_BLOCK
+    else:
+        blocked = None
     # Keep-mine commits only against the revision that the edit was held on, or against no page.
     if held_revision is None:
         unchanged = store is None
@@ -299,8 +316,8 @@ def _item(row: tuple, file: PersonFile, store: StoreFacts | None) -> HeldItem:
         file,
         store,
         version,
-        resolvable,
-        resolvable and unchanged,
+        blocked,
+        blocked is None and unchanged,
     )
 
 

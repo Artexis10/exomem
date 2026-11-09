@@ -69,6 +69,7 @@ def _row(item: Any) -> dict[str, Any]:
         if item.store is None
         else {"revision": item.store.revision, "sha256": item.store.sha256},
         "resolvable": item.resolvable,
+        **({"not_resolvable_because": item.blocked} if item.blocked else {}),
         "keep_mine_possible": item.keep_mine_possible,
         "choices": list(item.choices),
         "item_version": item.item_version,
@@ -102,8 +103,8 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
             else "This vault is not in store mode, so it holds no held items."
         )
     else:
-        binaries = sum(not item.resolvable for item in visible)
-        pages = len(visible) - binaries
+        blocked = [item.blocked for item in visible if item.blocked]
+        pages = len(visible) - len(blocked)
         parts = []
         if pages:
             parts.append(
@@ -112,11 +113,11 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
                 f"Keep the person's file with {held.KEEP_MINE}, "
                 f"or keep Exomem's page with {held.KEEP_STORE}."
             )
-        if binaries:
+        # One sentence for each reason, in the order the items list them.
+        for reason in dict.fromkeys(blocked):
             parts.append(
-                f"{_count(binaries, 'binary file is', 'binary files are')} held. "
-                "Binaries cannot be resolved here yet and stay held "
-                "until a later release adds that."
+                f"{_count(blocked.count(reason), 'held item', 'held items')} cannot be resolved "
+                f"here. {reason}"
             )
         if len(shown) < len(visible):
             parts.append(f"Showing {len(shown)} of {len(visible)}.")

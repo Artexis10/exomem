@@ -136,11 +136,9 @@ def test_the_list_gives_each_item_the_persons_file_and_the_stores_page_as_they_a
     assert only_item(stored).item_version != item.item_version
 
 
-def test_the_list_offers_keep_mine_only_while_the_stores_page_is_as_it_was_when_held(
-    stored, writer
-):
-    """A list that offers keep-mine after Exomem changed the page again, so the agent tries a
-    resolution that the store must refuse."""
+def test_the_list_offers_only_the_choices_that_a_resolve_takes(stored, writer, monkeypatch):
+    """A list that offers keep-mine after Exomem changed the page again, or any choice for a file
+    too large to read whole, so the agent tries a resolution that the store must refuse."""
     hold(stored, writer, "edit")
     before = only_item(stored)
     assert (before.resolvable, before.keep_mine_possible) == (True, True)
@@ -149,6 +147,12 @@ def test_the_list_offers_keep_mine_only_while_the_stores_page_is_as_it_was_when_
     after = only_item(stored)
     assert (after.resolvable, after.keep_mine_possible) == (True, False)
     assert after.choices == (held.KEEP_STORE,)
+    monkeypatch.setattr(projector, "HELD_BODY_LIMIT", len(MINE) - 1)
+    large = only_item(stored)
+    assert (large.blocked, large.choices) == (held.LARGE_BLOCK, ())
+    with pytest.raises(OpError) as refused:
+        resolve(stored, writer, held.KEEP_STORE, seen=large.item_version)
+    assert refused.value.code == held.TOO_LARGE
 
 
 def test_a_held_binary_is_listed_as_not_resolvable_and_refuses_both_choices(stored, writer):
