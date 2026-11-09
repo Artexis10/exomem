@@ -1,41 +1,46 @@
 # The unit kinds Exomem ships. A kind is what a `##` heading says a unit is.
 #
-# `heading_aliases` are the other spellings of a heading that name the kind; the kind's own
-# key always names it. `traits` state what code does with the kind, from the closed set in
-# `exomem.semantic_kinds.KIND_TRAITS`; a pack that names another trait fails the build, and a
-# vault kind declares its own traits from the same set in `_Schema/semantic-language-registry.yaml`.
+# `labels` map a language tag to the kind's name in that language, and each label names the kind
+# as a heading, as `## Claim` does. A shipped label is English and always spells the kind's own key
+# or one of its heading aliases, so no page parses differently for it; a vault adds labels in any
+# language under the kind's key in `_Schema/semantic-language-registry.yaml`.
+# `heading_aliases` are the other spellings of a heading that name the kind, in no stated
+# language; the kind's own key always names it. `traits` state what code does with the kind, from
+# the closed set in `exomem.semantic_kinds.KIND_TRAITS`; a pack that names another trait fails the
+# build, and a vault kind declares its own traits from the same set in
+# `_Schema/semantic-language-registry.yaml`.
 # The kind `question` is no entry: only `open_question` carries the `question` trait.
 schema_version: 1
 kinds:
-  claim: {description: Portable claim semantic block, heading_aliases: [claims], traits: [assertion, page_claim]}
-  finding: {description: Portable finding semantic block, heading_aliases: [findings], traits: [assertion]}
-  evidence: {description: Portable evidence semantic block, heading_aliases: [proof, proofs, evidences]}
-  decision: {description: Portable decision semantic block, heading_aliases: [decisions]}
-  assumption: {description: Portable assumption semantic block, heading_aliases: [assumptions]}
-  inference: {description: Portable inference semantic block, heading_aliases: [inferences], traits: [assertion]}
-  constraint: {description: Portable constraint semantic block, heading_aliases: [constraints]}
-  risk: {description: Portable risk semantic block, heading_aliases: [risks]}
-  open_question: {description: Portable open question semantic block, heading_aliases: [open_questions, questions], traits: [question]}
-  hypothesis: {description: Portable hypothesis semantic block, heading_aliases: [hypotheses], traits: [assertion]}
-  prediction: {description: Portable prediction semantic block, heading_aliases: [predictions]}
-  result: {description: Portable result semantic block, heading_aliases: [results, outcome, outcomes], traits: [assertion, outcome]}
-  metric: {description: Portable metric semantic block, heading_aliases: [metrics]}
-  failure: {description: Portable failure semantic block, heading_aliases: [failures]}
-  pattern: {description: Portable pattern semantic block, heading_aliases: [patterns]}
-  record: {description: Portable record semantic block, heading_aliases: [records]}
-  case: {description: Portable case semantic block, heading_aliases: [cases]}
-  timeline_event: {description: Portable timeline event semantic block, heading_aliases: [timeline, timelines, timeline_events, events], traits: [dated_event]}
-  requirement: {description: Portable requirement semantic block, heading_aliases: [requirements]}
-  action: {description: Portable action semantic block, heading_aliases: [actions, todo, todos]}
-  definition: {description: Portable definition semantic block, heading_aliases: [definitions]}
-  procedure: {description: Portable procedure semantic block, heading_aliases: [procedures], traits: [procedure]}
-  source: {description: Portable source semantic block, heading_aliases: [sources]}
-  experiment: {description: Portable experiment semantic block, heading_aliases: [experiments]}
-  entity: {description: Portable entity semantic block, heading_aliases: [entities]}
-  project: {description: Portable project semantic block, heading_aliases: [projects]}
-  media_segment: {description: Portable media segment semantic block, heading_aliases: [media_segments, segments]}
-  belief: {description: Portable belief semantic block, heading_aliases: [beliefs], traits: [credence]}
+  claim: {description: Portable claim semantic block, labels: {en: Claim}, heading_aliases: [claims], traits: [assertion, page_claim]}
+  finding: {description: Portable finding semantic block, labels: {en: Finding}, heading_aliases: [findings], traits: [assertion]}
+  evidence: {description: Portable evidence semantic block, labels: {en: Evidence}, heading_aliases: [proof, proofs, evidences]}
+  decision: {description: Portable decision semantic block, labels: {en: Decision}, heading_aliases: [decisions]}
+  assumption: {description: Portable assumption semantic block, labels: {en: Assumption}, heading_aliases: [assumptions]}
+  inference: {description: Portable inference semantic block, labels: {en: Inference}, heading_aliases: [inferences], traits: [assertion]}
+  constraint: {description: Portable constraint semantic block, labels: {en: Constraint}, heading_aliases: [constraints]}
+  risk: {description: Portable risk semantic block, labels: {en: Risk}, heading_aliases: [risks]}
+  open_question: {description: Portable open question semantic block, labels: {en: Open question}, heading_aliases: [open_questions, questions], traits: [question]}
+  hypothesis: {description: Portable hypothesis semantic block, labels: {en: Hypothesis}, heading_aliases: [hypotheses], traits: [assertion]}
+  prediction: {description: Portable prediction semantic block, labels: {en: Prediction}, heading_aliases: [predictions]}
+  result: {description: Portable result semantic block, labels: {en: Result}, heading_aliases: [results, outcome, outcomes], traits: [assertion, outcome]}
+  metric: {description: Portable metric semantic block, labels: {en: Metric}, heading_aliases: [metrics]}
+  failure: {description: Portable failure semantic block, labels: {en: Failure}, heading_aliases: [failures]}
+  pattern: {description: Portable pattern semantic block, labels: {en: Pattern}, heading_aliases: [patterns]}
+  record: {description: Portable record semantic block, labels: {en: Record}, heading_aliases: [records]}
+  case: {description: Portable case semantic block, labels: {en: Case}, heading_aliases: [cases]}
+  timeline_event: {description: Portable timeline event semantic block, labels: {en: Timeline event}, heading_aliases: [timeline, timelines, timeline_events, events], traits: [dated_event]}
+  requirement: {description: Portable requirement semantic block, labels: {en: Requirement}, heading_aliases: [requirements]}
+  action: {description: Portable action semantic block, labels: {en: Action}, heading_aliases: [actions, todo, todos]}
+  definition: {description: Portable definition semantic block, labels: {en: Definition}, heading_aliases: [definitions]}
+  procedure: {description: Portable procedure semantic block, labels: {en: Procedure}, heading_aliases: [procedures], traits: [procedure]}
+  source: {description: Portable source semantic block, labels: {en: Source}, heading_aliases: [sources]}
+  experiment: {description: Portable experiment semantic block, labels: {en: Experiment}, heading_aliases: [experiments]}
+  entity: {description: Portable entity semantic block, labels: {en: Entity}, heading_aliases: [entities]}
+  project: {description: Portable project semantic block, labels: {en: Project}, heading_aliases: [projects]}
+  media_segment: {description: Portable media segment semantic block, labels: {en: Media segment}, heading_aliases: [media_segments, segments]}
+  belief: {description: Portable belief semantic block, labels: {en: Belief}, heading_aliases: [beliefs], traits: [credence]}
 # A compact kind has no heading: it is the kind of a unit written as one line, so no `##`
 # heading resolves to it.
 compact_kinds:
-  observation: {description: Compact semantic observation}
+  observation: {description: Compact semantic observation, labels: {en: Observation}}
