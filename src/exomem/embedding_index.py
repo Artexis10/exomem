@@ -51,10 +51,9 @@ def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connect
         return _sqlite_connect_owned(database, *args, **kwargs)
 
 
-def _sqlite_connect_owned(
-    database: Any, *args: Any, **kwargs: Any
-) -> sqlite3.Connection:
+def _sqlite_connect_owned(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
     return sqlite3.connect(database, *args, **kwargs)
+
 
 #: The width of the legacy English space, kept for callers that name it. A
 #: sidecar's own width is `EmbeddingIndex.dim`, read from its vector-space record.
@@ -73,8 +72,16 @@ MISSING_COVERAGE = "missing-coverage"
 #: The occurrence columns, in table order, before `vector` and `file_mtime`. The
 #: table's own schema, named once for every reader and writer of its rows.
 OCCURRENCE_COLUMNS = (  # nosemgrep: ep-word-set -- The table's own column names.
-    "unit_key", "record_type", "parent_path", "parent_ref", "parent_generation",
-    "parent_source_hash", "parser_version", "form", "content", "unit_source_hash",
+    "unit_key",
+    "record_type",
+    "parent_path",
+    "parent_ref",
+    "parent_generation",
+    "parent_source_hash",
+    "parser_version",
+    "form",
+    "content",
+    "unit_source_hash",
     "source_order",
 )
 _CONTENT_COLUMN = OCCURRENCE_COLUMNS.index("content")
@@ -82,8 +89,8 @@ _CONTENT_COLUMN = OCCURRENCE_COLUMNS.index("content")
 SEMANTIC_UNIT_GENERATION = "semantic_unit_generation"
 #: The tables holding this sidecar's vectors; the first row read for a legacy width.
 _VECTOR_TABLES = ("chunks", "semantic_unit_vectors")
-#: The `meta` keys of a store-mode vault's change cursor: the store revision and the audit `seq` of the
-#: last audit row whose pages this sidecar has caught up with (see `vault_store.vectors`).
+#: The `meta` keys of a store-mode vault's change cursor: the store revision and the audit `seq` of
+#: the last audit row whose pages this sidecar has caught up with (see `vault_store.vectors`).
 STORE_CURSOR_REVISION = "store_revision_seen"
 STORE_CURSOR_SEQ = "store_audit_seq_seen"
 #: Paths per `IN (...)` read of the stamp table, under SQLite's bound-parameter limit.
@@ -93,13 +100,78 @@ _STAMP_QUERY_PATHS = 500
 class StoreStamp(NamedTuple):
     """Which store bytes one page's rows were computed from, written in the rows' own transaction.
 
-    ``owed`` marks a page whose attempt failed on exactly those bytes: its rows, kept only so a retry
-    can reuse their vectors, do not match the store, and no reader may serve them.
+    ``owed`` marks a page whose attempt failed on exactly those bytes: its rows, kept only so a
+    retry can reuse their vectors, do not match the store, and no reader may serve them.
     """
 
     sha256: str
     revision: int
     owed: bool = False
+
+
+class StoreRecord:
+    """The store-mode record of one sidecar, read in one open transaction (see `store_record`)."""
+
+    def __init__(self, conn: sqlite3.Connection | None) -> None:
+        self._conn = conn
+
+    def cursor(self) -> tuple[int, int] | None:
+        if self._conn is None:
+            return None
+        found = dict(
+            self._conn.execute(
+                "SELECT key, value FROM meta WHERE key IN (?, ?)",
+                (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ),
+            ).fetchall()
+        )
+        if STORE_CURSOR_REVISION in found and STORE_CURSOR_SEQ in found:
+            return int(found[STORE_CURSOR_REVISION]), int(found[STORE_CURSOR_SEQ])
+        return None
+
+    def stamps(
+        self, paths: Iterable[str] | None = None, *, with_owed: bool = False
+    ) -> dict[str, StoreStamp]:
+        if self._conn is None:
+            return {}
+        columns = "SELECT file_path, sha256, revision, owed FROM store_page_vectors"
+        if paths is None:
+            rows = self._conn.execute(columns).fetchall()
+        else:
+            rows = self._conn.execute(f"{columns} WHERE owed = 1").fetchall() if with_owed else []
+            wanted = sorted(set(paths))
+            for start in range(0, len(wanted), _STAMP_QUERY_PATHS):
+                batch = wanted[start : start + _STAMP_QUERY_PATHS]
+                marks = ", ".join("?" for _ in batch)
+                rows += self._conn.execute(
+                    f"{columns} WHERE file_path IN ({marks})", batch
+                ).fetchall()
+        return {path: StoreStamp(sha, revision, bool(owed)) for path, sha, revision, owed in rows}
+
+    def owed_paths(self, limit: int) -> list[str]:
+        if self._conn is None:
+            return []
+        return [
+            path
+            for (path,) in self._conn.execute(
+                "SELECT file_path FROM store_page_vectors WHERE owed = 1 "
+                "ORDER BY revision, file_path LIMIT ?",
+                (limit,),
+            )
+        ]
+
+    def row_paths(self) -> set[str]:
+        if self._conn is None:
+            return set()
+        found = set(indexed_parent_paths(self._conn))
+        found.update(
+            path
+            for (path,) in self._conn.execute(
+                "SELECT parent_path FROM semantic_unit_vectors "
+                "UNION SELECT file_path FROM store_page_vectors"
+            )
+        )
+        return found
+
 
 # Per-path change log for the read-side bounded catch-up (see sidecar_store's
 # "bounded catch-up" note). The table records the generation at which each
@@ -195,7 +267,8 @@ class ChunkRef(NamedTuple):
 
 
 def _cache_covers_publication(
-    cached: _EmbCache | None, token: tuple[int, ...] | None,
+    cached: _EmbCache | None,
+    token: tuple[int, ...] | None,
     identity: recall_space.SpaceIdentity | None,
 ) -> bool:
     """A failed token probe must not serve rows from an obsolete publication."""
@@ -207,9 +280,7 @@ def _cache_covers_publication(
         return True
     # Semantic-unit generation does not change the chunk matrix.
     epoch, generation, instance = token[:3]
-    return cached.instance == instance and (
-        cached.epoch, cached.generation
-    ) >= (epoch, generation)
+    return cached.instance == instance and (cached.epoch, cached.generation) >= (epoch, generation)
 
 
 class _MaskCache(NamedTuple):
@@ -278,8 +349,7 @@ def _splice_path_blocks(
         lo, hi = sidecar_store.file_block(keys, path)
         if lo < cursor:
             raise ValueError(
-                f"unsorted matrix metadata at {path}: block starts at {lo}, "
-                f"behind cursor {cursor}"
+                f"unsorted matrix metadata at {path}: block starts at {lo}, behind cursor {cursor}"
             )
         out_meta.extend(metadata[cursor:lo])
         parts.append(matrix[cursor:lo])
@@ -292,9 +362,7 @@ def _splice_path_blocks(
     parts.append(matrix[cursor:])
     parts = [p for p in parts if p.shape[0]]
     new_matrix = (
-        np.concatenate(parts, axis=0)
-        if parts
-        else np.zeros((0, matrix.shape[1]), dtype=np.float32)
+        np.concatenate(parts, axis=0) if parts else np.zeros((0, matrix.shape[1]), dtype=np.float32)
     )
     if len(out_meta) != new_matrix.shape[0]:
         raise ValueError(
@@ -534,9 +602,17 @@ def occurrence_rows(state: semantic_index.SemanticParentIndexState) -> list[tupl
     """
     return [
         (
-            occurrence.key, "structural_occurrence", state.path, state.parent_ref,
-            state.parent_generation, state.parent_source_hash, state.parser_version,
-            occurrence.form, occurrence.content, occurrence.source_hash, source_order,
+            occurrence.key,
+            "structural_occurrence",
+            state.path,
+            state.parent_ref,
+            state.parent_generation,
+            state.parent_source_hash,
+            state.parser_version,
+            occurrence.form,
+            occurrence.content,
+            occurrence.source_hash,
+            source_order,
         )
         for source_order, occurrence in enumerate(state.occurrences)
     ]
@@ -553,7 +629,9 @@ def coverage_record(state: semantic_index.SemanticParentIndexState) -> str:
             **semantic_index.structural_metadata(state),
             "occurrences": sorted(occurrence.key for occurrence in state.occurrences),
         },
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -582,7 +660,8 @@ def stored_parent_states(
         () if paths is None else (json.dumps(paths, ensure_ascii=False),),
     ).fetchall()
     grouped: dict[str, tuple[set[str], set[str]]] = {
-        path: ({generation}, set()) for path, (generation, _count) in _coverage_index(conn, paths).items()
+        path: ({generation}, set())
+        for path, (generation, _count) in _coverage_index(conn, paths).items()
     }
     for parent_path, generation, unit_key in rows:
         generations, keys = grouped.setdefault(str(parent_path), ({MISSING_COVERAGE}, set()))
@@ -594,7 +673,9 @@ def stored_parent_states(
     }
 
 
-def _write_coverage(conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState) -> None:
+def _write_coverage(
+    conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState
+) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
         (COVERAGE_PREFIX + state.path, coverage_record(state)),
@@ -608,18 +689,20 @@ def _delete_coverage(conn: sqlite3.Connection, paths: list[str] | None = None) -
             (COVERAGE_PREFIX, _COVERAGE_END),
         )
         return
-    conn.executemany("DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths))
+    conn.executemany(
+        "DELETE FROM meta WHERE key = ?", ((COVERAGE_PREFIX + path,) for path in paths)
+    )
 
 
 def _ensure_store_stamps(conn: sqlite3.Connection) -> None:
     """The stamp table of a store-mode vault's rows, and the triggers that keep each stamp honest.
 
-    A stamp says which store bytes a page's chunk and unit rows were computed from. Any other write of
-    those rows (a file-mode upsert, a rebuild, a purge) leaves rows that the stamp no longer describes,
-    so each insert or delete on either table turns that page's existing stamp into an owed one, which
-    no reader serves; the stamping transaction writes its stamp last. A page that has no stamp is not
-    touched, so a file-mode vault pays one failed key lookup per row. The table is created, never
-    migrated: an older binary that shares this sidecar keeps working.
+    A stamp says which store bytes a page's chunk and unit rows were computed from. Any other write
+    of those rows (a file-mode upsert, a rebuild, a purge) leaves rows that the stamp no longer
+    describes, so each insert or delete on either table turns that page's existing stamp into an
+    owed one, which no reader serves; the stamping transaction writes its stamp last. A page that
+    has no stamp is not touched, so a file-mode vault pays one failed key lookup per row. The table
+    is created, never migrated: an older binary that shares this sidecar keeps working.
     """
     conn.execute(
         "CREATE TABLE IF NOT EXISTS store_page_vectors ("
@@ -651,9 +734,7 @@ def _write_store_stamps(conn: sqlite3.Connection, stamps: dict[str, StoreStamp])
 def _clear_store_stamps(conn: sqlite3.Connection) -> None:
     """Forget every stamp and the cursor: the drain then compares every stored page again."""
     conn.execute("DELETE FROM store_page_vectors")
-    conn.execute(
-        "DELETE FROM meta WHERE key IN (?, ?)", (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ)
-    )
+    conn.execute("DELETE FROM meta WHERE key IN (?, ?)", (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ))
 
 
 def indexed_parent_paths(conn: sqlite3.Connection) -> list[str]:
@@ -706,12 +787,13 @@ def _coverage_records(conn: sqlite3.Connection, paths: list[str]) -> dict[str, d
         except (TypeError, ValueError):
             continue
         if isinstance(record, dict) and isinstance(record.get("occurrences"), list):
-            records[str(key)[len(COVERAGE_PREFIX):]] = record
+            records[str(key)[len(COVERAGE_PREFIX) :]] = record
     return records
 
 
 def _unit_coverage(
-    conn: sqlite3.Connection, width: int,
+    conn: sqlite3.Connection,
+    width: int,
 ) -> tuple[dict[str, tuple[str, int]], frozenset[str]]:
     """Compact neutral proof of exact occurrence keys, row stamps and usable vectors.
 
@@ -748,8 +830,14 @@ def _unit_coverage(
         "AND NOT EXISTS (SELECT 1 FROM semantic_unit_vectors v WHERE v.parent_path = records.path "
         "AND v.unit_key NOT IN (SELECT value FROM json_each(doc, '$.occurrences'))) "
         "FROM records",
-        (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END,
-         semantic_index.PARSER_VERSION, STRUCTURAL_FORMAT, width * 4),
+        (
+            len(COVERAGE_PREFIX) + 1,
+            COVERAGE_PREFIX,
+            _COVERAGE_END,
+            semantic_index.PARSER_VERSION,
+            STRUCTURAL_FORMAT,
+            width * 4,
+        ),
     )
     for path, generation, count, proved in rows:
         if generation is not None and count is not None:
@@ -1168,9 +1256,7 @@ class EmbeddingIndex:
                 # the log instead of full-loading — then read back the FULL
                 # (epoch, generation, instance) token, stable under the write
                 # lock. The cache keys on it, not the mtime.
-                sidecar_store.bump_generation_for_paths(
-                    conn, CHUNK_PATH_LOG, [rel_path]
-                )
+                sidecar_store.bump_generation_for_paths(conn, CHUNK_PATH_LOG, [rel_path])
                 own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
@@ -1240,8 +1326,9 @@ class EmbeddingIndex:
     ) -> tuple[int, int, int, int] | None:
         """Publish one bounded group of prepared parents, then release old caches.
 
-        ``store_stamps`` names, per replaced parent, the store bytes its rows were computed from. They
-        commit with the rows, after them, so a reader never meets rows and a stamp that disagree.
+        ``store_stamps`` names, per replaced parent, the store bytes its rows were computed from.
+        They commit with the rows, after them, so a reader never meets rows and a stamp that
+        disagree.
         """
         unit_replacements = unit_replacements or []
         if not replacements and not unit_replacements:
@@ -1357,7 +1444,8 @@ class EmbeddingIndex:
             ).fetchone()
             record = _coverage_records(conn, [rel_path]).get(rel_path)
             return (
-                units[0] == unit_count and (units[1] or 0) == 0
+                units[0] == unit_count
+                and (units[1] or 0) == 0
                 and record is not None
                 and record.get("parent_generation") == parent_generation
                 and len(record["occurrences"]) == unit_count
@@ -1366,7 +1454,10 @@ class EmbeddingIndex:
             conn.close()
 
     def _unchanged_chunk_paths(
-        self, conn: sqlite3.Connection, token: tuple[int, int, int], paths: set[str],
+        self,
+        conn: sqlite3.Connection,
+        token: tuple[int, int, int],
+        paths: set[str],
     ) -> set[str]:
         """Reuse the owner's contiguous path log inside the caller's snapshot."""
         current = self._build_token(conn)
@@ -1380,15 +1471,19 @@ class EmbeddingIndex:
         changed = set()
         for path in paths:
             row = conn.execute(
-                "SELECT generation FROM chunk_path_log WHERE file_path = ?", (path,),
+                "SELECT generation FROM chunk_path_log WHERE file_path = ?",
+                (path,),
             ).fetchone()
             if row is not None and int(row[0]) > token[1]:
                 changed.add(path)
         return paths - changed
 
     def parent_publication_from_source(
-        self, chunks: list[str], state: semantic_index.SemanticParentIndexState,
-        *, identity: recall_space.SpaceIdentity,
+        self,
+        chunks: list[str],
+        state: semantic_index.SemanticParentIndexState,
+        *,
+        identity: recall_space.SpaceIdentity,
     ) -> tuple[int, int, int, int] | None:
         """Recover publication authority from exact rows in one read snapshot.
 
@@ -1408,42 +1503,52 @@ class EmbeddingIndex:
             chunk_size = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0), "
                 "COALESCE(SUM(typeof(chunk_idx) != 'integer'), 0) "
-                "FROM chunks WHERE file_path = ?", (state.path,),
+                "FROM chunks WHERE file_path = ?",
+                (state.path,),
             ).fetchone()
             if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks), 0):
                 return None
             width = identity.dim * 4
-            for number, row in enumerate(conn.execute(
-                "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
-                "WHERE file_path = ? ORDER BY chunk_idx", (state.path,),
-            )):
+            for number, row in enumerate(
+                conn.execute(
+                    "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
+                    "WHERE file_path = ? ORDER BY chunk_idx",
+                    (state.path,),
+                )
+            ):
                 if row != (number, chunks[number], width):
                     return None
             columns = OCCURRENCE_COLUMNS
             text_size = " + ".join(
                 f"COALESCE(length(CAST({column} AS BLOB)), 0)"
-                for column in columns if column not in {"parser_version", "source_order"}
+                for column in columns
+                if column not in {"parser_version", "source_order"}
             )
             unit_size = conn.execute(
                 f"SELECT COUNT(*), COALESCE(SUM({text_size}), 0), "
                 "COALESCE(SUM(typeof(parser_version) != 'integer' OR "
                 "typeof(source_order) != 'integer'), 0) "
-                "FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,),
+                "FROM semantic_unit_vectors WHERE parent_path = ?",
+                (state.path,),
             ).fetchone()
             expected_size = sum(
-                len(value.encode("utf-8")) for row in units.values()
-                for value in row if isinstance(value, str)
+                len(value.encode("utf-8"))
+                for row in units.values()
+                for value in row
+                if isinstance(value, str)
             )
             if unit_size != (len(units), expected_size, 0):
                 return None
             for row in conn.execute(
                 f"SELECT {', '.join(columns)}, length(vector) "
-                "FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,),
+                "FROM semantic_unit_vectors WHERE parent_path = ?",
+                (state.path,),
             ):
                 if units.get(row[0]) != row[:-1] or row[-1] != width:
                     return None
             stored = conn.execute(
-                "SELECT value FROM meta WHERE key = ?", (COVERAGE_PREFIX + state.path,),
+                "SELECT value FROM meta WHERE key = ?",
+                (COVERAGE_PREFIX + state.path,),
             ).fetchone()
             if stored is None:
                 return None
@@ -1457,7 +1562,9 @@ class EmbeddingIndex:
             except (ValueError, TypeError, AttributeError):
                 return None
             if json.dumps(actual_coverage, sort_keys=True, separators=(",", ":")) != json.dumps(
-                expected_coverage, sort_keys=True, separators=(",", ":"),
+                expected_coverage,
+                sort_keys=True,
+                separators=(",", ":"),
             ):
                 return None
             return self._build_token(conn)
@@ -1497,7 +1604,8 @@ class EmbeddingIndex:
                         (rel_path,),
                     ).fetchone()[0]
                     covered = conn.execute(
-                        "SELECT 1 FROM meta WHERE key = ?", (COVERAGE_PREFIX + rel_path,),
+                        "SELECT 1 FROM meta WHERE key = ?",
+                        (COVERAGE_PREFIX + rel_path,),
                     ).fetchone()
                     if not chunk_count and not unit_count and covered is None:
                         continue
@@ -1513,15 +1621,14 @@ class EmbeddingIndex:
                     removed_paths.append(rel_path)
                 # After the row deletes, whose triggers owe the stamp: a purged page has no stamp.
                 conn.executemany(
-                    "DELETE FROM store_page_vectors WHERE file_path = ?", ((path,) for path in paths)
+                    "DELETE FROM store_page_vectors WHERE file_path = ?",
+                    ((path,) for path in paths),
                 )
                 if removed:
                     # ONE bump for the whole batch — hence the explicit path list:
                     # the generation delta alone could never say how many, or
                     # which, paths this retired.
-                    sidecar_store.bump_generation_for_paths(
-                        conn, CHUNK_PATH_LOG, removed_paths
-                    )
+                    sidecar_store.bump_generation_for_paths(conn, CHUNK_PATH_LOG, removed_paths)
                     sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
@@ -1584,26 +1691,47 @@ class EmbeddingIndex:
 
     # ------------------------------------------------ store-mode change record
     #
-    # What a store-mode vault's drain and readers share: the cursor, and the stamp of each page's rows
-    # (`vault_store.vectors` owns the meaning; this file only stores it).
+    # What a store-mode vault's drain and readers share: the cursor, and the stamp of each page's
+    # rows (`vault_store.vectors` owns the meaning; this file only stores it).
 
-    def store_cursor(self) -> tuple[int, int] | None:
-        """`(store revision, audit seq)` that this sidecar has caught up with, or None before a full pass."""
+    @contextlib.contextmanager
+    def store_record(self) -> Iterator[StoreRecord]:
+        """The cursor and the stamps in one read transaction, so that they agree with each other.
+
+        A sidecar that is not there yet has no record, and this never creates it.
+        """
         if not self.path.exists():
-            return None
+            yield StoreRecord(None)
+            return
         conn = self._connect()
         try:
-            found = dict(
-                conn.execute(
-                    "SELECT key, value FROM meta WHERE key IN (?, ?)",
-                    (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ),
-                ).fetchall()
-            )
+            conn.execute("BEGIN")
+            yield StoreRecord(conn)
         finally:
+            conn.rollback()
             conn.close()
-        if STORE_CURSOR_REVISION in found and STORE_CURSOR_SEQ in found:
-            return int(found[STORE_CURSOR_REVISION]), int(found[STORE_CURSOR_SEQ])
-        return None
+
+    def store_cursor(self) -> tuple[int, int] | None:
+        """`(store revision, audit seq)` this sidecar has caught up with; None before a pass."""
+        with self.store_record() as record:
+            return record.cursor()
+
+    def store_stamps(
+        self, paths: Iterable[str] | None = None, *, with_owed: bool = False
+    ) -> dict[str, StoreStamp]:
+        """The stamps of `paths`, or every stamp when None; `with_owed` adds every owed one."""
+        with self.store_record() as record:
+            return record.stamps(paths, with_owed=with_owed)
+
+    def store_owed_paths(self, limit: int) -> list[str]:
+        """Up to `limit` owed pages, the longest-owed first: a retry that fails goes to the back."""
+        with self.store_record() as record:
+            return record.owed_paths(limit)
+
+    def row_paths(self) -> set[str]:
+        """Every path that this sidecar holds chunk rows, unit rows, coverage or a stamp for."""
+        with self.store_record() as record:
+            return record.row_paths()
 
     def set_store_cursor(self, revision: int, seq: int) -> None:
         conn = self._connect()
@@ -1616,68 +1744,8 @@ class EmbeddingIndex:
         finally:
             conn.close()
 
-    def store_stamps(
-        self, paths: Iterable[str] | None = None, *, with_owed: bool = False
-    ) -> dict[str, StoreStamp]:
-        """The stamps of `paths`, or every stamp when None; `with_owed` adds every owed one.
-
-        One read transaction, so the stamps agree with each other. Never creates the sidecar.
-        """
-        if not self.path.exists():
-            return {}
-        columns = "SELECT file_path, sha256, revision, owed FROM store_page_vectors"
-        conn = self._connect()
-        try:
-            conn.execute("BEGIN")
-            if paths is None:
-                rows = conn.execute(columns).fetchall()
-            else:
-                rows = conn.execute(f"{columns} WHERE owed = 1").fetchall() if with_owed else []
-                wanted = sorted(set(paths))
-                for start in range(0, len(wanted), _STAMP_QUERY_PATHS):
-                    batch = wanted[start : start + _STAMP_QUERY_PATHS]
-                    marks = ", ".join("?" for _ in batch)
-                    rows += conn.execute(f"{columns} WHERE file_path IN ({marks})", batch).fetchall()
-        finally:
-            conn.rollback()
-            conn.close()
-        return {path: StoreStamp(sha, revision, bool(owed)) for path, sha, revision, owed in rows}
-
-    def store_owed_paths(self, limit: int) -> list[str]:
-        """Up to `limit` owed pages, the longest-owed first: a retry that fails again goes to the back."""
-        if not self.path.exists():
-            return []
-        conn = self._connect()
-        try:
-            rows = conn.execute(
-                "SELECT file_path FROM store_page_vectors WHERE owed = 1 "
-                "ORDER BY revision, file_path LIMIT ?",
-                (limit,),
-            ).fetchall()
-        finally:
-            conn.close()
-        return [path for (path,) in rows]
-
-    def row_paths(self) -> set[str]:
-        """Every path that this sidecar holds chunk rows, unit rows, a coverage record or a stamp for."""
-        if not self.path.exists():
-            return set()
-        conn = self._connect()
-        try:
-            found = set(indexed_parent_paths(conn))
-            found.update(
-                path
-                for (path,) in conn.execute(
-                    "SELECT parent_path FROM semantic_unit_vectors "
-                    "UNION SELECT file_path FROM store_page_vectors"
-                )
-            )
-        finally:
-            conn.close()
-        return found
-
     def record_store_stamps(self, stamps: dict[str, StoreStamp]) -> None:
-        """Stamp pages whose rows are not rewritten: an examined page that holds nothing, or an owed one."""
+        """Stamp pages whose rows are not rewritten: an examined page with none, or an owed one."""
         conn = self._connect()
         try:
             with conn:
@@ -1721,7 +1789,9 @@ class EmbeddingIndex:
 
     @staticmethod
     def _replace_occurrences(
-        conn: sqlite3.Connection, state: semantic_index.SemanticParentIndexState, rows: list[tuple],
+        conn: sqlite3.Connection,
+        state: semantic_index.SemanticParentIndexState,
+        rows: list[tuple],
     ) -> None:
         conn.execute("DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (state.path,))
         conn.executemany(
@@ -1887,7 +1957,9 @@ class EmbeddingIndex:
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
-        if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
+        if served is not None and _cache_covers_publication(
+            served, self._identity_token, self._identity
+        ):
             return served
         return None
 
@@ -2080,7 +2152,9 @@ class EmbeddingIndex:
             if c is not None and c.recall_policy_identity == policy_identity
             else None
         )
-        if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
+        if served is not None and _cache_covers_publication(
+            served, self._identity_token, self._identity
+        ):
             self._hits += 1
             return served
         # Bounded catch-up BEFORE the full reload: a cache a couple of
@@ -2094,9 +2168,7 @@ class EmbeddingIndex:
                 with call_spans.span("embeddings.matrix_catch_up", fields):
                     patched = self._catch_up_cache(c, fields)
             except Exception as e:  # noqa: BLE001 — always fall back, never raise
-                log.warning(
-                    "embedding matrix catch-up failed (%s); taking the full load", e
-                )
+                log.warning("embedding matrix catch-up failed (%s); taking the full load", e)
                 patched = None
             if patched is not None:
                 self._cache = patched
@@ -2310,9 +2382,7 @@ class EmbeddingIndex:
                     if delta is None:
                         return None
                     (epoch, gen, instance), changed = delta
-                    replacements: dict[
-                        str, tuple[list[tuple[str, int]], np.ndarray | None]
-                    ] = {}
+                    replacements: dict[str, tuple[list[tuple[str, int]], np.ndarray | None]] = {}
                     for path in changed:
                         rows = conn.execute(
                             "SELECT chunk_idx, vector FROM chunks "
@@ -2402,7 +2472,9 @@ class EmbeddingIndex:
                             raise ValueError("embedding row count differs from snapshot")
                     finally:
                         fields["rows"] = len(metadata)
-                        fields["vector_bytes"] = len(metadata) * width * np.dtype(np.float32).itemsize
+                        fields["vector_bytes"] = (
+                            len(metadata) * width * np.dtype(np.float32).itemsize
+                        )
             finally:
                 with call_spans.span("embeddings.matrix_load.release"):
                     conn.rollback()
@@ -2415,7 +2487,9 @@ class EmbeddingIndex:
                 mtime = self.path.stat().st_mtime
             except OSError:
                 mtime = 0.0
-            return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix, identity)
+            return _EmbCache(
+                epoch, gen, instance, mtime, policy_identity, metadata, matrix, identity
+            )
 
     def search(
         self,
@@ -2427,14 +2501,25 @@ class EmbeddingIndex:
         defer_cold_load: bool = False,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunks with eager text, preserving the ordinary search API."""
-        return cast(list[tuple[str, int, str, float]], self._search(
-            query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
-            defer_cold_load=defer_cold_load,
-        ))
+        return cast(
+            list[tuple[str, int, str, float]],
+            self._search(
+                query_vec,
+                k,
+                allowed_paths=allowed_paths,
+                encoded_for=encoded_for,
+                defer_cold_load=defer_cold_load,
+            ),
+        )
 
     def select_chunks(
-        self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
-        encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE,
+        defer_cold_load: bool = False,
     ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Keep modern passages as references until final evidence selection.
 
@@ -2442,13 +2527,22 @@ class EmbeddingIndex:
         has no durable token, and a different scorer can change tied winners.
         """
         return self._search(
-            query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
-            defer_cold_load=defer_cold_load, defer_text=True,
+            query_vec,
+            k,
+            allowed_paths=allowed_paths,
+            encoded_for=encoded_for,
+            defer_cold_load=defer_cold_load,
+            defer_text=True,
         )
 
     def _search(
-        self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
-        encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE,
+        defer_cold_load: bool = False,
         defer_text: bool = False,
     ) -> list[tuple[str, int, str | ChunkRef, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
@@ -2477,15 +2571,20 @@ class EmbeddingIndex:
             # Batched advisory scoring marks only its actual foreground caller.
             with foreground_priority.foreground():
                 return self._disk_score(
-                    [query_vec], k,
-                    admits=lambda path: path not in withheld
-                    and (allowed_paths is None or path in allowed_paths),
-                    encoded_for=encoded_for, hydrate=True, defer_text=defer_text,
+                    [query_vec],
+                    k,
+                    admits=lambda path: (
+                        path not in withheld and (allowed_paths is None or path in allowed_paths)
+                    ),
+                    encoded_for=encoded_for,
+                    hydrate=True,
+                    defer_text=defer_text,
                 )[0]
         if allowed_paths is None and not withheld:
             vec_hits = (
                 self._vec_search(query_vec, k, defer_text=True, encoded_for=encoded_for)
-                if defer_text else self._vec_search(query_vec, k)
+                if defer_text
+                else self._vec_search(query_vec, k)
             )
             if vec_hits is not None:
                 return vec_hits
@@ -2504,7 +2603,9 @@ class EmbeddingIndex:
         if not metadata:
             return []
         if defer_text and encoded_for is not _UNSPECIFIED_SPACE:
-            recall_space.require_same_space(SimpleNamespace(identity=resident.space), encoded_for, query_vec)
+            recall_space.require_same_space(
+                SimpleNamespace(identity=resident.space), encoded_for, query_vec
+            )
         mask: np.ndarray | None = None
         # The ceiling on how many rows may be returned. Under a filter it is the
         # ELIGIBLE count, never the row count: `argpartition` over the full score
@@ -2549,13 +2650,17 @@ class EmbeddingIndex:
         top_idx = top_idx[np.argsort(-scores[top_idx])]
         top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
         if defer_text and resident.generation > 0:
-            proof = ChunkProof(self, (resident.epoch, resident.generation, resident.instance), resident.space)
+            proof = ChunkProof(
+                self, (resident.epoch, resident.generation, resident.instance), resident.space
+            )
             return [(fp, ci, ChunkRef(proof, fp, ci), score) for fp, ci, score in top]
         # numpy-lite: hydrate only the winners' texts (PK point-lookups).
         if lagging and resident.generation > 0:
             # The proof refuses text for a path rewritten after this matrix, and a
             # hit without proven text is dropped: its row is not this path's now.
-            proof = ChunkProof(self, (resident.epoch, resident.generation, resident.instance), resident.space)
+            proof = ChunkProof(
+                self, (resident.epoch, resident.generation, resident.instance), resident.space
+            )
             try:
                 texts = self._texts_for([(fp, ci) for fp, ci, _ in top], proof=proof)
             except Exception as e:  # noqa: BLE001 — unproven rows are not served
@@ -2621,7 +2726,9 @@ class EmbeddingIndex:
             ):
                 return [
                     [(path, chunk, score) for path, chunk, _text, score in hits]
-                    for hits in self._disk_score(query_vecs, k, admits=visible, encoded_for=encoded_for)
+                    for hits in self._disk_score(
+                        query_vecs, k, admits=visible, encoded_for=encoded_for
+                    )
                 ]
         resident = self.require_resident_matrix() if defer_cold_load else None
         metadata, matrix = (
@@ -2668,8 +2775,13 @@ class EmbeddingIndex:
             conn.close()
 
     def _disk_score(
-        self, query_vecs, k: int, *, admits: Callable[[str], bool],
-        encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
+        self,
+        query_vecs,
+        k: int,
+        *,
+        admits: Callable[[str], bool],
+        encoded_for: Any = _UNSPECIFIED_SPACE,
+        hydrate: bool = False,
         defer_text: bool = False,
     ) -> list[list[tuple[str, int, str | ChunkRef, float]]]:
         """Exact eligible top-k with bounded vectors and one scoring snapshot."""
@@ -2687,9 +2799,13 @@ class EmbeddingIndex:
                 width = identity.dim if identity is not None else recall_space.current_dim()
                 queries = np.asarray(query_vecs, dtype=np.float32).reshape(-1, width)
                 if encoded_for is not _UNSPECIFIED_SPACE and len(queries):
-                    recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
+                    recall_space.require_same_space(
+                        SimpleNamespace(identity=identity), encoded_for, queries[0]
+                    )
                 self._observe_identity(identity, token)
-                proof = ChunkProof(self, token[:3], identity) if defer_text and token[1] > 0 else None
+                proof = (
+                    ChunkProof(self, token[:3], identity) if defer_text and token[1] > 0 else None
+                )
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]
@@ -2716,17 +2832,21 @@ class EmbeddingIndex:
                             fields["rows"] += 1
                             fields["vector_bytes"] += len(blob)
                     with call_spans.span("embeddings.disk_score.score"):
-                        block = (matrix @ queries[start:start + SEARCH_MANY_BLOCK].T).T
+                        block = (matrix @ queries[start : start + SEARCH_MANY_BLOCK].T).T
                     with call_spans.span("embeddings.disk_score.select"):
                         # Only this block's candidate verdicts live across queries.
                         verdicts: dict[str, bool] = {}
+
                         def admitted(row: int, metadata=metadata, verdicts=verdicts) -> bool:
                             path = metadata[row][0]
                             if path not in verdicts:
                                 verdicts[path] = bool(admits(path))
                             return verdicts[path]
+
                         for n, scores in enumerate(block, start):
-                            winners = _top_admitted(scores, min(k, len(rows)), len(rows), admitted, metadata)
+                            winners = _top_admitted(
+                                scores, min(k, len(rows)), len(rows), admitted, metadata
+                            )
                             merged = answers[n] + winners
                             # Stable sort preserves the existing score/tie contract.
                             merged.sort(key=lambda hit: (np.isnan(hit[2]), -hit[2]))
@@ -2754,7 +2874,8 @@ class EmbeddingIndex:
                 conn.close()
 
     def pairwise_current_chunks(
-        self, wanted: dict[str, list[str]],
+        self,
+        wanted: dict[str, list[str]],
     ) -> tuple[dict[frozenset[str], float], set[str]]:
         """Exact selected-parent coverage and blocked cosine maxima, no corpus cache."""
         if not self.path.exists():
@@ -2770,9 +2891,15 @@ class EmbeddingIndex:
                 exact = True
                 for chunk, text, size in conn.execute(
                     "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
-                    "WHERE file_path=? ORDER BY chunk_idx", (path,),
+                    "WHERE file_path=? ORDER BY chunk_idx",
+                    (path,),
                 ):
-                    if count >= len(chunks) or chunk != count or text != chunks[count] or size != width * 4:
+                    if (
+                        count >= len(chunks)
+                        or chunk != count
+                        or text != chunks[count]
+                        or size != width * 4
+                    ):
                         exact = False
                         break
                     count += 1
@@ -2781,7 +2908,8 @@ class EmbeddingIndex:
 
             def blocks(path: str):
                 cursor = conn.execute(
-                    "SELECT vector FROM chunks WHERE file_path=? ORDER BY chunk_idx", (path,),
+                    "SELECT vector FROM chunks WHERE file_path=? ORDER BY chunk_idx",
+                    (path,),
                 )
                 while rows := cursor.fetchmany(self.PAIRWISE_BLOCK_ROWS):
                     matrix = np.empty((len(rows), width), dtype=np.float32)
@@ -2794,7 +2922,7 @@ class EmbeddingIndex:
             best: dict[frozenset[str], float] = {}
             names = sorted(covered)
             for n, a in enumerate(names):
-                for b in names[n + 1:]:
+                for b in names[n + 1 :]:
                     maximum = -np.inf
                     for first in blocks(a):
                         for second in blocks(b):
@@ -2819,9 +2947,11 @@ class EmbeddingIndex:
         """
         kept = np.ones(len(metadata), dtype=bool) if mask is None else mask.copy()
         for path in paths:
-            kept[bisect_left(metadata, path, key=itemgetter(0)) : bisect_right(
-                metadata, path, key=itemgetter(0)
-            )] = False
+            kept[
+                bisect_left(metadata, path, key=itemgetter(0)) : bisect_right(
+                    metadata, path, key=itemgetter(0)
+                )
+            ] = False
         return kept, int(np.count_nonzero(kept))
 
     def _eligibility_mask(
@@ -2848,11 +2978,7 @@ class EmbeddingIndex:
         """
         key = frozenset(allowed_paths)
         cached = self._mask_cache
-        if (
-            cached is not None
-            and cached.metadata is metadata
-            and cached.allowed_paths == key
-        ):
+        if cached is not None and cached.metadata is metadata and cached.allowed_paths == key:
             return cached.mask, cached.eligible
         # Build from `key`, NOT from `allowed_paths`. The caller's set is mutable
         # and callers do mutate it, so reading it a second time here can cache a
@@ -2901,13 +3027,16 @@ class EmbeddingIndex:
         refs = None if allowed_unit_refs is None else frozenset(allowed_unit_refs)
         paths = None if allowed_parent_paths is None else frozenset(allowed_parent_paths)
         released = None if released_parent_paths is None else frozenset(released_parent_paths)
-        keep = (egress.page_release_filter(self.vault_root, pages=paths)
-                if released is None else None)
+        keep = (
+            egress.page_release_filter(self.vault_root, pages=paths) if released is None else None
+        )
 
         def admitted(path: str) -> bool:
-            return ((paths is None or path in paths)
-                    and (released is None or path in released)
-                    and (keep is None or bool(keep(path))))
+            return (
+                (paths is None or path in paths)
+                and (released is None or path in released)
+                and (keep is None or bool(keep(path)))
+            )
 
         def allowed(path: str) -> bool:
             return path not in withheld and admitted(path)
@@ -2989,7 +3118,7 @@ class EmbeddingIndex:
         return ranked
 
     def _withheld(self) -> Withheld:
-        """The pages whose rows the store does not vouch for: none unless the vault is in store mode."""
+        """The pages whose rows the store does not vouch for: none unless in store mode."""
         from .vault_store import vectors
 
         return vectors.withheld(self.vault_root, self)
@@ -3086,7 +3215,10 @@ class EmbeddingIndex:
         return _UnitCache(epoch, generation, instance, width, block, coverage, unproved)
 
     def _texts_for(
-        self, pairs: list[tuple[str, int]], *, proof: ChunkProof | None = None,
+        self,
+        pairs: list[tuple[str, int]],
+        *,
+        proof: ChunkProof | None = None,
     ) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
 
@@ -3103,11 +3235,14 @@ class EmbeddingIndex:
             if proof is not None:
                 conn.execute("BEGIN")
                 if (
-                    proof.index is not self or proof.token[1] <= 0
+                    proof.index is not self
+                    or proof.token[1] <= 0
                     or recall_space.read_identity(conn, tables=_VECTOR_TABLES) != proof.space
                 ):
                     return {}
-                unchanged = self._unchanged_chunk_paths(conn, proof.token, {fp for fp, _ci in pairs})
+                unchanged = self._unchanged_chunk_paths(
+                    conn, proof.token, {fp for fp, _ci in pairs}
+                )
                 pairs = [(fp, ci) for fp, ci in pairs if fp in unchanged]
             batch_size = 150  # 2 bound params per pair
             for s in range(0, len(pairs), batch_size):
@@ -3224,7 +3359,11 @@ class EmbeddingIndex:
         return keyed(chunk_rows), keyed(unit_rows), space
 
     def _vec_search(
-        self, query_vec: np.ndarray, k: int, *, defer_text: bool = False,
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        defer_text: bool = False,
         encoded_for: Any = _UNSPECIFIED_SPACE,
     ) -> list[tuple[str, int, str | ChunkRef, float]] | None:
         """vec0 KNN, or None when the backend can't serve (the scan takes over).
@@ -3250,7 +3389,9 @@ class EmbeddingIndex:
                     token = self._build_token(conn)
                     identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
                     if encoded_for is not _UNSPECIFIED_SPACE:
-                        recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, query_vec)
+                        recall_space.require_same_space(
+                            SimpleNamespace(identity=identity), encoded_for, query_vec
+                        )
                     if token[1] > 0:
                         proof = ChunkProof(self, token[:3], identity)
                 quant = vecstore.quant_mode() == "binary"
@@ -3267,8 +3408,14 @@ class EmbeddingIndex:
                 ).fetchall()
                 by_id = {r[0]: r for r in rows}
                 return [
-                    (by_id[rid][1], by_id[rid][2],
-                     ChunkRef(proof, by_id[rid][1], by_id[rid][2]) if proof is not None else by_id[rid][3], score)
+                    (
+                        by_id[rid][1],
+                        by_id[rid][2],
+                        ChunkRef(proof, by_id[rid][1], by_id[rid][2])
+                        if proof is not None
+                        else by_id[rid][3],
+                        score,
+                    )
                     for rid, score in pairs
                     if rid in by_id
                 ]
@@ -3424,7 +3571,10 @@ class EmbeddingIndex:
         unit_generation = conn.execute(
             "SELECT value FROM meta WHERE key = ?", (SEMANTIC_UNIT_GENERATION,)
         ).fetchone()
-        return (*sidecar_store.read_meta_token(conn), int(unit_generation[0]) if unit_generation else 0)
+        return (
+            *sidecar_store.read_meta_token(conn),
+            int(unit_generation[0]) if unit_generation else 0,
+        )
 
     def rebuild_all(self, *, batch_size: int = 256) -> int:
         """Stage bounded batches in this sidecar and atomically replace serving rows.

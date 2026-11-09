@@ -322,10 +322,10 @@ class SemanticDrain:
         return False, min(IDLE_POLL_SECONDS, max(MIN_WAKE_SECONDS, due - now))
 
     def _store_turn(self) -> tuple[bool, float]:
-        """A store-mode vault's turn. Its changes are the store's audit rows, so no receipt queues them.
+        """A store-mode vault's turn. Its changes are the store's audit rows, not receipts.
 
-        The drain bounds its own turn, so this runs it inline: a page's bytes come from the store, and
-        nothing here reads or waits on a file.
+        The drain bounds its own turn, so this runs it inline: a page's bytes come from the store,
+        and nothing here reads or waits on a file.
         """
         from .vault_store import vectors
 

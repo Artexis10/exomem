@@ -1,21 +1,23 @@
 """Vectors for a store-mode vault: computed after commit from the store's page bytes.
 
-OpenSpec make-vault-store-canonical, task 6.1 (design D2, D7). In store mode the Markdown on disk is a
-projection that may lag the store, so nothing here reads it: the drain takes each changed page's exact
-bytes from a store snapshot, and the vector sidecar records which bytes (and which store revision) each
-page's rows were computed from, in the transaction that writes the rows. A reader compares that stamp
-with ``store_pages.sha256``: a page whose vectors do not match is left out of the vector lane for that
-query, and the lexical and graph lanes still serve it. The drain runs after the commit and off the store
-transaction, so a kill between the two leaves the sidecar behind the store, never ahead of it.
+OpenSpec make-vault-store-canonical, task 6.1 (design D2, D7). In store mode the Markdown on disk is
+a projection that may lag the store, so nothing here reads it: the drain takes each changed page's
+exact bytes from a store snapshot, and the vector sidecar records which bytes (and which store
+revision) each page's rows were computed from, in the transaction that writes the rows. A reader
+compares that stamp with ``store_pages.sha256``: a page whose vectors do not match is left out of
+the vector lane for that query, and the lexical and graph lanes still serve it. The drain runs after
+the commit and off the store transaction, so a kill between the two leaves the sidecar behind the
+store, never ahead of it.
 
-Change detection reads the store's audit rows past the sidecar's cursor, never a file event or a file
-time. The cursor is ``(revision, audit seq)``: the audit trail has no index by revision, and its ``seq``
-is the key that a range scan follows. A migration or a rollback writes one audit row with no path, which
-says that every page's life restarts, and a sidecar with no cursor has never caught up: both make the
-drain compare every stored page with the sidecar.
+Change detection reads the store's audit rows past the sidecar's cursor, never a file event or a
+file time. The cursor is ``(revision, audit seq)``: the audit trail has no index by revision, and
+its ``seq`` is the key that a range scan follows. A migration or a rollback writes one audit row
+with no path, which says that every page's life restarts, and a sidecar with no cursor has never
+caught up: both make the drain compare every stored page with the sidecar.
 
-The cursor moves only after every page that its audit rows name is stamped, purged or owed. A page whose
-attempt failed is owed: its stamp says so, readers withhold it, and a turn with nothing newer retries it.
+The cursor moves only after every page that its audit rows name is stamped, purged or owed. A page
+whose attempt failed is owed: its stamp says so, readers withhold it, and a turn with nothing newer
+retries it.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ PURGES_PER_CALL = 512
 
 @dataclass(frozen=True, slots=True)
 class Withheld:
-    """The stored pages whose vector rows a reader must leave out, or every page when the store cannot say."""
+    """The pages whose vector rows a reader must leave out, or all if the store cannot say."""
 
     paths: frozenset[str] = frozenset()
     everything: bool = False
@@ -68,29 +70,30 @@ NOTHING_WITHHELD = Withheld()
 def withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
     """The pages whose vectors the store does not vouch for; nothing when the vault is in file mode.
 
-    A page is proven when its stamp, written with its rows, names the bytes that the store holds now.
-    The cursor says which pages can have changed since the sidecar last caught up, so only those, and
-    the owed ones, are compared; with no cursor every page that the sidecar holds rows for is. A mode
-    or a store that cannot be read withholds everything: an unknown state is never proof.
+    A page is proven when its stamp, written with its rows, names the bytes that the store holds
+    now. The cursor says which pages can have changed since the sidecar last caught up, so only
+    those, and the owed ones, are compared; with no cursor every page that the sidecar holds rows
+    for is. A mode or a store that cannot be read withholds everything: an unknown state is never
+    proof.
     """
     try:
         if not mode.store_mode_for_reads(vault_root):
             return NOTHING_WITHHELD
         return _withheld(vault_root, index)
-    except Exception as error:  # noqa: BLE001 - an unreadable store must withhold, not break the query
+    except Exception as error:  # noqa: BLE001 - an unreadable store withholds, not breaks, a query
         log.warning("store-mode vectors withheld: the mode or the store was unreadable (%s)", error)
         return Withheld(everything=True)
 
 
 def _withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
     if not index.path.exists():
-        return NOTHING_WITHHELD
-    cursor = index.store_cursor()
-    with read.snapshot(vault_root) as view:
+        return NOTHING_WITHHELD  # no sidecar, no rows to serve
+    with index.store_record() as record, read.snapshot(vault_root) as view:
+        cursor = record.cursor()
         if cursor is None or _restarted_after(view, cursor[1]):
             stored = {meta.path: meta.sha256 for meta in view.pages()}
-            candidates = index.row_paths()
-            stamps = index.store_stamps()
+            candidates = record.row_paths()
+            stamps = record.stamps()
         else:
             candidates = {
                 path
@@ -100,11 +103,15 @@ def _withheld(vault_root: Path, index: EmbeddingIndex) -> Withheld:
                 )
             }
             stored = {
-                path: meta.sha256 for path in candidates if (meta := view.page_meta(path)) is not None
+                path: meta.sha256
+                for path in candidates
+                if (meta := view.page_meta(path)) is not None
             }
-            stamps = index.store_stamps(candidates, with_owed=True)
+            stamps = record.stamps(candidates, with_owed=True)
             candidates |= {path for path, stamp in stamps.items() if stamp.owed}
-    return Withheld(frozenset(path for path in candidates if not _proves(stamps.get(path), stored.get(path))))
+    return Withheld(
+        frozenset(path for path in candidates if not _proves(stamps.get(path), stored.get(path)))
+    )
 
 
 def _proves(stamp: StoreStamp | None, sha256: str | None) -> bool:
@@ -113,7 +120,7 @@ def _proves(stamp: StoreStamp | None, sha256: str | None) -> bool:
 
 
 def _restarted_after(view: read.StoreSnapshot, seq: int) -> bool:
-    """Whether a migration or a rollback ran past `seq`: its audit row has no path (every page's life restarts)."""
+    """Whether a migration or a rollback ran past `seq`: its audit row has no path."""
     return (
         view.connection.execute(
             "SELECT 1 FROM store_audit WHERE seq > ? AND path IS NULL LIMIT 1", (seq,)
@@ -125,10 +132,10 @@ def _restarted_after(view: read.StoreSnapshot, seq: int) -> bool:
 def embeddable(rel: str) -> bool:
     """Whether the embedding walk would reach the stored page `rel`, judged by its path alone.
 
-    The walk (`index_paths.iter_index_markdown`) also looks at each file on disk, and a stored page may
-    have no file yet, so this keeps the walk's path tests: the Markdown suffix, the pages it skips by
-    name, the excluded folders of the index scope and the reserved registry. Content admission (the
-    access policy, a Records manifest) is judged on the page's bytes by the drain.
+    The walk (`index_paths.iter_index_markdown`) also looks at each file on disk, and a stored
+    page may have no file yet, so this keeps the walk's path tests: the Markdown suffix, the pages
+    it skips by name, the excluded folders of the index scope and the reserved registry. Content
+    admission (the access policy, a Records manifest) is judged on the page's bytes by the drain.
     """
     if not index_paths.is_embeddable_path(Path(rel)) or vault.in_excluded_scan_dir(rel):
         return False
@@ -146,7 +153,7 @@ def embeddable(rel: str) -> bool:
         ):
             return False
     parts = inside.split("/")
-    # The walk prunes a blocked folder, so a page below one is unreachable even when its own name is fine.
+    # The walk prunes a blocked folder, so a page below one is unreachable whatever its own name.
     return not any(
         reserved_paths.classify_logical("/".join(parts[: count + 1])).blocked
         for count in range(len(parts))
@@ -205,9 +212,9 @@ def drain(
     """Bring the vector sidecar of a store-mode vault one bounded step toward the store.
 
     Run it from the semantic drain, after the commit and never inside it. Each call plans from the
-    sidecar's cursor, so a call that a kill or a stop cut short is resumed, not repeated: a page whose
-    rows carry the stamp of the store's bytes is skipped, and a batch's rows commit with their stamps.
-    Nothing here reads the projected Markdown: each page's bytes come from a store snapshot.
+    sidecar's cursor, so a call that a kill or a stop cut short is resumed, not repeated: a page
+    whose rows carry the stamp of the store's bytes is skipped, and a batch's rows commit with their
+    stamps. Nothing here reads the projected Markdown: each page's bytes come from a store snapshot.
     """
     from .. import embeddings, foreground_priority
 
@@ -248,7 +255,7 @@ def _plan(vault_root: Path, index: EmbeddingIndex, audit_rows: int) -> _Plan:
 
 
 def _census_plan(index: EmbeddingIndex, view: read.StoreSnapshot) -> _Plan:
-    """Every page against every stamp: the first pass, and the one after a migration or a rollback."""
+    """Every page against every stamp: the first pass, and the one after a migration or rollback."""
     head = view.connection.execute("SELECT COALESCE(MAX(seq), 0) FROM store_audit").fetchone()[0]
     plan = _Plan(cursor=(view.revision, head))
     stored = {meta.path: meta for meta in view.pages()}

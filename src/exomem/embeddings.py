@@ -2489,9 +2489,9 @@ def parent_rows_from_source(
 
     `_upsert_after_write_status` reads the page from disk; a store-mode vault keeps its bytes in the
     store, and the projected file may lag it, so its drain passes them here. Nothing reads the page.
-    `preparation` holds the source (`SemanticPreparation.hold`). `reuse_from` names other paths whose
-    stored vectors may be reused by text, such as the old path of a moved page. A page that cannot be
-    parsed, chunked or encoded raises, and the caller decides what that page is owed.
+    `preparation` holds the source (`SemanticPreparation.hold`). `reuse_from` names other paths
+    whose stored vectors may be reused by text, such as the old path of a moved page. A page that
+    cannot be parsed, chunked or encoded raises, and the caller decides what that page is owed.
     """
     from . import find_corpus, semantic_index
 

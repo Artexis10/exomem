@@ -1,10 +1,10 @@
 """A store-mode vault's vectors: computed after commit from the store's bytes, stamped, and gated.
 
-OpenSpec make-vault-store-canonical, task 6.1. The vault is the migration suite's generated vault, moved
-into store mode by ``store-mode migrate``; the writer is a real store writer on the migrated store. The
-encoder is a deterministic hash of the words of a text, so nothing downloads a model. The drain runs
-here by direct calls, as the semantic drain's turn calls it. The interpreter that dies in the resume case
-is a real child process, killed by the operating system.
+OpenSpec make-vault-store-canonical, task 6.1. The vault is the migration suite's generated
+vault, moved into store mode by ``store-mode migrate``; the writer is a real store writer on the
+migrated store. The encoder is a deterministic hash of the words of a text, so nothing downloads a
+model. The drain runs here by direct calls, as the semantic drain's turn calls it. The interpreter
+that dies in the resume case is a real child process, killed by the operating system.
 """
 
 from __future__ import annotations
@@ -22,22 +22,28 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import test_vault_store_read_write as read_write
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
-from test_vault_store_read_write import put, stored, writer  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA, vault  # noqa: F401
 
 from exomem import embeddings, lexstore, readiness, semantic_drain
 from exomem.embedding_index import STORE_CURSOR_REVISION, STORE_CURSOR_SEQ, EmbeddingIndex
 from exomem.vault_store import read, vectors, write
+
+# The store-mode vault and its writer are that suite's fixtures; a name here is how pytest finds
+# them.
+stored = read_write.stored
+writer = read_write.writer
+put = read_write.put
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
 )
 
 MOVED = "Knowledge Base/Notes/Moved.md"
-LIGHTHOUSE = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe lighthouse keeper logs the tide in [[Beta]].\n"
 HARBOUR = (
-    b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe lighthouse keeper now answers the harbour pilot.\n"
+    b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\n"
+    b"The lighthouse keeper now answers the harbour pilot.\n"
 )
 POISON = "---\ntitle: Alpha\n---\n# Alpha\n\nPoisoned projection about a volcano observatory.\n"
 
@@ -121,7 +127,8 @@ def sidecar_state(root):
     with closing(sqlite3.connect(index_of(root).path)) as database:
         return (
             database.execute(
-                "SELECT file_path, chunk_idx, chunk_text, vector, file_mtime FROM chunks ORDER BY 1, 2"
+                "SELECT file_path, chunk_idx, chunk_text, vector, file_mtime"
+                " FROM chunks ORDER BY 1, 2"
             ).fetchall(),
             database.execute(
                 "SELECT parent_path, COUNT(*) FROM semantic_unit_vectors GROUP BY 1 ORDER BY 1"
@@ -161,9 +168,7 @@ def test_a_committed_edit_is_embedded_from_the_store_and_stamped_with_its_hash_a
     assert any("harbour pilot" in text for text in chunk_texts(stored, ALPHA))
 
 
-def test_the_first_pass_stamps_every_embeddable_page_once_and_then_goes_quiet(
-    stored, encoder
-):
+def test_the_first_pass_stamps_every_embeddable_page_once_and_then_goes_quiet(stored, encoder):
     """A first pass that leaves pages without a stamp (never served) or that embeds the vault again
     on every turn."""
     first = catch_up(stored)
@@ -172,7 +177,9 @@ def test_the_first_pass_stamps_every_embeddable_page_once_and_then_goes_quiet(
 
     stamps = index_of(stored).store_stamps()
     assert ALPHA in stamps and BETA in stamps
-    assert all(stamp.sha256 == stored_sha(stored, rel) and not stamp.owed for rel, stamp in stamps.items())
+    assert all(
+        stamp.sha256 == stored_sha(stored, rel) and not stamp.owed for rel, stamp in stamps.items()
+    )
     assert index_of(stored).store_cursor() is not None
     assert first.embedded == len(stamps) and encoded_by_first_pass > 0
     assert (second.embedded, second.purged, len(encoder.texts)) == (0, 0, encoded_by_first_pass)
@@ -209,7 +216,9 @@ def test_the_drain_embeds_the_stored_bytes_when_the_projected_markdown_is_poison
 
     assert any("harbour pilot" in text for text in chunk_texts(stored, ALPHA))
     assert not any("volcano" in text for text in encoder.texts)
-    assert index_of(stored).store_stamps([ALPHA])[ALPHA].sha256 == hashlib.sha256(HARBOUR).hexdigest()
+    assert (
+        index_of(stored).store_stamps([ALPHA])[ALPHA].sha256 == hashlib.sha256(HARBOUR).hexdigest()
+    )
 
 
 def test_a_deleted_page_loses_its_vectors_and_its_stamp(stored, writer, encoder):
@@ -264,7 +273,9 @@ def test_a_page_whose_encode_fails_is_withheld_then_retried_once_the_encoder_rec
     assert first.owed == 1
     assert index_of(stored).store_stamps([ALPHA])[ALPHA].owed
     assert ALPHA not in hit_paths(stored, "lighthouse keeper tide"), "the old rows are withheld"
-    assert index_of(stored).store_cursor() is not None, "one failed page does not hold the rest back"
+    assert index_of(stored).store_cursor() is not None, (
+        "one failed page does not hold the rest back"
+    )
 
     encoder.refuse = None
     catch_up(stored)
@@ -275,8 +286,8 @@ def test_a_page_whose_encode_fails_is_withheld_then_retried_once_the_encoder_rec
 def test_rows_that_a_foreign_writer_rewrote_are_withheld_even_though_the_cursor_passed_them(
     stored, encoder
 ):
-    """A file-mode writer that rebuilds rows from a lagging projection, after the cursor has passed the
-    page: its rows would be served as proven because the page looks caught up."""
+    """A file-mode writer that rebuilds rows from a lagging projection, after the cursor has
+    passed the page: its rows would be served as proven because the page looks caught up."""
     catch_up(stored)
     index = index_of(stored)
     identity = index.identity
@@ -293,11 +304,9 @@ def test_rows_that_a_foreign_writer_rewrote_are_withheld_even_though_the_cursor_
     assert ALPHA in hit_paths(stored, "lighthouse keeper tide")
 
 
-def test_rows_from_before_the_first_pass_are_not_served_until_the_pass_stamps_them(
-    stored, encoder
-):
-    """A sidecar that a file-mode vault filled before it migrated: its rows carry no stamp, and a reader
-    that serves what it cannot prove would serve them from the first query."""
+def test_rows_from_before_the_first_pass_are_not_served_until_the_pass_stamps_them(stored, encoder):
+    """A sidecar that a file-mode vault filled before it migrated: its rows carry no stamp, and a
+    reader that serves what it cannot prove would serve them from the first query."""
     catch_up(stored)
     with closing(sqlite3.connect(index_of(stored).path)) as database, database:
         database.execute("DELETE FROM store_page_vectors")
@@ -313,7 +322,7 @@ def test_rows_from_before_the_first_pass_are_not_served_until_the_pass_stamps_th
 
 
 def test_a_bounded_turn_leaves_the_cursor_behind_the_pages_it_did_not_reach(stored, encoder):
-    """A cursor that jumps over the pages that a turn's budget cut off, so they are never embedded."""
+    """A cursor that jumps over the pages a turn's budget cut off, so they are never embedded."""
     first = vectors.drain(stored, pages=1, publication=1)
 
     assert first.more and first.embedded == 1
@@ -338,11 +347,13 @@ def test_the_service_turn_drains_a_store_mode_vault_without_a_receipt(stored, wr
         if not progressed:
             break
 
-    assert index_of(stored).store_stamps([ALPHA])[ALPHA].sha256 == hashlib.sha256(HARBOUR).hexdigest()
+    assert (
+        index_of(stored).store_stamps([ALPHA])[ALPHA].sha256 == hashlib.sha256(HARBOUR).hexdigest()
+    )
 
 
 def drain_and_die(environment, publications):
-    """`vectors.drain` in a fresh interpreter that the operating system kills after a publication."""
+    """`vectors.drain` in a fresh interpreter that the operating system kills after a publish."""
     os.environ.clear()
     os.environ.update(environment)
     patch = pytest.MonkeyPatch()
@@ -391,6 +402,8 @@ def test_a_drain_killed_between_publications_resumes_with_the_rows_of_an_uninter
     assert resumed.embedded == pages - 2
     assert sidecar_state(stored) == reference
     reembedded_by_the_dead_drain = [
-        rel for rel in done_before_the_kill if any(text in encoder.texts for text in chunk_texts(stored, rel))
+        rel
+        for rel in done_before_the_kill
+        if any(text in encoder.texts for text in chunk_texts(stored, rel))
     ]
     assert reembedded_by_the_dead_drain == [], "the pages that the dead drain finished were kept"
