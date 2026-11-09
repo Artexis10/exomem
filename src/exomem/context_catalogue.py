@@ -82,10 +82,6 @@ PENDING_DEFERRED = "deferred"
 # `Basis.dependency` leads with this word when the status registry could not be read.
 STATUS_UNAVAILABLE = "unavailable"
 
-# The relation registry schema declares this family value; membership edges are
-# the authored edges whose relation kind has it, never a list of relation names.
-MEMBERSHIP_FAMILY = "membership"
-
 # `RelationEdgeResult.status` when the graph answered with its authoritative edge set,
 # and when its sidecar is missing or still being built.
 EDGES_AVAILABLE = "available"
@@ -1300,14 +1296,11 @@ def _graph_token(vault_root: Path, prove: bool | str = True) -> str:
 
 
 def _membership_edges(vault_root: Path, prove: bool | str = True) -> tuple[str, list[tuple[str, str]]]:
-    """The authored edges of every membership-family relation kind, or why there are none to read."""
+    """The authored edges of every relation kind with the membership behaviour, or why there are none to read."""
     from . import epistemic_graph, relation_registry
 
     registry = relation_registry.load_registry(vault_root)
-    keys = sorted(
-        definition.key for definition in (*registry.core.values(), *registry.extensions.values())
-        if definition.family == MEMBERSHIP_FAMILY
-    )
+    keys = sorted(registry.keys_with("membership"))
     try:
         result = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove).relation_edges(keys)
     except Exception:  # noqa: BLE001 - a graph miss leaves the stored edges as they were

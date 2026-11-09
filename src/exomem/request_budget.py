@@ -77,6 +77,22 @@ CONVERSATION_STAGE_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 0.06
 #: Validate its task allowance against scoped query spans before delivery. Skipping
 #: this optimisation preserves baseline context instead of risking a late packet.
 TASK_UNITS_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 2.0
+#: Kept back from the task method search for what must follow it: ordering, links and the projection of
+#: every lead. On a 13,000-page vault the warm projection of 12 leads took 2.3 s and links 0.7 s
+#: (`include_timings`, 2026-11-09), while one cold method search ran 41 s and left the leads unprojected,
+#: so the whole task context was dropped. The search stops this far before the request's deadline.
+TASK_PROJECTION_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 4.0
+#: The largest share of a request's budget that reserve may take. The 6 s activation door keeps 1.5 s, so a
+#: steady-state method search (0.4-0.7 s for two queries on the same vault) still runs there.
+TASK_PROJECTION_RESERVE_SHARE = 0.25
+
+
+def task_projection_reserve(leads: int) -> float:
+    """Seconds the task method search leaves for projecting `leads` found leads; none when there are none."""
+    budget = current()
+    if budget is None or leads <= 0:
+        return 0.0
+    return min(TASK_PROJECTION_RESERVE_SECONDS, budget.seconds * TASK_PROJECTION_RESERVE_SHARE)
 
 #: Operators may lengthen or shorten the origin budget. Clients may not: the
 #: client that most needs the bound is the one that cannot be trusted to set

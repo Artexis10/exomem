@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -37,7 +37,40 @@ _ORIGINS = {
     "frontmatter",
     "wikilink",
 }
+#: The origins that carry an edge a writer authored, as against one a reader derives from
+#: structure (`frontmatter`, `wikilink`, `semantic_block`, `semantic_unit`).
+AUTHORED_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+#: The closed relation-behaviour set. Each member is something code does with an edge, and
+#: that code reads it through `RelationRegistry.behaviours_of` and `keys_with`. Adding a member
+#: is a code change and a schema change, because a behaviour is a promise code keeps; the pack
+#: assigns members to core relations and a pack that names another fails the build.
+# nosemgrep: ep-word-set -- the closed set this schema declares and code implements, not text
+RELATION_BEHAVIOURS = frozenset(
+    (
+        "lifts",
+        "membership",
+        "bears_on",
+        "settles",
+        "sources",
+        "replaces",
+        "corrects",
+        "associative",
+        "plain_link",
+        "opposes",
+        "names_subject",
+        "earlier_than_target",
+        "later_than_target",
+    )
+)
+#: How a frontmatter field relates its page to the relation's other end: `forward` makes the page
+#: the edge's source, `reverse` its target.
+FRONTMATTER_DIRECTIONS = frozenset(  # nosemgrep: ep-word-set -- closed set of the binding schema
+    (
+        "forward",
+        "reverse",
+    )
+)
 #: Explicit spelling of a core relation: `core.<key>` names the core meaning of a
 #: bare label that a vault alias also uses.
 CORE_PREFIX = "core."
@@ -65,9 +98,18 @@ _DEFINITION_FIELDS = {
 _CORE_FIELDS = frozenset(
     {
         "description", "family", "direction", "inverse", "origins", "presentation_role", "generic",
-        "endpoints",
+        "endpoints", "behaviours", "frontmatter_fields",
     }
 )
+#: Core-only fields. An extension inherits their meaning through its parent and cannot set them.
+_CORE_ONLY_FIELDS = ("behaviours", "frontmatter_fields")
+
+
+class FrontmatterBinding(NamedTuple):
+    """The relation a frontmatter field states, and which end of the edge the page is."""
+
+    relation: str
+    direction: str
 
 
 @dataclass(frozen=True)
@@ -97,6 +139,11 @@ class RelationDefinition:
     # The pages this relation joins, as declared. An extension without a declaration takes its
     # parent's (see `RelationRegistry.endpoints_of`); a relation with neither is undeclared.
     endpoints: relation_endpoints.Endpoints | None = None
+    # What code does with this edge, from `RELATION_BEHAVIOURS`. Only a core entry sets it; an
+    # extension reads its parent's through `RelationRegistry.behaviours_of`.
+    behaviours: frozenset[str] = frozenset()
+    # Page frontmatter fields that state this relation, as (field, direction) pairs. Core only.
+    frontmatter_fields: tuple[tuple[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -169,6 +216,13 @@ class RelationRegistry:
         return next(key for key, definition in self.core.items() if definition.generic)
 
     @cached_property
+    def link_key(self) -> str:
+        """The key of the plain link: the one core relation a body `[[wikilink]]` mints."""
+        return next(
+            key for key, definition in self.core.items() if "wikilink" in definition.origins
+        )
+
+    @cached_property
     def active_keys_by_label(self) -> dict[str, tuple[str, ...]]:
         """Each display label with the active entries that carry it."""
         by_label: dict[str, list[str]] = {}
@@ -189,6 +243,63 @@ class RelationRegistry:
         """True for a registered relation that is not the generic one."""
         definition = self.definition(key)
         return definition is not None and not definition.generic
+
+    def behaviours_of(self, key: str) -> frozenset[str]:
+        """What code does with edges of `key`: a core key's own behaviours, an extension's
+        parent's. Never read through a saved family, so a grandfathered extension whose family
+        differs from its parent's still follows the parent. An unregistered key has none."""
+        definition = self.definition(key)
+        if definition is None:
+            return frozenset()
+        if definition.core:
+            return definition.behaviours
+        parent = self.core.get(definition.parent or "")
+        return parent.behaviours if parent is not None else frozenset()
+
+    def has(self, key: str, behaviour: str) -> bool:
+        """Whether edges of `key` have `behaviour`. A name outside `RELATION_BEHAVIOURS` is a
+        defect in the caller, so it raises instead of reading false for every key."""
+        if behaviour not in RELATION_BEHAVIOURS:
+            raise ValueError(f"{behaviour!r} is not a relation behaviour")
+        return behaviour in self.behaviours_of(key)
+
+    def behaviours_of_label(self, label: str) -> frozenset[str]:
+        """`behaviours_of` for a relation as an author wrote it: a key, an alias or an extension."""
+        return self.behaviours_of(self.resolve(label).canonical or "")
+
+    def keys_with(self, behaviour: str) -> frozenset[str]:
+        """Every core key and every extension, whatever its status, that has `behaviour`.
+
+        A deprecated extension is included: its edges still exist and still behave as its
+        parent does. A name outside `RELATION_BEHAVIOURS` is a defect in the caller, so it raises
+        instead of answering with an empty set."""
+        if behaviour not in RELATION_BEHAVIOURS:
+            raise ValueError(f"{behaviour!r} is not a relation behaviour")
+        return self._keys_by_behaviour.get(behaviour, frozenset())
+
+    @cached_property
+    def _keys_by_behaviour(self) -> dict[str, frozenset[str]]:
+        by_behaviour: dict[str, set[str]] = {}
+        for key in self.keys:
+            for behaviour in self.behaviours_of(key):
+                by_behaviour.setdefault(behaviour, set()).add(key)
+        return {behaviour: frozenset(keys) for behaviour, keys in by_behaviour.items()}
+
+    @cached_property
+    def _frontmatter_bindings(self) -> dict[str, FrontmatterBinding]:
+        return {
+            field_name: FrontmatterBinding(definition.key, direction)
+            for definition in self.core.values()
+            for field_name, direction in definition.frontmatter_fields
+        }
+
+    def frontmatter_fields(self) -> Mapping[str, FrontmatterBinding]:
+        """Each frontmatter field a core relation binds, with its relation and direction."""
+        return MappingProxyType(self._frontmatter_bindings)
+
+    def frontmatter_relation(self, field_name: str) -> FrontmatterBinding | None:
+        """The relation and direction a frontmatter field states; None for an unbound field."""
+        return self._frontmatter_bindings.get(field_name)
 
     def endpoints_of(self, key: str) -> relation_endpoints.Endpoints | None:
         """The endpoints a relation declares, else its parent's; None when neither does."""
@@ -326,9 +437,15 @@ def extension_registry_path(vault_root: Path) -> Path:
 @lru_cache(maxsize=1)
 def core_registry() -> RelationRegistry:
     """The shipped core relations. A malformed pack is a build defect, so this raises."""
-    data = yaml.safe_load(vocabulary_registry.pack_text("relations.yaml"))
+    return _core_from_pack(vocabulary_registry.pack_text("relations.yaml"))
+
+
+def _core_from_pack(text: str) -> RelationRegistry:
+    """Build the core registry from the relations pack text; a malformed pack raises."""
+    data = yaml.safe_load(text)
     version = int(data["schema_version"])
     definitions: dict[str, RelationDefinition] = {}
+    bound_fields: dict[str, str] = {}
     for key, value in data["relations"].items():
         unknown = sorted(set(value) - _CORE_FIELDS)
         if unknown or not isinstance(value.get("generic", False), bool):
@@ -341,17 +458,34 @@ def core_registry() -> RelationRegistry:
         )
         if problems:
             raise RuntimeError(f"shipped relations pack: {key!r} endpoints: {problems}")
+        behaviours = _pack_behaviours(key, value.get("behaviours", []))
+        frontmatter_fields = _pack_frontmatter_fields(key, value.get("frontmatter_fields", {}))
+        for field_name, _direction in frontmatter_fields:
+            if field_name in bound_fields:
+                raise RuntimeError(
+                    f"shipped relations pack: {key!r} frontmatter_fields: {field_name!r} is "
+                    f"already bound to {bound_fields[field_name]!r}; a field binds to one relation"
+                )
+            bound_fields[field_name] = key
+        origins = frozenset(value.get("origins") or ["semantic_relation"])
+        if "frontmatter" in origins:
+            raise RuntimeError(
+                f"shipped relations pack: {key!r} origins: remove 'frontmatter'; the loader adds "
+                "it to a relation that declares frontmatter_fields"
+            )
         definitions[key] = RelationDefinition(
             key=key,
             description=str(value["description"]),
             family=str(value["family"]),
             direction=str(value.get("direction", "directed")),
             inverse=value.get("inverse"),
-            origins=frozenset(value.get("origins") or ["semantic_relation"]),
+            origins=origins | {"frontmatter"} if frontmatter_fields else origins,
             presentation_role=value.get("presentation_role"),
             generic=value.get("generic", False),
             endpoints=endpoints,
             core=True,
+            behaviours=behaviours,
+            frontmatter_fields=frontmatter_fields,
         )
     generic = sorted(key for key, definition in definitions.items() if definition.generic)
     if len(generic) != 1:
@@ -361,9 +495,42 @@ def core_registry() -> RelationRegistry:
     return RelationRegistry(version, "none", definitions)
 
 
+def _pack_behaviours(key: str, raw: Any) -> frozenset[str]:
+    """The behaviours a core entry declares; one outside `RELATION_BEHAVIOURS` fails the build."""
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise RuntimeError(f"shipped relations pack: {key!r} behaviours: must be a list of strings")
+    undeclared = sorted(set(raw) - RELATION_BEHAVIOURS)
+    if undeclared:
+        raise RuntimeError(
+            f"shipped relations pack: {key!r} behaviours: {undeclared} are not declared; "
+            f"use {sorted(RELATION_BEHAVIOURS)}"
+        )
+    return frozenset(raw)
+
+
+def _pack_frontmatter_fields(key: str, raw: Any) -> tuple[tuple[str, str], ...]:
+    """The (field, direction) pairs a core entry binds; a direction outside the schema fails."""
+    if not isinstance(raw, dict) or any(
+        not isinstance(name, str)
+        or not isinstance(direction, str)
+        or direction not in FRONTMATTER_DIRECTIONS
+        for name, direction in raw.items()
+    ):
+        raise RuntimeError(
+            f"shipped relations pack: {key!r} frontmatter_fields: must map a field name to "
+            f"one of {sorted(FRONTMATTER_DIRECTIONS)}"
+        )
+    return tuple(raw.items())
+
+
 def generic_relation_key() -> str:
     """The core pack's generic relation, for code that must not name it."""
     return core_registry().generic_key
+
+
+def link_relation_key() -> str:
+    """The core pack's plain link, the relation a writer keeps when no specific one fits."""
+    return core_registry().link_key
 
 
 class _EveryKey:
@@ -740,8 +907,12 @@ def merge_extension_delta(current: dict[str, Any], delta: dict[str, Any]) -> dic
     for key, patch in upserts.items():
         if not isinstance(patch, dict):
             raise ValueError("INVALID_RELATION_DELTA: extension patch must be an object")
-        if set(patch) - _DEFINITION_FIELDS:
-            raise ValueError("INVALID_RELATION_DELTA: extension patch has unknown fields")
+        unknown = sorted(set(patch) - _DEFINITION_FIELDS)
+        if unknown:
+            raise ValueError(
+                f"INVALID_RELATION_DELTA: extension {key!r} patch has unknown fields {unknown}"
+                + (f"; {_core_only_detail()}" if set(unknown) & set(_CORE_ONLY_FIELDS) else "")
+            )
         old = extensions.get(key)
         if old is None:
             extensions[key] = deepcopy(patch)
@@ -1052,7 +1223,18 @@ def _parse_extension_data(
                 )
             )
             continue
-        for unknown in sorted(set(value) - _DEFINITION_FIELDS):
+        for core_only in _CORE_ONLY_FIELDS:
+            if core_only in value:
+                findings.append(
+                    _finding(
+                        "core_only_field",
+                        f"{span}.{core_only}",
+                        f"{core_only!r} is not an extension field: {_core_only_detail()}",
+                        relation=key,
+                        severity=unknown_severity,
+                    )
+                )
+        for unknown in sorted(set(value) - _DEFINITION_FIELDS - set(_CORE_ONLY_FIELDS)):
             findings.append(
                 _finding(
                     "unknown_field",
@@ -1376,6 +1558,15 @@ def _parse_extension_data(
     )
 
 
+def _core_only_detail() -> str:
+    """What to change when an extension sets a field only the shipped core pack sets."""
+    return (
+        f"only the shipped core pack sets {' and '.join(_CORE_ONLY_FIELDS)}; an extension takes "
+        "its parent's behaviours and binds no frontmatter field; remove the field from the "
+        "extension"
+    )
+
+
 def _strings(
     value: Any,
     path: str,
@@ -1551,6 +1742,11 @@ class _Adapter:
                     attributes[name] = sorted(getattr(definition, name))
             if definition.endpoints is not None:
                 attributes["endpoints"] = definition.endpoints.as_dict()
+            # Read-only like `generic`: only the shipped pack sets them, so no delta can.
+            if definition.behaviours:
+                attributes["behaviours"] = sorted(definition.behaviours)
+            if definition.frontmatter_fields:
+                attributes["frontmatter_fields"] = dict(definition.frontmatter_fields)
             scope = {
                 name: sorted(getattr(definition, name))
                 for name in ("projects", "page_types")

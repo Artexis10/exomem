@@ -94,6 +94,12 @@ def build_reconcile_config() -> ReconcileConfig:
     concurrency_raw = os.environ.get("CELLCTL_BACKUP_CONCURRENCY")
     if concurrency_raw is not None:
         kwargs["backup_concurrency"] = int(concurrency_raw)
+    for field, variable in (("export_pause_copy_floor_mib", "CELLCTL_EXPORT_PAUSE_COPY_FLOOR_MIB"),
+                            ("export_concurrency_per_node", "CELLCTL_EXPORT_CONCURRENCY_PER_NODE")):
+        if variable in os.environ:
+            kwargs[field] = int(os.environ[variable])
+            if kwargs[field] <= 0:
+                raise ValueError(f"{variable} must be positive")
     for field, variable, unit in (
         ("import_deadline", "CELLCTL_IMPORT_DEADLINE_MINUTES", "minutes"),
         ("import_growth_deadline", "CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES", "minutes"),

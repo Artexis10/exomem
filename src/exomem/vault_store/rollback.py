@@ -16,10 +16,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .. import epistemic_graph, lexstore, state_migration, vault
+from .. import epistemic_graph, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
 from . import migrate, mode, projection
+from .write import Origin
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
 _KEPT_TABLES = ("store_mode", "store_audit")  # nosemgrep: ep-word-set -- Table names that schema 15 fixes.
@@ -68,7 +69,7 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
     ]
     for rel, sha256 in conn.execute("SELECT path, sha256 FROM store_pages ORDER BY path"):
         try:
-            on_disk = vault.read_bytes_without_pinning(vault_root / rel)
+            on_disk = vault.read_disk_bytes_without_pinning(vault_root / rel)
         except FileNotFoundError:
             found.deleted.append(rel)
             continue
@@ -235,9 +236,11 @@ def _export(
             "sha256": sha256,
             "reason": reason,
             "at": at,
+            "from_path": from_path,
         }
-        for seq, rev, path, operation, origin, sha256, reason, at in conn.execute(
-            "SELECT seq, revision, path, operation, origin, sha256, reason, at FROM store_audit ORDER BY seq"
+        for seq, rev, path, operation, origin, sha256, reason, at, from_path in conn.execute(
+            "SELECT seq, revision, path, operation, origin, sha256, reason, at, from_path "
+            "FROM store_audit ORDER BY seq"
         )
     ]
     projection.write_file(
@@ -249,7 +252,7 @@ def _export(
     kept: dict[str, bytes] = {path: body for path, _, body in found.held if body is not None}
     beside: dict[str, bytes] = {}
     for rel in found.edited:
-        on_disk = vault.read_bytes_without_pinning(root / rel)
+        on_disk = vault.read_disk_bytes_without_pinning(root / rel)
         if rel not in kept:
             kept[rel] = on_disk
         elif kept[rel] != on_disk:
@@ -305,8 +308,8 @@ def _drop_store_mode(tx: sqlite3.Connection, *, revision: int, why: str) -> None
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     tx.execute(
         "INSERT INTO store_audit(revision, path, operation, origin, sha256, reason, at) "
-        "VALUES (?, NULL, 'rollback', 'store-mode rollback', NULL, ?, ?)",
-        (revision, why, now),
+        "VALUES (?, NULL, 'rollback', ?, NULL, ?, ?)",
+        (revision, Origin.ROLLBACK.value, why, now),
     )
     tx.execute(
         "UPDATE store_mode SET mode = ?, revision = ?, changed_at = ? WHERE id = 1",
@@ -335,7 +338,11 @@ def _finish(
         report["vacuum"] = f"failed: {type(error).__name__}"
     timings["vacuum_s"] = time.perf_counter() - started
     started = time.perf_counter()
-    report["sidecars"] = {"lexical": _rebuild_lexical(root), "graph": _rebuild_graph(root)}
+    report["sidecars"] = {
+        "lexical": _rebuild_lexical(root),
+        "graph": _rebuild_graph(root),
+        "references": _rebuild_references(root),
+    }
     timings["rebuild_s"] = time.perf_counter() - started
     return {**report, "timings": {name: round(seconds, 2) for name, seconds in timings.items()}}
 
@@ -362,3 +369,11 @@ def _rebuild_graph(root: Path) -> str:
     except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
         return f"pending: {type(error).__name__}"
     return "disabled" if built.get("disabled") else "rebuilt"
+
+
+def _rebuild_references(root: Path) -> str:
+    try:
+        memory_refs.ReferenceIndex(root).rebuild_all()
+    except Exception as error:  # noqa: BLE001 - the service rebuilds a sidecar that this could not
+        return f"pending: {type(error).__name__}"
+    return "rebuilt"

@@ -19,9 +19,9 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
         assert resolve_command(command.name, (command,)) is command
         assert resolve_command(command.public_name, ()) is None
         assert resolve_command(command.name, ()) is None
-    # 33 MCP commands, two Cloud-only commands and one owner CLI/REST readout.
-    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 36
-    assert len(commands.product_commands_for("mcp")) == 33
+    # 34 MCP commands, two Cloud-only commands and one owner CLI/REST readout.
+    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 37
+    assert len(commands.product_commands_for("mcp")) == 34
     assert any(command.name == "served_context" for command in commands.product_commands_for("rest"))
     assert all(command.name != "served_context" for command in commands.product_commands_for("mcp"))
     assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 7
@@ -135,7 +135,7 @@ def test_rest_cross_spelling_retry_replays_one_edit(vault, monkeypatch) -> None:
     written = (vault / relative).stat().st_mtime_ns
     retry = client.post("/api/edit_note", json=arguments, headers=headers)
     assert first.status_code == retry.status_code == 200, (first.text, retry.text)
-    assert first.json() == retry.json()
+    assert retry.json() == {**first.json(), "data": {**first.json()["data"], "replayed": True}}
     assert (vault / relative).stat().st_mtime_ns == written
     assert (vault / relative).read_text(encoding="utf-8").count("After") == 1
 

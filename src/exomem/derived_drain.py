@@ -331,6 +331,14 @@ class _Turn:
             and self._coordinator.waiter_count() > 0
         )
 
+    def hand_over(self) -> None:
+        """After an owned turn's release, let a writer that waits take the boundary before the next turn.
+
+        A borrowed turn returned the boundary to its owner, which a waiting writer must still wait for.
+        """
+        if not self.borrowed:
+            self._coordinator.hand_over()
+
 
 @contextmanager
 def _boundary_turn(
@@ -475,6 +483,8 @@ class _Pass:
                         claim_due = False
                     worked = worked or bool(waiting)
                     proven, waiting = self._prove(turn, waiting)
+            # A turn that ended for a waiting writer must not take the boundary back before it does.
+            turn.hand_over()
             first = False
             if turn.borrowed and not worked:
                 break  # only owned-turn work is left: another loan would cost the lender for nothing

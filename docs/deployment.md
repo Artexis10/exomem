@@ -1418,7 +1418,9 @@ including notes, episodes, collections and governed methods outside anchor
 neighborhoods. These leads require source reads before the client uses them as
 facts or ongoing intentions. A lead for an unrestricted caller also lists up to
 five outbound links (relation, target ref and title), typed relations first, with
-`links_omitted` counting the rest; the client chooses which to read. An incomplete
+`links_omitted` counting the rest; the client chooses which to read. The retrieve
+hook renders each lead's links on one line under the lead, with titles quoted, and
+drops those lines before any lead or method line when its cap is tight. An incomplete
 discovery returns `partial` or `unavailable`; it does not establish that the
 knowledge is absent.
 

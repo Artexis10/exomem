@@ -78,7 +78,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Generic, Literal, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, NamedTuple, TypeVar
 
 from . import (
     __version__,
@@ -89,10 +89,13 @@ from . import (
     reserved_paths,
     state_paths,
 )
-from .find_types import RankingPage
+from .find_types import ParsedPage, RankingPage
 from .kbdir import kb_dirname
 from .log_events import log_event
 from .published_admission import Admission, admission_of, deciding
+
+if TYPE_CHECKING:
+    from .semantic_index import SemanticParentIndexState
 
 log = logging.getLogger(__name__)
 
@@ -1398,7 +1401,7 @@ class _SelectedUnits:
                     yield row, unit
 
     def contributions(
-        self, column: str, parents: Sequence[str],
+        self, column: str, parents: Sequence[str], settled: dict[str, tuple[_UnitContribution, ...]] | None = None,
     ) -> tuple[dict[str, tuple[_UnitContribution, ...]], set[str]]:
         """Each of `parents`' referable units, as ranking statistics count it, by parent, and the parents read.
 
@@ -1408,6 +1411,10 @@ class _SelectedUnits:
         shared ref stands for it. A parent with no unit has no entry. The set
         names every parent that had a stored row and so was interpreted, even
         when its interpretation emitted no unit.
+
+        An empty `settled` receives each parent, with its units (none, for a parent that emitted none), at the
+        end of the batch in which a later parent's row arrives: rows come in parent order. A read that raises, as when the request budget stops it, leaves there
+        every parent it finished and never the one it was in the middle of.
         """
         if not parents:
             return {}, set()
@@ -1427,14 +1434,25 @@ class _SelectedUnits:
                     call_spans.measure(call_spans.UNIT_PARENTS_INTERPRETED)
                 yield row
 
-        grouped: dict[str, list[_UnitContribution]] = {}
-        for row, unit in self.served(counted()):
-            grouped.setdefault(str(row[1]), []).append(_UnitContribution(
-                int(row[3]), str(row[0]), str(unit.unit_ref),
-                # Interned: the units of a base share each distinct token.
-                tuple(map(sys.intern, str(row[2]).split())),
-            ))
-        return {path: tuple(units) for path, units in grouped.items()}, interpreted
+        settled = {} if settled is None else settled
+        # Each parent read and not yet settled, with the units interpreted so far.
+        reading: dict[str, list[_UnitContribution]] = {}
+        stream = counted()
+        while batch := list(itertools.islice(stream, _OCCURRENCE_TRANSPORT_BATCH)):
+            for row in batch:
+                reading.setdefault(str(row[1]), [])
+            for row, unit in self.served(batch):
+                reading[str(row[1])].append(_UnitContribution(
+                    int(row[3]), str(row[0]), str(unit.unit_ref),
+                    # Interned: the units of a base share each distinct token.
+                    tuple(map(sys.intern, str(row[2]).split())),
+                ))
+            # Rows come in parent order: only the batch's last parent can continue into the next batch.
+            last = str(batch[-1][1])
+            for path in [path for path in reading if path != last]:
+                settled[path] = tuple(reading.pop(path))
+        settled.update((path, tuple(units)) for path, units in reading.items())
+        return {path: units for path, units in settled.items() if units}, interpreted
 
 
 @dataclass(frozen=True, slots=True)
@@ -2615,6 +2633,12 @@ def _schedule_repair(
     a full pass is already active are one level-triggered observation and are
     coalesced into that pass instead of creating an unbounded rebuild chain.
     """
+    from . import service_standby
+
+    if service_standby.in_standby():
+        # The serving worker is the one repair owner, and a standby's read can find the catalogue
+        # one publication ahead of its unwatched registry. A rebuild here would be a publication.
+        return False
     # Pending-only callers already hold the resolved key; idle recovery must
     # inspect only process-local claims, without even resolving a path again.
     key = vault_root if pending_only else vault_root.resolve()
@@ -3146,6 +3170,12 @@ class _AdmittedStatisticsEntry:
 #: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
 #: no base, and its next build counts every page.
 _ADMITTED_BASE_TERMS_MAX = 4_000_000
+#: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
+#: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
+#: each other's pages: each build subtracted the other set's terms and re-read its own texts, about 2.5 s of CPU a
+#: recall on a 13,000-page vault (measured 2026-11-08). A base built from another shares that base's page entries
+#: and its frequency mapping is its statistics entry's own, so an extra base costs about a dictionary slot a page.
+_ADMITTED_BASES_MAX = 4
 
 
 class _PageTerms(NamedTuple):
@@ -3177,6 +3207,20 @@ class _AdmittedBase:
 _UNIT_BASE_BYTES_MAX = 64 << 20
 _UNIT_BYTES = 370
 _TOKEN_BYTES = 8
+
+
+def _keeps_interpretation(view: Any, path: str) -> bool:
+    """Whether a parent's interpretation may enter the shared unit base: only a public instance's.
+
+    An owner-only instance's interpretation belongs to its caller, so every request interprets it again.
+    """
+    from .vocabulary.registry import PUBLIC_INSTANCE
+
+    return view.instance(path) == PUBLIC_INSTANCE
+
+
+def _units_bytes(units: Iterable[_UnitContribution]) -> int:
+    return sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in units)
 
 
 class _UnitContribution(NamedTuple):
@@ -4936,6 +4980,235 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     LexicalStore._ensure_fts_schema(conn)
 
 
+@dataclass(frozen=True, slots=True)
+class SemanticUnitRow:
+    """One `semantic_units` row keyed by column, and the text `unit_fts` indexes for it."""
+
+    columns: Mapping[str, Any]
+    stemmed: str
+
+
+@dataclass(frozen=True, slots=True)
+class PageRows:
+    """Every catalogue row one page derives, as plain data; `write_page_rows` writes them.
+
+    `columns` is the `pages` row keyed by column. `stemmed`, `title_lower` and `body_lower` are the
+    text that `fts` and `tri` index under that row's id. `structure_json` is the page's structural
+    summary, None when the page has no semantic state and so no unit rows.
+    """
+
+    columns: Mapping[str, Any]
+    stemmed: str
+    title_lower: str
+    body_lower: str
+    structure_json: str | None
+    units: tuple[SemanticUnitRow, ...]
+
+
+def page_rows(
+    vault_root: Path,
+    rel: str,
+    raw: bytes,
+    *,
+    page: ParsedPage | None,
+    state: SemanticParentIndexState | None,
+    mtime_ns: int,
+    in_kb: bool,
+    in_vault: bool,
+) -> PageRows | None:
+    """The catalogue rows of one page, derived from ``raw`` and nothing on disk.
+
+    ``rel`` is the page's vault-relative path and ``raw`` its exact bytes. ``page`` is
+    ``find_corpus.parse_page(..., content=raw, resolved_relative=rel)`` of those bytes. It is None
+    when they are not a parseable page, which still gets an empty-text row. ``state`` is
+    ``semantic_index.current_parent_index_state(vault_root, rel, source=<raw decoded>)``. It is None
+    when it could not be derived, which leaves the page without unit rows. Returns None when recall
+    policy does not admit ``raw`` at ``rel``: such a page has no rows. The caller proves the
+    destination file itself.
+    """
+    from . import bm25 as bm25_module
+    from . import recall_policy, semantic_language_registry, semantic_units
+    from .semantic_index import structural_metadata
+
+    if not recall_policy.admits_markdown_content(vault_root, rel, raw):
+        return None
+    if page is not None:
+        title = page.title
+        title_lower = page.title_norm if title else ""
+        body_lower = page.body_norm
+        stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.search_body))
+        updated = page.updated or "0000-00-00"
+        # Scene-frame children carry the parent video they collapse into;
+        # unparseable rows (page is None) stay NULL like ordinary pages.
+        emitted_parent_path = page.emitted_parent
+        eligibility = _eligibility_columns(page)
+        eligibility_view = _eligibility_view_json(page)
+        content_hash = getattr(page, "snapshot_hash", None)
+        ranking = _ranking_metadata_json(page)
+    else:
+        title = None
+        title_lower = body_lower = stemmed = ""
+        updated = "0000-00-00"
+        emitted_parent_path = None
+        # An unparseable page has no frontmatter to filter on. Every axis is
+        # NULL, which is exactly "matches no positive constraint" — the same
+        # answer the scan oracle gives, since it cannot parse it either.
+        eligibility = _EMPTY_ELIGIBILITY
+        eligibility_view = None
+        content_hash = None
+        ranking = None
+    columns = {
+        "path": rel,
+        "title": title,
+        "mtime_ns": mtime_ns,
+        "updated": updated,
+        "in_kb": int(in_kb),
+        "in_vault": int(in_vault),
+        "is_nav": int(rel.rsplit("/", 1)[-1].lower() in _NAV_BASENAMES),
+        "emitted_parent_path": emitted_parent_path,
+        **dict(zip(_ELIGIBILITY_COLUMNS, eligibility, strict=True)),
+        "eligibility_view_json": eligibility_view,
+        "content_hash": content_hash,
+        "ranking_json": ranking,
+    }
+    structure_json = None
+    units: list[SemanticUnitRow] = []
+    if page is not None and state is not None and state.candidates is not None:
+        structure_json = json.dumps(structural_metadata(state), sort_keys=True)
+        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
+            verdict, check_by_day, check_by_json, tags_canonical_json = (
+                _unit_eligibility_columns(unit)
+            )
+            units.append(
+                SemanticUnitRow(
+                    {
+                        "record_type": "structural_occurrence",
+                        "unit_ref": semantic_units.occurrence_key(
+                            unit.form, unit.span, unit.source_hash
+                        ),
+                        "parent_path": state.path,
+                        "parent_ref": state.parent_ref,
+                        "parent_generation": state.parent_generation,
+                        "parent_source_hash": state.parent_source_hash,
+                        "parser_version": state.parser_version,
+                        "form": unit.form,
+                        "category_raw": unit.category_raw,
+                        "category_key": unit.category_key,
+                        "category": semantic_language_registry.normalize_label(unit.category_raw),
+                        "kind": unit.kind_key,
+                        "content": unit.content,
+                        "tags_json": json.dumps(
+                            list(unit.tags), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        "context": unit.context,
+                        "unit_source_hash": unit.source_hash,
+                        "anchor": unit.anchor,
+                        "line": unit.line,
+                        "end_line": unit.end_line,
+                        "fingerprint": None,
+                        "source_order": source_order,
+                        "updated": updated,
+                        "in_kb": int(in_kb),
+                        "in_vault": int(in_vault),
+                        "verdict": verdict,
+                        "check_by_day": check_by_day,
+                        "check_by_json": check_by_json,
+                        "tags_canonical_json": tags_canonical_json,
+                    },
+                    " ".join(bm25_module.tokenize(unit.content)),
+                )
+            )
+    return PageRows(columns, stemmed, title_lower, body_lower, structure_json, tuple(units))
+
+
+def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
+    """``(in_kb, in_vault)`` of the page at these vault-relative path parts.
+
+    These are the walks' directory skip rules.
+    """
+    from . import find as find_module
+    from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
+
+    dirs = rel_parts[:-1]
+    in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage(
+        "/".join(dirs)
+    )
+    in_kb = (
+        len(rel_parts) > 1
+        and rel_parts[0] == kb_dirname()
+        and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
+    )
+    return in_kb, in_vault
+
+
+def page_membership(rel: str) -> tuple[bool, bool]:
+    """Would each walk yield the page at this vault-relative POSIX path, from the path alone?
+
+    Returns ``(in_kb, in_vault)``.
+
+    A store-mode commit has no file to walk, so it asks here for the flags that ``page_rows``
+    stores.
+    """
+    return _membership_of_parts(tuple(rel.split("/")))
+
+
+def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]) -> int:
+    """Insert one row of ``table`` from its column values and return the new row id."""
+    cur = conn.execute(
+        f"INSERT INTO {table}({', '.join(columns)}) VALUES({', '.join('?' * len(columns))})",
+        tuple(columns.values()),
+    )
+    return cur.lastrowid
+
+
+def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
+    """Insert one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    rowid = _insert_row(conn, "pages", rows.columns)
+    if fts5_available():
+        conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, rows.stemmed))
+        conn.execute(
+            "INSERT INTO tri(rowid, title_lower, body_lower) VALUES(?, ?, ?)",
+            (rowid, rows.title_lower, rows.body_lower),
+        )
+    if rows.structure_json is not None:
+        conn.execute(
+            "UPDATE pages SET structure_json = ? WHERE path = ?",
+            (rows.structure_json, rows.columns["path"]),
+        )
+    for unit in rows.units:
+        unit_rowid = _insert_row(conn, "semantic_units", unit.columns)
+        if fts5_available():
+            conn.execute(
+                "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)", (unit_rowid, unit.stemmed)
+            )
+
+
+def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str) -> None:
+    if fts5_available():
+        rowids = conn.execute(
+            "SELECT rowid FROM semantic_units WHERE parent_path = ?", (parent_path,)
+        ).fetchall()
+        for (rowid,) in rowids:
+            conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
+    conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+
+
+def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
+    row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
+    if row is not None:
+        _delete_unit_rows(conn, row[0])
+    if fts5_available():
+        conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
+        conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
+    conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
+
+
+def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
+    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
+    for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
+        _delete_page_rowid(conn, rowid)
+
+
 def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
     """Fill the catalogue on ``conn`` from the vault's Markdown files, as a cold rebuild does.
 
@@ -5016,9 +5289,9 @@ class LexicalStore:
         # unchanged. Each entry holds one vocabulary-sized mapping and the page
         # terms it was counted from.
         self._admitted_statistics: dict[tuple, _AdmittedStatisticsEntry] = {}
-        # scope -> the pages the latest admitted corpus of that scope was built from;
-        # see `_admitted_corpus`. Guarded by `_term_frequency_cache_lock`.
-        self._admitted_bases: dict[str, _AdmittedBase] = {}
+        # (scope, admitted-set digest) -> the pages that admitted corpus was last built from, most recent
+        # last; see `_admitted_corpus` and `_ADMITTED_BASES_MAX`. Guarded by `_term_frequency_cache_lock`.
+        self._admitted_bases: OrderedDict[tuple[str, str], _AdmittedBase] = OrderedDict()
         # scope -> the public-instance parents the latest admitted unit corpus of that scope was built
         # from; see `_UnitBase`. Guarded by `_term_frequency_cache_lock`.
         self._unit_bases: dict[str, _UnitBase] = {}
@@ -6782,170 +7055,57 @@ class LexicalStore:
     ) -> None:
         """Insert one page row + its fts/tri rows (caller owns the txn).
 
-        Unparseable pages get an empty-text row: they keep the count check
-        honest but can never match — mirroring the python rungs, which skip
-        pages the parse cache rejects.
+        This is the file-mode driver of `page_rows` and `write_page_rows`: it
+        admits the path on disk, reads the page's bytes once and hands them to
+        the pure derivation. Unparseable pages get an empty-text row: they keep
+        the count check honest but can never match, mirroring the python rungs,
+        which skip pages the parse cache rejects.
         """
-        from . import bm25 as bm25_module
-        from . import find as find_module
-        from . import recall_policy
+        from . import find_corpus, recall_policy, semantic_index
 
         # Every insertion is independently guarded.  Rebuild, replay and a
         # second lookup must not be able to resurrect a raw Record after an
-        # earlier delete-only suppression.
+        # earlier delete-only suppression. The gate runs before the page is
+        # opened: a Records descendant's body is never read.
         if not recall_policy.is_recall_candidate(self.vault_root, path):
             return
-
-        page = find_module._CACHE.get(path, self.vault_root)
-        if page is not None:
-            rel = page.rel_path
-            title = page.title
-            title_lower = page.title_norm if title else ""
-            body_lower = page.body_norm
-            stemmed = " ".join(bm25_module.tokenize((title or "") + " " + page.search_body))
-            updated = page.updated or "0000-00-00"
-            # Scene-frame children carry the parent video they collapse into;
-            # unparseable rows (page is None) stay NULL like ordinary pages.
-            emitted_parent_path = page.emitted_parent
-            eligibility = _eligibility_columns(page)
-            eligibility_view = _eligibility_view_json(page)
-            content_hash = getattr(page, "snapshot_hash", None)
-            ranking = _ranking_metadata_json(page)
-        else:
-            try:
-                rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
-            except ValueError:
-                return
-            title = None
-            title_lower = body_lower = stemmed = ""
-            updated = "0000-00-00"
-            emitted_parent_path = None
-            # An unparseable page has no frontmatter to filter on. Every axis is
-            # NULL, which is exactly "matches no positive constraint" — the same
-            # answer the scan oracle gives, since it cannot parse it either.
-            eligibility = _EMPTY_ELIGIBILITY
-            eligibility_view = None
-            content_hash = None
-            ranking = None
-        is_nav = path.name.lower() in _NAV_BASENAMES
-        cur = conn.execute(
-            "INSERT INTO pages(path, title, mtime_ns, updated, in_kb, in_vault, is_nav, "
-            "emitted_parent_path, "
-            + ", ".join(_ELIGIBILITY_COLUMNS)
-            + ", eligibility_view_json, content_hash, ranking_json) "
-            "VALUES(" + ", ".join("?" * (11 + len(_ELIGIBILITY_COLUMNS))) + ")",
-            (
-                rel,
-                title,
-                mtime_ns,
-                updated,
-                int(in_kb),
-                int(in_vault),
-                int(is_nav),
-                emitted_parent_path,
-                *eligibility,
-                eligibility_view,
-                content_hash,
-                ranking,
-            ),
+        rel = self._rel(path)
+        if rel is None:
+            return
+        raw = find_corpus.read_page_bytes(path, self.vault_root)
+        page = (
+            None
+            if raw is None
+            else find_corpus.parse_page(
+                path, mtime_ns / 1e9, self.vault_root, content=raw, resolved_relative=rel
+            )
         )
-        rowid = cur.lastrowid
-        if fts5_available():
-            conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, stemmed))
-            conn.execute(
-                "INSERT INTO tri(rowid, title_lower, body_lower) VALUES(?, ?, ?)",
-                (rowid, title_lower, body_lower),
-            )
+        state = None
         if page is not None:
-            self._insert_semantic_units(
-                conn,
-                path,
-                updated=updated,
-                in_kb=in_kb,
-                in_vault=in_vault,
-            )
-
-    def _insert_semantic_units(
-        self,
-        conn: sqlite3.Connection,
-        path: Path,
-        *,
-        updated: str,
-        in_kb: bool,
-        in_vault: bool,
-    ) -> None:
-        """Store every structural occurrence some selected interpretation could emit.
-
-        Rows are shared by every caller, so they hold only selection-free facts:
-        raw category and heading labels in the registry normalization domain,
-        and the governed metadata the occurrence authors. Whether a row is a
-        unit, its category, kind and public reference belong to the reader's
-        selected interpretation of the page's stored summary.
-        """
-        from . import bm25 as bm25_module
-        from . import semantic_language_registry, semantic_units
-        from .semantic_index import current_parent_index_state, structural_metadata
-
-        try:
-            state = current_parent_index_state(self.vault_root, path)
-        except (OSError, UnicodeError, ValueError):
-            return
-        if state.candidates is None:
-            return
-        conn.execute("UPDATE pages SET structure_json = ? WHERE path = ?",
-                     (json.dumps(structural_metadata(state), sort_keys=True), state.path))
-        for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
-            cur = conn.execute(
-                "INSERT INTO semantic_units("
-                "record_type, unit_ref, parent_path, parent_ref, parent_generation, "
-                "parent_source_hash, parser_version, form, category_raw, category_key, "
-                "category, kind, content, tags_json, context, unit_source_hash, anchor, "
-                "line, end_line, fingerprint, source_order, updated, in_kb, in_vault, "
-                "verdict, check_by_day, check_by_json, tags_canonical_json) "
-                "VALUES('structural_occurrence', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash),
-                    state.path,
-                    state.parent_ref,
-                    state.parent_generation,
-                    state.parent_source_hash,
-                    state.parser_version,
-                    unit.form,
-                    unit.category_raw,
-                    unit.category_key,
-                    semantic_language_registry.normalize_label(unit.category_raw),
-                    unit.kind_key,
-                    unit.content,
-                    json.dumps(list(unit.tags), ensure_ascii=False, separators=(",", ":")),
-                    unit.context,
-                    unit.source_hash,
-                    unit.anchor,
-                    unit.line,
-                    unit.end_line,
-                    None,
-                    source_order,
-                    updated,
-                    int(in_kb),
-                    int(in_vault),
-                    *_unit_eligibility_columns(unit),
-                ),
-            )
-            if fts5_available():
-                stemmed = " ".join(bm25_module.tokenize(unit.content))
-                conn.execute(
-                    "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)",
-                    (cur.lastrowid, stemmed),
+            try:
+                state = semantic_index.current_parent_index_state(
+                    self.vault_root, rel, source=raw.decode("utf-8")
                 )
+            except (OSError, UnicodeError, ValueError):
+                state = None
+        # An unreadable page has no bytes to admit. An ordinary page still gets its empty-text row.
+        # A Records manifest is admitted by its content, so it gets no row until a later pass reads
+        # it: the gate fails closed.
+        rows = page_rows(
+            self.vault_root,
+            rel,
+            b"" if raw is None else raw,
+            page=page,
+            state=state,
+            mtime_ns=mtime_ns,
+            in_kb=in_kb,
+            in_vault=in_vault,
+        )
+        if rows is not None:
+            write_page_rows(conn, rows)
 
     def _delete_semantic_units(self, conn: sqlite3.Connection, parent_path: str) -> None:
-        if fts5_available():
-            rowids = conn.execute(
-                "SELECT rowid FROM semantic_units WHERE parent_path = ?", (parent_path,)
-            ).fetchall()
-            for (rowid,) in rowids:
-                conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
-        conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+        _delete_unit_rows(conn, parent_path)
 
     def _delete_orphan_rows(self, conn: sqlite3.Connection) -> None:
         """Remove side-table rows whose owning record was deleted out-of-band."""
@@ -6963,13 +7123,7 @@ class LexicalStore:
             conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
 
     def _delete_rowid(self, conn: sqlite3.Connection, rowid: int) -> None:
-        row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
-        if row is not None:
-            self._delete_semantic_units(conn, row[0])
-        if fts5_available():
-            conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
-            conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
-        conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
+        _delete_page_rowid(conn, rowid)
 
     # -------------------------------------------------------------- dual-write
 
@@ -7008,21 +7162,11 @@ class LexicalStore:
     def _membership(self, path: Path) -> tuple[bool, bool]:
         """Would each walk yield this file? Single-file replay of the walks'
         directory skip rules, so hook-written rows match a rebuild's."""
-        from . import find as find_module
-        from .vault import VAULT_SCAN_SKIP_DIRS, in_import_stage
-
         try:
             rel_parts = path.resolve().relative_to(self.vault_root.resolve()).parts
         except ValueError:
             return False, False
-        dirs = rel_parts[:-1]
-        in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs) and not in_import_stage("/".join(dirs))
-        in_kb = (
-            len(rel_parts) > 1
-            and rel_parts[0] == kb_dirname()
-            and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
-        )
-        return in_kb, in_vault
+        return _membership_of_parts(rel_parts)
 
     def upsert_paths(self, paths: list[Path]) -> bool:
         """Bounded inline upsert under the publication barrier.
@@ -10277,7 +10421,11 @@ class LexicalStore:
             else:
                 call_spans.measure(call_spans.STATS_REBUILT)
                 with self._term_frequency_cache_lock:
-                    base = self._admitted_bases.get(scope)
+                    # This admitted set's own base; a set seen first starts from the scope's latest base.
+                    base = self._admitted_bases.get((scope, digest)) or next(
+                        (kept for (kept_scope, _), kept in reversed(self._admitted_bases.items()) if kept_scope == scope),
+                        None,
+                    )
                 held = base.pages if base is not None else {}
                 # Only a page the base lacks, or holds under another identity, has its text read.
                 rows.update(self._stemmed_texts(conn, col, [
@@ -10286,10 +10434,11 @@ class LexicalStore:
                 ]))
                 statistics, postings, base = _admitted_corpus(rows, digests, base)
                 with self._term_frequency_cache_lock:
-                    if base is None:
-                        self._admitted_bases.pop(scope, None)
-                    else:
-                        self._admitted_bases[scope] = base
+                    self._admitted_bases.pop((scope, digest), None)
+                    if base is not None:
+                        self._admitted_bases[(scope, digest)] = base
+                        while len(self._admitted_bases) > _ADMITTED_BASES_MAX:
+                            self._admitted_bases.popitem(last=False)
             with self._term_frequency_cache_lock:
                 # Equivalent snapshot aliases must not evict another admitted corpus.
                 # Recheck here because another reader can install during aggregation.
@@ -10412,9 +10561,9 @@ class LexicalStore:
         interpretation's inputs are unchanged. Otherwise a parent is interpreted again only
         if it moved or the public-instance base lacks it, and every parent's units are then
         merged in `(parent path, rowid)` order, which gives the figures of a build from nothing.
+        A build that the request budget stops keeps no figures, but keeps the parents it finished.
         """
         from . import bm25 as bm25_module
-        from .vocabulary.registry import PUBLIC_INSTANCE
 
         admitted = {path for path in parents if view.parents.allowed(path)}
         digest = hashlib.blake2b(
@@ -10463,10 +10612,17 @@ class LexicalStore:
             with self._term_frequency_cache_lock:
                 base = self._unit_bases.get(scope)
             held = base.parents if base is not None and base.key == base_key else {}
-            fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
-                path for path, revision in revisions.items()
-                if (kept := held.get(path)) is None or kept.revision != revision
-            ])
+            finished: dict[str, tuple[_UnitContribution, ...]] = {}
+            try:
+                fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
+                    path for path, revision in revisions.items()
+                    if (kept := held.get(path)) is None or kept.revision != revision
+                ], finished)
+            except sqlite3.Error:
+                # The read stopped, as the request budget does (`stopping_at_budget`). Statistics over a part of the
+                # corpus would be wrong, so none are kept; the parents it finished are, so the next build resumes.
+                self._keep_unit_parents(scope, base_key, view, revisions, finished)
+                raise
             view.require_complete()
             corpus: dict[str, tuple[str, ...]] = {}
             representatives: dict[int, str] = {}
@@ -10482,7 +10638,7 @@ class LexicalStore:
                     # Only a parent with no stored row holds no interpretation at all.
                     parent = (
                         _ParentUnits(revision, units)
-                        if path not in interpreted or view.instance(path) == PUBLIC_INSTANCE else None
+                        if path not in interpreted or _keeps_interpretation(view, path) else None
                     )
                 else:
                     units = parent.units
@@ -10493,26 +10649,22 @@ class LexicalStore:
                     # Retain identities without text; ambiguous hit precedence still
                     # belongs to the original candidate SQL traversal.
                     occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
-                    if parent is not None:
-                        kept_bytes += _UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens)
                 if parent is not None:
                     kept_parents[path] = parent
+                    kept_bytes += _units_bytes(units)
             # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
             # parents this build did not read. Each is used again only at its own revision; a deleted or
             # renamed page's entry stays until the byte bound drops the base.
             for path, parent in held.items():
                 if path not in revisions:
                     kept_parents[path] = parent
-                    kept_bytes += sum(_UNIT_BYTES + _TOKEN_BYTES * len(unit.tokens) for unit in parent.units)
+                    kept_bytes += _units_bytes(parent.units)
             entry = _AdmittedStatisticsEntry(
                 current_fingerprint, bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
                 MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
             )
             with self._term_frequency_cache_lock:
-                if kept_bytes <= _UNIT_BASE_BYTES_MAX:
-                    self._unit_bases[scope] = _UnitBase(base_key, kept_parents)
-                else:
-                    self._unit_bases.pop(scope, None)
+                self._store_unit_base(scope, base_key, kept_parents, kept_bytes)
         with self._term_frequency_cache_lock:
             # Equivalent snapshot aliases must not evict another admitted corpus.
             for retained_key, other in tuple(self._admitted_statistics.items()):
@@ -10522,6 +10674,41 @@ class LexicalStore:
                 self._admitted_statistics.pop(next(iter(self._admitted_statistics)))
             self._admitted_statistics[key] = entry
         return entry
+
+    def _keep_unit_parents(
+        self, scope: str, base_key: tuple, view: _SelectedUnits, revisions: Mapping[str, str],
+        finished: Mapping[str, tuple[_UnitContribution, ...]],
+    ) -> None:
+        """Merge the parents a stopped build finished into the scope's unit base, so the next build resumes.
+
+        The same rule as a completed build's: a parent of an owner-only instance is never kept, nor one
+        whose coverage is incomplete, and a base of another key is replaced, not merged. The base keeps
+        every parent it held, each used again only at its own revision.
+        """
+        # A finished parent was resolved by the read, so `instance` answers from the view's memory.
+        kept = {
+            path: _ParentUnits(revisions[path], units) for path, units in finished.items()
+            if path not in view.parents.unavailable and _keeps_interpretation(view, path)
+        }
+        if not kept:
+            return
+        # One critical section: a build that stored in between would otherwise lose its parents.
+        with self._term_frequency_cache_lock:
+            base = self._unit_bases.get(scope)
+            merged = dict(base.parents) if base is not None and base.key == base_key else {}
+            merged.update(kept)
+            self._store_unit_base(
+                scope, base_key, merged, sum(_units_bytes(parent.units) for parent in merged.values())
+            )
+
+    def _store_unit_base(
+        self, scope: str, base_key: tuple, parents: dict[str, _ParentUnits], kept_bytes: int
+    ) -> None:
+        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock."""
+        if kept_bytes <= _UNIT_BASE_BYTES_MAX:
+            self._unit_bases[scope] = _UnitBase(base_key, parents)
+        else:
+            self._unit_bases.pop(scope, None)
 
     @staticmethod
     def _frequency_revision(conn: sqlite3.Connection) -> str:

@@ -1,0 +1,185 @@
+## MODIFIED Requirements
+
+### Requirement: Current Relation Review Disposition
+
+Every newly created active governed compiled page SHALL have a current relation-review
+disposition satisfied by a qualifying typed inbound/outbound relation, a qualifying
+outbound connectivity signal, an explicit reviewed-none decision bound to the page's stable identity, or an automatic no-candidates bootstrap disposition only for a genuinely
+empty governed corpus.
+
+A relation qualifies as a **typed edge** only when it is authored or explicitly
+reviewer-accepted, its target resolves unambiguously to an eligible governed page at
+evaluation time, its canonical registry entry is active and scope-valid, is not marked `generic: true`, its relation
+does not carry the `associative` behaviour (shipped on `links_to`, `cites`, `derived_from`,
+`evidenced_by`, `mentions` and `observed_in`), and either (a) its origin is `markdown_relation`, `semantic_relation`, or
+`semantic_block`, or (b) its origin is `frontmatter` and its relation carries the
+`replaces` behaviour. The sole inactive-target exception is an edge whose relation carries
+`replaces` to the exact governed predecessor now marked `superseded` whose `superseded_by` resolves back to
+the active successor.
+
+When no typed edge qualifies, the disposition MAY be satisfied by an **outbound
+connectivity signal**: an authored outbound connection whose target resolves unambiguously
+to a connectable governed page, whose canonical registry entry is active and scope-valid,
+and whose origin is `wikilink`, `markdown_relation`, `semantic_relation`, or
+`semantic_block`, irrespective of registry family. A resolved outbound body wikilink SHALL
+also satisfy this lane by normalized membership in the connectable target set without
+requiring a relation fact. The connectable set SHALL be the eligible governed set widened
+to admit append-only `Sources/` material, and SHALL be computed separately from the
+eligible governed set so that the empty-corpus bootstrap disposition is unaffected by
+captured sources.
+
+Frontmatter origin SHALL NOT satisfy connectivity. This keeps the disposition aligned with
+the relation-debt measurement, which clears a page on authored relation rows or body
+wikilinks and ignores `sources:`. Provenance is a vertical edge to raw material and carries
+no claim about how a conclusion relates to other conclusions; because every
+adoption-compiled note cites a source by construction, counting it would make the
+disposition a no-op for exactly the bulk-import case that most needs review.
+
+Inbound edges MUST NOT satisfy connectivity. Unresolved or ambiguous forward targets MUST
+NOT satisfy either lane. A disposition satisfied by connectivity SHALL report that signal
+distinctly from a typed edge and SHALL emit a non-blocking typed-edge-absent warning, except when the authored-all-generic advisory already describes that pattern. The
+disposition SHALL carry any reviewed-none reason and reference it was satisfied by, so
+review decisions are observable rather than write-only. No minimum relation count SHALL be
+imposed in either lane.
+
+A reviewed-none decision SHALL bind the page's stable identity until an edit of the page
+removes its last connection, not its exact bytes. An edit of a page that held a reviewed-none
+decision before the edit SHALL carry that decision forward, and report the disposition
+with `review_renewed: true`, when the page's identity is unique in the identity census,
+the page is an eligible active compiled page before and after, and the operation is not
+a creation, replacement, adoption compile or tier-2 creation. A carried disposition SHALL
+keep the recorded reason and reference. An edit SHALL NOT carry a decision when the page
+held a qualifying relation or connectivity signal before the edit, so an edit that
+removes a page's last connection is refused as before. A bootstrap disposition SHALL NOT
+carry once a second eligible page exists. Audit and watcher evaluation SHALL carry a
+reviewed-none decision that the loader finds for the page and report it as carried, so
+audit and writes agree. A disconnection that no edit of the page made, whether an edit of
+another page or a change outside the server, SHALL NOT lapse the decision: the older
+decision carries and audit reports it as carried. A page whose only decision is a
+lifecycle decision that no committed slot names, because an edit connected the page or its
+bytes changed outside the writers, asks for relation review once more.
+
+#### Scenario: Superseded predecessor remains a qualifying target
+- **WHEN** an active successor canonically supersedes a governed predecessor and the predecessor is marked `superseded` with an exact backlink to that successor
+- **THEN** the supersession edge remains qualifying after commit and during exact prepared recovery
+- **AND** no other inactive target receives this exception
+
+#### Scenario: Typed relation satisfies disposition
+- **WHEN** a new compiled page has a registered non-generic canonical relation to an existing page
+- **THEN** its relation disposition is satisfied and reports the typed edge
+- **AND** no typed-edge-absent warning is emitted
+
+#### Scenario: Reviewed none is fingerprint-bound
+- **WHEN** a reviewer records that a page has no qualifying relation candidates
+- **THEN** the decision is recorded against the page identity and the fingerprint of the content reviewed, and that exact match satisfies the disposition on its own
+- **AND** the recorded reason is reported on the disposition rather than discarded
+
+#### Scenario: Reviewed none binds the page identity across edits
+- **WHEN** a page that holds a reviewed-none decision is edited and still has no qualifying connection
+- **THEN** the edit commits without asking for relation review again, writes no new decision and reports `review_renewed: true`
+- **AND** the decision's recorded reason and reference stay on the disposition
+
+#### Scenario: Removing the last connection is refused despite an old decision
+- **WHEN** an edit removes the last qualifying relation of a page that holds an older reviewed-none decision
+- **THEN** the old decision does not satisfy the edited page
+- **AND** the edit is refused with `RELATION_DISPOSITION_STALE` unless it records a fresh reviewed-none decision
+
+#### Scenario: A disconnection that no edit of the page made does not lapse the decision
+- **WHEN** a page with a reviewed-none decision gains a connection, and either an edit of another page or a change outside the server removes its last connection
+- **THEN** audit reports the older decision as carried, with `review_renewed: true` and its recorded reason
+- **AND** the next edit of the page commits without asking for relation review again
+
+#### Scenario: A contested identity does not carry a decision
+- **WHEN** a second path claims the identity of a page that holds a reviewed-none decision
+- **THEN** an edit of the page does not carry the decision and relation review is asked again
+
+#### Scenario: Empty vault bootstraps without fake edge
+- **WHEN** the first compiled page is created in a genuinely empty governed corpus and no target can exist
+- **THEN** the writer records an automatic bootstrap disposition without fabricating a relation or placeholder
+
+#### Scenario: Captured source does not consume the bootstrap exception
+- **WHEN** a vault contains only captured `Sources/` material and the first compiled page is created
+- **THEN** the page still receives the automatic bootstrap disposition
+- **AND** the connectable target set does not widen the eligible governed set used to detect an empty corpus
+
+#### Scenario: Bootstrap exception expires when a candidate can exist
+- **WHEN** a second eligible compiled page is added after the first page received an automatic bootstrap disposition
+- **THEN** the first page's bootstrap disposition becomes stale and enters ordinary relation review
+
+#### Scenario: Excluded-family relation satisfies connectivity without a typed edge
+- **WHEN** an active compiled page carries no qualifying typed relation but one or more authored relation rows that carry the `associative` behaviour resolving to connectable governed pages
+- **THEN** its relation disposition is satisfied and reports the connectivity signal rather than a typed edge
+- **AND** a typed-edge-absent warning is emitted at warning severity
+- **AND** the write is not blocked
+
+#### Scenario: Resolved body wikilink satisfies connectivity
+- **WHEN** an active compiled page carries only an outbound body wikilink that resolves unambiguously to a connectable governed page
+- **THEN** the disposition is satisfied and reports the connectivity signal rather than a typed edge
+- **AND** a typed-edge-absent warning is emitted at warning severity
+- **AND** the write is not blocked
+
+#### Scenario: Cited provenance alone does not satisfy the disposition
+- **WHEN** an active compiled page carries no typed relation and no body wikilink, but names existing `Sources/` pages in its `sources:` frontmatter
+- **THEN** the disposition remains unsatisfied and enters ordinary relation review
+- **AND** an adoption-compiled page, which always cites a source, still receives relation review
+
+#### Scenario: A body wikilink to a Source does satisfy connectivity
+- **WHEN** an active compiled page links a `Sources/` page from its body rather than only from frontmatter
+- **THEN** the disposition is satisfied by the connectivity signal
+- **AND** the target is not required to be an eligible governed page
+
+#### Scenario: Inbound links and provenance back-references never satisfy connectivity
+- **WHEN** a compiled page has no outbound connection of any kind, but a `Sources/` page links to it and its own `ingested_into:` back-reference names it
+- **THEN** the disposition remains unsatisfied and enters ordinary relation review
+- **AND** automatically written back-references cannot make the disposition vacuous
+
+#### Scenario: Excluded-family relation does not qualify as a typed edge but may connect
+- **WHEN** a page's only relation is `cites`, `evidenced_by` or `links_to` and resolves to a connectable governed page
+- **THEN** it does not qualify as a typed edge
+- **AND** it satisfies the disposition as connectivity, reported distinctly, with a typed-edge-absent warning
+
+#### Scenario: Inactive relation does not qualify in either lane
+- **WHEN** a page has only a relation whose canonical registry entry is inactive or out of scope
+- **THEN** the edge remains visible in its own semantics and the disposition remains unsatisfied
+
+#### Scenario: Unresolved forward target does not qualify
+- **WHEN** a registered authored relation points to a missing or ambiguous target
+- **THEN** the relation remains visible with its resolution finding but does not satisfy relation review
+- **AND** it does not satisfy connectivity
+
+#### Scenario: Self wikilink does not qualify
+- **WHEN** a page's only outbound body wikilink resolves back to that same page
+- **THEN** the disposition remains unsatisfied and enters ordinary relation review
+- **AND** the self-link does not satisfy connectivity
+
+#### Scenario: Reviewed-none is not applicable to a connected page
+- **WHEN** a caller submits a reviewed-none decision for a page that satisfies the disposition through connectivity
+- **THEN** the write reports the decision as not applicable and names the connectivity satisfaction
+- **AND** the page commits without a review artifact
+
+#### Scenario: Generic links do not satisfy typed relation review
+- **WHEN** a page contains only inline wikilinks, `links_to`, or source/evidence provenance
+- **THEN** those connections do not qualify as typed epistemic edges
+- **AND** an eligible resolved outbound connection may satisfy the separate connectivity lane, while frontmatter provenance alone does not
+
+#### Scenario: Inactive or excluded-family relation does not qualify
+- **WHEN** a page has only an inactive relation or a `cites`, `evidenced_by` or `links_to` relation
+- **THEN** the edge remains visible in its own semantics but does not qualify as a typed edge
+- **AND** an active scope-valid associative relation to a connectable target may satisfy connectivity, while an inactive relation satisfies neither lane
+
+#### Scenario: Supersession frontmatter qualifies narrowly
+- **WHEN** a registered active scope-valid supersession edge is authored through the supported frontmatter lifecycle field
+- **THEN** it qualifies without making other frontmatter links relation-review eligible
+
+#### Scenario: Inactive body wikilink target does not connect
+- **WHEN** a compiled page's only outbound body wikilink resolves to an inactive page
+- **THEN** that link does not satisfy connectivity or qualify as a typed edge
+
+#### Scenario: A registry-marked generic relation is connectivity only
+- **WHEN** a page authors an active scope-valid relation marked generic in the registry to a connectable governed page
+- **THEN** that relation does not qualify as a typed edge, regardless of its behaviours
+- **AND** it remains writable connectivity with non-blocking guidance
+
+#### Scenario: A specific extension remains typed
+- **WHEN** an authored relation resolves to an active non-generic extension and meets the other typed-edge conditions
+- **THEN** it qualifies as a typed edge even when its registry parent is generic

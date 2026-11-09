@@ -1777,7 +1777,7 @@
   "tests/test_authorization_carriers.py::test_stdio_session_message_is_sanitized_before_low_level_logging": 0.004,
   "tests/test_authorization_request_context.py::test_absent_optional_credential_binds_no_session_without_loading_custody": 0.002,
   "tests/test_authorization_request_context.py::test_every_legacy_leaf_is_classified_and_registry_validation_is_total": 0.002,
-  "tests/test_authorization_request_context.py::test_every_non_governance_product_command_is_classified_optional": 0.003,
+  "tests/test_authorization_request_context.py::test_every_non_governance_product_command_has_its_declared_credential_rule": 0.003,
   "tests/test_authorization_request_context.py::test_governance_variants_have_one_closed_credential_rule[arguments0-forbidden]": 0.004,
   "tests/test_authorization_request_context.py::test_governance_variants_have_one_closed_credential_rule[arguments1-required]": 0.004,
   "tests/test_authorization_request_context.py::test_governance_variants_have_one_closed_credential_rule[arguments10-optional]": 0.004,

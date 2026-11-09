@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.165.0" # x-release-please-version
+version = "0.168.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -84,6 +84,9 @@ Issues = "https://github.com/Artexis10/exomem/issues"
 image-codecs = [
     "pillow>=11.1.0",
     "pillow-heif==1.8.1",
+    # Camera raw (DNG) through LibRaw. It publishes no Intel macOS wheel, and building LibRaw
+    # from source is not something an install should attempt; those Macs keep raw undecodable.
+    "rawpy>=0.28,<0.29; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 # The frame reader needs codecs, with no speech, model or document dependencies.
 frame-codecs = [

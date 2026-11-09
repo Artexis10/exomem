@@ -310,6 +310,25 @@ def test_a_name_that_the_edge_holds_busy_is_skipped_and_the_pass_goes_on(cell: C
     assert [cell.head(reference).condemned for reference in references] == [False, True]
 
 
+def test_an_edge_without_the_condemn_route_stops_the_pass(cell: Cell, monkeypatch, capsys):
+    """An edge rolled back to a build without `condemn` answers 404 for every name. Skipping each one would report a
+    complete pass that hid nothing, and the operator would never learn that collection had stopped."""
+    paths = [cell.original(f"{name}.txt", name.encode() * 8) for name in ("first", "second")]
+    for path in paths:
+        _offload(cell.vault, path)
+        cell.discard(path)
+    calls: list[str] = []
+
+    def edge(url: str, **kwargs):
+        calls.append(url)
+        return httpx.Response(404, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", edge)
+    assert cell.collect(cell.snapshot()) == 1
+    assert capsys.readouterr().out.splitlines()[-1] == "stopped edge-route 0 2 0"
+    assert len(calls) == 1
+
+
 def test_the_bucket_rule_deletes_only_hidden_or_superseded_versions():
     """The collection cases trust this rule: deleting a current version would make them fail for the wrong
     reason, and deleting nothing would make them pass for none."""

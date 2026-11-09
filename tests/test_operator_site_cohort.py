@@ -363,8 +363,9 @@ def test_a_missing_meaning_goes_through_the_governed_relation_extension(
             proposal=proposed["delta"],
             expected_hash=proposed["content_hash"],
             why="Selling under a growers' mark is a durable, recurring distinction.",
+            response_detail="full",
         )
-    assert saved["state"] == "committed", saved
+    assert saved["diagnostics"]["operational"]["state"] == "committed", saved
     assert relation_registry.load_registry(root).definition(key) is not None
 
     _relate(root, world.key_to_path["org_merrow"], key, brand)

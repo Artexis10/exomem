@@ -188,8 +188,18 @@ def excluded_frontmatter_reason(field: str) -> str | None:
     return None
 
 
-def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str | None:
+def governed_frontmatter_reason(
+    field: str,
+    value: Any,
+    page_type: Any,
+    *,
+    page: tuple[Path, str, Mapping[str, Any]] | None = None,
+) -> str | None:
     """A refusal reason if `field` breaks a governed enum contract, else None.
+
+    `page` is the vault root, vault-relative path and frontmatter of the page written. The
+    verdict registry of that page's instance checks an `outcome`, so a verdict the instance
+    added is accepted; without `page` only the shipped verdicts are.
 
     This lives beside `excluded_frontmatter_reason` deliberately. `confidence`
     is refused by that function at every governed write boundary, and
@@ -200,9 +210,9 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
     """
     if field.strip().casefold() != "outcome":
         return None
-    # Deferred: `semantic_units` reaches `semantic_language_registry`, which
-    # imports this module. The vocabulary still has exactly one definition.
-    from .semantic_units import EPISTEMIC_OUTCOMES
+    # Deferred: `semantic_language_registry` imports this module. The vocabulary still has
+    # exactly one definition, the verdict registry.
+    from . import semantic_language_registry, semantic_units
 
     normalized_type = str(page_type or "").strip().casefold()
     if normalized_type != "experiment":
@@ -212,11 +222,16 @@ def governed_frontmatter_reason(field: str, value: Any, page_type: Any) -> str |
             "conclusion turned out with a semantic unit's `verdict:` metadata "
             "instead."
         )
-    if not isinstance(value, str) or value.strip().casefold() not in EPISTEMIC_OUTCOMES:
+    keys = (
+        semantic_language_registry.load_for_page(*page)
+        if page is not None
+        else semantic_language_registry.core_registry()
+    ).verdict_keys()
+    # An outcome takes a key only; a unit verdict also takes a label.
+    if not isinstance(value, str) or value.strip().casefold() not in keys:
         return (
-            f"`outcome:` must be exactly one of {', '.join(EPISTEMIC_OUTCOMES)}. "
-            "It is categorical lifecycle state, not a confidence score, so a "
-            "number or a free-text hedge is never valid."
+            f"`outcome:` must be exactly one of {', '.join(keys)}. "
+            f"{semantic_units.NO_CONFIDENCE_RULE}"
         )
     return None
 
@@ -674,16 +689,40 @@ def ensure_canonical_h1(content: str, title: str) -> str:
     return f"{canonical}\n\n{body}"
 
 
-def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | str) -> str:
-    """Canonical display-title precedence shared by every read surface."""
+def authored_title(frontmatter: Any, body: str) -> str | None:
+    """The title that a page's own bytes give: frontmatter `title`, else the first H1, else None."""
     title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
     if title is not None and str(title).strip():
         return str(title).strip()
     h1 = _H1_PATTERN.search(body or "")
     if h1 and h1.group(1).strip():
         return h1.group(1).strip()
+    return None
+
+
+def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | str) -> str:
+    """Canonical display-title precedence shared by every read surface."""
+    title = authored_title(frontmatter, body)
+    if title is not None:
+        return title
     stem = Path(path).stem.replace("-", " ").replace("_", " ").strip()
     return stem or str(path)
+
+
+def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
+    """The wikilink resolver's lower-cased display title of a page's bytes, as a file read gives it.
+
+    ``path`` (absolute or vault-relative) only supplies the filename fallback of the title
+    precedence. It returns None when the bytes are not UTF-8 text.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    # A text-mode read translates newlines before it parses; the bytes path parses the same text.
+    fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    title = resolve_display_title(fm, body, path)
+    return title.lower() if title else None
 
 
 def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
@@ -704,7 +743,12 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
     if vault_root is not None:
         from .governance import connector_boundary
 
-        connector_boundary.require_create(vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix())
+        connector_boundary.require_create(
+            vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix()
+        )
+        stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
+        if stored is not None:
+            return directory / _first_free_name(stem, suffix, stored)
     try:
         taken = {vault_name_key(entry.name) for entry in directory.iterdir()}
     except OSError:
@@ -719,12 +763,35 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: 
             candidate = directory / f"{stem}-{i}{suffix}"
             i += 1
         return candidate
+    return directory / _first_free_name(stem, suffix, taken)
+
+
+def _first_free_name(stem: str, suffix: str, taken: set[str]) -> str:
+    """``stem + suffix``, else the first ``stem-2``, ``stem-3``... with no name key in ``taken``."""
     candidate = f"{stem}{suffix}"
     i = 2
     while vault_name_key(candidate) in taken:
         candidate = f"{stem}-{i}{suffix}"
         i += 1
-    return directory / candidate
+    return candidate
+
+
+def _stored_folder_keys(vault_root: Path, directory: Path, name: str) -> set[str] | None:
+    """The name keys of the folder's entries in the store, or None when ``name`` is no stored page.
+
+    A stored page may have no file yet, so the disk listing would call its name free. The store
+    lists the pages and the folders that hold pages; a file that the store does not hold as a page
+    takes the disk listing, which has it.
+    """
+    from .vault_store import read
+
+    root = Path(vault_root)
+    folder = relative_posix(directory, root)
+    folder = "" if folder == "." else folder
+    if not read.serves(root, f"{folder}/{name}" if folder else name):
+        return None
+    with read.snapshot(root) as view:
+        return {vault_name_key(child.name) for child in view.children(folder)}
 
 
 @dataclass
@@ -1272,10 +1339,22 @@ class PathGuard:
     ancestors: tuple[PathIdentity, ...]
     missing_parents: tuple[str, ...]
     leaf_identity: PathIdentity | None
-    leaf_policy: Literal["absent", "stable", "content", "generation"]
+    #: "store" guards a page that the vault's store owns: it holds the stored hash, or None for a
+    #: page the store lacks, and it rechecks against the store and never touches the disk.
+    leaf_policy: Literal["absent", "stable", "content", "generation", "store"]
     expected_content_hash: str | None
     expected_content_size: int | None = field(default=None, init=False)
     expected_generation: tuple[int, int, int] | None = field(default=None, init=False)
+
+    @classmethod
+    def capture_store(cls, vault_root: Path, target: str) -> PathGuard:
+        """Guard a path that the store serves: bind its stored hash, or its absence there."""
+        from .vault_store import read
+
+        rel = "/".join(_safe_guard_target(target))
+        if not read.serves(Path(vault_root), rel):
+            raise PathGuardError("PATH_GUARD_INVALID", "the store does not serve this path")
+        return _store_guard(rel, _stored_sha256(Path(vault_root), rel))
 
     @classmethod
     def capture(
@@ -1377,6 +1456,8 @@ class PathGuard:
 
     def prepare_and_bind_parents(self, vault_root: Path) -> PathGuard:
         self.recheck(vault_root)
+        if self.leaf_policy == "store":
+            return self  # a stored page has no folders to create; the projector makes them
         root = Path(vault_root)
         _create_missing_guard_parents(
             root,
@@ -1396,6 +1477,8 @@ class PathGuard:
         self, vault_root: Path, verified_ancestors: set[PathIdentity] | None = None
     ) -> None:
         """Re-prove retained ancestry without testing the destination leaf."""
+        if self.leaf_policy == "store":
+            return  # a stored page has no ancestry on disk
         root = Path(vault_root)
         # Plain string joins: a round rechecks thousands of leaves and pathlib
         # construction was most of each one.
@@ -1427,6 +1510,9 @@ class PathGuard:
     ) -> None:
         """Re-prove the guard, sharing ancestor proofs within one round."""
         root = Path(vault_root)
+        if self.leaf_policy == "store":
+            self._recheck_store(root)
+            return
         root_text = os.fspath(root)
         self.recheck_ancestors(root, verified_ancestors)
         for relative in self.missing_parents:
@@ -1483,6 +1569,36 @@ class PathGuard:
             elif _leaf_hash(Path(leaf), self.leaf_identity) != self.expected_content_hash:
                 # Compatibility for callers that predate bounded snapshots.
                 raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+    def _recheck_store(self, root: Path) -> None:
+        current = _stored_sha256(root, self.target)
+        if current == self.expected_content_hash:
+            return
+        if self.expected_content_hash is None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf appeared")
+        if current is None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared")
+        raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+def _store_guard(rel: str, sha256: str | None) -> PathGuard:
+    return PathGuard(rel, (), (), None, "store", sha256)
+
+
+def _stored_sha256(root: Path, rel: str) -> str | None:
+    """The hash of the page that the store holds at ``rel``, or None when it holds none."""
+    from .collection_store.connection import CollectionStoreError
+    from .vault_store import read
+
+    try:
+        with read.snapshot(root) as view:
+            meta = view.page_meta(rel)
+    except CollectionStoreError as error:
+        if error.code != read.NOT_ACTIVE:
+            raise
+        raise PathGuardError("PATH_GUARD_CHANGED", "the store no longer serves it") from error
+    return None if meta is None else meta.sha256
 
 
 def recheck_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> None:
@@ -3503,8 +3619,28 @@ def replace_tolerating_transient_sharing(
     raise AssertionError("unreachable: the final attempt re-raises")  # pragma: no cover
 
 
-def read_bytes_without_pinning(path: Path) -> bytes:
-    """Read a canonical file without blocking a concurrent replacement of it.
+def read_bytes_without_pinning(path: Path, vault_root: Path | None = None) -> bytes:
+    """The bytes of a canonical file, read as ``read_disk_bytes_without_pinning`` reads them.
+
+    ``vault_root`` is the vault that holds ``path``. A page that this vault's store owns is read
+    from the store, because there the file is only a projection that may lag; a page that the
+    store serves but lacks raises ``FileNotFoundError``, as a missing file does. A caller that
+    reads a file of a vault names the vault: the path alone cannot tell where a vault begins.
+    Without ``vault_root`` the file is no vault page (a state file, say) and the disk answers.
+    """
+    if vault_root is not None:
+        from .vault_store import read
+
+        page = read.owned_page_at(vault_root, path)
+        if page is not None:
+            return page.body
+    return read_disk_bytes_without_pinning(path)
+
+
+def read_disk_bytes_without_pinning(path: Path) -> bytes:
+    """Read a canonical file from the disk without blocking a concurrent replacement of it.
+
+    It never asks the store: a migration and a rollback compare the file with the store's page.
 
     Python's Windows `open()` requests FILE_SHARE_READ | FILE_SHARE_WRITE and
     omits FILE_SHARE_DELETE, so for as long as the file is open an `os.replace`
@@ -4096,8 +4232,12 @@ def _unbounded_leaf_reason(info: os.stat_result, limit: int) -> str | None:
     if info.st_nlink != 1:
         return f"has {info.st_nlink} hard links; only a file with one link is read"
     if info.st_size > limit:
-        return f"is {info.st_size} bytes, over the {limit}-byte read limit"
+        return _over_limit_reason(info.st_size, limit)
     return None
+
+
+def _over_limit_reason(size: int, limit: int) -> str:
+    return f"is {size} bytes, over the {limit}-byte read limit"
 
 
 def _refuse_unbounded_leaf(target: str, reason: str) -> PathGuardError:
@@ -4334,16 +4474,47 @@ def read_bounded_guarded_bytes(
     limit: int,
     expected_hash: str | None = None,
 ) -> tuple[bytes, PathGuard]:
-    """Read one bounded regular vault file and bind its exact descriptor snapshot."""
-    if type(limit) is not int or limit < 0:
-        raise PathGuardError("PATH_GUARD_INVALID", "guarded read limit is invalid")
-    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(
-        Path(vault_root), target, limit
-    )
+    """Read one bounded regular vault file and bind its exact descriptor snapshot.
+
+    A page that the vault's store owns is read from the store and bound to its stored hash instead.
+    """
+    root = Path(vault_root)
+    stored = _read_stored_guarded(root, target, limit)
+    if stored is not None:
+        data, guard = stored
+        if expected_hash is not None and guard.expected_content_hash != expected_hash:
+            raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+        return data, guard
+    data, guard = _read_bounded_guarded_snapshot_tolerating_transient_sharing(root, target, limit)
     if expected_hash is not None and guard.expected_content_hash != expected_hash:
         raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
-    guard.recheck(Path(vault_root))
+    guard.recheck(root)
     return data, guard
+
+
+def _require_read_limit(limit: int) -> None:
+    if type(limit) is not int or limit < 0:
+        raise PathGuardError("PATH_GUARD_INVALID", "guarded read limit is invalid")
+
+
+def _read_stored_guarded(root: Path, target: str, limit: int) -> tuple[bytes, PathGuard] | None:
+    """The stored page and its store guard when the store serves ``target``, else None.
+
+    None means read the file. A page that the store serves but lacks fails as a missing file does.
+    """
+    from .vault_store import read
+
+    _require_read_limit(limit)
+    rel = "/".join(_safe_guard_target(target))
+    try:
+        page = read.owned_page(root, rel)
+    except FileNotFoundError as error:
+        raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
+    if page is None:
+        return None
+    if page.meta.size > limit:
+        raise _refuse_unbounded_leaf(target, _over_limit_reason(page.meta.size, limit))
+    return page.body, _store_guard(rel, page.meta.sha256)
 
 
 def read_bounded_guarded_bytes_with_generation(
@@ -4378,7 +4549,11 @@ def read_bounded_guarded_bytes_with_generation(
     try:
         before = os.lstat(leaf)
     except FileNotFoundError:
-        raise
+        # A page that the store serves may have no file yet; the file of any other path is missing.
+        stored = _read_stored_guarded(root, target, limit)
+        if stored is None:
+            raise
+        return stored[0], stored[1], None  # a stored page has no stat generation to bind
     except OSError as error:
         raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
     data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
@@ -4418,8 +4593,13 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
                 "PATH_GUARD_INVALID", "guarded read target is outside the vault"
             ) from error
     absolute = root / relative
+    from .vault_store import read
+
+    # A stored page's size is the store's: its file may be absent, or differ until it is projected.
+    # A page that the store lacks raises FileNotFoundError, as the missing file does.
+    stored = read.owned_meta(root, relative.as_posix())
     try:
-        limit = absolute.lstat().st_size
+        limit = absolute.lstat().st_size if stored is None else stored.size
     except FileNotFoundError:
         raise
     except OSError as error:
@@ -4844,6 +5024,12 @@ def post_commit_batch_fanout(
 ) -> bool:
     if vault_root is None or not replaced:
         return True
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(Path(vault_root)):
+        # The store commit derived every row of a store-mode vault; the sidecars this fan-out
+        # refreshes belong to file mode, and nothing in store mode reads them.
+        return True
     # Register the self-authored replacements so the live watcher drops
     # their echo instead of re-embedding the same files a second time.
     publication_intents = tuple(publication_intents)
@@ -5038,14 +5224,17 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
         relative = Path(os.path.abspath(directory)).relative_to(os.path.abspath(vault_root))
     except ValueError:
         return []
+    from .capabilities import active_call_text
+
     warnings: list[str] = []
     current = Path(vault_root)
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
+            audit_call = active_call_text("review_memory", {"mode": "audit", "categories": ["path_variants"]})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
-                "run maintain_memory(mode='audit', categories=['path_variants']) to see the split"
+                f"run {audit_call} to see the split"
             )
         current = current / part
     return warnings
@@ -5319,16 +5508,27 @@ def batch_atomic_write(
     full content rehash before every destination flip. A trusted owner's private
     binding validator runs at those same boundaries; byte guards alone cannot
     establish fresh input permission.
+
+    A store-mode vault keeps its pages in the collection store, so its batch commits there, on the
+    store thread, and writes no Markdown for a page (``vault_store.batch``). Off that thread such a
+    batch refuses.
     """
     from . import working_set_heat
 
     if vault_root is not None:
         from .vault_store import availability
+        from .vault_store import batch as store_batch
 
-        # A store-mode vault keeps its pages in the store, so Markdown written here would go stale.
-        refusal = availability.write_refusal(Path(vault_root))
-        if refusal is not None:
-            raise refusal
+        writer = availability.page_writer(Path(vault_root))
+        if writer is not None:
+            return store_batch.commit_batch(
+                writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
+                completion_guards=completion_guards, index_reports=index_reports,
+                post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                defer_graph_completion=defer_graph_completion,
+                vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+            )
     with _BATCH_COMMIT_LOCK:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -5388,6 +5588,19 @@ def batch_atomic_write(
     return result
 
 
+def _require_distinct_destinations(writes: Iterable[PlannedWrite]) -> None:
+    """Refuse a batch that names one destination twice, by the portable key of each path part."""
+    destinations: set[str] = set()
+    for write in writes:
+        destination = os.path.abspath(write.path)
+        portable_destination = "/".join(
+            vault_name_key(part) for part in Path(destination).parts
+        )
+        if portable_destination in destinations:
+            raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
+        destinations.add(portable_destination)
+
+
 def _batch_atomic_write_locked(
     writes: Iterable[PlannedWrite],
     *,
@@ -5404,6 +5617,8 @@ def _batch_atomic_write_locked(
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
     _before_first_install: Callable[[], None] | None = None,
+    _graph_epoch: bool = True,
+    _before_commit_point: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -5434,7 +5649,8 @@ def _batch_atomic_write_locked(
     publication_intents_enabled = _prepare is None and vault_root is not None and (
         post_commit_fanout or publication_intents_out is not None
     )
-    if vault_root is not None:
+    # A store-mode batch derives its graph rows in its own transaction and never reads this epoch.
+    if vault_root is not None and _graph_epoch:
         from . import graph_sync
 
         if defer_graph_completion:
@@ -5467,15 +5683,7 @@ def _batch_atomic_write_locked(
             graph_debt_checkpoint = checkpoint_write
         elif defer_graph_completion:
             raise ValueError("defer_graph_completion requires graph-relevant writes")
-    destinations: set[str] = set()
-    for write in writes:
-        destination = os.path.abspath(write.path)
-        portable_destination = "/".join(
-            vault_name_key(part) for part in Path(destination).parts
-        )
-        if portable_destination in destinations:
-            raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
-        destinations.add(portable_destination)
+    _require_distinct_destinations(writes)
     for write in writes:
         absolute_parts = Path(os.path.abspath(write.path)).parts
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
@@ -6003,6 +6211,10 @@ def _batch_atomic_write_locked(
                 guard.recheck(root, allowed_changes=allowed_census_changes)
         for guard in final_guards.values():
             guard.recheck()
+        if _before_commit_point is not None:
+            # A store-mode batch commits its pages here, the last step that can fail, so a failure
+            # restores the files above and a retry meets a vault the batch never touched.
+            _before_commit_point()
         if additive_guard is not None:
             additive_guard.commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
@@ -6536,6 +6748,9 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
     read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
+    stored = _respell_in_store(Path(vault_root), parts, replacing)
+    if stored is not None:
+        return stored
     current = Path(vault_root)
     spelled: list[str] = []
     for index, part in enumerate(parts):
@@ -6553,17 +6768,58 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
             names = os.listdir(current)
         except OSError:
             names = []
-        prefix = "/".join(spelled)
-        variants = [
-            name
-            for name in held_fs.name_variants(names, part)
-            if (f"{prefix}/{name}" if prefix else name) != replacing
-        ]
-        if not variants:
+        variant = _sibling_spelling(names, part, "/".join(spelled), replacing)
+        if variant is None:
             spelled.extend(parts[index:])
             break
-        spelled.append(variants[0])
-        current = current / variants[0]
+        spelled.append(variant)
+        current = current / variant
+    return "/".join(spelled)
+
+
+def _sibling_spelling(
+    names: Iterable[str], part: str, prefix: str, replacing: str | None
+) -> str | None:
+    """The spelling of the first sibling in ``names`` that shares ``part``'s name key.
+
+    The path that a move vacates is no sibling.
+    """
+    variants = [
+        name
+        for name in held_fs.name_variants(names, part)
+        if (f"{prefix}/{name}" if prefix else name) != replacing
+    ]
+    return variants[0] if variants else None
+
+
+def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None) -> str | None:
+    """``respell_new_path`` for a stored page, reading folders from the store and the disk.
+
+    It returns None for a path that the store does not serve. A stored page may have no file yet,
+    so a folder that only the store knows would read as new. A folder that holds no page (one with
+    only binaries) is not in the store, so the disk adds its names.
+    """
+    from .vault_store import read
+
+    if not read.serves(vault_root, "/".join(parts)):
+        return None
+    spelled: list[str] = []
+    with read.snapshot(vault_root) as view:
+        for index, part in enumerate(parts):
+            prefix = "/".join(spelled)
+            names = {child.name for child in view.children(prefix)}
+            try:
+                names.update(os.listdir(vault_root / prefix if prefix else vault_root))
+            except OSError:
+                pass  # a folder that only the store knows has no directory yet
+            if part in names:
+                spelled.append(part)
+                continue
+            variant = _sibling_spelling(names, part, prefix, replacing)
+            if variant is None:
+                spelled.extend(parts[index:])
+                break
+            spelled.append(variant)
     return "/".join(spelled)
 
 
@@ -8355,12 +8611,10 @@ class WikilinkResolver:
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
         try:
-            text = abs_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            raw = abs_path.read_bytes()
+        except OSError:
             return None
-        fm, body, _ = parse_frontmatter(text)
-        title = resolve_display_title(fm, body, abs_path)
-        return title.lower() if title else None
+        return title_key_from_bytes(raw, abs_path)
 
     def on_files_changed(
         self,
@@ -8523,6 +8777,7 @@ def normalize_wikilink(
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
+    retired: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str | None]:
     """Canonicalize a wikilink target to full vault-rooted form (no `.md`).
 
@@ -8544,11 +8799,17 @@ def normalize_wikilink(
 
     `targeted_namespace_contains` answers exact resolver keys for explicit
     paths. Bare names use `resolver` or lazily call `resolver_factory`.
+
+    `retired` answers the item path that a converted collection retired for
+    an unresolved path, or None; `None` checks each link on its own. A caller
+    that resolves many links passes one `collection_store.aliases.LinkTargets`,
+    which reads each collection once.
     """
     canonical, warning, _candidate = _normalize_wikilink(
         target, vault_root, resolver=resolver,
         targeted_namespace_contains=targeted_namespace_contains,
         resolver_factory=resolver_factory, strict=strict, visible=visible,
+        retired=retired,
     )
     return canonical, warning
 
@@ -8567,6 +8828,7 @@ def _normalize_wikilink(
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
     strict: bool = False,
     visible: Callable[[str], bool] | None = None,
+    retired: Callable[[str], str | None] | None = None,
 ) -> tuple[str, str | None, WikilinkCandidate | None]:
     """Normalize a link and retain the physical owner for internal consumers."""
 
@@ -8635,10 +8897,14 @@ def _normalize_wikilink(
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.
     if not strict and "/" in cleaned:
-        from .collection_store import aliases
+        if retired is None:
+            from .collection_store import aliases
 
-        if (retired := aliases.link_target(vault_root, cleaned)) is not None:
-            return _wikilink_path_key(retired) + anchor, None, None
+            found = aliases.link_target(vault_root, cleaned)
+        else:
+            found = retired(cleaned)
+        if found is not None:
+            return _wikilink_path_key(found) + anchor, None, None
 
     # Unresolvable — forward reference or genuinely missing target. Return
     # a sensible fallback canonical form so callers can use the result

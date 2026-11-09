@@ -114,17 +114,18 @@ def _setting(name: str, default: int, *, original: bool = False) -> int | None:
     raw = os.environ.get(f"EXOMEM_{name.upper()}") or mode.read_config().get(name)
     if original and str(raw).strip().lower() == ORIGINAL:
         return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
+    return mode.int_setting(name, default)
 
 
-def resolve_side(max_side: int | str | None) -> int | None:
-    """The long side in pixels, or None to keep the original resolution."""
+def resolve_side(
+    max_side: int | str | None, *, setting: str = MAX_SIDE_SETTING, default: int = DEFAULT_MAX_SIDE,
+) -> int | None:
+    """The long side in pixels, or None to keep the original resolution.
+
+    A call that names no size gets `setting`, else `default`.
+    """
     if max_side is None:
-        return _setting(MAX_SIDE_SETTING, DEFAULT_MAX_SIDE, original=True)
+        return _setting(setting, default, original=True)
     if isinstance(max_side, str) and max_side.strip().lower() == ORIGINAL:
         return None
     if isinstance(max_side, bool) or not isinstance(max_side, int) or max_side < 1:
@@ -190,7 +191,7 @@ def _render(
 ) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes, bool]:
     from PIL import Image, ImageOps
 
-    with image_codecs.open_image(io.BytesIO(data), suffix=suffix) as opened:
+    with image_codecs.open_image(io.BytesIO(data), suffix=suffix, max_pixels=MAX_DECODE_PIXELS) as opened:
         # The stored size, before a reduced-scale decode changes what `size` reports.
         stored = opened.size
         if max_side is not None:
@@ -338,7 +339,8 @@ def show(
             raise ImageViewError(
                 "IMAGE_TOO_LARGE", _download_instead(path, smaller_helps=error.smaller_helps)
             ) from error
-        except Image.DecompressionBombError as error:
+        except (Image.DecompressionBombError, MemoryError) as error:
+            # A decoder out of memory names the same remedy as a declared size over the ceiling.
             raise ImageViewError("IMAGE_TOO_LARGE", _download_instead(path)) from error
         except (OSError, ValueError) as error:
             raise ImageViewError("IMAGE_UNDECODABLE", f"{path} could not be decoded as an image") from error

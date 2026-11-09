@@ -64,11 +64,11 @@ def _command(tmp_path: Path, vault: Path, name: str, run, serial: int) -> list[s
     terminal = manager.invoke(
         SimpleNamespace(name=name, leaf=run, read_only=False),
         (vault,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key=None,
         mutation_request_id=f"{serial:08d}-3333-4333-8333-333333333333",
     )
-    assert terminal["status"] == "committed", terminal
+    assert terminal["diagnostics"]["operational"]["status"] == "committed", terminal
     return [batch_id for batch_id in _batch_ids(vault) if batch_id not in before]
 
 

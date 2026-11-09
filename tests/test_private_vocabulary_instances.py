@@ -315,8 +315,9 @@ def test_bound_private_session_inspects_and_publishes_with_history_storage(
                 "attributes": {"folder": "Venues"},
             }}},
             "expected_hash": inspected["content_hash"], "why": "Private recurring places",
+            "response_detail": "full",
         }, idempotency_key="private-type", read_only=False)
-        assert saved["state"] == "committed", saved
+        assert saved["diagnostics"]["operational"]["state"] == "committed", saved
         after = commands.op_schema_memory(vault, "inspect", subject="entity-types", registry_scope=SCOPE)
         history = commands.op_schema_memory(vault, "history", subject="entity-types", registry_scope=SCOPE)
         assert after.get("available", True), after
@@ -324,9 +325,9 @@ def test_bound_private_session_inspects_and_publishes_with_history_storage(
         restored = manager.invoke(command, (vault,), {
             "operation": "restore", "subject": "entity-types", "registry_scope": SCOPE,
             "version": history["versions"][0]["version"], "expected_hash": after["content_hash"],
-            "why": "Restore the private core",
+            "why": "Restore the private core", "response_detail": "full",
         }, idempotency_key="private-restore", read_only=False)
-        assert restored["state"] == "committed", restored
+        assert restored["diagnostics"]["operational"]["state"] == "committed", restored
         assert entity_types.load_entity_types(vault, registry_scope=SCOPE).resolve("venue") is None
     with principal.request_scope(private_instances("limited")):
         assert commands.op_schema_memory(
@@ -921,8 +922,9 @@ def test_identical_selected_proposals_review_and_apply_to_their_own_instance(pri
             route = context["definitions"]["registration"]["save"].copy()
             assert route.pop("tool") == "schema_memory"
             assert route["registry_scope"] == scope
+            route["response_detail"] = "full"
             result = manager.invoke(command, (vault,), route, idempotency_key=f"apply-{scope}", read_only=False)
-            assert result["state"] == "committed", result
+            assert result["diagnostics"]["operational"]["state"] == "committed", result
             applied = VocabularyState(vault).get(item["ref"])
             assert applied["state"] == "applied", applied
             assert applied["decision"]["application"]["result_currency"]["target_versions"][target] == registry.load(spec, vault).content_hash
@@ -1159,9 +1161,9 @@ def test_legacy_queued_registry_request_applies_to_selected_public_storage(priva
         result = manager.invoke(command, (vault,), {"operation": operation, "subject": base.name,
                                 "proposal": document, "expected_hash": next(iter(item["target_versions"].values())),
                                 "why": "Recurring places", "vocabulary_ref": item["ref"],
-                                "vocabulary_fingerprint": item["fingerprint"]},
+                                "vocabulary_fingerprint": item["fingerprint"], "response_detail": "full"},
                                 idempotency_key="legacy-selected-public", read_only=False)
-        assert result["state"] == "committed", result
+        assert result["diagnostics"]["operational"]["state"] == "committed", result
         assert spec.overlay(vault).exists()
         assert not base.overlay(vault).exists()
 
@@ -1709,6 +1711,105 @@ def test_unit_ranking_keeps_only_public_instance_parents_across_requests(
     assert ranked(full, both)[0] is None
 
 
+def test_a_stopped_unit_build_keeps_the_public_parents_it_finished_and_never_a_private_one(
+    configured_boundary, private_instances, vault, monkeypatch
+):
+    """The owner's build that the request budget stops keeps its finished public parents only.
+
+    The owner ranks over a private-instance page between three public pages, and the budget runs out
+    while the third page is read. The next build interprets the private page, that third page and the
+    fourth, never the first page that was finished: a private reading is the owner's alone, so it is never retained.
+    This catches a stop that keeps nothing, and one that keeps a private page's reading for a caller
+    the host later refuses that instance.
+    """
+    import time
+
+    from exomem import (
+        bm25,
+        call_spans,
+        epistemic_graph,
+        freshness,
+        lexstore,
+        request_budget,
+        working_set,
+    )
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    def write(name: str, extra: str, number: int, content: str) -> str:
+        path = f"Knowledge Base/Notes/Insights/{name}.md"
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\n{extra}exomem_id: {number}7777777-7777-4777-8777-777777777777\n---\n"
+            f"# {name}\n\n{content}\n"
+        )
+        return path
+
+    # Pages are read in path order.
+    paths = {
+        write("stopped-a-public", "", 1, "- [procedure] read depth from the harbor gauges ^gauges"),
+        write("stopped-b-private", "project: private-project\n", 2, "- [procedure] raise the harbor tides ^tides"),
+        write("stopped-c-public", "", 3, "- [technique] hold depth at the harbor moorings ^moorings"),
+        write("stopped-d-public", "", 4, "- [design] harbor chains share one length ^chains"),
+    }
+    full = private_instances("full")
+
+    def ranked():
+        """The owner's method search, as the task context runs it: its hits, or None when stopped, and the parents interpreted."""
+        published = lexstore.get_store(vault).published_recall_checkpoint("kb")
+        with principal.request_scope(full), call_spans.meter(call_spans.UNIT_PARENTS_INTERPRETED) as measured:
+            result = working_set.search_method_units(
+                vault, bm25.token_units("harbor depth", query=True), 5,
+                categories=working_set.method_unit_categories(vault), allowed=paths,
+                fresh=published.triple, checkpoint=published,
+            )
+        found = None if not result.readiness.complete else [
+            (hit.parent_path, hit.anchor, hit.lexical_score) for hit in result.value
+        ]
+        return found, int(measured[call_spans.UNIT_PARENTS_INTERPRETED])
+
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        lexstore.ensure_fresh(vault)
+    lexstore.clear_stores()
+    # SQLite checks the budget every 1000 instructions, more than this build runs. One row per batch
+    # lets the read finish a parent before it starts the next.
+    monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
+    monkeypatch.setattr(lexstore, "_OCCURRENCE_TRANSPORT_BATCH", 1)
+    budget = request_budget.RequestBudget(seconds=60)
+    read: list[str] = []
+    unit = lexstore._SelectedUnits.unit
+
+    def unit_then_spend_the_budget(self, path, key):
+        found = unit(self, path, key)
+        if path not in read:
+            read.append(path)
+        if len(read) == 3:
+            budget.deadline = time.monotonic() - 1
+        return found
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lexstore._SelectedUnits, "unit", unit_then_spend_the_budget)
+        token = request_budget.set_current(budget)
+        try:
+            with lexstore.stopping_at_budget():
+                assert ranked()[0] is None
+        finally:
+            request_budget.reset_current(token)
+    assert len(read) == 3, "the budget never ran out inside the build, so this proved nothing"
+
+    resumed, interpreted = ranked()
+    assert interpreted == 3
+    lexstore.clear_stores()
+    cold, interpreted = ranked()
+    assert interpreted == 4
+    assert resumed and resumed == cold
+
+
 def test_a_private_page_without_referable_units_still_reports_unavailable_after_revocation(
     configured_boundary, storage_scope, private_instances, vault
 ):
@@ -2241,3 +2342,32 @@ def test_registry_saves_and_bootstrap_name_the_bound_public_overlay(private_inst
     assert "vault.hosts" in (vault / relations["saved"]["path"]).read_text(encoding="utf-8")
     taxonomy_path = bootstrap["source_taxonomy"]["registry"]
     assert taxonomy_path == "Knowledge Base/_Schema/public/source-taxonomy.yaml"
+
+
+def test_an_outcome_takes_the_verdicts_of_its_page_instance(private_instances, vault):
+    """A verdict that one instance adds is a valid outcome on that instance's pages only."""
+    from exomem import semantic_language_registry
+    from exomem import vault as vault_module
+    from exomem.governance import principal
+    from exomem.vocabulary import instances
+
+    path = "Knowledge Base/Notes/Experiments/trial.md"
+    private = {"type": "experiment", "projects": ["private-project"], "registry_scope": SCOPE}
+    with principal.request_scope(private_instances("full")):
+        spec = instances.select(vault, semantic_language_registry.CATEGORY_SPEC, SCOPE)
+        overlay = spec.overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\ncategories: {}\nkinds: {}\nverdicts:\n"
+            "  retracted:\n    description: The authors withdrew the claim\n",
+            encoding="utf-8",
+        )
+        on_private = vault_module.governed_frontmatter_reason(
+            "outcome", "retracted", "experiment", page=(vault, path, private)
+        )
+        on_public = vault_module.governed_frontmatter_reason(
+            "outcome", "retracted", "experiment", page=(vault, path, {"type": "experiment"})
+        )
+
+    assert on_private is None
+    assert on_public is not None and "`outcome:` must be exactly one of" in on_public

@@ -2374,23 +2374,29 @@ def converge_derived_component(
     if key not in _DERIVED_COMPONENT_REPORT_KEY:
         return False
     root = Path(vault_root)
-    from . import claims, mode, recall_policy, semantic_drain
+    from . import claims, derived_receipts, mode, recall_policy, semantic_drain
 
+    # A page a newer batch carries is that batch's to converge. Replaying it here
+    # races every later write: a shared page such as the vault log changes on each
+    # commit, so its replay never lands and this batch would retry for ever.
+    paths = derived_receipts.converge_paths(root, receipt)
+    if not paths:
+        return True
     service = mode.service_profile_enabled()
     # Tombstones must reach the removal owner before any component can finish,
     # including semantic components whose service path normally only queues work.
-    has_removals = any(path.after_hash is None for path in receipt.paths)
+    has_removals = any(path.after_hash is None for path in paths)
     semantic_outcome: bool | Literal["pending"] | None = None
     if service:
-        paths = [root / path.rel_path for path in receipt.paths if path.after_hash is not None]
+        semantic_paths = [root / path.rel_path for path in paths if path.after_hash is not None]
         if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-            semantic_drain.request(root, paths, edited=False, claims_required=key == DerivedComponent.CLAIMS.value and claims.claim_level_enabled())
+            semantic_drain.request(root, semantic_paths, edited=False, claims_required=key == DerivedComponent.CLAIMS.value and claims.claim_level_enabled())
         if key in {DerivedComponent.EMBEDDINGS.value, DerivedComponent.CLAIMS.value}:
             semantic_outcome = True
             enabled = not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and (
                 key != DerivedComponent.CLAIMS.value or claims.claim_level_enabled()
             )
-            for path in receipt.paths if enabled else ():
+            for path in paths if enabled else ():
                 if path.after_hash is None or not recall_policy.is_recall_candidate(root, root / path.rel_path):
                     continue
                 if not semantic_drain.publication_ready(root, path.rel_path, expected_hash=path.after_hash, claims_required=key == DerivedComponent.CLAIMS.value):
@@ -2408,7 +2414,7 @@ def converge_derived_component(
         written: list[Path] = []
         created: list[Path] = []
         removed: list[str] = []
-        for path in receipt.paths:
+        for path in paths:
             if path.after_hash is None:
                 removed.append(path.rel_path)
                 continue

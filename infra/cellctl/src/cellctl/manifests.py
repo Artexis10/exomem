@@ -30,6 +30,18 @@ from .backup_source import (
     media_manifest_command,
 )
 from .cell_readiness import CELL_HEALTH_PORT, CELL_HEALTH_PORT_ENV, CELL_READINESS_PATH
+from .export_layout import (
+    ARCHIVE_BOUND,
+    PACK,
+    PAUSE,
+    SPOOL_SUBPATH,
+    UPLOAD,
+    VERIFY,
+    job_name,
+    staging_bound_gib,
+    staging_claim_name,
+    verification_secret_name,
+)
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 
@@ -106,6 +118,14 @@ MEDIA_COLLECTOR_CREDENTIAL_ENV = "EXOMEM_MEDIA_EDGE_COLLECTOR_CREDENTIAL_FILE"
 RUNTIME_UID = 10001
 RUNTIME_GID = 10001
 JOB_KIND_LABEL = "exomem.io/cell-job"
+# add-cloud-media-store D8: the export's three steps. The upload and the
+# verification keep the plain export kind and its egress.
+JOB_KIND_EXPORT = "export"
+JOB_KIND_EXPORT_PAUSE = "export-pause"
+JOB_KIND_EXPORT_PACK = "export-pack"
+NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE)
+JOB_EGRESS_POLICY = "job-egress"
+EXPORT_STAGING_DIR = "/staging"
 INIT_CONTAINER_NAME = "cell-init"
 POD_SECURITY_VERSION = "v1.35"
 
@@ -233,8 +253,8 @@ def _memory_mib(quantity: str) -> int:
     raise ValueError(f"memory limit must be a whole number of Gi or Mi, got {quantity!r}")
 
 
-def _quota_memory_limit(memory_limit: str) -> str:
-    return _memory(_memory_mib(memory_limit) + JOB_MEMORY_LIMIT_MIB)
+def _quota_memory_limit(memory_limit: str, jobs: int) -> str:
+    return _memory(_memory_mib(memory_limit) + jobs * JOB_MEMORY_LIMIT_MIB)
 
 
 @dataclass(frozen=True)
@@ -452,28 +472,33 @@ def _memory(mib: int) -> str:
 
 def render_resource_quota(spec: CellManifestSpec) -> dict:
     r = spec.resources
+    # add-cloud-media-store D8: an export's staging claim, and its upload and
+    # pack Jobs, which run beside the serving pod after the pause.
+    staging_gib = staging_bound_gib(spec.storage_gib)
+    jobs = 2
     hard = {
-        "persistentvolumeclaims": "1",
-        "requests.storage": f"{spec.storage_gib}Gi",
-        # One serving pod, plus a second pod slot for a backup/restore Job
-        # that briefly overlaps it during a hold transition.
-        "pods": "2",
-        "requests.cpu": r.cpu_request,
-        "requests.memory": r.memory_request,
-        "limits.cpu": r.cpu_limit,
-        "limits.memory": _quota_memory_limit(r.memory_limit),
+        "persistentvolumeclaims": "2",
+        "requests.storage": f"{spec.storage_gib + staging_gib}Gi",
+        # The serving pod, the export's upload and pack, and one slot for a
+        # backup/restore Job that briefly overlaps it during a hold transition.
+        "pods": "4",
     }
     if spec.local_volume:
-        # D3: the hourly backup runs beside the serving pod, so the quota
-        # admits its clone claim (a second claim of the same size) and one
-        # backup Job's requests and CPU limit on top of the serving pod's.
+        # D3: the hourly backup runs beside the serving pod too, so the quota
+        # also admits its clone claim (a claim of the cell's size), its Job
+        # and that Job's requests and CPU limit.
+        jobs = 3
         hard.update({
-            "persistentvolumeclaims": "2",
-            "requests.storage": f"{2 * spec.storage_gib}Gi",
-            "requests.cpu": _cpu(_cpu_millicores(r.cpu_request) + _cpu_millicores(JOB_CPU_REQUEST)),
-            "requests.memory": _memory(_memory_mib(r.memory_request) + _memory_mib(JOB_MEMORY_REQUEST)),
-            "limits.cpu": _cpu(_cpu_millicores(r.cpu_limit) + _cpu_millicores(JOB_CPU_LIMIT)),
+            "persistentvolumeclaims": "3",
+            "requests.storage": f"{2 * spec.storage_gib + staging_gib}Gi",
+            "pods": "5",
         })
+    hard.update({
+        "requests.cpu": _cpu(_cpu_millicores(r.cpu_request) + jobs * _cpu_millicores(JOB_CPU_REQUEST)),
+        "requests.memory": _memory(_memory_mib(r.memory_request) + jobs * _memory_mib(JOB_MEMORY_REQUEST)),
+        "limits.cpu": _cpu(_cpu_millicores(r.cpu_limit) + jobs * _cpu_millicores(JOB_CPU_LIMIT)),
+        "limits.memory": _quota_memory_limit(r.memory_limit, jobs),
+    })
     return {
         "apiVersion": "v1",
         "kind": "ResourceQuota",
@@ -569,12 +594,18 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",
         "metadata": {
-            "name": "job-egress",
+            "name": JOB_EGRESS_POLICY,
             "namespace": spec.namespace,
             "labels": _labels(spec),
         },
         "spec": {
-            "podSelector": {"matchExpressions": [{"key": JOB_KIND_LABEL, "operator": "Exists"}]},
+            # add-cloud-media-store D8: the export's pause and its pack, which holds
+            # the media key, get no public egress. Like every cell pod, they reach
+            # only the peers runtime-ingress names, the media edge among them.
+            "podSelector": {"matchExpressions": [
+                {"key": JOB_KIND_LABEL, "operator": "Exists"},
+                {"key": JOB_KIND_LABEL, "operator": "NotIn", "values": list(NO_PUBLIC_EGRESS_JOB_KINDS)},
+            ]},
             "policyTypes": ["Egress"],
             "egress": [
                 {"to": egress_443_to, "ports": [{"protocol": "TCP", "port": 443}]},
@@ -1566,43 +1597,54 @@ def render_import_job(spec: CellManifestSpec, item, phase: str, *, deadline_seco
     }
 
 
-JOB_KIND_EXPORT = "export"
-
-
 def render_export_verification_secret(spec: CellManifestSpec, item, url: str) -> dict:
     """Keep the short-lived content-read capability out of routine-readable workload metadata."""
-    from .exports import verification_secret_name
-
     return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
             "metadata": {"name": verification_secret_name(item.export_id), "namespace": spec.namespace,
                          "labels": _labels(spec)}, "data": {"get-url": _b64(url)}}
 
 
-def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str], deadline_seconds: int) -> dict:
-    """C6: stream one staged part, or verify the private completed version under the same hold."""
-    from .exports import job_name, verification_secret_name
+def render_export_staging_claim(spec: CellManifestSpec, item, *, size_gib: int, storage_class: str) -> dict:
+    """add-cloud-media-store D8: the export's own claim, on the cell's class, which deletes its volumes."""
+    return {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": staging_claim_name(item.export_id), "namespace": spec.namespace, "labels": _labels(spec)},
+        "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": storage_class,
+                 "resources": {"requests": {"storage": f"{size_gib}Gi"}}},
+    }
 
-    verify = item.archive_version_id is not None
-    command = ["exomem", "cell-export", "--export-id", item.export_id, "--part-bytes", str(size.part_bytes),
-               "--max-bytes", str(size.max_bytes)]
-    for url in part_urls:
-        command += ["--part-url", url]
-    if verify:
-        command += ["--verify", "--archive-bytes", str(item.archive_bytes),
-                    "--archive-sha256", item.archive_sha256, "--archive-version-id", item.archive_version_id]
-    command += _grant_args(item.operation_grant, kind="export", operation_id=item.export_id)
-    # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
-    # read a WAL-mode store on a read-only mount once its -shm file is gone, and
-    # the export reads the collection store. The hold keeps the runtime stopped.
-    # Like the backup Job: a local volume pins this Job to a node that a move may have cordoned.
-    pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="",
-                        tolerate_cordon=spec.local_volume)
-    container = pod["containers"][0]
-    container["command"] = _cell_command(command)
-    container["env"] = [*_init_env(spec), {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"},
-                        *_containment_env(spec)]
-    if verify:
-        # Verification sees only its signed object version, never a cell volume or a cell key Secret.
+
+def _media_key_volume(spec: CellManifestSpec, keys: tuple[str, ...]) -> list[dict]:
+    """The named media keys of the cell's Secret and nothing else, required like the runtime's."""
+    return [{"name": MEDIA_VOLUME, "secret": {"secretName": spec.secret_name, "defaultMode": 0o440,
+                                             "items": [{"key": key, "path": MEDIA_FILES[key]} for key in keys]}}]
+
+
+def render_export_job(spec: CellManifestSpec, item, step: str, *, deadline_seconds: int, size=None,
+                      part_urls: list[str] = (), media_mode: str | None = None) -> dict:
+    """add-cloud-media-store D8: one step of the export.
+
+    - The pause copies the cell volume's present members into staging under
+      the hold. It mounts the media store configuration and no key.
+    - The pack mounts only staging, at /data, and holds the media key and the
+      edge credential.
+    - Neither has public egress: job-egress excludes both, so they reach only
+      the in-cluster peers runtime-ingress gives every cell pod, the edge among them.
+    - The upload mounts only the spool directory of staging and no media key, and sends the parts.
+    - The verification sees only its signed object version, never a cell volume or a cell key Secret.
+    """
+    staging = staging_claim_name(item.export_id)
+    command = ["exomem", "cell-export", "--export-id", item.export_id]
+    log_env = {"name": "EXOMEM_LOG_DIR", "value": "/tmp/exomem-logs"}
+    config_env = {"name": MEDIA_STORE_CONFIG_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_STORE_CONFIG_KEY]}"}
+    if step == VERIFY:
+        command += ["--part-bytes", str(size.part_bytes), "--max-bytes", str(size.max_bytes), "--verify",
+                    "--archive-bytes", str(item.archive_bytes), "--archive-sha256", item.archive_sha256,
+                    "--archive-version-id", item.archive_version_id]
+        command += _grant_args(item.operation_grant, kind="export", operation_id=item.export_id)
+        pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="")
+        container = pod["containers"][0]
         container["command"] = _cell_command(command, scratch=False)
         container["env"] = [{"name": "EXOMEM_CLOUD_CELL", "value": "1"},
                             {"name": "EXOMEM_CLOUD_CELL_ID", "value": spec.cell_id},
@@ -1612,11 +1654,78 @@ def render_export_job(spec: CellManifestSpec, item, size, *, part_urls: list[str
                             *_containment_env(spec)]
         container["volumeMounts"] = [{"name": "tmp", "mountPath": "/tmp"}]
         pod["volumes"] = [{"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "64Mi"}}]
-    labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}
+        kind = JOB_KIND_EXPORT
+    elif step == PAUSE:
+        command += ["--phase", PAUSE, "--staging", EXPORT_STAGING_DIR, "--max-bytes", str(ARCHIVE_BOUND)]
+        if media_mode is not None:
+            command += ["--media-mode", media_mode]
+        # Read-write like the import Jobs, not read-only like a backup: SQLite cannot
+        # read a WAL-mode store on a read-only mount once its -shm file is gone, and
+        # the pause reads the collection store. The hold keeps the runtime stopped.
+        # Like the backup Job: a local volume pins this Job to a node that a move may have cordoned.
+        pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT_PAUSE, command=[], data_read_only=False, repo="",
+                            tolerate_cordon=spec.local_volume)
+        container = pod["containers"][0]
+        container["command"] = _cell_command(command)
+        container["env"] = [*_init_env(spec), log_env, *([config_env] if spec.media_store else [])]
+        container["volumeMounts"] = [*container["volumeMounts"], {"name": "staging", "mountPath": EXPORT_STAGING_DIR},
+                                     *_media_mounts(spec)]
+        pod["volumes"] = [*pod["volumes"], {"name": "staging", "persistentVolumeClaim": {"claimName": staging}},
+                          *(_media_key_volume(spec, (MEDIA_STORE_CONFIG_KEY,)) if spec.media_store else [])]
+        kind = JOB_KIND_EXPORT_PAUSE
+    elif step == PACK:
+        command += ["--phase", PACK, "--staging", "/data", "--part-bytes", str(size.part_bytes),
+                    "--max-parts", str(size.parts), "--max-bytes", str(size.max_bytes)]
+        pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT_PACK, command=[], data_read_only=False, repo="",
+                            claim_name=staging, tolerate_cordon=spec.local_volume)
+        container = pod["containers"][0]
+        container["command"] = _cell_command(command)
+        env = [*_init_env(spec), log_env]
+        keys: tuple[str, ...] = ()
+        if spec.media_edge_url:
+            # The key bundle reads evicted originals and the credential admits the
+            # edge; the name key, which names new objects, stays with the runtime.
+            keys = (MEDIA_STORE_CONFIG_KEY, MEDIA_IDENTITY_KEY, MEDIA_CREDENTIAL_KEY)
+            env += [config_env, {"name": MEDIA_EDGE_URL_ENV, "value": spec.media_edge_url},
+                    {"name": MEDIA_EDGE_CREDENTIAL_ENV, "value": f"{MEDIA_DIR}/{MEDIA_FILES[MEDIA_CREDENTIAL_KEY]}"}]
+        elif spec.media_store:
+            # A retained store's pause already refused an evicted original; its pack reads only staging.
+            keys = (MEDIA_STORE_CONFIG_KEY,)
+            env.append(config_env)
+        container["env"] = env
+        if keys:
+            container["volumeMounts"] = [*container["volumeMounts"], *_media_mounts(spec)]
+            pod["volumes"] = [*pod["volumes"], *_media_key_volume(spec, keys)]
+        if not spec.local_volume:
+            # A Hetzner volume attaches to one node, so the pack joins the upload,
+            # which cellctl creates first. TopoLVM pins both to the volume's node.
+            pod["affinity"] = {"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{
+                "labelSelector": {"matchLabels": {"batch.kubernetes.io/job-name": job_name(item.export_id, UPLOAD)}},
+                "topologyKey": "kubernetes.io/hostname"}]}}
+        kind = JOB_KIND_EXPORT_PACK
+    elif step == UPLOAD:
+        command += ["--phase", UPLOAD, "--staging", "/data", "--max-bytes", str(size.max_bytes)]
+        for url in part_urls:
+            command += ["--part-url", url]
+        command += _grant_args(item.operation_grant, kind="export", operation_id=item.export_id)
+        pod = _job_pod_spec(spec, job_kind=JOB_KIND_EXPORT, command=[], data_read_only=False, repo="",
+                            claim_name=staging, tolerate_cordon=spec.local_volume)
+        container = pod["containers"][0]
+        # Only the spool is mounted below /data, so the upload keeps its scratch in the pod's own /tmp.
+        container["command"] = _cell_command(command, scratch=False)
+        container["env"] = [*({**entry, "value": "/tmp"} if entry["name"] == "TMPDIR" else entry
+                              for entry in _init_env(spec)), log_env, *_containment_env(spec)]
+        # Read-write, because the upload deletes each part that it sent.
+        container["volumeMounts"] = [{"name": "data", "mountPath": f"/data/{SPOOL_SUBPATH}", "subPath": SPOOL_SUBPATH}
+                                     if mount["name"] == "data" else mount for mount in container["volumeMounts"]]
+        kind = JOB_KIND_EXPORT
+    else:
+        raise ValueError(f"unknown export step {step!r}")
+    labels = {**_selector_labels(spec), JOB_KIND_LABEL: kind}
     return {
         "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": job_name(item.export_id, verify=verify), "namespace": spec.namespace,
-                     "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_EXPORT}},
+        "metadata": {"name": job_name(item.export_id, step), "namespace": spec.namespace,
+                     "labels": {**_labels(spec), JOB_KIND_LABEL: kind}},
         # No TTL: cellctl deletes the Job once C6 records its outcome.
         "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,
                  "template": {"metadata": {"labels": labels}, "spec": pod}},

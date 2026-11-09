@@ -86,10 +86,12 @@ def _remember(tmp_path: Path, root: Path, title: str, *, sources=None) -> dict:
     terminal = manager.invoke(
         SimpleNamespace(name="remember", leaf=leaf, read_only=False),
         (root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key=None,
         mutation_request_id=str(uuid.uuid4()),
     )
+    # `full` carries the sync fields under `diagnostics.operational`; read them beside the leaf's.
+    terminal = {**terminal, **terminal["diagnostics"]["operational"]}
     assert terminal["status"] == "committed", terminal
     return terminal
 
@@ -1022,13 +1024,14 @@ def test_a_failed_acknowledgement_logs_a_content_free_cause(
         terminal = manager.invoke(
             SimpleNamespace(name="remember", leaf=leaf, read_only=False),
             (vault,),
-            {"response_detail": "compact"},
+            {"response_detail": "full"},
             idempotency_key=None,
             mutation_request_id=str(uuid.uuid4()),
         )
 
     # The persisted terminal degrades to pending derived work; it never claims
     # the derived custody was proven.
+    terminal = terminal["diagnostics"]["operational"]
     assert terminal["status"] == "committed", terminal
     assert terminal["derived_sync"] == "pending", terminal
     [record] = [

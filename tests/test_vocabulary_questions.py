@@ -285,6 +285,7 @@ def test_relation_question_binds_the_exact_current_queue_pair(
     } | {
         "requested_relation": "venue.hosts",
         "why": "Apply the reviewed directed link.",
+        "response_detail": "full",
     }
     command = next(entry for entry in commands.PRODUCT_COMMANDS if entry.name == "connect_memory")
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "lease"))
@@ -296,21 +297,22 @@ def test_relation_question_binds_the_exact_current_queue_pair(
             idempotency_key="question-directed-link",
             read_only=False,
         )
-    assert accepted["state"] == "committed"
-    assert accepted["receipt_id"]
+    receipt_id = accepted["diagnostics"]["operational"]["receipt_id"]
+    assert accepted["diagnostics"]["operational"]["state"] == "committed"
+    assert receipt_id
     assert "- venue.hosts [[Knowledge Base/Notes/meaning-target]]" in (
         tmp_path / source
     ).read_text(encoding="utf-8")
     context = commands.op_review_item_context(tmp_path, ref=item["ref"])
     assert context["item"]["state"] == "applied"
     assert context["item"]["decision_currency"] == "current"
-    assert context["item"]["receipts"] == [accepted["receipt_id"]]
+    assert context["item"]["receipts"] == [receipt_id]
     state_path = VocabularyState(tmp_path).store.path
     before_restart = state_path.read_bytes()
     restarted_context = commands.op_review_item_context(tmp_path, ref=item["ref"])
     assert restarted_context["item"]["state"] == "applied"
     assert restarted_context["item"]["decision_currency"] == "current"
-    assert restarted_context["item"]["receipts"] == [accepted["receipt_id"]]
+    assert restarted_context["item"]["receipts"] == [receipt_id]
     assert state_path.read_bytes() == before_restart
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()

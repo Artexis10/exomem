@@ -95,6 +95,11 @@ def _assert_retained_outcome_unknown(store: object) -> None:
     assert pickle.loads(payload) == ("exomem.outcome-unknown", 1)
 
 
+def _flat(reply: dict) -> dict:
+    """A `full` reply with its operational fields lifted beside the agent's fields."""
+    return {**reply, **reply["diagnostics"]["operational"]}
+
+
 def test_canonical_result_is_handed_off_before_derived_wait(tmp_path: Path) -> None:
     """The graph wait cannot retain execution ownership of the leaf."""
     from exomem.writer_lease import IdempotencyStore
@@ -237,7 +242,7 @@ def test_lease_manager_recovers_terminal_from_exact_receipt_after_canonical_cas_
         manager.invoke(command, (vault,), {}, idempotency_key="receipt-cas-recovery")
     assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
 
-    recovered = manager.invoke(command, (vault,), {}, idempotency_key="receipt-cas-recovery")
+    recovered = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="receipt-cas-recovery"))
 
     assert recovered["status"] == "committed"
     assert recovered["mutated"] is True
@@ -289,7 +294,7 @@ def test_canonical_resume_rebuild_keeps_the_invoking_manager_boundary(
     with pytest.raises(OpError, match="exact terminal result"):
         manager.invoke(command, (vault,), {}, idempotency_key="resume-boundary")
 
-    result = manager.invoke(command, (vault,), {}, idempotency_key="resume-boundary")
+    result = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="resume-boundary"))
 
     assert result["graph_sync"] == "failed"
     assert observed_roots == [custom_state]
@@ -376,6 +381,7 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
         idempotency_key="receipt-schema-recovery",
     )
 
+    operational = full["diagnostics"]["operational"]
     assert {
         "ok",
         "state",
@@ -386,12 +392,12 @@ def test_receipt_recovery_preserves_public_terminal_schemas_without_leaf_leakage
         "receipt_id",
         "idempotency_key",
         "warnings_count",
-    } <= compact.keys()
-    assert full == {**compact, "diagnostics": legacy}
+    } <= operational.keys()
+    assert full == {**compact, "diagnostics": {"operational": operational, **legacy}, "replayed": True}
     assert compact["vocabulary_resolution"] == resolution
     assert full["vocabulary_resolution"] == resolution
     assert isinstance(legacy, dict)
-    assert compact_replay == compact
+    assert compact_replay == {**compact, "replayed": True}
     assert "private_leaf_value" not in json.dumps(full)
     assert "private warning" not in json.dumps(full)
     assert calls == 1
@@ -532,13 +538,13 @@ def test_lease_manager_receipt_recovery_returns_graph_failure_after_rebuild_erro
         raise RuntimeError("injected graph rebuild failure")
 
     monkeypatch.setattr(EpistemicGraphIndex, "rebuild_all", fail_rebuild)
-    recovered = manager.invoke(command, (vault,), {}, idempotency_key="receipt-rebuild-error")
-    replay = manager.invoke(command, (vault,), {}, idempotency_key="receipt-rebuild-error")
+    recovered = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="receipt-rebuild-error"))
+    replay = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="receipt-rebuild-error"))
 
     assert recovered["status"] == "committed"
     assert recovered["graph_sync"] == "failed"
     assert recovered["graph_sync_code"] == "GRAPH_SYNC_STABILIZATION_EXHAUSTED"
-    assert recovered == replay
+    assert replay == {**recovered, "replayed": True}
     assert calls == 1
 
 
@@ -752,12 +758,12 @@ def test_compact_terminal_retains_deferred_graph_failure_from_real_lease_manager
         batch_atomic_write([PlannedWrite(note, "# deferred\n")], vault_root=root)
         return {"path": "Knowledge Base/Notes/deferred.md", "warnings": []}
 
-    result = LeaseManager(LeaseConfig(state_dir=tmp_path / "state")).invoke(
+    result = _flat(LeaseManager(LeaseConfig(state_dir=tmp_path / "state")).invoke(
         SimpleNamespace(name="deferred-graph", read_only=False, leaf=leaf),
         (vault,),
-        {},
+        {"response_detail": "full"},
         idempotency_key="deferred-graph",
-    )
+    ))
 
     assert graph_sync.status(vault)["state"] == "recovery_required"
     assert result["status"] == "committed"
@@ -805,8 +811,8 @@ def test_lease_manager_outer_upsert_failure_registers_graph_failure_before_guard
         return {"path": "Knowledge Base/Notes/outer-upsert.md", "warnings": []}
 
     command = SimpleNamespace(name="outer-upsert", read_only=False, leaf=leaf)
-    result = manager.invoke(command, (vault,), {}, idempotency_key="outer-upsert")
-    replay = manager.invoke(command, (vault,), {}, idempotency_key="outer-upsert")
+    result = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="outer-upsert"))
+    replay = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="outer-upsert"))
 
     checkpoint = graph_sync.read_checkpoint(vault)
     assert checkpoint is not None
@@ -817,7 +823,7 @@ def test_lease_manager_outer_upsert_failure_registers_graph_failure_before_guard
     assert result["graph_sync"] == "failed"
     assert result["graph_sync_code"] == "GRAPH_SYNC_FANOUT_FAILED"
     assert result["graph_sync_checkpoint"] == checkpoint.checkpoint_sha256
-    assert replay == result
+    assert replay == {**result, "replayed": True}
     assert calls == 1
 
 
@@ -851,12 +857,12 @@ def test_compact_terminal_retains_typed_platform_graph_failure(
         batch_atomic_write([PlannedWrite(note, "# platform\n")], vault_root=root)
         return {"path": "Knowledge Base/Notes/platform.md", "warnings": []}
 
-    result = LeaseManager(LeaseConfig(state_dir=tmp_path / "state")).invoke(
+    result = _flat(LeaseManager(LeaseConfig(state_dir=tmp_path / "state")).invoke(
         SimpleNamespace(name="platform-graph", read_only=False, leaf=leaf),
         (vault,),
-        {},
+        {"response_detail": "full"},
         idempotency_key="platform-graph",
-    )
+    ))
 
     assert result["status"] == "committed"
     assert result["graph_sync"] == "failed"
@@ -924,14 +930,14 @@ def test_lease_manager_preserves_real_wait_path_graph_failure_code(
 
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
     command = SimpleNamespace(name="wait-path-failure", read_only=False, leaf=leaf)
-    result = manager.invoke(command, (vault,), {}, idempotency_key=f"wait-{failure_kind}")
-    replay = manager.invoke(command, (vault,), {}, idempotency_key=f"wait-{failure_kind}")
+    result = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key=f"wait-{failure_kind}"))
+    replay = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key=f"wait-{failure_kind}"))
 
     assert result["status"] == "committed"
     # The write no longer waits for the builder (#576/#588): the rebuild runs on
     # its own daemon thread, so at response time the honest outcome is `pending`.
     assert result["graph_sync"] == "pending"
-    assert replay == result
+    assert replay == {**result, "replayed": True}
     assert calls == 1
 
     # The three properties this test defends are unchanged; they are now
@@ -987,15 +993,15 @@ def test_lease_manager_preserves_graph_thread_start_failure(
 
     manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
     command = SimpleNamespace(name="thread-start-failure", read_only=False, leaf=leaf)
-    result = manager.invoke(command, (vault,), {}, idempotency_key="thread-start-failure")
-    replay = manager.invoke(command, (vault,), {}, idempotency_key="thread-start-failure")
+    result = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="thread-start-failure"))
+    replay = _flat(manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key="thread-start-failure"))
 
     assert result["graph_sync"] == "failed"
     assert result["graph_sync_code"] == "GRAPH_SYNC_START_FAILED"
     assert result["graph_sync_remediation"] == (
         graph_sync._RETRY_OR_RECONCILE
     )
-    assert replay == result
+    assert replay == {**result, "replayed": True}
     assert calls == 1
 
 

@@ -19,12 +19,13 @@ COMPILED_DESTINATIONS = {
     "failure": "Notes/Failures",
     "insight": "Notes/Insights",
     "pattern": "Notes/Patterns",
+    "procedure": "Notes/Procedures",
     "production-log": "Notes/Productions",
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     10,
-    "sha256:fafb8b21316dabe01452a6eab7be86c639c2ab068df51a53198ff432ffdd6da1",
+    "sha256:6d3a3c179884e0f1ca899363e04286375dcdccf9870c8022db25fee91d1cf955",
 )
 PORTABLE_CORE_KEYS = [
     "action",

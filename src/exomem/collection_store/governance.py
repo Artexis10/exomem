@@ -41,6 +41,13 @@ from . import tokens, types
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
 RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
+#: The owner's refusal on a connection whose write the host's connector boundary limits. Its words
+#: depend only on the collection's manifest, so they show the connection no hidden row.
+CONNECTOR_LIMITED = "COLLECTION_CONNECTOR_LIMITED"
+#: Where the boundary does not limit an owner's write, so an inspect there returns lifecycle guards
+#: that a write accepts (`visible_snapshot`).
+UNLIMITED_WRITE_ROUTES = ("from the owner's CLI or a stdio connection, or from a client whose entry in the host's "
+                          "connector boundary configuration denies it no scope")
 
 
 def _json(value: Any) -> str:
@@ -1138,16 +1145,17 @@ class OperationAuthorization:
                 connector_boundary.cache_identity(self.root, self.who, self.policy)
                 if connector_identity is None else connector_identity)
 
-    def decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
+    def decision(self, subject: CanonicalSubject, *, session=True, mutation: bool | None = None) -> Decision:
         """Decide one subject; a hold is released no further than the existing item it would change (A8).
 
         Without the item's decision, a hold would show a withheld item's values to an audience
-        that every selector of the item withholds it from.
+        that every selector of the item withholds it from. ``mutation`` decides for a read or a
+        write instead of this operation's own kind.
         """
         if subject.basis.quarantined and not (raw_protection.is_owner(self.who)
                                                and raw_protection.has_unrestricted_access(self.root, self.who)):
             return Decision(0)
-        decision = self._subject_decision(subject, session=session)
+        decision = self._subject_decision(subject, session=session, mutation=mutation)
         if decision.level == 0 or subject.basis.domain != "held":
             return decision
         try:
@@ -1159,21 +1167,22 @@ class OperationAuthorization:
         if not targets:
             return decision
         # A held whole log view is released as the log view is: only when every row it shows is.
-        return egress._meet_decisions((decision, *(self._subject_decision(target, session=session)
+        return egress._meet_decisions((decision, *(self._subject_decision(target, session=session, mutation=mutation)
                                                    for target in targets)))
 
-    def _subject_decision(self, subject: CanonicalSubject, *, session=True) -> Decision:
+    def _subject_decision(self, subject: CanonicalSubject, *, session=True, mutation: bool | None = None) -> Decision:
         basis = subject.basis
         path = basis.subject.path
+        mutation = self.mutation if mutation is None else mutation
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
         try:
-            inputs = path_inputs(self, subject, path, mutation=self.mutation)
-            if not inputs.shown or (self.mutation and inputs.write_withheld):
+            inputs = path_inputs(self, subject, path, mutation=mutation)
+            if not inputs.shown or (mutation and inputs.write_withheld):
                 return Decision(0)
             scope_ids = inputs.scopes
             ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
-                                                       mutation=self.mutation, capture=inputs.capture, strict=True)
+                                                       mutation=mutation, capture=inputs.capture, strict=True)
             if ceiling.level == 0:
                 return ceiling
         except connector_boundary.UNDECIDED:
@@ -1384,7 +1393,7 @@ class OperationAuthorization:
         manifest = _bound(state.subjects[state.epoch[0]], self.logical_vault_id)
         manifest_decision = self.decision(manifest)
         if manifest_decision.level < 6:
-            self.refuse()
+            self.refuse_manifest(manifest)
         summary = state.summaries.get(dependency)
         if summary is None:
             undecided = self.undecided
@@ -1448,8 +1457,8 @@ class OperationAuthorization:
             self.require_complete_fields(cid)
         try:
             head = self.summary_manifest(cid)
-            if head is not None:
-                if head[1].level < 6 or (complete and not self._summary_complete(cid, head)):
+            if head is not None and head[1].level >= 6:
+                if complete and not self._summary_complete(cid, head):
                     self.refuse()
                 return ()
         except collections.CollectionError as error:
@@ -1458,6 +1467,8 @@ class OperationAuthorization:
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
+        if head is not None:  # Its manifest is withheld from this caller.
+            self.refuse_manifest(head[0])
         if complete:
             try:
                 state, denied, overlay, _manifest, _decision = self._release_selection(cid)
@@ -1475,8 +1486,13 @@ class OperationAuthorization:
                     count += ((self.decision(subject).level < 6)
                               - (self.decision(subject, session=False).level < 6))
                 if count:
+                    # A row's refusal never names its cause, so it shows nothing of a row this caller may not read.
                     self.refuse()
                 return ()
+            except collections.CollectionError as error:
+                if error.code == CONNECTOR_LIMITED:  # The manifest, which `_release_selection` withholds.
+                    raise
+                self.refuse()
             except (ValueError, TypeError, sqlite3.Error,
                     authorization_session_lifecycle.AuthorizationSessionUnavailable):
                 self.refuse()
@@ -2074,7 +2090,9 @@ class OperationAuthorization:
                     )
                     if relative != path:
                         return False
-                    fingerprint = hashlib.sha256(vault.read_bytes_without_pinning(page)).hexdigest()
+                    fingerprint = hashlib.sha256(
+                        vault.read_bytes_without_pinning(page, vault_root=self.root)
+                    ).hexdigest()
                 scopes = tuple(sorted(scope_ids))
                 current: list[authority.SessionMembership] = []
 
@@ -2109,6 +2127,49 @@ class OperationAuthorization:
     def refuse(error_type=collections.CollectionError) -> None:
         # Internal freshness signals retain the same content-free public refusal.
         raise error_type("COLLECTION_NOT_FOUND", "collection was not found")
+
+    def connector_limited_owner(self) -> bool:
+        """Whether the caller is the owner on a connection that the host's connector boundary limits.
+
+        Only the owner may learn why it cannot have a collection whole, as `preview.store_notice`
+        decides; anyone else hears that the collection is absent.
+        """
+        return (raw_protection.has_unrestricted_access(self.root, self.who)
+                and not connector_boundary.unrestricted(self.root, self.who))
+
+    def refuse_manifest(self, manifest: CanonicalSubject) -> None:
+        """Refuse an operation on the collection whose manifest subject ``manifest`` withholds from it.
+
+        The owner on a limited connection hears why and what to change when this connection may read
+        the manifest and only the boundary's write ceiling refuses a write to it. Those words depend
+        on the manifest alone, so they show the connection nothing it may not read. Every other
+        caller and cause, and every read, hears `refuse`.
+        """
+        if self.mutation and self.connector_limited_owner() and self._only_the_write_ceiling_refuses(manifest):
+            raise collections.CollectionError(
+                CONNECTOR_LIMITED,
+                "this connection may not write this collection, because the host's connector boundary "
+                "limits what it can write",
+                {"remediation": f"Make this write {UNLIMITED_WRITE_ROUTES}."},
+            )
+        self.refuse()
+
+    def _only_the_write_ceiling_refuses(self, subject: CanonicalSubject) -> bool:
+        """Whether this connection reads ``subject`` and only the connector boundary's write ceiling refuses a write to it.
+
+        A subject that reads has passed the read floors, the policy and the connector's denied scopes,
+        so a write to it differs only by the write floor, the capture rule and the write ceiling.
+        """
+        try:
+            if self.decision(subject, mutation=False).level < 6:
+                return False
+            inputs = path_inputs(self, subject, subject.basis.subject.path, mutation=True)
+            return (not inputs.write_withheld
+                    and not connector_boundary.capture_refuses(inputs.scopes, inputs.capture)
+                    and connector_boundary.ceiling_refuses(self.root, self.who, inputs.scopes))
+        except (*connector_boundary.UNDECIDED, ValueError, TypeError, sqlite3.Error,
+                authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            return False  # An input that cannot be read leaves the content-free refusal.
 
     def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
         """Decode only released rows; the manifest is an independent L6 gate."""

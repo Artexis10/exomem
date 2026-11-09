@@ -100,10 +100,11 @@ def _page(root: Path, path: str, expected: Any, guards: list) -> str | None:
     return source if memory_refs.ref_from_markdown(source) == expected else None
 
 
-def _edge_presence(root: Path, source: str, subject: Mapping[str, Any], registry: Any) -> bool:
-    from . import markdown_relations, promotions
+def _edge_presence(
+    source: str, subject: Mapping[str, Any], registry: Any, resolve: Callable[[str], str | None]
+) -> bool:
+    from . import markdown_relations
 
-    resolve = promotions._Resolver(root)
     unresolved = False
     for candidate in markdown_relations.scan_markdown_relations(source).candidates:
         if not (candidate.canonical and candidate.grammar_valid):
@@ -122,9 +123,17 @@ def _edge_presence(root: Path, source: str, subject: Mapping[str, Any], registry
     return False
 
 
-def page(root: Path, kind: str, subject: Mapping[str, Any]) -> Proof:
-    """Prove entity identity or every retained state of one promoted edge."""
-    from . import relation_registry
+def page(
+    root: Path, kind: str, subject: Mapping[str, Any],
+    resolve: Callable[[str], str | None] | None = None,
+) -> Proof:
+    """Prove entity identity or every retained state of one promoted edge.
+
+    `resolve` maps a wikilink target to a vault path. A caller proving several subjects passes one, so
+    the vault's link index is built once: each `_Resolver` walks every page, about 5 s on a 14,000-page
+    vault, and a fresh one per retained state made one recall prove for minutes.
+    """
+    from . import promotions, relation_registry
 
     guards: list = []
     try:
@@ -141,7 +150,8 @@ def page(root: Path, kind: str, subject: Mapping[str, Any]) -> Proof:
         registry = relation_registry.load_for_page(root, path, vault.parse_frontmatter(current)[0])
         if registry is None:
             raise ValueError("relation registry unavailable")
-        if not _edge_presence(root, current, subject, registry):
+        resolve = resolve or promotions._Resolver(root)
+        if not _edge_presence(current, subject, registry, resolve):
             return _result("ended", subject, guards)
         introduction = subject["introduction"]
         if introduction["source_ref"] != expected or not _hash(introduction["after_hash"]):
@@ -214,7 +224,7 @@ def page(root: Path, kind: str, subject: Mapping[str, Any]) -> Proof:
             image_source = states.get(image_hash)
             if image_source is None:
                 raise ValueError("historical after image unavailable")
-            if not _edge_presence(root, image_source, subject, registry):
+            if not _edge_presence(image_source, subject, registry, resolve):
                 return _result("ended", subject, guards)
         return _result("same", subject, guards, [endpoint, sorted((key, before, after) for key, (before, after, _source) in nodes.items()), vault.content_hash(target)])
     except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError):

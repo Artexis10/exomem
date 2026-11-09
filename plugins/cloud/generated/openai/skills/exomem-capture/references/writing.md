@@ -14,9 +14,8 @@ Resolve entity candidates against the active entity registry and selected knowle
   `change_connections(operation={'kind': 'create-entity'})` only when the identity is stable,
   recurring, central to the conclusion, and useful beyond the current source.
   Pass known meaning as `relations=[{"kind": ..., "target": ...}]`;
-  `connections` always writes the generic `relates_to`, and a generic edge to an
-  entity where a specific relation fits is refused: use a `relations` item, which
-  takes a `reason` when no specific relation fits.
+  `connections` writes plain links and states no meaning: use a `relations` item to
+  name a specific relation. A write that adds the generic relation is refused.
   An unregistered-type finding supplies `proposal` and `expected_hash`; save
   those exact values through the governed
   `change_schema(operation={'kind': 'save-entity-types'})` leaf with `why`, never by
@@ -135,11 +134,13 @@ answer its one question now: does this page answer more than one independent
 question? Name them.
 
 - **One question.** Keep the page whole however long it is. Dismiss the item with
-  `triage_memory(ref=<ref>, action="dismiss", expected_fingerprint=<fingerprint>,
-  why="intentional: <the one question>")`. The page stays quiet until it reaches its
+  `triage_memory(operation={'kind': 'decision', 'ref': <ref>, 'action': 'dismiss',
+  'expected_fingerprint': <fingerprint>, 'why': 'intentional: <the one question>'})`. The page stays quiet until it reaches its
   next size step.
 - **Several questions, each with its own material.** Propose a split through the
-  curation lane, `repair_memory` operation `curation-propose`. Preview the plan and
+  curation lane. Read the page's `check_memory` `curation-work-item` first: its
+  `step_schemas` give each step kind's required and allowed args. Then submit the
+  plan with `repair_memory` operation `curation-propose`. Preview the plan and
   ask the user for exact confirmation before applying it. After a split, a remainder
   or a new child that still reaches a size step gets its own item. Answer those in
   the same pass.
@@ -239,7 +240,7 @@ For the full read-only / writeable path map see `write-scope.md`.
 
 ## Page types
 
-Eight page types under `Knowledge Base/`, each with a required frontmatter shape,
+Nine page types under `Knowledge Base/`, each with a required frontmatter shape,
 naming rule, and location. **Full per-type spec: `page-types.md`;
 frontmatter: `frontmatter.md`.** The behaviorally-load-bearing
 distinctions:
@@ -255,6 +256,7 @@ distinctions:
 - **failure** — failure mode, `Notes/Failures/`.
 - **pattern** — reusable pattern, `Notes/Patterns/`. Use `projects:` (plural) when
   it spans projects.
+- **procedure** — reusable way of working, with when to use it and when not to, `Notes/Procedures/`.
 - **experiment** — hypothesis + protocol + primary data, `Notes/Experiments/<domain>/`.
 - **production-log** — creative artifact + production knowledge, `Notes/Productions/<medium>/`.
 - **entity** — typed node under the folder resolved by the stable entity registry
@@ -342,7 +344,7 @@ Raw capture remains valid without compilation.
 4. Compile independently useful outputs into suitable existing or new homes; attribution, observations, hypotheses and measurements remain distinct.
    Keep coherent detail together and cite the preserved originals in the first write.
    Handle durable entities through the live resolve-before-create and vocabulary routes.
-5. Review candidate relations against their meaning and evidence; author grounded specific relations, honest generic relations or no edge.
+5. Review candidate relations against their meaning and evidence; author grounded specific relations, a proposed new relation type, a plain link as the last resort, or no edge.
    Resolve registered meaning before authoring, and inspect relation feedback after each write.
    Generic connectivity does not establish typed specificity. Suggestions never establish meaning by themselves.
 6. Check the whole inventory once against the committed outputs; report any unread, unavailable or uncompiled portion honestly.
@@ -391,9 +393,12 @@ under the vault root with no prefix guessing:
 
 Use semantic-block metadata such as
 `- relations: evidenced_by: [[Source]], contradicts: [[Earlier Finding]]` when
-the edge belongs to a specific claim, finding, or piece of evidence. Ordinary
-inline wikilinks remain useful generic `links_to` connections. Never turn a
-semantic suggestion into a typed relation without reviewing its meaning.
+the edge belongs to a specific claim, finding, or piece of evidence. An inline
+wikilink is only a plain link. When the note uses the page it links — the evidence
+it rests on, the decision it backs, a person who took part, the plan it carries
+out — also write that relation under `## Relations`. Keep the inline link alone
+only when the two pages just share a subject. Never turn a semantic suggestion
+into a typed relation without reviewing its meaning.
 
 **Relation labels are governed; categories and tags are not.** Categories are open
 vocabulary — invent one whenever it fits. Relation labels come from a registry, so
@@ -404,16 +409,16 @@ generic link.
 
 So the vocabulary is extensible, not fixed. Resolve before authoring with
 `read_connections(operation={'kind': 'resolve-relation'})`, and reuse a specific truthful
-registered relation when one fits. `relates_to` is honest only for a real generic
-connection, and a new one that joins an entity needs a stated reason where a specific
-relation fits; no edge is better than invented meaning. For a durable recurring
+registered relation when one fits. A write that adds the generic relation is refused:
+when no relation fits, propose a new relation type, write a plain link as the last
+resort, or write no edge. No edge is better than invented meaning. For a durable recurring
 distinction, use `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})`,
 review the complete delta and duplicate evidence, then persist that exact delta
 with `operation="save-relations"`, its `expected_hash`, and `why`. Meaning is
 immutable: corrections create a new canonical key and deprecate the old one.
 Registered relations become traversable edges while clean aliases remain authoring
-labels. A registry-marked generic relation establishes connectivity, not typed
-specificity; an all-generic advisory asks for meaning review without forcing an edge.
+labels. A registry-marked generic relation that an older page already holds establishes connectivity,
+not typed specificity; an all-generic advisory asks for meaning review without forcing an edge.
 
 **The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
@@ -422,7 +427,7 @@ can write in any form; the on-disk file lands canonical.
 
 If a wikilink target doesn't exist yet, prefer creating the entity stub via
 **read_connections/change_connections** rather than leaving a dangling link. Dangling links accumulate
-and surface in **read_review/triage_memory(mode="audit")** as `broken_wikilink`.
+and surface in `read_review(operation={'kind': 'audit'})` as `broken_wikilink`.
 
 When creating an entity that points at a **currently-evolving external artifact**
 (a live spec, a code library, a service config), use **pointer-style** — summary
@@ -487,9 +492,12 @@ Read-only recall and review follow the live retrieval policy.
   hash. The decision then binds the page, not its bytes: later edits ask nothing
   while the page stays unconnected, and an edit that removes its last connection
   is still refused. The alternative is a typed `## Relations` entry
-  (`- supports [[...]]`); Dataview `supports:: [[...]]` is not relation syntax.
-  A `GENERIC_RELATION_NEEDS_REASON` refusal replays the validated way with
-  `relation_disposition="generic"`.
+  (`- supports [[...]]`), or a plain link (`- links_to [[...]]`) when the page only
+  shares its subject with another page; use `reviewed_none` only when no page relates.
+  Dataview `supports:: [[...]]` is not relation syntax.
+  A `GENERIC_RELATION_REFUSED` refusal takes no disposition: repeat the call with one of
+  its listed specific relations, a proposed relation type, or a plain link
+  (see [mutation-results](mutation-results.md)).
 
 ### Correcting existing knowledge
 

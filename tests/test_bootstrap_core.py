@@ -38,7 +38,9 @@ CORE_HEADROOM_WARNING_BYTES = 512
 #: Per-section ceilings: the measured size on the largest surface plus about 10%, on a
 #: POPULATED vault (`bootstrap_populated`: 32 custom entity types, `due_state` and
 #: `latency` at their worst, which live in `epistemics` and `diagnostics_reading`), so a
-#: section cannot quietly regrow into a second full payload.
+#: section cannot quietly regrow into a second full payload. `epistemics` was raised from 4,950
+#: to 5,200 for the line that names the schema read listing a vault's own verdicts (about 150
+#: bytes), which the verdict registry requires: the payload teaches the shipped verdicts only.
 SECTION_BYTE_CEILINGS = {
     "authoring": 20_900,
     "vocabulary": 11_900,
@@ -46,7 +48,7 @@ SECTION_BYTE_CEILINGS = {
     "routing": 12_500,
     "adoption": 7_200,
     "envelope": 2_200,
-    "epistemics": 4_950,
+    "epistemics": 5_200,
     "diagnostics_reading": 2_200,
 }
 

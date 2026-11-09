@@ -156,7 +156,8 @@ def test_log_create_receipt_with_item_hash_is_projected_but_malformed_create_is_
         receipt_id=None,
         idempotency_key=None,
     )
-    assert mutation_terminal.project_terminal(log_terminal)["after_item_hash"] == "c" * 64
+    full = mutation_terminal.project_terminal(log_terminal, "full")
+    assert full["after_item_hash"] == "c" * 64
     malformed = dict(receipt, after_item_hash="not-a-hash")
     malformed_terminal = mutation_terminal.committed_terminal(
         malformed,

@@ -317,7 +317,7 @@ def test_attention_uses_exact_triage_fingerprint_after_unrelated_edit(tmp_path):
     assert attention.attention(tmp_path, categories=FAMILIES).items
 
 
-def test_actual_observe_mutation_delivers_state_signal_and_correction_settles(vault):
+def test_actual_observe_mutation_opens_state_review_and_correction_settles(vault):
     from exomem import commands, writer_lease
 
     write(
@@ -341,8 +341,9 @@ def test_actual_observe_mutation_delivers_state_signal_and_correction_settles(va
         context="batch 1",
         id="result",
     )
-    assert result.get("status") == "committed", result
-    assert result["due_state"]["categories"]["transient_state_review"] == 1
+    assert result["user_summary"].startswith("Saved"), result
+    assert "due_state" not in result
+    assert len([f for f in report(vault).findings if f.category == "transient_state_review"]) == 1
     from exomem import vault as vault_module
 
     source = (vault / ORIGIN).read_text()
@@ -361,11 +362,7 @@ def test_actual_observe_mutation_delivers_state_signal_and_correction_settles(va
         content="Previously no taste results existed.",
         context="batch 1",
     )
-    assert result.get("status") == "committed", result
-    assert (
-        "due_state" not in result
-        or "transient_state_review" not in result["due_state"]["categories"]
-    )
+    assert result["user_summary"].startswith("Updated"), result
     assert not [f for f in report(vault).findings if f.category == "transient_state_review"]
 
 

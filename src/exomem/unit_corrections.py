@@ -19,10 +19,6 @@ from . import (
 from .governance import egress
 from .published_admission import admission_of
 
-# nosemgrep: ep-word-set -- closed relation-schema families whose authored facts inform a claim.
-CORRECTIVE_FAMILIES = frozenset(
-    {"contradiction", "refinement", "support", "supersession", "resolution", "answer"}
-)
 MAX_COUNTERPARTS = 4
 
 
@@ -200,9 +196,9 @@ def discover(
             nonlocal partial
             check_deadline()
             target = seeds.get(edge.get("dst_key"))
-            family = (edge.get("metadata") or {}).get("relation_family")
-            if (target is None or family not in CORRECTIVE_FAMILIES
-                    or not relation_registry.traversable_resolution_status(edge.get("registry_status"))):
+            if (target is None
+                    or not relation_registry.traversable_resolution_status(edge.get("registry_status"))
+                    or not view.has(edge, "corrects")):
                 return False
             candidate = counterpart(str(edge.get("src_key") or ""))
             if candidate is None:
@@ -210,7 +206,10 @@ def discover(
             reference = candidate["unit_ref"]
             if reference == target or reference in admitted:
                 return False
-            candidate.update(corrects=target, relation=edge["relation_type"], family=family)
+            candidate.update(
+                corrects=target, relation=edge["relation_type"],
+                family=(edge.get("metadata") or {}).get("relation_family"),
+            )
             if not accept(candidate):
                 return False
             check_deadline()

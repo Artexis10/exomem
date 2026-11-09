@@ -85,7 +85,7 @@ def _author_edge(call, page: str, after: str, relation_line: str) -> dict:
     semantic = call("edit_note", {**arguments, "operation": {**operation, "validate_only": True}})
     operation["transition_token"] = semantic["semantic"]["transition_token"]
     edited = call("edit_note", {**arguments, "operation": operation})
-    assert edited.get("status") == "committed", edited
+    assert "error" not in edited, edited
     return edited
 
 
@@ -162,7 +162,7 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
         "expected_hash": inspected["content_hash"],
         "why": "Boats recur in this vault and need their own identity.",
     }})
-    assert saved.get("status") == "committed", saved
+    assert "error" not in saved, saved
     created = {}
     for name, plan in PROMOTIONS.items():
         route = listed[name]["route"]
@@ -170,7 +170,7 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
             **route["args"]["operation"], **plan,
             "relations": [{"kind": "located_at", "target": harbour["path"].removesuffix(".md")}],
         }})
-        assert created[name].get("status") == "committed", created[name]
+        assert "error" not in created[name], created[name]
     boat_path = created[BOAT]["path"]
     _author_edge(call, person["path"], PERSON_SUMMARY, f"- owns [[{boat_path.removesuffix('.md')}]]")
 

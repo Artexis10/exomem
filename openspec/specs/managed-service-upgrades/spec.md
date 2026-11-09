@@ -110,7 +110,7 @@ A standby worker SHALL take no writer lease, publish no index or graph state, sc
 
 ### Requirement: A promoted standby does not repeat the warm it already ran
 
-A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where promotion re-verified that the proved checkpoint is still current. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged.
+A promoted worker SHALL NOT repeat warm-up work its own standby completed and promotion either re-verified or cannot invalidate, and SHALL record which components were carried forward. A component SHALL be carried only where the standby completed it; the adopted graph snapshot SHALL be carried only where promotion re-verified that the proved checkpoint is still current. Carried components SHALL be marked ready before the promoted worker's warm begins serving requests, so a governed write arriving immediately after promotion is admitted rather than refused as warming. A worker that starts cold SHALL carry nothing and SHALL run its whole warm unchanged. A graph snapshot whose proof declined because it is unusable for the standby's build SHALL be reported settled, so it does not hold cutover, and SHALL NOT be carried.
 
 #### Scenario: A governed write arrives immediately after promotion
 - **WHEN** a governed write reaches a worker that was promoted from a standby whose warm completed
@@ -131,6 +131,11 @@ A promoted worker SHALL NOT repeat warm-up work its own standby completed and pr
 #### Scenario: A warm step failed rather than not running
 - **WHEN** a standby's semantic corpus build runs and fails
 - **THEN** the component is reported settled so the upgrade is not held, and it is not carried forward, so the promoted worker runs that step itself
+
+#### Scenario: The inherited graph snapshot belongs to an older graph schema
+- **WHEN** a standby proves that the inherited graph sidecar has an older graph schema version than its own build
+- **THEN** the graph snapshot component is reported settled so the upgrade is not held
+- **AND** promotion records the snapshot as unproven, and the promoted worker runs the whole graph handoff
 
 ### Requirement: A stopped worker's replacement is awaited under the cold-start budget
 
@@ -283,3 +288,81 @@ The supervisor SHALL open the public listener, the local listener and the contro
 #### Scenario: The first worker fails to start
 - **WHEN** the first worker exits before it reports ready, or does not report ready inside the cold-start window
 - **THEN** the supervisor stops with a failed exit status
+
+### Requirement: A waiting standby re-proves its graph snapshot
+
+A standby SHALL NOT treat one graph snapshot proof as final while it waits for
+promotion. Until it is promoted or discarded, it SHALL re-run the read-only proof when
+the durable graph checkpoint generation or the published snapshot's checkpoint has
+changed since its previous attempt, no sooner than the re-proof interval (30 seconds by
+default) after that attempt ended, and SHALL look for that change without opening the
+sidecar while neither file has moved. A proof SHALL be held only for the snapshot it
+read: when the published snapshot changed between the proof's start and its end, the
+attempt proves nothing. A newer proof that succeeds SHALL replace the held one; a newer
+proof that declines SHALL NOT. A re-proof SHALL write nothing the serving worker owns
+and SHALL NOT replace the adoption once promotion or discard has begun; a promotion that
+raises SHALL leave the standby proving. A re-proof that holds no proof SHALL reseed only
+this process's recall registry before proving. A re-proof of a held proof SHALL NOT
+reseed the registry or withdraw the held proof, because a reseed retires the delta
+origin that proof adopted; promotion during that re-proof SHALL rely on the held proof.
+
+#### Scenario: The serving worker republishes after a declined proof
+
+- **WHEN** a standby's first proof declined and the serving worker then publishes a
+  snapshot the standby can prove
+- **THEN** the standby re-proves within the interval after it observes the change, the
+  `graph_snapshot` component becomes ready, and the cutover is not held to its warm
+  budget
+
+#### Scenario: The serving worker publishes during the proof
+
+- **WHEN** the serving worker publishes a new snapshot while the standby's proof runs
+- **THEN** the standby does not name the new snapshot as proved, the component stays
+  waiting, and the next re-proof proves the new snapshot itself
+
+#### Scenario: Promotion lands while the standby re-proves its held proof
+
+- **WHEN** a standby holds a proof, a batch the serving worker has not published moves
+  the durable checkpoint generation, and promotion arrives while the re-proof runs
+- **THEN** promotion relies on the held proof and records `current` or `advanced`, never
+  `unproven`
+- **AND** the promoted worker drains the batch and serves its writes without a
+  whole-vault rebuild
+
+#### Scenario: Nothing changed since the last attempt
+
+- **WHEN** neither the durable checkpoint generation nor the published snapshot changed
+  since the standby's previous proof
+- **THEN** the standby does not re-run the proof
+
+### Requirement: Promotion retires whole-vault debt its source proof covers
+
+Promotion SHALL sample the whole-vault full-rebuild marker and its raise count before
+the source proof it relies on: the promotion re-proof when one runs, otherwise the
+standby's own proof when promotion re-verified that proof's checkpoint as current. When
+that proof adopted the snapshot, its residue was durably queued, and the durable graph
+checkpoint generation still equals the one sampled before that proof, promotion SHALL
+retire the sampled marker by compare-and-swap on its value and raise count, so debt
+raised after the sample survives. The generation check exists because a full-scope
+batch raises its marker before its bytes land, so a proof that finished in between saw
+the marker but not the change it stands for. The handoff record SHALL say whether the marker was
+retired or retained. A snapshot that advanced under the standby, an unproven snapshot
+and a residue that could not be queued SHALL retain the marker.
+
+#### Scenario: A full marker raised before the proof is retired at promotion
+
+- **WHEN** the serving worker raised a whole-vault marker, the standby's proof adopted
+  the snapshot with a bounded residue, and promotion re-verified that checkpoint
+- **THEN** promotion queues the residue, retires the marker, and the promoted worker's
+  drain converges the residue without a whole-vault rebuild
+
+#### Scenario: A batch that landed after the proof keeps its marker
+
+- **WHEN** a full-scope batch raised the marker, the standby's proof finished before the
+  batch's bytes landed, and nothing re-proved before promotion
+- **THEN** promotion retains the marker because the durable generation moved
+
+#### Scenario: Debt raised after the proof survives promotion
+
+- **WHEN** the marker is raised again after the proof sampled it
+- **THEN** promotion retains it and the handoff record says so

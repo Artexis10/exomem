@@ -112,6 +112,7 @@ def _control(
     count: int | None = None,
     launcher_python: str | None = None,
     active_python: str | None = None,
+    upgrade_blocker: str | None = None,
 ) -> tuple[list[dict], threading.Thread]:
     runtime = tmp_path / "managed"
     runtime.mkdir(mode=0o700)
@@ -151,6 +152,7 @@ def _control(
                             "launcher_python": str(launcher),
                             "unit": "exomem.service",
                             "port": 8765,
+                            "upgrade_blocker": upgrade_blocker,
                         }
                     client.sendall((json.dumps(response) + "\n").encode())
 
@@ -357,6 +359,21 @@ def test_failed_staging_leaves_no_release_directory(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert list((tmp_path / "releases").iterdir()) == []
+
+
+def test_a_supervisor_that_reports_an_upgrade_blocker_stops_the_upgrade_before_staging(tmp_path: Path) -> None:
+    blocker = "the supervisor runs Exomem 0.1.0, older than the vault's state, which records sample-format-v9"
+    requests, thread = _control(tmp_path, count=1, upgrade_blocker=blocker)
+    result = _operator(
+        tmp_path, "--package-version", "0.2.0", "--profile", "lean",
+        env={"EXOMEM_UV": str(_staging_uv(tmp_path))},
+    )
+    thread.join(3)
+
+    assert result.returncode != 0
+    assert blocker in result.stderr
+    assert requests == [{"command": "status"}]
+    assert not (tmp_path / "releases").exists()
 
 
 def test_retention_keeps_symlinked_and_unrecognized_entries(tmp_path: Path) -> None:

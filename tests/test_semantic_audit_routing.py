@@ -468,7 +468,6 @@ def test_mcp_audit_routes_reject_boolean_sample_limits_before_leaf_execution(
                         run_middleware=True,
                     )
                 )
-                assert result.structured_content["success"] is False
                 assert result.structured_content["error"]["code"] == "INVALID_OPERATION_ARGUMENTS"
                 assert "legacy_sample_limit" in result.structured_content["error"]["message"]
 

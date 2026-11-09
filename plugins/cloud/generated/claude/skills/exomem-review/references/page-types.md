@@ -1,6 +1,6 @@
 # Page Types
 
-Eight page types in the Knowledge Base. Each has a required location, naming
+Nine page types in the Knowledge Base. Each has a required location, naming
 convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
 For every active compiled-note type below, the fenced content shape includes a
@@ -12,9 +12,9 @@ governed rich kind is the alternative when richer semantics are intended.
 Each `## Relations` line below shows one registered relation that often fits that
 page type; it is an example, not a default. State the meaning the note actually
 has with the registered relation that fits (resolve it with
-`read_connections(operation={'kind': 'resolve-relation'})`), use `relates_to`
-only for a real generic connection (it needs a stated reason when it joins an entity
-and a specific relation fits), and write no edge when no meaning is known.
+`read_connections(operation={'kind': 'resolve-relation'})`). When none fits, propose a
+new relation type; a plain link is the last resort. A write that adds the generic
+relation is refused. Write no edge when no meaning is known.
 
 ## source
 
@@ -241,6 +241,50 @@ Conditions where it's a regression.
 ## Relations
 
 - mitigates [[...]]
+```
+
+## procedure
+
+**Location:** `Notes/Procedures/`
+**Naming:** `<procedure-name>.md`
+**Required frontmatter:** `type: procedure`, `status`, `created`, `updated`, `tags`. Optional: `summary`, `sources`, `projects`.
+
+A procedure is a reusable way of working that you write once and follow again.
+Write `summary` as one line that says when to use it. Put each distinct way of
+working in its own `## Procedure` block, so that the block reads on its own, and
+state in a "Not for" section when the procedure does not apply.
+
+**Content shape:**
+
+```markdown
+---
+type: procedure
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+summary: Use when preparing a release candidate for a library.
+projects: [project-alpha]
+tags: [...]
+---
+
+# <Procedure name>
+
+## Procedure
+
+1. First step, with the check that shows it worked.
+2. Second step.
+
+## Not for
+
+Situations where this procedure does not apply, such as a hotfix.
+
+## Observations
+
+- [technique] Run the full checks before tagging #release
+
+## Relations
+
+- depends_on [[...]]
 ```
 
 ## experiment
@@ -540,8 +584,8 @@ the summary or in `fact` units: activation serves them only when the turn asks t
 the person.
 
 On a topic page, prefer `about_entity [[Entities/People/...]]` for the canonical
-topic-to-person edge. On the entity page, prefer a specific relation such as
-`member_of` or `produces`; `relates_to` stays honest only for a real generic connection.
+topic-to-person edge. On the entity page, write a specific relation such as
+`member_of` or `produces`; a write that adds the generic relation is refused.
 
 ### Organizations
 
@@ -610,7 +654,7 @@ attempt language-aware transliteration, and it never renames existing pages on
 upgrade or reconcile.
 
 - Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
-- Notes (research, insight, failure, pattern): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
+- Notes (research, insight, failure, pattern, procedure): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
 - Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
 - Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-launch-recap.md`
 - Entities: the Unicode canonical name is stored in `title:` and the H1; an

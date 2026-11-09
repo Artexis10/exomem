@@ -318,18 +318,28 @@ def decide_scopes(root: Path, who: RequestPrincipal, scope_ids, *, compiled: pol
         scope_ids = frozenset(scope_ids)
         current = snapshot(root, compiled)
         denied = current.denied_scopes(who) if current is not None else frozenset()
-        if mutation:
-            # Canonical SQL subjects need the same write ceiling without relying on a projected file's existence.
-            ceiling = write_ceiling(root, who)
-            if ceiling is not None and not _writable(ceiling, scope_ids):
-                return Decision(policy.DISCLOSURE_MIN)
-        if mutation and capture is not None and scope_ids != capture:
+        if mutation and (ceiling_refuses(root, who, scope_ids) or capture_refuses(scope_ids, capture)):
             return Decision(policy.DISCLOSURE_MIN)
         return Decision(policy.DISCLOSURE_MIN if denied.intersection(scope_ids) else policy.DISCLOSURE_MAX)
     except UNDECIDED:
         if strict:
             raise
         return Decision(policy.DISCLOSURE_MIN)
+
+
+def ceiling_refuses(root: Path, who: RequestPrincipal, scope_ids) -> bool:
+    """Whether the write ceiling refuses ``who`` a write to a subject in ``scope_ids``. Raises one of ``UNDECIDED``."""
+    # Canonical SQL subjects need the same write ceiling without relying on a projected file's existence.
+    ceiling = write_ceiling(root, who)
+    return ceiling is not None and not _writable(ceiling, frozenset(scope_ids))
+
+
+def capture_refuses(scope_ids, capture: frozenset[str] | None) -> bool:
+    """Whether a capture folder refuses a write to a subject in ``scope_ids``; ``capture`` is its ``capture_membership``.
+
+    A capture page keeps exactly the membership its path gives, whoever writes it.
+    """
+    return capture is not None and frozenset(scope_ids) != capture
 
 
 def capture_membership(root: Path, path: str, compiled: policy.Policy) -> frozenset[str] | None:

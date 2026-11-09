@@ -24,7 +24,13 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, semantic_blocks, semantic_units, workflow_skills
+from exomem import (
+    commands,
+    semantic_blocks,
+    semantic_language_registry,
+    semantic_units,
+    workflow_skills,
+)
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
 pytestmark = pytest.mark.reads_repository_docs
@@ -206,7 +212,7 @@ def test_compact_operating_instructions_and_simple_actions_precede_large_catalog
     for doctrine in ("simple_actions", "workflow", "vocabulary_workflow", "epistemic_contract"):
         for catalog in ("front_door_actions", "product_commands"):
             assert keys.index(doctrine) < keys.index(catalog)
-    assert any("vocabulary_sync" in step and "recovery" in step for step in payload["workflow"]["loop"])
+    assert any("user_summary" in step and "notice" in step for step in payload["workflow"]["loop"])
 
 
 @pytest.mark.parametrize(
@@ -260,8 +266,30 @@ def test_vocabulary_bootstrap_marks_each_operation_available_or_limited(
 
 def test_taught_outcomes_are_the_runtime_outcomes(vault: Path) -> None:
     vocabulary = _contract(vault)["vocabulary"]
+    runtime = semantic_language_registry.core_registry()
 
-    assert tuple(vocabulary["outcomes"]) == semantic_units.EPISTEMIC_OUTCOMES
+    assert sorted(vocabulary["outcomes"]) == list(runtime.verdict_keys())
+    assert all(runtime.resolve_verdict(outcome) == outcome for outcome in vocabulary["outcomes"])
+
+
+def test_a_vault_added_verdict_is_discoverable_but_not_taught(vault: Path) -> None:
+    registry = vault / "Knowledge Base/_Schema/semantic-language-registry.yaml"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        "schema_version: 1\ncategories: {}\nkinds: {}\n"
+        "verdicts:\n  retracted:\n    description: The authors withdrew the claim\n",
+        encoding="utf-8",
+    )
+
+    contract = _contract(vault)
+
+    assert "retracted" not in json.dumps(contract)
+    named = contract["vocabulary"]["vault_verdicts"]
+    for part in ("schema_memory", "categories", "infer", "verdicts"):
+        assert part in named
+    # Run the read the contract names: its verdict list is where the vault's own verdict shows.
+    read = commands.op_schema_memory(vault, subject="categories", operation="infer")
+    assert "retracted" in [item["key"] for item in read["verdicts"]]
 
 
 def test_taught_metadata_keys_are_the_runtime_keys(vault: Path) -> None:
@@ -429,8 +457,8 @@ def _assert_doctrine_intact(descriptor: ActiveSurfaceDescriptor, vault: Path) ->
 
     contract = payload["epistemic_contract"]
     assert tuple(contract["commitments"]) == _COMMITMENTS, descriptor.profile
-    assert tuple(contract["vocabulary"]["outcomes"]) == (
-        semantic_units.EPISTEMIC_OUTCOMES
+    assert sorted(contract["vocabulary"]["outcomes"]) == list(
+        semantic_language_registry.core_registry().verdict_keys()
     ), descriptor.profile
 
     serialized = json.dumps(contract)
@@ -508,7 +536,7 @@ def test_payload_no_longer_omits_the_doctrine(vault: Path) -> None:
         )
 
     # None of the five appeared in the pre-change payload at all.
-    for outcome in semantic_units.EPISTEMIC_OUTCOMES:
+    for outcome in semantic_language_registry.core_registry().verdict_keys():
         assert outcome in serialized, outcome
 
 

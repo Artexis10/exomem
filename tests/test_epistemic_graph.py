@@ -445,16 +445,19 @@ def test_similarity_suggestions_are_neutral_evidenced_and_read_only(
         candidate for candidate in candidates if candidate["method"] == "frontmatter_sources"
     )
 
-    assert shared["relation_type"] == "relates_to"
+    # A candidate that observes only similarity names no relation; it offers a choice instead.
+    assert shared["relation_type"] is None
     assert shared["evidence"]["shared_source"].endswith("2026-07-08-source.md")
-    assert proximity == {
-        "from": CURRENT,
-        "to": RELATED,
-        "relation_type": "relates_to",
-        "relation_label": "relates_to",
-        "method": "embedding_proximity",
-        "evidence": {"cosine": 0.9123},
-    }
+    assert proximity["relation_type"] is None
+    assert proximity["relation_label"] is None
+    assert proximity["plain_link"] == "links_to"
+    assert proximity["options"]
+    assert (proximity["from"], proximity["to"], proximity["method"], proximity["evidence"]) == (
+        CURRENT,
+        RELATED,
+        "embedding_proximity",
+        {"cosine": 0.9123},
+    )
     assert wikilink["relation_type"] == "links_to"
     assert frontmatter["relation_type"] == "derived_from"
     assert suggestions["mutated"] is False

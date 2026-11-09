@@ -159,10 +159,11 @@ or state change, a stable preference, a method or parameter, an entity facet, an
 operational or vendor quirk, evidence worth preserving, a relation, a planning
 implication, a record implication. That list is examples rather than a boundary.
 Do not repeat a completed review after every destination write. Never re-write
-what a write response lists as written recently, and stay silent when nothing
-qualifies. A write response may carry a
-`capture_sweep` block saying this is the first write after a quiet interval; it
-prompts a pass if one has not already been completed for that episode, never a
+what you already wrote in this episode, and stay silent when nothing
+qualifies. A write reply may carry a `next_action` sentence that asks for one pass over
+the conversation, with `unpaged_mentions` naming references that have no page. It
+means this is the first write after a quiet interval and arrives once per episode;
+it prompts a pass if one has not already been completed for that episode, never a
 demand that something be written.
 
 **Close the session: record the conversation, then cite it.** At a decision or
@@ -238,7 +239,7 @@ Use one applicable authored writer to record a verdict or resolving relation und
 For example, `change_observations(operation={'kind': 'update'})` uses the real unit fingerprint and current parent hash.
 The due fingerprint binds a review finding and is not the unit fingerprint.
 The existing projection update clears a resolved finding; do not add a second dismissal.
-If presentation dismissal is the decision, use one `triage_memory(ref, action="dismiss", expected_fingerprint, why)` mutation.
+If presentation dismissal is the decision, use one `triage_memory(operation={'kind': 'decision', 'ref': ..., 'action': 'dismiss', 'expected_fingerprint': ..., 'why': ...})` mutation.
 That disposition does not claim an authored resolution, and no operation universally combines repair with dismissal.
 
 ## Passing the conversation to activation
@@ -336,8 +337,9 @@ own workspace or repository; those already persist there.
 
 Give each hand-over its own `adoption.key`, such as the file name plus a version.
 A revision you hand over later takes a new key and is kept beside the first under
-the next free name. The same bytes again, under any key or name, return
-`already_stored` and write nothing. The same key with other bytes is refused as
+the next free name. The same bytes again under a new key or name return
+`already_stored`, name the earlier copy and write nothing; a retry with the same
+key replays the first answer. The same key with other bytes is refused as
 `ADOPTION_KEY_REUSED`.
 
 Choose the semantic lane before transport: reasoning material is a Source;

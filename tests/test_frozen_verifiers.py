@@ -776,7 +776,7 @@ def _contradiction_fixture() -> claims.FixturePair:
 
 
 def _wire_claim_texts(monkeypatch, texts: dict[str, str]) -> None:
-    monkeypatch.setattr(claims,"extract_claim_for_page",lambda page:texts.get(page.rel_path))
+    monkeypatch.setattr(claims,"extract_claim_for_page",lambda page, vault_root: texts.get(page.rel_path))
 
 
 def _proximity_finding(

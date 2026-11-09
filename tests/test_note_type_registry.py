@@ -230,13 +230,28 @@ def test_a_registered_folder_routes_like_a_shipped_one(vault: Path) -> None:
 def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
     from exomem import note_types
 
-    compiled = {"research-note", "insight", "failure", "pattern", "experiment", "production-log"}
+    compiled = {
+        "research-note",
+        "insight",
+        "failure",
+        "pattern",
+        "experiment",
+        "production-log",
+        "procedure",
+    }
     former_sets = {
         note_types.ranks_as_compiled: compiled | {"entity"},
         note_types.compiled: compiled,
         note_types.governed_endpoint: compiled | {"entity"},
         note_types.connectable: compiled | {"entity", "source"},
-        note_types.stale_reviewed: {"research-note", "insight", "failure", "pattern", "entity"},
+        note_types.stale_reviewed: {
+            "research-note",
+            "insight",
+            "failure",
+            "pattern",
+            "procedure",
+            "entity",
+        },
         note_types.sources_required: {"research-note", "insight", "failure", "pattern"},
         note_types.ranks_as_source: {"source"},
         note_types.raw: {"source", "evidence"},
@@ -252,6 +267,7 @@ def test_the_shipped_pack_reproduces_each_former_type_set() -> None:
         "pattern": "Notes/Patterns",
         "experiment": "Notes/Experiments",
         "production-log": "Notes/Productions",
+        "procedure": "Notes/Procedures",
     }
 
 
@@ -419,6 +435,7 @@ def test_product_page_types_are_never_note_type_debt(vault: Path) -> None:
         "pattern",
         "experiment",
         "production-log",
+        "procedure",
         "entity",
         "source",
         "evidence",

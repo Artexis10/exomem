@@ -201,10 +201,15 @@ cellctl:
   # cell, longer on a larger vault. A broken image keeps the canary cell down for the
   # whole deadline. The schema allows 5 to 120.
   upgradeReadyDeadlineMinutes: 30
-  # C6 owner exports: an export hold not finished in this many minutes per
-  # started 10 GiB of the cell's size fails and the cell starts again, and a
-  # ready export is deleted this many hours after it is ready.
+  # C6 owner exports: the pause copies the cell's used bytes under the export
+  # hold at no less than exportPauseCopyFloorMiB per second, or the export fails
+  # and the cell starts again. The pack, upload and verify that follow, beside
+  # the serving cell, end within exportDeadlineMinutes per started 10 GiB of the
+  # archive. Each node runs at most exportConcurrencyPerNode exports at once, and
+  # a ready export is deleted this many hours after it is ready.
   exportDeadlineMinutes: 30
+  exportPauseCopyFloorMiB: 25
+  exportConcurrencyPerNode: 1
   exportTtlHours: 24
   databaseDsnSecretName: exomem-cellctl-database-dsn
   databaseDsnSecretKey: dsn

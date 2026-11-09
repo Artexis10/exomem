@@ -241,7 +241,7 @@ def test_a_rendered_write_crosses_every_seam_as_the_grouped_call_does(build, sea
     rendered, direct = _session(build(), scenario)
 
     assert _envelope(rendered) == _envelope(direct)
-    assert rendered["success"] is False
+    assert "error" in rendered
     first, second = seams.dispatched
     assert first == second and first["command"] == "record_memory"
     assert seams.egress[: len(seams.egress) // 2] == seams.egress[len(seams.egress) // 2 :]
@@ -288,8 +288,7 @@ def test_a_retry_across_spellings_with_one_key_replays_one_write(build, vault) -
 
     first, retry, changed = _session(build(), scenario)
 
-    assert first["ok"] is True and retry == first
-    assert retry["idempotency_key"] == first["idempotency_key"] == "k-1"
+    assert "error" not in first and retry == {**first, "replayed": True}
     assert "IDEMPOTENCY_KEY_REUSED" in json.dumps(changed)
 
 
@@ -378,7 +377,7 @@ def test_an_operation_the_tool_does_not_carry_is_refused_before_the_writer_is_co
     refusal = _session(mcp, scenario)
 
     code = "INVALID_PLAN_ARGUMENTS" if tool.endswith("plans") else "INVALID_RECORD_ARGUMENTS"
-    assert refusal["success"] is False
+    assert set(refusal) == {"error"}
     assert refusal["error"]["code"] == code
     assert names in refusal["error"]["message"]
     assert seams.dispatched == []
@@ -414,7 +413,7 @@ def test_a_wrong_type_in_a_rendered_call_is_refused_without_naming_a_hidden_tool
     refusal = _session(build(), scenario)
 
     code = "INVALID_PLAN_ARGUMENTS" if tool.endswith("plans") else "INVALID_RECORD_ARGUMENTS"
-    assert refusal.get("success") is False, refusal
+    assert set(refusal) == {"error"}, refusal
     assert refusal["error"]["code"] == code
     assert field in refusal["error"]["message"] and tool in refusal["error"]["message"]
     assert not {name for name in GROUPED if name in json.dumps(refusal)}
@@ -422,7 +421,7 @@ def test_a_wrong_type_in_a_rendered_call_is_refused_without_naming_a_hidden_tool
 
 
 def test_a_write_refused_before_the_lease_carries_the_grouped_write_refusal_keys(build) -> None:
-    """A client branches on `ok`, `error_code` and `request_id` whichever spelling it called."""
+    """A client branches on `error.code` whichever spelling it called."""
     stray = {**_APPEND, "manifest_text": "not an append field"}
 
     async def scenario(client):
@@ -432,10 +431,10 @@ def test_a_write_refused_before_the_lease_carries_the_grouped_write_refusal_keys
 
     rendered, direct = _session(build(), scenario)
 
-    assert _envelope(rendered) == _envelope(direct)
-    assert set(rendered["error"]) == set(direct["error"])
-    (row,) = [row for row in _ledger_rows() if row.get("rendering") == "change_records"]
-    assert rendered["error"]["request_id"] == row["request_id"]
+    assert rendered == direct
+    assert set(rendered) == {"error"}
+    assert rendered["error"]["code"] == "INVALID_RECORD_ARGUMENTS"
+    assert rendered["error"]["message"].endswith("Nothing was saved.")
 
 
 def test_the_contact_spy_sees_a_write_that_is_allowed(build, seams) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -968,6 +969,281 @@ def test_a_same_schema_stale_catalogue_prepares_without_admitting_retrieval(
     )
     assert len(list(live.parent.glob(f"{live.name}.rebuild-*.tmp"))) == 1
     service_standby.discard()
+
+
+def _method_unit_vault(tmp_path: Path, monkeypatch) -> tuple[Path, set[str]]:
+    """A vault whose serving worker published a catalogue over pages that carry method units."""
+    from exomem import freshness, lexstore
+
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    pages = set()
+    for index, line in enumerate((
+        "- [procedure] rotate the harbor keys each quarter ^rotate",
+        "- [technique] read depth from the harbor gauges ^gauges",
+        "- [design] moorings share one chain length ^chains",
+    )):
+        (notes / f"unit-{index}.md").write_text(
+            f"---\ntype: insight\nexomem_id: {index}1111111-1111-4111-8111-111111111111\n---\n"
+            f"# Unit {index}\n\n{line}\n",
+            encoding="utf-8",
+        )
+        pages.add(f"Knowledge Base/Notes/unit-{index}.md")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    freshness.clear()
+    lexstore.clear_stores()
+    lexstore.ensure_fresh(vault)
+    # A new process: this one holds no unit base, as a standby that has built none.
+    lexstore.clear_stores()
+    freshness.clear()
+    return vault, pages
+
+
+def _method_search_result(vault: Path, allowed: set[str]) -> tuple[Any, Any]:
+    """The owner's task context's method query: its catalogue result, and what the query measured."""
+    from exomem import bm25, call_spans, lexstore, working_set
+    from exomem.governance import principal
+
+    store = lexstore.get_store(vault)
+    published = store.published_recall_checkpoint("kb")
+    with principal.library_scope(), call_spans.meter(
+        call_spans.STATS_REBUILT, call_spans.UNIT_PARENTS_INTERPRETED
+    ) as measured:
+        result = working_set.search_method_units(
+            vault, bm25.token_units("harbor depth", query=True), 6,
+            categories=working_set.method_unit_categories(vault), allowed=allowed,
+            fresh=published.triple, checkpoint=published,
+        )
+    return result, measured
+
+
+def _method_search(vault: Path, allowed: set[str]) -> tuple[int, int]:
+    """What the owner's task context measures for one method query: (statistics rebuilt, parents interpreted)."""
+    from exomem import call_spans
+
+    result, measured = _method_search_result(vault, allowed)
+    assert result.readiness.complete
+    return int(measured[call_spans.STATS_REBUILT]), int(measured[call_spans.UNIT_PARENTS_INTERPRETED])
+
+
+def test_a_standby_warm_builds_the_method_unit_statistics_the_first_request_would_pay_for(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """After a handoff the first task context must not interpret every page's units itself.
+
+    On a vault of several thousand pages that build took 41 s of the first request. The standby becomes
+    the serving process, so statistics it built in memory are the ones that request reuses.
+    """
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+
+    assert _method_search(vault, pages) == (1, 3), "without the warm the request builds everything"
+
+    from exomem import freshness, lexstore
+
+    lexstore.clear_stores()
+    freshness.clear()
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert _method_search(vault, pages) == (0, 0)
+    # The owner's catalogue admits fewer pages than the lexical catalogue holds, as when some are
+    # navigation pages. Its statistics are merged again, but no page is interpreted a second time.
+    assert _method_search(vault, pages - {"Knowledge Base/Notes/unit-2.md"}) == (1, 0)
+
+
+@pytest.mark.parametrize("limit", ["warm-up disabled", "warm budget spent"])
+def test_the_method_unit_statistics_warm_yields_to_the_disable_switch_and_the_warm_budget(
+    tmp_path: Path, monkeypatch, limit: str
+) -> None:
+    """An operator who disables warm-up, or a standby past its budget, must not get the optional build."""
+    from exomem.service_manager import STANDBY_WARM_ENV
+
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    if limit == "warm-up disabled":
+        monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
+    else:
+        monkeypatch.setenv(STANDBY_WARM_ENV, "0.001")
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert _method_search(vault, pages) == (1, 3)
+
+
+def test_the_method_unit_statistics_warm_runs_while_the_old_worker_still_serves(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Past `finish_warm` the supervisor promotes, and a long build would then run against the new worker."""
+    from exomem import working_set
+
+    vault, _pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    seen: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(
+        working_set, "warm_owner_method_units",
+        lambda root: seen.append((readiness.is_warming(), service_standby.cutover_ready())) or "recorded",
+    )
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert seen == [(True, False)], "the build ran after the warm finished or the standby was cutover-ready"
+
+
+def test_a_standby_whose_graph_proof_declined_skips_the_method_unit_statistics_warm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A declined proof is re-proved after the warm; the build must not delay that re-proof."""
+    from exomem import working_set
+
+    vault, _pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch, adopted=False, reason="declined")
+    seen: list[str] = []
+    monkeypatch.setattr(working_set, "warm_owner_method_units", lambda root: seen.append("built") or "recorded")
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert service_standby.cutover_components()["graph_snapshot"] != "ready"
+    assert seen == []
+
+
+def test_a_method_unit_statistics_build_the_warm_budget_ends_leaves_no_statistics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A build that outlives its budget stops at the catalogue query, without raising, and leaves nothing."""
+    import time
+
+    from exomem import lexstore
+
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    # SQLite checks the budget every 1000 instructions, more than this three-page build runs.
+    monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
+    build = lexstore.LexicalStore._admitted_unit_statistics
+    delays = [0.3]
+
+    def slow_start(self, *args, **kwargs):
+        # The budget runs out before the build reads its first row.
+        if delays:
+            time.sleep(delays.pop())
+        return build(self, *args, **kwargs)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_admitted_unit_statistics", slow_start)
+
+    service_standby.enter_standby()
+    service_standby._warm_method_unit_statistics(vault, deadline=time.monotonic() + 0.2)
+
+    assert not delays, "the build never started, so this proved nothing about stopping it"
+    assert _method_search(vault, pages) == (1, 3), "an interrupted build must leave no statistics behind"
+
+
+def test_a_method_unit_build_the_request_budget_stops_keeps_the_parents_it_interpreted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stopped build keeps no statistics but spares the next build the parents it finished.
+
+    Under sustained load each cold request ran to its deadline and served no methods, and the next
+    one began from nothing: the build took 41 s on a vault of several thousand pages.
+    """
+    import time
+
+    from exomem import call_spans, lexstore, request_budget
+
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch)
+    # SQLite checks the budget every 1000 instructions, more than this three-page build runs. One row per
+    # batch lets the read finish a parent before it starts the next.
+    monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
+    monkeypatch.setattr(lexstore, "_OCCURRENCE_TRANSPORT_BATCH", 1)
+    budget = request_budget.RequestBudget(seconds=60)
+    interpreted_paths: list[str] = []
+    unit = lexstore._SelectedUnits.unit
+
+    def unit_then_spend_the_budget(self, path, key):
+        found = unit(self, path, key)
+        if path not in interpreted_paths:
+            interpreted_paths.append(path)
+        if len(interpreted_paths) == 2:
+            budget.deadline = time.monotonic() - 1
+        return found
+
+    with monkeypatch.context() as patched:
+        patched.setattr(lexstore._SelectedUnits, "unit", unit_then_spend_the_budget)
+        token = request_budget.set_current(budget)
+        try:
+            with lexstore.stopping_at_budget():
+                stopped, _measured = _method_search_result(vault, pages)
+        finally:
+            request_budget.reset_current(token)
+
+    assert stopped.readiness.status == lexstore.DEADLINE_STATUS
+    assert len(interpreted_paths) == 2, "the budget never ran out inside the build, so this proved nothing"
+    resumed, measured = _method_search_result(vault, pages)
+    # The first parent was finished, and the second was being read; the third was never reached.
+    assert resumed.readiness.complete
+    assert (int(measured[call_spans.STATS_REBUILT]), int(measured[call_spans.UNIT_PARENTS_INTERPRETED])) == (1, 2)
+
+    lexstore.clear_stores()
+    cold, measured = _method_search_result(vault, pages)
+    assert int(measured[call_spans.UNIT_PARENTS_INTERPRETED]) == 3
+    ranking = [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in cold.value]
+    assert ranking and [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in resumed.value] == ranking
+
+
+def test_a_standby_warm_of_the_method_unit_statistics_writes_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The step reads the live catalogue beside the worker that still owns it, so it may change no byte."""
+    from exomem import lexstore, state_paths
+
+    vault, _pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch)
+    state = state_paths.vault_state_dir(vault)
+    before_vault, before_state = _bytes_census(vault), _bytes_census(state)
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert service_standby.cutover_ready() is True
+    # The exact SHM path belongs to SQLite's reader coordination, never catalogue content.
+    coordination_path = f"{lexstore.lexical_path(vault).relative_to(state).as_posix()}-shm"
+    after_state = _bytes_census(state)
+    assert _bytes_census(vault) == before_vault
+    assert all(
+        after_state.get(name) == digest for name, digest in before_state.items()
+        if name != coordination_path
+    )
+    assert set(after_state) - set(before_state) <= {coordination_path}
+
+
+def test_a_standby_never_schedules_a_catalogue_repair(tmp_path: Path, monkeypatch) -> None:
+    """A read that finds the catalogue ahead of the standby's registry must not start a rebuild.
+
+    The serving worker publishes while the standby warms, so any read here can land on that
+    disagreement; a repair is a publication, and the serving worker is the one repair owner.
+    """
+    from exomem import lexstore
+
+    vault, _pages = _method_unit_vault(tmp_path, monkeypatch)
+    service_standby.enter_standby()
+
+    lexstore.request_repair(vault)
+
+    assert lexstore.repair_progress(vault) is None
 
 
 def _promotion_vault(tmp_path: Path, monkeypatch) -> Path:

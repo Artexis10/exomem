@@ -563,7 +563,12 @@ class Arm:
         """One unmeasured call through this arm's own tools; a refusal stops the run."""
         result = await self.client.call_tool(name, arguments, raise_on_error=False, timeout=120)
         data = result.structured_content
-        if result.is_error or not isinstance(data, dict) or data.get("success") is False:
+        if (
+            result.is_error
+            or not isinstance(data, dict)
+            or data.get("success") is False
+            or isinstance(data.get("error"), dict)
+        ):
             # The product's error code goes to the log only; the summary keeps the runner's closed code.
             error = data.get("error", {}) if isinstance(data, dict) else {}
             print(f"{self.name} arm: {name} {arguments['operation']['kind']} failed with "

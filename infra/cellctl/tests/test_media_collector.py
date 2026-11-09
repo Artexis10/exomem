@@ -11,6 +11,8 @@ import jwt
 import pytest
 
 from cellctl import backup_source, db, manifests, media_edge
+from cellctl.capacity import GIB
+from cellctl.exports import PACK, PAUSE, UPLOAD, ExportRow, export_size
 from cellctl.manifests import MEDIA_COLLECTOR_CREDENTIAL_KEY, MEDIA_CREDENTIAL_KEY, namespace_name
 from cellctl.state import MediaCollection
 
@@ -138,6 +140,48 @@ def test_each_edge_credential_reaches_only_its_own_workload(store: str) -> None:
     assert manifests.MEDIA_COLLECTOR_CREDENTIAL_ENV in backup_env
 
 
+def _selects(selector: dict, labels: dict) -> bool:
+    """A NetworkPolicy podSelector, for matchLabels and the expression operators the cell's policies use."""
+    if any(labels.get(key) != value for key, value in selector.get("matchLabels", {}).items()):
+        return False
+    for expression in selector.get("matchExpressions", []):
+        value = labels.get(expression["key"])
+        assert expression["operator"] in ("Exists", "NotIn"), "a selector operator this check does not read"
+        if value is None if expression["operator"] == "Exists" else value in expression["values"]:
+            return False
+    return True
+
+
+def test_the_media_identity_never_shares_a_pod_with_public_egress() -> None:
+    """Defect: the key that decrypts every stored original sits in a pod that can reach the internet, so one
+    compromised step sends the store out; the pause beside the live vault gets public egress; or the pack
+    loses the key and cannot read evicted originals."""
+    spec = _spec(**COLLECTING, hold_kind="export", hold_started_at=NOW.isoformat())
+    policies = manifests.render_network_policies(spec)
+    item = ExportRow("00000000-0000-4000-8000-000000000001", spec.cell_id, "requested", NOW)
+    templates = {
+        "runtime": manifests.render_statefulset(spec)["spec"]["template"],
+        "backup": manifests.render_backup_job(spec, bucket_name="b", endpoint="https://s3.example")["spec"]["template"],
+        **{step: manifests.render_export_job(spec, item, step, deadline_seconds=60, size=export_size(GIB),
+                                             part_urls=["https://storage.example/part"])["spec"]["template"]
+           for step in (PAUSE, PACK, UPLOAD)},
+    }
+
+    def public_peers(name: str) -> list[dict]:
+        # A rule without `to`, or with an IP block, reaches beyond the cluster's own pods.
+        labels = templates[name]["metadata"]["labels"]
+        return [peer for policy in policies if "Egress" in policy["spec"]["policyTypes"]
+                and _selects(policy["spec"]["podSelector"], labels)
+                for rule in policy["spec"].get("egress", []) for peer in rule.get("to", [{}])
+                if not peer or "ipBlock" in peer]
+
+    holders = {name for name, template in templates.items()
+               if _secret_keys(template["spec"]) & {manifests.MEDIA_IDENTITY_KEY, "the whole Secret"}}
+    assert holders == {"runtime", PACK}
+    assert [name for name in templates if public_peers(name)] == ["backup", UPLOAD]
+    assert manifests.MEDIA_NAME_KEY_KEY not in _secret_keys(templates[PACK]["spec"])  # the pack names no new object
+
+
 COLLECTING = dict(media_collector_url=URL, media_collector_credential="collector")
 PRUNING = ["--keep-daily", "7"]
 
@@ -195,6 +239,19 @@ def test_a_failed_manifest_or_collection_leaves_the_backup_successful(tmp_path, 
     assert time.monotonic() - started < 30
     # A collector that wrote no result still leaves a line, with every count unknown.
     assert observed.backup_job_media_collection == MediaCollection("stopped", "no-result", None, None, None)
+
+
+def test_a_collection_line_that_does_not_parse_is_logged_as_a_warning(tmp_path, caplog) -> None:
+    """A cell image that writes the result in another format would otherwise drop the collection without a trace, and
+    the operator would read every later hold as one that ran no collection."""
+    with caplog.at_level(logging.WARNING, logger="cellctl"):
+        observed, _data = _run_backup_job(tmp_path, _exomem(tmp_path, manifest="echo manifest",
+                                                            collect="echo 'done: hid two names'"),
+                                          retention=PRUNING, **COLLECTING)
+
+    assert observed.backup_job_media_collection is None
+    assert any(record.levelno == logging.WARNING for record in caplog.records)
+    assert "hid two names" not in caplog.text
 
 
 async def test_the_collectors_result_reaches_cellctls_log_when_the_hold_ends(cell_db, caplog) -> None:

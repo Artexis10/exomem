@@ -23,6 +23,7 @@ from typing import Any
 
 from . import activation as activation_module
 from . import (
+    agent_refusal,
     context_refs,
     note_types,
     recall_policy,
@@ -92,6 +93,27 @@ def candidate_identity(candidate: dict[str, Any]) -> str:
         for key in ("from", "to", "relation_type", "method")
     )
     return review_state_module.item_id(f"relation:{payload}")
+
+
+def generic_choice(
+    registry: relation_registry.RelationRegistry,
+    candidate: dict[str, Any],
+    options: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The fields a generated candidate shows in place of the generic relation; None for any other.
+
+    Such a candidate names no relation and no bullet: it shows the ranked specific options and
+    the plain link, and accepting it takes one of them. The generic relation stays on the
+    internal candidate so its review id does not move.
+    """
+    if not registry.is_generic(str(candidate.get("relation_type") or "")):
+        return None
+    return {
+        "relation_type": None,
+        "bullet": None,
+        "options": options,
+        "plain_link": registry.link_key,
+    }
 
 
 def _bullet(candidate: dict[str, Any]) -> str:
@@ -171,10 +193,10 @@ class RelationFit:
     """The specific relations that fit a generated candidate's two pages.
 
     A generator proposes the generic relation when its evidence shows two pages are related
-    and nothing more (shared sources, a shared question). When the registry names a specific
-    relation that joins those pages, the candidate carries it as an option and the agent
-    chooses; `relation_options.fitting_options` is the one producer. Page lookups are held for
-    one read, so a page that many candidates name is read once. The same holds for a page's
+    and nothing more (shared sources, a shared question). The candidate then names no relation
+    to write: it carries the ranked specific relations that join those pages, and the agent
+    chooses one (`relation_options.ranked_options` is the one producer). Page lookups are held
+    for one read, so a page that many candidates name is read once. The same holds for a page's
     registry and parsed relation bullets, which a run of candidates from one page asks for each.
     """
 
@@ -233,7 +255,7 @@ class RelationFit:
         source_page: Any | None = None,
         relation: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Up to four fitting relations when the relation is the generic one, else none.
+        """The ranked specific relations when the relation is the generic one, else none.
 
         `relation` is the one under judgement: the candidate's own, unless an agent asked for another.
         """
@@ -250,24 +272,19 @@ class RelationFit:
         target = self._page(str(candidate.get("to") or ""))
         if page is None or target is None:
             return []
-        subject = self._kind(page)
-        other = self._kind(target)
-        if subject is None or other is None:
-            return []
-        return relation_options.fitting_options(
+        return relation_options.ranked_options(
             registry,
-            subject,
-            other,
+            self._kind(page),
+            self._kind(target),
             self._types(),
             accepts=lambda key: _usable_relation(registry, key, page, target) is not None,
         )
 
 
-#: What the agent does when the queue will not write the generic relation for a pair that a
-#: specific relation fits.
+#: What the agent does when the queue will not write the generic relation for a pair.
 RELATION_CHOICE_REMEDIATION = (
-    "Accept again with requested_relation set to one of the offered relations, "
-    "or dismiss the candidate. A generic edge with a reason can be authored on the page."
+    "Accept again with requested_relation set to one of the offered relations. When none "
+    "fits, set it to the plain link relation, the last candidate, or dismiss the candidate."
 )
 
 #: What the agent does when a candidate offers no relation to choose and one is requested anyway.
@@ -283,8 +300,7 @@ RELATION_NONE_OFFERED_REMEDIATION = (
 RELATION_NOT_OFFERED_REMEDIATION = (
     "Choose one of the offered relations. To use another, ask a vocabulary question for this "
     "candidate, record a reuse decision that names the relation, then accept the candidate "
-    "with requested_relation, vocabulary_ref and vocabulary_fingerprint. Or dismiss the candidate. "
-    "A generic edge with a reason can be authored on the page."
+    "with requested_relation, vocabulary_ref and vocabulary_fingerprint. Or dismiss the candidate."
 )
 
 
@@ -296,7 +312,7 @@ def require_relation_choice(
     page: Any | None = None,
     fit: RelationFit | None = None,
 ) -> None:
-    """Refuse to accept the generic relation where a specific one fits; the agent chooses.
+    """Refuse to accept the generic relation: the agent names a specific relation or the plain link.
 
     Naming no relation takes the candidate's own, so a generic candidate is refused. Naming
     the generic relation is refused too. Any other registered relation passes.
@@ -306,17 +322,22 @@ def require_relation_choice(
         return
     registry = relation_registry.load_for_page(vault_root, page.rel_path, page.frontmatter)
     fit = fit or RelationFit(vault_root)
-    relation = None
+    relation = str(candidate.get("relation_type") or "")
     if requested_relation is not None:
         chosen = selected_relation(vault_root, candidate, requested_relation, source_page=page)
         relation = str(chosen.get("relation_type") or "")
-    options = fit.options(candidate, registry=registry, source_page=page, relation=relation)
-    if options:
+    if registry.is_generic(relation):
+        options = fit.options(candidate, registry=registry, source_page=page)
         raise OpError(
             "RELATION_CHOICE_REQUIRED",
-            "a specific relation fits these two pages, so the generic relation is not chosen for you",
+            "the generic relation is not written; name a specific relation or the plain link",
             RELATION_CHOICE_REMEDIATION,
-            details={"options": options, "mutated": False},
+            details={
+                "options": options,
+                "plain_link": registry.link_key,
+                "candidates": agent_refusal.ranked_with_link(options, registry.link_key),
+                "mutated": False,
+            },
         )
 
 
@@ -658,7 +679,7 @@ def _body_wikilink_candidates(
             {
                 "from": page.rel_path,
                 "to": str(observation["target_path"]),
-                "relation_type": "links_to",
+                "relation_type": relation_registry.link_relation_key(),
                 "method": "wikilink",
                 "evidence": evidence,
             }
@@ -679,22 +700,34 @@ def _shared_source_candidates(
     if connection is None:
         return []
     try:
+        # Debt (drifted shared-source copy): reads only the frontmatter field's stored edges, while the
+        # graph's copy also reads page-level extensions; folding the two changes suggestions and needs
+        # its own evidence. The field and relation come from the binding, not from literals.
+        field, relation = epistemic_graph_module.declared_sources_binding()
         rows = connection.execute(
             "SELECT e2.source_path, e1.dst_key "
             "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
             "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
             "WHERE e1.source_path = ? "
-            "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
-            "AND e1.relation_type = 'derived_from' "
-            "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
-            "AND e2.relation_type = 'derived_from' "
+            "AND e1.origin = 'frontmatter' AND e1.source_anchor = ? "
+            "AND e1.relation_type = ? "
+            "AND e2.origin = 'frontmatter' AND e2.source_anchor = ? "
+            "AND e2.relation_type = ? "
             "AND e2.source_path <> e1.source_path "
             "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
             "WHERE p.src_key = ('file:' || e1.source_path) "
             "AND p.dst_page_key = ('file:' || e2.source_path) "
             "AND p.relation_type = ?) "
             "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
-            (rel_path, relation_registry.generic_relation_key(), max(0, int(limit))),
+            (
+                rel_path,
+                field,
+                relation,
+                field,
+                relation,
+                relation_registry.generic_relation_key(),
+                max(0, int(limit)),
+            ),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -869,8 +902,7 @@ def _enrich(
         to_ref=to_ref,
         signal_version=_evidence_signal_version(page, candidate),
     )
-    # Where a specific relation fits, the item offers it and no bullet: the agent picks the relation.
-    options = (fit or RelationFit(vault_root)).options(candidate, source_page=page)
+    fit = fit or RelationFit(vault_root)
     item = {
         "review_id": review_id,
         "ref": relation_review_ref(review_id),
@@ -880,12 +912,12 @@ def _enrich(
         "relation_type": candidate.get("relation_type"),
         "method": candidate.get("method"),
         "evidence": candidate.get("evidence") or {},
-        "bullet": None if options else _bullet(candidate),
         "target_ref": from_ref,
         "state": "open",
     }
-    if options:
-        item["options"] = options
+    # A candidate the generator could only call generic names no relation and no bullet.
+    generic = generic_choice(fit.registry(page), candidate, fit.options(candidate, source_page=page))
+    item.update(generic if generic is not None else {"bullet": _bullet(candidate)})
     return item
 
 
@@ -1168,6 +1200,10 @@ def resolve_candidate(
             for item in group.get("items") or []:
                 if str(item.get("review_id") or "") != wanted:
                     continue
+                if item.get("plain_link"):
+                    # A generic candidate shows no relation, so its own candidate is generated again
+                    # from its page; the queue item cannot rebuild the generic relation it hides.
+                    return resolve_candidate(vault_root, ref, source_path=str(item.get("from") or ""))
                 candidate = {
                     key: item.get(key)
                     for key in (
@@ -1267,13 +1303,19 @@ def _require_offered(
     offers none takes no requested relation: it writes its own.
     """
     offered = fit.options(candidate, source_page=page)
-    if str(selected.get("relation_type") or "") in {option["key"] for option in offered}:
+    chosen = str(selected.get("relation_type") or "")
+    # The plain link is the last resort the candidate always allows.
+    if chosen == fit.registry(page).link_key or chosen in {option["key"] for option in offered}:
         return
     raise OpError(
         "VOCABULARY_APPLICATION_INVALID",
         "a relation the candidate does not offer needs a recorded vocabulary choice",
         RELATION_NOT_OFFERED_REMEDIATION if offered else RELATION_NONE_OFFERED_REMEDIATION,
-        details={"options": offered, "mutated": False},
+        details={
+            "options": offered,
+            "candidates": [option["key"] for option in offered],
+            "mutated": False,
+        },
     )
 
 

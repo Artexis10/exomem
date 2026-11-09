@@ -76,6 +76,8 @@ APPLY_CHUNK_ITEMS = 25
 APPLY_CHUNK_BYTES = 64 * 1024 * 1024
 # A chunk is also cut so its predicted cost stays at most this share of the call's budget.
 APPLY_CHUNK_BUDGET_SHARE = 0.1
+# The `stop_reason` of a call that ended after a chunk because a write waited for the boundary.
+STOP_FOR_WAITING_WRITE = "interactive_write_waiting"
 # What a call assumes before it has timed a chunk: seconds per item, and per media
 # artifact for its extraction request (both pessimistic starts).
 INITIAL_ITEM_SECONDS = 0.5
@@ -3106,8 +3108,14 @@ def apply(
 
         pacer = _ApplyPacer(root, budget)
         stopped = False
+        stop_reason: str | None = None
         chunks = 0
         while pending:
+            if chunks and active_manager().writers_waiting(root):
+                # Each chunk is committed whole, so the call may end here: the writer that waits commits
+                # when this call releases the boundary, and the continuation resumes the import.
+                stopped, stop_reason = True, STOP_FOR_WAITING_WRITE
+                break
             if chunks:
                 # Each chunk is committed whole, so a waiting derived proof may hold the boundary here.
                 seconds, batches, room = pacer.next_unit(pending)
@@ -3200,6 +3208,8 @@ def apply(
         }
         if stopped:
             reply["continuation"] = _issue_cursor(run, "apply")
+        if stop_reason is not None:
+            reply["stop_reason"] = stop_reason
         if entry is not None:
             entry["state"], entry["reply"] = "used", reply
         if reads.sealed:

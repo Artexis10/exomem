@@ -419,15 +419,7 @@ class ReferenceIndex:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             conn = _sqlite_connect_owned(retained_path)
             try:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS identities ("
-                    "path TEXT PRIMARY KEY, exomem_id TEXT, raw_id TEXT NOT NULL, "
-                    "source_hash TEXT NOT NULL, status TEXT NOT NULL)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_identities_exomem_id "
-                    "ON identities(exomem_id)"
-                )
+                create_identity_schema(conn)
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS ref_meta "
                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -1620,12 +1612,36 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
         ).as_posix()
     except (OSError, ValueError):
         return None
+    return rel if _is_scanned_page(rel) else None
+
+
+def _is_scanned_page(rel: str) -> bool:
+    """Whether the reference scan reads this path: a Markdown page in the Knowledge Base."""
     prefix = f"{kb_dirname()}/"
     if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
-        return None
-    if vault_module.in_excluded_scan_dir(rel):
-        return None
-    return rel
+        return False
+    return not vault_module.in_excluded_scan_dir(rel)
+
+
+def create_identity_schema(conn: sqlite3.Connection) -> None:
+    """Create the identity table and its id index; the sidecar and store mode share this one DDL."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS identities ("
+        "path TEXT PRIMARY KEY, exomem_id TEXT, raw_id TEXT NOT NULL, "
+        "source_hash TEXT NOT NULL, status TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_identities_exomem_id ON identities(exomem_id)"
+    )
+
+
+def derive_identities(vault_root: Path, conn: sqlite3.Connection) -> None:
+    """Fill the empty ``identities`` table from the files, as a full sidecar rebuild does."""
+    conn.executemany(
+        "INSERT INTO identities(path, exomem_id, raw_id, source_hash, status) "
+        "VALUES (?, ?, ?, ?, ?)",
+        _scan_pages(vault_root),
+    )
 
 
 #: Row status for a page the scan would read whose bytes could not be observed.
@@ -1651,20 +1667,61 @@ def _identity_or_unreadable(
     # returns False on PermissionError, which would turn an unreadable page
     # into a gone one.
     try:
-        raw = path.read_bytes().decode("utf-8")
+        raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError):
         return None
-    except (OSError, UnicodeDecodeError):
+    except OSError:
+        return rel, None, "", "", _UNREADABLE
+    return _identity_from_bytes(rel, raw)
+
+
+def _identity_from_bytes(rel: str, raw: bytes) -> tuple[str, str | None, str, str, str]:
+    """The identity row of one page's bytes; bytes that are not UTF-8 give an `_UNREADABLE` row."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
         return rel, None, "", "", _UNREADABLE
     # Parse what text mode reads (universal newlines) but hash the bytes as
     # stored: recall custody proves a page by the digest of its bytes, so a
     # CRLF page hashed after newline translation could never be proven.
-    fm, _, _ = vault_module.parse_frontmatter(raw.replace("\r\n", "\n").replace("\r", "\n"))
+    fm, _, _ = vault_module.parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
     value = fm.get(ID_FIELD)
     raw_id = "" if value is None else str(value)
     normalized = normalize_id(value)
     status = "missing" if value is None else ("valid" if normalized else "malformed")
-    return rel, normalized, raw_id, vault_module.content_hash(raw), status
+    return rel, normalized, raw_id, vault_module.content_hash(text), status
+
+
+def identity_row(
+    vault_root: Path, rel: str, raw: bytes
+) -> tuple[str, str | None, str, str, str] | None:
+    """The row that the reference sidecar holds for one page, read from bytes instead of a file.
+
+    It returns what ``_read_identity`` returns for the same file: None when the scan does not
+    read ``rel`` (outside the Knowledge Base, an excluded directory, not Markdown) or when the
+    bytes are not text. ``vault_root`` names the vault whose scan rule applies; today that rule
+    depends on configuration only.
+    """
+    row = _identity_from_bytes(rel, raw) if _is_scanned_page(rel) else None
+    return None if row is None or row[4] == _UNREADABLE else row
+
+
+def replace_identity_row(
+    conn: sqlite3.Connection, rel: str, row: tuple[str, str | None, str, str, str] | None
+) -> None:
+    """Replace the identity row of ``rel`` with ``row`` (``identity_row`` of its bytes).
+
+    A ``row`` of None drops the row.
+
+    The caller owns the transaction.
+    """
+    conn.execute("DELETE FROM identities WHERE path = ?", (rel,))
+    if row is not None:
+        conn.execute(
+            "INSERT INTO identities(path, exomem_id, raw_id, source_hash, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            row,
+        )
 
 
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:

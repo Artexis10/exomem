@@ -252,7 +252,7 @@ def test_raw_preservation_release_revocation_and_held_download(vault: Path, monk
                          "issuer_family": recipient.issuer_family,
                          "purpose": None, "includes_location": True},
         )
-    assert grant["ok"], grant
+    assert grant["diagnostics"]["operational"]["ok"], grant
     assert _download(client, path, token).content == raw.encode()
     assert _download(client, saved["sidecar_path"], token).content == (vault / saved["sidecar_path"]).read_bytes()
     with principal_module.request_scope(recipient):
@@ -350,7 +350,7 @@ def test_raw_transfer_rechecks_verified_session_purpose_and_closure(vault: Path,
                          "issuer_family": recipient.issuer_family,
                          "purpose": "route-audit", "includes_location": True},
         )
-    assert grant["ok"], grant
+    assert grant["diagnostics"]["operational"]["ok"], grant
     monkeypatch.setattr(raw_protection.time, "time", lambda: NOW)
     monkeypatch.setattr(raw_protection.store, "open_authorization_session_connection", lambda _root: sqlite3.connect(database))
     monkeypatch.setattr(raw_protection.authorization_custody, "load_authorization_custody", lambda _root, **_kw: custody)

@@ -74,17 +74,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # conversion has no item file: read_records measures 3,337 B, read_plans 2,757 B and change_plans 3,360 B,
 # so their ceilings round to 3,350 B, 2,800 B and 3,400 B. The complete local wire measures 168,761 B, so
 # the budget rises 200 B.
+# With both sets of changes above, the complete local wire measures 169,044 B, so the budget is 169,050 B.
+# The owner-only approve_procedure tool (approve, revoke and quarantine) measures 1,748 B, and its
+# procedure_approvals listing kind adds 148 B to read_review, which measures 7,591 B. Their ceilings
+# round to 1,750 B and 7,600 B.
+# With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
+# The video kind of read_media takes `max_side` as the image kind does, so a caller chooses the frame
+# size: read_media measures 1,790 B and its ceiling rounds to 1,800 B. The total stays within budget.
 # The `file` kind of import_memory adds one variant (kind, path, collection, continuation) and the lead
 # sentence that names it: import_memory measures 6,653 B, 9% over its old size, and its ceiling rounds to
 # 6,700 B. read_import names `file` as the next step and measures 3,119 B, so its ceiling rounds to 3,150 B.
-# They add 622 B to the complete local wire, to replace a six-call import loop.
-# With every change above, the complete local wire measures 169,666 B, so the budget is 169,700 B.
-TOTAL_BUDGET = 169_700
+# The kind replaces a six-call import loop.
+# With every change above, the complete local wire measures 171,447 B, so the budget is 171,450 B.
+TOTAL_BUDGET = 171_450
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
     "adopt_vault": 1350,
     "adoption_studio": 3800,
+    "approve_procedure": 1750,
     "bootstrap": 1450,
     "browse_memory": 6700,
     "capture_source": 3400,
@@ -122,11 +130,11 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_connections": 3300,
     "read_episode": 2000,
     "read_governance": 2250,
-    "read_media": 1750,
+    "read_media": 1800,
     "read_memory": 3450,
     "read_plans": 2800,
     "read_records": 3350,
-    "read_review": 7550,
+    "read_review": 7600,
     "read_schema": 16700,
     "recall_context": 2950,
     "record_episode": 5500,

@@ -1,0 +1,6 @@
+## 1. Keep recall caches until memory pressure
+
+- [x] 1.1 Gate the idle release of CPU cache slots in normal mode on the host or cgroup memory reading, with the floor as a setting and release on an unknown reading.
+- [x] 1.2 Cover the plentiful, short, unknown and configured-floor cases and the cgroup headroom reading with reaper tests.
+- [x] 1.3 After release on the personal service in normal mode, show that a recall after more than fifteen idle minutes no longer rebuilds the find caches (no `reaped idle model find-ram-caches` while memory is plentiful). Before release the personal unit (`MemoryHigh=10G`) read about 3.05 GiB of working-set headroom against the 2 GiB floor; record the reading after release beside the reap count.
+      Evidence: 0.166.0 served on the personal service in normal mode from 2026-11-08T19:35:31Z. Its service log recorded no idle model or cache release through 20:30Z, three idle thresholds. At 20:30Z the unit read 7.48 GiB current and 1.08 GiB inactive file, a 6.40 GiB working set and about 3.6 GiB of headroom under `MemoryHigh=10G`; host available memory was 30.5 GiB. The same log showed no cache release in quiet mode earlier that day either, so this shows the release holds under plentiful memory, not a before-and-after change on this vault.

@@ -211,7 +211,9 @@ def test_a_confined_observation_ack_and_exact_unit_read_keep_their_parent(confin
     observed = _call(vault, writer, "observe_memory", path=OWN_NOTE, operation="add", category="finding",
                      content="Keep an independent observation.", response_detail=detail)
 
-    assert isinstance(observed, dict) and observed.get("state") == "committed", observed
+    assert isinstance(observed, dict) and observed.get("unit_ref"), observed
+    if detail == "full":
+        assert observed["diagnostics"]["operational"]["state"] == "committed", observed
     assert "Keep an independent observation." in (vault / OWN_NOTE).read_text()
     current = _call(vault, writer, "read_memory", path=OWN_NOTE, unit_ref=observed["unit_ref"])
     assert isinstance(current, dict) and current.get("status") == "found", current
@@ -221,9 +223,26 @@ def test_a_confined_observation_ack_and_exact_unit_read_keep_their_parent(confin
     removed = _call(vault, writer, "observe_memory", path=OWN_NOTE, operation="remove",
                     unit_ref=observed["unit_ref"], expected_hash=current["parent"]["content_hash"],
                     expected_fingerprint=current["unit"]["fingerprint"], response_detail=detail)
-    assert isinstance(removed, dict) and removed.get("state") == "committed", removed
+    assert isinstance(removed, dict) and "removed_unit_ref" in removed, removed
+    if detail == "full":
+        assert removed["diagnostics"]["operational"]["state"] == "committed", removed
     assert removed["removed_unit_ref"] == observed["unit_ref"]
     assert "Keep an independent observation." not in (vault / OWN_NOTE).read_text()
+
+
+def test_a_confined_observation_retried_under_its_key_replays_with_its_unit_reference(confined, vault):
+    """The replay names the unit the first commit wrote, as the parent binding of a confined reply needs."""
+    _, authenticate = confined
+    writer = authenticate("writer")
+    request = dict(path=OWN_NOTE, operation="add", category="finding",
+                   content="Keep a retried observation.", idempotency_key="retried-observation")
+
+    first = _call(vault, writer, "observe_memory", **request)
+    retry = _call(vault, writer, "observe_memory", **request)
+
+    assert isinstance(first, dict) and first.get("unit_ref"), first
+    assert retry.get("replayed") is True and retry.get("unit_ref") == first["unit_ref"], retry
+    assert (vault / OWN_NOTE).read_text().count("Keep a retried observation.") == 1
 
 
 def _committed_unit_reply(path, source, reference):
@@ -909,7 +928,7 @@ def _remember(vault: Path, who, title: str, **kwargs: Any) -> Any:
         anchor.parent.mkdir(parents=True, exist_ok=True)
         anchor.write_text("---\ntype: insight\nstatus: active\nproject: shared-project\n---\n# Anchor\n\nShared anchor text.\n", encoding="utf-8")
     content = ("## Finding\n\nA durable conclusion.\n\n## Observations\n\n- [finding] One bath runs every stage. ^bath\n\n"
-               f"## Relations\n\n- relates_to [[{ANCHOR.removesuffix('.md')}]]\n")
+               f"## Relations\n\n- supports [[{ANCHOR.removesuffix('.md')}]]\n")
     return _call(vault, who, "remember", content=content, title=title, note_type="insight", **kwargs)
 
 
@@ -1049,7 +1068,7 @@ def test_a_fenced_episode_records_prepares_and_resumes_without_touching_policy(c
     leaf = {"leaf_key": "write", "effect_revision": 1, "kind": "create-note", "args": {
         "title": "Steady bath model", "slug": "steady-bath-model", "content": (
             "## Observations\n\n- [finding] One bath. ^bath\n\n"
-            f"## Relations\n\n- relates_to [[{OWN_NOTE.removesuffix('.md')}]]\n")}}
+            f"## Relations\n\n- supports [[{OWN_NOTE.removesuffix('.md')}]]\n")}}
     proposal = {"route": "focused_note", "alternatives": [], "evidence": "complete", "title": "Steady bath model",
                 "reason": "A named model none of the existing pages own.", "leaves": [leaf]}
 

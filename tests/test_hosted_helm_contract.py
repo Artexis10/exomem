@@ -574,6 +574,21 @@ def test_cellctl_renders_the_media_engine_switch_under_the_name_the_runtime_read
     assert rendered == media_engines.ENGINES_ENV
 
 
+def test_cellctl_mounts_the_spool_where_the_cell_writes_it() -> None:
+    """The upload mounts only the export's spool directory by its path on the staging claim. Renaming
+    it on one side only would give the upload an empty directory, and every export would fail at its deadline."""
+    from exomem import cloud_export_steps
+
+    layout = ast.parse((ROOT / "infra/cellctl/src/cellctl/export_layout.py").read_text(encoding="utf-8"))
+    [mounted] = [
+        ast.literal_eval(node.value)
+        for node in layout.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "SPOOL_SUBPATH" for target in node.targets)
+    ]
+    assert mounted == f"{cloud_export_steps.EXPORT_DIR}/{cloud_export_steps.SPOOL_NAME}"
+
+
 def test_chart_schema_names_exactly_the_engines_the_runtime_knows() -> None:
     """The schema's engine list is a copy of `media_engines.ENGINES`. A name the runtime does
     not know, in a fleet default, renders into every cell's environment and restarts them all."""

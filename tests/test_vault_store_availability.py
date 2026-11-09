@@ -21,8 +21,9 @@ from exomem.collection_store import (
     takeover,
 )
 from exomem.collection_store.connection import CollectionStoreError
+from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import availability
+from exomem.vault_store import availability, migrate, ownership, write
 
 AT = "2026-11-08T00:00:00Z"
 LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_CLOUD_CELL")
@@ -30,13 +31,25 @@ LEASE_ENV = ("EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_TOPOLOGY", "EXOMEM_
 
 @pytest.fixture
 def store_mode_vault(vault, monkeypatch):
-    """The fixture vault with both store-mode records written directly, as activation leaves them."""
+    """The fixture vault with both store-mode records and its pages in the store, as activation leaves them."""
     for name in LEASE_ENV:
         monkeypatch.delenv(name, raising=False)
-    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as writer:
-        with writer.transaction() as tx:
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            # A store-mode store holds the owners' tables, and every commit derives rows into them.
+            migrate.create_owner_schema(tx)
             tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
                        "VALUES (1, 'store', 1, ?, 'test')", (AT,))
+        # In store mode a page read answers from the store, so the pages must be there.
+        pages = tuple(
+            write.PagePut(owned.rel, (vault / owned.rel).read_bytes(), owned.stat.st_mtime_ns)
+            for owned in ownership.iter_owned(vault)
+            if owned.ownership is ownership.Ownership.PAGE
+        )
+        write.commit(
+            CollectionWriter(vault, handle),
+            write.StoreChange(write.Origin.MIGRATION, "test fixture", puts=pages),
+        )
     state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
     return vault
 
@@ -99,7 +112,7 @@ def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):
     for name in LEASE_ENV:
         monkeypatch.delenv(name, raising=False)
     availability.require_servable(vault)
-    assert availability.write_refusal(vault) is None
+    assert availability.page_writer(vault) is None
     assert availability.marker_inconsistency(vault) is None
     assert doctor._check_vault_store_records(vault) is None
 
@@ -121,15 +134,14 @@ def test_a_write_to_a_diverged_store_mode_vault_refuses_with_the_stores_code_and
     assert _vault_bytes(store_mode_vault) == before
 
 
-def test_a_write_to_a_healthy_store_mode_vault_refuses_until_the_store_takes_page_writes(
-        store_mode_vault):
-    """Defect: with no write path into the store, a page write lands in Markdown the store ignores."""
+def test_a_page_write_off_the_store_thread_refuses_and_changes_no_markdown(store_mode_vault):
+    """Defect: a page write off the store thread lands in Markdown that the store ignores."""
     before = _vault_bytes(store_mode_vault)
     with pytest.raises(OpError) as refused:
         commands.op_remember(store_mode_vault, title="Pump note", status="draft",
                              content="## Observations\n\n- [finding] The pump holds pressure.\n",
                              summary="A pump finding for the test rig.")
-    assert refused.value.code == availability.WRITE_PATH_PENDING
+    assert refused.value.code == availability.OFF_THREAD
     assert _vault_bytes(store_mode_vault) == before
 
 
@@ -243,7 +255,7 @@ def test_a_recorded_id_with_no_store_mode_warns_and_names_the_rollback_without_r
     warnings = [record.getMessage() for record in caplog.records if record.name == availability.log.name]
     assert warnings == [availability.marker_inconsistency(vault)]
     assert "exomem store-mode rollback" in caplog.text
-    assert availability.write_refusal(vault) is None
+    assert availability.page_writer(vault) is None
     check = doctor._check_vault_store_records(vault)
     assert (check.status, check.message) == ("warn", availability.marker_inconsistency(vault))
     assert "exomem store-mode rollback" in check.remediation

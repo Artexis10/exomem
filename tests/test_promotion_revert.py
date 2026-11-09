@@ -101,7 +101,7 @@ def test_an_edge_reverts_in_one_call_and_only_that_bullet_goes(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     subject, target, ref = _edge_vault(vault, monkeypatch)
-    _append_relation(vault, subject, "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
+    _append_relation(vault, subject, "- cites [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
     page = vault / subject
     before = page.read_text(encoding="utf-8")
     edge_line = f"- supports [[{target.removesuffix('.md')}]]\n"
@@ -166,7 +166,7 @@ def test_a_revert_needs_the_current_fingerprint_and_a_stale_one_changes_nothing(
     _as(monkeypatch, "session-b")
     fingerprint = _context(vault, ref)["revert_fingerprint"]
 
-    _append_relation(vault, subject, "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
+    _append_relation(vault, subject, "- cites [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
     edited = page.read_text(encoding="utf-8")
 
     with pytest.raises(ValueError, match="CURATION_PLAN_IDENTITY_MISMATCH"):
@@ -185,7 +185,7 @@ def test_the_leaf_keeps_an_unrelated_edit_made_after_the_plan_was_read(
 
     subject, target, _ref = _edge_vault(vault, monkeypatch)
     page = vault / subject
-    _append_relation(vault, subject, "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
+    _append_relation(vault, subject, "- cites [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
 
     promotion_revert.remove_relation(
         vault, subject=subject, predicate="supports", target=target, why="Revert it."
@@ -468,7 +468,7 @@ def test_incomplete_edge_proof_stays_unavailable_while_ordinary_edits_work(
     from exomem import compiled_history, memory_refs
 
     subject, _target, ref = _edge_vault(vault, monkeypatch)
-    _append_relation(vault, subject, "- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
+    _append_relation(vault, subject, "- cites [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]")
     source_ref = memory_refs.ref_from_markdown((vault / subject).read_text())
     history = vault / compiled_history.history_dir(source_ref)
     if gap == "missing":

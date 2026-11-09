@@ -1042,6 +1042,7 @@ def test_every_item_returned_at_supported_64_cap_is_hinted_actionable(
         expected_hash=items[-1]["source_content_hash"],
         expected_fingerprint=items[-1]["fingerprint"],
         why="Accept the final supported-cap item.",
+        requested_relation=items[-1]["plain_link"],
         edit_memory=lambda *_args, **_kwargs: {"mutated": True},
     )
     triaged = relation_queue.triage(

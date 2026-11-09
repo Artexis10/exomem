@@ -24,6 +24,7 @@ from . import (
 )
 from . import find as find_module
 from .audit import AuditFinding
+from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vault import content_hash, find_body_wikilinks, kb_root
 
 ACTIVATION_CATEGORIES: tuple[str, ...] = (
@@ -33,18 +34,6 @@ ACTIVATION_CATEGORIES: tuple[str, ...] = (
     "relation_debt",
 )
 
-_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
-_SKIP_TAGS = frozenset({"hub", "snapshot"})
-_ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
-_PROVENANCE_RELATIONS = frozenset({"derived_from", "evidenced_by", "cites"})
-_FRONTMATTER_TYPED_FIELDS: dict[str, str] = {
-    "sources": "derived_from",
-    "evidence": "evidenced_by",
-    "evidences": "evidenced_by",
-    "evidence_paths": "evidenced_by",
-    "supersedes": "supersedes",
-    "superseded_by": "supersedes",
-}
 _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]+)?\]\]")
 
 
@@ -107,10 +96,7 @@ def scan(vault_root: Path) -> ActivationScan:
         measurement = _measure_page(
             page,
             definitions.snapshots["relations"].typed,
-            language_registry=semantic_language_registry.for_attached_projects(
-                definitions.snapshots["categories"].typed,
-                semantic_index.page_projects(page.frontmatter),
-            ),
+            language=definitions.snapshots["categories"].typed,
         )
         meta = {
             "signal_version": _signal_version(page),
@@ -307,12 +293,12 @@ def structurally_placed(
     if access.access_tier(vault_root, page.rel_path) not in tiers:
         return False
     stem = page.path.stem.lower()
-    if any(stem.endswith(suffix) for suffix in _SKIP_SLUG_SUFFIXES):
+    if any(stem.endswith(suffix) for suffix in BREADTH_SLUG_SUFFIXES):
         return False
     normalized_tags = {
         str(tag).strip().casefold().lstrip("#") for tag in page.tags
     }
-    if _SKIP_TAGS & normalized_tags:
+    if BREADTH_TAGS & normalized_tags:
         return False
     return True
 
@@ -321,13 +307,17 @@ def _measure_page(
     page: Any,
     registry: relation_registry.RelationRegistry,
     *,
-    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> dict[str, Any]:
+    from . import semantic_index
+
     project = _page_project(page.frontmatter)
     document = semantic_units.parse_semantic_units(
         page.body,
         validate=False,
-        language_registry=language_registry,
+        language_registry=semantic_language_registry.for_attached_projects(
+            language, semantic_index.page_projects(page.frontmatter)
+        ),
         relation_registry=registry,
         include_legacy_relations=True,
         retain_unknown_relations=True,
@@ -336,24 +326,31 @@ def _measure_page(
     )
 
     return measure_document(
-        document, registry, project=project, page_type=page.page_type,
+        document, registry, language=language, project=project, page_type=page.page_type,
         body_wikilinks=len(find_body_wikilinks(page.body)),
         frontmatter_counts=frontmatter_link_counts(page.frontmatter),
     )
 
 
 def frontmatter_link_counts(frontmatter: dict[str, Any]) -> dict[str, int]:
-    """Keep each fixed field separate so summaries preserve provenance counts."""
+    """Keep each bound field separate so summaries preserve provenance counts.
+
+    The fields are core-only registry data, so the shipped registry names them for every page.
+    """
     return {field: len(_frontmatter_links(frontmatter.get(field)))
-            for field in (*_FRONTMATTER_TYPED_FIELDS, "related")}
+            for field in relation_registry.core_registry().frontmatter_fields()}
 
 
 def measure_document(
     document: semantic_units.SemanticUnitDocument | semantic_units.SelectedStructure,
-    registry: relation_registry.RelationRegistry, *, project: str | None,
+    registry: relation_registry.RelationRegistry, *,
+    language: semantic_language_registry.SemanticLanguageRegistry, project: str | None,
     page_type: str | None, body_wikilinks: int, frontmatter_counts: dict[str, int],
 ) -> dict[str, Any]:
-    """Reduce selected authored occurrences through one activation arithmetic owner."""
+    """Reduce selected authored occurrences through one activation arithmetic owner.
+
+    `language` is the page's own registry, so a vault kind with the `assertion` trait counts.
+    """
     registered: list[str] = []
     unregistered: list[dict[str, str | int]] = []
     for relation in document.note_relations:
@@ -392,17 +389,14 @@ def measure_document(
                 registered.append(resolution.canonical)
 
     frontmatter_links = 0
-    for field, relation_kind in _FRONTMATTER_TYPED_FIELDS.items():
+    for field, binding in registry.frontmatter_fields().items():
         count = frontmatter_counts.get(field, 0)
         frontmatter_links += count
-        registered.extend([relation_kind] * count)
-    related_count = frontmatter_counts.get("related", 0)
-    frontmatter_links += related_count
+        if not registry.has(binding.relation, "plain_link"):
+            registered.extend([binding.relation] * count)
 
-    assertion_blocks = sum(
-        1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
-    )
-    provenance_relations = sum(1 for kind in registered if kind in _PROVENANCE_RELATIONS)
+    assertion_blocks = sum(1 for unit in document.rich_units if language.has(unit.kind, "assertion"))
+    provenance_relations = sum(1 for kind in registered if registry.has(kind, "sources"))
     unique_unknown = {
         (str(item["label"]), str(item["anchor"])): item for item in unregistered
     }

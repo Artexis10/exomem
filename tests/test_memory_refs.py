@@ -57,6 +57,36 @@ def test_a_legacy_bom_negative_row_rebuilds_without_rewriting_the_page(tmp_path:
     assert path.read_bytes() == raw
 
 
+def test_an_identity_row_from_a_pages_bytes_equals_the_row_that_the_sidecar_holds(
+    tmp_path: Path,
+) -> None:
+    """Defect: store mode derives identities from stored bytes. A row that differs from the file
+    scan's splits one page's identity between the modes (a CRLF page hashed after translation)."""
+    import sqlite3
+
+    pages = {
+        "Knowledge Base/Notes/valid.md": _page(memory_refs.new_id()).encode(),
+        "Knowledge Base/Notes/crlf.md": _page(memory_refs.new_id()).replace("\n", "\r\n").encode(),
+        "Knowledge Base/Notes/malformed.md": _page("not an id").encode(),
+        "Knowledge Base/Notes/missing.md": _page(None).encode(),
+        "Knowledge Base/Notes/binary.md": b"\xff\xfe not text",
+        "Knowledge Base/Notes/diagram.bin": b"\x00\x01",
+    }
+    for rel, raw in pages.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(raw)
+    index = memory_refs.ReferenceIndex(tmp_path)
+    index.rebuild_all()
+    with sqlite3.connect(index.path) as connection:
+        held = {row[0]: row for row in connection.execute("SELECT * FROM identities")}
+
+    from_bytes = {rel: memory_refs.identity_row(tmp_path, rel, raw) for rel, raw in pages.items()}
+
+    assert {rel: row for rel, row in from_bytes.items() if row is not None} == held
+    assert from_bytes["Knowledge Base/Notes/binary.md"] is None  # the scan reads no row for it
+    assert from_bytes["Knowledge Base/Notes/diagram.bin"] is None  # and none for a non-page
+
+
 def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     old = vault / "Knowledge Base" / "Notes" / "old.md"

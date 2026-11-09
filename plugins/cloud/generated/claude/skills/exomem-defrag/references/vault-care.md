@@ -95,7 +95,7 @@ Both update on every confirmed write.
 
 ## Audit (lint) checks
 
-The **read_review/triage_memory(mode="audit")** operation runs read-only checks and proposes fixes (never
+The audit operation, `read_review(operation={'kind': 'audit'})`, runs read-only checks and proposes fixes (never
 auto-fixes); every audit presentation remains read-only. The default
 `detail="actionable"` puts current blockers first, then malformed semantic units
 and unregistered relation work, then ordinary findings. Grandfathered relation-
@@ -166,7 +166,7 @@ A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview 
 4. Stop one early with `repair_memory` and `operation.kind="maintenance-job-cancel"` (`run_id`, `why`). The job stops at its next checkpoint.
 5. Read the receipt. A finished job's status holds the totals: pages `committed`, `skipped_changed` (the page changed after the preview) and `outcome_unknown`. The page list is long, so read it page by page: pass the receipt's `next_cursor` as `cursor` to the same call, and repeat with each returned `next_cursor` until it is `null`. Each entry names a path, its kind and, for `backfill-ids`, the minted ID. A preview's entries are kind `planned`: the items its `plan_id` covers (paths, components or identities). A `fix` entry's value says what the plan does to the page. A `backfill-ids` preview also lists kind `identity_issue` and `skipped` entries, each with its detail as the value.
 
-If the vault changed after the preview, the job returns `STALE_MAINTENANCE_PLAN`, writes nothing and gives a fresh `plan_id`: preview again. Another start while a job runs returns `MAINTENANCE_JOB_ACTIVE` with the running `run_id`. `fix` and `backfill-ids` write in short chunks that let other writes through. `reconcile` holds writes only in short holds, one per phase that writes, and other writes go through between them. A `MUTATION_BUSY` refusal during one of its holds names the job's `run_id`. Applying `collections-store-export` is host work: run it with the service stopped.
+If the vault changed after the preview, the job returns `STALE_MAINTENANCE_PLAN`, writes nothing and gives a fresh `plan_id`: preview again. Another start while a job runs returns `MAINTENANCE_JOB_ACTIVE`, and its `retry` reads the running job by its `run_id`. `fix` and `backfill-ids` write in short chunks that let other writes through. `reconcile` holds writes only in short holds, one per phase that writes, and other writes go through between them. A `MUTATION_BUSY` refusal during one of its holds names the job's `run_id`. Applying `collections-store-export` is host work: run it with the service stopped.
 
 ### structured-files
 
@@ -202,4 +202,4 @@ Previews the move of every structured collection to SQLite-only storage. It is o
 
 ### Sidecar collapse (`fix`)
 
-`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `mode="audit", categories=["duplicated_sidecar"]`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.
+`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `read_review(operation={'kind': 'audit', 'categories': ['duplicated_sidecar']})`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.

@@ -313,15 +313,20 @@ export class ExomemProvider implements Provider {
         mode: "hybrid",
         detail: "full",
       })
-      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        const state = (raw as { status?: unknown }).status
+      // The reply is `{user_summary, hits, notice?}`; recorded replies from before that shape are a bare list.
+      // A `notice` says the results may be incomplete, which this exact-limit run refuses.
+      const reply = raw as { status?: unknown; hits?: unknown; notice?: unknown } | null
+      if (reply && typeof reply === "object" && !Array.isArray(reply)) {
+        const state = reply.status
         if (state === "warming" || state === "degraded") throw new Error(`Exomem search refused ${state} response`)
-        throw new Error("Exomem search response is invalid")
+        if (typeof reply.notice === "string") throw new Error("Exomem search refused incomplete response")
+        if (!Array.isArray(reply.hits)) throw new Error("Exomem search response is invalid")
       }
-      if (!Array.isArray(raw) || raw.length === 0) throw new Error("Exomem search response is empty")
-      if (raw.length > limit!) throw new Error("Exomem search response exceeds exact limit")
+      const hits = Array.isArray(raw) ? raw : (reply as { hits: unknown[] } | null)?.hits
+      if (!Array.isArray(hits) || hits.length === 0) throw new Error("Exomem search response is empty")
+      if (hits.length > limit!) throw new Error("Exomem search response exceeds exact limit")
       const results: Array<{ content: string; score: number }> = []
-      for (const selected of raw as SearchSelection[]) {
+      for (const selected of hits as SearchSelection[]) {
         if (!selected || typeof selected.path !== "string" || selected.path.length === 0) {
           throw new Error("Exomem search response is missing a selected path")
         }

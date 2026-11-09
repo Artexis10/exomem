@@ -238,7 +238,7 @@ def test_a_public_move_attributes_preflight_to_its_existing_command_span(vault, 
             command, vault, operation="move", old_path=old_path, new_path=new_path,
         )
 
-    assert result["status"] == "committed"
+    assert result["user_summary"].startswith("Moved")
     assert not (vault / old_path).exists()
     assert (vault / new_path).exists()
     stages = {item["name"]: item for item in call_spans.pop_call_spans(token)}
@@ -533,7 +533,6 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "post_commit.capture_sweep",
         "post_commit.entity_candidate",
         "post_commit.undeclared_referents",
-        "post_commit.specific_options",
         "advisory.default_sweep",
         "command.body",
         "command.terminal_filter",

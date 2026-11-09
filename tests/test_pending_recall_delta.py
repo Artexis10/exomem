@@ -1238,20 +1238,18 @@ def test_pending_raw_pages_do_not_displace_managed_guest_recall(tmp_path: Path, 
     with principal.request_scope(guest):
         after = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1)
         browse = commands.op_ask_memory(tmp_path, query="", mode="keyword", limit=1)
-    assert [row["path"] for row in before] == [visible]
+    assert [row["path"] for row in before["hits"]] == [visible]
     assert after == before
-    assert [row["path"] for row in browse] == [visible]
+    assert [row["path"] for row in browse["hits"]] == [visible]
 
 
 @pytest.mark.parametrize("change", ["reparent", "delete_parent"])
 def test_managed_guest_scene_admission_uses_pending_parent_changes(
     tmp_path: Path, monkeypatch, managed_runtime, change: str,
 ) -> None:
-    from exomem import commands, due_state
+    from exomem import commands
     from exomem.governance import principal
 
-    # The scene's Source page is a backlog item; the recall envelope that reports it is not under test.
-    monkeypatch.setattr(due_state, "should_emit", lambda *_args, **_kwargs: False)
     _seed_corpus(tmp_path)
     parent = "Knowledge Base/Notes/video.mp4.md"
     child = "Knowledge Base/Notes/frame.jpg.md"
@@ -1265,7 +1263,7 @@ def test_managed_guest_scene_admission_uses_pending_parent_changes(
     guest = principal.RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
     with principal.request_scope(guest):
         before = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1, graph=False)
-    assert [row["path"] for row in before] == [parent]
+    assert [row["path"] for row in before["hits"]] == [parent]
     changes = (
         ((child, child_text, child_text.replace("Notes/video.mp4", "Notes/__exomem_raw_v1__video.mp4"), None),)
         if change == "reparent" else ((parent, parent_text, None, None),)
@@ -1274,8 +1272,7 @@ def test_managed_guest_scene_admission_uses_pending_parent_changes(
     _forbid_whole_corpus(monkeypatch, "scene parent admission")
     with principal.request_scope(guest):
         after = commands.op_ask_memory(tmp_path, query="orchard", mode="keyword", limit=1, graph=False)
-    after_hits = after["hits"] if isinstance(after, dict) else after
-    assert [row["path"] for row in after_hits] == ([] if change == "reparent" else [child])
+    assert [row["path"] for row in after["hits"]] == ([] if change == "reparent" else [child])
     if change == "reparent":
         assert after["next_action"]["state"] == "search_miss"
 

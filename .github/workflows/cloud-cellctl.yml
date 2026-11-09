@@ -9,7 +9,7 @@ on:
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - "src/exomem/cloud_import*.py"
-      - "src/exomem/cloud_export.py"
+      - "src/exomem/cloud_export*.py"
       - "Dockerfile"
       - "pyproject.toml"
       - "uv.lock"
@@ -25,7 +25,7 @@ on:
       - "infra/tool-versions.env"
       - "infra/ansible/roles/k3s/files/audit-policy.yaml"
       - "src/exomem/cloud_import*.py"
-      - "src/exomem/cloud_export.py"
+      - "src/exomem/cloud_export*.py"
       - "Dockerfile"
       - "pyproject.toml"
       - "uv.lock"
@@ -57,11 +57,14 @@ jobs:
       - uses: ./.github/actions/substrate-test-contract
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+          # v6 stopped activating a venv for python-version and v9 stopped pruning; keep v5's behaviour.
+          activate-environment: true
+          prune-cache: true
       - name: Install the pinned Helm release binary
         run: |
           curl --fail --silent --show-error --location \
@@ -156,7 +159,7 @@ jobs:
           # is left out because release bumps touch it; chart tests pin the
           # invariants it carries. Git quotes a path with special or
           # non-ASCII characters, hence the optional leading quote.
-          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|infra/cellctl/tests/test_export_storage\.py$|infra/cellctl/src/cellctl/exports\.py$|src/exomem/cloud_(import[^/]*|export)\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$|\.github/actions/free-runner-disk/)'
+          LIVE_K3S_PATTERN: '^"?(infra/helm/platform/(templates/|values\.schema\.json$|values\.validation\.yaml$|Chart\.(yaml|lock)$)|infra/cellctl/src/cellctl/manifests\.py$|infra/cellctl/src/cellctl/k8s_client\.py$|infra/ansible/roles/k3s/files/audit-policy\.yaml$|infra/cellctl/tests/test_k3s_integration\.py$|infra/cellctl/tests/test_export_storage\.py$|infra/cellctl/src/cellctl/exports\.py$|infra/cellctl/src/cellctl/export_layout\.py$|src/exomem/cloud_(import[^/]*|export[^/]*)\.py$|Dockerfile$|pyproject\.toml$|uv\.lock$|\.github/workflows/cloud-cellctl\.yml$|\.github/actions/free-runner-disk/)'
         run: |
           case "$EVENT" in
             # Reusable workflows retain the full-CI caller's scheduled event.
@@ -220,11 +223,14 @@ jobs:
       - uses: ./.github/actions/substrate-test-contract
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+          # v6 stopped activating a venv for python-version and v9 stopped pruning; keep v5's behaviour.
+          activate-environment: true
+          prune-cache: true
       # Docker loads the model image while BuildKit retains its build state.
       - name: Free runner disk for the import image
         if: matrix.suite == 'protected-import'
