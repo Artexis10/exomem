@@ -762,7 +762,9 @@ class ExomemLocalAdapter:
 
     def _normalize(self, payload: object) -> list[object]:
         if isinstance(payload, dict):
-            for marker in ("warming", "degraded"):
+            # `notice` is the reply's one sentence for results that may be incomplete; it
+            # replaces the raw `warming` and `degraded` fields, which only timings requests return.
+            for marker in ("warming", "degraded", "notice"):
                 value = payload.get(marker)
                 if value:
                     raise AdapterEnvironmentError(
@@ -778,7 +780,7 @@ class ExomemLocalAdapter:
             return []
         if isinstance(payload, list):
             return payload
-        for marker in ("warming", "degraded"):
+        for marker in ("warming", "degraded", "notice"):
             value = getattr(payload, marker, None)
             if value:
                 raise AdapterEnvironmentError(

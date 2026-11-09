@@ -711,7 +711,8 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
                         error_code=code,
                         attempts=attempts,
                         hits=len(result.get("hits") or []),
-                        degraded=sorted(str(lane) for lane in result.get("degraded") or []),
+                        # The agent reply folds warming and degraded state into one `notice` sentence.
+                        notice=result.get("notice"),
                         **settle,
                     )
                 )

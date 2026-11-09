@@ -514,14 +514,15 @@ def _connector_read_your_write(client: Any, marker: str, rel_path: str) -> str:
             failure = result.get("error")
             if isinstance(failure, dict):
                 if failure.get("code") == "RETRIEVAL_INDEX_WARMING":
-                    # RetrievalIndexWarming declares both public availability statuses.
-                    if failure.get("status") == "warming":
-                        return "warming"
+                    # RetrievalIndexWarming declares both public availability statuses. The compact
+                    # MCP refusal drops `status`, so a refusal without one reads as warming.
                     if failure.get("status") == "temporarily_unavailable":
                         return "unavailable"
+                    return "warming"
                 return "unknown"
             hits = result.get("hits")
-            warming = bool(result.get("warming"))
+            # Without timings the reply folds `warming` into a `notice` that results may be incomplete.
+            warming = bool(result.get("warming") or result.get("notice"))
         else:
             hits, warming = result, False
         if not isinstance(hits, list):
