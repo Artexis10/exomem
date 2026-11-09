@@ -1192,10 +1192,7 @@ def infer_category_registry(
         **{
             labels.section: [
                 {
-                    "key": definition.key,
-                    "labels": dict(definition.labels),
-                    "description": definition.description,
-                    "shipped": definition.core,
+                    **_label_entry(definition),
                     # A dimension also lists what makes a unit belong to it, how context shows it
                     # and how many units of this scan belong to it.
                     **{
@@ -1213,6 +1210,10 @@ def infer_category_registry(
             ]
             for labels in semantic_labels.REGISTRIES
         },
+        # Every kind a `##` heading can name, with the labels that name it in each language.
+        "kinds": [
+            _label_entry(definition) for definition in registry.kind_label_definitions().values()
+        ],
         "proposal": semantic_language_registry.registry_proposal(registry),
         "content_hash": registry.content_hash,
         "registry_findings": [item.as_dict() for item in registry.findings],
@@ -1293,6 +1294,16 @@ _GRAPH_REBUILD: dict[str, Any] = {
     "reason": "The graph that records typed edges is missing or stale; a rebuild has been "
     "scheduled, and this operation runs it now.",
 }
+
+
+def _label_entry(definition: semantic_labels.LabelDefinition) -> dict[str, Any]:
+    """One entry of a label list in the schema read: a kind or an entry of a label registry."""
+    return {
+        "key": definition.key,
+        "labels": dict(definition.labels),
+        "description": definition.description,
+        "shipped": definition.core,
+    }
 
 
 def category_observations(

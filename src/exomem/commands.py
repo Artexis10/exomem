@@ -12517,13 +12517,14 @@ def op_schema_memory(
                     raise ValueError(
                         f"CATEGORY_SAVE_{labels.noun.upper()}_DROPPED: {dropped['detail']}"
                     )
-                # Debt: this kinds leg refuses every kind change, an addition too, and validation
-                # does not report it; it predates the verdict leg above, which refuses a loss only.
-                reviewed = semantic_language_registry_module.registry_proposal
+                # Debt: this leg refuses every kind change but a label, an added kind too, and
+                # validation does not report it; it predates the verdict leg above.
                 if (
                     registry_file_exists
                     and not candidate.findings
-                    and reviewed(current)["kinds"] != reviewed(candidate)["kinds"]
+                    and semantic_language_registry_module.kind_changes_beyond_labels(
+                        current, candidate
+                    )
                 ):
                     raise ValueError(
                         "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "

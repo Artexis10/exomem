@@ -52,7 +52,7 @@ def test_an_ascii_heading_resolves_to_its_shipped_kind() -> None:
     assert [unit.kind for unit in document.units] == ["open_question", "claim"]  # CORE
 
 
-def test_a_categories_save_refuses_a_kind_label_today(tmp_path: Path) -> None:
+def test_a_categories_save_adds_a_kind_label(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     (vault / "Knowledge Base" / "_Schema").mkdir(parents=True)
     current = {
@@ -61,14 +61,14 @@ def test_a_categories_save_refuses_a_kind_label_today(tmp_path: Path) -> None:
     }
     created = semantic_language_registry.save_registry(vault, current)
 
-    with library_scope(), pytest.raises(ValueError) as refused:  # FLIPS slice6: was refused; now saves
+    with library_scope():  # FLIPS slice6: was refused with INVALID_SEMANTIC_LANGUAGE_REGISTRY
         commands.op_schema_memory(
             vault, operation="infer", subject="categories", save=True, proposal=FINNISH,
             expected_hash=created["content_hash"],
         )
 
-    # FLIPS slice6: was INVALID_SEMANTIC_LANGUAGE_REGISTRY, the unknown `labels` field
-    assert str(refused.value).startswith("CATEGORY_SAVE_KIND_CHANGE")  # FLIPS slice6: see above
+    saved = semantic_language_registry.load_registry(vault)
+    assert saved.resolve_heading("Pöytäkirja").resolved == "protocol"  # FLIPS slice6: was None
 
 
 # ---------------------------------------------------------------------------
@@ -263,3 +263,96 @@ def test_a_finnish_heading_is_a_claim_in_a_search_hit(vault: Path) -> None:
 
     assert hits("claim") == [("claim", "Väite")]
     assert hits("decision") == []
+
+
+# ---------------------------------------------------------------------------
+# Saving a label, and reading it back
+# ---------------------------------------------------------------------------
+
+
+def _saved_vault(tmp_path: Path, kinds: dict) -> tuple[Path, str]:
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base" / "_Schema").mkdir(parents=True)
+    created = semantic_language_registry.save_registry(
+        vault, {"schema_version": 1, "categories": {}, "kinds": kinds}
+    )
+    return vault, created["content_hash"]
+
+
+def _save(vault: Path, expected_hash: str, kinds: dict) -> None:
+    with library_scope():
+        commands.op_schema_memory(
+            vault, operation="infer", subject="categories", save=True,
+            proposal={"schema_version": 1, "categories": {}, "kinds": kinds},
+            expected_hash=expected_hash,
+        )
+
+
+def test_a_categories_save_adds_and_removes_a_labels_only_entry_for_a_shipped_kind(
+    tmp_path: Path,
+) -> None:
+    vault, before = _saved_vault(tmp_path, {})
+
+    _save(vault, before, CLAIM_IN_FINNISH["kinds"])
+    added = semantic_language_registry.load_registry(vault)
+    assert added.resolve_heading("Väite").resolved == "claim"
+    assert added.kinds == {}  # the entry labels the shipped kind; it defines no vault kind
+
+    # Removing the entry is no drop: the shipped kind still resolves without it.
+    _save(vault, added.content_hash, {})
+    assert semantic_language_registry.load_registry(vault).resolve_heading("Väite").resolved is None
+
+
+def test_a_categories_save_changes_the_labels_of_a_vault_kind(tmp_path: Path) -> None:
+    vault, before = _saved_vault(tmp_path, FINNISH["kinds"])
+    relabelled = {"protocol": {"description": "A repeatable protocol", "labels": {"sv": "Protokoll"}}}
+
+    _save(vault, before, relabelled)
+
+    saved = semantic_language_registry.load_registry(vault)
+    assert saved.resolve_heading("Protokoll").resolved == "protocol"
+    assert saved.resolve_heading("Pöytäkirja").resolved is None
+
+
+@pytest.mark.parametrize(
+    "kinds",
+    [
+        {"protocol": {"description": "Another description", "labels": {"fi": "Pöytäkirja"}}},
+        {
+            "protocol": {"description": "A repeatable protocol", "labels": {"fi": "Pöytäkirja"}},
+            "playbook": {"description": "A playbook"},
+        },
+        {},
+    ],
+    ids=["description-changed", "kind-added", "kind-removed"],
+)
+def test_a_categories_save_still_refuses_every_other_kind_change(tmp_path: Path, kinds: dict) -> None:
+    vault, before = _saved_vault(tmp_path, FINNISH["kinds"])
+
+    with pytest.raises(ValueError, match="CATEGORY_SAVE_KIND_CHANGE"):
+        _save(vault, before, kinds)
+
+
+def test_the_schema_read_lists_each_kinds_labels_and_its_diff_reports_a_label_change(
+    tmp_path: Path,
+) -> None:
+    vault, _hash = _saved_vault(tmp_path, {**CLAIM_IN_FINNISH["kinds"], **FINNISH["kinds"]})
+
+    read = commands.op_schema_memory(vault, operation="infer", subject="categories")
+    diff = commands.op_schema_memory(
+        vault, operation="diff", subject="categories",
+        proposal={"schema_version": 1, "categories": {}, "kinds": {
+            "claim": {"labels": {"fi": "Väite", "sv": "Påstående"}},
+            "protocol": FINNISH["kinds"]["protocol"],
+        }},
+    )
+
+    kinds = {entry["key"]: entry for entry in read["kinds"]}
+    assert kinds["claim"]["labels"] == {"en": "Claim", "fi": "Väite"}
+    assert kinds["claim"]["shipped"] is True
+    assert kinds["protocol"]["labels"] == {"fi": "Pöytäkirja"}
+    assert kinds["protocol"]["shipped"] is False
+    assert diff["kinds_changed"] is True
+    assert diff["changes"]["kinds"]["modified"]["claim"]["after"] == {
+        "labels": {"fi": "Väite", "sv": "Påstående"}
+    }
