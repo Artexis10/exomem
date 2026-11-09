@@ -610,8 +610,11 @@ def test_the_store_drain_embeds_the_pages_that_the_file_mode_walk_embeds(vault):
     for name in names:
         (knowledge_base / name).parent.mkdir(parents=True, exist_ok=True)
         (knowledge_base / name).write_text("---\ntitle: T\n---\n# T\n\nA page.\n")
+    # The walk's callers apply `is_embeddable_path` to what it yields, as the file-mode drain does.
     walked = {
-        Path(path).relative_to(vault).as_posix() for path in index_paths.iter_index_markdown(vault)
+        Path(path).relative_to(vault).as_posix()
+        for path in index_paths.iter_index_markdown(vault)
+        if index_paths.is_embeddable_path(Path(path))
     }
 
     disagreements = {
