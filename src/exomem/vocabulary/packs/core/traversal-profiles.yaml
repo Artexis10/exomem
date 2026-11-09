@@ -1,0 +1,18 @@
+# The traversal profiles Exomem ships, in the grammar of the vault overlay
+# `_Schema/traversal-profiles.yaml`: `schema_version`, then `profiles`, each stating its
+# families with `add_families`. A shipped profile starts from an empty base, so it takes
+# no `extends`. Its priority is its families in sorted order.
+#
+# The `all` profile is not listed. It is every family of the core relations, so a family
+# added to the relations pack joins it without an edit here. A vault profile extends one
+# of these profiles or `all`.
+schema_version: 1
+profiles:
+  epistemic:
+    add_families: [support, contradiction, refinement, duplication, supersession, question, answer]
+  provenance:
+    add_families: [derivation, evidence, citation, observation]
+  causal:
+    add_families: [causality, dependency, mitigation, blocking, resolution]
+  decision:
+    add_families: [evidence, derivation, dependency, implementation, use, mitigation, resolution]

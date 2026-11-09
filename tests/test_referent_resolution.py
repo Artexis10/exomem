@@ -292,7 +292,7 @@ def test_graph_edge_from_non_entity_anchor_is_graph_evidence() -> None:
         "which coastal friend",
         entities=(entity,),
         hits=(_hit(anchor, descriptor_tokens=("coastal",)),),
-        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),),
+        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", True),),
     )
     assert {e.kind for e in out.resolved[0].evidence} == {"attribute", "graph"}
 
@@ -320,7 +320,7 @@ def test_counted_slot_requires_descriptor_evidence_when_cue_has_descriptors() ->
             _hit(anchor, rank=2, descriptor_tokens=("friends", "route", "timing")),
         ),
         edges=(
-            rr.EdgeFact(anchor, distractor.path, "relates_to", "outbound", "epistemic"),
+            rr.EdgeFact(anchor, distractor.path, "relates_to", "outbound", True),
         ),
     )
 
@@ -340,7 +340,7 @@ def test_descriptor_bearing_anchor_lets_graph_evidence_resolve() -> None:
         entities=(entity,),
         hits=(_hit(anchor, descriptor_tokens=("crystal", "project")),),
         edges=(
-            rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),
+            rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", True),
         ),
     )
 
@@ -381,7 +381,7 @@ def test_descriptorless_cue_keeps_existing_two_kind_resolution() -> None:
         entities=(entity,),
         hits=(_hit(anchor),),
         edges=(
-            rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),
+            rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", True),
         ),
     ).as_dict()
 
@@ -431,13 +431,13 @@ def test_exact_name_keeps_pre_change_first_graph_edge() -> None:
             _hit(qualifier_bearing, rank=2, descriptor_tokens=("crystal",)),
         ),
         edges=(
-            rr.EdgeFact(first, entity.path, "relates_to", "outbound", "epistemic"),
+            rr.EdgeFact(first, entity.path, "relates_to", "outbound", True),
             rr.EdgeFact(
                 qualifier_bearing,
                 entity.path,
                 "relates_to",
                 "outbound",
-                "epistemic",
+                True,
             ),
         ),
     )
@@ -465,7 +465,7 @@ def test_links_to_edge_is_tier_one_graph_evidence() -> None:
         "which coastal friend",
         entities=(entity,),
         hits=(_hit(anchor),),
-        edges=(rr.EdgeFact(anchor, entity.path, "links_to", "outbound", "link"),),
+        edges=(rr.EdgeFact(anchor, entity.path, "links_to", "outbound", False),),
     )
     graph = next(e for e in out.resolved[0].evidence if e.kind == "graph")
     assert graph.detail["tier"] == 1
@@ -479,7 +479,7 @@ def test_superseded_anchor_does_not_corroborate() -> None:
         "which coastal friend",
         entities=(entity,),
         hits=(_hit(anchor, status="superseded"),),
-        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),),
+        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", True),),
     )
     assert out.resolved == ()
 
@@ -492,7 +492,7 @@ def test_anchor_beyond_cap_does_not_corroborate() -> None:
         "which coastal friend",
         entities=(entity,),
         hits=hits,
-        edges=(rr.EdgeFact(hits[-1].path, entity.path, "about_entity", "outbound", "entity"),),
+        edges=(rr.EdgeFact(hits[-1].path, entity.path, "about_entity", "outbound", True),),
         anchor_cap=10,
     )
     assert out.resolved == ()
@@ -531,7 +531,7 @@ def test_qualifier_anchor_scan_is_hoisted_for_large_graph_fanout(
         for index in range(500)
     )
     edges = tuple(
-        rr.EdgeFact(anchor, entity.path, "relates_to", "outbound", "epistemic")
+        rr.EdgeFact(anchor, entity.path, "relates_to", "outbound", True)
         for entity in entities
     )
     out = _resolve(
@@ -745,6 +745,6 @@ def test_qualifier_seed_reads_folded_and_cjk_descriptor_tokens(
         query,
         entities=(entity,),
         hits=(_hit(anchor, descriptor_tokens=(descriptor_token,)),),
-        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", "entity"),),
+        edges=(rr.EdgeFact(anchor, entity.path, "about_entity", "outbound", True),),
     )
     assert {e.kind for e in out.resolved[0].evidence} == {"attribute", "graph"}

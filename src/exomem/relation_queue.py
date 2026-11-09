@@ -704,22 +704,34 @@ def _shared_source_candidates(
     if connection is None:
         return []
     try:
+        # Debt (drifted shared-source copy): reads only the frontmatter field's stored edges, while the
+        # graph's copy also reads page-level extensions; folding the two changes suggestions and needs
+        # its own evidence. The field and relation come from the binding, not from literals.
+        field, relation = epistemic_graph_module.declared_sources_binding()
         rows = connection.execute(
             "SELECT e2.source_path, e1.dst_key "
             "FROM graph_edges e1 JOIN graph_edges e2 ON e2.dst_key = e1.dst_key "
             "JOIN graph_nodes d ON d.node_key = ('file:' || e2.source_path) "
             "WHERE e1.source_path = ? "
-            "AND e1.origin = 'frontmatter' AND e1.source_anchor = 'sources' "
-            "AND e1.relation_type = 'derived_from' "
-            "AND e2.origin = 'frontmatter' AND e2.source_anchor = 'sources' "
-            "AND e2.relation_type = 'derived_from' "
+            "AND e1.origin = 'frontmatter' AND e1.source_anchor = ? "
+            "AND e1.relation_type = ? "
+            "AND e2.origin = 'frontmatter' AND e2.source_anchor = ? "
+            "AND e2.relation_type = ? "
             "AND e2.source_path <> e1.source_path "
             "AND NOT EXISTS (SELECT 1 FROM graph_edges p "
             "WHERE p.src_key = ('file:' || e1.source_path) "
             "AND p.dst_page_key = ('file:' || e2.source_path) "
             "AND p.relation_type = ?) "
             "ORDER BY e2.source_path, e1.dst_key LIMIT ?",
-            (rel_path, relation_registry.generic_relation_key(), max(0, int(limit))),
+            (
+                rel_path,
+                field,
+                relation,
+                field,
+                relation,
+                relation_registry.generic_relation_key(),
+                max(0, int(limit)),
+            ),
         ).fetchall()
     except sqlite3.Error:
         return []

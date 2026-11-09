@@ -31,6 +31,7 @@ SUPERSEDED = "superseded"
 #: Lifecycles that are history. Draft, planned and dropped material is not
 #: history: it has not been replaced, it has not happened yet.
 #: Provenance keys the compiler uses internally and never publishes.
+# Debt (K21): these provenance keys carry the same successor-pointer rule the readers repeat.
 INTERNAL_PROVENANCE = frozenset({"page_updated", "supersedes_targets", "supersession"})
 
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
@@ -69,8 +70,7 @@ def relation_targets(relations: Sequence[Mapping[str, Any]] | None, *,
     registry = registry or relation_registry.core_registry()
     for relation in relations or ():
         definition = registry.resolve(str(relation.get("kind") or "")).definition
-        # `supersession` is a closed family implemented by the relation schema.
-        if definition is not None and definition.family == "supersession":
+        if definition is not None and registry.has(definition.key, "replaces"):
             target = str(relation.get("target") or "").strip()
             if target:
                 out.append(target)

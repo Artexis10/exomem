@@ -9,6 +9,7 @@ relations:
   about_entity: {direction: directed, origins: [semantic_relation]}
   affiliated_with: {direction: directed, origins: [semantic_relation]}
   answers: {direction: directed, origins: [semantic_relation]}
+  assesses: {direction: directed, origins: [semantic_relation]}
   blocks: {direction: directed, origins: [semantic_relation]}
   caused_by: {direction: directed, inverse: causes, origins: [semantic_relation]}
   causes: {direction: directed, inverse: caused_by, origins: [semantic_relation]}
@@ -20,6 +21,7 @@ relations:
   duplicates: {direction: symmetric, origins: [semantic_relation]}
   evidenced_by: {direction: directed, origins: [frontmatter, semantic_relation]}
   extends: {direction: directed, origins: [semantic_relation]}
+  follows: {direction: directed, inverse: precedes, origins: [semantic_relation]}
   implements: {direction: directed, origins: [semantic_relation]}
   kin_of: {direction: symmetric, origins: [semantic_relation]}
   links_to: {direction: directed, origins: [frontmatter, semantic_relation, wikilink]}
@@ -31,6 +33,7 @@ relations:
   operates: {direction: directed, origins: [semantic_relation]}
   owns: {direction: directed, origins: [semantic_relation]}
   part_of: {direction: directed, inverse: contains, origins: [semantic_relation]}
+  precedes: {direction: directed, inverse: follows, origins: [semantic_relation]}
   produces: {direction: directed, origins: [semantic_relation]}
   raises_question: {direction: directed, origins: [semantic_relation]}
   refines: {direction: directed, origins: [semantic_relation]}

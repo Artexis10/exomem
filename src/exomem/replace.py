@@ -433,6 +433,7 @@ def _mark_superseded(text: str, rel_new_no_ext: str, date_iso: str) -> str:
     # superseded_by — missing: add the key. Present: append through the shared
     # list helper, which leaves the page as it was when it cannot append safely.
     newline = document_newline(text)
+    # Debt (K21): the writer names the field it adds; the same pointer rule repeats in the readers.
     if re.search(r"^superseded_by:", fm_text, re.MULTILINE):
         marked = render_frontmatter_document(fm_text, body, newline=newline)
         linked = append_frontmatter_list_item(marked, "superseded_by", new_link)
