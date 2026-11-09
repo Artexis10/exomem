@@ -1030,9 +1030,10 @@ def warm(vault_root: Path) -> None:
         # corpus is what the gate that admits it waits for.
         build_semantic_corpus(vault_root)
         _preload_models()
-        if catalogue_proven:
-            # Inside the warm, not after `finish_warm`: past it the supervisor promotes, and a build that took
-            # the better part of a minute would then hold the interpreter against the promoted worker's requests.
+        # Inside the warm: during it the `collections_migration` component keeps the standby from cutover
+        # readiness, so the old worker serves while it builds. Only over a proven graph snapshot: a declined
+        # proof waits on `reprove_until_promoted`, which starts after `warm()`, and must not wait on this too.
+        if catalogue_proven and cutover_components().get("graph_snapshot") == "ready":
             _warm_method_unit_statistics(vault_root, deadline=optional_deadline)
     except Exception:  # noqa: BLE001 - a standby warm must never die loudly
         log.warning("standby warm-up crashed", exc_info=True)

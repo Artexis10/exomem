@@ -1092,6 +1092,26 @@ def test_the_method_unit_statistics_warm_runs_while_the_old_worker_still_serves(
     assert seen == [(True, False)], "the build ran after the warm finished or the standby was cutover-ready"
 
 
+def test_a_standby_whose_graph_proof_declined_skips_the_method_unit_statistics_warm(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A declined proof is re-proved after the warm; the build must not delay that re-proof."""
+    from exomem import working_set
+
+    vault, _pages = _method_unit_vault(tmp_path, monkeypatch)
+    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
+    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
+    _stub_adoption(monkeypatch, adopted=False, reason="declined")
+    seen: list[str] = []
+    monkeypatch.setattr(working_set, "warm_owner_method_units", lambda root: seen.append("built") or "recorded")
+
+    service_standby.enter_standby()
+    service_standby.warm(vault)
+
+    assert service_standby.cutover_components()["graph_snapshot"] != "ready"
+    assert seen == []
+
+
 def test_a_method_unit_statistics_build_the_warm_budget_ends_leaves_no_statistics(
     tmp_path: Path, monkeypatch
 ) -> None:
