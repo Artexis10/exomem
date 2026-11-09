@@ -39,6 +39,8 @@ BAD_CHOICE = "VAULT_STORE_HELD_CHOICE"
 UNREADABLE = "VAULT_STORE_HELD_UNREADABLE"
 TOO_LARGE = "VAULT_STORE_HELD_TOO_LARGE"
 NO_WRITER = "VAULT_STORE_WRITER_UNAVAILABLE"
+#: The code of every refusal to write that the connector boundary gives, as a governed write has it.
+WRITE_REFUSED = "WRITE_REFUSED"
 #: The folder of the vault's state directory that keeps the person's bytes that keep-store replaced.
 EXPORT_FOLDER = "held-exports"
 
@@ -212,6 +214,12 @@ def resolve_held(
         )
     if item.item_version != seen:
         raise write.StoreConflict(rel, "this held item changed after it was listed", _LIST_AGAIN)
+    # The bytes that this resolution commits as the page, or None when the page goes away.
+    if choice == KEEP_MINE:
+        written = disk.body if disk.file.exists else None
+    else:
+        written = None if page is None else page.body
+    _require_write(root, rel, written)
     exported: tuple[Path | None, str | None] = (None, None)
     if choice == KEEP_MINE:
         change = _keep_mine(rel, row, disk, why)
@@ -225,6 +233,28 @@ def resolve_held(
             raise write.StoreConflict(conflict.path, conflict.reason, _LIST_AGAIN) from conflict
         raise
     return Resolution(rel, choice, result.revision, bool(disk.file.exists), *exported)
+
+
+def _require_write(root: Path, rel: str, written: bytes | None) -> None:
+    """Refuse a caller whose write authority does not cover what this resolution commits.
+
+    A governed write of a page passes the connector boundary's write check on the bytes it
+    publishes, so a resolve passes the same check, before it saves or commits anything. A caller
+    who may not read the item never gets here: the adapter answers it with ``nothing_held``.
+    """
+    from ..governance import connector_boundary
+
+    try:
+        connector_boundary.require_write(root, rel, content=written)
+    except ValueError as refused:
+        if str(refused).partition(":")[0] != WRITE_REFUSED:
+            raise
+        raise OpError(
+            WRITE_REFUSED,
+            f"{rel}: target is unavailable",
+            "Leave the item held. Resolve it as the vault owner, or from a connection whose "
+            "write access covers this page and the bytes that the choice keeps.",
+        ) from None
 
 
 def nothing_held(rel: str) -> write.StoreConflict:

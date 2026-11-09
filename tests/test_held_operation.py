@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from test_connector_boundary import configured_boundary, public_matter_writer  # noqa: F401
 from test_governance_egress import EXTERNAL, SCOPE_ID, _gov_dir, write_rule, write_scope
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_held import (  # noqa: F401
@@ -260,3 +261,48 @@ def test_a_held_binary_stays_listed_for_the_owner_under_a_tag_scope_and_not_for_
     (row,) = listed(stored)["items"]
     assert (row["path"], row["resolvable"], row["choices"]) == (DIAGRAM, False, [])
     assert row["not_resolvable_because"] == held.BINARY_BLOCK
+
+
+def test_an_outside_caller_who_may_read_a_held_page_may_not_resolve_it_without_write_access(
+    stored, writer, served
+):
+    """A resolve that skips the write check lets a reader commit a page that a governed write of
+    the same bytes refuses. The refusal comes before anything is saved or committed."""
+    hold(stored, writer, "edit")
+    version = held.list_held(stored)[0].item_version
+    restrict_by_tag(stored)
+    with principal.request_scope(OUTSIDER):
+        assert len(listed(stored)["items"]) == 1
+        for choice in held.CHOICES:
+            with pytest.raises(OpError) as refused:
+                repair(stored, choice, item_version=version)
+            assert refused.value.code == held.WRITE_REFUSED
+    assert (len(held.list_held(stored)), exports(stored)) == (1, [])
+    assert stored_page(stored)[0][0] == EXOMEM
+    assert repair(stored, held.KEEP_STORE, item_version=version)["choice"] == held.KEEP_STORE
+
+
+@pytest.mark.parametrize(
+    ("persons_project", "refused"), [("private-project", True), ("public-project", False)]
+)
+def test_a_connector_limited_owner_keeps_mine_only_into_a_scope_its_connector_may_write(
+    stored, public_matter_writer, writer, served, persons_project, refused
+):
+    """The page is public matter that the limited owner may read and write. The person's file
+    moves it into a scope that the connector denies in one case, and keeps it in the other."""
+    _, authenticate = public_matter_writer
+    page = EXOMEM.replace(b"type: note\n", b"type: note\nproject: public-project\n")
+    file = MINE.replace(b"type: note\n", f"type: note\nproject: {persons_project}\n".encode())
+    hold(stored, writer, "edit", exomem=page, mine=file)
+    version = held.list_held(stored)[0].item_version
+    with principal.request_scope(authenticate("limited")):
+        assert [row["path"] for row in listed(stored)["items"]] == [ALPHA]
+        if refused:
+            with pytest.raises(OpError) as answer:
+                repair(stored, held.KEEP_MINE, item_version=version)
+            assert answer.value.code == held.WRITE_REFUSED
+        else:
+            assert repair(stored, held.KEEP_MINE, item_version=version)["choice"] == held.KEEP_MINE
+    assert (len(held.list_held(stored)), stored_page(stored)[0][0] == file) == (
+        (1, False) if refused else (0, True)
+    )
