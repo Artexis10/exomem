@@ -6750,10 +6750,10 @@ _SEARCH_NOTICE_DEGRADED = "One search method failed, so these results may miss r
 _SEARCH_NOTICE_BUDGET = (
     "Part of this search was skipped to stay within its time limit, so results may be incomplete."
 )
-#: Page and unit hit fields that name an object a second time or label how the index stores it.
-#: The hit's `path` and `unit_ref` are the identifiers the next call takes.
+#: Hit fields that label how the index stores a hit or repeat its unit's parent. A hit keeps `path`,
+#: `ref` and `unit_ref`: `record_episode` takes only refs in `about`, and `read_memory` takes either.
 # nosemgrep: ep-word-set -- this module's own closed wire-field names, not a customer vocabulary.
-_SEARCH_HIT_DROPPED = ("ref", "scope", "parent_ref")
+_SEARCH_HIT_DROPPED = ("scope", "parent_ref")
 
 
 def _search_notice(envelope: Mapping[str, Any]) -> str | None:

@@ -176,8 +176,8 @@ def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.Mo
     payload = r.json()
     assert payload["success"] is True
     find_module.clear_cache()
-    # The reply keeps one identifier per hit (`path`) and no scope label.
-    dropped = {"ref", "scope", "parent_ref"}
+    # The reply keeps a hit's `path` and `ref` and drops the scope label.
+    dropped = {"scope", "parent_ref"}
     expected = [
         {key: value for key, value in h.as_dict().items() if key not in dropped}
         for h in find_module.find(vault, query="metabolism", mode="keyword")

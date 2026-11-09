@@ -104,7 +104,7 @@ class PageHit(TypedDict):
     type: str | None
     title: str
     updated: str
-    # `scope` and `ref` are internal labels: a search reply carries them only for `explain`.
+    # `scope` is an internal label that the agent search reply drops. `ref` stays: `record_episode` takes only refs.
     scope: NotRequired[str | None]
     result_type: NotRequired[Literal["page"]]
     ref: NotRequired[str]
