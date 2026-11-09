@@ -804,7 +804,7 @@ class MediaWorker:
         except extract.ExtractionUnavailable as e:
             error = f"{type(e).__name__}: {e}"
             log.warning("extraction unavailable for %s: %s", job.binary_path.name, e)
-            module = e.missing_module
+            module = e.missing_module if media_engines.stage_available(job.media_type) else None
             committed = self._commit_processing_failure(
                 job,
                 expected_sidecar=expected_sidecar,

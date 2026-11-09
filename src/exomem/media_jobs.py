@@ -3280,9 +3280,7 @@ def _status_job(row: Any) -> dict[str, Any]:
     elif reason == HYDRATION_TOO_LARGE:
         actions[BLOCKED] = _hydration_too_large_action()
     elif reason == ENGINE_UNAVAILABLE:
-        actions[BLOCKED] = media_engines.unavailable_next_action(
-            row["blocked_context"] if "blocked_context" in row.keys() else None
-        )
+        actions[BLOCKED] = media_engines.unavailable_next_action(row["blocked_context"])
     # A stopped reprocess leaves the completed transcript as it was, and a retry would
     # find that transcript complete, so only a new request runs it again.
     reprocess_stopped = (

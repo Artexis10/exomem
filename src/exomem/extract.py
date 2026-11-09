@@ -1547,11 +1547,12 @@ def _extract_document(path: Path, media_type: str) -> ExtractResult:
     except FileConversionException as e:
         # MarkItDown wraps every converter's exception, even a MemoryError under the
         # child's data limit, and records each one's type in `attempts`.
-        causes = _markitdown_attempt_types(e)
-        if any(issubclass(cause, MemoryError) for cause in causes):
+        attempts = _markitdown_attempts(e)
+        if any(issubclass(kind, MemoryError) for kind, _error in attempts):
             raise MediaMemoryExhausted(f"markitdown: {e}") from e
-        if any(issubclass(cause, MissingDependencyException) for cause in causes):
-            raise ExtractionUnavailable(f"markitdown cannot read {media_type}: {e}") from e
+        missing = [error for kind, error in attempts if issubclass(kind, MissingDependencyException)]
+        if missing:
+            raise ExtractionUnavailable(f"markitdown cannot read {media_type}: {e}") from (missing[0] or e)
         # Any other error is about this file: the worker records it as a failed
         # artifact, so a malformed document is not retried as if its engine were missing.
         raise
@@ -1560,42 +1561,36 @@ def _extract_document(path: Path, media_type: str) -> ExtractResult:
 
 
 def _missing_module(error: BaseException) -> str | None:
-    """The top-level package of the first named failed import in `error`'s cause graph.
+    """The top-level package of the first named failed import down `error`'s cause chain.
 
-    Walks `__cause__`, then `__context__`, then the exceptions inside each
-    MarkItDown-style `attempts` entry, breadth-first. A cut to the top-level name
-    keeps `find_spec` from importing a parent package.
+    Follows `__cause__` where set, else `__context__` unless suppressed. A cut to
+    the top-level name keeps `find_spec` from importing a parent package.
     """
     seen: set[int] = set()
-    queue: list[BaseException] = [error]
-    while queue:
-        node = queue.pop(0)
-        if id(node) in seen:
-            continue
+    node: BaseException | None = error
+    while node is not None and id(node) not in seen:
         seen.add(id(node))
         if isinstance(node, ImportError) and node.name:
             return node.name.partition(".")[0]
         if node.__cause__ is not None:
-            queue.append(node.__cause__)
-        if node.__context__ is not None:
-            queue.append(node.__context__)
-        for attempt in getattr(node, "attempts", None) or ():
-            exc_info = getattr(attempt, "exc_info", None)
-            if exc_info is not None and exc_info[1] is not None:
-                queue.append(exc_info[1])
+            node = node.__cause__
+        elif node.__suppress_context__:
+            node = None
+        else:
+            node = node.__context__
     return None
 
 
-def _markitdown_attempt_types(error: BaseException) -> list[type]:
-    """The exception types inside a MarkItDown FileConversionException, nested ones included."""
-    found: list[type] = []
+def _markitdown_attempts(error: BaseException) -> list[tuple[type[BaseException], BaseException | None]]:
+    """(type, exception) pairs inside a MarkItDown FileConversionException, nested ones included."""
+    found: list[tuple[type[BaseException], BaseException | None]] = []
     for attempt in getattr(error, "attempts", None) or ():
         exc_info = getattr(attempt, "exc_info", None)
         if not exc_info or exc_info[0] is None:
             continue
-        found.append(exc_info[0])
+        found.append((exc_info[0], exc_info[1]))
         if exc_info[1] is not None and getattr(exc_info[1], "attempts", None):
-            found.extend(_markitdown_attempt_types(exc_info[1]))
+            found.extend(_markitdown_attempts(exc_info[1]))
     return found
 
 
