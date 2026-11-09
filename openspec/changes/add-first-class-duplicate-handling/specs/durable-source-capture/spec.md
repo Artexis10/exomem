@@ -64,7 +64,7 @@ File handles keep the existing `already_stored` outcome, which the preservation 
 
 ### Requirement: A shared URL with different text is surfaced and never blocks
 
-After writing a new capture that carries a URL, `capture_source` SHALL look up live Sources that the caller can read and that share the capture's canonical URL. The canonical form SHALL lowercase the scheme and host, drop a default port and the fragment, and keep the path and query exactly. When one or more such Sources exist and none holds an identical payload, the result SHALL carry a `same_url` advisory naming up to five of them (ref, path, capture date, title) and their total count. The capture SHALL still be written, and nothing SHALL be reused, superseded or changed. When an identical payload exists, reuse applies and no `same_url` advisory is added. Choosing between the captures, or recording a correction, remains the caller's decision.
+For a new capture that carries a URL, `capture_source` SHALL look up, in the same boundary hold as the write, live Sources that the caller can read and that share the capture's canonical URL. The canonical form SHALL lowercase the scheme and host, drop a default port and the fragment, and keep the path and query exactly. When one or more such Sources exist and none holds an identical payload, the result SHALL carry a `same_url` advisory naming up to five of them (ref, path, capture date, title) and their total count. The capture SHALL still be written, and nothing SHALL be reused, superseded or changed. When an identical payload exists, reuse applies and no `same_url` advisory is added. Choosing between the captures, or recording a correction, remains the caller's decision.
 
 #### Scenario: A page changed since its first capture
 
