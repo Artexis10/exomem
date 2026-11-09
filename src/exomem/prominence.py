@@ -218,10 +218,13 @@ _GLOBAL_STANCE_CAPTURE = (
     "Authorize each promoted unit; keep scoped rules local. "
 )
 
-#: A correction the user states is durable at once: an uncorrected note keeps recommending what the
-#: user already found wrong, and recall returns it as authoritative. Command-free, so a reduced
-#: surface keeps it.
-_CORRECTION_CAPTURE = "When the user says stored advice failed or a claim is wrong, correct or supersede that note now."
+#: A correction the user states is durable: an uncorrected note keeps recommending what the user
+#: already found wrong, and recall returns it as authoritative. Scoped by `proactive_capture`, so
+#: advisory offers the fix and silent makes it. `balanced`, `maximal` and the activation block share it.
+_CORRECTION_CAPTURE = (
+    "Stored advice the user says failed, or a claim they correct, is durable: correct it under "
+    "proactive_capture."
+)
 
 #: The durable-baseline doctrine that `balanced` and `maximal` share word for word, and the
 #: activation `capture_policy` block repeats. Product doctrine, not vault data: one source, so
@@ -433,6 +436,8 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "entity with reusable facts, or method that was carried out with a reported "
             "result. Not "
             "mid-thought exploration, tangents, or unresolved questions. "
+            + _CORRECTION_CAPTURE
+            + " "
             + _BASELINE_CAPTURE
             + " A concise observation or "
             "narrow Entity facet follows proactive_capture. Route stated intent to "
@@ -451,8 +456,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
         level="maximal",
         recall=(
             ACTIVATION_CARRIER_LINE + " "
-            "Search memory before answering any substantive turn, not only those "
-            "that obviously reference prior work. Assume the knowledge base may hold "
+            "Search memory before answering any substantive turn. Assume the knowledge base may hold "
             "something relevant until a search says otherwise. Skip only pure "
             "chit-chat and control messages."
         ),
@@ -464,11 +468,12 @@ CONTRACTS: dict[str, ProminenceContract] = {
             "a decision, a resolved problem, a diagnosed failure, a reusable pattern, "
             "a fact about a central or recurring entity, or a method you actually ran and "
             "how it turned out. "
+            + _CORRECTION_CAPTURE
+            + " "
             + _BASELINE_CAPTURE
             + " A concise observation "
             "or narrow Entity facet follows proactive_capture. When torn between "
             "capturing and letting it pass, capture. "
-            "Prefer a real page over a mental note; do not wait to be asked. "
             "Route stated intent to Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
