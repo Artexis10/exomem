@@ -1656,6 +1656,16 @@ def test_a_write_with_its_own_next_step_carries_the_sweep_ask_after_it() -> None
     assert compact["unpaged_mentions"] == CAPTURE_SWEEP_LEAF["unpaged_mentions"]
 
 
+def test_a_closed_next_step_value_keeps_its_value_and_the_sweep_ask_sits_beside_it() -> None:
+    mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
+    terminal["next_action"] = "resume"
+
+    compact = mutation_terminal.project_terminal(terminal, "compact")
+
+    assert compact["next_action"] == "resume"
+    assert compact["capture_next"] == mutation_terminal.CAPTURE_SWEEP_NEXT
+
+
 def test_full_detail_carries_the_producers_capture_sweep_block() -> None:
     mutation_terminal, terminal = _committed_terminal_with_leaf(_sweep_leaf(None))
 

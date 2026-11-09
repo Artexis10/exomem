@@ -2468,11 +2468,16 @@ def _agent_reply(
     }
     if capture_sweep is not None:
         # A write's own step (a guarded write waiting for review) is a sentence; the sweep's ask
-        # follows it in the same `next_action`, so neither is lost.
+        # follows it in the same `next_action`, so neither is lost. A step that is one closed
+        # protocol value (a curation run's `resume`, `apply`) takes no prose, so the ask sits
+        # beside it. The check is the value's shape, one token, not its meaning.
         own_step = reply.get("next_action")
-        reply["next_action"] = (
-            f"{own_step} {CAPTURE_SWEEP_NEXT}" if isinstance(own_step, str) else CAPTURE_SWEEP_NEXT
-        )
+        if not isinstance(own_step, str):
+            reply["next_action"] = CAPTURE_SWEEP_NEXT
+        elif len(own_step.split()) == 1:
+            reply["capture_next"] = CAPTURE_SWEEP_NEXT
+        else:
+            reply["next_action"] = f"{own_step} {CAPTURE_SWEEP_NEXT}"
         if mentions := capture_sweep.get("unpaged_mentions"):
             # Names this page reached for that have no page: data the sweep acts on, not rule text.
             reply["unpaged_mentions"] = list(mentions)
