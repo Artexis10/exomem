@@ -236,7 +236,7 @@ class FrontmatterCache:
         return tuple(stale)
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
-        stored = _stored_relative(path, vault_root)
+        stored = stored_relative(path, vault_root)
         if stored is not None:
             return self._get_stored(path, vault_root, stored)
         snapshot = _read_page_snapshot(path, vault_root)
@@ -356,7 +356,7 @@ class FrontmatterCache:
         return parsed
 
 
-def _stored_relative(path: Path, vault_root: Path) -> str | None:
+def stored_relative(path: Path, vault_root: Path) -> str | None:
     """The vault-relative path of ``path`` when the store serves that page, else None: read the
     file.
 
@@ -462,8 +462,9 @@ class StoreCorpus:
     revision: int
     #: The stored pages of the scope, in path order.
     pages: tuple[PageMeta, ...]
-    #: The walk of the disk for this scope; it runs once for each pass over ``other_paths``.
-    disk: Callable[[], Iterable[Path]] = field(repr=False)
+    #: The walk of the disk for this scope; it runs once for each pass over ``other_paths``, with
+    #: the ``skip`` test that drops a stored page's projected file unstatted.
+    disk: Callable[..., Iterable[Path]] = field(repr=False)
 
     def __iter__(self):
         for meta in self.pages:
@@ -471,17 +472,21 @@ class StoreCorpus:
         yield from self.other_paths()
 
     def other_paths(self):
-        """The walk's files that the store does not own."""
+        """The walk's files that the store does not own.
+
+        The walk never stats the projected file of a stored page: the store decides that page, and
+        its file may lag, be damaged or be absent.
+        """
+        return self.disk(skip=self._owned)
+
+    def _owned(self, path: Path) -> bool:
         from .vault_store import ownership
 
-        for path in self.disk():
-            try:
-                rel = relative_posix(path, self.vault_root)
-            except ValueError:
-                yield path
-                continue
-            if ownership.classify(rel) is not ownership.Ownership.PAGE:
-                yield path
+        try:
+            rel = relative_posix(path, self.vault_root)
+        except ValueError:
+            return False
+        return ownership.classify(rel) is ownership.Ownership.PAGE
 
     def signature_lookup(self) -> Callable[[Path], freshness.FileSignature]:
         """The change signature of each page: the store's row for a stored page, the stat of any
@@ -520,12 +525,14 @@ def store_serves(vault_root: Path) -> bool:
     return mode.store_mode_for_reads(vault_root)
 
 
-def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[[], Iterable[Path]]):
+def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[..., Iterable[Path]]):
     """The page paths of ``scope`` ("kb" or "vault"): ``disk_walk()`` in file mode, a
     ``StoreCorpus`` in store mode.
 
     A caller hands over its own walk of the disk, as a function, so that a file-mode vault pays only
-    a read of the mode records and calls the walk it always called.
+    a read of the mode records and calls the walk it always called. In store mode the walk also
+    takes ``skip=``, the test that drops a stored page's file unstatted (``walk_md``'s ``skip``), so
+    a caller passes its keywords on: ``lambda **walk: walk_md(root, **walk)``.
     """
     from .vault_store import read
 
@@ -650,20 +657,31 @@ def walk_name_admits(name: str, *, directory: bool) -> bool:
     return Path(name).suffix.lower() == ".md" and not is_sync_conflict_copy(name)
 
 
-def walk_md(root: Path, *, on_error: Callable[[OSError], None] | None = None):
+def walk_md(
+    root: Path,
+    *,
+    on_error: Callable[[OSError], None] | None = None,
+    skip: Callable[[Path], bool] | None = None,
+):
     """Yield every .md path under root, skipping excluded subtrees.
 
     Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
     duplicates that would otherwise pollute the index and search results.
     `on_error` receives every directory or entry the walk could not read, so a
     caller can tell an incomplete walk from a whole one; without it the walk
-    stays best-effort.
+    stays best-effort. `skip` is asked about each Markdown-named entry before
+    the walk stats it, and an entry that it takes is dropped unstatted.
     """
-    for path, _info in walk_md_with_stat(root, on_error=on_error):
+    for path, _info in walk_md_with_stat(root, on_error=on_error, skip=skip):
         yield path
 
 
-def walk_md_with_stat(root: Path, *, on_error: Callable[[OSError], None] | None = None):
+def walk_md_with_stat(
+    root: Path,
+    *,
+    on_error: Callable[[OSError], None] | None = None,
+    skip: Callable[[Path], bool] | None = None,
+):
     """`walk_md`, yielding `(path, lstat)`: the stat that admitted each page.
 
     A caller that keys on file identity takes it from here instead of statting
@@ -683,6 +701,8 @@ def walk_md_with_stat(root: Path, *, on_error: Callable[[OSError], None] | None 
             return
         for child in children:
             foreground_priority.check_cancelled()
+            if skip is not None and walk_name_admits(child.name, directory=False) and skip(child):
+                continue
             kind, info = _classify_walk_entry(anchor, child, reserved_paths, on_error)
             if kind == "dir":
                 yield from walk(child)
@@ -782,6 +802,34 @@ def _read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
 def read_page_bytes(path: Path, vault_root: Path) -> bytes | None:
     """The bytes the parser reads for one page, or None when it cannot be read."""
     return _read_page_bytes(path, vault_root)
+
+
+@dataclass(frozen=True, slots=True)
+class PageStat:
+    """The fields of a page's stat that a cache key reads."""
+
+    st_mtime: float
+    st_mtime_ns: int
+    st_size: int
+
+
+def page_stat(path: Path, vault_root: Path) -> PageStat:
+    """What a stat of the page at ``path`` gives: the store's row when the store serves that page,
+    else the file's own stat.
+
+    A stored page's file may lag a commit, be damaged or be absent, so a cache key built on its stat
+    would key on the wrong bytes. A page that the store serves but lacks raises
+    ``FileNotFoundError``, as a stat of a missing file does.
+    """
+    rel = stored_relative(path, vault_root)
+    if rel is not None:
+        from .vault_store import read
+
+        meta = read.owned_meta(vault_root, rel)
+        if meta is not None:
+            return PageStat(meta.mtime_ns / 1e9, meta.mtime_ns, meta.size)
+    found = path.stat()
+    return PageStat(found.st_mtime, found.st_mtime_ns, found.st_size)
 
 
 def page_relative_path(path: Path, vault_root: Path) -> str:

@@ -187,6 +187,36 @@ def admitted_catalog_scope(vault_root: Path):
         _ADMITTED_CATALOG.reset(token)
 
 
+#: Set while one request reads a vault whose pages the store holds.
+_CATALOGUE_RETIRED: ContextVar[bool] = ContextVar("catalogue_retired_for_store", default=False)
+
+
+@contextlib.contextmanager
+def catalogue_retired_scope(vault_root: Path):
+    """Retire the catalogue for one request that reads a store-mode vault.
+
+    The catalogue is built from files, so it never covers pages that only the store holds, and a
+    repair of it never converges. Inside this scope ``backend()`` answers ``python``, the documented
+    rung that reads the corpus and not the catalogue, and the corpus of a store-mode vault is the
+    store's. A vault that is not in store mode changes nothing.
+    """
+    from . import find_corpus
+
+    if not find_corpus.store_serves(vault_root):
+        yield
+        return
+    token = _CATALOGUE_RETIRED.set(True)
+    try:
+        yield
+    finally:
+        _CATALOGUE_RETIRED.reset(token)
+
+
+def catalogue_retired() -> bool:
+    """Whether the request in this context reads a store-mode vault, so no catalogue serves it."""
+    return _CATALOGUE_RETIRED.get()
+
+
 def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -> None:
     """Bind only checkpoints already admitted by this recall's policy proof."""
     root = Path(vault_root).resolve()
@@ -1628,7 +1658,12 @@ def backend() -> str:
 
     Unrecognized values fall back to `auto` — a typo must not silently disable
     the in-process escape hatch someone reached for, nor hard-fail search.
+
+    A request that reads a store-mode vault gets ``python`` whatever the variable says
+    (``catalogue_retired_scope``).
     """
+    if _CATALOGUE_RETIRED.get():
+        return "python"
     raw = (os.environ.get("EXOMEM_LEXICAL_BACKEND") or "").strip().lower()
     return raw if raw in ("fts5", "python") else "auto"
 
@@ -11066,7 +11101,9 @@ class LexicalStore:
         ``schedule_repair=False`` makes an ``allow_delta=False`` call a pure
         proof, so repeated health probes cannot create sequential rebuilds.
         Every non-`available` outcome is reported (never raised); raw SQLite is
-        classified here and never escapes this seam.
+        classified here and never escapes this seam. The one exception is a
+        vault whose state manifest cannot be read: the mode lookup raises, as it
+        does for every reader that asks the mode, and this seam does not catch it.
         """
         from . import freshness as freshness_module
 

@@ -212,9 +212,15 @@ def is_connectable_target(
 
 def is_managed_governed_path(vault_root: Path, path: Path | str) -> bool:
     """Return whether ``path`` resolves inside the configured governed subtree."""
+    from . import find_corpus
+
     root = Path(vault_root)
     candidate = Path(path)
     absolute = candidate if candidate.is_absolute() else root / candidate
+    if find_corpus.stored_relative(absolute, root) is not None:
+        # The store owns only pages below the governed folder, and its page has no file to resolve:
+        # the file at that path is a projection, and resolving it would follow a stray link.
+        return True
     try:
         # The subtree root is configuration, so a scope may reuse it; the candidate resolves live.
         governed = state_paths.resolved_vault_path(kb_root(root), expanduser=False)

@@ -1378,6 +1378,9 @@ def resolve_physical_relative(
     itself.
     """
 
+    stored = _stored_key(vault_root, value)
+    if stored is not None:
+        return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
@@ -1408,6 +1411,23 @@ def resolve_physical_relative(
                     if parent_path in ("", ".")
                     else f"{parent_path}/{physical_leaf}"
                 )
+
+
+def _stored_key(vault_root: Path, value: object) -> str | None:
+    """The store key of the page that ``value`` names when the store serves it, else None: look on
+    the disk.
+
+    The store holds one spelling of each page, so no physical alias can collide. A page that the
+    store serves but lacks is MISSING, as a file that is gone is.
+    """
+    from .vault_store import read
+
+    parent, leaf = _leaf_spelling(value)
+    rel = leaf if parent == "." else f"{parent}/{leaf}"
+    try:
+        return rel if read.owned_meta(Path(vault_root), rel) is not None else None
+    except FileNotFoundError as error:
+        raise ReservedPathLeafError("MISSING") from error
 
 
 def physical_spelling_refusal(vault_root: Path, value: object) -> tuple[str, str] | None:

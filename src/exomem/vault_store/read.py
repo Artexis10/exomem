@@ -226,9 +226,11 @@ class _RequestScope:
     view: StoreSnapshot
 
 
-#: The open request scope of this context. A connection cannot cross threads, so a worker thread that
-#: inherits the context still opens its own snapshot (see ``snapshot``).
-_REQUEST: ContextVar[_RequestScope | None] = ContextVar("vault_store_request_snapshot", default=None)
+#: The open request scope of this context. A connection cannot cross threads, so a worker thread
+#: that inherits the context still opens its own snapshot (see ``snapshot``).
+_REQUEST: ContextVar[_RequestScope | None] = ContextVar(
+    "vault_store_request_snapshot", default=None
+)
 
 
 @contextmanager

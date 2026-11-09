@@ -685,7 +685,29 @@ class ReferenceIndex:
     def _refs_for_paths_batch(
         self, wanted: list[str], *, recall_reader: bool = False
     ) -> dict[str, str | None]:
-        """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned."""
+        """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned.
+
+        In store mode the store's identity rows answer for each page that the store owns: they are
+        written with the page, so no sidecar is read or rebuilt and no file is read to fill a miss.
+        A page that the store does not own keeps the sidecar's route below.
+        """
+        from .vault_store import mode, ownership, read
+
+        if not mode.store_mode_for_reads(self.vault_root):
+            return self._refs_for_paths_from_sidecar(wanted, recall_reader=recall_reader)
+        owned = [p for p in wanted if ownership.classify(p) is ownership.Ownership.PAGE]
+        resolved: dict[str, str | None] = {}
+        if owned:
+            with read.snapshot(self.vault_root) as view:
+                resolved, _indexed = self._refs_from_connection(view.connection, owned)
+        rest = [path for path in wanted if path not in resolved]
+        if rest:
+            resolved.update(self._refs_for_paths_from_sidecar(rest, recall_reader=recall_reader))
+        return resolved
+
+    def _refs_for_paths_from_sidecar(
+        self, wanted: list[str], *, recall_reader: bool = False
+    ) -> dict[str, str | None]:
         conn = self._current_readonly_connection()
         if conn is None:
             if recall_reader:

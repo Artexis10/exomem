@@ -10,10 +10,17 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
+from test_vault_store_migration import (
+    ALPHA,
+    BETA,
+    build_indexes,
+    migrate_apply,
+    vault,  # noqa: F401
+)
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 
 from exomem import __main__ as cli
@@ -21,6 +28,9 @@ from exomem import commands, get_page, lexstore, list_directory, project_keys, w
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.collection_store import connection
+from exomem.find_types import Hit
+from exomem.governance import egress
+from exomem.governance.principal import RequestPrincipal
 from exomem.vault_store import ownership, write
 from exomem.vocabulary import registry
 
@@ -152,6 +162,122 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
     assert scheduled == []
 
 
+UNIT = "\n- [constraint] The lantern stays lit until dawn. ^lit\n"
+
+
+def derived_row_answers(root):
+    """What each catalogue reader of find answers, as plain data: keyword, browse, a category
+    filter, the unit lane and the vault scope."""
+
+    def found(**keywords):
+        hits = find_module.find(
+            root, limit=50, graph=False, rerank=False, mode="keyword", **keywords
+        )
+        return [(getattr(hit, "path", None) or hit.parent_path) for hit in hits]
+
+    return {
+        "keyword": found(query="lantern"),
+        "keyword and type": found(query="lighthouse", types=["note"]),
+        "browse": found(query="", types=["note"]),
+        "category": found(query="", categories=["constraint"]),
+        "units": found(query="lantern dawn", result_level="unit"),
+        "mixed": found(query="lantern dawn", result_level="mixed"),
+        "vault scope": found(query="lantern", scope="vault"),
+    }
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("damage", DAMAGE)
+def test_each_catalogue_reader_answers_from_the_store_as_it_answers_in_file_mode(
+    vault, damage, monkeypatch  # noqa: F811
+):
+    """A reader that still takes the sidecar that files built, or the projected file, for the
+    store's rows: it refuses, answers empty or serves the poison, where file mode answers the same
+    bytes."""
+    for index in range(GENERATED):
+        rel, body = generated_page(index)
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_bytes(body + UNIT.encode() if index % 5 == 0 else body)
+    build_indexes(vault)
+    find_module.clear_cache()
+    in_file_mode = derived_row_answers(vault)
+    assert all(in_file_mode.values()), "each reader must have something to answer"
+    assert migrate_apply(vault) == 0
+
+    damage_every_owned_projection(vault, damage)
+    sidecar = lexstore.lexical_path(vault)
+    sidecar.unlink()
+    sidecar.write_bytes(SENTINEL)  # a read of the file-built catalogue fails
+    find_module.clear_cache()
+    scheduled = []
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: scheduled.append(1))
+
+    assert derived_row_answers(vault) == in_file_mode
+    assert scheduled == []
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("damage", ("poisoned", "deleted"))
+def test_a_store_mode_read_stats_no_stored_page_and_schedules_no_repair(
+    stored, writer, damage, monkeypatch  # noqa: F811
+):
+    """A read path that still checks a stored page's file (a freshness witness, an mtime key, a
+    first-use sync) pays a stat for every page on every request, and keys its answer on a file that
+    the store does not hold."""
+    for index in range(GENERATED):
+        write.commit(writer, put(*generated_page(index)))
+    damage_every_owned_projection(stored, damage)
+    find_module.clear_cache()
+    repairs, stats = [], []
+
+    def watching(real):
+        def watched(path, *arguments, **keywords):
+            try:
+                rel = Path(path).relative_to(stored).as_posix()
+            except (TypeError, ValueError):
+                rel = None  # a descriptor, or a path outside the vault
+            if rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE:
+                stats.append(rel)
+            return real(path, *arguments, **keywords)
+
+        return watched
+
+    monkeypatch.setattr(os, "stat", watching(os.stat))
+    monkeypatch.setattr(os, "lstat", watching(os.lstat))
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: repairs.append(1))
+    monkeypatch.setattr(lexstore, "request_repair", lambda *args, **kwargs: repairs.append(1))
+
+    derived_row_answers(stored)
+    find_module.find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+    commands.op_ask_memory(stored, query="lighthouse", limit=15)
+
+    assert stats == []
+    assert repairs == []
+
+
+@pytest.mark.parametrize("catalogue_off", ("the python backend", "a SQLite build without FTS5"))
+def test_a_store_vault_reads_the_store_corpus_for_its_lexical_lanes_with_the_catalogue_off(
+    stored, writer, catalogue_off, monkeypatch  # noqa: F811
+):
+    """A routing that waits for the file catalogue to be usable: with the catalogue off, the lexical
+    lanes of a store-mode vault fall back to a build from files that never covers the store."""
+    for index in range(GENERATED):
+        write.commit(writer, put(*generated_page(index)))
+    if catalogue_off == "the python backend":
+        monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    else:
+        monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    find_module.clear_cache()
+
+    asked = commands.op_ask_memory(stored, query="lighthouse", limit=15, include_timings=True)
+
+    assert any(hit["path"].startswith("Knowledge Base/Notes/Gen/") for hit in asked["hits"])
+    assert asked["timings"]["profile"]["lexical_lanes"] == {
+        "corpus": "store",
+        "catalogue": "bypassed",
+    }
+
+
 def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolver(
     stored, writer  # noqa: F811
 ):
@@ -202,6 +328,55 @@ def test_a_find_request_reads_one_store_snapshot_however_many_pages_it_reads(
     many = snapshots_for_one_find(60)
 
     assert many == few
+
+
+def test_a_store_page_tagged_into_a_restricted_scope_is_withheld_whatever_its_projected_file_says(
+    stored, writer  # noqa: F811
+):
+    """A decision read from the projected file releases a page that the store already holds in a
+    restricted scope (the file still has the old tags, or none), and withholds an open page whose
+    file has not been written yet."""
+    governance = stored / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir()
+    (governance / "scopes" / "secret.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Secret\ntags: ["secret"]\n'
+    )
+    (governance / "rules" / "secret-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 0\n'
+    )
+    restricted = "Knowledge Base/Notes/Gen/Restricted.md"
+    open_page = "Knowledge Base/Notes/Gen/Open.md"
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED,
+            "test",
+            puts=(
+                write.PagePut(
+                    restricted,
+                    b"---\ntitle: R\ntype: note\ntags: [secret]\n---\n# R\n\nHeld back.\n",
+                ),
+                write.PagePut(open_page, b"---\ntitle: O\ntype: note\n---\n# O\n\nOpen.\n"),
+            ),
+        ),
+    )
+    # The restricted page's file is a stale projection from before the retag; the open page has
+    # none.
+    (stored / restricted).parent.mkdir(parents=True, exist_ok=True)
+    (stored / restricted).write_bytes(b"---\ntitle: R\ntype: note\n---\n# R\n\nHeld back.\n")
+    hits = [
+        Hit(path=rel, type="note", scope="proj", title="t", updated="2026-01-01", excerpt="e",
+            bm25_rank=1, vector_score=0.5)
+        for rel in (restricted, open_page)
+    ]
+
+    released = egress.annotate_hits(
+        stored, hits, principal=RequestPrincipal(audience_id="external", surface="mcp"), limit=5
+    )
+
+    assert [hit.path for hit in released.hits] == [open_page]
 
 
 def test_warm_and_status_leave_no_sidecar_and_status_reports_the_store(

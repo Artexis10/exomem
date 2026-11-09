@@ -249,6 +249,18 @@ _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
 _FIND_CACHE_DELTA_PATH_CAP = 64
 
 
+def _managed_reader() -> bool:
+    """Whether the managed runtime's catalogue contract governs this request's reads.
+
+    A request that reads a store-mode vault is not under it: no catalogue covers the store's pages,
+    so the request reads the store's corpus (`lexstore.catalogue_retired_scope`) and no warm-up or
+    repair can make a catalogue answer for it.
+    """
+    from . import lexstore, readiness
+
+    return bool(readiness.runtime_managed()) and not lexstore.catalogue_retired()
+
+
 def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
     """Permit a cold inline sidecar build only for a provably small corpus.
 
@@ -259,9 +271,10 @@ def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
     build to and a typed warming outcome to answer with; an offline caller has
     neither, so it keeps the bounded inline build.
     """
-    from . import readiness
+    from . import lexstore
 
-    if readiness.runtime_managed():
+    # A repair rebuilds the catalogue from files; the store-mode request has no catalogue to repair.
+    if _managed_reader() or lexstore.catalogue_retired():
         return False
     return bool(
         freshness_key
@@ -698,8 +711,6 @@ class FreshnessSnapshot:
         self, scope: str, admit_path: Callable[[str], bool],
         *, page_of: Callable[[str], ParsedPage | None] | None,
     ) -> set[str]:
-        from . import readiness
-
         candidates = {
             path for path in self.recall_paths(scope)
             if scope == "vault" or path.startswith(kb_prefix())
@@ -736,7 +747,7 @@ class FreshnessSnapshot:
                 )
                 parents = {path: row.parent for path, row in metadata.items()}
         except RetrievalIndexWarming:
-            if readiness.runtime_managed():
+            if _managed_reader():
                 raise
             if self._timings is not None and (stage := self._timings.current_stage()) is not None:
                 self._timings.mark_source(stage, find_types.SOURCE_COMPUTED)
@@ -1019,13 +1030,13 @@ def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
     `vault.walk_vault_md` still reaches it.
     """
 
-    def disk() -> Iterable[Path]:
+    def disk(**walk: Any) -> Iterable[Path]:
         if scope == "kb":
             kb = vault_root / kb_dirname()
-            return _walk_md(kb) if kb.is_dir() else ()
+            return _walk_md(kb, **walk) if kb.is_dir() else ()
         from .vault import walk_vault_md
 
-        return walk_vault_md(vault_root)
+        return walk_vault_md(vault_root, **walk)
 
     return find_corpus.corpus_paths(vault_root, scope, disk)
 
@@ -1399,9 +1410,13 @@ def _with_catalog_scope(function):
 
         # A store-mode request reads one store revision: the parse cache, the corpus and the
         # admission checks all join this snapshot instead of opening one per page.
-        with lexstore.admitted_catalog_scope(vault_root), store_read.request_snapshot(vault_root):
+        with (
+            lexstore.admitted_catalog_scope(vault_root),
+            store_read.request_snapshot(vault_root),
+            lexstore.catalogue_retired_scope(vault_root),
+        ):
             if (
-                not readiness.runtime_managed() or not freshness.event_indexes_enabled()
+                not _managed_reader() or not freshness.event_indexes_enabled()
                 or lexstore.backend() == "python"
             ):
                 return function(vault_root, *args, **kwargs)
@@ -1714,7 +1729,7 @@ def find(
     from . import lexstore, readiness
 
     catalog_view = lexstore._admitted_catalog_view(vault_root)
-    managed_runtime = readiness.runtime_managed()
+    managed_runtime = _managed_reader()
     if catalog_view is not None:
         from .governance import egress
         from .published_admission import admission_of
@@ -2924,7 +2939,7 @@ def _eligible_unit_records(
         ):
             continue
         try:
-            state = semantic_index.selected_parent_index_state(vault_root, page.path)
+            state = semantic_index.selected_parent_index_state(vault_root, page.rel_path)
         except (OSError, UnicodeError, ValueError) as error:
             log.warning(
                 "semantic-unit retrieval parse failed for %s: %s",
@@ -3121,8 +3136,6 @@ def _select_indexed_unit_records(
     scope: str, freshness_key: tuple | None, stale_out: list[str] | None = None,
     parent_reads: UnitParentReads | None = None, recall_checkpoint: Any | None = None,
 ) -> dict[str, tuple[Any, Any, int]]:
-    from . import readiness
-
     if not indexed:
         return {}
     try:
@@ -3131,7 +3144,7 @@ def _select_indexed_unit_records(
             freshness_key=freshness_key, plan=plan, recall_checkpoint=recall_checkpoint,
         )
     except (RetrievalIndexWarming, structured_filters.FilterError):
-        if readiness.runtime_managed():
+        if _managed_reader():
             raise
         return _hydrate_indexed_unit_records(
             vault_root, indexed, plan=plan, stale_out=stale_out, parent_reads=parent_reads,
@@ -3775,7 +3788,8 @@ def _find_semantic_units(
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
-    if mode in {"keyword", "hybrid", "vector"}:
+    # A store-mode request has no catalogue to seed from: the oracle below reads the store's corpus.
+    if mode in {"keyword", "hybrid", "vector"} and not lexstore.catalogue_retired():
         if dnf_clauses is not None:
             # Exact eligibility is normal-table metadata only. Hybrid/vector
             # content ranking consumes this finite candidate set independently,
@@ -4486,7 +4500,7 @@ def _eligible_filter_paths(
                 try:
                     from . import semantic_index
 
-                    state = semantic_index.selected_parent_index_state(vault_root, emitted.path)
+                    state = semantic_index.selected_parent_index_state(vault_root, emitted.rel_path)
                     units = tuple(
                         structured_filters.unit_view(unit, instance=state.instance_id)
                         for unit in state.document.units
@@ -4753,9 +4767,13 @@ def _resolve_eligible_filter_paths(
     full-scan oracle. A CLI user with a cold catalogue must still get an
     answer, including for the fields no index can evaluate.
     """
-    from . import readiness
+    from . import lexstore
 
-    if readiness.runtime_managed():
+    if lexstore.catalogue_retired():
+        # No catalogue covers the store, so the exact oracle reads the store's corpus.
+        _mark_source(timings, "filter_eligibility", find_types.SOURCE_COMPUTED)
+        return _eligible_filter_paths(vault_root, scope=scope, plan=plan, pending=pending)
+    if _managed_reader():
         return _managed_eligible_filter_paths(
             vault_root,
             scope=scope,
@@ -5390,9 +5408,7 @@ def _managed_browse_reader() -> bool:
     change in one place. An offline/CLI caller keeps its documented scan
     fallback and is not under the read-path contract.
     """
-    from . import readiness
-
-    return bool(readiness.runtime_managed())
+    return bool(_managed_reader())
 
 
 def _find_managed_browse(
@@ -5979,17 +5995,18 @@ def _find_semantic(
         lexical_freshness = snapshot.for_scope(scope)
         lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
         lexical_from_store = False
-        if mode != "vector" and lexstore.maintained_content_index_enabled():
+        if mode != "vector":
             if find_corpus.store_serves(vault_root):
                 # The catalogue is built from files, so it never covers the store corpus and an
                 # inline build would present the files as the whole store. Every lexical lane
                 # reads the store corpus instead, so the answer is whole: no notice, only an
-                # owner diagnostic.
+                # owner diagnostic. The store decides this, not the backend switch: the python
+                # rung and a build without FTS5 read the store corpus too.
                 lexical_from_store = True
                 lexical_repair = False
                 if timings is not None:
                     timings.profile["lexical_lanes"] = {"corpus": "store", "catalogue": "bypassed"}
-            elif not lexical_repair:
+            elif lexstore.maintained_content_index_enabled() and not lexical_repair:
                 catalog = lexstore.get_store(vault_root).catalog_readiness(
                     scope,
                     lexical_freshness,
@@ -6810,9 +6827,9 @@ def _find_outside_kb(
     """
     if not query_norm or limit < 1:
         return []
-    from . import bm25, lexstore, readiness
+    from . import bm25, lexstore
 
-    managed = readiness.runtime_managed()
+    managed = _managed_reader()
     if managed and snapshot is not None and snapshot.projection_is_lagging("vault"):
         # Ordinary recall can use its proven pending overlay, but widening has
         # no such overlay and requires the current vault catalogue. Its cache

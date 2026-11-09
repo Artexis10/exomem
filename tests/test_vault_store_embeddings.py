@@ -217,8 +217,8 @@ def test_before_the_drain_runs_the_vector_lane_leaves_out_the_edited_page_and_le
 
     assert ALPHA not in hit_paths(stored, "lighthouse keeper tide")
     assert BETA in hit_paths(stored, "lighthouse keeper tide"), "the pages that did not change stay"
-    # In store mode find's lexical lanes read the store corpus, not the file catalogue.
-    found = find.find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+    # "harbour pilot" is only in the edited bytes: a lexical lane that reads the old page misses it.
+    found = find.find(stored, query="harbour pilot", limit=15, graph=False, rerank=False)
     assert ALPHA in [hit.path for hit in found], "find keeps the edited page through its lexical lane"
 
     catch_up(stored)
