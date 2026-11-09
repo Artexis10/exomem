@@ -326,7 +326,7 @@ def test_check_by_is_taught_as_a_due_date_not_an_expiry(vault: Path) -> None:
 def test_taught_kinds_are_governed_block_types(vault: Path) -> None:
     kinds = _contract(vault)["vocabulary"]["kinds"]
 
-    assert set(kinds) == {"open_question", "hypothesis", "prediction"}
+    assert set(kinds) == {"open_question", "hypothesis", "prediction", "belief"}
     for kind, description in kinds.items():
         assert kind in semantic_blocks.BLOCK_TYPES, kind
         assert description

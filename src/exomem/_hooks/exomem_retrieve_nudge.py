@@ -1852,6 +1852,7 @@ def _packet_lines(packet: dict) -> list[str]:
             # These are closed semantic-metadata rows, rendered without interpreting prose: the
             # judgment, the revisit date, whose claim it is, how it binds and whose belief at
             # what strength. This standalone hook cannot import the language's key list.
+            # nosemgrep: ep-word-set -- closed metadata keys of the unit language, fixed by its spec
             for key in (
                 "verdict", "check_by", "asserted_by", "modality", "credence_holder", "credence",
             ):

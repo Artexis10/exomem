@@ -272,7 +272,7 @@ def test_a_verdict_label_normalizes_to_its_key(tmp_path: Path, authored: str) ->
 
 
 @pytest.mark.parametrize("authored", ["probably-wrong", "0.7", "70%"])
-def test_a_refused_verdict_names_the_registered_verdicts_and_refuses_a_number(
+def test_a_refused_verdict_names_the_registered_verdicts_and_the_belief_unit(
     tmp_path: Path, authored: str
 ) -> None:
     registry = _add_retracted_verdict(tmp_path)
@@ -284,6 +284,8 @@ def test_a_refused_verdict_names_the_registered_verdicts_and_refuses_a_number(
         assert key in error.remediation
     assert "retracted" in error.remediation
     assert "probability is not a verdict" in error.remediation
+    assert "## Belief" in error.remediation
+    assert "credence_holder" in error.remediation
 
 
 # --------------------------------------------------------------------------

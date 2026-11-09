@@ -23,10 +23,11 @@
 
 ## 4. Belief and the new keys
 
-- [ ] 4.1 Add the `belief` kind, the belief-level registry, the `credence`, `credence_holder` and `credence_basis` keys and the `assesses` relation, with validation that names the missing key and points misplaced rows to the belief form. Point the `invalid_rich_verdict` remediation to the belief form.
-- [ ] 4.2 Add `asserted_by` and `modality`, with context that presents attributed claims and keeps modalities apart.
-- [ ] 4.3 Add `occurred_at`, the three quantity keys and `inference_mode` with its registry.
-- [ ] 4.4 Reserve the new keys, with warnings for one release on pages that already use them.
+- [x] 4.1 Add the `belief` kind, the belief-level registry, the `credence`, `credence_holder` and `credence_basis` keys and the `assesses` relation, with validation that names the missing key and points misplaced rows to the belief form. Point the `invalid_rich_verdict` remediation to the belief form.
+- [x] 4.2 Add `asserted_by` and `modality`, with context that presents attributed claims and keeps modalities apart.
+- [x] 4.3 Add `occurred_at`, the three quantity keys and `inference_mode` with its registry.
+- [x] 4.4 Reserve the new keys, with warnings for one release on pages that already use them.
+- [ ] 4.5 One release after slice 4 ships, turn the first-release warnings into errors.
 
 ## 5. Dimensions
 

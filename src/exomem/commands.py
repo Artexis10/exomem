@@ -1616,6 +1616,7 @@ def op_bootstrap(
                 "open_question": "a question this store has not answered yet",
                 "hypothesis": "a proposed explanation still under test",
                 "prediction": "a checkable claim about a future observation",
+                "belief": "one holder's level, or sourced probability, for a claim",
             },
             "relations": {
                 "contradicts": "edge to material conflicting with this claim",

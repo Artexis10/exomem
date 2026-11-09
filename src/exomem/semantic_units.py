@@ -1744,8 +1744,12 @@ NO_CONFIDENCE_RULE = (
 
 
 def verdict_remediation(keys: Iterable[str]) -> str:
-    """What a refused unit verdict should become: a registered key or its label."""
-    return f"Use exactly one of {', '.join(keys)}, as the key or its label. {NO_CONFIDENCE_RULE}"
+    """What a refused unit verdict should become: a registered key or its label, or, for a
+    degree of belief, a belief unit."""
+    return (
+        f"Use exactly one of {', '.join(keys)}, as the key or its label. {NO_CONFIDENCE_RULE} "
+        f"{BELIEF_FORM}"
+    )
 
 
 def _rich_verdict(
