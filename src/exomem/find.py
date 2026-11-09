@@ -7354,7 +7354,9 @@ def _keyword_match_paths(
         _record_degradation("keyword_lexical")
     if allowed_paths is not None:
         walk: Iterable[Path] = (
-            vault_root / rel for rel in allowed_paths if scope != "kb" or rel.startswith(kb_prefix())
+            vault_root / rel
+            for rel in allowed_paths
+            if scope != "kb" or rel.startswith(kb_prefix())
         )
     elif scope == "kb" and _kb_missing(vault_root):
         return []
