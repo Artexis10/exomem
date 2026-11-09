@@ -2,17 +2,18 @@
 typed private catalog outcomes.
 
 Pins the design.md Decision 4 / spec *Incomplete Exact Recall Is Observable*
-requirement that REST, MCP, and CLI project the identical shared `OpError`
-envelope for a safe exact-category plan the maintained semantic catalog
-cannot yet answer completely (`RETRIEVAL_INDEX_WARMING`):
+requirement that every surface reports a safe exact-category plan the
+maintained semantic catalog cannot yet answer completely
+(`RETRIEVAL_INDEX_WARMING`). REST and CLI project the shared `OpError`
+envelope; the MCP agent reads one sentence and one retry (`agent_refusal`):
 
 * REST maps the code to HTTP 503 and preserves bounded `retry_after_ms`;
 * the OpenAPI `Error`/`ErrorEnvelope` schema documents and accepts the fixed
   warming fields (`code`, `message`, `remediation`, `status`, `complete`,
   `retry_after_ms`) with no extra keys;
-* MCP (the `bind_vault` tool wrapper) and CLI (`--json`) project the exact
-  same envelope `cli_ops` already builds for REST — no surface invents its
-  own shape or leaks raw query/category/path/exception detail.
+* CLI (`--json`) projects the exact same envelope `cli_ops` already builds for
+  REST, and MCP (the `bind_vault` tool wrapper) names the same code and wait --
+  no surface leaks raw query/category/path/exception detail.
 
 RED until `cli_ops.http_status_for` maps `RETRIEVAL_INDEX_WARMING` to 503 and
 the REST OpenAPI `Error` schema accepts the `complete` field the typed
@@ -147,8 +148,10 @@ def _assert_warming_error(error: dict) -> None:
     assert error["remediation"]
 
 
-def _assert_no_leak(error: dict) -> None:
-    assert set(error) <= _ALLOWED_WARMING_ERROR_KEYS, set(error) - _ALLOWED_WARMING_ERROR_KEYS
+def _assert_no_leak(
+    error: dict, allowed: frozenset[str] = _ALLOWED_WARMING_ERROR_KEYS
+) -> None:
+    assert set(error) <= allowed, set(error) - allowed
     # The discriminator widens the envelope, so hold it to the closed
     # vocabulary: an ad-hoc site string is exactly how content would get in.
     if "site" in error:
@@ -296,12 +299,16 @@ def test_mcp_tool_wrapper_projects_same_warming_envelope(warming_vault: Path) ->
 
     result = wrapped(**_ASK_MEMORY_BODY)
 
-    assert result["success"] is False
-    _assert_warming_error(result["error"])
-    _assert_no_leak(result["error"])
+    assert set(result) == {"error"}
+    error = result["error"]
+    assert error["code"] == "RETRIEVAL_INDEX_WARMING"
+    assert error["message"]
+    assert error["retry"]["tool"] == cmd.name
+    assert 0 < error["retry"]["after_s"] <= 60
+    _assert_no_leak(error, frozenset({"code", "message", "retry"}))
 
 
-def test_mcp_and_rest_project_identical_warming_error(
+def test_mcp_and_rest_report_the_same_warming_code_and_wait(
     warming_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cmd = _ask_memory_command()
@@ -333,7 +340,10 @@ def test_mcp_and_rest_project_identical_warming_error(
         headers={"Authorization": "Bearer sekret"},
     ).json()["error"]
 
-    assert mcp_error == rest_error
+    # REST keeps the shared envelope; the MCP agent reads one sentence and one retry. Both name
+    # the same outcome and the same bounded wait.
+    assert mcp_error["code"] == rest_error["code"]
+    assert mcp_error["retry"]["after_s"] == -(-rest_error["retry_after_ms"] // 1000)
 
 
 # --------------------------------------------------------------------------- #

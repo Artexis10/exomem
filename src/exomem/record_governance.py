@@ -1040,6 +1040,9 @@ class _LinkProjector:
     # from it instead of a walk, and its per-identity owner lookup.
     borrowed: Any | None = None
     owners_of: Callable[[str], tuple[str, ...] | None] | None = None
+    # The retired item paths that this projector's links name, made on the first such link. It
+    # reads each linked collection once for the whole query, however many of its rows are named.
+    retired_links: Any | None = None
 
     @classmethod
     def create(
@@ -1108,6 +1111,14 @@ class _LinkProjector:
                     else _authorize(self.root, relative, policy=self.policy)
                 )
         return seen
+
+    def _retired_target(self, target: str) -> str | None:
+        """The retired item path that the link path `target` names for this reader, or None (design §17)."""
+        if self.retired_links is None:
+            from .collection_store import aliases
+
+            self.retired_links = aliases.LinkTargets(self.root)
+        return self.retired_links(target)
 
     def _memory_target(self, identity: str) -> str | None:
         """The one page this reader may see holding `identity`, else None."""
@@ -1289,14 +1300,14 @@ class _LinkProjector:
                 except vault.UnresolvedWikilinkError:
                     canonical, _warning = vault.normalize_wikilink(
                         inner.split("|", 1)[0].strip(), self.root, resolver=resolver,
-                        visible=visible,
+                        visible=visible, retired=self._retired_target,
                     )
                 except vault.WikilinkError:
                     return False
                 target = canonical.split("#", 1)[0] + ".md"
             elif "/" in raw and not raw.startswith(("/", "\\")):
                 canonical, _warning = vault.normalize_wikilink(
-                    raw, self.root, resolver=self.resolver
+                    raw, self.root, resolver=self.resolver, retired=self._retired_target
                 )
                 if not canonical or "#" in canonical:
                     return False
@@ -1320,11 +1331,9 @@ class _LinkProjector:
                     vault.PathGuard.capture(self.root, relative, leaf_policy="absent")
             except (vault.VaultPathError, vault.PathGuardError):
                 return False
-            # A converted collection's retired item path names its stored row, which the alias read
-            # releases under that collection's governed query (design §17).
-            from .collection_store import aliases
-
-            return self._remember(f"forward:{relative}", aliases.link_target(self.root, relative) is not None)
+            # A converted collection's retired item path names its stored row, which the reader may
+            # see as far as that collection's governed rows release it (design §17).
+            return self._remember(f"forward:{relative}", self._retired_target(relative) is not None)
         except (memory_refs.ReferenceError, vault.PathGuardError):
             return False
         if relative in self.verdicts:

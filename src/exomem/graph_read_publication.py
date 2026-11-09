@@ -344,7 +344,7 @@ def begin_observation(
             state = _states.get(root)
         if state is None:
             return None
-        with state.coordinator.try_hold(operation="graph_observation_begin") as held:
+        with state.coordinator.try_hold(operation="graph_observation_begin", holder_kind="graph") as held:
             if not held:
                 return None
             with _lock:
@@ -386,7 +386,7 @@ def finish_observation(root: Path, observation: _Observation | None) -> None:
         if root != observation.root:
             return
         prior = observation.state
-        with prior.coordinator.try_hold(operation="graph_observation_finish") as held:
+        with prior.coordinator.try_hold(operation="graph_observation_finish", holder_kind="graph") as held:
             if not held:
                 return
             with _lock:
@@ -480,7 +480,7 @@ def _complete_observation(root: Path, pending: _State) -> None:
                 # Keep the descriptor-bound identity; finalization reads no file contents.
                 guard = replace(content, leaf_policy="stable", expected_content_hash=None)
             guards.append((target, guard))
-        with pending.coordinator.try_hold(operation="graph_observation_complete") as held:
+        with pending.coordinator.try_hold(operation="graph_observation_complete", holder_kind="graph") as held:
             if not held:
                 return
             with _lock:

@@ -44,7 +44,7 @@ def test_edit_receipt_hash_chains_without_reading_again(tmp_path: Path, newline:
     assert second["after_hash"] == vault.content_hash(page.read_bytes().decode())
 
 
-def test_observation_compact_preserves_producer_hashes_and_exact_unit_reference(tmp_path: Path):
+def test_observation_compact_keeps_the_next_edit_hash_and_exact_unit_reference(tmp_path: Path):
     page = tmp_path / PAGE
     page.parent.mkdir(parents=True)
     page.write_text(
@@ -55,8 +55,10 @@ def test_observation_compact_preserves_producer_hashes_and_exact_unit_reference(
         tmp_path, path=PAGE, category="fact", content="Certificate received",
     )
     compact = _compact(leaf)
-    for key in ("before_hash", "after_hash", "unit_ref"):
+    for key in ("after_hash", "unit_ref"):
         assert compact[key] == leaf[key]
+    # The next call takes the page's after-hash as `expected_hash`; the before-hash is audit data.
+    assert "before_hash" not in compact
     assert "unit" not in compact
     assert "semantic" not in compact
     assert commands.op_read_memory(tmp_path, path=PAGE, unit_ref=compact["unit_ref"])["status"] == "found"

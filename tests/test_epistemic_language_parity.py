@@ -44,6 +44,7 @@ from exomem import (
     request_budget,
     semantic_contract,
     semantic_index,
+    semantic_language_registry,
     semantic_units,
     sensed_model,
     traversal_profiles,
@@ -1062,6 +1063,7 @@ def _activation(vault: Path, *, body: str = "", front: dict | None = None) -> di
     return activation.measure_document(
         document,
         registry,
+        language=semantic_language_registry.core_registry(),
         project=None,
         page_type=None,
         body_wikilinks=0,

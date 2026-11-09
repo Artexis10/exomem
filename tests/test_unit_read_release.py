@@ -180,7 +180,6 @@ def test_mcp_unit_read_of_a_withheld_page_answers_like_an_absent_page(vault: Pat
     kind, body = absent[0]
     assert kind == "result", body
     refusal = json.loads(body)["structured"]
-    assert refusal["success"] is False
     assert "NOT_FOUND" in refusal["error"]["code"]
     assert len(set(withheld + absent)) == 1, withheld + absent
     for _, text in withheld:

@@ -26,4 +26,4 @@ def test_a_discovery_gap_survives_a_later_truncation(vault: Path, monkeypatch: p
     assert [gap["reason"] for gap in roomy["task_context"]["missing"]] == ["lane_failed"]
     crowded = _activate(vault, _external(), turn="Inspect the optical alignment", max_chars=1300)
     reasons = [gap["reason"] for gap in crowded["task_context"]["missing"]]
-    assert sorted(reasons) == ["lane_failed", "lane_truncated"]
+    assert sorted(reasons) == ["budget", "lane_failed"]

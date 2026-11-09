@@ -613,22 +613,31 @@ def test_a_retry_that_finds_the_file_in_place_flushes_its_folder_and_every_folde
 
 
 RELEASE_WITH_STORE_SCHEMA = "v0.167.0"
-#: Run by the interpreter that imports the released code: it creates the store as that release
-#: did, and puts it in store mode.
+#: Run by the interpreter that imports the released code: it opens the store, which runs that
+#: release's schema steps, then installs what its migration installs on an empty vault: the
+#: owners' tables, their record in ``store_mode_objects`` and the store-mode row. Its route
+#: itself needs the three index sidecars and a lease topology that a bare vault lacks.
 CREATE_A_STORE_AS_RELEASED = """
 import sys
 from pathlib import Path
 
 import exomem
 from exomem.collection_store import connection
+from exomem.vault_store import migrate
 
 released_source, root = Path(sys.argv[1]), Path(sys.argv[2])
 assert Path(exomem.__file__).resolve().is_relative_to(released_source), exomem.__file__
 with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
     with handle.transaction() as tx:
+        lexical, graph, refs = migrate.create_owner_schema(tx)
+        tx.executemany(
+            "INSERT INTO store_mode_objects(name, type) VALUES (?, ?)",
+            list({**lexical, **graph, **refs}.items()),
+        )
         tx.execute(
             "INSERT INTO store_mode(id, mode, revision, changed_at, release) "
-            "VALUES (1, 'store', 0, '2026-11-08 00:00:00', 'released')"
+            "VALUES (1, 'store', 1, '2026-11-08 00:00:00', ?)",
+            (exomem.__version__,),
         )
 """
 

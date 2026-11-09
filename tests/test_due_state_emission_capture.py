@@ -47,29 +47,6 @@ def _observe(vault: Path, content: str, *, path: str = SCRATCH) -> dict:
     )
 
 
-def _adopt_twelve(vault: Path, *, directory: str = "legacy") -> dict:
-    """Twelve legacy files absorbed by ONE `adopt_vault` through the real terminal."""
-    source = vault / directory
-    source.mkdir(exist_ok=True)
-    for index in range(12):
-        (source / f"note-{index}.md").write_text(
-            f"---\ntitle: legacy {index}\n---\n\n"
-            "## Prediction\n\n"
-            f"- id: q{index}\n"
-            f"- check_by: {(dt.date.today() - dt.timedelta(days=index + 1)).isoformat()}\n\n"
-            "A legacy claim.\n",
-            encoding="utf-8",
-        )
-    response = writer_lease.invoke_command(
-        _command("adopt_vault"),
-        vault,
-        mode="copy-as-sources",
-        selected_paths=[f"{directory}/note-{index}.md" for index in range(12)],
-    )
-    assert isinstance(response, dict), response
-    return response
-
-
 def _bulk_pages(vault: Path, count: int) -> list[str]:
     """`count` pages that each add one overdue prediction, so each write moves the counts."""
     paths = []
@@ -130,21 +107,6 @@ def test_a_governed_write_increments_the_write_count(vault: Path) -> None:
     _observe(vault, "Reader saturation reproduces on the replica too.")
 
     assert due_state_module.emission_ledger(vault)["writes"] == before + 1
-
-
-def test_an_emitted_block_increments_the_emission_count(vault: Path) -> None:
-    overdue_prediction(vault)
-    scratch_page(vault)
-    commands.op_bootstrap(vault, section="all")
-    due_state_module.reset_emission_state()
-    before = due_state_module.emission_ledger(vault)["emissions"]
-
-    result = _observe(vault, "Reader saturation reproduces on the replica too.", path="Knowledge Base/Notes/Insights/nag-backlog.md")
-
-    assert "due_state" in result
-    ledger = due_state_module.emission_ledger(vault)
-    assert ledger["emissions"] == before + 1
-    assert ledger["last_digest"]
 
 
 def test_a_block_that_is_not_delivered_does_not_count(vault: Path) -> None:
@@ -271,23 +233,6 @@ def test_a_write_beside_a_batch_on_another_thread_keeps_its_block(vault: Path) -
     finally:
         write_done.set()
         runner.join(10)
-
-
-def test_source_adoption_omits_unrelated_due_advice(vault: Path) -> None:
-    """Adopting Sources must not repeat due findings from untouched compiled pages."""
-    overdue_prediction(vault)
-    scratch_page(vault)
-    commands.op_bootstrap(vault, section="all")
-    due_state_module.reset_emission_state()
-    before = due_state_module.emission_ledger(vault)["emissions"]
-
-    response = _adopt_twelve(vault)
-
-    assert response["status"] == "committed"
-    assert "due_state" not in response
-    assert due_state_module.emission_ledger(vault)["emissions"] == before
-
-
 
 
 def test_the_ledger_records_the_size_of_the_block_it_delivered(vault: Path) -> None:

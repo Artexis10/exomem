@@ -6020,10 +6020,10 @@ def _postfilter(
         if parent_binding is None and "revision_history" in result:
             result = dict(result)
             result.pop("revision_history")
-    # The public terminal schema fixes these state and unit-reference fields.
-    if (isinstance(result, Mapping) and result.get("ok") is True
-            and result.get("state") == "committed" and result.get("status") == "committed"
-            and result.get("terminal") is True and result.get("mutated") is True
+    # A write reply names the unit it added or removed together with the page `path` and that page's
+    # `after_hash`. The binding holds only when the page's current bytes match that hash, so no
+    # other field of the reply is a precondition.
+    if (parent_binding is None and isinstance(result, Mapping)
             and ("unit_ref" in result or "removed_unit_ref" in result)):
         parent_binding = _bind_current_parent(
             vault_root, path=result.get("path"), content_hash=result.get("after_hash"),

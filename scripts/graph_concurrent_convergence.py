@@ -176,13 +176,14 @@ class _Writer(threading.Thread):
             command = SimpleNamespace(name="remember", read_only=False, leaf=leaf)
             started = time.perf_counter()
             try:
-                terminal = manager.invoke(command, (self.vault_root,), {})
-                reported = (
-                    terminal.get("graph_sync", "absent")
-                    if isinstance(terminal, dict)
-                    else "absent"
+                terminal = manager.invoke(
+                    command, (self.vault_root,), {"response_detail": "full"}
                 )
-                dispatch = terminal.get("dispatch", "?") if isinstance(terminal, dict) else "?"
+                # The sync state is an operational field, which only a full reply carries.
+                diagnostics = terminal.get("diagnostics") if isinstance(terminal, dict) else None
+                diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+                reported = (diagnostics.get("operational") or {}).get("graph_sync", "absent")
+                dispatch = diagnostics.get("dispatch", "?")
                 outcome = f"graph_sync={reported} via {dispatch}"
             except Exception as error:  # noqa: BLE001 - a writer failure is a finding
                 outcome = f"error:{type(error).__name__}"

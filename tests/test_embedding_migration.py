@@ -435,7 +435,7 @@ def test_recall_is_marked_warming_until_the_job_first_plans(preseeded_world, mon
         find_module.clear_cache()
         result = commands.op_ask_memory(
             vault, query="retry backoff", limit=5, mode="vector", scope="kb-only", graph=False,
-            rerank=False, detail="compact", result_level="unit",
+            rerank=False, detail="compact", result_level="unit", include_timings=True,
         )
         return {"hits": result} if isinstance(result, list) else result
 
@@ -443,7 +443,10 @@ def test_recall_is_marked_warming_until_the_job_first_plans(preseeded_world, mon
     try:
         assert planning.wait(timeout=60)
         marked = {"components": ["embeddings"], "since_s": None}
-        assert _recall(vault, "retry backoff")["warming"] == marked
+        marked_recall = _recall(vault, "retry backoff")
+        assert marked_recall["warming"] == marked
+        # The agent reads one sentence; the raw block is only for a caller that asked for timings.
+        assert marked_recall["notice"]
         assert unit_recall()["warming"] == marked
     finally:
         proceed.set()  # never leave the job waiting on a vault the fixture deletes
@@ -519,7 +522,7 @@ def _recall(vault: Path, query: str) -> dict:
     find_module.clear_cache()
     result = commands.op_ask_memory(
         vault, query=query, limit=5, mode="vector", scope="kb-only", graph=False, rerank=False,
-        detail="compact",
+        detail="compact", include_timings=True,
     )
     return {"hits": result} if isinstance(result, list) else result
 

@@ -56,12 +56,13 @@ def test_legacy_entity_creation_accepts_absent_correlation(tmp_path, metadata):
                 "name": "Field Station",
                 "slug": "field-station",
                 "summary": "A permanent research organization.",
+                "response_detail": "full",
                 **metadata,
             },
             idempotency_key="legacy-entity-create",
             read_only=False,
         )
-    assert result["state"] == "committed"
-    assert result["receipt_id"]
+    assert result["diagnostics"]["operational"]["state"] == "committed"
+    assert result["diagnostics"]["operational"]["receipt_id"]
     target = vault / "Knowledge Base/Entities/Organizations/field-station.md"
     assert "A permanent research organization." in target.read_text()

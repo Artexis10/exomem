@@ -2439,7 +2439,8 @@ def _upsert_after_write_status(
                 if publication is not None:
                     publication = replace(publication, claims_enabled=True,
                                           claim_checksum=claims.claim_checksum_for_page(
-                                              pages[published_paths[0]][0], type_basis=type_basis
+                                              pages[published_paths[0]][0],
+                                              vault_root=vault_root, type_basis=type_basis,
                                           ))
                     if not publication.current(vault_root, claims_required=True):
                         failure_code = failure_code or "embedding_auxiliary_failed"

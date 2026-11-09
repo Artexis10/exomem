@@ -77,7 +77,11 @@ def test_a_policy_changed_during_a_store_routed_write_applies_to_what_it_release
 
     cover("unrelated-project")
     def append(title):  # a repeated item would replay the first write instead of committing again
-        return {"action": "append", "collection": CID, "item": {"title": title}, "why": "scope"}
+        return {"action": "append", "collection": CID, "item": {"title": title}, "why": "scope",
+                "response_detail": "full"}
 
-    assert released(service.root, who, lambda: None, **append("first"))["affected_paths"] == [PRIVATE]
-    assert released(service.root, who, lambda: cover("private-project"), **append("second"))["affected_paths"] == []
+    def affected(result):
+        return result["diagnostics"]["operational"]["affected_paths"]
+
+    assert affected(released(service.root, who, lambda: None, **append("first"))) == [PRIVATE]
+    assert affected(released(service.root, who, lambda: cover("private-project"), **append("second"))) == []

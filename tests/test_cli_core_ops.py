@@ -615,19 +615,14 @@ def test_adopt_human_renderer_prints_compact_terminal_decisively(capsys) -> None
 
     _print_human(
         {
-            "ok": True,
-            "status": "committed",
-            "mutated": True,
+            "user_summary": "Saved the adoption manifest.",
             "path": "Knowledge Base/_Adoption/manifest.md",
-            "request_id": "11111111-1111-4111-8111-111111111111",
-            "receipt_id": None,
-            "warnings_count": 0,
         },
         op="adopt_vault",
     )
     out = capsys.readouterr().out
 
-    assert '"status": "committed"' in out
+    assert '"user_summary": "Saved the adoption manifest."' in out
     assert "Adoption report" not in out
     assert "Mode: scan-only" not in out
 

@@ -171,14 +171,11 @@ def test_a_resurfacing_signal_keeps_its_original_stamp(vault: Path) -> None:
     assert _ledger(vault) == first, "a resurfacing re-stamped its first-surfaced date"
 
 
-def test_a_legacy_response_that_strips_the_block_never_stamps(vault: Path) -> None:
-    """`legacy` drops the block at the terminal, so nothing was surfaced.
+def test_a_write_reply_never_stamps_the_ledger(vault: Path) -> None:
+    """A write reply carries no due block, so producing one stamps nothing.
 
-    Driven through `project_terminal` at both detail levels on the same leaf,
-    because the earlier version of this test asserted `hasattr(...)` and an
-    empty ledger — which is true of a test that does nothing at all. The A/B is
-    what makes it a claim: same block, same vault, one detail level delivers and
-    stamps, the other returns the bare leaf and stamps nothing.
+    Driven through `project_terminal` at the compact and legacy detail levels on a leaf that still
+    carries a block: neither reply delivers it, so the ledger stays empty.
     """
     from exomem import due_state as due_state_module
     from exomem import mutation_terminal
@@ -192,24 +189,17 @@ def test_a_legacy_response_that_strips_the_block_never_stamps(vault: Path) -> No
 
     def terminal() -> dict:
         return mutation_terminal.committed_terminal(
-            # `_vault` rides INSIDE the block: that is where the terminal
-            # reads it from, and it is a server-internal key the projection
-            # strips before the block reaches the wire.
+            # `_vault` rides INSIDE the block: that is where the terminal reads it from.
             {"path": SCRATCH, "due_state": {**block, "_vault": str(vault)}},
             request_id="request",
             receipt_id="receipt",
             idempotency_key=None,
         )
 
-    legacy = mutation_terminal.project_terminal(terminal(), detail="legacy")
-    assert "due_state" not in legacy, legacy
-    assert _ledger(vault) == {}, "a legacy response stamped the ledger"
-
-    compact = mutation_terminal.project_terminal(terminal(), detail="compact")
-    assert compact["due_state"]["total"] == block["total"], compact
-    stamped = _ledger(vault)
-    assert stamped, "the delivered block did not stamp the ledger"
-    assert {row["surface"] for row in stamped.values()} == {"carrier"}
+    for detail in ("legacy", "compact"):
+        reply = mutation_terminal.project_terminal(terminal(), detail=detail)
+        assert "due_state" not in reply, (detail, reply)
+    assert _ledger(vault) == {}, "a reply stamped the ledger without delivering a block"
 
 
 def test_an_emitted_write_advisory_stamps_the_write_surface(vault: Path) -> None:
