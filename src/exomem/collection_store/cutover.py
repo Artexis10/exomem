@@ -171,14 +171,13 @@ def _conversion_blocker(root, conn, row):
                         path), []
     operation = governance.OperationAuthorization(root, conn, mutation=False)
     try:
-        stored = _stored(root, conn, cid)
-        conversion.summary_form(root, operation, *stored)
+        _, proposed = conversion.summary_form(root, operation, *_stored(root, conn, cid))
     except (collections.CollectionError, types.CollectionTypeError) as error:
         return _blocker(error.code, error.reason, path), []
     finally:
         operation.close()
     return None, [{"code": found.code, "reason": found.reason, "location": found.location}
-                  for found in stored[0].view_diagnostics]
+                  for found in proposed.view_diagnostics]
 
 
 def _vault_blockers(root, steps):
@@ -247,7 +246,10 @@ def _outcome(sealed):
                 "Fix them, then preview again.")
     if not moving:
         return "Every structured collection is already in SQLite-only storage, or stays in files; nothing to do."
-    return (f"{moving} collection(s) would move to SQLite-only storage. The owner applies this plan_id on the "
+    carried = sum(len(row["warnings"]) for row in sealed["collections"])
+    warned = (f" {carried} saved view(s) that already cannot be served move unchanged; each collection's warnings "
+              "name them, so revise them after the cutover." if carried else "")
+    return (f"{moving} collection(s) would move to SQLite-only storage.{warned} The owner applies this plan_id on the "
             f"host: {APPLY}.")
 
 

@@ -576,7 +576,6 @@ def test_a_saved_view_the_collection_already_cannot_serve_warns_and_does_not_blo
         "    count: {type: integer}\n", "    count: {type: integer}\n    stage: {type: enum, enum: [open, done]}\n")
     manifest.write_text(text[:-len("---\n")] + (
         "views:\n  stale:\n    query: {filters: [{column: stage, op: eq, value: archived}], limit: 12}\n---\n"))
-    stop_writer()
 
     code = cutover(root, "--dry-run")
     preview = printed(capsys)
@@ -584,6 +583,7 @@ def test_a_saved_view_the_collection_already_cannot_serve_warns_and_does_not_blo
     [kept] = [row for row in preview["collections"] if row["path"] == KEPT_PATH]
     # The plan names the stale view, so the owner can fix it after the cutover.
     assert [(found["code"], found["location"]) for found in kept["warnings"]] == [("INVALID_SAVED_VIEW", "views.stale")]
+    assert "1 saved view(s)" in preview["outcome"]
     assert apply(root, preview["plan_id"], backup_file(tmp_path)) == 0, capsys.readouterr().err
     assert view_mode(root, KEPT) == "summary"
 
