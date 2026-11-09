@@ -28,17 +28,21 @@ Several title matches narrow by what the operation needs. An edit prefers pages 
 
 ### A guard compares in the leaf, after admission
 
-`expected_hash` accepts the short id or the 64-character hash. The compare stays in the leaf writers, after the write is admitted, through `page_ids.guard_matches`: `edit.load_editable` (shared by `edit`, `multi_edit`, `set_take` and `observe_memory`) and `set_frontmatter_field`. An id names a version by its tail, and the path the caller gave names the page, so the compare reads no page identity and works for a KB-relative path. Nothing reads a page before the leaf admits the write: a read at the command seam would answer a caller who may not see the page, and a withheld page would differ from an absent one.
+`expected_hash` accepts the short id or the 64-character hash. The compare stays in the leaf writers, after the write is admitted, through `page_ids.guard_matches`: `edit.load_editable` (shared by `edit`, `multi_edit`, `set_take` and `observe_memory`) and `set_frontmatter_field`. The frontmatter writer is admitted by its semantic preflight, so it compares the id after that preflight, against the bytes it read. An id names a version by its tail, and the path the caller gave names the page, so the compare reads no page identity and works for a KB-relative path. Nothing reads a page before the leaf admits the write: a read at the command seam would answer a caller who may not see the page, and a withheld page would differ from an absent one.
 
-A stale id leaves the leaf as its usual refusal. `op_edit` and `op_observe_memory` then read the page, which the caller may now see, and refuse with `STALE_EDIT`, the current id and a retry. Every door model already requires `expected_hash` where the leaf does, so the server fills no guard. Optional guards stay optional.
+A stale id leaves the leaf as its usual refusal. `op_edit` and `op_observe_memory` then call `page_names.stale_edit`, which names the page's current id and a retry only when the caller may see the page, and refuse with `STALE_EDIT`. When the caller may not see it, the leaf's own refusal stands. Every door model already requires `expected_hash` where the leaf does, so the server fills no guard. Optional guards stay optional.
 
 ### Replies are named after the egress release
 
 `command_surface` names the pages in a released MCP reply, after the dispatcher's terminal filter. The filter binds a unit reference to its page by `path` and `after_hash`, so removing the path earlier would break that binding. Naming after it also leaves the CLI and REST replies as they are. A command opts in through `Command.names_pages`, which is true for the page-subject writes and for search. A file tool keeps `path`, because it takes no title or id.
 
-A write reply takes the version part of its id from its own `after_hash`, so a replayed reply or a raced write does not name a newer version, and an edit guarded by that id is refused. A reply holds an `after_hash` for its primary page only; the other pages of a multi-page write and a source take the version current when the reply is named.
+A write reply takes the version part of its id from its own `after_hash`, so a replayed reply or a raced write does not name a newer version, and an edit guarded by that id is refused. An edit, a create and a supersede report an `after_hash` for the page they wrote: `CreationCommit.after_hash` is the hash of the created page, as `ExistingCommit.after_hash` is for an edit, and a supersede reports it for its successor. Two kinds of page take the version current when the reply is named, because no guarded edit can reach them: a source, which lives in the append-only tree where `edit` refuses before it compares a guard, and the superseded page, which `edit` refuses as already superseded.
 
 A search with `detail=full` keeps each hit's `path` beside its `id`. That level is for a harness that reads vault files, as `response_detail=full` is for a write; the default hit names the page by title and id only.
+
+### Old debt: the frontmatter door tells a withheld path from an absent one
+
+Without a guard, `patch_frontmatter` already answers a withheld path with `WRITE_REFUSED` where an absent path answers `NOT_FOUND`: the door resolves the path before its preflight refuses the write. This change does not widen that. An id guard adds nothing to the answer, and the test compares guarded and unguarded calls. Closing the difference belongs to the door.
 
 ### A key change is reported
 

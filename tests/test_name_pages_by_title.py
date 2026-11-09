@@ -286,13 +286,30 @@ def test_a_restricted_mcp_caller_gets_named_replies_as_if_the_withheld_pages_wer
     assert all(_ID.fullmatch(hit["id"]) and "path" not in hit for hit in hits)
 
 
-def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(build) -> None:
-    async def call(client: Client, name: str, arguments: dict[str, Any], key: str) -> dict[str, Any]:
-        meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: key}
-        result = await client.call_tool(name, arguments, meta=meta, raise_on_error=False)
-        assert result.structured_content is not None
-        return result.structured_content
+async def _keyed(
+    client: Client, name: str, arguments: dict[str, Any], key: str
+) -> dict[str, Any]:
+    meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: key}
+    result = await client.call_tool(name, arguments, meta=meta, raise_on_error=False)
+    assert result.structured_content is not None
+    return result.structured_content
 
+
+async def _overwrite_is_refused(client: Client, page: str, guard: str) -> None:
+    """An edit that carries `guard` is refused once another writer has changed `page`."""
+    refused = await _tool(
+        client,
+        "edit_note",
+        {
+            "path": page,
+            "operation": _replace("limited", "dropped", expected_hash=guard),
+            "why": "overwrite",
+        },
+    )
+    assert refused["error"]["code"] == "STALE_EDIT"
+
+
+def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(build) -> None:
     async def run() -> None:
         async with Client(build()) as client:
             created = await _tool(client, "create_note", _new_note("Retry policy"))
@@ -301,9 +318,9 @@ def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(b
                 "operation": _replace("bounded", "capped"),
                 "why": "tighten",
             }
-            first = await call(client, "edit_note", first_edit, "first-edit-key")
+            first = await _keyed(client, "edit_note", first_edit, "first-edit-key")
             # Another writer changes the page after the first edit.
-            await call(
+            await _keyed(
                 client,
                 "edit_note",
                 {
@@ -314,20 +331,63 @@ def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(b
                 "second-edit-key",
             )
 
-            replayed = await call(client, "edit_note", first_edit, "first-edit-key")
+            replayed = await _keyed(client, "edit_note", first_edit, "first-edit-key")
             assert replayed["id"] == first["id"]
 
             # The id of the replayed reply cannot guard an edit of the other writer's version.
-            refused = await _tool(
+            await _overwrite_is_refused(client, created["id"], replayed["id"])
+
+    asyncio.run(run())
+
+
+def test_a_replayed_create_names_the_version_it_wrote_not_the_page_as_it_is_now(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            create = _new_note("Retry policy")
+            created = await _keyed(client, "create_note", create, "create-key")
+            # Another writer changes the page after the create.
+            await _tool(
                 client,
                 "edit_note",
                 {
                     "path": created["id"],
-                    "operation": _replace("limited", "dropped", expected_hash=replayed["id"]),
-                    "why": "overwrite",
+                    "operation": _replace("bounded", "limited"),
+                    "why": "tighten",
                 },
             )
-            assert refused["error"]["code"] == "STALE_EDIT"
+
+            replayed = await _keyed(client, "create_note", create, "create-key")
+            assert replayed["id"] == created["id"]
+
+            # The id of the replayed reply cannot guard an edit of the other writer's version.
+            await _overwrite_is_refused(client, created["id"], replayed["id"])
+
+    asyncio.run(run())
+
+
+def test_a_replayed_supersede_names_the_successor_it_wrote(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            old = await _tool(client, "create_note", _new_note("Retry policy"))
+            supersede = {**_new_note("Retry policy v2"), "old_path": old["id"], "reason": "revise"}
+            first = await _keyed(client, "supersede_note", supersede, "supersede-key")
+            successor = first["pages"][1]
+            # Another writer changes the successor after the supersede.
+            await _tool(
+                client,
+                "edit_note",
+                {
+                    "path": successor["id"],
+                    "operation": _replace("bounded", "limited"),
+                    "why": "tighten",
+                },
+            )
+
+            replayed = await _keyed(client, "supersede_note", supersede, "supersede-key")
+            assert replayed["pages"] == first["pages"]
+
+            # The id of the replayed successor cannot guard an edit of the other writer's version.
+            await _overwrite_is_refused(client, successor["id"], replayed["pages"][1]["id"])
 
     asyncio.run(run())
 
@@ -382,6 +442,33 @@ def test_an_id_guard_does_not_tell_a_restricted_caller_a_withheld_page_exists(
 
     assert answers["with"] == answers["without"]
     assert "STALE" not in json.dumps(answers["with"])
+
+
+def test_a_frontmatter_id_guard_adds_nothing_a_restricted_caller_learns_of_a_withheld_page(
+    tmp_path: Path,
+) -> None:
+    base, withheld = _write_door_fixture()
+    vault = _materialize(
+        tmp_path / "vault", {**base, **withheld}, "external", scope=_WRITE_SCOPE
+    )
+    current = page_names.read_identity(vault, _WITHHELD_TARGET)
+    assert current is not None
+
+    def patch(guard: str | None) -> Any:
+        operation = {"kind": "patch_frontmatter", "field": "tags", "value": ["x"]}
+        if guard is not None:
+            operation["expected_hash"] = guard
+        return _call(
+            vault, _principal("external"), "edit_memory",
+            path=_WITHHELD_TARGET, why="fix", operation=operation,
+        )
+
+    # This door answers a withheld path differently from an absent one with or without a guard; the
+    # guard must change nothing: neither a stale-version answer nor the current id.
+    unguarded = patch(None)
+    assert patch(_FAKE_ID) == unguarded
+    assert patch(current.id) == unguarded
+    assert "STALE" not in json.dumps(unguarded) and current.id not in json.dumps(unguarded)
 
 
 def test_a_visible_page_titled_like_a_withheld_path_is_no_oracle_for_that_path(

@@ -35,7 +35,7 @@ A title that several pages the caller may see share SHALL refuse with `AMBIGUOUS
 
 ### Requirement: A Short Id Guards An Edit
 
-`expected_hash` SHALL accept a short id or the 64-character hash. A short id SHALL guard the write against the version it names. The leaf writers SHALL compare it after the write is admitted, and no page SHALL be read to translate it before that. When the page has moved past the id, the write SHALL refuse with `STALE_EDIT`, the current id and a retry that carries it. A restricted caller who names a page that it may not see SHALL receive the refusal it receives for a page that does not exist, whatever `expected_hash` holds. An optional guard SHALL stay optional.
+`expected_hash` SHALL accept a short id or the 64-character hash. A short id SHALL guard the write against the version it names. The leaf writers SHALL compare it after the write is admitted, and no page SHALL be read to translate it before that. When the page has moved past the id, the write SHALL refuse with `STALE_EDIT`, the current id and a retry that carries it. A restricted caller who names a page that it may not see SHALL receive, whatever `expected_hash` holds, the refusal that the same call receives without a guard, and no id guard SHALL name that page's version. An optional guard SHALL stay optional.
 
 #### Scenario: A stale id refuses with the current id
 - **WHEN** a caller edits with an `expected_hash` id that names an older version
@@ -44,7 +44,8 @@ A title that several pages the caller may see share SHALL refuse with `AMBIGUOUS
 
 #### Scenario: An id guard does not show a withheld page
 - **WHEN** a restricted caller names a withheld page by path and sends an id-shaped `expected_hash`
-- **THEN** the refusal equals the refusal for a path that no page holds
+- **THEN** the refusal equals the refusal of the same call without the guard, and it holds no id
+- **AND** for an edit or an observation, it equals the refusal for a path that no page holds
 
 #### Scenario: A KB-relative path takes an id guard
 - **WHEN** a caller names a page by its KB-relative path and sends the id of its current version
@@ -52,13 +53,13 @@ A title that several pages the caller may see share SHALL refuse with `AMBIGUOUS
 
 ### Requirement: A Search Hit And A Page Read Carry The Page's Short Id
 
-Over MCP, a search hit for a page SHALL carry `id` in place of `path` and keep its `title` and `ref`. A search with `detail="full"` SHALL keep the `path` beside `id`. A page read SHALL carry `id` beside its `path`. A page that cannot be read as a Markdown page SHALL keep its path. A write reply SHALL take the version part of its `id` from its own `after_hash`, so that a replayed reply names the version it wrote and an edit guarded by that id is refused once another writer has changed the page.
+Over MCP, a search hit for a page SHALL carry `id` in place of `path` and keep its `title` and `ref`. A search with `detail="full"` SHALL keep the `path` beside `id`. A page read SHALL carry `id` beside its `path`. A page that cannot be read as a Markdown page SHALL keep its path. A write reply SHALL take the version part of its `id` from its own `after_hash`, so that a replayed reply names the version it wrote and an edit guarded by that id is refused once another writer has changed the page. An edit and a create report `after_hash` for the page they wrote, and a supersede reports it for its successor. A source and a superseded page, which no guarded edit can reach, take the version current when the reply is named.
 
 #### Scenario: A hit names the page by id
 - **WHEN** a search returns a page hit
 - **THEN** the hit carries `id`, `title` and `ref` and no `path`, unless the search asked for `detail="full"`
 
 #### Scenario: A replayed write names the version it wrote
-- **WHEN** a caller repeats a committed edit after another writer has changed the page
-- **THEN** the replayed reply carries the id of the version the first edit wrote
+- **WHEN** a caller repeats a committed edit, create or supersede after another writer has changed the page it wrote
+- **THEN** the replayed reply carries the id of the version the first call wrote
 - **AND** an edit guarded by that id refuses with `STALE_EDIT`

@@ -291,12 +291,17 @@ def stale_edit(
 ) -> OpError | None:
     """The refusal for a write whose short-id guard names a version the page has moved past.
 
-    The leaf has already refused, so the caller was admitted to write the page at `path` (a vault
-    path or a KB shorthand) and may see its id. The refusal names the current id and a retry that
-    carries it, spelled in the command's terms: `path_field` and the nested `guard_field`. None when
-    the page cannot be read, so the leaf's own refusal stands.
+    The refusal names the current id and a retry that carries it, spelled in the command's terms:
+    `path_field` and the nested `guard_field`. `path` is a vault path or a KB shorthand. None when
+    the caller may not see that page, or it cannot be read, so the leaf's own refusal stands: no
+    door can give a caller the id of a page it may not see.
     """
-    current = read_identity(Path(root), kb_page_target(Path(root), path)[1])
+    root = Path(root)
+    rel_path = kb_page_target(root, path)[1]
+    visible = egress.visible_page_filter(root)
+    if visible is not None and not visible(rel_path):
+        return None
+    current = read_identity(root, rel_path)
     if current is None:
         return None
     guard: Any = current.id
@@ -347,14 +352,13 @@ def _name_hit(root: Path, hit: Any, *, keep_paths: bool) -> Any:
     return {**hit, "id": found.id} if keep_paths else _renamed(hit, {"path": {"id": found.id}})
 
 
-def _id_as_written(identity: PageIdentity, reply: Mapping[str, Any]) -> str:
-    """The id of the version this reply's own write produced, not of the page as it is now.
+def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
+    """The id of the version a write produced, not of the page as it is now.
 
     A replayed reply, or one that another writer raced, names a page that has moved on. An id of the
-    current version would let a guarded edit overwrite that other change. A reply that holds no
-    `after_hash` (the pages of a multi-page write, a source) names the current version.
+    current version would let a guarded edit overwrite that other change. A page the reply reports
+    no `after_hash` for (the other pages of a supersede, a source) takes the current version.
     """
-    after_hash = reply.get("after_hash")
     if isinstance(after_hash, str):
         try:
             return f"{identity.id.partition('.')[0]}.{page_ids.id_version(after_hash)}"
@@ -378,12 +382,25 @@ def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
         return reply
     swaps: dict[str, Mapping[str, Any]] = {}
     moved: dict[str, Any] = {}
+    # `after_hash` is the version of the page this write produced: `path`, or for a supersede the
+    # last of `paths`, its successor. The superseded page takes the current version, since no
+    # guarded edit can reach it.
+    after_hash = reply.get("after_hash")
+    produced = path
+    if not isinstance(path, str) and isinstance(paths, list) and paths:
+        produced = paths[-1]
     if isinstance(path, str) and path in named:
-        swaps["path"] = {"title": named[path].title, "id": _id_as_written(named[path], reply)}
+        swaps["path"] = {"title": named[path].title, "id": _id_as_written(named[path], after_hash)}
         moved["path"] = path
     if isinstance(paths, list) and len(named) and all(item in named for item in paths):
         swaps["paths"] = {
-            "pages": [{"title": named[item].title, "id": named[item].id} for item in paths]
+            "pages": [
+                {
+                    "title": named[item].title,
+                    "id": _id_as_written(named[item], after_hash if item == produced else None),
+                }
+                for item in paths
+            ]
         }
         moved["paths"] = paths
     if isinstance(source, Mapping) and source.get("path") in named:
