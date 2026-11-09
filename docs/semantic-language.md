@@ -79,11 +79,12 @@ when present and are omitted when absent, so an unjudged unit is distinguishable
 from a judged one.
 
 Both are answered from the maintained catalogue rather than by reading pages, so
-a due-date query costs an index read on a served cell. The one filter field with
-no index answer is `page.frontmatter:/<pointer>`, which is open-ended by
-construction; a served request naming it is refused with `UNSUPPORTED_FILTER_FIELD`
-rather than silently falling back to a corpus scan, while an offline CLI caller
-keeps the exact scan. A date bound is answered exactly when it names a whole
+a due-date query costs an index read on a served cell. Two filter fields have no
+index answer: `page.frontmatter:/<pointer>`, which is open-ended by construction,
+and `unit.dimension` (below), whose membership no catalogue column holds. A served
+request naming either is refused with `UNSUPPORTED_FILTER_FIELD` rather than
+silently falling back to a corpus scan, while an offline CLI caller keeps the
+exact scan. A date bound is answered exactly when it names a whole
 day, so `updated_after`, `updated_before`, `recency_days` and a bare ISO date can
 all be negated with `$not`; a bound carrying a timestamp is refused under the same
 code when nothing else in the filter narrows it, because a day column cannot
@@ -142,6 +143,25 @@ plans fail before candidate retrieval and never silently widen.
 
 An empty query plus filters is a filter-only lookup. It uses the documented
 filtered-most-recent sort tuple; it does not fabricate a text score.
+
+`unit.dimension` filters units by epistemic dimension, with `$eq`, `$in` and
+`$ne`. It takes a dimension key or a label in any language, and a name that no
+registry entry holds is refused with the known keys. A unit belongs to a
+dimension when its kind is a member, when it carries a member key, or when its
+page is an endpoint of a typed edge whose family is a member; the graph records
+edges between pages, so every unit of such a page belongs. A vault adds a
+dimension in `_Schema/semantic-language-registry.yaml`, and the filter takes it
+with no code change.
+
+```json
+{"filters": {"unit.dimension": {"$eq": "currency"}}, "result_level": "unit"}
+```
+
+A dimension with a family member reads the edge graph once per family for the
+whole request. While the graph sidecar is missing or stale the request raises
+the typed warming outcome and never answers as if no edge existed. A caller sees
+an edge only when it may see both of its pages. A served request refuses the
+field today; the offline CLI evaluates it.
 
 ## Explain ranking without inventing confidence
 

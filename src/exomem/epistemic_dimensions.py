@@ -8,12 +8,16 @@ word comes from the registries, so a vault dimension needs no code.
 A unit belongs to a dimension when its kind is a member, when it carries a member key, or when it
 is an endpoint of an edge whose relation family is a member. A family comes from the relation
 registry entry: a core key's own, a vault extension's parent's, never a saved family.
+
+The graph records a typed edge between pages, not between units, so a unit is an endpoint of
+every edge its page is an endpoint of; the `relations` filter treats a unit the same way.
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from . import semantic_labels
 from .relation_registry import RelationRegistry
@@ -43,28 +47,31 @@ class DimensionMembership:
         membership. A reader that has no edges to give skips the edge read when this is false."""
         return bool(self.by_family)
 
+    def families_of(self, edge_relations: Iterable[str]) -> frozenset[str]:
+        """The families of relation keys: the roll-up rule, kept in `RelationRegistry.family_of`."""
+        families = (self.relations.family_of(relation) for relation in edge_relations)
+        return frozenset(family for family in families if family is not None)
+
     def of(
         self,
         *,
         kind: str,
         row_keys: Collection[str] = (),
-        edge_relations: Iterable[str] = (),
+        edge_families: Iterable[str] = (),
     ) -> frozenset[str]:
         """The dimensions a unit belongs to.
 
         `kind` is the unit's resolved kind key, `row_keys` the keys of the rows it carries and
-        `edge_relations` the relation keys of every edge that has the unit as an endpoint. A unit
-        can belong to several dimensions, and to none.
+        `edge_families` the relation families of every edge that has the unit as an endpoint. A
+        unit can belong to several dimensions, and to none.
         """
         found = set(self.by_kind.get(kind, ()))
         if kind in self.known_kinds:
             found |= self.every_kind
         for key in row_keys:
             found |= self.by_key.get(key, frozenset())
-        for relation in edge_relations:
-            family = self.relations.family_of(relation)
-            if family is not None:
-                found |= self.by_family.get(family, frozenset())
+        for family in edge_families:
+            found |= self.by_family.get(family, frozenset())
         return frozenset(found)
 
 
@@ -111,8 +118,42 @@ def dimensions_of(
 
     A reader that tests many units builds `membership` once instead.
     """
-    return membership(language, relations).of(
+    lookups = membership(language, relations)
+    return lookups.of(
         kind=str(getattr(unit, "kind", "")),
         row_keys=tuple(getattr(unit, "metadata", None) or ()),
-        edge_relations=edge_relations,
+        edge_families=lookups.families_of(edge_relations),
     )
+
+
+def family_relation_keys(relations: RelationRegistry, family: str) -> tuple[str, ...]:
+    """The shipped relation keys of `family`. A vault extension rolls up to one of them, so a
+    graph query on these keys also finds the extension's edges."""
+    return tuple(sorted(key for key, entry in relations.core.items() if entry.family == family))
+
+
+@dataclass(frozen=True, slots=True)
+class UnitDimensions:
+    """Answers `unit.dimension` for one request: the dimensions a unit belongs to.
+
+    `participants` maps each family some dimension names to the pages that are an endpoint of an
+    edge of that family, read from the graph once for the whole candidate set.
+    """
+
+    membership: DimensionMembership
+    participants: Mapping[str, frozenset[str]]
+
+    def __call__(self, page: Mapping[str, Any], unit: Mapping[str, Any]) -> frozenset[str]:
+        families: tuple[str, ...] = ()
+        if self.participants:
+            path = page.get("path")
+            if path is None:
+                raise ValueError("a page view that is evaluated for a dimension names its path")
+            families = tuple(
+                family for family, pages in self.participants.items() if path in pages
+            )
+        return self.membership.of(
+            kind=str(unit.get("kind", "")),
+            row_keys=tuple(unit.get("row_keys") or ()),
+            edge_families=families,
+        )

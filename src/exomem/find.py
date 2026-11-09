@@ -30,6 +30,7 @@ from typing import Any
 from . import (
     call_spans,
     cli_ops,
+    epistemic_dimensions,
     find_candidates,
     find_corpus,
     find_policy,
@@ -1865,6 +1866,30 @@ def find(
             )
         return resolution.resolved or resolution.key
 
+    def _resolve_dimension_name(value: str) -> str:
+        nonlocal language_registry
+        if language_registry is None:
+            from . import semantic_language_registry
+
+            language_registry = semantic_language_registry.load_registry(vault_root)
+        from . import semantic_labels
+
+        key = language_registry.resolve_label(semantic_labels.DIMENSIONS, value)
+        if key is None:
+            known = ", ".join(language_registry.label_keys(semantic_labels.DIMENSIONS))
+            raise structured_filters.FilterError(
+                "INVALID_FILTER_VALUE",
+                "$.unit.dimension",
+                f"unknown dimension {value!r}",
+                expected=f"a dimension key or label: {known}",
+                remediation=(
+                    "Name one of the listed dimensions, or add the dimension to the vault's "
+                    "semantic-language registry; a vault dimension is unavailable while that "
+                    "registry has an error."
+                ),
+            )
+        return key
+
     filter_plan = structured_filters.compile_filter(
         filters,
         shortcuts=structured_filters.FilterShortcuts(
@@ -1884,6 +1909,7 @@ def find(
         ),
         resolve_category=lambda value: _resolve_language_value(value, namespace="category"),
         resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
+        resolve_dimension=_resolve_dimension_name,
     )
     if filter_plan.root is not None and managed_runtime:
         # A managed reader refuses a field no index can evaluate, and refuses it
@@ -1897,6 +1923,16 @@ def find(
         refused_shapes = _refused_filter_shapes(filter_plan)
         if refused_shapes:
             raise _unsupported_filter_shape_error(refused_shapes)
+    # Resolved before any caching, like the relation filter below, so a warming sidecar raises
+    # its typed outcome instead of being masked by a stale cache hit. The language registry that
+    # decides membership is in the freshness key already (`unit_filters`), the graph by the
+    # `relation_filter` flag that `dimension_edges` sets.
+    dimension_source = _resolve_dimension_source(
+        vault_root, filter_plan, language=language_registry, keep=admit_path
+    )
+    dimension_edges = dimension_source is not None and dimension_source.membership.needs_edges
+    if dimension_source is not None:
+        filter_plan = filter_plan.with_dimensions(dimension_source)
     filter_key = json.dumps(
         filter_plan.to_dict(),
         ensure_ascii=False,
@@ -2034,7 +2070,7 @@ def find(
                     snapshot=snapshot,
                     unit_filters=True,
                     metadata_only_catalog=unit_algebra.status == "complete",
-                    relation_filter=relation_active,
+                    relation_filter=relation_active or dimension_edges,
                 )
             unit_request_key = (
                 "unit",
@@ -2202,7 +2238,7 @@ def find(
                     not query_norm
                     and structured_filters.plan_index_candidates(filter_plan).status == "complete"
                 ),
-                relation_filter=relation_active,
+                relation_filter=relation_active or dimension_edges,
             )
         delta_cache_eligible = bool(
             mode == "keyword"
@@ -4727,6 +4763,49 @@ def _resolve_relation_filter(
         )
         raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return result.paths, dict(result.provenance), plan.findings
+
+
+def _resolve_dimension_source(
+    vault_root: Path,
+    plan: structured_filters.FilterPlan,
+    *,
+    language: Any,
+    keep: Callable[[str], bool] | None,
+) -> epistemic_dimensions.UnitDimensions | None:
+    """What answers a plan's `unit.dimension` predicates, or None when it names none.
+
+    Membership that depends on edges reads, for each family a named dimension has, the pages
+    that an edge of that family touches: one graph read per family for the whole candidate set,
+    never one per unit. `keep` is the caller's admission, so an edge to a page the caller cannot
+    see gives no membership. A missing or stale sidecar raises the typed warming outcome and
+    schedules a rebuild, as the relation filter does; an empty set from a current one is real.
+    """
+    named = structured_filters.named_dimensions(plan)
+    if not named:
+        return None
+    from . import epistemic_graph, relation_registry
+
+    relations = relation_registry.load_registry(vault_root)
+    lookups = epistemic_dimensions.membership(language, relations, only=named)
+    participants: dict[str, frozenset[str]] = {}
+    if lookups.needs_edges:
+        graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
+        for family in sorted(lookups.by_family):
+            result = graph_index.relation_participants(
+                epistemic_dimensions.family_relation_keys(relations, family), keep=keep
+            )
+            if result.status == "temporarily_unavailable":
+                raise RetrievalIndexWarming(
+                    site="relation_graph", status="temporarily_unavailable"
+                )
+            if result.status == "warming":
+                epistemic_graph.schedule_background_rebuild(
+                    vault_root,
+                    mutation_coordinator=graph_index._canonical_mutation_coordinator(),
+                )
+                raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
+            participants[family] = result.paths
+    return epistemic_dimensions.UnitDimensions(lookups, participants)
 
 
 def _resolve_eligible_filter_paths(

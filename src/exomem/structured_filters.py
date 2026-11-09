@@ -7,6 +7,7 @@ any backend or candidate work; the evaluator is shared by every retrieval lane.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import re
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, Literal, TypeAlias, cast
 
-from . import semantic_language_registry, semantic_units, temporal
+from . import semantic_labels, semantic_language_registry, semantic_units, temporal
 from .vocabulary.registry import PUBLIC_INSTANCE
 
 MAX_PLAN_BYTES = 16 * 1024
@@ -99,12 +100,22 @@ _UNIT_FIELDS = frozenset(
         "unit.form",
         "unit.verdict",
         "unit.check_by",
+        "unit.dimension",
     }
 )
+# A unit holds several of these at once, and the registry decides which: membership is read from
+# the unit's kind, its row keys and the typed edges of its page, none of which a catalogue column
+# holds. `$eq`, `$in` and `$ne` mean "is a member of", "is a member of one of" and "is not a member
+# of"; the array operators and the ordered ones have no meaning here.
+_MEMBERSHIP_FIELDS = frozenset({"unit.dimension"})
+_MEMBERSHIP_OPERATORS = frozenset({"$eq", "$ne", "$in"})
 
 ScalarKind = Literal["null", "boolean", "number", "string", "date", "datetime"]
 CategoryResolver = Callable[[str], str]
 KindResolver = Callable[[str], str]
+DimensionResolver = Callable[[str], str]
+#: The dimension keys one unit belongs to, from its page's view and its own.
+DimensionSource = Callable[[Mapping[str, Any], Mapping[str, Any]], frozenset[str]]
 
 
 class FilterError(ValueError):
@@ -212,9 +223,18 @@ class FilterPlan:
     #: `unit.kind` values name. A unit holds the same entry only when the value
     #: is core or its page selected this instance.
     unit_instance: str = PUBLIC_INSTANCE
+    #: Answers `unit.dimension`; the caller that evaluates the plan attaches it with
+    #: `with_dimensions`. It is not part of the plan's identity (`to_dict`): the registry
+    #: content and the graph epoch that decide it are part of the request's freshness key.
+    dimensions: DimensionSource | None = dataclasses.field(
+        default=None, compare=False, repr=False
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return _node_to_dict(self.root) if self.root is not None else {}
+
+    def with_dimensions(self, source: DimensionSource) -> FilterPlan:
+        return dataclasses.replace(self, dimensions=source)
 
 
 @dataclass(slots=True)
@@ -253,12 +273,14 @@ def compile_filter(
     shortcuts: FilterShortcuts | None = None,
     resolve_category: CategoryResolver | None = None,
     resolve_kind: KindResolver | None = None,
+    resolve_dimension: DimensionResolver | None = None,
     unit_instance: str = PUBLIC_INSTANCE,
 ) -> FilterPlan:
     """Validate and normalize a generic expression plus legacy shortcuts.
 
     `unit_instance` is the instance the resolvers read; unit values compile
-    to its entries.
+    to its entries. `resolve_dimension` turns a dimension label into its key and refuses a name
+    the registry does not hold; without one, a dimension operand is only normalized.
     """
     generic = {} if expression is None else expression
     if not isinstance(generic, Mapping):
@@ -322,6 +344,8 @@ def compile_filter(
     resolved = _normalize_node(
         _resolve_language_aliases(structural, category_resolver, kind_resolver)
     )
+    if resolve_dimension is not None:
+        resolved = _normalize_node(_resolve_dimension_names(resolved, resolve_dimension))
     _bounded_json(
         _node_to_dict(resolved) if resolved is not None else {},
         path="$",
@@ -345,7 +369,35 @@ def evaluate_filter(
     """Evaluate one normalized plan against one parent/unit pair."""
     if plan.root is None:
         return True
-    return _evaluate_node(plan.root, page=page, unit=unit, instance=plan.unit_instance) is True
+    return (
+        _evaluate_node(
+            plan.root, page=page, unit=unit, instance=plan.unit_instance, dimensions=plan.dimensions
+        )
+        is True
+    )
+
+
+def named_dimensions(plan: FilterPlan) -> frozenset[str]:
+    """The dimension keys a plan's `unit.dimension` predicates name."""
+    found: set[str] = set()
+
+    def visit(node: FilterNode | None) -> None:
+        if node is None:
+            return
+        if isinstance(node, Predicate):
+            if node.field.name in _MEMBERSHIP_FIELDS:
+                for _operator, operand in node.operators:
+                    for scalar in operand if isinstance(operand, tuple) else (operand,):
+                        if isinstance(scalar, TypedScalar) and isinstance(scalar.value, str):
+                            found.add(scalar.value)
+        elif isinstance(node, Not):
+            visit(node.child)
+        else:
+            for child in node.children:
+                visit(child)
+
+    visit(plan.root)
+    return frozenset(found)
 
 
 def resolve_result_level(requested: str, plan: FilterPlan) -> str:
@@ -660,7 +712,7 @@ _ALWAYS_PRESENT_UNIT_AXES: Final = frozenset(
 #: answered without reading pages, so a managed reader refuses it outright
 #: instead of silently becoming the scan. Only `page.frontmatter:/<pointer>`
 #: is outside this set: it is open-ended by construction and has no column.
-INDEX_ANSWERABLE_FIELDS: Final = _PAGE_FIELDS | _UNIT_FIELDS
+INDEX_ANSWERABLE_FIELDS: Final = _PAGE_FIELDS | (_UNIT_FIELDS - _MEMBERSHIP_FIELDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1123,6 +1175,10 @@ def page_view(page: Any) -> dict[str, Any]:
         "frontmatter": frontmatter,
         "file_type": page.file_kind,
     }
+    rel_path = getattr(page, "rel_path", None)
+    if rel_path is not None:
+        # Names the page for a membership that its edges decide; no filter field reads it.
+        out["path"] = rel_path
     for source_key, target_key in (
         ("status", "status"),
         ("type", "type"),
@@ -1204,6 +1260,8 @@ def unit_view(unit: Any, *, instance: str | None = None) -> dict[str, Any]:
         "context": unit.context,
         "form": unit.form,
         "instance": instance,
+        # The keys of the rows the unit carries, which decide its membership of a dimension.
+        "row_keys": tuple(getattr(unit, "metadata", None) or ()),
     }
     verdict = getattr(unit, "verdict", None)
     if verdict is not None:
@@ -1339,6 +1397,14 @@ def _parse_predicate(
                 f"unknown operator {operator!r}",
                 "one of $eq, $ne, $in, $all, $contains, $exists, comparison operators, or $between",
                 "Use a documented bounded operator; regex, SQL, and scripts are unsupported.",
+            )
+        if field.name in _MEMBERSHIP_FIELDS and operator not in _MEMBERSHIP_OPERATORS:
+            raise _error(
+                "INVALID_FILTER_OPERATOR",
+                operator_path,
+                f"{operator} cannot test {field.name}",
+                "$eq, $in, or $ne",
+                "Name the dimension with $eq or $in, or exclude it with $ne.",
             )
         if field.name in _KNOWN_ARRAY_FIELDS and operator in {"$eq", "$ne"}:
             raise _error(
@@ -1604,6 +1670,14 @@ def _validate_closed_field_operand(
                 "string operand (or null for $eq/$ne)",
             )
         return
+    if field.name in _MEMBERSHIP_FIELDS:
+        if any(value.kind != "string" for value in scalars):
+            raise _invalid_value(
+                path,
+                f"{field.name} accepts only dimension names",
+                "dimension key or label string",
+            )
+        return
     if field.name in _KNOWN_ARRAY_FIELDS and any(
         value.kind != "string" for value in scalars
     ):
@@ -1656,6 +1730,12 @@ def _canonicalize_string(field: str, value: str, *, path: str = "$") -> str:
                 "non-empty governed kind",
             )
         return normalized
+    if field in _MEMBERSHIP_FIELDS:
+        # Folded the way the registry folds a key or a label, so a multi-word label still matches.
+        folded = semantic_labels.fold(value)
+        if not folded:
+            raise _invalid_value(path, "dimension cannot be empty", "non-empty dimension name")
+        return folded
     return value
 
 
@@ -1838,6 +1918,51 @@ def _resolve_language_aliases(
     )
 
 
+def _resolve_dimension_names(
+    node: FilterNode | None, resolver: DimensionResolver
+) -> FilterNode | None:
+    """Rewrite each `unit.dimension` operand to the key the registry holds for it."""
+    if node is None:
+        return None
+    if isinstance(node, Predicate):
+        if node.field.name not in _MEMBERSHIP_FIELDS:
+            return node
+        operators: list[tuple[str, TypedScalar | tuple[TypedScalar, ...] | bool]] = []
+        for operator, operand in node.operators:
+            if isinstance(operand, tuple):
+                operators.append(
+                    (
+                        operator,
+                        _dedupe_scalars(
+                            tuple(_resolve_dimension_scalar(item, resolver, node) for item in operand)
+                        ),
+                    )
+                )
+            elif isinstance(operand, TypedScalar):
+                operators.append((operator, _resolve_dimension_scalar(operand, resolver, node)))
+            else:
+                operators.append((operator, operand))
+        return Predicate(node.field, tuple(operators))
+    if isinstance(node, Not):
+        return Not(_require_node(_resolve_dimension_names(node.child, resolver)))
+    children = tuple(
+        _require_node(_resolve_dimension_names(child, resolver)) for child in node.children
+    )
+    return AllOf(children) if isinstance(node, AllOf) else AnyOf(children)
+
+
+def _resolve_dimension_scalar(
+    value: TypedScalar, resolver: DimensionResolver, node: Predicate
+) -> TypedScalar:
+    try:
+        key = resolver(str(value.value))
+    except FilterError as error:
+        raise _error(
+            error.code, node.field.path, error.message, error.expected, error.remediation
+        ) from error
+    return TypedScalar("string", key)
+
+
 def _resolve_scalar_language(
     value: TypedScalar,
     resolver: Callable[[str], str],
@@ -1891,18 +2016,21 @@ def _evaluate_node(
     page: Mapping[str, Any],
     unit: Mapping[str, Any] | None,
     instance: str,
+    dimensions: DimensionSource | None,
 ) -> bool | None:
     if isinstance(node, Predicate):
         if node.field.namespace == "unit" and unit is None:
             return None
-        runtime = _resolve_runtime_field(node.field, page=page, unit=unit, instance=instance)
+        runtime = _resolve_runtime_field(
+            node.field, page=page, unit=unit, instance=instance, dimensions=dimensions
+        )
         return all(
             _evaluate_operator(node.field, runtime, operator, operand)
             for operator, operand in node.operators
         )
     if isinstance(node, AllOf):
         values = [
-            _evaluate_node(child, page=page, unit=unit, instance=instance)
+            _evaluate_node(child, page=page, unit=unit, instance=instance, dimensions=dimensions)
             for child in node.children
         ]
         if False in values:
@@ -1910,13 +2038,15 @@ def _evaluate_node(
         return None if None in values else True
     if isinstance(node, AnyOf):
         values = [
-            _evaluate_node(child, page=page, unit=unit, instance=instance)
+            _evaluate_node(child, page=page, unit=unit, instance=instance, dimensions=dimensions)
             for child in node.children
         ]
         if True in values:
             return True
         return None if None in values else False
-    value = _evaluate_node(node.child, page=page, unit=unit, instance=instance)
+    value = _evaluate_node(
+        node.child, page=page, unit=unit, instance=instance, dimensions=dimensions
+    )
     return None if value is None else not value
 
 
@@ -1926,6 +2056,7 @@ def _resolve_runtime_field(
     page: Mapping[str, Any],
     unit: Mapping[str, Any] | None,
     instance: str,
+    dimensions: DimensionSource | None,
 ) -> Any:
     if field.pointer is not None:
         current: Any = page.get("frontmatter", MISSING)
@@ -1939,6 +2070,18 @@ def _resolve_runtime_field(
     if field.namespace == "unit":
         if unit is None:
             return MISSING
+        if field.name in _MEMBERSHIP_FIELDS:
+            if dimensions is None:
+                # An answer of "no unit belongs" from a reader that cannot compute membership
+                # would be a false empty, so the evaluation stops instead.
+                raise _error(
+                    "UNSUPPORTED_FILTER_FIELD",
+                    field.path,
+                    f"{field.name} needs the registry and the page's edges, and this reader has neither",
+                    "a reader that attaches dimension membership to the plan",
+                    "Query through recall, which resolves dimensions before it evaluates the filter.",
+                )
+            return dimensions(page, unit)
         value = unit.get(field.name.removeprefix("unit."), MISSING)
         if field.name in ENTRY_AXES and value is not MISSING and unit.get("instance") != instance:
             core = semantic_language_registry.core_registry()
@@ -1963,6 +2106,15 @@ def _evaluate_operator(
     if runtime is FOREIGN_ENTRY:
         # A distinct entry equals, contains and belongs to no operand value.
         return operator == "$ne"
+    if field.name in _MEMBERSHIP_FIELDS:
+        wanted = {
+            scalar.value
+            for scalar in (operand if isinstance(operand, tuple) else (operand,))
+            if isinstance(scalar, TypedScalar)
+        }
+        if operator == "$ne":
+            return not (wanted & runtime)
+        return bool(wanted & runtime)
     if field.name in _KNOWN_ARRAY_FIELDS and not isinstance(runtime, (list, tuple)):
         return False
     if operator in {"$in", "$all", "$between"}:
