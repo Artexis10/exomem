@@ -74,11 +74,11 @@ def test_neighbors_for_returns_both_directions(tmp_path: Path) -> None:
     assert TARGET in by_target
     assert by_target[TARGET].relation_type == "evidenced_by"
     assert by_target[TARGET].direction == "outbound"
-    assert by_target[TARGET].family == "evidence"
+    assert by_target[TARGET].typed
     assert by_target[TARGET].seed_rel == SEED
 
     assert LINKED in by_target
-    assert by_target[LINKED].family == "link"
+    assert not by_target[LINKED].typed
 
     # Inbound edge from another page surfaces its source as a neighbour.
     assert INBOUND in by_target
@@ -231,7 +231,7 @@ def test_neighbors_for_resolves_semantic_block_relations(tmp_path: Path) -> None
     typed = [n for n in neighbors if n.other_rel == target_rel and n.relation_type == "evidenced_by"]
     assert len(typed) == 1, f"expected exactly one evidenced_by neighbor, got {neighbors}"
     assert typed[0].direction == "outbound"
-    assert typed[0].family == "evidence"
+    assert typed[0].typed
 
 
 def test_neighbors_for_resolves_inbound_semantic_block_relations(tmp_path: Path) -> None:

@@ -17,7 +17,7 @@ When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief,
 ## Vocabulary lives in registries
 
 - Every category set (entity types, relations, source kinds, domains, semantic categories, and later statuses and note types) lives in one vocabulary registry: a shipped pack under `src/exomem/vocabulary/packs/` plus the vault overlay in `_Schema/`. Never add a vocabulary list, set or keyed dict to code.
-- Code branches only on closed attribute values that a registry schema declares and code implements (`family`, `role`, status `class`). It never branches on an entry key.
+- Code branches only on closed attribute values that a registry schema declares and code implements (`behaviours`, `traits`, `role`, status `class`). It never branches on an entry key or a `family` value.
 - Every review verdict names C4 (vocabulary fixed in code): absent, found in the change, or reported as old debt.
 - The semgrep C6 gate in `.github/quality.yml` flags word lists and word regexes on added lines in `src/exomem`.
 

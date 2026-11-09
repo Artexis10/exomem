@@ -3,8 +3,8 @@
 Two things live here, both about a PAIR of pages rather than a single note:
 
 - `asserted_pairs()` / `structural_pair()` read the typed graph for relationships
-  the author wrote down — a `contradicts` edge between two pages, or two `answers`
-  edges into one question. An authored `contradicts` edge is the strongest
+  the author wrote down — an edge that opposes one page to another, or two edges
+  that settle one question. An authored opposing edge is the strongest
   contradiction signal a vault can carry (the author stated the conflict in their
   own words), and it is the source of the `corpus_contradictions` queue's asserted
   entries.
@@ -36,13 +36,16 @@ from pathlib import Path
 from typing import Any
 
 from . import epistemic_graph as epistemic_graph_module
+from . import relation_registry
 from . import review_state as review_state_module
 from .vault import content_hash
 
 log = logging.getLogger(__name__)
 
-CONTRADICTS = "contradicts"
-ANSWERS = "answers"
+#: The reason codes `structural_pair` returns. They name why a pair is declared and are
+#: shown to callers; they do not select relations.
+REASON_OPPOSED = "contradicts"
+REASON_SETTLED_TOGETHER = "answers_same_question"
 STANCE_ACTION = "competing"
 
 # Namespaces the pair identity so it can never collide with an attention,
@@ -354,6 +357,11 @@ def _index(vault_root: Path) -> epistemic_graph_module.EpistemicGraphIndex:
     return epistemic_graph_module.EpistemicGraphIndex(Path(vault_root))
 
 
+def _core_keys_with(behaviour: str) -> list[str]:
+    """The core relations with `behaviour`; the graph reaches an extension through its parent."""
+    return sorted(relation_registry.core_registry().keys_with(behaviour))
+
+
 @dataclass(frozen=True)
 class DeclaredEdges:
     """One snapshot of the authored edges that declare two pages as rivals.
@@ -364,8 +372,8 @@ class DeclaredEdges:
     packs.
     """
 
-    contradicts: frozenset[tuple[str, str]]   # `pair_key` form
-    answers: dict[str, frozenset[str]]        # page -> the targets it answers
+    opposed: frozenset[tuple[str, str]]       # `pair_key` form
+    settled: dict[str, frozenset[str]]        # page -> the targets it settles
 
 
 def declared_edges(
@@ -373,27 +381,27 @@ def declared_edges(
     *,
     index: epistemic_graph_module.EpistemicGraphIndex | None = None,
 ) -> DeclaredEdges:
-    """Read both declaring relations in two queries. Empty on any unavailability."""
+    """Read both declaring behaviours in two queries. Empty on any unavailability."""
     try:
         idx = index or _index(vault_root)
-        contra = idx.relation_edges([CONTRADICTS])
-        answered = idx.relation_edges([ANSWERS])
+        opposing = idx.relation_edges(_core_keys_with("opposes"))
+        settling = idx.relation_edges(_core_keys_with("settles"))
         pairs = (
-            frozenset(pair_key(src, dst) for src, dst in contra.edges)
-            if contra.status == "available"
+            frozenset(pair_key(src, dst) for src, dst in opposing.edges)
+            if opposing.status == "available"
             else frozenset()
         )
-        answers: dict[str, set[str]] = {}
-        if answered.status == "available":
-            for src, dst in answered.edges:
-                answers.setdefault(src, set()).add(dst)
+        settled: dict[str, set[str]] = {}
+        if settling.status == "available":
+            for src, dst in settling.edges:
+                settled.setdefault(src, set()).add(dst)
         return DeclaredEdges(
-            contradicts=frozenset(pair for pair in pairs if pair[0] != pair[1]),
-            answers={page: frozenset(targets) for page, targets in answers.items()},
+            opposed=frozenset(pair for pair in pairs if pair[0] != pair[1]),
+            settled={page: frozenset(targets) for page, targets in settled.items()},
         )
     except Exception as error:  # noqa: BLE001 — a graph miss never breaks a write
         log.debug("declared-edge snapshot failed: %s", error)
-        return DeclaredEdges(contradicts=frozenset(), answers={})
+        return DeclaredEdges(opposed=frozenset(), settled={})
 
 
 def asserted_pairs(
@@ -401,16 +409,16 @@ def asserted_pairs(
     *,
     index: epistemic_graph_module.EpistemicGraphIndex | None = None,
 ) -> list[tuple[str, str]]:
-    """Deduped, unordered page pairs joined by an authored `contradicts` edge.
+    """Deduped, unordered page pairs joined by an authored edge that opposes them.
 
-    `contradicts` is symmetric, so one authored bullet yields ONE pair, ordered by
+    An opposing relation is symmetric, so one authored bullet yields ONE pair, ordered by
     path exactly like a proximity pair. One indexed query for the whole vault. A
     disabled, missing, or warming graph index yields `[]` — an explicit absence,
     never a fabricated result.
     """
     try:
         idx = index or _index(vault_root)
-        result = idx.relation_edges([CONTRADICTS])
+        result = idx.relation_edges(_core_keys_with("opposes"))
         if result.status != "available":
             return []
         pairs = {pair_key(src, dst) for src, dst in result.edges}
@@ -430,8 +438,8 @@ def structural_pair(
 ) -> str | None:
     """Why the author already declared this pair as rivals, or None.
 
-    Returns `"contradicts"` for an authored contradiction edge between the two, and
-    `"answers_same_question"` when both pages answer one common target. Either way
+    Returns `REASON_OPPOSED` for an authored edge that opposes the two, and
+    `REASON_SETTLED_TOGETHER` when both pages settle one common target. Either way
     the write-time proximity warning would only tell the author what they typed.
     Pass a prepared `edges` snapshot to answer many candidates without re-querying.
     """
@@ -439,12 +447,10 @@ def structural_pair(
     if left == right:
         return None
     snapshot = edges if edges is not None else declared_edges(vault_root, index=index)
-    if (left, right) in snapshot.contradicts:
-        return CONTRADICTS
-    if snapshot.answers.get(left, frozenset()) & snapshot.answers.get(
-        right, frozenset()
-    ):
-        return "answers_same_question"
+    if (left, right) in snapshot.opposed:
+        return REASON_OPPOSED
+    if snapshot.settled.get(left, frozenset()) & snapshot.settled.get(right, frozenset()):
+        return REASON_SETTLED_TOGETHER
     return None
 
 
@@ -452,7 +458,7 @@ class DeclaredPairFilter:
     """Memoized "has the author already declared this pair?" predicate.
 
     Declared means the reader recorded a competing stance, or the pages already
-    carry an authored `contradicts` edge, or both answer one question. Used by the
+    carry an authored edge that opposes them, or both settle one question. Used by the
     write-time near-duplicate and overlap warnings, which have nothing to add once
     the relationship is on the page.
 

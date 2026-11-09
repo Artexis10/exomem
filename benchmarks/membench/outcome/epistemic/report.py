@@ -22,7 +22,7 @@ from recall_parity.scoring import DEFAULT_RESAMPLES
 from ..faults import books
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
-from .cases import STORE_NAMES, is_stable
+from .cases import STORE_NAMES, holds_store_name, is_stable
 from .judge import BEHAVIOURS, HISTORY_ARM, behaviours_asked, scored
 
 BOOTSTRAP_SEED = 20261108
@@ -193,7 +193,7 @@ def store_mentions(outcomes: list[dict], arms: list[str]) -> dict:
         answered = [o["answer"] for o in outcomes if o["arm"] == arm and o["state"] == "answered"]
         # A run judged before raw answers were kept has none: unknown, never a mention-free answer.
         texts = [text for text in answered if text is not None]
-        naming = sum(any(name in text.casefold() for name in STORE_NAMES) for text in texts)
+        naming = sum(holds_store_name(text) for text in texts)
         rows[arm] = {
             "answers": len(texts),
             "naming_a_store": naming,

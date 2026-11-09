@@ -13,6 +13,7 @@ Maps packets SHALL carry a bounded `task_context` section beside the map and tur
 
 - **WHEN** final egress releases task candidates or methods in a maps response
 - **THEN** the existing private served-context record retains their state, source identity, version and read route without source or prompt text
+- **AND** it keeps each candidate's offered links as relation and target ref, with the count of omitted links and no title, so a later read can be credited to a link that was offered
 - **AND** earlier records without task metadata remain readable with an explicit unrecorded task state
 
 ### Requirement: Method continuation cannot certify stale behavior
@@ -83,6 +84,13 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 - **WHEN** the packet allowance cannot hold every listed link
 - **THEN** every lead and method that fits without links is served, and links fill only the room that remains, in lead order
 - **AND** the candidate counts the links it could not list
+
+#### Scenario: The hook shows each lead's links
+
+- **WHEN** the retrieve hook renders a lead that lists links
+- **THEN** it renders one line under the lead with each link's relation, quoted and escaped title, and ref, and the count of omitted links when there is one
+- **AND** the hook charges link lines after every lead and method line, so a tight cap drops link lines before any lead or method line
+- **AND** a lead that the turn slice already lists renders no second lead line, only its link line named by the slice's ref
 
 #### Scenario: An unavailable graph keeps the leads
 

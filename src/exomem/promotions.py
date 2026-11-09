@@ -187,17 +187,20 @@ def record(
 
 
 class _Resolver:
-    """Resolve wikilink targets to vault paths, building the vault index once."""
+    """Resolve wikilink targets to vault paths through the process-shared writer index."""
 
     def __init__(self, vault_root: Path) -> None:
         self._root = Path(vault_root)
         self._resolver: Any = None
 
     def _factory(self) -> Any:
-        from . import vault as vault_module
+        from . import find
 
         if self._resolver is None:
-            self._resolver = vault_module.WikilinkResolver(self._root)
+            # The writer's process-shared, freshness-checked resolver: the same vault-wide policy the edge was
+            # authored under. A fresh `WikilinkResolver` read every page, about 6 s of CPU on every search while
+            # an edge notice was open.
+            self._resolver = find.shared_resolver(self._root)
         return self._resolver
 
     def __call__(self, raw: str) -> str | None:

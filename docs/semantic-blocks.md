@@ -147,6 +147,9 @@ Supported relations:
 - `supplies`
 - `produces`
 - `member_of`
+- `precedes`
+- `follows`
+- `assesses`
 
 Unsupported relation names and malformed relation entries are validation
 errors. Duplicate block IDs are warnings because the file remains readable, but

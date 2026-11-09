@@ -474,8 +474,6 @@ def observe_memory(
     if target_fingerprints is not None:
         # An episode correction must not change a different claim after target drift.
         # A refusal costs this leaf a re-read; ordinary page/heading edits keep their route.
-        from .unit_corrections import CORRECTIVE_FAMILIES
-
         if not isinstance(target_fingerprints, dict):
             raise ObserveMemoryError(
                 "INVALID_UNIT_TARGETS", "target_fingerprints must be an object"
@@ -487,7 +485,9 @@ def observe_memory(
         ):
             if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
                 continue
-            if fact.family not in CORRECTIVE_FAMILIES:
+            if "corrects" not in semantic_contract.page_relation_behaviours(
+                preflight.after, preflight.after_corpus, fact.canonical_relation
+            ):
                 continue
             if fact.target_unit_status != "found" or fact.logical_target_ref is None:
                 raise ObserveMemoryError(

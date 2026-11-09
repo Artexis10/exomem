@@ -1751,6 +1751,11 @@ def test_a_session_start_with_upkeep_holds_the_same_ceilings(
     )
     dreamer_fixture.plant_deliverable(vault, pages[0], pages[1:3], now=time.time())
     monkeypatch.setattr(dreamer, "delivering", lambda: True)
+    # A warm request reads settled pages. Without this, a runner fast enough to finish within the racy-mtime
+    # window never stores the container memo, and every container check re-reads its page (delta 47, not 33).
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
 
     def measure(carrier: bool) -> tuple[dict, _FilesystemCalls]:
         upkeep.reset_delivery_state()
@@ -1779,7 +1784,7 @@ def test_a_session_start_with_upkeep_holds_the_same_ceilings(
     # calls (the sidecar's existence check, the envelope's config read and the
     # release filter's policy read).
     assert with_upkeep.enumerations == without.enumerations, (without.report(), with_upkeep.report())
-    # Measured +28 (2026-09-24): the release filter's policy and tombstone
+    # Measured +28 (2026-09-24), +33 with settled pages (2026-11-09): the release filter's policy and tombstone
     # reads, the sidecar's existence check, the config read and one scope-key
     # resolution for the batched signature lookup.
     assert with_upkeep.total <= without.total + 40, (without.report(), with_upkeep.report())

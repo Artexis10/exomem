@@ -15,7 +15,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from . import activation, find_corpus, lifecycle_statuses, note_types, request_budget
+from . import (
+    activation,
+    find_corpus,
+    lifecycle_statuses,
+    note_types,
+    relation_registry,
+    request_budget,
+)
 from . import artifact_role_review as sensor
 from .find_types import ParsedPage
 
@@ -70,6 +77,7 @@ def _raw_links(unit: Any) -> list[str]:
 
 
 def describe(root: Path, state: Any) -> dict[str, Any]:
+    registry = relation_registry.load_for_page(root, state.path, state.frontmatter)
     units = state.document.units
     complete = len(units) <= sensor.MAX_UNITS and all(
         len(u.content) + len(u.context or "") <= sensor.MAX_UNIT_CHARS for u in units
@@ -109,7 +117,7 @@ def describe(root: Path, state: Any) -> dict[str, Any]:
                             "occurrence",
                         )
                     },
-                    "supersedes": [r.target for r in unit.relations if r.kind == "supersedes"],
+                    "supersedes": [r.target for r in unit.relations if "replaces" in registry.behaviours_of_label(r.kind)],
                 }
             )
     return {
@@ -204,6 +212,7 @@ def _resolved(index: Mapping[str, Any], page: Mapping[str, Any]) -> tuple[dict, 
             dependencies.add(path)
             if ref:
                 exact.append(ref)
+            # Debt (page-type keys): `source` is a note-type key; the note-type `role` states the fact.
             if index["pages"][path]["type"] == "source":
                 documents.append(path)
         links[unit["ref"]] = tuple(sorted(set(exact)))

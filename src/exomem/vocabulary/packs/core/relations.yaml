@@ -1,31 +1,32 @@
 schema_version: 2
 relations:
-  supports: {description: Provides support for, family: support, direction: directed, origins: [semantic_relation], presentation_role: support}
-  contradicts: {description: Conflicts with, family: contradiction, direction: symmetric, origins: [semantic_relation], presentation_role: conflict}
-  refines: {description: Makes more precise, family: refinement, direction: directed, origins: [semantic_relation], presentation_role: refinement}
-  duplicates: {description: Duplicates, family: duplication, direction: symmetric, origins: [semantic_relation]}
-  supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation, frontmatter], presentation_role: replacement}
-  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, semantic_unit, frontmatter]}
-  evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation, frontmatter]}
+  supports: {description: Provides support for, family: support, direction: directed, origins: [semantic_relation], presentation_role: support, behaviours: [lifts, bears_on, corrects]}
+  contradicts: {description: Conflicts with, family: contradiction, direction: symmetric, origins: [semantic_relation], presentation_role: conflict, behaviours: [lifts, bears_on, corrects, opposes]}
+  refines: {description: Makes more precise, family: refinement, direction: directed, origins: [semantic_relation], presentation_role: refinement, behaviours: [lifts, corrects]}
+  duplicates: {description: Duplicates, family: duplication, direction: symmetric, origins: [semantic_relation], behaviours: [lifts]}
+  supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation], presentation_role: replacement, behaviours: [replaces, corrects], frontmatter_fields: {supersedes: forward, superseded_by: reverse}}
+  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, semantic_unit], behaviours: [sources, associative], frontmatter_fields: {sources: forward}}
+  evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation], behaviours: [lifts, bears_on, sources, associative], frontmatter_fields: {evidence: forward, evidences: forward, evidence_paths: forward}}
   depends_on: {description: Depends on, family: dependency, direction: directed, origins: [semantic_relation]}
   implements: {description: Implements, family: implementation, direction: directed, origins: [semantic_relation]}
   mitigates: {description: Reduces a risk or effect of, family: mitigation, direction: directed, origins: [semantic_relation]}
+  # `causes` and `caused_by` carry no `lifts`: lifting one unit's causal claim to the page would assert a mechanism between pages.
   causes: {description: Causes, family: causality, direction: directed, inverse: caused_by, origins: [semantic_relation]}
   caused_by: {description: Is caused by, family: causality, direction: directed, inverse: causes, origins: [semantic_relation]}
   blocks: {description: Prevents progress on, family: blocking, direction: directed, origins: [semantic_relation]}
-  resolves: {description: Resolves, family: resolution, direction: directed, origins: [semantic_relation]}
-  answers: {description: Answers, family: answer, direction: directed, origins: [semantic_relation]}
-  raises_question: {description: Raises a question about, family: question, direction: directed, origins: [semantic_relation]}
+  resolves: {description: Resolves, family: resolution, direction: directed, origins: [semantic_relation], behaviours: [lifts, bears_on, settles, corrects]}
+  answers: {description: Answers, family: answer, direction: directed, origins: [semantic_relation], behaviours: [lifts, settles, corrects]}
+  raises_question: {description: Raises a question about, family: question, direction: directed, origins: [semantic_relation], behaviours: [lifts]}
   used_for: {description: Is used for, family: use, direction: directed, origins: [semantic_relation]}
-  observed_in: {description: Was observed in, family: observation, direction: directed, origins: [semantic_relation]}
-  mentions: {description: Mentions, family: mention, direction: directed, origins: [semantic_relation]}
-  about_entity: {description: Is about an entity, family: entity, direction: directed, origins: [semantic_relation], endpoints: {subject: [role:compiled], object: [entity:*]}}
+  observed_in: {description: Was observed in, family: observation, direction: directed, origins: [semantic_relation], behaviours: [associative]}
+  mentions: {description: Mentions, family: mention, direction: directed, origins: [semantic_relation], behaviours: [associative]}
+  about_entity: {description: Is about an entity, family: entity, direction: directed, origins: [semantic_relation], behaviours: [names_subject], endpoints: {subject: [role:compiled], object: [entity:*]}}
   relates_to: {description: Has a general meaningful relationship to, family: relation, direction: symmetric, origins: [semantic_relation], presentation_role: association, generic: true}
-  links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, frontmatter, wikilink], presentation_role: association}
-  cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation]}
+  links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, wikilink], presentation_role: association, behaviours: [associative, plain_link], frontmatter_fields: {related: forward}}
+  cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation], behaviours: [sources, associative]}
   tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}
   # A refusal lists at most four fitting relations: those whose endpoints name both pages by type first, then those that need `entity:*`; each group keeps this order.
-  member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
+  member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation], behaviours: [membership], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
   kin_of: {description: Is a relative of, family: kinship, direction: symmetric, origins: [semantic_relation], endpoints: {subject: [entity:person], object: [entity:person]}}
   affiliated_with: {description: Is affiliated with without being a member or owner, family: affiliation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person], object: [entity:organization]}}
   owns: {description: Owns, family: ownership, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:*]}}
@@ -36,3 +37,6 @@ relations:
   operates: {description: Operates or runs day to day, family: operation, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
   supplies: {description: Supplies goods or services to, family: supply, direction: directed, origins: [semantic_relation], endpoints: {subject: [entity:person, entity:organization], object: [entity:person, entity:organization]}}
   produces: {description: Produces or makes, family: production, direction: directed, origins: [semantic_relation]}
+  precedes: {description: Comes before in time, family: order, direction: directed, inverse: follows, origins: [semantic_relation], behaviours: [earlier_than_target]}
+  follows: {description: Comes after in time, family: order, direction: directed, inverse: precedes, origins: [semantic_relation], behaviours: [later_than_target]}
+  assesses: {description: Assesses how far a claim holds, family: assessment, direction: directed, origins: [semantic_relation]}
