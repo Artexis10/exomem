@@ -201,7 +201,7 @@ _PREPARATION_TOOL_SUFFIXES = ("compile_source", "prepare_note")
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
     "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
-    "contradicted conclusion; intent->Planning, outcome->Records; "
+    "contradicted conclusion, and now advice the user says failed; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
     'Rules: Exomem skill or bootstrap with operation.kind="instructions", profile="compact".'
 )
