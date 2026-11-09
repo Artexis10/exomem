@@ -211,9 +211,37 @@ def _positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def configure_logging(
-    log_dir: Path, level: int = logging.INFO, *, process: str = "server"
-) -> None:
+class _ReopeningRotatingFileHandler(RotatingFileHandler):
+    """A rotating handler that follows its path when another process rotates the file.
+
+    During a standby handoff the outgoing and incoming servers both log to the
+    server file. When one of them rotates it, the other would keep writing to the
+    renamed backup, and the live file would show a silent service until its own
+    size check rotated again. Reopening on an inode change, as `WatchedFileHandler`
+    does, keeps every process writing to the path that readers open.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._reopen_if_replaced()
+        super().emit(record)
+
+    def _reopen_if_replaced(self) -> None:
+        if self.stream is None:
+            return
+        try:
+            on_disk = os.stat(self.baseFilename)
+        except FileNotFoundError:
+            on_disk = None
+        except OSError:
+            return
+        held = os.fstat(self.stream.fileno())
+        if on_disk is not None and (on_disk.st_dev, on_disk.st_ino) == (held.st_dev, held.st_ino):
+            return
+        self.stream.close()
+        self.stream = self._open()
+
+
+def configure_logging(log_dir: Path, level: int = logging.INFO, *, process: str = "server") -> None:
     """Configure root JSONL file logging for one process role.
 
     `process` selects the per-process-role log file
@@ -224,7 +252,7 @@ def configure_logging(
     max_bytes = int(_positive_float_env("EXOMEM_LOG_MAX_MB", 5.0) * 1024 * 1024)
     backup_count = _positive_int_env("EXOMEM_LOG_BACKUPS", 5)
     log_dir.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
+    handler = _ReopeningRotatingFileHandler(
         log_dir / filename,
         maxBytes=max_bytes,
         backupCount=backup_count,
