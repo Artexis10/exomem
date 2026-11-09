@@ -177,7 +177,7 @@ has one unambiguous child container.
 Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
-  `Saved -> <path>`.
+  `Saved -> <title>`.
 - "What did I conclude about onboarding?" -> reuse current context, search remaining gaps with `search_memory`, cite hits, and
   retry with adjacent terms before treating a miss as meaningful.
 - "Save this article" -> `capture_source` with provenance; ask about compiling

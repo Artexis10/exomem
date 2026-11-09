@@ -1077,8 +1077,25 @@ def _contains_path(payload: Any, path: str) -> bool:
     return False
 
 
-def recall_has_exact_hit(payload: Mapping[str, Any], path: str, marker: str) -> bool:
-    """Require a returned recall hit, never a diagnostic/overlay echo."""
+def _written_path(reply: Mapping[str, Any]) -> str:
+    """The vault path a full-detail MCP write reply holds; a compact reply names the page by title and id."""
+    operational = (reply.get("diagnostics") or {}).get("operational") or {}
+    return str(reply.get("path") or operational.get("path") or "")
+
+
+def _id_head(page_id: object) -> str | None:
+    """The part of a short id before its dot: it names the page across edits, the rest names a version."""
+    return page_id.partition(".")[0] if isinstance(page_id, str) and "." in page_id else None
+
+
+def recall_has_exact_hit(
+    payload: Mapping[str, Any], path: str, marker: str, page_id: str | None = None
+) -> bool:
+    """Require a returned recall hit, never a diagnostic/overlay echo.
+
+    A compact hit names its page by `id` and no path, so a hit also matches by the head of the
+    write reply's `page_id`, which stays the same through later edits of the page.
+    """
     candidates: list[Any] = []
     for key in ("hits", "results", "items", "result"):
         value = payload.get(key)
@@ -1087,7 +1104,8 @@ def recall_has_exact_hit(payload: Mapping[str, Any], path: str, marker: str) -> 
     for hit in candidates:
         if not isinstance(hit, Mapping):
             continue
-        if hit.get("path") != path and hit.get("parent_path") != path:
+        by_id = _id_head(page_id) is not None and _id_head(hit.get("id")) == _id_head(page_id)
+        if hit.get("path") != path and hit.get("parent_path") != path and not by_id:
             continue
         visible = [
             hit.get(key)
@@ -1579,7 +1597,7 @@ async def run_public_workflow(
                 },
                 phase="source-closure",
             )
-            path = str(remembered.get("path") or "")
+            path = _written_path(remembered)
             if path:
                 remembered_observation = await _observe_reviewed(
                     client,
@@ -1634,7 +1652,7 @@ async def run_public_workflow(
         and _contains_marker(direct, marker)
         and all(_contains_marker(direct, evidence_path) for evidence_path in evidence_paths)
         and _contains_marker(tracker_read, marker)
-        and recall_has_exact_hit(recall, path, marker)
+        and recall_has_exact_hit(recall, path, marker, remembered.get("id"))
         and not _contains_marker(stale_relation_read, stale_line)
     )
     closure = evaluate_useful_closure(
@@ -1701,7 +1719,7 @@ async def run_public_workflow(
         "verification": {
             "direct_marker": _contains_marker(direct, marker),
             "tracker_marker": _contains_marker(tracker_read, marker),
-            "recall_hit": recall_has_exact_hit(recall, path, marker),
+            "recall_hit": recall_has_exact_hit(recall, path, marker, remembered.get("id")),
             "evidence_citations": all(_contains_marker(direct, evidence_path) for evidence_path in evidence_paths),
             "stale_relation_absent": not _contains_marker(stale_relation_read, stale_line),
             "mutations_succeeded": mutation_success,

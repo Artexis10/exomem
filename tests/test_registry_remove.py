@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from test_relation_endpoints import _page_path
 from test_vocabulary_registries import _VENUE, _served
 
 from exomem import commands, graph_sync
@@ -34,15 +35,18 @@ def _save(call, subject: str, proposal: dict, why: str, *, detail: str = "full")
 
 
 def _venue_page(call, name: str) -> str:
-    return call(
-        "connect_memory",
-        {
-            "operation": "create-entity",
-            "entity_type": "venue",
-            "name": name,
-            "summary": "A concert hall by the harbour that hosts the spring series.",
-        },
-    )["path"]
+    return _page_path(
+        call(
+            "connect_memory",
+            {
+                "operation": "create-entity",
+                "entity_type": "venue",
+                "name": name,
+                "summary": "A concert hall by the harbour that hosts the spring series.",
+                "response_detail": "full",
+            },
+        )
+    )
 
 
 def _entity_type_keys(call) -> dict[str, str]:
@@ -115,10 +119,11 @@ def test_a_home_with_notes_is_deprecated_without_moving_its_pages(
         }}},
         "Group equipment notes",
     )
-    path = call("create_note", {
+    path = _page_path(call("create_note", {
         "note_type": "insight", "title": "Seal inspection", "topics": ["equipment"],
         "status": "draft", "content": "## Observations\n\n- [finding] The seal holds pressure.\n",
-    })["path"]
+        "response_detail": "full",
+    }))
     before = (vault / path).read_bytes()
     assert graph_sync.drain_active_rebuilds(timeout=60)
 
