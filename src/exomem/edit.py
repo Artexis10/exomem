@@ -44,6 +44,7 @@ from . import (
     indexes,
     lifecycle_statuses,
     markdown_relations,
+    page_ids,
     reserved_paths,
     semantic_contract,
     semantic_writes,
@@ -650,7 +651,7 @@ def load_editable(
     original_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
 
     # Optimistic-concurrency guard. If the caller passed the hash it read via
-    # `get`, refuse when the file changed on disk since — don't clobber another
+    # `get` (or the short id of that version), refuse when the file changed on disk since — don't clobber another
     # writer. Checked before any mutation; the `updated:` bump happens after
     # this read, so it never self-trips.
     #
@@ -660,7 +661,9 @@ def load_editable(
     # every CRLF page, so the guard reported STALE_EDIT when nothing had
     # changed -- and re-reading returned the same raw hash, so the page could
     # never be edited through the guarded path at all.
-    if expected_hash is not None and content_hash(raw_text) != expected_hash:
+    if expected_hash is not None and not page_ids.guard_matches(
+        expected_hash, content_hash(raw_text)
+    ):
         raise EditError(
             code="STALE_EDIT",
             missing=["expected_hash"],

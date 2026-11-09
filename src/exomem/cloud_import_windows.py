@@ -27,6 +27,7 @@ from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
 from .cloud_import_client import (
     _STOP_ON_CLOUD,
+    CHECKPOINT_RECORD,
     PREFLIGHT,
     REGISTER,
     CloudImportClientConfig,
@@ -35,6 +36,7 @@ from .cloud_import_client import (
     _coded,
     _Where,
     import_source,
+    lands_declared,
     safe_code,
     server_code,
 )
@@ -329,6 +331,12 @@ class Member:
 #     record is about to forget its ID. The CLI then waits until Cloud ends the attempt, and at register it renews (rule b).
 #     It cancels only an ID that the series record holds, and it waits only on its own cancel: a row that someone else
 #     cancelled follows rules (c) and (d).
+# (g) The window's attempt lands its declared paths, whatever the source holds now, when a rerun resumes a checkpoint
+#     that holds the encrypted copy or its completed upload, or when Cloud holds the attempt's whole upload. So the
+#     record keeps every declared path, also when a change at the source empties the window. With no copy to resume,
+#     nothing is left to send, so the run stops until Cloud ends the import. When a window lands, each declared path that
+#     changed or vanished since the series recorded it landed with its content from before the change: the run reports
+#     it so, whenever the change came.
 
 
 @dataclass
@@ -340,6 +348,8 @@ class SentWindow:
     cost: int = 0
     # The import IDs of earlier attempts that ended terminally or declared another member set. A receipt for one lands the window.
     attempts: list[str] = field(default_factory=list)
+    # Rule (g): the paths that differed from the series record when the window landed, so they landed with their old content.
+    changed: list[str] = field(default_factory=list)
 
     def ids(self) -> list[str]:
         return [*self.attempts, *([self.import_id] if self.import_id else [])]
@@ -429,6 +439,7 @@ class _Run:
                  uploads, limits: dict | None, progress: Progress, poll_seconds: float, sleep, clock, on_landed=None,
                  file: bool = False, collection: str | None = None):
         self.series, self.record, self.source, self.config = series, record, source, config
+        self.members = {member.path: member for member in series.members}
         self.cell, self.api, self.uploads, self.limits, self.progress = cell, api, uploads, limits, progress
         self.sleep, self.clock, self.on_landed = sleep, clock, on_landed
         # Filing: the CLI files each landed window through the cell's `file`. `unfiled` maps a landed window's import ID to
@@ -451,6 +462,11 @@ class _Run:
         """The members that no window holds yet."""
         planned = {path for window in self.series.windows for path in window.paths} | set(self.series.skipped)
         return [member for member in self.series.members if member.path not in planned]
+
+    def unchanged(self, path: str) -> import_selection.Kept | None:
+        """The member as the source holds it now, or None when it changed or vanished since the series recorded it."""
+        member, fresh = self.members[path], _kept_now(self.source, self.members[path])
+        return fresh if fresh is not None and (fresh.size, fresh.mtime_ns) == (member.size, member.mtime_ns) else None
 
     def stop(self, code: str, message: str) -> Stopped:
         """Every stop says that the members not yet sent are not in Exomem."""
@@ -643,23 +659,26 @@ class _Run:
 
     async def send(self, window: SentWindow) -> None:
         """Send one window; a window that the Job refuses for space is dropped, so the loop plans it again smaller."""
-        kept, gone = [], []
-        for path in window.paths:
-            member = next(m for m in self.series.members if m.path == path)
-            fresh = _kept_now(self.source, member)
-            if fresh is None or (fresh.size, fresh.mtime_ns) != (member.size, member.mtime_ns):
-                gone.append(path)
-            else:
-                kept.append(fresh)
-        checkpoint = self.record.parent / window.dir
-        if gone:  # The window keeps its import ID (rule a); the create decides.
+        number, checkpoint = self.series.windows.index(window) + 1, self.record.parent / window.dir
+        fresh = {path: self.unchanged(path) for path in window.paths}
+        kept, gone = [item for item in fresh.values() if item is not None], [path for path, item in fresh.items() if item is None]
+        # Rule (g): a copy that the rerun resumes lands the declared paths, so the window keeps them all.
+        copy = bool(gone) and lands_declared(checkpoint)
+        row = await self._own_row(window.import_id) if gone and not copy else None
+        if row is not None and _uploaded(row):  # Rule (g): only Cloud holds the declared paths, so nothing is left to send.
+            message = (f"Cloud import {window.import_id} holds the whole upload of window {number}, with the content from before a "
+                       f"change at the source ({len(gone):,} files: {_listed(gone)}), and its state is "
+                       f"{safe_code(row['observed_state']) or 'unknown'}. The run continues once the cell receives it or Cloud ends it")
+            if _holds_cell(row):  # Cloud refuses to cancel a row that no longer holds the cell.
+                message += f". To end it now, {_STOP_ON_CLOUD}; the changed files are then not sent"
+            raise self.stop("WINDOW_IMPORTING", message)
+        if gone and not copy:  # The window keeps its import ID (rule a); the create decides.
             # The record is the partition: a member that changed is not sent and not planned again, and the person keeps it.
             window.paths = [item.rel for item in kept]
             self.series.skipped.extend(gone)
             self.progress.say(f"Not sent, because the source file changed or vanished since the series began ({len(gone):,}); "
                               "keep the source: " + _listed(gone))
             if not kept:
-                row = await self._own_row(window.import_id)
                 if row is not None and _unsent(row):  # Rule (f): settle the attempt before the record forgets its ID.
                     await self._cancel(window.import_id)
                 shutil.rmtree(checkpoint, ignore_errors=True)  # The record forgets the window, so no run uses its copy again.
@@ -667,7 +686,8 @@ class _Run:
                 self.series.write(self.record)
                 return
             self.series.write(self.record)
-        self.progress.say(f"Sending window {self.series.windows.index(window) + 1}: {len(kept):,} files, {human_bytes(sum(i.size for i in kept))}.")
+        self.progress.say(f"Sending window {number}: {len(window.paths):,} files, "
+                          f"{human_bytes(sum(self.members[path].size for path in window.paths))}.")
         renewed, result = False, None
         while True:
             try:
@@ -768,6 +788,11 @@ class _Run:
 
     async def settle(self, window: SentWindow) -> None:
         """A landed window drops its checkpoint, and a landed window of a resend clears its members from the old residual records, once."""
+        if window.state == "landed":  # Rule (g), once, whichever way the window landed.
+            window.changed = [path for path in window.paths if self.unchanged(path) is None]
+            if window.changed:
+                self.progress.say(f"Window {self.series.windows.index(window) + 1} landed with the content from before a change at "
+                                  f"the source ({len(window.changed):,}); keep the source: " + _listed(window.changed))
         # The client removes the copy only when the window lands through it; a window that lands on the cell's record lands here too.
         shutil.rmtree(self.record.parent / window.dir, ignore_errors=True)
         if self.on_landed is not None and window.state == "landed":
@@ -878,7 +903,7 @@ class _Run:
         checkpoint = self.record.parent / window.dir
         row = await self._own_row(window.import_id)
         if row is None:
-            if (checkpoint / "checkpoint.json").exists():
+            if (checkpoint / CHECKPOINT_RECORD).exists():
                 shutil.rmtree(checkpoint)
                 self.progress.say(f"Cloud cannot show import {window.import_id} of window {self.series.windows.index(window) + 1}, "
                                   "so its checkpoint is stale; sending the window afresh.")
@@ -921,9 +946,14 @@ class _Run:
         await self.file_windows(to_the_end=True)
         final = await self.cell.status()
         keep = Reading.of(final).keep_source
-        if self.series.skipped:
+        landed = [window for window in self.series.windows if window.state != "open"]
+        before = [path for window in landed for path in window.changed]
+        if self.series.skipped or before:
+            # Only the source holds the current content of a member that was not sent or that landed from before a change.
             cell_says = keep["message"] if keep and keep.get("keep") and keep.get("message") else "Keep the source folder."
-            keep = {"keep": True, "message": f"{cell_says} {len(self.series.skipped):,} files were not sent."}
+            notes = [f"{len(self.series.skipped):,} files were not sent."] if self.series.skipped else []
+            notes += [f"{len(before):,} files were sent with their content from before a change at the source."] if before else []
+            keep = {"keep": True, "message": " ".join([cell_says, *notes])}
         waiting = sorted(set(self.unfiled) | set(self.stopped))
         if keep is None or keep.get("keep"):
             # The cell did not take every window to the end of filing when this run filed, so it says what is left.
@@ -931,10 +961,9 @@ class _Run:
             self.progress.say(lead + " " + ((keep or {}).get("message") or "Keep your source folder until the cell reports that nothing is left to file."))
         else:
             self.progress.say("Every member is filed" + ("" if self.filing else " and discarded") + ", so you no longer need to keep the source folder.")
-        landed = [window for window in self.series.windows if window.state != "open"]
         result = {"import_id": landed[-1].import_id if landed else None, "windows": len(landed),
                   "import_ids": [window.import_id for window in landed], "keep_source": keep,
-                  "not_sent": list(self.series.skipped)}
+                  "not_sent": list(self.series.skipped), "sent_before_change": before}
         if self.filing or self.refusal:
             finished = self.finished_windows.values()
             result["filing"] = {"filed": sum(reply.count("filed") for reply in finished),
@@ -960,6 +989,12 @@ def _unsent(row: dict) -> bool:
     """Rule (f): Cloud holds the attempt, and its upload never completed, so no receipt can come from it."""
     # The Cloud import protocol fixes these states: Cloud keeps `requested` and `key_ready` until the upload completes.
     return row["requested_state"] == "requested" and row["observed_state"] == "key_ready"
+
+
+def _uploaded(row: dict) -> bool:
+    """Rule (g): Cloud holds the attempt's whole upload and has not ended it, so it imports the declared member set."""
+    # The Cloud import protocol fixes `uploaded`: Cloud sets it when the upload completes.
+    return row["requested_state"] == "uploaded" and not _ended(row)
 
 
 def _kept_now(source: Path, member: Member) -> import_selection.Kept | None:

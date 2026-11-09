@@ -54,6 +54,7 @@ from .errors import describe_error as _describe_error
 from .export_layout import (
     PACK,
     PAUSE,
+    STEPS,
     UPLOAD,
     VERIFY,
     legacy_job_name,
@@ -3104,7 +3105,7 @@ async def _remove_export(
     namespace = namespace_name(row.cell_id)
     try:
         # D8: an ended export leaves no step Job and no staging claim; a retry repeats each removal.
-        for name in (*(export_job_name(item.export_id, step) for step in (PAUSE, UPLOAD, PACK, VERIFY)),
+        for name in (*(export_job_name(item.export_id, step) for step in STEPS),
                      legacy_job_name(item.export_id)):
             cluster.delete_job(namespace, name)
         cluster.delete_export_staging(namespace, item.export_id)

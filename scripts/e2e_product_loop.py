@@ -1286,7 +1286,8 @@ async def _records_first_session(client, state: dict[str, Any], timeout: float) 
     recalled = await _call(
         client,
         "ask_memory",
-        {"query": "e2e record row-only sentinel", "mode": "keyword"},
+        # `detail="full"` keeps each hit's vault path, which the raw-log check below compares.
+        {"query": "e2e record row-only sentinel", "mode": "keyword", "detail": "full"},
         timeout,
     )
     hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
@@ -1670,7 +1671,7 @@ async def _stdio_session(
                     timeout,
                 )
                 recalled_hits = recalled.get("hits", []) if isinstance(recalled, dict) else recalled
-                if memory["path"] not in {hit["path"] for hit in recalled_hits}:
+                if memory["ref"] not in {hit.get("ref") for hit in recalled_hits}:
                     raise RuntimeError("fresh memory was not recalled through stdio MCP")
                 read = await _call(
                     client,

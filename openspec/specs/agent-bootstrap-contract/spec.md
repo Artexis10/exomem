@@ -942,7 +942,7 @@ unaffected.
 
 ### Requirement: Stop-hook blocks are one short paragraph
 
-Where a client Stop hook blocks to ask for a capture or an episode record, the reason SHALL be one short paragraph, asserted by a byte ceiling per block. The capture check SHALL be the same short text on every fire, with no first-fire or post-compaction full text, and SHALL NOT carry the capture doctrine. It SHALL name the rules that prevent known incidents (the live-policy pointer, no transcripts, `replace_memory` supersedes a contradicted conclusion, stated intent to Planning and observed outcome to Records, transient code, test and CI output stays out, and nothing durable means stop).
+Where a client Stop hook blocks to ask for a capture or an episode record, the reason SHALL be one short paragraph, asserted by a byte ceiling per block. The capture check SHALL be the same short text on every fire, with no first-fire or post-compaction full text, and SHALL NOT carry the capture doctrine. It SHALL name the rules that prevent known incidents (the live-policy pointer, no transcripts, `replace_memory` supersedes a contradicted conclusion and, at once, advice the user says failed, stated intent to Planning and observed outcome to Records, transient code, test and CI output stays out, and nothing durable means stop).
 
 The capture check SHALL end with a pointer to the installed Exomem skill or compact bootstrap when the skill is unavailable. The agent SHALL reuse an already-held current operating contract. The pointer SHALL NOT require a vault copy of the shipped references.
 

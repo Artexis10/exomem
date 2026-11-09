@@ -1662,6 +1662,11 @@ def _status_main(argv: list[str]) -> int:
     if vault_root is not None:
         state_migration.require_vault_state_ready(vault_root)
     status = resource_status.collect(vault_root)
+    if vault_root is not None:
+        from .vault_store import mode as store_mode
+
+        # The records' own answer: it opens the store only when the manifest says store mode.
+        status["vault_store"] = store_mode.status(vault_root)
     if args.json:
         print(json.dumps(status))
     else:
@@ -1672,6 +1677,8 @@ def _status_main(argv: list[str]) -> int:
         print(f"  originals: {status['originals']}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
+        if "vault_store" in status:
+            print(f"  vault_store: {status['vault_store']}")
     return 0
 
 

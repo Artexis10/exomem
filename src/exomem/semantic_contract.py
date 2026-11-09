@@ -100,7 +100,7 @@ _IDENTITY_CENSUS_RESERVED_KB_DIRS = frozenset({".graph-commit-receipts", "_trash
 
 def _prune_identity_census_directory(kb: Path, directory: Path, name: str) -> bool:
     """Whether an entry is runtime state rather than canonical Markdown."""
-    if name.startswith(vault.VAULT_SCAN_SKIP_DIR_PREFIXES):
+    if vault.is_scan_skipped_runtime_name(name):
         return True
     if directory != kb:
         return False
@@ -2071,8 +2071,8 @@ def _resolve_reference_wikilink_from_context(
     matches.update(
         candidate.path for candidate in vault.wikilink_candidates(
             context.resolver_candidates_by_key,
-            context.resolver_titles.get(cleaned.lower(), ()),
-            title_key=cleaned.lower(), visible=visible,
+            context.resolver_titles.get(vault.title_key(cleaned), ()),
+            title_key=vault.title_key(cleaned), visible=visible,
         )
     )
     if len(matches) > 1:
@@ -3924,7 +3924,7 @@ def _build_corpus_context_uncached(
 
 def _read_corpus_source(root: Path, path: Path) -> str:
     if request_budget.current_checkpoint() is None:
-        return path.read_bytes().decode("utf-8")
+        return vault.read_bytes_without_pinning(path, root).decode("utf-8")
     return vault.read_guarded_text(root, path)[0]
 
 

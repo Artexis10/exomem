@@ -156,6 +156,16 @@ def test_recall_gate_does_not_accept_a_diagnostic_path_without_a_real_hit() -> N
     ) is False
 
 
+def test_recall_gate_matches_a_compact_hit_by_the_page_id_the_write_returned() -> None:
+    # A compact MCP hit names its page by id and no path, and the page was edited after the write.
+    written = {"id": "abcdefg.abcd", "diagnostics": {"operational": {"path": "Knowledge Base/Notes/Insights/new-note.md"}}}
+    recall = {"hits": [{"id": "abcdefg.wxyz", "title": "New note", "excerpt": "unique marker"}]}
+
+    assert benchmark._written_path(written) == "Knowledge Base/Notes/Insights/new-note.md"
+    assert benchmark.recall_has_exact_hit(recall, benchmark._written_path(written), "unique marker", written["id"])
+    assert not benchmark.recall_has_exact_hit(recall, "Knowledge Base/Notes/Insights/new-note.md", "unique marker")
+
+
 def test_overlapping_ledger_calls_keep_sum_and_union_distinct() -> None:
     timings = benchmark.summarize_ledger_calls(
         [

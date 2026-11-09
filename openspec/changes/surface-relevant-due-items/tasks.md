@@ -18,4 +18,6 @@
 - [x] 3.1 Complete independent review, integrated CI, and ordinary release; record exact accepted and released commits.
       Evidence: accepted PR #1700 (merge 34c1a76a4, independent reviews recorded in its body); released in 0.116.0 (release PR #1683, merge 886a0a9bf); later due memo repair PR #1883 (merge 92f752d39).
 - [ ] 3.2 Check native relevance and mention behavior through continuation, compaction, and credential renewal after release; record unverified behavior explicitly.
+      Unverified, 2026-11-09: the call ledger and the activation journal have no field for an attached due candidate, so server records cannot show the behavior.
+      Continuation, compaction and credential renewal still need a check in a client session that captures the hook output.
 - [ ] 3.3 Synchronize and archive the change after shipped non-optional tasks complete; verify strict OpenSpec validation.
