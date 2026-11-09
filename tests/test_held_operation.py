@@ -13,10 +13,11 @@ from __future__ import annotations
 import sys
 
 import pytest
-from test_governance_egress import EXTERNAL, write_rule, write_scope
+from test_governance_egress import EXTERNAL, SCOPE_ID, _gov_dir, write_rule, write_scope
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_held import (  # noqa: F401
     ALPHA,
+    EXOMEM,
     MINE,
     digest,
     exports,
@@ -30,7 +31,7 @@ from test_vault_store_read_write import rows, stored, writer  # noqa: F401
 from exomem import commands, held_operation, state_paths
 from exomem.cli_ops import OpError
 from exomem.collection_store import preview
-from exomem.governance import egress, policy, principal
+from exomem.governance import egress, membership, policy, principal
 from exomem.vault_store import held, write
 
 pytestmark = pytest.mark.skipif(
@@ -38,6 +39,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 WHY = "the owner asked"
+
+
+def tagged(body):
+    return body.replace(b"type: note\n", b"type: note\ntags: [restricted]\n")
 
 
 @pytest.fixture
@@ -173,3 +178,36 @@ def test_a_policy_that_restricts_one_folder_hides_its_held_item_from_an_outside_
     assert stored_page(stored)[0][0] != MINE
     assert repair(stored, held.KEEP_MINE, item_version=version)["choice"] == held.KEEP_MINE
     assert stored_page(stored)[0][0] == MINE
+
+
+@pytest.mark.parametrize("stored_page_is_tagged", [True, False])
+def test_a_tag_scope_hides_a_held_item_from_an_outside_caller_only_when_the_stored_page_is_tagged(
+    stored, writer, served, stored_page_is_tagged
+):
+    """A scope that reads frontmatter left a level from the path alone at the minimum for every
+    caller, so the owner saw nothing held and could not resolve. The stored page decides, never the
+    person's file: here the file carries the tag exactly when the stored page does not."""
+    hold(
+        stored,
+        writer,
+        "edit",
+        exomem=tagged(EXOMEM) if stored_page_is_tagged else EXOMEM,
+        mine=MINE if stored_page_is_tagged else tagged(MINE),
+    )
+    version = held.list_held(stored)[0].item_version
+    scope = _gov_dir(stored) / "scopes" / "patterns.yaml"
+    scope.parent.mkdir(parents=True, exist_ok=True)
+    scope.write_text(
+        f"governance_version: 1\nid: {SCOPE_ID}\nname: Restricted\ntags: [restricted]\n",
+        encoding="utf-8",
+    )
+    write_rule(stored, ceiling=egress.LEVEL_NONE)
+    policy._CACHE.clear()
+    membership.clear_memo()
+    egress.clear_decision_memo()
+    outsider = principal.RequestPrincipal(audience_id=EXTERNAL, surface="mcp")
+    with principal.request_scope(outsider):
+        assert len(listed(stored)["items"]) == (0 if stored_page_is_tagged else 1)
+    assert len(listed(stored)["items"]) == 1
+    assert repair(stored, held.KEEP_MINE, item_version=version)["choice"] == held.KEEP_MINE
+    assert held.list_held(stored) == []

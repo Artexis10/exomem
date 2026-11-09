@@ -39,14 +39,35 @@ RESOLVE_FIELDS = tuple(_REQUIRED)
 def _may_see(vault_root: Path, rel: str) -> bool:
     """Whether this caller may read the page at ``rel`` in full: a held item is its business.
 
-    The release level comes from the path alone. The level that compares the page's bytes on disk
-    would hide every held item, since a held edit has file bytes that differ from the stored page
-    and a held delete has no file.
+    The store's page is the page's authority, so the release level comes from its bytes: the
+    caller sees an item exactly when a read of that page would give it the page in full. The file
+    on disk cannot decide it, since a held edit has file bytes that differ from the stored page and
+    a held delete has no file. The path alone cannot decide it either, because a scope that reads
+    frontmatter, such as a tag, leaves a path-only level at the minimum for every caller, the
+    owner included. A path with no stored page, such as a binary, is decided by its path alone.
     """
     from .governance import egress
+    from .governance import policy as policy_module
     from .governance.principal import effective_principal
+    from .vault_store import read
 
-    level = egress.release_level_for_path_only(vault_root, rel, principal=effective_principal())
+    who = effective_principal()
+    try:
+        page = read.owned_page(vault_root, rel)
+    except FileNotFoundError:
+        page = None  # The store serves this path and holds no page: nothing to decide on.
+    if page is None:
+        level = egress.release_level_for_path_only(vault_root, rel, principal=who)
+    else:
+        # The one call that decides a page from exact bytes, as `registry_history` makes it.
+        level = egress._release_level_for_markdown_snapshot(
+            vault_root,
+            rel,
+            page.body,
+            principal=who,
+            purpose=who.purpose,
+            policy=policy_module.load(vault_root),
+        )
     return level >= egress.LEVEL_FULL
 
 

@@ -70,7 +70,7 @@ In store mode, a file the store owns whose hash differs from the projection mani
 - **THEN** the store keeps the page and records a held deletion for review
 
 ### Requirement: A held item is resolved by an explicit choice
-In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL mark a held binary as not yet resolvable with no choices; a resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries.
+In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that from the stored page's bytes, not from the file or the path alone. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.
 
 #### Scenario: Keep mine adopts the person's file
 - **WHEN** an agent resolves a held edit with keep-mine and the store page is still at the revision the hold saw
@@ -100,10 +100,20 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 - **THEN** the list leaves the item out and gives no count of left-out items
 - **AND** a resolve by that caller refuses as if nothing were held for the path
 
+#### Scenario: A tag scope decides a held item on the stored page
+- **WHEN** a policy restricts pages by a tag, a held page's stored bytes carry no such tag and the person's file does
+- **THEN** the owner and a caller outside that policy both see the item and the owner can resolve it
+- **AND** when the stored bytes carry the tag, the caller outside the policy sees nothing and the owner still sees and resolves the item
+
 #### Scenario: A held binary is not resolved yet
 - **WHEN** a held item is a binary and an agent lists or resolves it
 - **THEN** the list marks it not yet resolvable and offers no choice
 - **AND** a resolve refuses and says that binaries stay held until a later release resolves them
+
+#### Scenario: A held file that is too large is not resolved
+- **WHEN** a held file is above 64 MiB and an agent lists or resolves it
+- **THEN** the list marks it not yet resolvable, offers no choice and says why
+- **AND** a resolve refuses with `VAULT_STORE_HELD_TOO_LARGE`
 
 ### Requirement: Semantic units are first-class store rows
 In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes and SHALL NOT write anchors into a page. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.

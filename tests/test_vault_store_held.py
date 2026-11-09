@@ -38,15 +38,15 @@ def digest(body):
     return hashlib.sha256(body).hexdigest()
 
 
-def hold(root, writer, kind, *, body=True):
-    """Exomem changed ALPHA and a person changed its file.
+def hold(root, writer, kind, *, body=True, exomem=EXOMEM, mine=MINE):
+    """Exomem changed ALPHA to ``exomem`` and a person changed its file to ``mine``.
 
     The store, the file and the held row end as the projector leaves them.
     """
     manifest = rows(root, "SELECT sha256, revision FROM store_manifest WHERE path = ?", ALPHA)[0]
-    revision = write.commit(writer, put(ALPHA, EXOMEM)).revision
+    revision = write.commit(writer, put(ALPHA, exomem)).revision
     if kind == "edit":
-        (root / ALPHA).write_bytes(MINE)
+        (root / ALPHA).write_bytes(mine)
     else:
         (root / ALPHA).unlink()
     with writer.handle.transaction() as tx:
@@ -59,8 +59,8 @@ def hold(root, writer, kind, *, body=True):
                 kind,
                 manifest[1],
                 revision,
-                digest(MINE) if kind == "edit" else manifest[0],
-                MINE if kind == "edit" and body else None,
+                digest(mine) if kind == "edit" else manifest[0],
+                mine if kind == "edit" and body else None,
                 "2026-11-09T09:00:00Z",
             ),
         )
