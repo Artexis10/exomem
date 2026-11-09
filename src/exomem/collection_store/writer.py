@@ -53,6 +53,7 @@ from . import (
     governance,
     index_migrations,
     log_view,
+    reference_declarations,
     references,
     rollups,
     schema,
@@ -2184,6 +2185,7 @@ class CollectionWriter:
             if manifest.view_diagnostics:
                 diagnostic = manifest.view_diagnostics[0]
                 raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+            reference_declarations.require_targets(self._operation, manifest)
             try:
                 connector_boundary.require_create(self.root, manifest.path)
                 connector_boundary.require_create(self.root, manifest.storage.source)
@@ -3444,6 +3446,7 @@ class CollectionWriter:
             diagnostic = proposed.view_diagnostics[0]
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)
         record_formats.validate_storage_contract(proposed)
+        reference_declarations.require_targets(self._operation, proposed, current)
         if declared.kind == "intended":
             planning.require_planning_profile(proposed)
         plans = {
