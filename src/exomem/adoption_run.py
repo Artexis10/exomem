@@ -3757,7 +3757,7 @@ def _write_run_manifest(
 # --------------------------------------------------------------------------- #
 # The closed protocol of a `file` reply, which the Cloud CLI reads as well: its states, and the counts in `progress`.
 FILING_STATES = ("working", "stopped", "done")  # nosemgrep: ep-word-set -- the closed states of a `file` reply.
-FILING_COUNTS = ("filed", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of a `file` reply.
+FILING_COUNTS = ("filed", "skipped_duplicates", "failed", "remaining", "pages_done")  # nosemgrep: ep-word-set -- the closed counts of a `file` reply.
 _WORKING, _STOPPED, _DONE = FILING_STATES
 # The driver's own steps that publish: a reconciling call runs only the apply that its identity stored.
 _APPLY_STEPS = ("apply", "retry")  # nosemgrep: ep-word-set -- the `file` driver's closed step names that call `apply`.
@@ -4103,9 +4103,13 @@ def _files(count: int) -> str:
     return f"{count} file" if count == 1 else f"{count} files"
 
 
-def _filing_summary(filing: str, filed: int, failed: int, remaining: int) -> str:
-    """One sentence built from the three counts and nothing else: it claims no more than the outcomes record."""
-    counts = f"{_files(filed)} filed, {failed} failed, {remaining} left"
+def _filing_summary(filing: str, filed: int, skipped: int, failed: int, remaining: int) -> str:
+    """One sentence built from the counts and nothing else: it claims no more than the outcomes record.
+
+    It names the skipped duplicates only when there are some, so an import without any reads as before.
+    """
+    duplicates = f"{skipped} duplicate{'' if skipped == 1 else 's'} skipped, " if skipped else ""
+    counts = f"{_files(filed)} filed, {duplicates}{failed} failed, {remaining} left"
     if filing == _DONE:
         return f"Filing is done: {counts}."
     return f"Filing is {filing}: {counts}."
@@ -4125,7 +4129,13 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     pages = (run, *_earlier_pages(store, run))
     scans = sorted(store.runs_at(run["source_root"]), key=lambda page: str(page.get("created") or ""))
     newest = {path: outcome for page in scans for path, outcome in (page.get("outcomes") or {}).items()}
-    filed = sum(1 for outcome in newest.values() if outcome.get("status") in _APPLIED_STATUSES)
+    # A skipped duplicate is a file whose newest outcome names the Source that already held its bytes, as
+    # `_skipped_duplicates` reads it. A file whose Source a page of this import stored stays filed when a later
+    # scan meets that Source again, so each file counts once: as filed or as a skipped duplicate.
+    stored = {path for page in scans for path, outcome in (page.get("outcomes") or {}).items()
+              if _source_status(outcome) == "applied"}
+    skipped = _skipped_duplicates({path: outcome for path, outcome in newest.items() if path not in stored})
+    filed = sum(1 for outcome in newest.values() if outcome.get("status") in _APPLIED_STATUSES) - skipped
     failed = sum(1 for outcome in newest.values() if outcome.get("status") == "failed")
     remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
     if _next_filing_step(run) == "done":
@@ -4141,10 +4151,10 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
         "collection": run["collection"]["label"],
         "filing": filing,
         "progress": {
-            **dict(zip(FILING_COUNTS, (filed, failed, remaining, pages_done), strict=True)),
+            **dict(zip(FILING_COUNTS, (filed, skipped, failed, remaining, pages_done), strict=True)),
             "page": _page_position(run),
         },
-        "summary": _filing_summary(filing, filed, failed, remaining),
+        "summary": _filing_summary(filing, filed, skipped, failed, remaining),
     }
     if derived is not None:
         reply["stop"] = derived

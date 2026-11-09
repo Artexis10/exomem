@@ -30,7 +30,8 @@ pytestmark = needs_age
 # The classification inputs of the synthetic cell: an artifact of 800 bytes is offloadable, one of 3000 is resident.
 HYDRATION, VOLUME = 2000, 1_000_000
 BIG = 10**9
-FILED = {"filing": "done", "progress": {"filed": 3, "failed": 0, "remaining": 0, "pages_done": 1}, "person": []}
+FILED = {"filing": "done", "progress": {"filed": 3, "skipped_duplicates": 1, "failed": 0, "remaining": 0, "pages_done": 1},
+         "person": []}
 
 
 class FakeCell(Cell):
@@ -1447,6 +1448,9 @@ def test_filing_a_landed_window_while_the_series_waits_makes_room_for_the_next_w
     assert len(rig.cell.filed) == len(rig.cloud.completed) >= 3
     assert {call[:2] for call in rig.cell.filed} == {(import_id, "Field Notes") for import_id in rig.cloud.completed}
     assert result["filing"]["windows_waiting"] == 0 and result["filing"]["filed"] == 3 * len(rig.cloud.completed)
+    # A duplicate that a window skipped is reported as skipped, never as filed.
+    assert result["filing"]["skipped_duplicates"] == len(rig.cloud.completed)
+    assert "3 files filed, 1 duplicate skipped, 0 failed." in rig.said()
     assert "no longer need to keep the source folder" in rig.said()
 
 
@@ -1517,7 +1521,7 @@ def test_a_window_that_stops_for_space_is_filed_again_from_its_continuation_on_t
     nine(rig)
     _staged_copies_hold_the_room_until_filed(rig)
     stopped = {"filing": "stopped", "continuation": "run-1:file-0001-ab", "stop": {"code": "INSUFFICIENT_SPACE"},
-               "progress": {"filed": 1, "failed": 0, "remaining": 2, "pages_done": 0},
+               "progress": {"filed": 1, "skipped_duplicates": 0, "failed": 0, "remaining": 2, "pages_done": 0},
                "person": [{"need": "free_space", "text": "Free space."}]}
     rig.cell.file_replies = [stopped, FILED]
 

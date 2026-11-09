@@ -557,8 +557,10 @@ class _Run:
                     self.stopped.pop(import_id, None)
                     self.finished_windows[import_id] = reply
                     moved = True
+                    skipped = reply.count("skipped_duplicates")
+                    duplicates = f"{skipped:,} duplicate{'' if skipped == 1 else 's'} skipped, " if skipped else ""
                     self.progress.say(f"Filed window {self._number(import_id)}: {reply.count('filed'):,} files filed, "
-                                      f"{reply.count('failed'):,} failed.")
+                                      f"{duplicates}{reply.count('failed'):,} failed.")
                 elif reply.state == STOPPED:
                     self._say_stop(import_id, reply)
                     if reply.continuation is None:  # Nothing to carry on from: this run leaves the window to the person.
@@ -936,6 +938,7 @@ class _Run:
         if self.filing or self.refusal:
             finished = self.finished_windows.values()
             result["filing"] = {"filed": sum(reply.count("filed") for reply in finished),
+                                "skipped_duplicates": sum(reply.count("skipped_duplicates") for reply in finished),
                                 "failed": sum(reply.count("failed") for reply in finished),
                                 "windows_done": len(self.finished_windows), "windows_waiting": len(waiting)}
         return result

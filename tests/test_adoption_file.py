@@ -86,6 +86,45 @@ def test_an_agent_files_a_multi_page_stage_to_done_by_repeating_one_call(vault):
     assert len(_runs(vault)) == 3
 
 
+def test_a_stage_with_identical_files_and_its_reimport_under_another_collection_file_to_done_storing_each_once(
+        vault, duplicate_index):
+    """Catches duplicates that hold `file` short of done, or that the counts report as filed, failed or left."""
+    # Six files and four byte strings: a2 repeats a1 on its own page, c1 repeats b1 from an earlier page.
+    files = {"a1.pdf": PDF + b"x", "a2.pdf": PDF + b"x", "b1.pdf": PDF + b"y", "b2.pdf": PDF + b"z",
+             "c1.pdf": PDF + b"y", "c2.pdf": PDF + b"w"}
+    first, second = _stage(vault, files), _stage(vault, files)
+    before = _sources(vault)
+
+    async def file_to_done(client: Client, staged: str, collection: str) -> dict:
+        operation = {"path": staged, "collection": collection}
+        for number in range(40):
+            result = await _file(client, f"{collection}-{number}", **operation)
+            assert not result.is_error and "error" not in result.structured_content, result
+            reply = result.structured_content
+            if reply["filing"] != "working":
+                return reply
+            operation = {"path": staged, "continuation": reply["continuation"]}
+        raise AssertionError(f"filing {collection} never ended in 40 calls")
+
+    async def journey() -> tuple[dict, dict]:
+        async with Client(server.build_server(require_auth=False)) as client:
+            return await file_to_done(client, first, "Field Notes"), await file_to_done(client, second, "Reading List")
+
+    once, again = asyncio.run(journey())
+
+    assert once["filing"] == "done" and again["filing"] == "done"
+    assert {key: once["progress"][key] for key in ("filed", "skipped_duplicates", "failed", "remaining")} == {
+        "filed": 4, "skipped_duplicates": 2, "failed": 0, "remaining": 0}
+    assert once["summary"] == "Filing is done: 4 files filed, 2 duplicates skipped, 0 failed, 0 left."
+    assert {key: again["progress"][key] for key in ("filed", "skipped_duplicates", "failed", "remaining")} == {
+        "filed": 0, "skipped_duplicates": 6, "failed": 0, "remaining": 0}
+    assert again["summary"] == "Filing is done: 0 files filed, 6 duplicates skipped, 0 failed, 0 left."
+    added = [path for path in _sources(vault) if path not in before]
+    assert len(added) == 4
+    stored = [path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.pdf")]
+    assert sorted(stored) == sorted({PDF + suffix for suffix in (b"x", b"y", b"z", b"w")})
+
+
 @pytest.mark.parametrize("cut", ["after-chunk-commit", "after-next-page-start", "during-finish"])
 def test_the_exact_repeat_of_an_interrupted_call_files_every_source_once(vault, monkeypatch, cut):
     """Catches an interrupted `file` call whose exact repeat is refused as an unknown outcome or publishes twice."""
@@ -321,6 +360,8 @@ def test_a_file_that_a_rerun_of_a_local_import_copies_after_done_is_filed_by_the
     again = _file_to_the_end(vault, first["start_path"])
 
     assert again["filing"] == "done"
+    # The new scan meets the first file's own Source again: that file stays filed, never a skipped duplicate.
+    assert (again["progress"]["filed"], again["progress"]["skipped_duplicates"]) == (2, 0)
     added = [path.read_text(encoding="utf-8") for path in _sources(vault) if path not in before]
     assert len(added) == 2 and sum("The last field note." in text for text in added) == 1
 
