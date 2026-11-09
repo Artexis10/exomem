@@ -1439,7 +1439,15 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
     """Use native custody and native publication, with one sealed core allocation."""
     from dataclasses import replace
 
-    from . import add, artifact_recovery, memory_refs, preserve, retained_inputs, schema
+    from . import (
+        add,
+        artifact_recovery,
+        evidence_reuse,
+        memory_refs,
+        preserve,
+        retained_inputs,
+        schema,
+    )
     from .governance.principal import effective_principal
     from .vault import PreparedBinaryContent, _NativePrepared
 
@@ -1451,8 +1459,7 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
         if held.size != original["size"] or held.held is None:
             raise artifact_recovery.RecoveryUnavailable
         if prepared is None and kind == "preserve-evidence":
-            duplicate = preserve.find_duplicate_artifact(vault_root, scope=values["scope"], category=values["category"], sha256=held.sha256, raw_protection=values.get("raw_protection", False))
-            if duplicate is not None:
+            if evidence_reuse.already_in_family(vault_root, scope=values["scope"], category=values["category"], sha256=held.sha256, protected=values.get("raw_protection", False)):
                 raise _error("EPISODE_PRIOR_PRESERVATION", "original already preserved at this native destination")
         with memory_refs._allocated_ids(prepared["memory_ids"] if prepared is not None else None) as identities:
             def validate_inputs() -> None:

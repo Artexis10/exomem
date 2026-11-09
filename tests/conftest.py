@@ -1244,6 +1244,15 @@ def earlier_layout() -> Iterator[pytest.MonkeyPatch]:
 
 
 @pytest.fixture
+def owner_scope() -> Iterator[None]:
+    """Run the test as the vault owner, in process: the one caller who can read a raw-protected page."""
+    from exomem.governance.principal import library_scope
+
+    with library_scope():
+        yield
+
+
+@pytest.fixture
 def earlier_episode(vault: Path, source_schema, earlier_layout) -> Iterator[Callable[..., list[str]]]:
     """Build an episode as earlier releases kept it, as the local owner for the whole test.
 

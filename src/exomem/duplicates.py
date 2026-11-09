@@ -12,7 +12,7 @@ import hashlib
 import http.client
 import re
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
@@ -184,7 +184,10 @@ def _original_intact(vault_root, rel: str, payload: PagePayload) -> bool:
         return False
 
 
-def find_duplicate(vault_root, *, sha256: str, lane: str, protected: bool) -> DuplicateLookup:
+def find_duplicate(
+    vault_root, *, sha256: str, lane: str, protected: bool, needs_original: bool = False,
+    prefer: Callable[[Duplicate], bool] | None = None,
+) -> DuplicateLookup:
     """The earliest live page of `lane` and protection class whose stored payload hashes to `sha256`.
 
     The one call every storing door makes under its mutation boundary. A candidate counts only after its
@@ -192,6 +195,11 @@ def find_duplicate(vault_root, *, sha256: str, lane: str, protected: bool) -> Du
     current caller may read the page in full. A candidate that fails either test reads as absent, so the
     answer equals the answer of a vault without that page. `available` is False when the catalogue cannot
     answer; the door then stores the content as new and carries `duplicate_check_unavailable`.
+
+    `needs_original` admits only a page that keeps the bytes as a file: a file hand-over has no use for a
+    text Source whose captured text happens to hash alike. `prefer` names the hit a door would rather have
+    when several live copies exist (older vaults hold one per family); the earliest hit stands when none
+    qualifies.
     """
     from . import lexstore
 
@@ -200,6 +208,7 @@ def find_duplicate(vault_root, *, sha256: str, lane: str, protected: bool) -> Du
     candidates = lexstore.payload_candidates(vault_root, sha256)
     if candidates is None:
         return DuplicateLookup(available=False)
+    first: Duplicate | None = None
     for rel in candidates:
         if vault.in_append_only_tree(rel) != lane or raw_protection.marked(rel) != protected:
             continue
@@ -207,10 +216,23 @@ def find_duplicate(vault_root, *, sha256: str, lane: str, protected: bool) -> Du
         if (payload is None or payload.sha256 != sha256 or payload.lane != lane
                 or payload.protected != protected or payload.ref is None):
             continue
+        if needs_original and payload.artifact_path is None:
+            continue
         if payload.artifact_path is not None and not _original_intact(vault_root, rel, payload):
             continue
-        return DuplicateLookup(Duplicate(path=rel, ref=payload.ref, payload=payload))
-    return DuplicateLookup()
+        hit = Duplicate(path=rel, ref=payload.ref, payload=payload)
+        if prefer is None or prefer(hit):
+            return DuplicateLookup(hit)
+        first = first or hit
+    return DuplicateLookup(first)
+
+
+def unavailable_warning(subject: str) -> str:
+    """The warning a door carries when the duplicate index could not answer, so `subject` was stored unchecked."""
+    return (
+        f"duplicate_check_unavailable: the duplicate index could not answer, so {subject} was stored without "
+        "a check for an earlier copy; the audit reports any copy later"
+    )
 
 
 @dataclass(frozen=True, slots=True)

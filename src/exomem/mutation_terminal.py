@@ -556,6 +556,48 @@ def settled_media_terminal(
     return terminal
 
 
+def is_reused_capture(leaf_result: Any) -> bool:
+    """Whether a capture matched an earlier copy and wrote nothing (`capture_outcome` is a closed protocol value)."""
+    return (
+        isinstance(leaf_result, Mapping)
+        and leaf_result.get("mutated") is False
+        and leaf_result.get("capture_outcome") == "reused"
+    )
+
+
+def reused_capture_terminal(
+    leaf_result: Any,
+    *,
+    request_id: str,
+    receipt_id: str | None,
+    idempotency_key: str | None,
+) -> dict[str, Any] | None:
+    """Own a capture that reused an earlier copy: settled, never committed.
+
+    Nothing was written, so the reply states the outcome like any other tool result and carries no
+    graph-sync or durable-write text: there is no write for either to describe. It names the earlier copy.
+    """
+    if not is_reused_capture(leaf_result):
+        return None
+    terminal: dict[str, Any] = {
+        "_terminal": _TERMINAL_MARKER,
+        "version": _TERMINAL_VERSION,
+        "ok": True,
+        "state": "settled",
+        "status": "settled",
+        "terminal": True,
+        "mutated": False,
+        "request_id": request_id,
+        "receipt_id": receipt_id,
+        "warnings_count": _warning_count(leaf_result),
+        "leaf_result": leaf_result,
+    }
+    terminal.update(_path_projection(leaf_result))
+    if idempotency_key is not None:
+        terminal["idempotency_key"] = idempotency_key
+    return terminal
+
+
 def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
     """Keep the bounded client-artifact outcome visible in compact terminals."""
 
@@ -651,6 +693,22 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
             return None
         return {"path": value["path"], "ref": value["ref"]}
 
+    def families(value: Any) -> list[dict[str, str]] | None:
+        """The bounded `(scope, category)` list an Evidence page carries."""
+        if not (
+            isinstance(value, (list, tuple))
+            and 1 <= len(value) <= 64
+            and all(
+                isinstance(pair, Mapping)
+                and set(pair) == {"scope", "category"}  # nosemgrep: ep-word-set -- the two field names of a family pair, a closed record shape.
+                and string(pair.get("scope"), limit=256)
+                and string(pair.get("category"), limit=256)
+                for pair in value
+            )
+        ):
+            return None
+        return [{"scope": pair["scope"], "category": pair["category"]} for pair in value]
+
     def transcription(value: Any) -> dict[str, Any] | None:
         """Whether a client transcription was recorded with its original."""
         if not isinstance(value, Mapping):
@@ -724,6 +782,13 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     projected.append(invalid_row(item, index))
                     continue
                 row["duplicate_of"] = duplicate
+            if "families" in item or "family_added" in item:
+                listed = families(item.get("families"))
+                if listed is None or not isinstance(item.get("family_added"), bool):
+                    projected.append(invalid_row(item, index))
+                    continue
+                row["families"] = listed
+                row["family_added"] = item["family_added"]
             if "transcription" in item:
                 recorded = transcription(item["transcription"])
                 if recorded is None:
@@ -2172,7 +2237,9 @@ def _user_summary(
         head = verb.capitalize()
         if (partial := _partial_batch_summary(verb, batch)) is not None:
             return partial
-    elif result.get("status") == "replayed":
+    elif result.get("status") == "replayed" or (
+        result.get("status") == "settled" and is_reused_capture(result.get("leaf_result"))
+    ):
         head = f"Already {verb}"
     else:
         return None

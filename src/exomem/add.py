@@ -944,15 +944,12 @@ def add(
             vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
         )
 
-    if checks_duplicates:
-        # The next acquisition of the mutation boundary finds this text, whatever other indexes have caught up.
-        if not lexstore.record_payload_commit(vault_root, [source_path.relative_to(vault_root).as_posix()]):
-            duplicate_unavailable = True
+    if checks_duplicates or artifact is not None:
+        # The next acquisition of the mutation boundary finds this payload, whatever other indexes have caught up.
+        recorded = lexstore.record_payload_commit(vault_root, [source_path.relative_to(vault_root).as_posix()])
+        duplicate_unavailable = duplicate_unavailable or (checks_duplicates and not recorded)
     if duplicate_unavailable:
-        warnings.append(
-            "duplicate_check_unavailable: the duplicate index could not answer, so this text was stored without "
-            "a check for an earlier copy; the audit reports any copy later"
-        )
+        warnings.append(duplicates.unavailable_warning("this text"))
 
     from . import due_state
 

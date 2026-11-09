@@ -85,6 +85,7 @@ def test_preserve_text_artifact_writes_file(vault: Path) -> None:
     assert companions.classify(vault, result.path).projects == ()
 
 
+@pytest.mark.usefixtures("owner_scope")
 def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: Path) -> None:
     """An exact-byte legacy duplicate must not undo the caller's protection opt-in."""
     from exomem import commands
@@ -117,6 +118,63 @@ def test_raw_capture_dedup_and_extraction_cannot_reuse_a_legacy_original(vault: 
 
 
 
+def test_text_handed_into_a_second_family_is_one_page_that_lists_both(vault: Path) -> None:
+    """Identical Evidence bytes are stored once; the page gains the second family and keeps everything else."""
+    from exomem import commands
+
+    content = "Dear Ms. Vale, please withdraw the notice."
+    first = commands.op_preserve_evidence(
+        vault, scope="Case", category="letters", filename="letter.txt", content=content,
+    )
+    page = vault / first["sidecar_path"]
+    before = vault_module.parse_frontmatter(_read(page), strict=True)
+    stored_files = sorted(path for path in (vault / "Knowledge Base" / "Evidence").rglob("*") if path.is_file())
+
+    second = commands.op_preserve_evidence(
+        vault, scope="case", category="exhibits", filename="exhibit-a.txt", content=content,
+    )
+
+    assert second["state"] == "already_stored"
+    assert second["family_added"] is True
+    assert second["families"] == [
+        {"scope": "Case", "category": "letters"},
+        {"scope": "Case", "category": "exhibits"},
+    ]
+    assert second["path"] == first["path"]
+    assert sorted(path for path in (vault / "Knowledge Base" / "Evidence").rglob("*") if path.is_file()) == stored_files
+    after = vault_module.parse_frontmatter(_read(page), strict=True)
+    assert after[0]["families"] == second["families"]
+    assert after[1] == before[1]
+    unchanged = {key: value for key, value in before[0].items() if key != "tags"}
+    assert {key: after[0][key] for key in unchanged} == unchanged
+    assert after[0]["tags"] == [*before[0]["tags"], "exhibits"]
+
+    settled = _read(page)
+    repeated = commands.op_preserve_evidence(
+        vault, scope="Case", category="exhibits", filename="exhibit-b.txt", content=content,
+    )
+    assert repeated["family_added"] is False
+    assert _read(page) == settled
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_protected_original_is_not_rewritten_to_add_a_family(vault: Path) -> None:
+    """A release grant binds to the protected page's content hash, so a rewrite would revoke it silently."""
+    from exomem import commands
+
+    arguments = dict(filename="sample.txt", content="sensitive original", raw_protection=True)
+    first = commands.op_preserve_evidence(vault, scope="Case", category="letters", **arguments)
+    page = vault / first["sidecar_path"]
+    stored = page.read_bytes()
+
+    elsewhere = commands.op_preserve_evidence(vault, scope="Case", category="exhibits", **arguments)
+
+    assert elsewhere["state"] == "stored"
+    assert elsewhere["path"] != first["path"]
+    assert page.read_bytes() == stored
+
+
+@pytest.mark.usefixtures("owner_scope")
 def test_protected_dedup_requires_a_real_pair_and_matching_original_bytes(vault: Path) -> None:
     """Authored Markdown cannot substitute an unrelated or changed original for new bytes."""
     import hashlib

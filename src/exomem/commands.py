@@ -5383,14 +5383,17 @@ def op_preserve(
         )
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
-    # Same destination-scoped lookup the batch command uses, run before the
-    # write: Evidence is append-only, so the same bytes under the same family
-    # are one fact, and reporting the copy that is already there beats adding a
-    # second one that no later reader can tell apart.
+    # The same lookup the batch command uses, under this command's mutation hold, which also covers the write
+    # below: Evidence is append-only, so the same bytes in any family are one fact, and reporting the copy that is
+    # already there, with the requested family added to its page, beats adding a second copy that no later
+    # reader can tell apart.
+    from . import evidence_reuse
+
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
-    duplicate = preserve_module.find_duplicate_artifact(
-        vault_root, scope=scope, category=category, sha256=digest, raw_protection=raw_protection
+    held = evidence_reuse.reuse(
+        vault_root, scope=scope, category=category, sha256=digest, protected=raw_protection
     )
+    duplicate = held.duplicate
     if duplicate is not None:
         from .writer_lease import mark_active_mutation_committed
 
@@ -5421,6 +5424,10 @@ def op_preserve(
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
     payload = result.as_dict()
+    if not held.available:
+        from . import duplicates as duplicates_module
+
+        payload["warnings"] = [*payload.get("warnings", ()), duplicates_module.unavailable_warning("this text")]
     _note_committed_artifact_targets(payload)
     from . import semantic_writes
 

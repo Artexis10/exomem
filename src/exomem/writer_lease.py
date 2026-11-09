@@ -60,9 +60,11 @@ from .mutation_terminal import (
     ResponseDetail,
     _CanonicalRequestReplay,
     committed_terminal,
+    is_reused_capture,
     needs_review_terminal,
     project_terminal,
     replayed_terminal,
+    reused_capture_terminal,
     settled_media_terminal,
     split_response_detail,
     valid_collection_receipt,
@@ -6102,6 +6104,14 @@ class LeaseManager:
                         )
                         if terminal is not None:
                             return attach_evidence(terminal, gate_context)
+                    reused = reused_capture_terminal(
+                        leaf_result,
+                        request_id=request_id,
+                        receipt_id=receipt,
+                        idempotency_key=effective_public_idempotency_key,
+                    )
+                    if reused is not None:
+                        return attach_evidence(reused, gate_context)
                     # A guarded write that validated but did not commit is mid-flight, not
                     # failed. Give it the same envelope shape as its eventual success so a
                     # client can correlate the pair on `operation_id` and see `terminal`
@@ -6174,6 +6184,9 @@ class LeaseManager:
                 if isinstance(result, Mapping)
                 else result
             )
+            if isinstance(result, Mapping) and is_reused_capture(result.get("leaf_result")):
+                # Nothing was written, so there is no write whose graph state to report.
+                return terminal_result
             has_reconcile_handoff = _carries_graph_rebuild_handoff(terminal_result)
 
             def finish_reconcile_graph_status(value: Any, *, current: bool) -> Any:

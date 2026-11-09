@@ -111,7 +111,10 @@ def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply
     assert again["mutated"] is False
     assert again["duplicate_of"]["path"] == first["path"]
     first_ref = again["duplicate_of"]["ref"]
-    assert again["source"] == {"path": first["path"], "ref": first_ref, "warnings": [], "capture_outcome": "reused"}
+    assert again["source"] == {"path": first["path"], "ref": first_ref}
+    # Nothing was written: the reply leads with its outcome and says nothing of a durable write or graph sync.
+    assert again["user_summary"].startswith(f"Already saved -> {first['path']}")
+    assert not {"graph_sync", "graph_sync_remediation"} & again.keys()
     assert (again["duplicate_of"]["title"], again["duplicate_of"]["url"]) == ("Retention note", "https://Example.com:443/a#top")
     assert again["fields_not_applied"] == [
         {"field": "title", "provided": "Retention note, again", "kept": "Retention note"},

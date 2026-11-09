@@ -49,7 +49,6 @@ from .vault import (
     ContentHashMismatchError,
     DeferredGraphCompletion,
     DefiniteNoEffect,
-    FrontmatterError,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
@@ -249,16 +248,21 @@ class PreserveResult:
 
 @dataclass(frozen=True)
 class DuplicateArtifact:
-    """An artifact already committed under one destination with these bytes."""
+    """An artifact already committed in the vault with these bytes."""
 
     hash: str          # the sha256 both copies share
     path: str          # vault-relative path of the existing artifact
     sidecar_path: str  # vault-relative path of its page
     ref: str           # the page's stable ref, always resolvable
+    #: The `(scope, category)` families its Evidence page lists after the call, folder family first. Empty for a Source.
+    families: tuple[tuple[str, str], ...] = ()
+    #: Whether this call added the requested family to the page.
+    family_added: bool = False
 
     def receipt(self, *, size: int | None, content_type: str | None) -> dict:
         """The `already_stored` outcome naming this artifact, with the stored outcome's fields."""
         return {
+            **self.family_fields(),
             "path": self.path,
             "stored_path": self.path,
             "sidecar_path": self.sidecar_path,
@@ -274,126 +278,14 @@ class DuplicateArtifact:
             "content_type": content_type,
         }
 
-
-_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
-
-
-def _duplicate_from_sidecar(
-    vault_root: Path, folder: Path, sidecar: Path, *, raw_protection: bool = False,
-    wanted_hashes: frozenset[str] | None = None,
-) -> DuplicateArtifact | None:
-    """One sidecar's artifact identity, or None when it cannot stand for one."""
-    try:
-        source = sidecar.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-    try:
-        frontmatter, _body, marker = parse_frontmatter(source, strict=True)
-    except FrontmatterError:
-        return None
-    if marker is None:
-        return None
-    companion = frontmatter.get("governance_companion")
-    if not isinstance(companion, Mapping):
-        return None
-    digest = companion.get("artifact_sha256")
-    artifact_path = companion.get("artifact_path")
-    if (
-        not isinstance(digest, str)
-        or not _SHA256_HEX.fullmatch(digest)
-        or not isinstance(artifact_path, str)
-        or not artifact_path
-    ):
-        return None
-    if wanted_hashes is not None and digest not in wanted_hashes:
-        return None
-    # The page is vault data and its `artifact_path` reaches the client as
-    # `duplicate_of.path`. A page that points outside the destination it lives
-    # in describes some other artifact, so it cannot stand for a duplicate here.
-    resolved = os.path.realpath(vault_root / artifact_path)
-    if os.path.dirname(resolved) != os.path.realpath(folder):
-        return None
-    # No resolvable ref, no duplicate. The contract says an `already_stored`
-    # outcome names the existing path *and ref*, and a row that cannot is
-    # better answered by storing the bytes than by reporting half an identity.
-    ref = memory_refs.ref_from_markdown(source)
-    if not isinstance(ref, str) or not ref:
-        return None
-    if raw_protection:
-        from .governance.raw_protection import binding
-
-        relative = sidecar.relative_to(vault_root).as_posix()
-        found = binding(vault_root, relative)
-        if found is None:
-            return None
-        block, paired_companion, _ = found
-        if (paired_companion != relative or block["original_ref"] != ref
-                or block["artifact_path"] != artifact_path or block["artifact_sha256"] != digest):
-            return None
-    from . import reserved_paths
-
-    try:
-        with reserved_paths.open_generic_binary(vault_root, artifact_path) as original:
-            actual_digest = hashlib.file_digest(original.stream, "sha256").hexdigest()
-    except (OSError, reserved_paths.ReservedPathLeafError):
-        return None
-    if actual_digest != digest:
-        return None
-    return DuplicateArtifact(
-        hash=digest,
-        path=artifact_path,
-        sidecar_path=sidecar.relative_to(vault_root).as_posix(),
-        ref=ref,
-    )
-
-
-def destination_duplicate_index(
-    vault_root: Path, *, scope: str, category: str, raw_protection: bool = False,
-    wanted_hashes: frozenset[str] | None = None,
-) -> dict[str, DuplicateArtifact]:
-    """sha256 -> the artifact already under this destination with those bytes.
-
-    Bounded to `Evidence/<scope>/<category>/` deliberately. The same bytes filed
-    in two evidence families are two facts, and a global content address would
-    make the second one disappear without saying so; the failure actually
-    observed is the retry into the *same* family after a lost acknowledgement.
-
-    Built once per call and handed to every file in a batch. Reading the whole
-    directory once per *file* would make an eight-file batch eight full passes
-    over a category that can hold hundreds of sidecars -- and the design's claim
-    that this is cheaper than the staging download only holds for one pass.
-    Only wanted hashes, when supplied, reach artifact byte verification.
-    """
-    index: dict[str, DuplicateArtifact] = {}
-    folder = evidence_folder(vault_root, scope, category)
-    admit_destination(vault_root, folder, directory=True)
-    try:
-        sidecars = sorted(folder.glob("*.md"))
-    except OSError:
-        return index
-    for sidecar in sidecars:
-        from .governance.raw_protection import marked
-
-        if marked(sidecar.name) != raw_protection:
-            continue
-        duplicate = _duplicate_from_sidecar(
-            vault_root, folder, sidecar, raw_protection=raw_protection, wanted_hashes=wanted_hashes,
-        )
-        if duplicate is not None:
-            index.setdefault(duplicate.hash, duplicate)
-    return index
-
-
-def find_duplicate_artifact(
-    vault_root: Path, *, scope: str, category: str, sha256: str, raw_protection: bool = False
-) -> DuplicateArtifact | None:
-    """The single-file lane's lookup: one destination index, one probe."""
-    if not _SHA256_HEX.fullmatch(sha256 or ""):
-        return None
-    return destination_duplicate_index(
-        vault_root, scope=scope, category=category, raw_protection=raw_protection,
-        wanted_hashes=frozenset({sha256}),
-    ).get(sha256)
+    def family_fields(self) -> dict:
+        """`families` and `family_added` for an Evidence outcome; nothing for a Source."""
+        if not self.families:
+            return {}
+        return {
+            "families": [{"scope": scope, "category": category} for scope, category in self.families],
+            "family_added": self.family_added,
+        }
 
 
 @dataclass
@@ -530,18 +422,34 @@ def admit_destination(
             _raise("WRITE_REFUSED", [], _UNAVAILABLE)
 
 
+def family_tags(scope: str, category: str) -> list[str]:
+    """The two tags that name an Evidence family on its page, so a tag filter finds the page under that family."""
+    return [scope.lower().replace(" ", "-"), category.lower().replace(" ", "-")]
+
+
+def _evidence_segments(vault_root: Path, scope: str, category: str) -> tuple[str, str, str]:
+    """The `Evidence`, scope and category folder names as they are spelled on disk, each taking an existing sibling's."""
+    relative = respell_new_path(
+        vault_root, (kb_root(vault_root) / "Evidence" / scope / category).relative_to(vault_root).as_posix()
+    )
+    evidence, scope_spelled, category_spelled = relative.split("/")[-3:]
+    return evidence, scope_spelled, category_spelled
+
+
 def evidence_folder(vault_root: Path, scope: str, category: str) -> Path:
     """The Evidence family folder for already-valid destination segments.
 
     Each folder on the way takes an existing sibling's spelling when it matches
     by `vault_name_key`, so scope `food` lands in an existing `Food`.
     """
-    root = kb_root(vault_root)
-    relative = respell_new_path(
-        vault_root, (root / "Evidence" / scope / category).relative_to(vault_root).as_posix()
-    )
-    evidence, scope_spelled, category_spelled = relative.split("/")[-3:]
-    return root / evidence / scope_spelled / category_spelled
+    evidence, scope_spelled, category_spelled = _evidence_segments(vault_root, scope, category)
+    return kb_root(vault_root) / evidence / scope_spelled / category_spelled
+
+
+def evidence_family(vault_root: Path, scope: str, category: str) -> tuple[str, str]:
+    """The `(scope, category)` pair as `evidence_folder` spells it on disk."""
+    _evidence, scope_spelled, category_spelled = _evidence_segments(vault_root, scope, category)
+    return scope_spelled, category_spelled
 
 
 def evidence_artifact(
@@ -999,6 +907,10 @@ def preserve(
                            _prepare=prepare_final if _prepare is not None else None,
                            _validate_prepared_bindings=_validate_inputs)
         written_artifact = True
+        from . import lexstore
+
+        # The next acquisition of the mutation boundary finds these bytes, whatever other indexes have caught up.
+        lexstore.record_payload_commit(vault_root, [sidecar_rel])
         try:
             catalog_publication.publish_markdown_batch(prepared_catalog)
         except catalog_publication.CatalogPublicationError as error:
@@ -1437,11 +1349,7 @@ def _render_sidecar(
         lines.append(f"parent_media: {parent_media}")
     if frame_ts is not None:
         lines.append(f"frame_ts: {frame_ts}")
-    tags = [
-        label.lower(),
-        scope.lower().replace(" ", "-"),
-        category.lower().replace(" ", "-"),
-    ]
+    tags = [label.lower(), *family_tags(scope, category)]
     if parent_media:
         tags.append("scene-frame")
     # Tags remain strings even when YAML would otherwise parse a date or boolean.
