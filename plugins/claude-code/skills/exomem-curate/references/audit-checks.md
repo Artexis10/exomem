@@ -70,6 +70,35 @@ discard either with a reason; a later edit of the view never resolves them. A
 owner saves a valid edit of the view, or when you discard it. Discarding an
 invalid view that is still in place renders the view from the store again.
 
+## Duplicate content and source URLs
+
+Both categories are opt-in: pass them in `categories` on `audit` or `attention`.
+The default audit and the default attention surface skip them, and every finding
+is advisory. The lexical index only proposes groups. The audit reads each member
+again and re-hashes its original, so a stale index entry gives no finding.
+
+- `duplicate_content` reports one finding per group of two or more live Sources
+  or Evidence pages whose bytes are identical. It names each member (`ref`,
+  `path`, lane, families or import mappings, capture date), the suggested
+  canonical page, the bytes a fold would free, and in `meta.steps` the exact
+  `fold-duplicate` step for each copy. The suggestion is the oldest filing by
+  capture date, then path, unless a page the fold cannot rewrite (a Source,
+  Evidence page or another owner's page) cites another member: that member is
+  then the canonical page. `meta.canonical_because` says which rule applied.
+- A finding offers no step when `meta.no_fold` gives a reason: the group spans
+  lanes, the pages are raw-protected, or two or more members are cited by pages
+  the fold cannot rewrite. Raw-protected Evidence is never rewritten, because a
+  release grant binds to each page's content hash.
+- `duplicate_source_url` reports one finding per group of Sources that share a
+  canonical URL but hold different text. It names them and offers no fold: link
+  the Sources or supersede one through the normal tools.
+
+The report counts groups and copies by lane and states that each count was
+re-hashed. An index that cannot answer reads as `unchecked` with coverage
+`unknown`, never as zero findings. Propose the steps of one finding as a single
+curation plan, keep or change its canonical page, then preview and confirm the
+exact plan ([vault-care](vault-care.md#curation)).
+
 ## Path variants
 
 `path_variants` (opt-in: `categories=["path_variants"]`) lists sibling names

@@ -35,7 +35,7 @@ Each task names the test that proves it and the realistic failure only that test
 ## D. Skill text and generated copies
 
 - [x] D1 Update the scaffold skill text in `src/exomem/_scaffold/_Schema/`: the outcomes `duplicate_of`, `same_url`, `family_added`, `mapped` and `duplicate_check_unavailable`, one page per episode with `include_history`, the two audit categories and the fold step. Keep the text generic. Replace the sentence that promises a surface for a duplicate URL with the behaviour that now backs it. Proved by `tests/test_scaffold_no_leak.py`. Catches: a personal token in the shipped scaffold.
-- [ ] D2 Regenerate the copies of the skill text.
+- [x] D2 Regenerate the copies of the skill text.
   1. Run `scripts/refresh-skill-contract.py`.
   2. Run `python -m exomem package-skills --plugin-root plugins/claude-code`.
   3. Restore `plugins/claude-code/.claude-plugin/plugin.json` from origin/main.
