@@ -1355,12 +1355,14 @@ def diff_category_registries(
     """Diff reviewed categories, custom kinds and vault verdicts as distinct namespaces."""
     before_proposal = semantic_language_registry.registry_proposal(before)
     after_proposal = semantic_language_registry.registry_proposal(after)
+    # `verdicts` is in a proposal only when the vault has some.
+    # nosemgrep: ep-word-set -- the registry document's own sections, fixed by its schema
+    namespaces = ("categories", "kinds", "verdicts")
     changes = {
-        # `verdicts` is in a proposal only when the vault has some.
         namespace: _definition_changes(
             before_proposal.get(namespace, {}), after_proposal.get(namespace, {})
         )
-        for namespace in ("categories", "kinds", "verdicts")  # nosemgrep: ep-word-set -- the registry document's own sections, fixed by its schema
+        for namespace in namespaces
     }
     return {
         "subject": "categories",
