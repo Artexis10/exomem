@@ -6470,6 +6470,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "select": "mutation",
         "plan": "mutation",
         "apply": "mutation",
+        "file": "mutation",
         "cancel": "mutation",
         "finish": "mutation",
         "work-item": "structure",
