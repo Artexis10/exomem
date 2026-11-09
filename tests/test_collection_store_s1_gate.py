@@ -993,13 +993,13 @@ def test_a_slow_publication_copy_leaves_file_and_store_writes_acknowledging(abc,
     abc.write_c(LATER, "Starts a publication")
     try:
         assert staged.wait(10)
-        started = time.monotonic()
+        # The publisher stays parked at the barrier until `release`, so a boundary it held would make
+        # both writes refuse MUTATION_BUSY at the mutation timeout. Committing proves it was not held;
+        # a wall-clock bound would only measure the runner.
         assert abc.write_a("A file write during publication verification") == "committed"
         assert abc.write_c(str(uuid.uuid4()), "A store write during publication verification")["outcome"] == "committed"
-        took = time.monotonic() - started
     finally:
         release.set()
-    assert took < 2.5  # the mutation timeout is 5 s; a held boundary refuses MUTATION_BUSY there
     _published(abc)  # the next window carries the writes made during the copy
     # Drain the publisher before the fixture retires its SQLite handle.
     abc.manager.close(drain_views=False)

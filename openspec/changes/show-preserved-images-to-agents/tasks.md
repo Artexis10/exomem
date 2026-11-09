@@ -13,7 +13,13 @@
 - [x] 2.3 Prefer the HTTPS delivery in `transfer_artifact`
 - [x] 2.4 Test that a short link serves the exact original bytes
 
-## 3. Acceptance
+## 3. Video frame size
 
-- [ ] 3.1 After release, show two stored photos through `read_media` in Claude and confirm the model describes them
-- [ ] 3.2 After the ChatGPT connector refresh, show the same two photos in ChatGPT
+- [x] 3.1 Let the caller's `max_side` on `read_media` set the video frame long side up to `"original"`, defaulting to the `video_frames_max_side` setting
+- [x] 3.2 Make the frame cap the `video_frames_tool_cap` setting, keep `EXOMEM_VIDEO_FRAMES_TOOL_CAP` as its override, and bound returned frames by the image view byte settings
+- [x] 3.3 Report `max_side_effective` and `not_shown`; keep Cloud at its worker's fixed edge and report it
+
+## 4. Acceptance
+
+- [ ] 4.1 After release, show two stored photos through `read_media` in Claude and confirm the model describes them
+- [ ] 4.2 After the ChatGPT connector refresh, show the same two photos in ChatGPT

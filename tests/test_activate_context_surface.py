@@ -140,12 +140,11 @@ def test_unavailable_graph_diagnostics_cannot_delay_activation_past_its_deadline
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", unavailable_for_caller
     )
-    started = time.monotonic()
     reference = commands.op_activate_context(activation_vault, turn=TURN)
-    # The same cold activation without the lock sizes the remaining budget, so a slow runner leaves
-    # room for the work itself. It stays under the queue's 5 s busy timeout, so one wait on the locked
-    # queue still runs past the deadline and fails.
-    remaining = min(4.5, max(1.6, 3 * (time.monotonic() - started)))
+    # Just under the queue's 5 s busy timeout, so one wait on the locked queue still runs past the
+    # deadline. Each stage boundary keeps the 1 s activation reserve, so a loaded runner still has
+    # 3.5 s for work that takes well under a second.
+    remaining = 4.5
     working_set_runtime.reset_caches_for_tests()
     locker = deferred_index._connect(activation_vault, create=True)
     locker.execute("PRAGMA locking_mode=EXCLUSIVE")

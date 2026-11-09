@@ -750,6 +750,7 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
         candidates=1,
         dedup_dropped=0,
         max_frames_effective=1,
+        max_side_effective=768,
     )
 
     class _CannedVideoFramesModule:

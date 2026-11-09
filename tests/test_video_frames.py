@@ -61,7 +61,7 @@ def _patch_decode(monkeypatch, *, duration=100.0, images=None):
         def images(ts_list):
             return [_img(i) for i in range(len(ts_list))]
     monkeypatch.setattr(embeddings, "_decode_frames_at", lambda p, ts_list: images(ts_list))
-    monkeypatch.setattr(video_frames, "_encode_jpeg", lambda img: b"\xff\xd8fake")
+    monkeypatch.setattr(video_frames, "_encode_jpeg", lambda img, max_side: b"\xff\xd8fake")
 
 
 # ---------------- error paths ----------------
@@ -211,7 +211,7 @@ def test_unknown_duration_falls_back_sequential(video_vault, monkeypatch) -> Non
         "_sample_video_keyframes",
         lambda p: [(0.0, _img(0)), (1.0, _img(1))],
     )
-    monkeypatch.setattr(video_frames, "_encode_jpeg", lambda img: b"\xff\xd8fake")
+    monkeypatch.setattr(video_frames, "_encode_jpeg", lambda img, max_side: b"\xff\xd8fake")
     result = video_frames.get_frames(video_vault, VIDEO)
     assert result.duration_sec is None
     assert [f.timestamp_sec for f in result.frames] == [0.0, 1.0]
@@ -223,18 +223,92 @@ def test_unknown_duration_falls_back_sequential(video_vault, monkeypatch) -> Non
 def test_encode_jpeg_bounds_long_edge() -> None:
     PIL_Image = pytest.importorskip("PIL.Image")
     src = PIL_Image.new("RGB", (2000, 1000), (200, 30, 30))
-    data = video_frames._encode_jpeg(src)
+    data = video_frames._encode_jpeg(src, 768)
     assert data.startswith(b"\xff\xd8")  # JPEG magic
     import io
 
     out = PIL_Image.open(io.BytesIO(data))
-    assert max(out.size) <= video_frames.FRAME_JPEG_MAX_EDGE
+    assert max(out.size) <= 768
+
+
+def _patch_photo_frames(monkeypatch, size=(2000, 1000)):
+    """Stub decode only: real 2000 x 1000 frames go through the real JPEG encode."""
+    PIL_Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(video_frames, "_probe_duration", lambda p: 100.0)
+    monkeypatch.setattr(embeddings, "_decode_frames_at", lambda p, ts_list: [
+        PIL_Image.effect_noise(size, 100).convert("RGB") for _ in ts_list])
+    monkeypatch.setattr(embeddings, "_dedup_keyframes", lambda candidates: candidates)
+    return PIL_Image
+
+
+def _long_sides(PIL_Image, result) -> set[int]:
+    import io
+
+    return {max(PIL_Image.open(io.BytesIO(frame.jpeg)).size) for frame in result.frames}
+
+
+def test_the_caller_and_the_setting_choose_the_frame_size(video_vault, monkeypatch) -> None:
+    """Defect: frames stay at 768 px whatever the caller or the machine's setting asks."""
+    PIL_Image = _patch_photo_frames(monkeypatch)
+    default = video_frames.get_frames(video_vault, VIDEO, max_frames=2)
+    assert (_long_sides(PIL_Image, default), default.max_side_effective) == ({768}, 768)
+    asked = video_frames.get_frames(video_vault, VIDEO, max_frames=2, max_side=1200)
+    assert (_long_sides(PIL_Image, asked), asked.max_side_effective) == ({1200}, 1200)
+    original = video_frames.get_frames(video_vault, VIDEO, max_frames=2, max_side="original")
+    assert (_long_sides(PIL_Image, original), original.max_side_effective) == ({2000}, None)
+    monkeypatch.setenv("EXOMEM_VIDEO_FRAMES_MAX_SIDE", "1000")
+    configured = video_frames.get_frames(video_vault, VIDEO, max_frames=2)
+    assert _long_sides(PIL_Image, configured) == {1000}
+    with pytest.raises(video_frames.VideoFramesError) as error:
+        video_frames.get_frames(video_vault, VIDEO, max_side=0)
+    assert error.value.code == "IMAGE_MAX_SIDE_INVALID"
+
+
+def test_frames_past_the_call_byte_limit_are_listed_not_shown(video_vault, monkeypatch) -> None:
+    """Defect: a large frame size sends more bytes than one call may carry, or drops frames silently."""
+    _patch_photo_frames(monkeypatch)
+    one = video_frames.get_frames(video_vault, VIDEO, max_frames=1, max_side="original").frames[0]
+    # Room for two original-size frames of four, as base64.
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_MAX_CALL_BYTES", str(int(2.5 * 4 * len(one.jpeg) / 3)))
+    mcp = _build_server(monkeypatch)
+    result = asyncio.run(mcp.call_tool(
+        "read_media", {"operation": {"kind": "video", "path": VIDEO, "max_frames": 4, "max_side": "original"}},
+        run_middleware=True))
+    meta = result.structured_content
+    assert meta["frame_count"] == 2 and len(result.content) == 3
+    assert meta["max_side_effective"] == "original"
+    assert len(meta["not_shown"]) == 2
+    assert min(meta["not_shown"]) > max(frame["timestamp_sec"] for frame in meta["frames"])
+
+
+def test_a_cloud_read_past_the_call_byte_limit_lists_what_it_left_out(video_vault, monkeypatch) -> None:
+    """Defect: the Cloud worker cuts frames at the byte limit and the caller never learns of them."""
+    from exomem import cloud_cell, video_frames_worker
+
+    frames = [video_frames.Frame(timestamp_sec=float(t), jpeg=b"\xff\xd8" + bytes(1000)) for t in range(4)]
+    monkeypatch.setattr(cloud_cell, "cloud_mode_enabled", lambda: True)
+    monkeypatch.setattr(video_frames_worker, "get_frames", lambda *a, **k: video_frames.FramesResult(
+        VIDEO, 4.0, frames, 4, 0, 4, max_side_effective=video_frames.CLOUD_MAX_SIDE))
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_MAX_CALL_BYTES", "3000")
+    result = video_frames.get_frames(video_vault, VIDEO, max_frames=4, max_side="original")
+    assert [f.timestamp_sec for f in result.frames] == [0.0, 1.0]
+    assert result.not_shown == (2.0, 3.0)
+    assert result.max_side_effective == video_frames.CLOUD_MAX_SIDE
+
+
+def test_a_frame_too_large_for_one_call_is_refused_with_the_remedy(video_vault, monkeypatch) -> None:
+    """Defect: a size no frame fits answers an empty result instead of saying what to lower."""
+    _patch_decode(monkeypatch, duration=100.0)
+    monkeypatch.setenv("EXOMEM_IMAGE_VIEW_MAX_CALL_BYTES", "4")
+    with pytest.raises(video_frames.VideoFramesError) as error:
+        video_frames.get_frames(video_vault, VIDEO, max_frames=2)
+    assert error.value.code == "FRAME_TOO_LARGE" and "max_side" in error.value.reason
 
 
 def test_encode_jpeg_handles_alpha() -> None:
     PIL_Image = pytest.importorskip("PIL.Image")
     src = PIL_Image.new("RGBA", (100, 50), (0, 100, 0, 128))
-    data = video_frames._encode_jpeg(src)
+    data = video_frames._encode_jpeg(src, 768)
     assert data.startswith(b"\xff\xd8")
 
 
@@ -294,6 +368,7 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
         candidates=4,
         dedup_dropped=2,
         max_frames_effective=2,
+        max_side_effective=768,
     )
 
     class _CannedVideoFramesModule:
@@ -312,6 +387,7 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     assert meta["path"] == VIDEO
     assert meta["duration_sec"] == 42.0
     assert meta["frame_count"] == 2
+    assert meta["max_side_effective"] == 768
     assert meta["frames"] == [
         {"index": 0, "timestamp_sec": 1.5},
         {"index": 1, "timestamp_sec": 20.25},
