@@ -19,7 +19,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import cloud_containment, cloud_grant, vault_portability
@@ -86,8 +86,10 @@ def _put(url: str, chunk) -> str:
                 raise ExportRefused(EXPORT_UPLOAD_FAILED, cause) from None
         except OSError as error:
             if attempt == UPLOAD_ATTEMPTS:
+                # urllib wraps a failure to connect, verify TLS or send in URLError, whose reason names it.
+                failure = error.reason if isinstance(error, URLError) and isinstance(error.reason, BaseException) else error
                 # The class names the failure; an SSL error's number is a library code, not an errno.
-                raise ExportRefused(EXPORT_UPLOAD_FAILED, {"cause": type(error).__name__}) from None
+                raise ExportRefused(EXPORT_UPLOAD_FAILED, {"cause": type(failure).__name__}) from None
     raise AssertionError("unreachable")
 
 

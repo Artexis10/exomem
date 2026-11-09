@@ -9,6 +9,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import ssl
 import subprocess
 import sys
@@ -220,6 +221,17 @@ def test_a_refused_part_upload_names_the_storage_status(vault, tmp_path, storage
     status, report = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, urls=urls)
     assert status == 1 and report["error"] == "EXPORT_UPLOAD_FAILED"
     assert report["diagnostic"] == {"type": "ExportRefused", "function": "_put", "cause": "HTTPError", "status": 403}
+
+
+def test_a_part_upload_that_cannot_connect_names_the_connection_error(vault, tmp_path, storage):
+    """Defect: urllib wraps a refused connection in URLError, so the report named only the wrapper."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    urls = [f"https://127.0.0.1:{closed_port}/cells/{CELL}/exports/archive.zip?partNumber=1"]
+    status, report = _cell_export(vault, tmp_path, storage, part_bytes=64 * 1024, urls=urls)
+    assert status == 1 and report["error"] == "EXPORT_UPLOAD_FAILED"
+    assert report["diagnostic"] == {"type": "ExportRefused", "function": "_put", "cause": "ConnectionRefusedError"}
 
 
 def test_the_part_digest_matches_cellctls_vector():
