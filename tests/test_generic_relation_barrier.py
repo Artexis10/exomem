@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 import pytest
-from test_relation_endpoints import _entity, _extension, _save_extension, _served
+from test_relation_endpoints import _entity, _extension, _page_path, _save_extension, _served
 
 from exomem import (
     agent_refusal,
@@ -33,9 +33,14 @@ _RANDOM_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 def _source(call, title: str) -> str:
     captured = call(
         "capture_source",
-        {"title": f"{title} source", "source_kind": "session", "content": f"{title} was discussed."},
+        {
+            "title": f"{title} source",
+            "source_kind": "session",
+            "content": f"{title} was discussed.",
+            "response_detail": "full",
+        },
     )
-    return f"{captured['path']}#Capture"
+    return f"{_page_path(captured)}#Capture"
 
 
 def _body(title: str, *rows: str) -> str:
@@ -53,6 +58,7 @@ def _create(call, title: str, source: str, *rows: str, **extra) -> dict:
             "note_type": "insight",
             "content": _body(title, *rows),
             "sources": [source],
+            "response_detail": "full",
             **extra,
         },
     )
@@ -79,7 +85,7 @@ def _shown(result: dict, vault: Path) -> str:
 
 
 def _target(entity: dict) -> str:
-    return entity["path"].removesuffix(".md")
+    return _page_path(entity).removesuffix(".md")
 
 
 def _page(vault: Path, path: str) -> str:
@@ -91,7 +97,7 @@ def _anchored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     vault, call = _served(tmp_path, monkeypatch)
     anchor = _create(call, "Anchor", _source(call, "Anchor"))
     assert "error" not in anchor, anchor
-    return vault, call, anchor["path"].removesuffix(".md")
+    return vault, call, _page_path(anchor).removesuffix(".md")
 
 
 def test_a_generic_edge_between_two_notes_is_refused_with_a_ranked_menu_and_three_routes(
@@ -164,7 +170,7 @@ def test_a_retry_with_the_menus_top_relation_commits(
     committed = _create(call, "Crane", source, f"{top} [[{anchor}]]")
 
     assert "error" not in committed, committed
-    assert f"- {top} [[{anchor}]]" in _page(vault, committed["path"])
+    assert f"- {top} [[{anchor}]]" in _page(vault, _page_path(committed))
 
 
 def test_a_plain_link_bullet_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,7 +183,7 @@ def test_a_plain_link_bullet_commits(tmp_path: Path, monkeypatch: pytest.MonkeyP
     committed = _create(call, "Crane", source, bullet)
 
     assert "error" not in committed, committed
-    assert f"- {bullet}" in _page(vault, committed["path"])
+    assert f"- {bullet}" in _page(vault, _page_path(committed))
 
 
 def test_a_relation_the_vault_already_authors_between_these_note_types_ranks_first(
@@ -204,7 +210,7 @@ def test_an_edit_adding_a_generic_edge_is_refused_and_leaves_the_page_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
-    page = _create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]")["path"]
+    page = _page_path(_create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]"))
     before = _page(vault, page)
 
     refused = call(
@@ -229,7 +235,7 @@ def test_an_edit_that_leaves_a_legacy_generic_edge_untouched_commits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
-    page = _create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]")["path"]
+    page = _page_path(_create(call, "Crane", _source(call, "Crane"), f"supports [[{anchor}]]"))
     # A generic edge written before the barrier existed.
     legacy = _page(vault, page).replace(f"- supports [[{anchor}]]", f"- relates_to [[{anchor}]]")
     (vault / page).write_text(legacy, encoding="utf-8")
@@ -266,9 +272,10 @@ def test_an_edit_that_leaves_a_legacy_generic_unit_relation_untouched_commits(
                 f"## Finding\n- relations: supports: [[{anchor}]]\n\nCrane lifts the load.\n"
             ),
             "sources": [_source(call, "Crane")],
+            "response_detail": "full",
         },
     )
-    page = created["path"]
+    page = _page_path(created)
     legacy = _page(vault, page).replace(f"supports: [[{anchor}]]", f"relates_to: [[{anchor}]]")
     (vault / page).write_text(legacy, encoding="utf-8")
 
@@ -323,7 +330,7 @@ def test_a_successor_is_refused_for_a_generic_edge_it_adds_but_not_for_one_it_ca
     vault, call, anchor = _anchored(tmp_path, monkeypatch)
     other = _target(_entity(call, "person", "Ben Quay"))
     source = _source(call, "Crane")
-    old = _create(call, "Crane", source, f"supports [[{anchor}]]")["path"]
+    old = _page_path(_create(call, "Crane", source, f"supports [[{anchor}]]"))
     # A generic edge written before the barrier existed.
     (vault / old).write_text(
         _page(vault, old).replace(f"- supports [[{anchor}]]", f"- relates_to [[{anchor}]]"), encoding="utf-8"
@@ -439,7 +446,7 @@ def test_bare_connections_render_as_plain_links(tmp_path: Path, monkeypatch: pyt
     committed = _entity(call, "person", "Cy Dock", connections=[f"[[{ben}]]"])
 
     assert "error" not in committed, committed
-    page = _page(vault, committed["path"])
+    page = _page(vault, _page_path(committed))
     assert f"- links_to [[{ben}]]" in page
     assert "relates_to" not in page
 
