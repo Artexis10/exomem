@@ -19,7 +19,7 @@ def _run(b, tmp_path, name="run"):
 
 
 def test_completed_phase_is_typed_and_times_are_split(tmp_path):
-    b = broker(Backend([tool("ask_memory", {"query": "x"}), {"role": "assistant", "content": "Cedar."}]))
+    b = broker(Backend([tool("search_memory", {"query": "x"}), {"role": "assistant", "content": "Cedar."}]))
     result = _run(b, tmp_path)
     assert result["status"] == "completed"
     assert result["outcome_class"] == "completed"
@@ -32,7 +32,7 @@ def test_completed_phase_is_typed_and_times_are_split(tmp_path):
 
 def test_declared_exhaustion_is_classified_apart_from_infrastructure(tmp_path):
     limits = AgentLimits(phase_model_calls=1, phase_seconds=20, run_seconds=30)
-    b = broker(Backend([tool("ask_memory", {"query": "x"}), {"role": "assistant", "content": "done"}]),
+    b = broker(Backend([tool("search_memory", {"query": "x"}), {"role": "assistant", "content": "done"}]),
                limits=limits)
     result = _run(b, tmp_path)
     assert result["status"] == "incomplete"

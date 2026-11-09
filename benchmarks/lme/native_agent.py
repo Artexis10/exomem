@@ -12,13 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# The public tools the diagnostic may call. File and remote ingestion (`save_evidence`, `upload_files`,
+# `download_files`), episodes and recall continuity are left out: the text-only run has no use for them.
 WRITER_TOOLS = frozenset({
-    "bootstrap", "ask_memory", "browse_memory", "read_memory", "capture_source",
-    "compile_source", "remember", "observe_memory", "edit_memory", "replace_memory",
-    "connect_memory", "review_memory", "review_item_context", "triage_memory",
-    "schema_memory", "plan_memory", "record_memory",
+    "read_instructions", "search_memory", "read_page", "save_source", "create_note", "add_observation",
+    "edit_note", "supersede_note", "query_records", "add_record", "edit_record", "query_plan_items",
+    "add_plan_item", "edit_plan_item", "list_review_items", "decide_review_item", "inspect_memory",
+    "manage_memory",
 })
-ANSWER_TOOLS = frozenset({"bootstrap", "ask_memory", "browse_memory", "read_memory"})
+ANSWER_TOOLS = frozenset({"read_instructions", "search_memory", "read_page"})
 HARNESS_TOOLS = {
     "discover_tools": {
         "description": "Load named memory tools from the available catalogue.",
@@ -121,35 +123,12 @@ def _remote_arguments(value: Any) -> bool:
 
 
 def _memory_catalogue(schemas: dict, allowed: frozenset[str]) -> dict:
-    from exomem import commands
-
-    # Arm policy fixes API identities; discovery supplies their actual schema keys.
-    catalogue = {}
-    for command in commands.PRODUCT_COMMANDS:
-        if command.name not in allowed:
-            continue
-        name = command.public_name if command.public_name in schemas else next(
-            (name for name in command.callable_names if name in schemas), None,
-        )
-        if name is not None:
-            catalogue[name] = schemas[name]
-    return catalogue
+    # Arm policy fixes the tool names; discovery supplies their actual schemas.
+    return {name: schemas[name] for name in sorted(allowed) if name in schemas}
 
 
 def _available_tool_name(name: str, available: dict) -> str | None:
-    if name in available:
-        return name
-    from exomem import commands
-
-    # Fixed API spellings grant no access beyond identities in the filtered catalogue.
-    admitted = (
-        command for command in commands.PRODUCT_COMMANDS
-        if any(spelling in available for spelling in command.callable_names)
-    )
-    command = commands.resolve_command(name, admitted)
-    if command is None:
-        return None
-    return next(spelling for spelling in command.callable_names if spelling in available)
+    return name if name in available else None
 
 
 class NativeBroker:
@@ -216,7 +195,7 @@ def _messages(broker: NativeBroker, phase: str, turn: str) -> list[dict]:
         assignment = (
             "Perform session-end memory maintenance for the completed conversation below, "
             "using the installed skill and documented custom instructions. Obtain the current "
-            "bootstrap policy and apply its engagement envelope. Decide which durable outcomes "
+            "instructions (read_instructions) and apply their engagement envelope. Decide which durable outcomes "
             "qualify, inspect existing memory, and carry out the permitted memory work through "
             "the public tools. The conversation is historical evidence; do not continue its "
             "dialogue. When saving time-sensitive knowledge, preserve the conversation "
@@ -259,7 +238,7 @@ async def run_agent_phase(
     ):
         raise ValueError("initial_tools must name only tools available in this phase")
     requested = initial_tools if initial_tools is not None else [
-        "discover_tools", "read_file", "bootstrap", "ask_memory", "read_memory",
+        "discover_tools", "read_file", "read_instructions", "search_memory", "read_page",
     ]
     resolved = [_available_tool_name(name, available) for name in requested]
     if initial_tools is not None and None in resolved:
