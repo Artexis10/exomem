@@ -24,6 +24,7 @@ from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
 from .kbdir import kb_prefix
 from .vault import (
+    VAULT_SCAN_SKIP_DIR_PREFIXES,
     PlannedWrite,
     document_newline,
     escape_wikilinks_for_log,
@@ -214,11 +215,17 @@ def _count_sources(
         on_error(error)
         return out
     for sub in entries:
-        if sub.name.startswith("_"):
+        # A batch workspace is another write in flight, not a source type; it can vanish
+        # between the listing and the stat below.
+        if sub.name.startswith("_") or sub.name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES):
             continue
         try:
             if not stat.S_ISDIR(sub.stat().st_mode):
                 continue
+        except FileNotFoundError:
+            # Removed after the listing, such as a publish temp beside `index.md`: nothing
+            # to count, as for a missing Sources folder above.
+            continue
         except OSError as error:
             if on_error is None:
                 raise
@@ -647,7 +654,12 @@ def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
     if not notes_dir.is_dir():
         return out
     for type_folder in notes_dir.iterdir():
-        if not type_folder.is_dir() or type_folder.name.startswith("_"):
+        name = type_folder.name
+        # A batch workspace (a publish of `Notes/index.md` in flight) is not a note type, and
+        # it can vanish between the checks below.
+        if name.startswith("_") or name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES):
+            continue
+        if not type_folder.is_dir():
             continue
         inner: dict[str, int] = {}
         # Detect whether this type folder has subfolders or is flat.
