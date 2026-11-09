@@ -1,0 +1,396 @@
+"""A store-mode vault's vectors: computed after commit from the store's bytes, stamped, and gated.
+
+OpenSpec make-vault-store-canonical, task 6.1. The vault is the migration suite's generated vault, moved
+into store mode by ``store-mode migrate``; the writer is a real store writer on the migrated store. The
+encoder is a deterministic hash of the words of a text, so nothing downloads a model. The drain runs
+here by direct calls, as the semantic drain's turn calls it. The interpreter that dies in the resume case
+is a real child process, killed by the operating system.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import multiprocessing
+import os
+import signal
+import sqlite3
+import sys
+import zlib
+from contextlib import closing
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
+from test_vault_store_read_write import put, stored, writer  # noqa: F401
+
+from exomem import embeddings, lexstore, readiness, semantic_drain
+from exomem.embedding_index import STORE_CURSOR_REVISION, STORE_CURSOR_SEQ, EmbeddingIndex
+from exomem.vault_store import read, vectors, write
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
+)
+
+MOVED = "Knowledge Base/Notes/Moved.md"
+LIGHTHOUSE = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe lighthouse keeper logs the tide in [[Beta]].\n"
+HARBOUR = (
+    b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe lighthouse keeper now answers the harbour pilot.\n"
+)
+POISON = "---\ntitle: Alpha\n---\n# Alpha\n\nPoisoned projection about a volcano observatory.\n"
+
+
+class Encoder:
+    """Hashes each word of a text into the vector, so texts that share words score alike.
+
+    ``texts`` records every text that reached the model, which is how a case sees what was encoded
+    and what was reused.
+    """
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+        self.refuse: str | None = None
+
+    def __call__(self, texts: list[str], *, is_query: bool = False) -> np.ndarray:
+        self.texts.extend(texts)
+        out = np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32)
+        for row, text in enumerate(texts):
+            if self.refuse is not None and self.refuse in text:
+                raise RuntimeError("the encoder refused this text")
+            for word in text.lower().split():
+                out[row, zlib.crc32(word.encode()) % embeddings.VECTOR_DIM] += 1.0
+            out[row] /= max(float(np.linalg.norm(out[row])), 1.0)
+        return out
+
+
+def install_encoder(monkeypatch) -> Encoder:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    model = SimpleNamespace(texts_fit=lambda _texts: True)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
+    readiness.reset()
+    encoder = Encoder()
+    monkeypatch.setattr(embeddings, "embed_texts", encoder)
+    return encoder
+
+
+@pytest.fixture
+def encoder(monkeypatch):
+    yield install_encoder(monkeypatch)
+    readiness.reset()
+
+
+def catch_up(root, **limits):
+    """Drain until the sidecar is level with the store, and say what the calls did together."""
+    total = {"embedded": 0, "purged": 0, "owed": 0}
+    for _ in range(50):
+        drained = vectors.drain(root, **limits)
+        assert drained.blocked is None
+        for name in total:
+            total[name] += getattr(drained, name)
+        if not drained.more:
+            return SimpleNamespace(**total)
+    raise AssertionError("the drain never reached the end of the store")
+
+
+def index_of(root) -> EmbeddingIndex:
+    return embeddings.get_embedding_index(root)
+
+
+def hit_paths(root, query: str) -> list[str]:
+    """The pages whose chunks the vector lane returns for `query`, best first."""
+    hits = index_of(root).search(Encoder()([query], is_query=True)[0], 50)
+    return list(dict.fromkeys(path for path, _chunk, _text, _score in hits))
+
+
+def chunk_texts(root, rel: str) -> list[str]:
+    with closing(sqlite3.connect(index_of(root).path)) as database:
+        return [
+            text
+            for (text,) in database.execute(
+                "SELECT chunk_text FROM chunks WHERE file_path = ? ORDER BY chunk_idx", (rel,)
+            )
+        ]
+
+
+def sidecar_state(root):
+    """The chunk rows, the unit-row counts and the stamps: what a resumed drain must reproduce."""
+    with closing(sqlite3.connect(index_of(root).path)) as database:
+        return (
+            database.execute(
+                "SELECT file_path, chunk_idx, chunk_text, vector, file_mtime FROM chunks ORDER BY 1, 2"
+            ).fetchall(),
+            database.execute(
+                "SELECT parent_path, COUNT(*) FROM semantic_unit_vectors GROUP BY 1 ORDER BY 1"
+            ).fetchall(),
+            database.execute(
+                "SELECT file_path, sha256, revision, owed FROM store_page_vectors ORDER BY 1"
+            ).fetchall(),
+        )
+
+
+def stored_sha(root, rel: str) -> str:
+    with read.snapshot(root) as view:
+        return view.page_meta(rel).sha256
+
+
+def commit(writer_, body: bytes, rel: str = ALPHA) -> int:
+    return write.commit(writer_, put(rel, body)).revision
+
+
+def test_a_committed_edit_is_embedded_from_the_store_and_stamped_with_its_hash_and_revision(
+    stored, writer, encoder
+):
+    """Vector rows that do not say which bytes they came from: a reader cannot tell a current page
+    from a stale one, and the revision shows nothing about how far the drain has caught up."""
+    catch_up(stored)
+    revision = commit(writer, HARBOUR)
+
+    drained = catch_up(stored)
+
+    stamp = index_of(stored).store_stamps([ALPHA])[ALPHA]
+    assert (stamp.sha256, stamp.revision, stamp.owed) == (
+        hashlib.sha256(HARBOUR).hexdigest(),
+        revision,
+        False,
+    )
+    assert drained.embedded == 1, "only the edited page needed new rows"
+    assert any("harbour pilot" in text for text in chunk_texts(stored, ALPHA))
+
+
+def test_the_first_pass_stamps_every_embeddable_page_once_and_then_goes_quiet(
+    stored, encoder
+):
+    """A first pass that leaves pages without a stamp (never served) or that embeds the vault again
+    on every turn."""
+    first = catch_up(stored)
+    encoded_by_first_pass = len(encoder.texts)
+    second = catch_up(stored)
+
+    stamps = index_of(stored).store_stamps()
+    assert ALPHA in stamps and BETA in stamps
+    assert all(stamp.sha256 == stored_sha(stored, rel) and not stamp.owed for rel, stamp in stamps.items())
+    assert index_of(stored).store_cursor() is not None
+    assert first.embedded == len(stamps) and encoded_by_first_pass > 0
+    assert (second.embedded, second.purged, len(encoder.texts)) == (0, 0, encoded_by_first_pass)
+
+
+def test_before_the_drain_runs_the_vector_lane_leaves_out_the_edited_page_and_lexical_find_keeps_it(
+    stored, writer, encoder
+):
+    """A stale vector served for bytes that the page no longer holds, or a page that disappears from
+    find altogether because its vectors lag."""
+    catch_up(stored)
+    assert ALPHA in hit_paths(stored, "lighthouse keeper tide")
+    commit(writer, HARBOUR)
+
+    assert ALPHA not in hit_paths(stored, "lighthouse keeper tide")
+    assert BETA in hit_paths(stored, "lighthouse keeper tide"), "the pages that did not change stay"
+    lexical = lexstore.search_bm25(stored, "lighthouse", 5, scope="kb", repair=False)
+    assert ALPHA in [path for path, _score in lexical]
+
+    catch_up(stored)
+    assert ALPHA in hit_paths(stored, "lighthouse keeper harbour pilot")
+
+
+def test_the_drain_embeds_the_stored_bytes_when_the_projected_markdown_is_poisoned(
+    stored, writer, encoder
+):
+    """A drain that reads the projection, which lags the store and which an outside edit can change,
+    so the vectors describe text that the store does not hold."""
+    catch_up(stored)
+    commit(writer, HARBOUR)
+    (stored / ALPHA).write_text(POISON)
+
+    catch_up(stored)
+
+    assert any("harbour pilot" in text for text in chunk_texts(stored, ALPHA))
+    assert not any("volcano" in text for text in encoder.texts)
+    assert index_of(stored).store_stamps([ALPHA])[ALPHA].sha256 == hashlib.sha256(HARBOUR).hexdigest()
+
+
+def test_a_deleted_page_loses_its_vectors_and_its_stamp(stored, writer, encoder):
+    """A deleted page that stays in the vector lane, so find returns a page that is not there."""
+    catch_up(stored)
+    assert chunk_texts(stored, BETA)
+    write.commit(
+        writer, write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(BETA),))
+    )
+
+    drained = catch_up(stored)
+
+    assert drained.purged == 1
+    assert chunk_texts(stored, BETA) == []
+    assert BETA not in index_of(stored).store_stamps()
+    assert BETA not in hit_paths(stored, "lighthouse keeper tide")
+
+
+def test_a_moved_page_takes_its_vectors_to_the_new_path_without_a_model_call(
+    stored, writer, encoder
+):
+    """A move that leaves the old path's vectors behind or encodes the page again, so each rename
+    costs the model the whole page and find returns a path that no longer exists."""
+    catch_up(stored)
+    old_texts = chunk_texts(stored, BETA)
+    seen = len(encoder.texts)
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "tidy", moves=(write.PageMove(BETA, MOVED),)),
+    )
+
+    catch_up(stored)
+
+    assert chunk_texts(stored, BETA) == []
+    assert chunk_texts(stored, MOVED) == old_texts
+    stamps = index_of(stored).store_stamps()
+    assert BETA not in stamps and stamps[MOVED].sha256 == stored_sha(stored, MOVED)
+    assert len(encoder.texts) == seen, "the new path reused the old path's vectors by text"
+
+
+def test_a_page_whose_encode_fails_is_withheld_then_retried_once_the_encoder_recovers(
+    stored, writer, encoder
+):
+    """A failed page that the cursor skips for good (never searchable by meaning), or one that the
+    reader serves from rows that no longer match its bytes."""
+    catch_up(stored)
+    commit(writer, HARBOUR)
+    encoder.refuse = "harbour"
+
+    first = catch_up(stored)
+
+    assert first.owed == 1
+    assert index_of(stored).store_stamps([ALPHA])[ALPHA].owed
+    assert ALPHA not in hit_paths(stored, "lighthouse keeper tide"), "the old rows are withheld"
+    assert index_of(stored).store_cursor() is not None, "one failed page does not hold the rest back"
+
+    encoder.refuse = None
+    catch_up(stored)
+    assert not index_of(stored).store_stamps([ALPHA])[ALPHA].owed
+    assert ALPHA in hit_paths(stored, "lighthouse keeper harbour pilot")
+
+
+def test_rows_that_a_foreign_writer_rewrote_are_withheld_even_though_the_cursor_passed_them(
+    stored, encoder
+):
+    """A file-mode writer that rebuilds rows from a lagging projection, after the cursor has passed the
+    page: its rows would be served as proven because the page looks caught up."""
+    catch_up(stored)
+    index = index_of(stored)
+    identity = index.identity
+    index.upsert_batch(
+        [(ALPHA, ["a chunk of the projection"], encoder(["a chunk of the projection"]), 1.0)],
+        identity=identity,
+    )
+
+    assert index.store_stamps([ALPHA])[ALPHA].owed
+    assert ALPHA not in hit_paths(stored, "a chunk of the projection")
+
+    catch_up(stored)
+    assert chunk_texts(stored, ALPHA) != ["a chunk of the projection"]
+    assert ALPHA in hit_paths(stored, "lighthouse keeper tide")
+
+
+def test_rows_from_before_the_first_pass_are_not_served_until_the_pass_stamps_them(
+    stored, encoder
+):
+    """A sidecar that a file-mode vault filled before it migrated: its rows carry no stamp, and a reader
+    that serves what it cannot prove would serve them from the first query."""
+    catch_up(stored)
+    with closing(sqlite3.connect(index_of(stored).path)) as database, database:
+        database.execute("DELETE FROM store_page_vectors")
+        database.execute(
+            "DELETE FROM meta WHERE key IN (?, ?)", (STORE_CURSOR_REVISION, STORE_CURSOR_SEQ)
+        )
+    assert index_of(stored).store_cursor() is None
+    assert ALPHA not in hit_paths(stored, "lighthouse keeper tide")
+
+    catch_up(stored)
+
+    assert ALPHA in hit_paths(stored, "lighthouse keeper tide")
+
+
+def test_a_bounded_turn_leaves_the_cursor_behind_the_pages_it_did_not_reach(stored, encoder):
+    """A cursor that jumps over the pages that a turn's budget cut off, so they are never embedded."""
+    first = vectors.drain(stored, pages=1, publication=1)
+
+    assert first.more and first.embedded == 1
+    assert index_of(stored).store_cursor() is None
+
+    catch_up(stored, pages=1, publication=1)
+    assert index_of(stored).store_cursor() is not None
+
+
+def test_the_service_turn_drains_a_store_mode_vault_without_a_receipt(stored, writer, encoder):
+    """A semantic drain that waits for a receipt, which a store-mode commit never queues, so no
+    vector row is ever written."""
+    drain = semantic_drain.SemanticDrain(stored)
+
+    for _ in range(50):
+        progressed, _interval = drain._turn()
+        if not progressed:
+            break
+    commit(writer, HARBOUR)
+    for _ in range(50):
+        progressed, _interval = drain._turn()
+        if not progressed:
+            break
+
+    assert index_of(stored).store_stamps([ALPHA])[ALPHA].sha256 == hashlib.sha256(HARBOUR).hexdigest()
+
+
+def drain_and_die(environment, publications):
+    """`vectors.drain` in a fresh interpreter that the operating system kills after a publication."""
+    os.environ.clear()
+    os.environ.update(environment)
+    patch = pytest.MonkeyPatch()
+    install_encoder(patch)
+    published = []
+    upsert = EmbeddingIndex.upsert_batch
+
+    def upsert_then_die(self, *arguments, **keywords):
+        token = upsert(self, *arguments, **keywords)
+        published.append(token)
+        if len(published) == publications:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return token
+
+    EmbeddingIndex.upsert_batch = upsert_then_die
+    vectors.drain(Path(environment["EXOMEM_VAULT_PATH"]), publication=1)
+    os._exit(0)
+
+
+def test_a_drain_killed_between_publications_resumes_with_the_rows_of_an_uninterrupted_one(
+    stored, encoder
+):
+    """A restart that begins again (re-embedding what the dead drain finished) or that skips a page
+    whose rows the dead drain never wrote: the rows must equal those of a drain that never died."""
+    catch_up(stored)
+    reference = sidecar_state(stored)
+    pages = len(index_of(stored).store_stamps())
+    for suffix in ("", "-wal", "-shm"):
+        path = index_of(stored).path
+        path.with_name(path.name + suffix).unlink(missing_ok=True)
+    embeddings._INDEX_CACHE.clear()
+
+    child = multiprocessing.get_context("spawn").Process(
+        target=drain_and_die, args=(dict(os.environ), 2)
+    )
+    child.start()
+    child.join(180)
+    assert child.exitcode == -signal.SIGKILL
+    done_before_the_kill = set(index_of(stored).store_stamps())
+    assert len(done_before_the_kill) == 2 and len(done_before_the_kill) < pages
+    assert index_of(stored).store_cursor() is None, "the census was not finished"
+
+    encoder.texts.clear()
+    resumed = catch_up(stored)
+
+    assert resumed.embedded == pages - 2
+    assert sidecar_state(stored) == reference
+    reembedded_by_the_dead_drain = [
+        rel for rel in done_before_the_kill if any(text in encoder.texts for text in chunk_texts(stored, rel))
+    ]
+    assert reembedded_by_the_dead_drain == [], "the pages that the dead drain finished were kept"

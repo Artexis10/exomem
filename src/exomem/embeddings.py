@@ -2045,6 +2045,82 @@ def upsert_after_write_status(
     )
 
 
+def _encode_chunks(
+    index: Any, chunks: list[str] | None, stored_chunks: dict[str, np.ndarray]
+) -> tuple[np.ndarray, recall_space.SpaceIdentity]:
+    """One parent's chunk vectors, reusing the stored vector of every text that did not change."""
+    with recall_space.encoding_for(index):
+        return _encode_prepared(
+            lambda: (
+                _embed_live_chunks_reusing(chunks, stored_chunks)
+                if chunks
+                else np.zeros((0, recall_space.current_dim()), dtype=np.float32)
+            ),
+            fallback=getattr(index, "identity", None),
+        )
+
+
+def _encode_units(
+    index: Any,
+    chunks: list[str] | None,
+    producer: recall_space.SpaceIdentity,
+    units: list[Any],
+    stored_units: dict[str, np.ndarray],
+) -> tuple[np.ndarray, recall_space.SpaceIdentity]:
+    """One parent's unit vectors, and the one producer that its chunk and unit vectors share."""
+    with recall_space.encoding_for(index):
+        unit_vectors, unit_producer = _encode_prepared(
+            lambda: (
+                _embed_live_chunks_reusing([unit.content for unit in units], stored_units)
+                if units
+                else np.zeros((0, producer.dim), dtype=np.float32)
+            ),
+            fallback=getattr(index, "identity", None),
+        )
+    if len(unit_vectors):
+        if chunks and (
+            producer.dim != unit_producer.dim
+            or not producer.accepts(unit_producer.model, unit_producer.fingerprint)
+        ):
+            raise recall_space.VectorSpaceMismatch("parent encoders changed during preparation")
+        if not chunks or unit_producer.fingerprint is not None:
+            producer = unit_producer
+    return unit_vectors, producer
+
+
+def _load_model() -> str | None:
+    """Load the encoder, or say why it cannot be had: the status code a write reports for it."""
+    global _IMPORT_FAILED
+    try:
+        get_model()  # triggers the heavy import; cheap thereafter.
+    except ImportError as e:
+        if not _IMPORT_FAILED:
+            log.warning(
+                "embeddings disabled (import failed: %s); writers will not "
+                "update the vector sidecar. Keyword-mode find() still works.",
+                e,
+            )
+            _IMPORT_FAILED = True
+        return "embeddings_import_unavailable"
+    except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
+        log.warning("embedding model load failed: %s; skipping upsert", e)
+        return "embedding_model_load_failed"
+    return None
+
+
+def backend_unavailable() -> str | None:
+    """Why no vector can be encoded now (a status code), or None when the backend is ready.
+
+    The checks a write makes before it encodes, in the order it makes them, for a caller that has no
+    file to write: the store-mode drain.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return "embeddings_disabled"
+    if _IMPORT_FAILED:
+        return "embeddings_import_unavailable"
+    return _load_model()
+
+
 def _upsert_after_write_status(
     vault_root: Path,
     written_paths: list[Path],
@@ -2054,7 +2130,6 @@ def _upsert_after_write_status(
     preparation: Any = None,
 ) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
-    global _IMPORT_FAILED
     md_paths: list[Path] = []
     rejected_paths: list[str] = []
     for path in written_paths:
@@ -2125,24 +2200,11 @@ def _upsert_after_write_status(
             deferred_index.clear_receipts(vault_root, race_receipts)
         return status
 
-    try:
-        get_model()  # triggers the heavy import; cheap thereafter.
-    except ImportError as e:
-        if not _IMPORT_FAILED:
-            log.warning(
-                "embeddings disabled (import failed: %s); writers will not "
-                "update the vector sidecar. Keyword-mode find() still works.",
-                e,
-            )
-            _IMPORT_FAILED = True
-        return finish(
-            EmbeddingSyncStatus("disabled", "embeddings_import_unavailable", eligible_count)
-        )
-    except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
-        log.warning("embedding model load failed: %s; skipping upsert", e)
-        return finish(
-            EmbeddingSyncStatus("degraded", "embedding_model_load_failed", eligible_count)
-        )
+    blocked = _load_model()
+    if blocked == "embeddings_import_unavailable":
+        return finish(EmbeddingSyncStatus("disabled", blocked, eligible_count))
+    if blocked is not None:
+        return finish(EmbeddingSyncStatus("degraded", blocked, eligible_count))
 
     from . import find as find_module
 
@@ -2332,15 +2394,7 @@ def _upsert_after_write_status(
             index, rel_path, max_bytes=preparation.reuse_allowance if preparation else None
         )
         try:
-            with recall_space.encoding_for(index):
-                vectors, producer = _encode_prepared(
-                    lambda chunks=chunks, stored_chunks=stored_chunks: (
-                        _embed_live_chunks_reusing(chunks, stored_chunks)
-                        if chunks
-                        else np.zeros((0, recall_space.current_dim()), dtype=np.float32)
-                    ),
-                    fallback=getattr(index, "identity", None),
-                )
+            vectors, producer = _encode_chunks(index, chunks, stored_chunks)
         except Exception as error:  # noqa: BLE001
             log.warning("embedding encode failed for %s: %s; sidecar left stale", rel_path, error)
             failure_code = failure_code or "embedding_encode_failed"
@@ -2348,26 +2402,9 @@ def _upsert_after_write_status(
         unit_replacement = None
         try:
             state = prepared_state or semantic_index.current_parent_index_state(vault_root, md)
-            units = state.occurrences
-            with recall_space.encoding_for(index):
-                unit_vectors, unit_producer = _encode_prepared(
-                    lambda units=units, stored_units=stored_units, producer=producer: (
-                        _embed_live_chunks_reusing([unit.content for unit in units], stored_units)
-                        if units
-                        else np.zeros((0, producer.dim), dtype=np.float32)
-                    ),
-                    fallback=getattr(index, "identity", None),
-                )
-            if len(unit_vectors):
-                if chunks and (
-                    producer.dim != unit_producer.dim
-                    or not producer.accepts(unit_producer.model, unit_producer.fingerprint)
-                ):
-                    raise recall_space.VectorSpaceMismatch(
-                        "parent encoders changed during preparation"
-                    )
-                if not chunks or unit_producer.fingerprint is not None:
-                    producer = unit_producer
+            unit_vectors, producer = _encode_units(
+                index, chunks, producer, state.occurrences, stored_units
+            )
             unit_replacement = (state, unit_vectors, mtime)
         except Exception as error:  # noqa: BLE001 - optional unit vectors soft-fail
             log.warning("semantic-unit embedding update failed for %s: %s", rel_path, error)
@@ -2427,6 +2464,65 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     # embeddable paths.
     return not _IMPORT_FAILED and (
         status.status == "completed" or status.code == "embedding_auxiliary_failed"
+    )
+
+
+class ParentRows(NamedTuple):
+    """One parent's encoded rows, ready for `EmbeddingIndex.upsert_batch`."""
+
+    replacement: tuple[str, list[str], np.ndarray, float]
+    unit: tuple[Any, np.ndarray, float]
+    producer: recall_space.SpaceIdentity
+
+
+def parent_rows_from_source(
+    vault_root: Path,
+    index: Any,
+    rel_path: str,
+    content: bytes,
+    *,
+    mtime: float,
+    preparation: Any,
+    reuse_from: Sequence[str] = (),
+) -> ParentRows:
+    """The chunk and unit vectors of a parent whose exact bytes the caller already holds.
+
+    `_upsert_after_write_status` reads the page from disk; a store-mode vault keeps its bytes in the
+    store, and the projected file may lag it, so its drain passes them here. Nothing reads the page.
+    `preparation` holds the source (`SemanticPreparation.hold`). `reuse_from` names other paths whose
+    stored vectors may be reused by text, such as the old path of a moved page. A page that cannot be
+    parsed, chunked or encoded raises, and the caller decides what that page is owed.
+    """
+    from . import find_corpus, semantic_index
+
+    page = find_corpus.parse_page(
+        vault_root / rel_path, mtime, vault_root, content=content, resolved_relative=rel_path
+    )
+    if page is None:
+        raise ValueError("the page could not be parsed")
+    identity = getattr(index, "identity", None)
+    width = identity.dim if identity else recall_space.current_dim()
+    preparation.check_page(page, vector_dim=0 if preparation.source_bytes <= 1024 else width)
+    chunks = _chunks_for_page(vault_root, page, allow_encode=False)
+    if chunks is None:
+        # Timed segmentation encodes while it chunks, so its reservation comes first.
+        preparation.check_page(page, vector_dim=width)
+        chunks = _chunks_for_page(vault_root, page)
+    state = semantic_index.current_parent_index_state(
+        vault_root, rel_path, source=preparation.source
+    )
+    preparation.check_projections(chunks or [], state.occurrences, vector_dim=width)
+    share = preparation.reuse_allowance // (1 + len(reuse_from))
+    stored_chunks, stored_units = _stored_text_vectors(index, rel_path, max_bytes=share)
+    for other in reuse_from:
+        other_chunks, other_units = _stored_text_vectors(index, other, max_bytes=share)
+        # A text has one vector, so which path it came from does not matter.
+        stored_chunks = {**other_chunks, **stored_chunks}
+        stored_units = {**other_units, **stored_units}
+    vectors, producer = _encode_chunks(index, chunks, stored_chunks)
+    unit_vectors, producer = _encode_units(index, chunks, producer, state.occurrences, stored_units)
+    return ParentRows(
+        (rel_path, chunks or [], vectors, mtime), (state, unit_vectors, mtime), producer
     )
 
 

@@ -215,6 +215,10 @@ class SemanticDrain:
         sets no cadence, because the writer hints (``signal``/``_wake``) and
         the idle poll deliver that change.
         """
+        from .vault_store import mode as store_mode
+
+        if store_mode.store_mode_for_reads(self.root):
+            return self._store_turn()
         with self._lock:
             hints = self._hints
             self._hints = set()
@@ -316,6 +320,22 @@ class SemanticDrain:
         if due is None:
             return False, IDLE_POLL_SECONDS
         return False, min(IDLE_POLL_SECONDS, max(MIN_WAKE_SECONDS, due - now))
+
+    def _store_turn(self) -> tuple[bool, float]:
+        """A store-mode vault's turn. Its changes are the store's audit rows, so no receipt queues them.
+
+        The drain bounds its own turn, so this runs it inline: a page's bytes come from the store, and
+        nothing here reads or waits on a file.
+        """
+        from .vault_store import vectors
+
+        try:
+            report = vectors.drain(self.root, stop=self._stop)
+        except foreground_priority.BulkCancelled:
+            return False, IDLE_POLL_SECONDS
+        if report.blocked is not None:
+            return False, IDLE_POLL_SECONDS  # the backend is off or cannot load: the work waits
+        return report.progressed, MIN_WAKE_SECONDS if report.more else IDLE_POLL_SECONDS
 
     def _bulk(self, receipt, signature: str, policy: str) -> None:
         try:
