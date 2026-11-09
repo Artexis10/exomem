@@ -130,6 +130,7 @@ STORE_FIGURES = (
     "registry",
     "registry_revision",
     "registry_target_revision",
+    "registry_waiting_on_paths",
 )
 
 
@@ -144,6 +145,8 @@ def status(vault_root: Path) -> dict:
     deferred, such as one on a linked file, stays queued and keeps ageing. The registry figures say
     whether the derived rows reflect the schema overlay (``current``), are being derived again
     toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
+    ``registry_waiting_on_paths`` counts the overlay paths that the projector has not put on disk or
+    that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start on
     another state root refuse. A store that cannot be read gives "unknown", for the mode or for each
     figure, with the error's name in ``unreadable``: an unreadable store never reports zeros. A
@@ -183,6 +186,7 @@ def _store_figures(vault_root: Path) -> dict:
     )
     with closing(reader):
         registry = rederive.read(reader)
+        waiting = rederive.waiting_on(reader, vault_root)
         revision, release, changed_at = reader.execute(
             "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"
         ).fetchone()
@@ -216,4 +220,5 @@ def _store_figures(vault_root: Path) -> dict:
         "registry": registry.state,
         "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
         "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,
+        "registry_waiting_on_paths": waiting,
     }

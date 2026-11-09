@@ -40,9 +40,11 @@ KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS)
 CURRENT = "current"
 REBUILDING = "rebuilding"
 
-#: What one ``settle`` call did. A batch is bounded so that a request waits for at most one.
+#: What ``pending`` and one ``settle`` call report. A batch is bounded so that a request waits for
+#: at most one. ``READY`` is only ``pending``'s answer: a batch can run.
 IDLE = "idle"
 WAITING = "waiting"
+READY = "ready"
 ADVANCED = "advanced"
 DONE = "done"
 BATCH_PAGES = 32
@@ -93,7 +95,12 @@ def clear(tx: Connection) -> None:
 
 
 def read(conn: Connection) -> Registry:
-    """The registry state that the store's own records show."""
+    """The registry state that the store's own records show.
+
+    ``unknown`` is a store that records no reflected revision, and one whose record of the last
+    overlay change is not a number: neither says which overlay the rows reflect, and a guess of
+    ``current`` would serve the rows of an overlay that may have changed.
+    """
     meta = dict(
         conn.execute(
             "SELECT key, value FROM store_meta WHERE key IN (?, ?)",
@@ -101,15 +108,41 @@ def read(conn: Connection) -> Registry:
         )
     )
     reflected = _revision(meta.get(REGISTRY_REVISION))
-    if reflected is None:
-        # Nothing records which overlay the rows reflect (a vault that entered store mode before
-        # this job): one pass over every page to the head settles it, and until then it is unknown.
+    # No overlay change on record is a revision of 0: every reflected revision is at or past it.
+    changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
+    if reflected is None or changed is None:
+        # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
-        return Registry(mode.UNKNOWN, None, None if head is None else head[0])
-    changed = _revision(meta.get(OVERLAY_REVISION)) or 0
+        return Registry(mode.UNKNOWN, reflected, None if head is None else head[0])
     if reflected >= changed:
         return Registry(CURRENT, reflected, changed)
     return Registry(REBUILDING, reflected, changed)
+
+
+def pending(conn: Connection, root: Path) -> str:
+    """Whether a batch is owed: ``idle``, ``waiting`` for the projector, or ``ready`` to run.
+
+    It reads only, so the store thread asks it on a plain read and takes the vault's mutation
+    boundary for a batch that can run, never for a tick with nothing to do.
+    """
+    return _due(conn, root)[0]
+
+
+def waiting_on(conn: Connection, root: Path) -> int:
+    """How many overlay paths still wait to reach the disk, queued or held: the job waits for each.
+
+    A held path waits for a person, so it can hold the job back for as long as the hold lasts. The
+    count names no path and no content: status shows it, and the held list names the paths.
+
+    The loaders read the disk until the readers move to the store (tasks 3.1 and 3.2), so a pass
+    that began while a path waited would derive rows from the old registry and record them as
+    current. The wait costs the seconds that the projector takes, and it lapses once the loaders
+    read the store.
+    """
+    queued = conn.execute("SELECT path, from_path FROM store_projection_queue").fetchall()
+    held = conn.execute("SELECT path FROM store_held").fetchall()
+    named = {rel for row in (*queued, *held) for rel in row if rel is not None}
+    return sum(is_overlay_source(root, rel) for rel in named)
 
 
 def settle(root: Path, writer) -> str:
@@ -121,16 +154,12 @@ def settle(root: Path, writer) -> str:
     revision that the rows now reflect.
     """
     conn = writer.connection
-    registry = read(conn)
-    if registry.state == CURRENT:
-        return IDLE
-    if _overlay_unprojected(conn, root):
-        return WAITING
+    due, registry = _due(conn, root)
     target = registry.target
-    if target is None:
-        return IDLE  # no mode row: not a store-mode vault, so there is nothing to derive
+    if due != READY or target is None:
+        return due
     with writer.handle.transaction() as tx:
-        found = _resume_after(tx, target)
+        target, found = _resume(tx, target, registry.state)
         paths = [
             row[0]
             for row in tx.execute(
@@ -142,36 +171,45 @@ def settle(root: Path, writer) -> str:
             derive.rederive_pages(tx, root, paths)
         if len(paths) < BATCH_PAGES:
             _set(tx, REGISTRY_REVISION, str(target))
+            overlay = tx.execute(
+                "SELECT value FROM store_meta WHERE key = ?", (OVERLAY_REVISION,)
+            ).fetchone()
+            if overlay is not None and _revision(overlay[0]) is None:
+                # Every page now reflects the overlay at ``target``, which replaces the unreadable record.
+                _set(tx, OVERLAY_REVISION, str(target))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
         _set(tx, PASS, json.dumps({"target": target, "after": paths[-1]}))
         return ADVANCED
 
 
-def _resume_after(tx: Connection, target: int) -> str:
-    """The path after which this pass continues; a pass for another target starts over."""
+def _due(conn: Connection, root: Path) -> tuple[str, Registry]:
+    registry = read(conn)
+    if registry.state == CURRENT or registry.target is None:
+        # No mode row means not a store-mode vault: there is nothing to derive.
+        return IDLE, registry
+    return (WAITING if waiting_on(conn, root) else READY), registry
+
+
+def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
+    """The target of this batch's pass and the path after which it continues.
+
+    A pass for a rebuild starts over at a new target, because the pages before its cursor were
+    derived from an overlay that has changed since. A pass for an unknown state keeps the target it
+    began with: the head moves with every commit, a page committed meanwhile is derived by the
+    overlay it was committed under, and an overlay commit sets its own revision, which this pass
+    does not reflect. Restarting at each head would never finish on a vault that is written to.
+    """
     row = tx.execute("SELECT value FROM store_meta WHERE key = ?", (PASS,)).fetchone()
     if row is not None:
         try:
             recorded = json.loads(row[0])
-            if recorded["target"] == target:
-                return str(recorded["after"])
+            pinned = int(recorded["target"])
+            if pinned == target or state == mode.UNKNOWN:
+                return pinned, str(recorded["after"])
         except (ValueError, KeyError, TypeError):
             pass  # an unreadable cursor starts the pass over: it costs time, never correctness
-    return ""
-
-
-def _overlay_unprojected(conn: Connection, root: Path) -> bool:
-    """Whether an overlay file still lacks the store's bytes on disk, queued or held.
-
-    The loaders read the disk until the readers move to the store (tasks 3.1 and 3.2), so a pass
-    that began earlier would derive rows from the old registry and record them as current. The wait
-    costs the seconds that the projector takes, and it lapses once the loaders read the store.
-    """
-    queued = conn.execute("SELECT path, from_path FROM store_projection_queue").fetchall()
-    held = conn.execute("SELECT path FROM store_held").fetchall()
-    named = [rel for row in (*queued, *held) for rel in row if rel is not None]
-    return any(is_overlay_source(root, rel) for rel in named)
+    return target, ""
 
 
 def _revision(value: str | None) -> int | None:

@@ -1851,9 +1851,10 @@ class StoreServer:
         """Derive a store-mode vault's pages again after a commit changed its registries or policy.
 
         The job is ``vault_store.rederive``: one bounded transaction per tick, resumed from the
-        store's own cursor after a restart. A file-mode vault, which no running service ever turns
-        into store mode, and a store whose rows already reflect the overlay each cost one stat of
-        the manifest per tick.
+        store's own cursor after a restart. A plain read decides first, as the import and derived
+        ticks do: a file-mode vault costs one stat of the manifest, and a store-mode vault whose
+        rows already reflect the overlay, or that waits for the projector, costs one read. Only a
+        batch that can run takes the store checkout and the vault's mutation boundary.
         """
         from ..governance import principal
         from ..vault_store import mode as store_mode
@@ -1865,8 +1866,11 @@ class StoreServer:
         try:
             if not store_mode.store_mode_for_reads(self.root):
                 return IMPORT_RETRY_SECONDS
-            with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                outcome = self._write(rederive.settle, self.root, writer)
+            with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
+                outcome = rederive.pending(reader, self.root)
+            if outcome == rederive.READY:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    outcome = self._write(rederive.settle, self.root, writer)
         except Exception:  # noqa: BLE001 - a refused batch leaves the rows behind the store, and a later tick retries
             logger.warning(
                 "the registry state of the vault store could not advance; retrying later",

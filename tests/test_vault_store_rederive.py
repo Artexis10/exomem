@@ -10,7 +10,9 @@ how migration proves its own rows.
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import json
 import multiprocessing
 import os
 import signal
@@ -20,6 +22,7 @@ from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import pytest
+from test_collection_store_runtime import Client
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     ALPHA,
@@ -30,6 +33,7 @@ from test_vault_store_migration import (  # noqa: F401
 )
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
+from exomem import writer_lease
 from exomem.collection_store import connection, preview, runtime
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import derive, mode, projection, rederive, verify, write
@@ -201,9 +205,33 @@ def test_the_job_waits_until_the_projector_has_put_the_overlay_file_on_disk(
         ),
     )
     assert rederive.settle(stored, writer) == rederive.WAITING
-    assert mode.status(stored)["registry"] == rederive.REBUILDING
+    waiting = mode.status(stored)
+    assert (waiting["registry"], waiting["registry_waiting_on_paths"]) == (rederive.REBUILDING, 1)
     project(writer, stored)
     assert rederive.settle(stored, writer) != rederive.WAITING
+    assert mode.status(stored)["registry_waiting_on_paths"] == 0
+
+
+def test_a_held_overlay_file_keeps_the_job_waiting_and_status_counts_it(
+    stored, writer  # noqa: F811
+):
+    """A held edit of a registry file that keeps the vault rebuilding with nothing in status that
+    says what it waits for."""
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED, "profiles", puts=(write.PagePut(PROFILES, b"profiles: {}\n"),)
+        ),
+    )
+    project(writer, stored)
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "INSERT INTO store_held(path, kind, detected_at) VALUES (?, 'edit', 'now')", (PROFILES,)
+        )
+
+    assert rederive.settle(stored, writer) == rederive.WAITING
+    waiting = mode.status(stored)
+    assert (waiting["registry"], waiting["registry_waiting_on_paths"]) == (rederive.REBUILDING, 1)
 
 
 def test_a_commit_between_two_batches_is_not_blocked_and_its_page_is_derived_by_the_new_policy(
@@ -266,7 +294,7 @@ def test_the_store_threads_tick_derives_one_batch_per_call_and_asks_to_come_back
     monkeypatch.setattr(preview, "preview_store", checkout)
     thread = SimpleNamespace(
         root=stored,
-        runtime=object(),
+        runtime=SimpleNamespace(path=connection.store_path(stored), reader_pool=lambda: None),
         _idle_released=lambda: False,
         _write=lambda method, *arguments: method(*arguments),
     )
@@ -372,3 +400,136 @@ def test_migration_records_the_overlay_as_reflected_and_rollback_removes_every_k
     assert rollback_apply(stored, tmp_path / "export") == 0
     kept = dict(rows(stored, "SELECT key, value FROM store_meta"))
     assert not set(rederive.KEYS) & set(kept)
+
+
+def test_a_pass_over_an_unknown_state_keeps_its_target_when_a_commit_lands(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A pass that restarts at the new head on every commit, so it never finishes on a vault that
+    is written to."""
+    monkeypatch.setattr(rederive, "BATCH_PAGES", 1)
+    with writer.handle.transaction() as tx:
+        tx.execute("DELETE FROM store_meta WHERE key = ?", (rederive.REGISTRY_REVISION,))
+    assert mode.status(stored)["registry"] == mode.UNKNOWN
+
+    def cursor():
+        found = rows(stored, "SELECT value FROM store_meta WHERE key = ?", rederive.PASS)
+        return json.loads(found[0][0])
+
+    assert rederive.settle(stored, writer) == rederive.ADVANCED
+    began = cursor()
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "note", puts=(write.PagePut(GAMMA, GAMMA_TEXT),)),
+    )
+    project(writer, stored)
+    assert rederive.settle(stored, writer) == rederive.ADVANCED
+
+    assert cursor()["target"] == began["target"] < revision(stored)
+    assert cursor()["after"] > began["after"]
+    settle_to_the_end(stored, writer, limit=200)
+    settled = mode.status(stored)
+    assert (settled["registry"], settled["registry_revision"]) == (
+        rederive.CURRENT,
+        began["target"],
+    )
+
+
+def test_an_overlay_revision_that_is_not_a_number_reads_unknown_until_a_pass_settles_it(
+    stored, writer  # noqa: F811
+):
+    """A damaged record that reads as no overlay change, which marks stale rows as current."""
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "UPDATE store_meta SET value = 'damaged' WHERE key = ?", (rederive.OVERLAY_REVISION,)
+        )
+    assert mode.status(stored)["registry"] == mode.UNKNOWN
+
+    settle_to_the_end(stored, writer, limit=200)
+
+    assert mode.status(stored)["registry"] == rederive.CURRENT
+    assert rederive.settle(stored, writer) == rederive.IDLE
+
+
+@pytest.fixture
+def served_store(tmp_path, monkeypatch):
+    """The store thread's own objects over a store in store mode that holds no pages: a real
+    lease manager and runtime, and the thread's real ``_write``."""
+    root = tmp_path / "bare-vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(
+        writer_lease.LeaseConfig(
+            url="https://lease.example",
+            vault_id="vault",
+            replica_id="local",
+            state_dir=tmp_path / "lease",
+            idle_release_seconds=1,
+            ttl_seconds=3,
+        ),
+        client=Client(),
+    )
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            tx.execute(
+                "INSERT INTO store_mode(id, mode, revision, changed_at, release) "
+                "VALUES (1, 'store', 5, 'now', 'test')"
+            )
+            for key in (rederive.OVERLAY_REVISION, rederive.REGISTRY_REVISION):
+                tx.execute("INSERT INTO store_meta(key, value) VALUES (?, '5')", (key,))
+    monkeypatch.setattr(writer_lease, "active_manager", lambda: manager)
+    # The state manifest of a real migration is the other suite's subject; this one needs the answer.
+    monkeypatch.setattr(mode, "store_mode_for_reads", lambda _root: True)
+    thread = SimpleNamespace(
+        root=root,
+        runtime=runtime.CollectionStoreRuntime(root, manager, authority_check=lambda: True),
+        _idle_released=lambda: False,
+    )
+    thread._write = functools.partial(runtime.StoreServer._write, thread)
+    yield thread
+    if thread.runtime._handle is not None:
+        thread.runtime._handle.close()
+    manager._stop.set()
+
+
+def test_idle_registry_ticks_leave_the_commit_generation_and_the_idle_clock_alone(served_store):
+    """A tick with nothing to derive that takes the vault's mutation boundary every second, which
+    advances the commit generation and keeps the lease from ever idle-releasing."""
+    manager = served_store.runtime.manager
+    manager._last_activity_monotonic -= 10
+    clock = manager._last_activity_monotonic
+    generation = writer_lease.read_commit_generation(served_store.root)
+
+    waits = [runtime.StoreServer._registry_tick(served_store) for _ in range(3)]
+
+    assert waits == [runtime.IMPORT_IDLE_SECONDS] * 3
+    assert writer_lease.read_commit_generation(served_store.root) == generation
+    assert manager._last_activity_monotonic == clock
+
+
+def test_a_registry_tick_runs_a_batch_once_the_overlay_is_on_disk_and_not_before(served_store):
+    """A tick that never derives the pages, or one that derives them before the projector has put
+    the overlay file on disk."""
+    root = served_store.root
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            tx.execute(
+                "UPDATE store_meta SET value = '6' WHERE key = ?", (rederive.OVERLAY_REVISION,)
+            )
+            tx.execute(
+                "INSERT INTO store_projection_queue(path, revision, operation, queued_at) "
+                "VALUES (?, 6, 'write', 'now')",
+                (PROFILES,),
+            )
+    generation = writer_lease.read_commit_generation(root)
+
+    assert runtime.StoreServer._registry_tick(served_store) == runtime.DERIVED_RETRY_SECONDS
+    assert writer_lease.read_commit_generation(root) == generation
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        with handle.transaction() as tx:
+            tx.execute("DELETE FROM store_projection_queue")
+
+    runtime.StoreServer._registry_tick(served_store)
+
+    assert writer_lease.read_commit_generation(root) == generation + 1
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert rederive.read(reader).state == rederive.CURRENT
