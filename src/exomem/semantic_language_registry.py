@@ -100,7 +100,8 @@ class VerdictDefinition:
     """A verdict: a key, its labels and what it says. No behaviour.
 
     `labels` holds each (language tag, label) pair, sorted. A vault entry for a shipped key
-    holds only what the vault wrote: its own labels, and no description.
+    holds only what the vault wrote: its own labels, and a description only when the vault
+    wrote one, which makes the registry ignore that entry.
     """
 
     key: str
@@ -346,7 +347,9 @@ class SemanticLanguageRegistry:
         definitions = dict(self.core_verdicts)
         if not self._has_error_findings():
             for key, entry in self.verdicts.items():
-                definitions[key] = _effective_verdict(self.core_verdicts.get(key), entry)
+                effective = _effective_verdict(self.core_verdicts.get(key), entry)
+                if effective is not None:
+                    definitions[key] = effective
         return dict(sorted(definitions.items()))
 
     def verdict_keys(self) -> tuple[str, ...]:
@@ -948,15 +951,19 @@ def _parse_verdicts(
             )
         labels = _verdict_labels(value.get("labels", {}), span, findings)
         if shipped is not None:
-            if "description" in value:
+            # Kept as written, so a save preserves the entry; `_effective_verdict` ignores it.
+            raw_description = value.get("description")
+            description = "" if raw_description is None else str(raw_description).strip()
+            if description:
                 findings.append(
                     _finding(
-                        "core_verdict_fixed",
+                        "core_verdict_shadowed",
                         f"{span}.description",
-                        f"{key!r} is a shipped verdict: give it labels only",
+                        f"{key!r} is a shipped verdict with a fixed description, so this entry is "
+                        "ignored; remove its description to use its labels",
+                        severity="warning",
                     )
                 )
-            description = ""
         else:
             description = value.get("description")
             if not isinstance(description, str) or not description.strip():
@@ -997,11 +1004,17 @@ def _verdict_labels(
 
 def _effective_verdict(
     shipped: VerdictDefinition | None, entry: VerdictDefinition
-) -> VerdictDefinition:
+) -> VerdictDefinition | None:
     """The verdict a vault entry gives: a new one as written, or a shipped one whose labels
-    the vault's replace, language by language."""
+    the vault's replace, language by language.
+
+    An entry that rewrites a shipped verdict's description gives None: it is ignored, as a
+    category that shadows a shipped one is, and its warning says so.
+    """
     if shipped is None:
         return entry
+    if entry.description:
+        return None
     labels = {**dict(shipped.labels), **dict(entry.labels)}
     return VerdictDefinition(
         key=entry.key,
@@ -1021,14 +1034,19 @@ def _check_verdict_spellings(
     The shipped spellings the vault keeps own their verdict first, so a finding always points
     at something the vault wrote.
     """
+    effective = {
+        key: entry
+        for key, entry in verdicts.items()
+        if _effective_verdict(shipped.get(key), entry) is not None
+    }
     owners: dict[str, str] = {}
     for key, definition in shipped.items():
-        entry = verdicts.get(key)
+        entry = effective.get(key)
         replaced = {language for language, _text in entry.labels} if entry else set()
         kept = (text for language, text in definition.labels if language not in replaced)
         for spelling in (key, *kept):
             owners[semantic_verdicts.fold(spelling)] = key
-    for key, entry in sorted(verdicts.items()):
+    for key, entry in sorted(effective.items()):
         written = [] if entry.core else [(f"verdicts.{key}", key)]
         written += [(f"verdicts.{key}.labels.{language}", text) for language, text in entry.labels]
         for span, spelling in written:

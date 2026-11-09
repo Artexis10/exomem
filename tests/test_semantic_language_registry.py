@@ -583,13 +583,12 @@ def test_a_vault_adds_a_verdict_and_labels_a_shipped_one_in_another_language() -
         ),
         ({"retracted": {"labels": "Retracted", "description": "Withdrawn"}}, "invalid_labels"),
         ({"retracted": {"labels": {"en": "Retracted"}}}, "missing_description"),
-        ({"refuted": {"description": "Rewritten"}}, "core_verdict_fixed"),
         ({"retracted": {"description": "Withdrawn", "behaviour": "closes"}}, "unknown_field"),
         ({"Not A Key": {"description": "Withdrawn"}}, "invalid_key"),
     ],
     ids=[
         "label-is-another-key", "label-is-another-label", "bad-language-tag", "labels-not-a-map",
-        "no-description", "shipped-fixed",
+        "no-description",
         "unknown-field", "bad-key",
     ],
 )
@@ -599,6 +598,28 @@ def test_a_malformed_verdict_is_refused_and_hides_every_vault_verdict(verdicts, 
     assert code in [item["code"] for item in registry.findings]
     # The shipped verdicts always resolve; the vault's own wait for a clean registry.
     assert registry.verdict_keys() == language_registry.core_registry().verdict_keys()
+
+
+def test_a_vault_entry_that_redescribes_a_shipped_verdict_is_ignored_with_a_warning() -> None:
+    proposal = _proposal(
+        verdicts={
+            "refuted": {"labels": {"fi": "Kumottu"}, "description": "Rewritten"},
+            "retracted": {"labels": {"en": "Retracted by authors"}, "description": "Withdrawn"},
+        }
+    )
+    registry = language_registry.load_registry(proposal=proposal)
+
+    assert [(item["code"], item["severity"]) for item in registry.findings] == [
+        ("core_verdict_shadowed", "warning")
+    ]
+    # The rest of the vault's verdicts still resolve; the shadowing entry adds nothing.
+    assert registry.resolve_verdict("Retracted by authors") == "retracted"
+    assert registry.resolve_verdict("Kumottu") is None
+    assert registry.verdict_definitions()["refuted"] == (
+        language_registry.core_registry().verdict_definitions()["refuted"]
+    )
+    # A save keeps the entry as the vault wrote it.
+    assert language_registry.registry_proposal(registry) == proposal
 
 
 def test_a_saved_vault_verdict_keeps_its_labels_and_description(tmp_path: Path) -> None:
