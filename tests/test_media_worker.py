@@ -5673,6 +5673,13 @@ def test_a_document_parked_for_a_missing_converter_dependency_returns_only_once_
 
         def convert(self, path):
             try:
+                try:
+                    raise ImportError("No module named 'lxml'", name="lxml")
+                except ImportError:
+                    raise RuntimeError("html converter failed")  # noqa: B904
+            except RuntimeError:
+                first = FailedConversionAttempt(converter=self, exc_info=sys.exc_info())
+            try:
                 import mammoth  # noqa: F401
             except ImportError as error:
                 try:
@@ -5680,8 +5687,10 @@ def test_a_document_parked_for_a_missing_converter_dependency_returns_only_once_
                         "mammoth is required to read .docx files"
                     ) from error
                 except MissingDependencyException:
-                    attempt = FailedConversionAttempt(converter=self, exc_info=sys.exc_info())
-            raise FileConversionException(attempts=[attempt])
+                    mammoth_attempt = FailedConversionAttempt(
+                        converter=self, exc_info=sys.exc_info()
+                    )
+            raise FileConversionException(attempts=[first, mammoth_attempt])
 
     markitdown.FileConversionException = FileConversionException
     markitdown.MissingDependencyException = MissingDependencyException
