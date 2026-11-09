@@ -819,7 +819,7 @@ def test_file_retry_separates_clients_and_survives_reauthentication(configured_b
     writer_lease.reset_managers_for_tests()
     refreshed = authenticate("limited")
     assert refreshed.origin_session != limited.origin_session
-    assert append(refreshed) == first
+    assert append(refreshed) == {**first, "replayed": True}
     assert (vault / PUBLIC).read_text().count("one actual append") == 2
     append(authenticate("full"))
     assert (vault / PUBLIC).read_text().count("one actual append") == 3

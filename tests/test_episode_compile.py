@@ -9,7 +9,10 @@ that live policy forbids, and the record never walks the vault to count.
 
 The count borrows a current resident resolver without rebuilding it, so a test
 that expects a citation to be found warms the shared resolver just before its
-record (`find_module.shared_resolver`), as a running service keeps it warm.
+record (`find_module.shared_resolver`), as a running service keeps it warm. It
+first joins the background graph rebuild an earlier write started: a rebuild
+that retargets drops the shared resolver, and the count then honestly reports
+unchecked.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import _drain_background_threads
 from test_episode_coverage_citation import _cite
 from test_episode_memory_command import _record, _withhold_notes_from
 
@@ -61,6 +65,7 @@ def test_the_block_names_the_recap_to_cite_and_the_open_count_falls_once_a_live_
 ) -> None:
     # The first write into a vault leaves the writers' snapshot stale; a running service has it warm.
     record_episode(episode="ep-" + "c3" * 16, decided=["Prime the snapshot"])
+    _drain_background_threads()
     find_module.shared_resolver(vault)
     first = record_episode(decided=DECIDED)
 
@@ -70,6 +75,7 @@ def test_the_block_names_the_recap_to_cite_and_the_open_count_falls_once_a_live_
     assert first["compile"]["outcome"] == "This recap has 2 decided items; none is already cited by a live page."
 
     _cite(vault, first["source"]["path"])
+    _drain_background_threads()
     find_module.shared_resolver(vault)
     second = record_episode(episode=first["episode"], decided=DECIDED, open=["Pick the paint"])
 

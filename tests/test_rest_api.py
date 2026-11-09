@@ -73,7 +73,12 @@ def test_rest_ask_memory_roundtrip_matches_leaf_shape(vault, monkeypatch: pytest
     assert isinstance(data, list)
     # Same hit shape as the product `ask_memory` tool, wrapped in the shared envelope.
     find_module.clear_cache()
-    expected = [h.as_dict() for h in find_module.find(vault, query="metabolism", mode="keyword")]
+    # The reply keeps one identifier per hit (`path`) and no scope label.
+    dropped = {"ref", "scope", "parent_ref"}
+    expected = [
+        {key: value for key, value in h.as_dict().items() if key not in dropped}
+        for h in find_module.find(vault, query="metabolism", mode="keyword")
+    ]
     assert data == expected
     assert data, "keyword ask_memory for 'metabolism' should surface fixture notes"
     assert {"path", "title", "type"} <= set(data[0].keys())

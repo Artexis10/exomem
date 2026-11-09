@@ -251,7 +251,7 @@ def test_a_held_image_is_preserved_byte_for_byte_with_its_transcription(
             transcriptions=[{"file_id": handle["file_id"], "text": TRANSCRIPTION}],
         )
 
-    assert result["status"] == "committed", result
+    assert result["user_summary"].startswith("Saved"), result
     row = result["files"][0]
     assert row["state"] == "stored", row
     stored = vault / row["stored_path"]
@@ -545,7 +545,7 @@ def test_a_held_markdown_file_is_preserved_byte_for_byte(vault: Path, lease) -> 
         )
         result = _preserve(lease, vault, [held["file"]], "held-markdown")
 
-    assert result["status"] == "committed", result
+    assert result["user_summary"].startswith("Saved"), result
     row = result["files"][0]
     assert row["state"] == "stored", row
     assert (vault / row["stored_path"]).read_bytes() == original

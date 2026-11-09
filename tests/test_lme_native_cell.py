@@ -34,6 +34,19 @@ def test_native_cell_does_not_index_paths_from_an_mcp_error(tmp_path: Path) -> N
     assert _committed_paths(result, tmp_path) == set()
 
 
+def test_native_cell_tracks_the_path_of_a_compact_write_reply(tmp_path: Path) -> None:
+    from benchmarks.lme.native_cell import _committed_paths
+
+    (tmp_path / "Notes").mkdir()
+    (tmp_path / "Notes/example.md").write_text("Saved note")
+    compact = SimpleNamespace(
+        is_error=False,
+        structured_content={"result": {"user_summary": "Saved the note.", "path": "Notes/example.md"}},
+    )
+    assert _committed_paths(compact, tmp_path, writes=True) == {"Notes/example.md"}
+    assert _committed_paths(compact, tmp_path) == set()
+
+
 @pytest.mark.parametrize("with_aliases", [False, True])
 def test_snapshot_ignores_transient_root_filesystem_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_aliases: bool

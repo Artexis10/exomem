@@ -22,6 +22,7 @@ from record_presentation_fixtures import ITEM_KEY as OBSERVATION
 from record_presentation_fixtures import manifest_text as observed_manifest
 from record_presentation_fixtures import values as observation
 from test_collection_store_migration import (  # noqa: F401 - the env fixture
+    LEDGER_ID,
     PLANNING,
     WORK,
     env,
@@ -44,6 +45,7 @@ from exomem.collection_store import (
     conversion,
     edit_back,
     export,
+    governance,
     runtime,
     summary,
 )
@@ -457,6 +459,65 @@ def test_a_query_keeps_a_link_to_an_old_item_path_when_the_reader_may_read_that_
         assert after == before
         # The stored value is unchanged, and following it reads the other stored row.
         assert call(root, "read_memory", path=two)["store_row"]["title"] == "Two"
+    finally:
+        service.stop()
+
+
+def test_a_query_reads_a_linked_collection_once_and_shows_its_links_only_to_a_reader_of_its_rows(
+        env, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: after conversion each link value that names an old item path runs its own governed read of
+    the linked collection, so a query reads every row there once per link, on the legacy and on the typed
+    query route; or that one read shows a guest a link to a row withheld from it, or hides a link to a row
+    it may read."""
+    root = legacy_vault(env, relationships=True)
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
+    try:
+        _until(lambda: settled(root, LEDGER_ID), 30)
+        # Each new Work row links to one Publications item file, an old item path once Publications converts.
+        entries = sorted((root / Path(LEDGER).parent / "Entries").glob("*.md"))
+        links = {f"Cites {index}": f"[[{path.relative_to(root / 'Knowledge Base').with_suffix('').as_posix()}]]"
+                 for index, path in enumerate(entries)}
+        assert len(links) == 4
+        for title, link in links.items():
+            call(root, "record_memory", action="append", collection=WORK,
+                 item={"title": title, "count": 1, "related": link}, why="cite a publication")
+        _until(lambda: settled(root, CID), 30)
+        for path in (LEDGER, WORK):
+            convert(root, path)
+
+        reads = []
+        authorized_rows = governance.OperationAuthorization.authorized_rows
+
+        def counted(operation, cid):
+            reads.append(cid)
+            return authorized_rows(operation, cid)
+
+        monkeypatch.setattr(governance.OperationAuthorization, "authorized_rows", counted)
+
+        def shown(read, route):
+            reads.clear()
+            rows = read(root, "record_memory", action="query", collection=WORK, **route)["rows"]
+            return {row["title"]: row.get("related") for row in rows if row["title"] in links}
+
+        routes = ({}, {"query": {"version": 1, "select": ["title", "related"]}})
+        for route in routes:
+            assert shown(call, route) == links, route
+            # One read of the Publications rows answers all four links.
+            assert reads.count(LEDGER_ID) == 1, (route, reads)
+        # One linked row is withheld from the guest, by its ref: the guest keeps the other three links.
+        [(withheld,)] = store(root, "SELECT item_key FROM items WHERE collection_id=? AND view_path=?",
+                              LEDGER_ID, entries[0].relative_to(root).as_posix())
+        write_scope(root, paths="Unrelated/**")
+        scope = root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+        scope.write_text(scope.read_text() + f"refs: [{collections.record_ref(LEDGER_ID, withheld)}]\n")
+        write_rule(root, ceiling=0)
+        for route in routes:
+            assert shown(as_guest, route) == {**links, "Cites 0": None}, route
+            assert shown(call, route) == links, route
+        write_scope(root, paths="Records/Publications/**", default_deny=True)
+        for route in routes:
+            assert shown(as_guest, route) == dict.fromkeys(links), route
     finally:
         service.stop()
 

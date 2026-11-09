@@ -486,7 +486,7 @@ def compile_context(
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
-                    _add_missing(block, "lane_truncated")
+                    _add_missing(block, "budget")
                 else:
                     linked.append((item, links, False))
             elif links:
@@ -496,13 +496,13 @@ def compile_context(
                 block["methods"]["items"].append(method)
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
-                    _add_missing(block, "lane_truncated")
+                    _add_missing(block, "budget")
         for item, links, named in linked:
             if named:
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
-                    _add_missing(block, "lane_truncated")
+                    _add_missing(block, "budget")
                     continue
             item["links"] = []
             for link in links:
@@ -517,7 +517,7 @@ def compile_context(
                 if named:
                     # A named lead without one listed link would only repeat the turn slice's route.
                     block["candidates"].remove(item)
-                    _add_missing(block, "lane_truncated")
+                    _add_missing(block, "budget")
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)

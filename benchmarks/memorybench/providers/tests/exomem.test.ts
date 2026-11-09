@@ -53,10 +53,13 @@ function harness() {
       return { path: `Knowledge Base/Sources/Sessions/${body.slug}.md` }
     }
     if (path === "/api/ask_memory") {
-      return [
-        { path: "Knowledge Base/Sources/Sessions/a.md", title: "a" },
-        { path: "Knowledge Base/Sources/Sessions/b.md", title: "b" },
-      ]
+      return {
+        user_summary: "Found 2 pages.",
+        hits: [
+          { path: "Knowledge Base/Sources/Sessions/a.md", title: "a" },
+          { path: "Knowledge Base/Sources/Sessions/b.md", title: "b" },
+        ],
+      }
     }
     if (path === "/api/read_memory") {
       return { body: `body:${body.path}` }
@@ -161,7 +164,7 @@ describe("Exomem guest provider", () => {
       post: async (service, path, body) => {
         routed.push({ tag: service.container_tag, token: service.bearer_token, path })
         if (path === "/api/capture_source") return { path: `${body.slug}.md` }
-        if (path === "/api/ask_memory") return [{ path: `${service.container_tag}.md` }]
+        if (path === "/api/ask_memory") return { user_summary: "Found 1 page.", hits: [{ path: `${service.container_tag}.md` }] }
         return { body: `body:${service.container_tag}` }
       },
       doctor: h.doctor,
@@ -478,7 +481,22 @@ describe("Exomem guest provider", () => {
     expect(h.cleared).toEqual(["container"])
   })
 
-  test.each(["warming", "degraded", "overlimit", "missing-path"])(
+  test("search still reads a bare list of hits from a recorded reply", async () => {
+    const h = harness()
+    const post = async (service: typeof h.service, path: string, body: Record<string, unknown>) =>
+      path === "/api/ask_memory" ? [{ path: "Knowledge Base/Sources/Sessions/a.md" }] : h.post(service, path, body)
+    const provider = new ExomemProvider({
+      ensureService: async () => h.service,
+      post,
+      doctor: h.doctor,
+      clearService: async (tag) => h.cleared.push(tag),
+    })
+    await provider.initialize({ apiKey: "none" })
+    const results = await provider.search("query", { containerTag: "container", limit: 2 })
+    expect(results).toEqual([{ content: "body:Knowledge Base/Sources/Sessions/a.md", score: 0.0 }])
+  })
+
+  test.each(["warming", "degraded", "incomplete", "overlimit", "missing-path"])(
     "search refuses %s response",
     async (failure) => {
       const h = harness()
@@ -486,8 +504,11 @@ describe("Exomem guest provider", () => {
         if (path === "/api/ask_memory") {
           if (failure === "warming") return { status: "warming", data: [] }
           if (failure === "degraded") return { status: "degraded", data: [] }
-          if (failure === "overlimit") return [{ path: "a" }, { path: "b" }, { path: "c" }]
-          return [{ title: "no path" }]
+          if (failure === "incomplete") {
+            return { user_summary: "Found 1 page.", hits: [{ path: "a" }], notice: "Results may be incomplete." }
+          }
+          if (failure === "overlimit") return { user_summary: "Found 3 pages.", hits: [{ path: "a" }, { path: "b" }, { path: "c" }] }
+          return { user_summary: "Found 1 page.", hits: [{ title: "no path" }] }
         }
         return h.post(service, path, body)
       }

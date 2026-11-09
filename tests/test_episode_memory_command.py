@@ -903,7 +903,7 @@ def test_unproved_episode_references_return_a_bounded_retryable_failure_without_
     )
     try:
         with request_scope(owner_principal(surface="mcp")):
-            result = bound(**arguments)
+            result = bound(**arguments, response_detail="full")
             assert _episodes(vault) == []
             with pytest.raises(EpisodeError, match="EPISODE_NOT_FOUND"):
                 episode_recovery.EpisodeInputOwner(vault).input_history(KEY)
@@ -916,12 +916,15 @@ def test_unproved_episode_references_return_a_bounded_retryable_failure_without_
         assert 0 < len(scans) <= 1
     else:
         assert 1 <= len(scans) <= 2
-    assert result["success"] is False
     error = result["error"]
     assert error["code"] == "REFERENCE_PREPARATION_UNAVAILABLE"
-    assert error["status"] == "retryable" and error["committed"] is False
-    assert error["cause"] == ("generation_unavailable" if failure == "generation_unavailable" else "preparation_changed")
-    assert "same idempotency key" in error["remediation"]
+    assert error["retry"]["tool"] == "episode_memory"
+    assert error["message"].endswith("Nothing was saved.")
+    detail = result["diagnostics"]["error"]
+    assert result["diagnostics"]["success"] is False
+    assert detail["status"] == "retryable" and detail["committed"] is False
+    assert detail["cause"] == ("generation_unavailable" if failure == "generation_unavailable" else "preparation_changed")
+    assert "same idempotency key" in detail["remediation"]
     if failure == "allowance_exhausted":
         monkeypatch.setattr(memory_refs, "_scan_pages", real_scan)
         with request_scope(owner_principal(surface="mcp")):
@@ -1243,7 +1246,7 @@ def test_episode_cold_graph_repair_respects_the_callers_acknowledgement_contract
                 "worked_on": ["Compared two lamps for Project Alpha"],
             }
             result = (
-                manager.invoke(command, (vault, schema), arguments)
+                manager.invoke(command, (vault, schema), {**arguments, "response_detail": "full"})
                 if managed else commands.op_episode_memory(vault, schema, **arguments)
             )
     finally:
@@ -1252,16 +1255,17 @@ def test_episode_cold_graph_repair_respects_the_callers_acknowledgement_contract
     assert (vault / result["source"]["path"]).exists()
     assert result["source"]["path"] in deferred_index.full_status(vault)["paths"]
     if managed:
-        assert result["state"] == "committed"
+        operational = result["diagnostics"]["operational"]
+        assert operational["state"] == "committed"
         assert not blocked_return
         assert threading.get_ident() not in rebuilds
-        assert result.get("derived_sync") != "failed"
-        assert result["graph_sync"] in {"pending", "completed"}
+        assert operational.get("derived_sync") != "failed"
+        assert operational["graph_sync"] in {"pending", "completed"}
         checkpoint = graph_sync.read_checkpoint(vault)
         assert checkpoint is not None
         assert graph_sync.repair_is_provisioned(
             vault, checkpoint,
-            outcome="deferred" if result["graph_sync"] == "pending" else "completed",
+            outcome="deferred" if operational["graph_sync"] == "pending" else "completed",
         )
     else:
         assert rebuilds
@@ -1301,10 +1305,12 @@ def test_episode_terminal_fanout_starts_repair_on_the_invoking_manager(
                     "subject": "Harbor Lamp purchase",
                     "summary": "Chose the brass lamp; delivery date still open.",
                     "worked_on": ["Compared two lamps for Project Alpha"],
+                    "response_detail": "full",
                 },
             )
-        assert result["state"] == "committed"
-        assert result["graph_sync"] == "pending"
+        operational = result["diagnostics"]["operational"]
+        assert operational["state"] == "committed"
+        assert operational["graph_sync"] == "pending"
         assert started.wait(timeout=2)
     finally:
         release.set()
@@ -1608,9 +1614,10 @@ def test_material_binding_and_keyed_read_cross_the_three_public_doors(vault, mon
         "journal_digest": current["journal_digest"], "materials": {"version": 1, "items": [
             {"key": "reading", "reading_reference": reference},
         ]},
+        "response_detail": "full",
     }, headers={"Authorization": "Bearer sekret"})
     assert bound.status_code == 200, bound.text
-    assert bound.json()["data"]["state"] == "committed", bound.json()
+    assert bound.json()["data"]["diagnostics"]["operational"]["state"] == "committed", bound.json()
     inspected = client.post("/api/episode_memory", json={"action": "candidates", "episode": KEY},
         headers={"Authorization": "Bearer sekret"})
     assert inspected.status_code == 200, inspected.text

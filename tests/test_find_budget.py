@@ -289,7 +289,7 @@ def test_a_tight_budget_with_nothing_to_skip_carries_no_budget_key(
     assert budgeted == unbudgeted
 
 
-def test_the_compact_recall_product_carries_the_block(
+def test_the_compact_recall_product_says_a_skipped_stage_in_one_notice(
     vault: Path, bind_budget, reversing_reranker
 ) -> None:
     budget = bind_budget(0.001)
@@ -300,8 +300,9 @@ def test_the_compact_recall_product_carries_the_block(
 
     assert budget.skipped == ["rerank"]
     assert isinstance(result, dict)
-    assert result["budget"]["applied"] is True
-    assert result["budget"]["skipped"] == ["rerank"]
+    # The agent reads one sentence; the raw block stays for a caller that asks for timings.
+    assert "time limit" in result["notice"]
+    assert "budget" not in result
 
 
 def test_a_local_call_with_no_budget_skips_nothing(

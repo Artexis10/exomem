@@ -280,15 +280,13 @@ def test_studio_proposal_omits_due_advice_on_untouched_pages(tmp_path: Path) -> 
 
 
 @pytest.mark.usefixtures("obligations_only")
-def test_maintain_fix_carries_one_block(vault: Path) -> None:
+def test_maintain_fix_refreshes_the_served_projection_and_carries_no_block(vault: Path) -> None:
     _seed(vault)
     _repairable_overdue(vault, "carrier-fix")
 
     response = _maintain(vault, mode="fix", dry_run=False)
 
-    assert "due_state" in response, response
-    assert response["due_state"]["scope"] == "affected_paths"
-    assert response["due_state"]["total"] == 1
+    assert "due_state" not in response, response
     assert due_state_module.served(vault)["total"] == 2
 
 
@@ -298,15 +296,6 @@ def test_reconcile_updates_global_projection_without_local_advice(vault: Path) -
     response = _maintain(vault, mode="reconcile")
 
     assert "due_state" not in response, response
-
-
-def test_identity_backfill_counts_due_items_on_changed_pages(vault: Path) -> None:
-    _seed(vault)
-
-    response = _maintain(vault, mode="backfill-ids", dry_run=False)
-
-    assert response["due_state"]["scope"] == "affected_paths"
-    assert response["due_state"]["total"] == 1
 
 
 def test_artifact_preservation_omits_unrelated_due_advice(vault: Path, monkeypatch) -> None:
@@ -514,11 +503,10 @@ def test_an_unreadable_review_state_yields_no_block_and_completes(
 
     monkeypatch.setattr(due_state_module, "served_entries", unreadable)
 
-    response = _maintain(vault, mode="fix", dry_run=False)
+    response = _maintain(vault, mode="fix", dry_run=False, response_detail="full")
 
     assert "due_state" not in response, response
-    assert response["ok"] is True
-    assert response["state"] == "committed"
+    assert response["diagnostics"]["operational"]["state"] == "committed"
 
 
 def test_partial_source_adoption_omits_unrelated_due_advice(
@@ -558,19 +546,6 @@ def test_source_adoption_keeps_global_due_counts(vault: Path) -> None:
     assert after["categories"]["unprocessed_source"] == before["categories"]["unprocessed_source"] + 12
     assert after["total"] == before["total"] + 12
     assert "due_state" not in response
-
-
-def test_the_fix_block_counts_the_pages_the_pass_just_rewrote(vault: Path) -> None:
-    """`maintain fix` has no full recompute, so its batch deltas must be wired."""
-    _seed(vault)
-    before = due_state_module.served(vault)["total"]
-    _repairable_overdue(vault, "carrier-stale")
-
-    response = _maintain(vault, mode="fix", dry_run=False)
-
-    assert response["due_state"]["scope"] == "affected_paths"
-    assert response["due_state"]["total"] == 1
-    assert due_state_module.served(vault)["total"] == before + 1
 
 
 def test_reconcile_refreshes_global_counts_after_an_outside_write(vault: Path) -> None:

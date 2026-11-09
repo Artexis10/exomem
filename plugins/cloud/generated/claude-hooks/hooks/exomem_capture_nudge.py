@@ -412,14 +412,25 @@ def _codex_call_output_succeeded(output: object) -> bool:
     return True
 
 
+def _refusal_payload(payload: object) -> bool:
+    """Whether a parsed tool result is a refusal.
+
+    The server answers a refusal with `{"error": {...}}` and no `success`; the old envelope that
+    `response_detail="full"` carries beside it, and REST, say `{"success": false}`.
+    """
+    return isinstance(payload, dict) and (
+        payload.get("success") is False or isinstance(payload.get("error"), dict)
+    )
+
+
 def _refused_with_envelope(content: object) -> bool:
-    """Whether a Claude tool result holds the `{"success": false}` error envelope.
+    """Whether a Claude tool result holds the server's refusal.
 
     MCP answers a coded refusal as normal tool content, so the result carries no
-    `is_error`. Only the parsed envelope shows that the call was refused.
+    `is_error`. Only the parsed payload shows that the call was refused.
     """
     if isinstance(content, dict):
-        return content.get("success") is False
+        return _refusal_payload(content)
     if isinstance(content, str):
         texts = [content]
     elif isinstance(content, list):
@@ -431,7 +442,7 @@ def _refused_with_envelope(content: object) -> bool:
             payload = json.loads(text)
         except (TypeError, ValueError):
             continue
-        if isinstance(payload, dict) and payload.get("success") is False:
+        if _refusal_payload(payload):
             return True
     return False
 

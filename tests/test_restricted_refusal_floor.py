@@ -396,7 +396,6 @@ def test_mcp_refusals_of_withheld_and_missing_pages_take_the_same_time(
         result = await client.call_tool("read_memory", {"path": target}, raise_on_error=False)
         elapsed[target].append(time.perf_counter() - started)
         answer = json.loads(result.content[0].text)
-        assert answer["success"] is False
         assert answer["error"]["code"] == "NOT_FOUND"
         answers.add(result.content[0].text.replace(target, "<target>"))
 

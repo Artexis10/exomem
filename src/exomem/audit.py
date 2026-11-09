@@ -6040,6 +6040,8 @@ QUESTION_AGING_DAYS = 30
 #: all normalise here (`semantic_language_registry` core category `question`),
 #: so matching the resolved value rather than the authored heading is what makes
 #: the check alias-proof.
+# Debt (C9): stays on category, because a unit's category and kind diverge when it carries an
+# explicit `category:` row; the category registry is out of scope for the kind-trait change.
 _QUESTION_CATEGORY = "question"
 
 # Authoring a `bears_on` relation on the unit is the signal that SOMEBODY ANSWERED the question.
@@ -6892,11 +6894,13 @@ def _capture_audit_scope(vault_root: Path) -> tuple[Any, Any]:
     ), keep
 
 
-def _claim_request(eligible: Mapping[str, find_module.ParsedPage], a: str, b: str):
+def _claim_request(
+    vault_root: Path, eligible: Mapping[str, find_module.ParsedPage], a: str, b: str
+):
     from . import claims, sensing
 
     paths = (a, b)
-    texts = tuple(claims.extract_claim_for_page(eligible[path]) for path in paths)
+    texts = tuple(claims.extract_claim_for_page(eligible[path], vault_root) for path in paths)
     if not all(texts):
         return None
     # These slot names and this extractor are the reviewed pair.relation input contract.
@@ -7003,7 +7007,7 @@ def _enrich_contradiction_polarity(
         if len(paths) != 2:
             continue
         try:
-            request = _claim_request(eligible, paths[0], paths[1])
+            request = _claim_request(vault_root, eligible, paths[0], paths[1])
             if request is None:
                 continue
             label = _pair_polarity(vault_root, request)

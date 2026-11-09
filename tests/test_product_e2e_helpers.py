@@ -446,11 +446,16 @@ def test_mutation_diagnostics_requires_and_unwraps_committed_full_envelope() -> 
 
     assert e2e_product_loop._mutation_diagnostics(
         {
-            "ok": True,
-            "status": "committed",
-            "mutated": True,
-            "request_id": "request-1",
-            "diagnostics": diagnostics,
+            "user_summary": "Saved.",
+            "diagnostics": {
+                "operational": {
+                    "ok": True,
+                    "status": "committed",
+                    "mutated": True,
+                    "request_id": "request-1",
+                },
+                **diagnostics,
+            },
         },
         operation="schema_memory",
     ) == diagnostics
@@ -471,10 +476,9 @@ def test_mutation_diagnostics_rejects_explicit_graph_sync_failure() -> None:
     ):
         e2e_product_loop._mutation_diagnostics(
             {
-                "ok": True,
-                "status": "committed",
-                "mutated": True,
+                "user_summary": "Saved.",
                 "diagnostics": {
+                    "operational": {"ok": True, "status": "committed", "mutated": True},
                     "graph_sync": "failed",
                     "graph_sync_code": "GRAPH_SYNC_STABILIZATION_EXHAUSTED",
                 },
@@ -489,10 +493,11 @@ def test_mutation_diagnostics_rejects_explicit_graph_sync_failure() -> None:
         ({"graph_status": "current"}, {"graph_status": "current"}),
         (
             {
-                "ok": True,
-                "status": "committed",
-                "mutated": True,
-                "diagnostics": {"graph_status": "refreshed"},
+                "user_summary": "Saved.",
+                "diagnostics": {
+                    "operational": {"ok": True, "status": "committed", "mutated": True},
+                    "graph_status": "refreshed",
+                },
             },
             {"graph_status": "refreshed"},
         ),
@@ -648,8 +653,13 @@ def test_operator_reconcile_output_rejects_non_success(stdout: str) -> None:
 @pytest.mark.parametrize(
     "result",
     [
-        {"ok": False, "status": "retryable", "mutated": False, "diagnostics": {}},
-        {"ok": True, "status": "committed", "mutated": True},
+        {
+            "user_summary": "Not saved.",
+            "diagnostics": {
+                "operational": {"ok": False, "status": "retryable", "mutated": False}
+            },
+        },
+        {"user_summary": "Saved."},
     ],
 )
 def test_mutation_diagnostics_rejects_noncommitted_or_nonfull_results(

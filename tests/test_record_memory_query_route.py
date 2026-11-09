@@ -109,7 +109,7 @@ def mcp(tmp_path, monkeypatch):
     def call(tool_name, /, **arguments):
         content = asyncio.run(app.call_tool(tool_name, arguments, run_middleware=False)).structured_content
         content = content.get("result", content) if set(content) == {"result"} else content
-        return content["error"] if content.get("success") is False else content
+        return content["error"] if "error" in content else content
 
     call.vault = vault
     return call
@@ -407,9 +407,9 @@ def test_query_object_refuses_legacy_shaping_arguments(mcp):
     """Two grammars merged in one call, so a legacy filter silently narrows or is ignored."""
     error = mcp("record_memory", action="query", collection=SUMMARY_CID, query=STEPS,
                 filters=[{"column": "steps", "op": "gt", "value": 1}])
-    assert {name: error[name] for name in ERROR_SHAPE} == {
-        "code": "QUERY_ARGUMENT_CONFLICT", "at": "query", "expected": "one query grammar", "allowed": ["filters"],
-        "repair": "Remove filters, or omit query.", "retryable": False}
+    assert error["code"] == "QUERY_ARGUMENT_CONFLICT" and error["candidates"] == ["filters"]
+    assert "at query" in error["message"] and "Remove filters, or omit query." in error["message"]
+    assert "retry" not in error
 
 
 def test_a_visible_file_mode_collection_refuses_the_query_object(mcp):
@@ -434,4 +434,5 @@ def test_query_engine_chapters_are_bounded_read_only_and_name_what_is_unavailabl
         assert runtime.wire_bytes(chapter) <= runtime.MAX_RESULT_BYTES
     assert vault_files() == before
     graph = mcp("schema_memory", operation="inspect", subject="query-engine", name="graph")
-    assert (graph["code"], graph["at"], graph["retryable"]) == ("QUERY_CAPABILITY_UNAVAILABLE", "name", False)
+    assert graph["code"] == "QUERY_CAPABILITY_UNAVAILABLE" and "at name" in graph["message"]
+    assert "retry" not in graph

@@ -140,6 +140,7 @@ from . import semantic_authoring as semantic_authoring_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
+from . import semantic_verdicts as semantic_verdicts_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
@@ -1577,11 +1578,19 @@ def op_bootstrap(
             ),
         },
         "vocabulary": {
-            "outcomes": list(semantic_units_module.EPISTEMIC_OUTCOMES),
+            # The shipped verdicts only. A vault's own live in its registry and in the schema read
+            # named by `vault_verdicts`; teaching them here would hand every vault the same list.
+            "outcomes": list(semantic_verdicts_module.pack()),
             "governed_unit_metadata": list(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS),
             "verdict": (
-                "The judgment: exactly one outcome word, shared with an experiment "
+                "The judgment: exactly one verdict, shared with an experiment "
                 "page's outcome. A number, percentage, or hedge is rejected outright."
+            ),
+            # A surface without schema_memory drops this line (`_filter_bootstrap_payload`).
+            "vault_verdicts": (
+                "A vault may add verdicts. "
+                f"{call_text('schema_memory', {'subject': 'categories', 'operation': 'infer'})} "
+                "lists every accepted verdict under `verdicts`."
             ),
             "check_by": (
                 "One exact ISO calendar date (YYYY-MM-DD) naming the day to revisit "
@@ -1804,12 +1813,13 @@ def op_bootstrap(
                     "create_note(suggestions=true)"
                 ),
                 (
-                    "Inspect vocabulary_sync; if warming/unavailable, use its recovery route "
-                    "once; preserve writes/retry identity; never repeat writes."
+                    "Tell the user the reply's user_summary; follow next_action when present; "
+                    "relay notice in one sentence; never repeat a saved write."
                     if profile == "compact" else
-                    "also inspect vocabulary_sync: if guidance is warming or unavailable, "
-                    "follow its recovery route for one bounded review pass. Preserve the "
-                    "committed write and its retry identity; recovery does not repeat it."
+                    "tell the user the write reply's user_summary. Follow `next_action` when it is "
+                    "present and relay `notice` in one sentence: it appears only when the "
+                    "change may be incomplete. A saved write is never repeated; a refusal's "
+                    "`retry` is the exact next call."
                 ),
             ],
             "save_rule": (
@@ -1905,9 +1915,9 @@ def op_bootstrap(
                 # matter MOST on the reduced, hookless surfaces where such a string
                 # would silently vanish.
                 "due_state": (
-                    "Write counts cover affected pages (scope: affected_paths); recall and bootstrap counts are global. Each has category counts and up to five dated refs."
+                    "Only bootstrap carries global counts; search replies and write replies carry none. The block has category counts and up to five dated refs."
                     if profile == "compact"
-                    else "Write advice counts affected pages and declares scope: affected_paths. Recall and bootstrap retain global counts. Each block has a total, category counts and up to five dated references. Missing advice does not mean nothing is due."
+                    else "Only bootstrap carries global counts, and search replies and write replies carry none; recall may name one due item that fits the turn. The block has a total, category counts and up to five dated references. Missing advice does not mean nothing is due."
                 ),
                 "due_state_handling": (
                     "Consult review; judge relevance. Raise at most one item per conversation in the user's language. "
@@ -1966,9 +1976,9 @@ def op_bootstrap(
                 # spells out in full (a later decision, lookup, repeated task,
                 # comparison or continuation); it is not repeated here.
                 "capture_sweep_handling": (
-                    "On the first durable write after a quiet interval, `capture_sweep` calls for one bounded pass over recent conversation. `consider` gives examples; `written_recently` prevents duplicates; `unpaged_mentions` names references without pages. Save what qualifies in the user's language; otherwise stay silent."
+                    "On the first durable write after a quiet interval, the write reply's `next_action` calls for one bounded pass over recent conversation, once per episode. `unpaged_mentions` names references without pages. Save what qualifies, for example a decision or lookup, in the user's language; otherwise stay silent."
                     if profile == "compact"
-                    else "a `capture_sweep` block on a write response means this is the first durable write after a quiet interval: make one bounded pass over the recent exchange for anything else worth keeping. Its `consider` list is examples, not a closed set; `written_recently` is what not to write again, and `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
+                    else "a write reply's `next_action` that asks for a pass over the recent exchange means this is the first durable write after a quiet interval, and it arrives once per episode: make one bounded pass for anything else worth keeping. What qualifies is for example a decision, a lookup or a repeated task, not a closed set; `unpaged_mentions` names what the page reached for without a page. You decide: write what qualifies in the user's own language, and say nothing when nothing does"
                 ),
                 "review_reason": "every review decision records WHY as a closed code: lead the `why` with intentional:, false_positive:, handled:, deferred:, or too_frequent: followed by the free text. Anything else records unspecified",
                 "family_disposition": f"when the user asks to stop hearing about a KIND of signal, quiet that family rather than lowering prominence, which silences everything: {call_text('triage_memory', {'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': '<code>: ...'})}, or action 'off' or 'normal'. quiet drops it from the default review union and every carrier; off also drops it from explicit category review; normal restores it",
@@ -6745,14 +6755,12 @@ def op_ask_memory(
                 explain=explain,
                 purpose=purpose,
             )
-            result = _with_due_state(vault_root, result, purpose=purpose)
-    from . import read_next_action
+        from . import read_next_action
 
-    if isinstance(result, list):
-        if not result:
-            result = {"hits": result}
-    if isinstance(result, dict):
-        read_next_action.attach(result, search=True)
+        # Inside the measured call, so the whole-call timing covers the shaping too.
+        if isinstance(result, (list, dict)):
+            result = _agent_search_reply(result, internals=bool(include_timings or explain))
+            read_next_action.attach(result, search=True)
     return recall_timing_module.completed(result, trace)
 
 
@@ -6768,60 +6776,69 @@ def op_served_context(vault_root: Path, *, served_context_id: str | None = None)
     return served_context.read(vault_root, served_context_id=served_context_id)
 
 
-def _with_due_state(
-    vault_root: Path,
-    result: list | dict,
-    *,
-    purpose: str | None = None,
-) -> list | dict:
-    """Attach the advisory due-state block to a recall response, delta-only.
+#: A search reply says one sentence when part of the index was not ready. The tokens are the
+#: closed component names `find` defines for `warming`, not vocabulary a customer configures.
+_SEARCH_NOTICE_UNREADABLE = "Some pages could not be read just now, so these results may be incomplete."
+_SEARCH_NOTICE_RECENT = "Pages saved in the last minute may be missing from these results."
+_SEARCH_NOTICE_WARMING = "Search is still starting up, so these results may miss related pages."
+_SEARCH_NOTICE_DEGRADED = "One search method failed, so these results may miss related pages."
+_SEARCH_NOTICE_BUDGET = (
+    "Part of this search was skipped to stay within its time limit, so results may be incomplete."
+)
+#: Hit fields that label how the index stores a hit or repeat its unit's parent. A hit keeps `path`,
+#: `ref` and `unit_ref`: `record_episode` takes only refs in `about`, and `read_memory` takes either.
+# nosemgrep: ep-word-set -- this module's own closed wire-field names, not a customer vocabulary.
+_SEARCH_HIT_DROPPED = ("scope", "parent_ref")
 
-    Reading turns are where "this prediction is due" naturally belongs, and without
-    them the channel is blind in a read-only conversation — which is most of them.
-    Emission governance keeps it a delta rather than a second nagging surface: the
-    first qualifying response of a session carries it, and after that only a change
-    in the totals does.
 
-    Attached on the PRODUCT command rather than in `op_find`, so the retrieval
-    primitive keeps exactly the response it has always returned and only the
-    product surface grows a carrier.
-
-    The block is deliberately NOT declared in `retrieval_models.FindEnvelope`.
-    Declaring it would move `search_memory`'s published `outputSchema`, and therefore
-    the packaged tool-surface fingerprint and the connector attestations bound to
-    it — the one thing this change promises not to touch. The envelope's schema
-    does not forbid additional properties, and the block is advisory by
-    construction: nothing branches on it, so nothing can break for want of a
-    declaration. Revisit this the next time the fingerprint moves for its own
-    reasons.
-
-    The list-to-envelope flip this can cause is the shape `find` already produces
-    for `warming`, `degraded`, `timings` and `explain`, and both shapes are already
-    in the declared return union.
-    """
-    if projection_runtime_module.requires_projected_read_boundary(vault_root):
-        return result
-    try:
-        from . import due_state as due_state_module
-
-        # Inside the command's own disclosure boundary: the block aggregates
-        # across pages, so every path is decided by the release plane before
-        # anything is counted.
-        with (
-            egress_module.disclosure_boundary(vault_root, "ask_memory"),
-            call_spans_module.span("recall.due_state", {}),
+def _search_notice(envelope: Mapping[str, Any]) -> str | None:
+    """The one sentence that says these results may be incomplete, or None when they are not."""
+    warming = envelope.get("warming")
+    components = warming.get("components") if isinstance(warming, Mapping) else None
+    if components:
+        if find_module._STORE_UNAVAILABLE_COMPONENT in components:
+            return _SEARCH_NOTICE_UNREADABLE
+        if (
+            find_module._PENDING_VISIBILITY_COMPONENT in components
+            or find_module._RECALL_PROJECTION_STALE_COMPONENT in components
         ):
-            block = due_state_module.served(vault_root, purpose=purpose)
-        with call_spans_module.span("recall.due_state.emit", {}):
-            emit = due_state_module.should_emit(block, vault_root=vault_root)
-        if not emit:
-            return result
-    except Exception:  # noqa: BLE001 — a due-state count never breaks a recall
-        log.debug("due-state projection unavailable for recall", exc_info=True)
-        return result
-    if isinstance(result, dict):
-        return {**result, "due_state": block}
-    return {"hits": result, "due_state": block}
+            return _SEARCH_NOTICE_RECENT
+        return _SEARCH_NOTICE_WARMING
+    if envelope.get("degraded"):
+        return _SEARCH_NOTICE_DEGRADED
+    if envelope.get("budget"):
+        return _SEARCH_NOTICE_BUDGET
+    return None
+
+
+def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
+    """Shape a search result for the agent: a summary, the hits, and one notice when partial.
+
+    Index, warming and budget state become a `notice` sentence. A caller that asked for timings or
+    an explanation asked to see retrieval internals, so those raw blocks stay beside them.
+    """
+    envelope = {"hits": result} if isinstance(result, list) else dict(result)
+    hits = [
+        {key: value for key, value in hit.items() if key not in _SEARCH_HIT_DROPPED}
+        if isinstance(hit, dict)
+        else hit
+        for hit in envelope.pop("hits", ())
+    ]
+    notice = _search_notice(envelope)
+    for internal in ("warming", "degraded", "budget"):
+        if internals:
+            continue
+        envelope.pop(internal, None)
+    reply: dict[str, Any] = {
+        "user_summary": f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."
+        if hits
+        else "Found no matches.",
+        "hits": hits,
+        **envelope,
+    }
+    if notice is not None:
+        reply["notice"] = notice
+    return reply
 
 
 #: Bounded own-page FTS corroborators; governed overfetch precedes release.
@@ -7943,10 +7960,8 @@ def _op_activate_context_body(
     _attach_episode_advice(vault_root, packet)
     if include_timings and timings is not None:
         packet["timings"] = timings.as_dict()
-    # Deliberately NOT `_with_due_state`. That helper consults the emission
-    # ledger and marks it emitted, so an activation carrying the block would eat
-    # the next recall's delta — a read-only operation changing what a later read
-    # returns. Recall is the only `due_state` carrier.
+    # The packet carries no `due_state` block and never reads or advances the emission ledger:
+    # a read-only operation must not change what a later read returns.
     return packet
 
 
@@ -12329,11 +12344,18 @@ def op_schema_memory(
                 registry_file_exists = instances.select(
                     vault_root, semantic_language_registry_module.CATEGORY_SPEC
                 ).overlay(vault_root).exists()
+                dropped = semantic_language_registry_module.dropped_verdicts_finding(
+                    current, candidate
+                )
+                if dropped is not None:
+                    raise ValueError(f"CATEGORY_SAVE_VERDICT_DROPPED: {dropped['detail']}")
+                # Debt: this kinds leg refuses every kind change, an addition too, and validation
+                # does not report it; it predates the verdict leg above, which refuses a loss only.
+                reviewed = semantic_language_registry_module.registry_proposal
                 if (
                     registry_file_exists
                     and not candidate.findings
-                    and semantic_language_registry_module.registry_proposal(current)["kinds"]
-                    != semantic_language_registry_module.registry_proposal(candidate)["kinds"]
+                    and reviewed(current)["kinds"] != reviewed(candidate)["kinds"]
                 ):
                     raise ValueError(
                         "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "

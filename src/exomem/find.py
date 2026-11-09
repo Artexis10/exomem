@@ -3196,7 +3196,7 @@ def _finish_unit_candidates(
                 page.body, unit, occurrences[unit.occurrence_key], content=raw[unit.occurrence_key].content,
                 category_raw=raw[unit.occurrence_key].category_raw, category_key=raw[unit.occurrence_key].category_key,
                 tags=raw[unit.occurrence_key].tags, context=raw[unit.occurrence_key].context,
-                parent_ref=parent.structure.parent_ref, path=path,
+                parent_ref=parent.structure.parent_ref, path=path, language_registry=parent.language,
             ) for unit in parent.structure.units if unit.occurrence_key in raw and not any(
                 start < occurrences[unit.occurrence_key]["end_offset"]
                 and occurrences[unit.occurrence_key]["start_offset"] < end for start, end in spans
@@ -4686,13 +4686,11 @@ def _resolve_relation_filter(
     for raw in relations or ():
         resolution = registry.resolve(raw)
         if resolution.canonical is None or resolution.status == "unregistered":
+            suggestions = _nearest_relation_keys(registry, raw)
             raise cli_ops.OpError(
                 "INVALID_RELATION_FILTER",
                 f"unknown relation {raw!r}",
-                details={
-                    "relation": raw,
-                    "suggestions": _nearest_relation_keys(registry, raw),
-                },
+                details={"relation": raw, "suggestions": suggestions, "candidates": suggestions},
             )
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
     result = graph_index.relation_participants(

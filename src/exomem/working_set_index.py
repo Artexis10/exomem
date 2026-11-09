@@ -288,6 +288,7 @@ def _unicode_tokens(text: str) -> tuple[str, ...]:
 #: Section/tag names that structurally imply a semantic-unit category. The map
 #: is the shipped core category vocabulary plus its plural section spellings; it
 #: is a lookup, not an inference, so the same page always yields the same set.
+# Debt (category registry, out of scope for the kind-trait change): the shipped category spellings.
 _CATEGORY_BY_LABEL: Mapping[str, str] = {
     "decision": "decision",
     "decisions": "decision",

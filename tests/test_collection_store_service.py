@@ -89,6 +89,11 @@ def call(root, tool, **arguments):
         return writer_lease.invoke_command(command, root, **arguments)
 
 
+def operational(reply):
+    """The operational receipt of a write reply, which only ``response_detail="full"`` carries."""
+    return reply["diagnostics"]["operational"]
+
+
 def imported(root, collection=CID, **request):
     return call(root, "record_memory", action="import", collection=collection, import_request=request)
 
@@ -572,7 +577,8 @@ def test_global_inspection_rechecks_canonical_support_and_permissions_without_a_
          manifest_text=observed_text, why="observed routing")
     for key, title in ((ROW, "First"), (OTHER, "Second")):
         appended = call(root, "record_memory", action="append", collection=observed,
-                        item_key=key, item={"title": title, "category": "account subscriptions"}, why="support")
+                        item_key=key, item={"title": title, "category": "account subscriptions"}, why="support",
+                        response_detail="full")
     daily_text = DAILY_TEXT.replace("lifecycle: active\n",
                                     "lifecycle: active\nclaims:\n  terms: [device, inventory]\n")
     call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
@@ -807,8 +813,9 @@ def test_rollback_preserves_a_pending_later_create_without_recovering_it(service
         deadline.setattr(admission, "time", SimpleNamespace(
             monotonic=lambda: time.monotonic() - 31, time=time.time, sleep=time.sleep))
         created = call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
-                       manifest_text=DAILY_TEXT, why="summary", idempotency_key="pending-create")
-        assert created["status"] == "committed"
+                       manifest_text=DAILY_TEXT, why="summary", idempotency_key="pending-create",
+                       response_detail="full")
+        assert operational(created)["status"] == "committed"
         refused(service.stop, "COLLECTION_STORE_FLUSH_PENDING")
     # The close test proves renewal stops; surrender the stopped holder instead of waiting its TTL here.
     service.manager.client.release_holder(service.manager.config.replica_id, service.manager._fencing_token)
@@ -851,14 +858,15 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
 
     def create():
         return call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
-                    why="summary", idempotency_key="daily-create")
+                    why="summary", idempotency_key="daily-create", response_detail="full")
 
     def append():
         return call(root, "record_memory", action="append", collection=DAILY, item={"title": "Daily row"},
                     why="summary write")
 
     created = create()
-    assert created["status"] == "committed" and created["warnings"][0].startswith("collection_publication_pending")
+    assert operational(created)["status"] == "committed"
+    assert created["warnings"][0].startswith("collection_publication_pending")
     refused(append, "COLLECTION_STORE_BUSY")  # retryable while the service keeps resuming the create
     # A restart while the create is still pending: the stop cannot hand off, so a new
     # process's service starts beside it, and its requests for the create stay busy.
@@ -892,7 +900,7 @@ def test_a_served_create_that_misses_its_publication_deadline_recovers_without_a
             return False
 
     _until(written)
-    assert create()["status"] == "committed" and titles(root, DAILY) == ["Daily row"]
+    assert operational(create())["status"] == "committed" and titles(root, DAILY) == ["Daily row"]
     service.stop()  # the handoff publishes; a pending create would refuse it as FLUSH_PENDING
 
 
@@ -1497,14 +1505,18 @@ def test_served_field_release_and_summary_use_canonical_authority_without_previe
     basis = call(root, "record_memory", action="inspect", collection=CID)["field_release_basis"]
     proposed = call(root, "govern_memory", operation="propose", intent="Release invented location",
                     documents={"grants/collection-location.yaml": release_document(basis)},
-                    selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
-    assert proposed["ok"], proposed
-    committed = call(root, "govern_memory", operation="commit", proposal_id=proposed["diagnostics"]["proposal_id"])
-    assert committed["ok"], committed
+                    selector_paths=[basis["path"]], target_ceiling=6, duration="standing",
+                    response_detail="full")
+    assert operational(proposed)["ok"], proposed
+    committed = call(root, "govern_memory", operation="commit", proposal_id=proposed["diagnostics"]["proposal_id"],
+                     response_detail="full")
+    assert operational(committed)["ok"], committed
     rows = recipient("record_memory", action="query", collection=CID,
                      query={"version": 1, "select": ["place", "label"]})["rows"]
     assert any(row.get("place") == {"label": "invented-place"} for row in rows)
-    assert call(root, "govern_memory", operation="revoke", scope="standing", grant_id=GRANT)["ok"]
+    revoked = call(root, "govern_memory", operation="revoke", scope="standing", grant_id=GRANT,
+                   response_detail="full")
+    assert operational(revoked)["ok"]
     refused(lambda: recipient("record_memory", action="query", collection=CID,
                               query={"version": 1, "select": ["place"]}), "QUERY_FIELD_UNAVAILABLE")
     service.stop()
@@ -1638,8 +1650,9 @@ def test_new_c_requires_readable_file_ownership_and_succeeds_after_declaration_r
                          manifest_text=DAILY_TEXT, why="new separate collection"), "COLLECTION_STORE_MARKER_CONFLICT")
     assert authority.read_marker(root) == marker and not (root / DAILY_PATH).exists()
     (root / A_PATH).write_bytes(original)
-    assert call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
-                manifest_text=DAILY_TEXT, why="file declaration repaired")["status"] == "committed"
+    repaired = call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
+                    manifest_text=DAILY_TEXT, why="file declaration repaired", response_detail="full")
+    assert operational(repaired)["status"] == "committed"
     assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Still writable"},
                 item_key=ROW, why="file authority retained")["outcome"] == "committed"
 
@@ -1722,8 +1735,9 @@ def test_new_file_declaration_arrival_cannot_lose_its_authority_to_c(service, mo
                 item_key=ROW, why="retained file authority")["outcome"] == "committed"
     assert call(root, "record_memory", action="append", collection=KEY, item={"title": "Existing file row"},
                 item_key=LATER, why="existing authority")["outcome"] == "committed"
-    assert call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
-                why="retry with separate source")["status"] == "committed"
+    retried = call(root, "record_memory", action="create", manifest_path=DAILY_PATH, manifest_text=DAILY_TEXT,
+                   why="retry with separate source", response_detail="full")
+    assert operational(retried)["status"] == "committed"
     assert titles(root, late_id) == ["Arrived file row"] and titles(root, KEY) == ["Before", "Existing file row"]
 
 
@@ -1757,8 +1771,8 @@ def test_pending_create_cannot_publish_over_an_arriving_file_declaration(service
             deadline.setattr(admission, "_publish_current_epoch", publish)
         created = call(root, "record_memory", action="create", manifest_path=DAILY_PATH,
                        manifest_text=DAILY_TEXT.replace("source: Items", "source: " + source + "/Nested"),
-                       why="interrupted create", idempotency_key="arrival-pending")
-        assert created["status"] == "committed" and created["warnings"]
+                       why="interrupted create", idempotency_key="arrival-pending", response_detail="full")
+        assert operational(created)["status"] == "committed" and created["warnings"]
         if arrival == "interrupted":
             arrive()
         else:
@@ -2027,8 +2041,8 @@ def test_a_store_routed_write_refused_at_a_held_boundary_is_journaled_and_counte
     holder = threading.Thread(target=hold)
     route = runtime.route
 
-    def route_then_hold(*args):
-        server = route(*args)
+    def route_then_hold(*args, **keywords):
+        server = route(*args, **keywords)
         if server is not None and not holding.is_set():
             holder.start()
             assert holding.wait(5)
