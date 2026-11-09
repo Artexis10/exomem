@@ -75,7 +75,7 @@ def test_a_new_governed_row_with_a_valid_value(heading: str, row: str, value: st
 
     (unit,) = document.units  # CORE
     assert unit.metadata[row] == value  # CORE
-    assert getattr(unit, row, None) is None  # FLIPS slice4: was None (no projected value)
+    assert getattr(unit, row) == value  # FLIPS slice4: was None (no projected value)
     assert _codes(document.errors) == []  # CORE
     assert _codes(document.warnings) == []  # CORE
 
@@ -84,8 +84,8 @@ def test_a_quantity_value_without_its_unit() -> None:
     document = _parse("# Release outlook\n\n## Metric\n- quantity_value: 42\n\nBuild minutes per day.\n")
 
     assert [unit.kind for unit in document.units] == ["metric"]  # CORE
-    assert getattr(document.units[0], "quantity_value", None) is None  # FLIPS slice4: was None
-    assert _codes(document.errors) == []  # FLIPS slice4: was [] (no missing-unit error)
+    assert getattr(document.units[0], "quantity_value", None) is None  # CORE: no unit, no value
+    assert _codes(document.errors) == ["missing_rich_quantity_unit"]  # FLIPS slice4: was []
 
 
 def test_a_unit_whose_rows_are_only_new_governed_keys() -> None:
@@ -100,8 +100,8 @@ def test_a_unit_whose_rows_are_only_new_governed_keys() -> None:
 def test_a_new_governed_row_below_a_nested_heading() -> None:
     document = _parse("# Release outlook\n\n## Claim\n### Detail\n- modality: should\n")
 
-    assert [unit.kind for unit in document.units] == ["claim"]  # FLIPS slice4: was ["claim"]
-    assert _codes(document.errors) == []  # FLIPS slice4: was [] (row not reserved)
+    assert [unit.kind for unit in document.units] == []  # FLIPS slice4: was ["claim"]
+    assert _codes(document.errors) == ["empty_rich_unit"]  # FLIPS slice4: was [] (row not reserved)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +224,94 @@ def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path
     assert updated["unit"]["credence_holder"] == "Finance lead"
     assert updated["unit"]["credence"] == "likely"
     assert "- credence: likely" in page.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Statement rows
+# ---------------------------------------------------------------------------
+
+
+def test_a_quantity_without_its_unit_is_refused_and_names_the_unit_row() -> None:
+    """Catches a bare number stored as a measurement nobody can compare."""
+    document = _parse("# Release outlook\n\n## Finding\n- quantity_value: 42\n\nBuild minutes per day.\n")
+
+    (error,) = document.errors
+    assert error.code == "missing_rich_quantity_unit"
+    assert "quantity_unit" in error.remediation
+
+
+def test_a_measured_quantity_keeps_its_stated_number_and_unit() -> None:
+    """Catches a quantity converted to a float, which rounds it or drops its trailing zeros."""
+    document = _parse(
+        "# Release outlook\n\n## Finding\n- quantity_value: 0.950\n- quantity_unit: ratio\n"
+        "- quantity_error: 0.005\n\nThe nightly pass rate.\n"
+    )
+
+    (finding,) = document.units
+    assert document.errors == () and document.warnings == ()
+    assert (finding.quantity_value, finding.quantity_unit, finding.quantity_error) == (
+        "0.950", "ratio", "0.005",
+    )
+    assert finding.to_dict()["quantity_value"] == "0.950"
+
+
+def test_an_inductive_finding_records_its_mode_by_label() -> None:
+    """Catches an inference-mode label that does not resolve to its registry key."""
+    document = _parse(
+        "# Release outlook\n\n## Finding\n- inference_mode: Induction\n\nMost nightly builds pass.\n"
+    )
+
+    (finding,) = document.units
+    assert document.errors == () and document.warnings == ()
+    assert finding.inference_mode == "induction"
+
+
+def test_an_event_time_with_a_clock_time_is_accepted() -> None:
+    """Catches an outage timeline refused because its event times carry the hour."""
+    document = _parse(
+        "# Release outlook\n\n## Timeline Event\n- occurred_at: 2026-03-01T14:30+02:00\n\n"
+        "The outage began.\n"
+    )
+
+    (event,) = document.units
+    assert document.errors == () and document.warnings == ()
+    assert event.occurred_at == "2026-03-01T14:30+02:00"
+
+
+def test_a_newly_reserved_row_with_an_old_value_warns_and_still_parses() -> None:
+    """Catches a page written before the keys existed that stops parsing in this release."""
+    document = _parse("# Release outlook\n\n## Claim\n- modality: video\n\nThe talk is online.\n")
+
+    (warning,) = document.warnings
+    assert document.errors == ()
+    assert [unit.content for unit in document.units] == ["The talk is online."]
+    assert document.units[0].modality is None
+    assert warning.code == "invalid_rich_modality"
+    assert "modality" in warning.message
+    for modality in ("is", "should", "must", "may"):
+        assert modality in warning.remediation
+    assert "rename the row" in warning.remediation
+
+
+@pytest.mark.parametrize(
+    ("heading", "row", "body"),
+    [
+        ("Claim", "- occurred_at: 2026-03-01", "The outage began."),
+        ("Procedure", "- inference_mode: induction", "Run the nightly build."),
+    ],
+)
+def test_a_row_on_a_kind_that_does_not_take_it_warns_and_projects_nothing(
+    heading: str, row: str, body: str,
+) -> None:
+    """Catches an event time on a claim, or a mode on a procedure, read as if it applied."""
+    document = _parse(f"# Release outlook\n\n## {heading}\n{row}\n\n{body}\n")
+
+    (warning,) = document.warnings
+    key = row.removeprefix("- ").split(":", 1)[0]
+    assert document.errors == ()
+    assert getattr(document.units[0], key) is None
+    assert warning.code == f"misplaced_rich_{key}"
+    assert "rename the row" in warning.remediation.lower()
 
 
 # ---------------------------------------------------------------------------

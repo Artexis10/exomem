@@ -144,6 +144,10 @@ class LanguageRegistryView(Protocol):
 
     def label_keys(self, registry: LabelRegistry) -> tuple[str, ...]: ...
 
+    def has(self, kind: str, trait: str) -> bool: ...
+
+    def kinds_with(self, trait: str) -> frozenset[str]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class UnitQueryPlan:
@@ -566,6 +570,12 @@ class AttachedProjectsLanguageRegistry:
 
     def label_keys(self, registry: LabelRegistry) -> tuple[str, ...]:
         return self.registry.label_keys(registry)
+
+    def has(self, kind: str, trait: str) -> bool:
+        return self.registry.has(kind, trait)
+
+    def kinds_with(self, trait: str) -> frozenset[str]:
+        return self.registry.kinds_with(trait)
 
     def _resolve(
         self,

@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from types import MappingProxyType
@@ -149,6 +149,15 @@ class SemanticUnit:
     credence: str | None = None
     credence_holder: str | None = None
     credence_basis: str | None = None
+    # The statement rows. `modality` and `inference_mode` are registry keys; the others are the
+    # stated text, so a quantity is never rounded.
+    asserted_by: str | None = None
+    modality: str | None = None
+    occurred_at: str | None = None
+    quantity_value: str | None = None
+    quantity_unit: str | None = None
+    quantity_error: str | None = None
+    inference_mode: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))
@@ -1751,6 +1760,12 @@ _PERCENT_RE = re.compile(rf"^(?P<number>{_DECIMAL})\s*%$")
 # The language spec ties the credence rows to the core kind `belief`. A vault cannot redefine
 # a core kind, so this names a value the spec fixes, not vocabulary a vault defines.
 _BELIEF_KIND = "belief"
+# The language spec ties `occurred_at` to the core kind `timeline_event`, as `_BELIEF_KIND`.
+_EVENT_KIND = "timeline_event"
+# The shape of an ISO date and time, checked before the calendar parser: a field's format.
+_ISO_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?$"
+)
 # Task 4.5 of `make-epistemic-language-dynamic` turns these into errors one release after the
 # keys became reserved; until then a page written before the keys existed keeps parsing.
 _FIRST_RELEASE_SEVERITY = "warning"
@@ -1793,7 +1808,18 @@ def _governed_rows(
     kind: str,
     language: semantic_language_registry.LanguageRegistryView,
 ) -> tuple[dict[str, str | None], list[_RowProblem]]:
-    """Validate the belief rows. A row that does not validate projects no value."""
+    """Validate the belief and statement rows. A row that does not validate projects no value."""
+    values, problems = _belief_rows(metadata, kind=kind, language=language)
+    statement_values, statement_problems = _statement_rows(metadata, kind=kind, language=language)
+    return {**values, **statement_values}, [*problems, *statement_problems]
+
+
+def _belief_rows(
+    metadata: Mapping[str, str],
+    *,
+    kind: str,
+    language: semantic_language_registry.LanguageRegistryView,
+) -> tuple[dict[str, str | None], list[_RowProblem]]:
     values: dict[str, str | None] = dict.fromkeys(semantic_blocks.BELIEF_UNIT_METADATA_KEYS)
     problems: list[_RowProblem] = []
     present = [key for key in semantic_blocks.BELIEF_UNIT_METADATA_KEYS if key in metadata]
@@ -1829,6 +1855,76 @@ def _governed_rows(
     if problem is not None:
         problems.append(problem)
     values.update(credence=credence, credence_holder=holder, credence_basis=basis)
+    return values, problems
+
+
+def _statement_rows(
+    metadata: Mapping[str, str],
+    *,
+    kind: str,
+    language: semantic_language_registry.LanguageRegistryView,
+) -> tuple[dict[str, str | None], list[_RowProblem]]:
+    """Validate the statement rows. Until task 4.5, a row that does not validate warns."""
+    values: dict[str, str | None] = dict.fromkeys(semantic_blocks.STATEMENT_UNIT_METADATA_KEYS)
+    problems: list[_RowProblem] = []
+    if not any(key in metadata for key in semantic_blocks.STATEMENT_UNIT_METADATA_KEYS):
+        return values, problems  # Most units carry none; skip the registry reads below.
+
+    def read(
+        key: str, parse: Callable[[str], str | None], form: str, *, place: str | None = None,
+    ) -> None:
+        """Project `key`, or warn that it is misplaced (`place` names where it belongs) or
+        does not match `form`."""
+        if key not in metadata:
+            return
+        if place is not None:
+            problems.append(_RowProblem(
+                key, f"misplaced_rich_{key}",
+                f"{key} belongs on {place}, not on a {kind or 'plain'} unit",
+                f"Rename the row if it is an ordinary row, or put the statement in {place}.",
+                severity=_FIRST_RELEASE_SEVERITY,
+            ))
+            return
+        values[key] = parse(metadata[key])
+        if values[key] is None:
+            problems.append(_RowProblem(
+                key, f"invalid_rich_{key}", f"{key} is not {form}",
+                f"Give `- {key}:` {form}, or rename the row if it is an ordinary row.",
+                severity=_FIRST_RELEASE_SEVERITY,
+            ))
+
+    def labels(registry: semantic_labels.LabelRegistry) -> str:
+        return f"one of {', '.join(language.label_keys(registry))}"
+
+    read("asserted_by", _row_text, "a plain name or a link to an entity page")
+    read(
+        "modality", lambda raw: language.resolve_label(semantic_labels.MODALITIES, raw),
+        labels(semantic_labels.MODALITIES),
+    )
+    read(
+        "occurred_at", _event_time, "an ISO date or date and time, such as 2026-03-01 or "
+        "2026-03-01T14:30", place=None if kind == _EVENT_KIND else f"a {_EVENT_KIND} unit",
+    )
+    read("quantity_value", _number, "a number, such as 42 or 0.95")
+    read("quantity_unit", _row_text, "the unit of quantity_value")
+    read("quantity_error", _number, "a number, such as 0.5")
+    read(
+        "inference_mode",
+        lambda raw: language.resolve_label(semantic_labels.INFERENCE_MODES, raw),
+        labels(semantic_labels.INFERENCE_MODES),
+        place=(
+            None if language.has(kind, "assertion")
+            else f"an assertion unit ({', '.join(sorted(language.kinds_with('assertion')))})"
+        ),
+    )
+    if values["quantity_value"] is not None and _row_text(metadata.get("quantity_unit")) is None:
+        problems.append(_RowProblem(
+            "quantity_value", "missing_rich_quantity_unit",
+            "quantity_value has no quantity_unit",
+            "Add `- quantity_unit: <the unit the number counts>`. A number without its unit "
+            "cannot be compared.",
+        ))
+        values["quantity_value"] = None
     return values, problems
 
 
@@ -1870,6 +1966,26 @@ def _credence(
         "credence", "invalid_rich_credence",
         "credence is neither a belief level nor a probability from 0 to 1", fix,
     )
+
+
+def _number(raw: str) -> str | None:
+    """A number as written, or None when the text is no plain decimal number."""
+    stated = _row_text(raw)
+    return stated if stated is not None and _NUMBER_RE.match(stated) else None
+
+
+def _event_time(raw: str) -> str | None:
+    """An ISO calendar date or date and time as written, or None when it is neither."""
+    stated = _row_text(raw)
+    if stated is None or calendar_date(stated) is not None:
+        return stated
+    if not _ISO_DATETIME_RE.match(stated):
+        return None
+    try:
+        dt.datetime.fromisoformat(stated)
+    except ValueError:
+        return None
+    return stated
 
 
 def _percent_as_probability(number: str) -> str:

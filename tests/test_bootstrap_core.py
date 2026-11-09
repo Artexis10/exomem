@@ -41,6 +41,8 @@ CORE_HEADROOM_WARNING_BYTES = 512
 #: section cannot quietly regrow into a second full payload. `epistemics` was raised from 4,950
 #: to 5,200 for the line that names the schema read listing a vault's own verdicts (about 150
 #: bytes), which the verdict registry requires: the payload teaches the shipped verdicts only.
+#: It was raised again to 5,400 for the ten governed unit-metadata keys and the `belief` kind
+#: that the language added (about 190 bytes): the contract must name every key the parser reads.
 SECTION_BYTE_CEILINGS = {
     "authoring": 20_900,
     "vocabulary": 11_900,
@@ -48,7 +50,7 @@ SECTION_BYTE_CEILINGS = {
     "routing": 12_500,
     "adoption": 7_200,
     "envelope": 2_200,
-    "epistemics": 5_200,
+    "epistemics": 5_400,
     "diagnostics_reading": 2_200,
 }
 

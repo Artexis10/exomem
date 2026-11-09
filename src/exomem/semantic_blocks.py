@@ -42,9 +42,19 @@ _NORMALIZE_RE = re.compile(r"[\s-]+")
 # The rows of a belief unit: whose belief it is, how strong, and on what basis.
 # nosemgrep: ep-word-set -- closed keys of the unit language, fixed by its spec
 BELIEF_UNIT_METADATA_KEYS = ("credence", "credence_holder", "credence_basis")
+# The rows that qualify any statement: whose claim it is, how it binds, when it happened, what
+# it measured and how it was reached.
+# nosemgrep: ep-word-set -- closed keys of the unit language, fixed by its spec
+STATEMENT_UNIT_METADATA_KEYS = (
+    "asserted_by", "modality", "occurred_at", "quantity_value", "quantity_unit", "quantity_error",
+    "inference_mode",
+)
 # Closed metadata keys of the semantic-unit language, shared with the writer and the bootstrap.
 # nosemgrep: ep-word-set -- closed keys of the unit language, fixed by its spec
-GOVERNED_UNIT_METADATA_KEYS = ("verdict", "check_by", "as_of", "until", *BELIEF_UNIT_METADATA_KEYS)
+GOVERNED_UNIT_METADATA_KEYS = (
+    "verdict", "check_by", "as_of", "until", *BELIEF_UNIT_METADATA_KEYS,
+    *STATEMENT_UNIT_METADATA_KEYS,
+)
 _RESERVED_METADATA_KEYS = frozenset(
     {"category", "id", "tags", "context", "relations", *GOVERNED_UNIT_METADATA_KEYS}
 )
