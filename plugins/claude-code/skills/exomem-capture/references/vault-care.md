@@ -116,10 +116,8 @@ Two categories report exact duplicates and run only when you ask for them:
 `duplicate_content` (identical bytes in two or more live Sources or Evidence
 pages) and `duplicate_source_url` (one URL captured with different text). Pass
 them in `categories`, for example
-`read_review(operation={'kind': 'audit', 'categories': ['duplicate_content']})`;
-`attention` takes the same `categories`. A default audit and the default
-attention surface skip them, so an old vault's first run cannot bury the daily
-queue. Each `duplicate_content` finding carries the exact `fold-duplicate` step
+`list_review_items(categories=['duplicate_content'])`. The default review
+skips them, so an old vault's first run cannot bury the daily queue. Each `duplicate_content` finding carries the exact `fold-duplicate` step
 for every copy, or says why it offers none. Propose those steps as one curation plan, then preview, confirm
 and apply it ([curation](#curation)); an undo is a compensation plan.
 

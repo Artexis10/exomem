@@ -11680,12 +11680,12 @@ def op_observe_transfer(
        browser sign-in; takes a folder or ZIP.
        browser: without a shell, the Home link; desktop only, folders only, within one page
        session; phones cannot upload folders.
-       attachments: chat or phone attachments go through preserve_artifacts or
-       capture_source, within their per-call bounds.
+       attachments: chat or phone attachments go through save_evidence or
+       save_source, within their per-call bounds.
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
-    3. File it: import_memory `file` on the `next` path (`_Imports/<id>`), repeated with its
-       `continuation` until `filing` is not `working`. An older server refuses `file`: start on
+    3. File it: manage_memory `imports.file` on the `next` path (`_Imports/<id>`), repeated with its
+       `continuation` until `filing` is not `working`. An older server refuses it: `imports.start` on
        the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
        until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
@@ -11801,7 +11801,7 @@ def op_maintain_memory(
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
     collections-cutover only previews the move of every collection to SQLite-only storage;
     the owner applies its plan_id with `exomem collections cutover` on the host.
-    held-resolve settles one held item from read_review mode held: path, choice keep-mine or
+    held-resolve settles one held item that mode held of review_memory lists: path, choice keep-mine or
     keep-store, that item's item_version and why.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.

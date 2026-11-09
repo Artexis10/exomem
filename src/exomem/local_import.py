@@ -519,9 +519,9 @@ def stage(folder: Path, vault: Path, *, include_hidden: bool = False, use_gitign
 
 def _closing_lines(result: dict) -> list[str]:
     staged = result["staged"]
-    start = f'import_memory with operation kind "file" and path "{result["start_path"]}"'
+    start = f'manage_memory with operation "imports.file" and arguments {{"path": "{result["start_path"]}"}}'
     # `file` scans as `start` does by default, so a hidden file that the person staged stays staged and is reported.
-    hidden = (' Hidden files stay staged: to file them, call import_memory with operation kind "start" and include_hidden=true on that path.'
+    hidden = (' Hidden files stay staged: to file them, call manage_memory with operation "imports.start" and arguments {"path": that path, "include_hidden": true}.'
               if result["include_hidden"] else "")
     lines = [f"Staged {files_phrase(staged['files'])}, {human_bytes(staged['bytes'])}, in {result['staged_folder']}.",
              "This is a second copy of the folder on this disk. No Exomem command discards it: "
