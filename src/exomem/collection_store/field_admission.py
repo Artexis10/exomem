@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
@@ -227,6 +228,9 @@ class FieldPlan:
     grants: tuple
     # An ordered-v1 item key spells the natural key, so it is withheld with any natural-key field the plan withholds.
     item_key_withheld: bool = False
+    # Whether the plan withholds any natural-key field, whatever the key scheme: a key that is partly
+    # hidden cannot be matched, because each match would confirm a hidden value.
+    natural_key_withheld: bool = False
 
     @property
     def whole_fields(self):
@@ -248,6 +252,19 @@ class FieldPlan:
             if chosen is None:
                 return False
         return True
+
+    def admits_member_path(self, names):
+        """Whether every value at a declared path is admitted, an array being walked through member by member."""
+        chosen = self.fields
+        for name in names:
+            if chosen is WHOLE_SUBTREE:
+                return True
+            while isinstance(chosen, tuple):
+                chosen = chosen[0]
+            chosen = chosen.get(name) if isinstance(chosen, Mapping) else None
+            if chosen is None:
+                return False
+        return whole_value(chosen)
 
     def binding(self, paths):
         requested = [(path,) if path in self.fields else tuple(path.split(".")) for path in paths]
@@ -312,9 +329,10 @@ def resolve(operation, manifest):
     # The store records the scheme; a manifest parsed from its text carries the default.
     scheme = operation.conn.execute("SELECT item_key_scheme FROM collections WHERE collection_id=?",
                                     (manifest.collection_id,)).fetchone()
-    spelled = (scheme is not None and scheme[0] == item_keys.ORDERED_V1
-               and len(visible.schema.natural_key) < len(manifest.schema.natural_key))
-    return FieldPlan(basis, MappingProxyType(selected), visible, False, grants, item_key_withheld=spelled)
+    key_withheld = len(visible.schema.natural_key) < len(manifest.schema.natural_key)
+    spelled = scheme is not None and scheme[0] == item_keys.ORDERED_V1 and key_withheld
+    return FieldPlan(basis, MappingProxyType(selected), visible, False, grants, item_key_withheld=spelled,
+                     natural_key_withheld=key_withheld)
 
 
 def public_basis(operation, manifest):

@@ -4,8 +4,8 @@
 
 ## 1. Declared references and forward reads (phase 1)
 
-- [ ] 1.1 Parse and validate `references` on string fields, arrays of strings and object properties in arrays; generic refusal for missing, foreign or withheld targets first, then key and field-type refusals that name what to change.
-- [ ] 1.2 Resolve forward references at read time through the target's natural-key index or canonical refs, with per-target admission, field plans and link projectors; withheld and missing twins read the same.
+- [x] 1.1 Parse and validate `references` on string fields, arrays of strings and object properties in arrays; generic refusal for missing, foreign or withheld targets first, then key and field-type refusals that name what to change.
+- [x] 1.2 Resolve forward references at read time through the target's natural-key index or canonical refs, with per-target admission, field plans and link projectors; withheld and missing twins read the same.
 - [ ] 1.3 Add `related` expansion and dotted paths (select, filter, grouping) through single-valued references to `read_records` and `read_plans` queries, within the result and visit budgets; cursors bind each target's release-qualified basis.
 - [ ] 1.4 Add filtered base-row reductions, with an optional `where` per aggregate, returning rows and `combined` (`count`, `unresolved_rows`, `excluded_unresolved`, `unresolved_values`) from one filter and snapshot.
 - [ ] 1.5 Warn on writes under the writer's own view, with bounded import warnings; report resolution counts and distinct unresolved values in `inspect`.

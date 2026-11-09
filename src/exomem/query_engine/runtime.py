@@ -125,6 +125,18 @@ class AdmittedCollection:
         raise TypeError("query admission is request-local")
 
 
+@dataclass(frozen=True, slots=True)
+class LookupAdmission:
+    """A collection admitted for lookups by key: what the caller may see of it, and none of its rows."""
+
+    collection_id: str
+    manifest: collections.CollectionManifest  # the caller's visible manifest
+    plan: object  # the caller's field plan (`collection_store.field_admission.FieldPlan`)
+    uniform: bool  # whether every row is released whole, so no lookup needs a row decision
+    source: derived_rows.RowSource
+    layout: typed_storage.Layout | None
+
+
 class ReadSession:
     def __init__(self, root, conn, limits, cancelled, deadline):
         self.connection = conn
@@ -139,6 +151,7 @@ class ReadSession:
         self._failure = None
         self._authorization = None
         self._admitted = {}
+        self._lookups = {}
         self._field_plans = {}
         self._queries = {}
         self._cursors = set()
@@ -372,6 +385,37 @@ class ReadSession:
                 return result
         except (ValueError, TypeError, StopIteration, collections.CollectionError) as error:
             raise QueryError("COLLECTION_NOT_FOUND") from error
+
+    def admit_lookup(self, collection_id: str) -> LookupAdmission:
+        """Admit a collection for lookups by key, under the decision `admit` makes and without counting its rows.
+
+        A lookup pays for itself through `charge_visits`. A collection that does not exist and one the
+        caller may not read raise the same COLLECTION_NOT_FOUND.
+        """
+        self.check()
+        found = self._lookups.get(collection_id)
+        if found is None:
+            with self._manifest(collection_id) as (manifest, _, _, uniform):
+                plan = self._field_plans[collection_id]
+            source = self.row_source(collection_id)
+            layout = source.layout or self.typed_layout(collection_id)
+            found = self._lookups[collection_id] = LookupAdmission(collection_id, manifest, plan, uniform, source, layout)
+        return found
+
+    def charge_visits(self, count: int) -> None:
+        """Count row visits against this session's bound; the visit that passes the bound is refused."""
+        self.check()
+        self._estimated_visits += count
+        if self._estimated_visits > self.limits.max_row_visits:
+            raise QueryError("QUERY_COST_LIMIT")
+
+    def lookup_values(self, collection_id: str, row_id: int, fields) -> dict:
+        """The named top-level values of one row of a collection admitted for lookup, under its field plan."""
+        found = self._lookups.get(collection_id)
+        if found is None:
+            raise QueryError("COLLECTION_NOT_FOUND")
+        return self.selected_values(row_id, found.layout, fields,
+                                    max_bytes=min(_MAX_DECODE_BYTES, self.limits.max_temp_bytes), check=self.check)
 
     def typed_layout(self, collection_id) -> typed_storage.Layout | None:
         """The published typed layout of an admitted collection, or None for json-v1."""

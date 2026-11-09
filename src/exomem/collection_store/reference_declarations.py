@@ -10,9 +10,6 @@ from __future__ import annotations
 
 from .. import structured_collections as collections
 
-#: Natural-key field types whose values a reference can match by one text value.
-_KEY_TYPES = ("string", "date", "datetime")
-
 
 def require_targets(operation, proposed: collections.CollectionManifest,
                     current: collections.CollectionManifest | None = None) -> None:
@@ -39,7 +36,7 @@ def _readable(operation, cid: str) -> collections.CollectionManifest | None:
         plan = operation.field_plan(target)
     except collections.CollectionError:
         return None
-    return target if len(plan.manifest.schema.natural_key) == len(target.schema.natural_key) else None
+    return None if plan.natural_key_withheld else target
 
 
 def _require_target(operation, declaration: collections.ReferenceDeclaration) -> None:
@@ -59,7 +56,7 @@ def _require_target(operation, declaration: collections.ReferenceDeclaration) ->
         raise generic
     key = target.schema.natural_key
     unsupported = {"field": field, "expected": "a collection whose natural key is one field of type "
-                   f"{', '.join(_KEY_TYPES[:-1])} or {_KEY_TYPES[-1]}",
+                   f"{', '.join(collections.REFERENCE_KEY_TYPES[:-1])} or {collections.REFERENCE_KEY_TYPES[-1]}",
                    "example": "pick a collection that keeps one natural-key field, such as a code or an id"}
     if len(key) != 1:
         raise collections.CollectionError(
@@ -68,7 +65,7 @@ def _require_target(operation, declaration: collections.ReferenceDeclaration) ->
             {**unsupported, "received": list(key)},
         )
     key_type = target.schema.fields[key[0]].type
-    if key_type not in _KEY_TYPES:
+    if key_type not in collections.REFERENCE_KEY_TYPES:
         raise collections.CollectionError(
             "UNSUPPORTED_REFERENCE_TARGET",
             "a reference matches text, so the target's natural-key field must be a string, date or datetime",

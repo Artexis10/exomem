@@ -3109,6 +3109,10 @@ def _parse_field_reference(value: object, at: str) -> FieldReference | None:
     return FieldReference(target)
 
 
+#: The natural-key field types whose values one text value can match, which fixes what a reference may target.
+REFERENCE_KEY_TYPES = ("string", "date", "datetime")
+
+
 def _reference_slots(name: str, spec: FieldSpec) -> Iterable[tuple[tuple[str, ...], FieldSpec, bool]]:
     """Where one top-level field may declare a reference: ``(path, the spec that carries it, many)``.
 
