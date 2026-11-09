@@ -1511,7 +1511,10 @@ def test_only_interactive_writers_count_as_waiters(tmp_path: Path) -> None:
         threading.Thread(target=wait_for_the_boundary, args=(kind,))
         for kind in ("graph", "derived-worker", "maintenance-job")
     ]
-    interactive = threading.Thread(target=wait_for_the_boundary, args=("unknown",))
+    # A request-driven collection read is a waiter background work steps aside for, as a write is.
+    interactive = [
+        threading.Thread(target=wait_for_the_boundary, args=(kind,)) for kind in ("unknown", "collection-read")
+    ]
     with coordinator.hold(timeout_seconds=_OBSERVE_SECONDS, holder_kind="maintenance-job"):
         for thread in machines:
             thread.start()
@@ -1521,9 +1524,10 @@ def test_only_interactive_writers_count_as_waiters(tmp_path: Path) -> None:
         behind_the_head[0] = 2
         assert coordinator.waiter_count() == 2
         behind_the_head[0] = 0
-        interactive.start()
-        assert _wait_until(lambda: coordinator.waiter_count() == 1)
-    for thread in (*machines, interactive):
+        for thread in interactive:
+            thread.start()
+        assert _wait_until(lambda: coordinator.waiter_count() == 2)
+    for thread in (*machines, *interactive):
         thread.join(_OBSERVE_SECONDS)
         assert not thread.is_alive()
 

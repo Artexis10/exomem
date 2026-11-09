@@ -75,9 +75,10 @@ _QUIET_HOLD_MS = 250.0
 # derived-receipt proofs, watcher freshness, media commits and collection ownership reads.
 # Their holds run beside ordinary traffic and would rotate the service log every fifteen minutes.
 _MACHINE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "collection-read"})  # nosemgrep: ep-word-set -- Closed holder labels implement the mutation-boundary protocol.
-# Holder kinds whose waiters are not an interactive writer: the machine kinds above and a maintenance
-# job. A holder steps aside for an interactive waiter (`waiter_count`), never for another machine hold.
-_NON_INTERACTIVE_HOLDER_KINDS = _MACHINE_HOLDER_KINDS | frozenset({"maintenance-job"})  # nosemgrep: ep-word-set -- Closed holder labels implement the mutation-boundary protocol.
+# Holder kinds whose waiters are not an interactive writer: background work that steps aside for one
+# (`waiter_count`) and never for another of its kind. A request-driven read (`collection-read`) is
+# interactive, though its hold logs quietly above.
+_NON_INTERACTIVE_HOLDER_KINDS = frozenset({"background", "graph", "derived-worker", "maintenance-job"})  # nosemgrep: ep-word-set -- Closed holder labels implement the mutation-boundary protocol.
 # One INFO `mutation_lock_hold_summary` row per window stands in for every
 # demoted hold in it, so the log keeps hours of boundary evidence.
 _HOLD_SUMMARY_INTERVAL_SECONDS = 60.0
@@ -2988,8 +2989,10 @@ class VaultMutationCoordinator:
     ) -> None:
         """Acquire and publish with the metadata mutex held for one generation.
 
-        The first failed try of an interactive writer raises this process's cross-process waiter
-        signal; the caller drops it. A machine hold raises none, so a signal always means a writer.
+        A failed try raises this process's cross-process waiter signal while an interactive writer
+        waits here, and the caller drops it. Only the thread that polls the OS lock can raise it, so
+        a machine hold that polls with a writer queued behind it on the local guard raises it for
+        that writer. A signal always means a writer.
         """
         while True:
             try:
@@ -3039,8 +3042,14 @@ class VaultMutationCoordinator:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _Contended() if probe else self._refused(wait_start)
-            if holder_kind not in _NON_INTERACTIVE_HOLDER_KINDS:
+            # Asked again at each poll: this thread counts itself when it is a writer, and a writer
+            # that queued behind it, or left, changes the answer.
+            with waiter_state.metadata_guard:
+                writer_waits = waiter_state.interactive_waiters > 0
+            if writer_waits:
                 _raise_waiter_signal(waiter_state)
+            else:
+                _drop_waiter_signal(waiter_state)
             time.sleep(min(self.poll_interval_seconds, remaining))
 
     def _publish_holder_metadata(self, holder: dict[str, object]) -> None:
