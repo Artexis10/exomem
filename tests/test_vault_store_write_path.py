@@ -17,7 +17,7 @@ from contextlib import closing
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, vault  # noqa: F401
+from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
 from exomem import bm25, commands, lexstore
@@ -422,6 +422,35 @@ def test_a_batch_that_mixes_a_page_a_binary_and_a_file_the_store_does_not_own(se
         assert view.page(OUTSIDE) is None
     assert store_rows(served, "SELECT 1 FROM pages WHERE path = ?", OUTSIDE)
     assert bm25_paths(served, "harbour") == [GAMMA]
+
+
+def test_a_binary_delete_that_the_disk_already_made_queues_no_removal(stored, writer):  # noqa: F811
+    """A delete of a binary's record that also queues the removal of a file that is already gone,
+    so that a file restored before the projector runs is taken away."""
+    found = "Knowledge Base/Notes/found.bin"
+    digest = hashlib.sha256(DIAGRAM_BYTES).hexdigest()
+    change = write.StoreChange(
+        write.Origin.GOVERNED, "test", binaries=(write.BinaryRecord(found, digest, 256),)
+    )
+    write.commit(writer, change)
+
+    def drop(rel, **how):
+        gone = write.StoreChange(
+            write.Origin.GOVERNED, "test", binary_deletes=(write.BinaryDelete(rel, **how),)
+        )
+        write.commit(writer, gone)
+        return store_rows(
+            stored, "SELECT operation FROM store_projection_queue WHERE path = ?", rel
+        )
+
+    assert drop(found, on_disk=True) == [], "the file is gone, so nothing is left to remove"
+    assert drop(DIAGRAM) == [("delete",)], "a governed delete still queues the file's removal"
+    assert not store_rows(
+        stored, "SELECT path FROM store_binaries WHERE path IN (?, ?)", found, DIAGRAM
+    )
+    assert store_rows(
+        stored, "SELECT operation FROM store_audit WHERE path = ? ORDER BY seq", found
+    ) == [("write",), ("delete",)]
 
 
 def test_a_folder_and_a_name_that_only_the_store_holds_are_taken_not_new(served):

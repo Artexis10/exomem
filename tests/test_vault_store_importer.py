@@ -15,9 +15,11 @@ import multiprocessing
 import os
 import queue
 import signal
+import sqlite3
 import sys
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -30,7 +32,7 @@ from test_vault_store_projector import NOTES, commit, put, rows
 from exomem import file_watcher, server_runtime
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
-from exomem.vault_store import importer, ownership, projector, read, write
+from exomem.vault_store import importer, ownership, projector, read, verify, write
 
 # The generated vault and the store fixtures are the sibling suites' own: pytest finds a fixture by
 # its name in this module, and an alias keeps a test's argument from shadowing an import.
@@ -478,27 +480,74 @@ def test_a_path_the_importer_cannot_read_is_reported_and_never_taken_for_a_delet
     assert len(rows(stored, "SELECT path FROM store_pages WHERE path = ?", ALPHA)) == 1
 
 
-def test_a_markdown_file_the_store_does_not_own_is_noted_for_a_lexical_refresh(stored, importing):
-    """An importer that imports a collection layer's file into the store's pages, or ignores a
-    change to a file that has lexical rows, so that its search rows go stale."""
+def cold_differences(root, scratch):
+    """The derived tables of the store that differ from a cold derivation of the vault's files."""
+    expected = scratch / "expected.sqlite"
+    expected.unlink(missing_ok=True)
+    verify.derive_expected(root, expected)
+    with closing(sqlite3.connect(connection.store_path(root))) as store:
+        comparison = verify.compare_tables(store, expected)
+    assert comparison.tables, "a comparison of no table proves nothing"
+    return comparison.differences
+
+
+def test_an_outside_edit_leaves_rows_that_equal_a_cold_derivation_of_the_files(
+    stored, importing, tmp_path
+):
+    """An importer that imports a collection layer's file into the store's pages, or leaves the
+    search, graph and identity rows of an edited file stale, so that a search finds old text."""
     layer = stored / UNOWNED
     original = layer.read_bytes()
+    assert cold_differences(stored, tmp_path) == (), "the vault starts equal to its derivation"
+    before = revision(stored)
     layer.write_bytes(original)
     assert importing.import_paths([UNOWNED]).settled == 0
-    assert importing.take_refresh() == [], "a file with the bytes that its rows describe is current"
+    assert revision(stored) == before, "a file with the bytes that its rows describe is current"
 
-    layer.write_bytes(original + b"\nAn outside edit.\n")
-    report = importing.import_paths([UNOWNED])
+    edited_layer = original + b"\nThe harbour master keeps the tide ledger.\n"
+    layer.write_bytes(edited_layer)
+    alpha = (stored / ALPHA).read_text(encoding="utf-8")
+    (stored / ALPHA).write_text(alpha + "\nThe heron fishes at low tide.\n", encoding="utf-8")
+    report = importing.import_paths([UNOWNED, ALPHA])
 
-    assert (report.imported, report.held) == ([], [])
-    assert importing.take_refresh() == [UNOWNED]
-    assert importing.take_refresh() == [], "taking the list clears it"
+    assert (report.refreshed, report.imported, report.held) == ([UNOWNED], [ALPHA], [])
     assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", UNOWNED) == []
+    assert rows(stored, "SELECT content_hash FROM pages WHERE path = ?", UNOWNED) == [
+        (sha(edited_layer),)
+    ]
+    assert rows(stored, "SELECT path FROM store_audit WHERE path = ?", UNOWNED) == [], (
+        "the store keeps no page, record or audit row for a file that it does not own"
+    )
+    assert cold_differences(stored, tmp_path) == ()
 
-    layer.write_bytes(original)
-    layer.write_bytes(original.replace(b"a", b"e", 1) if b"a" in original else original + b" ")
-    importing.sweep()
-    assert importing.take_refresh() == [UNOWNED], "the sweep finds a stale row without an event"
+    layer.write_bytes(edited_layer + b"Saved again, with no event.\n")
+    swept = importing.sweep()
+    assert swept.refreshed == [UNOWNED], "the sweep finds a stale row without an event"
+    assert cold_differences(stored, tmp_path) == ()
+    assert importing.sweep().settled == 0, "a refreshed file is current: the next sweep is quiet"
+
+    layer.unlink()
+    assert importing.import_paths([UNOWNED]).refreshed == [UNOWNED]
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", UNOWNED) == []
+
+
+def test_a_file_whose_rows_the_recall_policy_withholds_is_refreshed_once(
+    stored, importing, monkeypatch
+):
+    """An importer that commits a refresh for the same bytes at every event or sweep, so that a
+    file that has no rows by policy moves the store's revision without end."""
+    monkeypatch.setattr("exomem.recall_policy.admits_markdown_content", lambda *args: False)
+    loose = stored / "Outside" / "Withheld.md"
+    loose.parent.mkdir()
+    loose.write_bytes(b"# Withheld\n\nA page that recall policy keeps out of the search rows.\n")
+
+    first = importing.import_paths(["Outside/Withheld.md"])
+    before = revision(stored)
+    again = importing.import_paths(["Outside/Withheld.md"])
+
+    assert first.refreshed == ["Outside/Withheld.md"]
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", "Outside/Withheld.md") == []
+    assert (again.settled, revision(stored)) == (0, before)
 
 
 def test_a_file_restored_where_the_stores_life_of_the_path_ended_is_imported(
@@ -576,7 +625,6 @@ def test_a_clean_sweep_counts_every_path_it_examined_as_unchanged(stored, import
 
     report = importing.sweep()
 
-    assert importing.take_refresh() == []
     assert (report.settled, report.unchanged) == (0, owned + len(unowned))
 
 

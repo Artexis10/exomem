@@ -114,6 +114,8 @@ class ImportReport:
     removed: list[str] = field(default_factory=list)
     #: Held deletes that cleared because the file came back with Exomem's own bytes.
     cleared: list[str] = field(default_factory=list)
+    #: Markdown files that the store does not own, whose derived rows were rederived from the file.
+    refreshed: list[str] = field(default_factory=list)
     #: Every path that was examined and carried no change, whatever its kind.
     unchanged: int = 0
     #: A path the importer left alone, with the reason: a refusal of the file system or the store,
@@ -128,6 +130,7 @@ class ImportReport:
             + len(self.held)
             + len(self.removed)
             + len(self.cleared)
+            + len(self.refreshed)
         )
 
 
@@ -161,6 +164,8 @@ class Importer:
         self._exclusive = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._refresh: set[str] = set()
+        #: The hash of each unowned Markdown file that was noted with no row to compare it with.
+        self._rowless: dict[str, str] = {}
         #: The version and hash of each binary that the last sweep found equal to its record.
         self._clean: dict[str, tuple[held_fs.FileVersion, str]] = {}
 
@@ -183,6 +188,7 @@ class Importer:
         report = ImportReport()
         with self._exclusive, self._filesystem() as filesystem:
             self._settle(filesystem, sorted(set(rels)), dict(moves or {}), report)
+            self._refresh_noted(report)
         return report
 
     def sweep(self) -> ImportReport:
@@ -224,10 +230,11 @@ class Importer:
             missing = [rel for rel in known if rel not in seen and not _below_any(rel, skipped)]
             self._settle(filesystem, sorted({*differing, *missing}), {}, report)
             self._sweep_unowned(filesystem, report)
+            self._refresh_noted(report)
         return report
 
-    def take_refresh(self) -> list[str]:
-        """The unowned Markdown paths whose lexical rows are stale, in order; clears the list."""
+    def _take_refresh(self) -> list[str]:
+        """The unowned Markdown paths whose derived rows are stale, in order; clears the list."""
         with self._refresh_lock:
             taken, self._refresh = sorted(self._refresh), set()
         return taken
@@ -368,7 +375,7 @@ class Importer:
                 write.Origin.OUTSIDE_EDITOR,
                 "an outside rename",
                 binaries=(write.BinaryRecord(rename.dst, rename.disk.sha256, rename.disk.size),),
-                binary_deletes=(write.BinaryDelete(rename.src),),
+                binary_deletes=(write.BinaryDelete(rename.src, on_disk=True),),
                 expect={
                     rename.src: write.Expect(revision=stored.revision, sha256=source.stored_sha256),
                     rename.dst: write.Expect(absent=True),
@@ -379,7 +386,7 @@ class Importer:
         except write.StoreConflict:
             return False
         if not rename.page:
-            self._tidy_binary(writer, rename.src, rename.dst, removed=rename.src)
+            self._clear_binary_holds(writer, rename.src, rename.dst)
         return True
 
     @staticmethod
@@ -521,7 +528,7 @@ class Importer:
         except OpError as refusal:
             self._not_owned(rel, refusal, report)
         else:
-            self._tidy_binary(writer, rel)
+            self._clear_binary_holds(writer, rel)
             report.imported.append(rel)
 
     def _remove_binary(
@@ -532,7 +539,7 @@ class Importer:
         change = write.StoreChange(
             write.Origin.OUTSIDE_EDITOR,
             "an outside delete",
-            binary_deletes=(write.BinaryDelete(rel),),
+            binary_deletes=(write.BinaryDelete(rel, on_disk=True),),
             expect={rel: write.Expect(revision=binary.revision, sha256=binary.sha256)},
         )
         try:
@@ -542,7 +549,7 @@ class Importer:
         except OpError as refusal:
             self._not_owned(rel, refusal, report)
         else:
-            self._tidy_binary(writer, rel, removed=rel)
+            self._clear_binary_holds(writer, rel)
             report.removed.append(rel)
 
     @staticmethod
@@ -552,20 +559,13 @@ class Importer:
         report.unjudged[rel] = refusal.code
 
     @staticmethod
-    def _tidy_binary(writer: CollectionWriter, *paths: str, removed: str | None = None) -> None:
-        """Settle what a binary's commit leaves behind, in one transaction.
+    def _clear_binary_holds(writer: CollectionWriter, *paths: str) -> None:
+        """Drop the holds on binaries that a commit has just settled.
 
-        A hold on a binary keeps no bytes, so an import that settles the path ends it. A delete
-        that the commit queued has no file left to remove: a file that a person restores before
-        the projector runs must not be taken away.
+        A hold on a binary keeps no bytes, so an import that settles the path ends it.
         """
         with writer.handle.transaction() as tx:
             tx.executemany("DELETE FROM store_held WHERE path = ?", [(path,) for path in paths])
-            if removed is not None:
-                tx.execute(
-                    "DELETE FROM store_projection_queue WHERE path = ? AND operation = 'delete'",
-                    (removed,),
-                )
 
     @staticmethod
     def _clear_held_delete(writer: CollectionWriter, rel: str) -> None:
@@ -600,14 +600,54 @@ class Importer:
 
     # -- Markdown that the store does not own ----------------------------------------------------
 
+    def _refresh_noted(self, report: ImportReport) -> None:
+        """Rederive, on the store thread, the rows of each unowned Markdown file that was noted.
+
+        The store holds no bytes for such a file, so nothing is imported: ``StoreChange.refresh``
+        derives its lexical, graph and identity rows from the file at the commit's revision. A
+        failure that is not a refusal puts the paths back for the next settle and is raised.
+        """
+        noted = self._take_refresh()
+        pending = list(noted)
+        try:
+            for chunk in _chunks(noted, APPLY_BATCH):
+                self._refresh_rows(chunk, report)
+                pending = pending[len(chunk) :]
+        except Exception:
+            for rel in pending:
+                self._note_refresh(rel)
+            raise
+
+    def _refresh_rows(self, rels: list[str], report: ImportReport) -> None:
+        change = write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR,
+            "an outside change to a file that the store does not own",
+            refresh=tuple(rels),
+        )
+
+        def work(writer: CollectionWriter) -> None:
+            write.commit(writer, change)
+
+        try:
+            self._run(work)
+        except OpError as refusal:
+            if len(rels) > 1:
+                # A refusal names no path: ask for each, so one bad path holds back no other.
+                for rel in rels:
+                    self._refresh_rows([rel], report)
+                return
+            report.unjudged[rels[0]] = refusal.code
+        else:
+            report.refreshed.extend(rels)
+
     def _judge_unowned(
         self, filesystem: held_fs.HeldFilesystem, rel: str, report: ImportReport
     ) -> None:
-        """Note a Markdown file outside the store's ownership whose lexical rows are stale.
+        """Note a Markdown file outside the store's ownership whose derived rows are stale.
 
-        The store does not hold such a file's bytes, so nothing is imported: the page's derived rows
-        are refreshed from the file. A file with no row is noted only when the corpus walk reaches
-        it.
+        The store does not hold such a file's bytes, so nothing is imported: ``_refresh_noted``
+        rederives the page's rows from the file. A file with no row is noted only when the corpus
+        walk reaches it.
         """
         if not ownership.is_markdown(rel):
             return
@@ -620,10 +660,7 @@ class Importer:
             ).fetchone()
         if row is None and not read.walk_member(rel):
             return
-        if disk is None or row is None or disk.sha256 != row[0]:
-            self._note_refresh(rel)
-        else:
-            report.unchanged += 1
+        self._check_unowned(rel, disk, None if row is None else row[0], report)
 
     def _sweep_unowned(self, filesystem: held_fs.HeldFilesystem, report: ImportReport) -> None:
         """Compare each lexical row of an unowned Markdown file with the file's hash."""
@@ -638,10 +675,26 @@ class Importer:
             disk = self._observe(filesystem, rel, report)
             if rel in report.unjudged:
                 continue
-            if disk is None or disk.sha256 != content_hash:
-                self._note_refresh(rel)
-            else:
-                report.unchanged += 1
+            self._check_unowned(rel, disk, content_hash, report)
+
+    def _check_unowned(
+        self, rel: str, disk: OnDisk | None, content_hash: str | None, report: ImportReport
+    ) -> None:
+        """Note ``rel`` for a refresh when its row differs from the file; else it is unchanged."""
+        if disk is None:
+            stale = content_hash is not None  # the rows of a file that is gone
+        elif content_hash is not None:
+            stale = disk.sha256 != content_hash
+        else:
+            # No row for these bytes: a new file, or one whose rows the recall policy withholds.
+            # The second kind stays rowless after a refresh: note its bytes once, not each sweep.
+            stale = self._rowless.get(rel) != disk.sha256
+            if stale:
+                self._rowless[rel] = disk.sha256
+        if stale:
+            self._note_refresh(rel)
+        else:
+            report.unchanged += 1
 
     def _note_refresh(self, rel: str) -> None:
         with self._refresh_lock:

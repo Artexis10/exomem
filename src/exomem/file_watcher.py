@@ -1516,9 +1516,9 @@ class FileWatcher:
         if report.settled or report.unjudged:
             log.info(
                 "file watcher: imported %d, renamed %d, held %d, removed %d, cleared %d, "
-                "left %d outside change(s)",
+                "refreshed %d, left %d outside change(s)",
                 len(report.imported), len(report.moved), len(report.held), len(report.removed),
-                len(report.cleared), len(report.unjudged),
+                len(report.cleared), len(report.refreshed), len(report.unjudged),
             )
 
     def _hand_to_media(self, path: Path) -> None:
