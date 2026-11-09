@@ -32,6 +32,7 @@ from __future__ import annotations
 import enum
 import logging
 import threading
+import time
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -39,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs
+from .. import held_fs, lexstore, media_processing, vault
 from ..cli_ops import OpError
 from . import ownership, projector, read, write
 from .projector import HELD_DELETE, HELD_EDIT, Facts, OnDisk, Runner
@@ -53,6 +54,9 @@ _Item = TypeVar("_Item")
 
 #: What ``ImportReport.unjudged`` says of a file that changed between a read and its commit.
 CHANGED_WHILE_READ = "the file changed after it was read"
+
+#: The state of an imported media binary: store mode derives no preview or transcript for it yet.
+MEDIA_WAITS = "media waits for the store-mode media writer"
 
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
@@ -116,8 +120,15 @@ class ImportReport:
     cleared: list[str] = field(default_factory=list)
     #: Markdown files that the store does not own, whose derived rows were rederived from the file.
     refreshed: list[str] = field(default_factory=list)
+    #: Imported or renamed media binaries, each in the state ``MEDIA_WAITS`` names: the store-mode
+    #: media writer does not exist yet, so no derived media row follows the change.
+    media_waiting: list[str] = field(default_factory=list)
     #: Every path that was examined and carried no change, whatever its kind.
     unchanged: int = 0
+    #: What a sweep's walk of the lexical corpus cost: the Markdown files it reached, and the
+    #: seconds it took, which include the walk itself. Zero for an import, which walks nothing.
+    corpus_files: int = 0
+    corpus_seconds: float = 0.0
     #: A path the importer left alone, with the reason: a refusal of the file system or the store,
     #: or a file that changed after it was read.
     unjudged: dict[str, str] = field(default_factory=dict)
@@ -163,8 +174,11 @@ class Importer:
         # deadlock with the job that it waits for.
         self._exclusive = threading.Lock()
         self._refresh_lock = threading.Lock()
-        self._refresh: set[str] = set()
-        #: The hash of each unowned Markdown file that was noted with no row to compare it with.
+        #: Unowned Markdown paths to refresh, each with the hash of its bytes when it had no row to
+        #: compare them with (None otherwise).
+        self._refresh: dict[str, str | None] = {}
+        #: The hash of each unowned Markdown file whose refresh left it with no row, because recall
+        #: policy withholds it. Set only after that refresh committed.
         self._rowless: dict[str, str] = {}
         #: The version and hash of each binary that the last sweep found equal to its record.
         self._clean: dict[str, tuple[held_fs.FileVersion, str]] = {}
@@ -189,6 +203,7 @@ class Importer:
         with self._exclusive, self._filesystem() as filesystem:
             self._settle(filesystem, sorted(set(rels)), dict(moves or {}), report)
             self._refresh_noted(report)
+            self._note_media(report)
         return report
 
     def sweep(self) -> ImportReport:
@@ -231,13 +246,28 @@ class Importer:
             self._settle(filesystem, sorted({*differing, *missing}), {}, report)
             self._sweep_unowned(filesystem, report)
             self._refresh_noted(report)
+            self._note_media(report)
         return report
 
-    def _take_refresh(self) -> list[str]:
+    def _take_refresh(self) -> dict[str, str | None]:
         """The unowned Markdown paths whose derived rows are stale, in order; clears the list."""
         with self._refresh_lock:
-            taken, self._refresh = sorted(self._refresh), set()
+            taken, self._refresh = dict(sorted(self._refresh.items())), {}
         return taken
+
+    @staticmethod
+    def _note_media(report: ImportReport) -> None:
+        """Name the state of each imported media binary: its media rows wait for the media writer.
+
+        ``media_processing.reconcile_media`` writes the media sidecar from the watcher thread, and
+        store mode refuses that write off the store thread, so nothing derives these rows yet.
+        """
+        for rel in (*report.imported, *report.moved):
+            if (
+                ownership.classify(rel) is ownership.Ownership.BINARY
+                and media_processing.classify_media(rel) is not None
+            ):
+                report.media_waiting.append(rel)
 
     # -- reading the disk -------------------------------------------------------------------------
 
@@ -610,15 +640,17 @@ class Importer:
         noted = self._take_refresh()
         pending = list(noted)
         try:
-            for chunk in _chunks(noted, APPLY_BATCH):
-                self._refresh_rows(chunk, report)
+            for chunk in _chunks(list(noted), APPLY_BATCH):
+                self._refresh_rows(chunk, noted, report)
                 pending = pending[len(chunk) :]
         except Exception:
             for rel in pending:
-                self._note_refresh(rel)
+                self._note_refresh(rel, noted[rel])
             raise
 
-    def _refresh_rows(self, rels: list[str], report: ImportReport) -> None:
+    def _refresh_rows(
+        self, rels: list[str], noted: Mapping[str, str | None], report: ImportReport
+    ) -> None:
         change = write.StoreChange(
             write.Origin.OUTSIDE_EDITOR,
             "an outside change to a file that the store does not own",
@@ -634,11 +666,35 @@ class Importer:
             if len(rels) > 1:
                 # A refusal names no path: ask for each, so one bad path holds back no other.
                 for rel in rels:
-                    self._refresh_rows([rel], report)
+                    self._refresh_rows([rel], noted, report)
                 return
+            # Nothing is remembered, so the next settle notes the path and asks again.
             report.unjudged[rels[0]] = refusal.code
         else:
             report.refreshed.extend(rels)
+            self._remember_rowless(rels, noted)
+
+    def _remember_rowless(self, rels: list[str], noted: Mapping[str, str | None]) -> None:
+        """Remember the bytes of each refreshed file that still has no row, and forget the rest.
+
+        A file with no row after its refresh is one that recall policy withholds: its bytes are
+        refreshed once, not at each sweep. A file that has rows is current by its hash alone.
+        """
+        marks = ",".join("?" * len(rels))
+        with read.snapshot(self._root) as view:
+            rowed = {
+                rel
+                for (rel,) in view.connection.execute(
+                    f"SELECT path FROM pages WHERE content_hash IS NOT NULL AND path IN ({marks})",
+                    rels,
+                )
+            }
+        for rel in rels:
+            sha256 = noted[rel]
+            if rel in rowed or sha256 is None:
+                self._rowless.pop(rel, None)
+            else:
+                self._rowless[rel] = sha256
 
     def _judge_unowned(
         self, filesystem: held_fs.HeldFilesystem, rel: str, report: ImportReport
@@ -663,42 +719,67 @@ class Importer:
         self._check_unowned(rel, disk, None if row is None else row[0], report)
 
     def _sweep_unowned(self, filesystem: held_fs.HeldFilesystem, report: ImportReport) -> None:
-        """Compare each lexical row of an unowned Markdown file with the file's hash."""
+        """Compare each unowned Markdown file with its rows, and find the files that have none.
+
+        A file with a row is judged by its hash. A file that the lexical corpus holds and no row
+        describes is new, or its rows are withheld by recall policy. The corpus walk that file mode
+        makes finds it. That walk reads the vault's whole Markdown tree, so the report carries
+        what it cost (``corpus_files``, ``corpus_seconds``).
+        """
         with read.snapshot(self._root) as view:
             rows = view.connection.execute(
                 "SELECT path, content_hash FROM pages WHERE content_hash IS NOT NULL"
             ).fetchall()
+        rowed: set[str] = set()
         for rel, content_hash in rows:
-            owned = ownership.classify(rel) is not ownership.Ownership.NONE
-            if owned or not ownership.is_markdown(rel):
+            if self._owned_or_not_markdown(rel):
                 continue
+            rowed.add(rel)
             disk = self._observe(filesystem, rel, report)
             if rel in report.unjudged:
                 continue
             self._check_unowned(rel, disk, content_hash, report)
+        started = time.monotonic()
+        corpus = lexstore.corpus_paths(self._root)
+        report.corpus_seconds = time.monotonic() - started
+        report.corpus_files = len(corpus)
+        for path in corpus:
+            rel = vault.relative_posix(path, self._root)
+            if rel in rowed or self._owned_or_not_markdown(rel):
+                continue
+            disk = self._observe(filesystem, rel, report)
+            if rel in report.unjudged:
+                continue
+            self._check_unowned(rel, disk, None, report)
+
+    @staticmethod
+    def _owned_or_not_markdown(rel: str) -> bool:
+        return ownership.classify(rel) is not ownership.Ownership.NONE or not ownership.is_markdown(
+            rel
+        )
 
     def _check_unowned(
         self, rel: str, disk: OnDisk | None, content_hash: str | None, report: ImportReport
     ) -> None:
         """Note ``rel`` for a refresh when its row differs from the file; else it is unchanged."""
+        rowless_sha256 = None
         if disk is None:
             stale = content_hash is not None  # the rows of a file that is gone
         elif content_hash is not None:
             stale = disk.sha256 != content_hash
         else:
             # No row for these bytes: a new file, or one whose rows the recall policy withholds.
-            # The second kind stays rowless after a refresh: note its bytes once, not each sweep.
-            stale = self._rowless.get(rel) != disk.sha256
-            if stale:
-                self._rowless[rel] = disk.sha256
+            # The second kind stays rowless after a refresh: refresh its bytes once, not each sweep.
+            rowless_sha256 = disk.sha256
+            stale = self._rowless.get(rel) != rowless_sha256
         if stale:
-            self._note_refresh(rel)
+            self._note_refresh(rel, rowless_sha256)
         else:
             report.unchanged += 1
 
-    def _note_refresh(self, rel: str) -> None:
+    def _note_refresh(self, rel: str, rowless_sha256: str | None = None) -> None:
         with self._refresh_lock:
-            self._refresh.add(rel)
+            self._refresh[rel] = rowless_sha256
 
 
 def _below_any(rel: str, skipped: list[ownership.Skipped]) -> bool:

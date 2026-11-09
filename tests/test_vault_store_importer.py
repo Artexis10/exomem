@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import logging
 import multiprocessing
 import os
 import queue
@@ -30,6 +31,7 @@ from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, migr
 from test_vault_store_projector import NOTES, commit, put, rows
 
 from exomem import file_watcher, server_runtime
+from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import importer, ownership, projector, read, verify, write
@@ -550,6 +552,65 @@ def test_a_file_whose_rows_the_recall_policy_withholds_is_refreshed_once(
     assert (again.settled, revision(stored)) == (0, before)
 
 
+def test_a_refused_refresh_of_a_new_file_is_asked_for_again(stored, writer):
+    """An importer that remembers a new file as refreshed when the store refused the refresh, so
+    that the file has no search rows until a person edits it again."""
+    refusals = [write.NOT_OWNED]
+
+    def run(work):
+        if refusals:
+            raise OpError(refusals.pop(), "the store refused the refresh")
+        work(writer)
+
+    refusing = importer.Importer(stored, run=run)
+    fresh = stored / "Outside" / "Fresh.md"
+    fresh.parent.mkdir()
+    fresh.write_bytes(b"# Fresh\n\nA page that the harbour master added outside Exomem.\n")
+
+    first = refusing.import_paths(["Outside/Fresh.md"])
+    assert first.unjudged == {"Outside/Fresh.md": write.NOT_OWNED} and first.refreshed == []
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", "Outside/Fresh.md") == []
+
+    again = refusing.sweep()
+
+    assert "Outside/Fresh.md" in again.refreshed
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", "Outside/Fresh.md") != []
+
+
+def test_a_sweep_refreshes_a_new_markdown_file_that_no_event_named(stored, importing, tmp_path):
+    """An importer that finds an unowned file only through rows that exist, so that a file added
+    while no watcher ran has no search rows, and a sweep that hides what its walk cost."""
+    fresh = stored / "Outside" / "Fresh.md"
+    fresh.parent.mkdir()
+    fresh.write_bytes(b"# Fresh\n\nA page that the harbour master added with no event.\n")
+
+    swept = importing.sweep()
+
+    assert swept.refreshed == ["Outside/Fresh.md"]
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", "Outside/Fresh.md") != []
+    assert cold_differences(stored, tmp_path) == ()
+    assert swept.corpus_files >= 2 and swept.corpus_seconds > 0, "the walk's cost is reported"
+    assert importing.sweep().refreshed == [], "a refreshed file is current: the next sweep is quiet"
+
+
+def test_a_markdown_file_at_the_vault_root_is_imported_by_a_sweep_and_an_event(
+    stored, importing, tmp_path
+):
+    """An importer that cannot open the folder of a file at the vault root, so that a note kept
+    next to the Knowledge Base folder never reaches the search rows."""
+    (stored / "Home.md").write_bytes(b"# Home\n\nThe lighthouse keeper keeps this page here.\n")
+    (stored / "Landing.md").write_bytes(b"# Landing\n\nThe pilot reads this page first.\n")
+
+    by_event = importing.import_paths(["Home.md"])
+    swept = importing.sweep()
+
+    assert by_event.refreshed == ["Home.md"] and not by_event.unjudged
+    assert swept.refreshed == ["Landing.md"] and not swept.unjudged
+    for rel in ("Home.md", "Landing.md"):
+        assert rows(stored, "SELECT path FROM pages WHERE path = ?", rel) != []
+    assert cold_differences(stored, tmp_path) == ()
+
+
 def test_a_file_restored_where_the_stores_life_of_the_path_ended_is_imported(
     stored, writer, projecting, importing
 ):
@@ -580,6 +641,28 @@ def test_a_file_restored_where_the_stores_life_of_the_path_ended_is_imported(
     assert sorted(path for path, _ in imports(stored)) == sorted([ALPHA, BETA, DIAGRAM])
     projecting.run_pass()
     assert {rel: (stored / rel).read_bytes() for rel in original} == original
+
+
+def test_a_move_after_a_kill_that_lost_the_manifest_row_removes_the_old_file_and_imports_nothing(
+    stored, writer, projecting, importing
+):
+    """A projector or importer that takes the leftover file of a moved page for a person's edit,
+    so that the store ends with the page at both its old path and its new one."""
+    old, new = f"{NOTES}/Gamma.md", f"{NOTES}/Elsewhere/Gamma.md"
+    body = b"# Gamma\n\nA page that a kill left on disk without a manifest row.\n"
+    commit(writer, **put(old, body))
+    (stored / old).write_bytes(body)
+    assert rows(stored, "SELECT COUNT(*) FROM store_manifest WHERE path = ?", old) == [(0,)]
+    commit(writer, moves=(write.PageMove(old, new),))
+
+    projecting.run_pass()
+    report = importing.import_paths([old, new])
+
+    assert not (stored / old).exists(), "the projector removed Exomem's own leftover"
+    assert (stored / new).read_bytes() == body
+    assert rows(stored, "SELECT path FROM store_pages WHERE path IN (?, ?)", old, new) == [(new,)]
+    assert (report.imported, report.held) == ([], [])
+    assert imports(stored) == [] and rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
 
 
 def test_a_held_delete_clears_when_the_file_comes_back_with_exomems_bytes(stored, importing):
@@ -861,43 +944,42 @@ def test_a_commit_of_bytes_read_before_a_newer_governed_write_is_skipped(
     assert settling.import_paths([ALPHA]).settled == 0
 
 
-def test_a_running_watcher_hands_an_imported_binary_to_media_processing(
-    stored, store_thread, monkeypatch
+def test_an_imported_media_binary_is_named_as_waiting_for_the_media_writer(stored, importing):
+    """An importer that says nothing of an imported media file, so that nobody can tell that its
+    preview and transcript are not coming, or that names a file that media processing ignores."""
+    picture, bundle, gone = (f"{NOTES}/{name}" for name in ("plain.png", "data.bin", "old.png"))
+    (stored / gone).write_bytes(b"\x89PNG old")
+    importing.import_paths([gone])
+    (stored / gone).unlink()
+    (stored / picture).write_bytes(b"\x89PNG plain")
+    (stored / bundle).write_bytes(b"\x00\x01 not media")
+
+    report = importing.import_paths([picture, bundle, gone])
+
+    assert sorted(report.imported) == sorted([picture, bundle]) and report.removed == [gone]
+    assert report.media_waiting == [picture], "a deleted file and a non-media file are not named"
+
+
+def test_a_running_watcher_imports_a_media_file_without_calling_media_processing(
+    stored, store_thread, caplog
 ):
-    """A watcher that imports a media file into the store but never gives it to media processing,
-    so that its preview and transcript never follow an outside change, or that gives it a file
-    that the media store is writing or has proven."""
-    from exomem import media_processing, media_store
-
-    plain, proven, busy = (f"{NOTES}/{name}.png" for name in ("plain", "proven", "busy"))
-    reconciled, asked = [], {}
-
-    def managed_event(vault, path):
-        rel = path.relative_to(vault).as_posix()
-        asked[rel] = asked.get(rel, 0) + 1
-        if rel == proven:
-            return "suppress"
-        return "defer" if rel == busy and asked[rel] == 1 else None
-
-    monkeypatch.setattr(media_store, "managed_event", managed_event)
-    monkeypatch.setattr(
-        media_processing, "reconcile_media", lambda vault, path, **options: reconciled.append(path)
-    )
+    """A watcher that hands an imported media file to a media writer that store mode refuses off
+    the store thread, so that the log shows a traceback for every binary a person adds."""
+    picture = f"{NOTES}/plain.png"
+    caplog.set_level(logging.INFO, logger="exomem.file_watcher")
     watching = file_watcher.FileWatcher(
         stored, debounce_seconds=0.2, importer=importer.Importer(stored, run=store_thread.run)
     )
     assert watching.start()
     try:
         assert watching.wait_until_seeded(120)
-        for rel in (plain, proven, busy):
-            (stored / rel).write_bytes(b"\x89PNG" + rel.encode())
+        (stored / picture).write_bytes(b"\x89PNG plain")
         wait_for(
-            lambda: {stored / plain, stored / busy} <= set(reconciled),
-            "media processing of the imported files",
+            lambda: any(importer.MEDIA_WAITS in record.getMessage() for record in caplog.records),
+            "the watcher's report of the imported media file",
         )
-        for rel in (plain, proven, busy):
-            assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", rel) != []
     finally:
         watching.stop()
-    assert stored / proven not in reconciled, "the media store proved these bytes already"
-    assert asked[busy] >= 2, "a deferred file is asked about again, not dropped"
+
+    assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", picture) != []
+    assert [record for record in caplog.records if record.exc_info or record.levelno >= 40] == []

@@ -204,7 +204,9 @@ class _Derivation:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
         found = self.source(rel)
-        if found is not None:
+        # File mode builds the graph from the Knowledge Base walk alone: a refreshed page outside it
+        # has lexical rows and no graph rows, or it would get a node under a path that has no file.
+        if found is not None and lexstore.page_membership(rel)[0]:
             raw, mtime_ns = found
             page, state = self.parse(rel, raw, mtime_ns)
             if page is not None and state is not None:

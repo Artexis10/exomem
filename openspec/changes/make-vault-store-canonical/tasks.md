@@ -37,6 +37,8 @@
 - [ ] 6.1 Key vector rows by page hash and store revision; keep the semantic drain asynchronous.
 - [ ] 6.2 Let a Cloud cell run without per-write projection and export Markdown on request.
 - [ ] 6.3 Run the acceptance set on native Windows/NTFS.
+- [ ] 6.4 Write the derived media rows that `media_processing.reconcile_media` writes from the store thread in store mode. The importer records each imported or renamed media binary as waiting for this writer and calls no media processing, which `VAULT_STORE_OFF_THREAD` refuses off the store thread. Done when an outside media file gains its derived rows from the store thread.
+- [ ] 6.5 Before store mode serves, route the media store's originals eviction and restore through `media_store.managed_event`. Otherwise the importer reads each eviction as an outside delete of a binary and each restore as an outside create.
 
 ## 7. Acceptance and switch
 

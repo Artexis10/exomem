@@ -133,6 +133,9 @@ class Facts:
     removed: bool = False
     #: The record of a binary at this path; None for a page, or when the store records none.
     binary: read.BinaryMeta | None = None
+    #: A queued move names this path as its source. The projector still has to remove the file
+    #: here, so Exomem's link to the path lasts until that removal, as an intent's does.
+    moves_away: bool = False
 
     @property
     def stored_sha256(self) -> str | None:
@@ -145,10 +148,16 @@ class Facts:
     def own_hashes(self) -> frozenset[str]:
         """The hashes of a file that Exomem put at this path and that a person did not change.
 
-        With no manifest row, no queued intent and nothing stored, Exomem's life at this path has
-        ended: a file with bytes of that life is a person's restore, so none are Exomem's.
+        With no manifest row, no queued intent, no queued move away and nothing stored, Exomem's life
+        at this path has ended: a file with bytes of that life is a person's restore, so none are
+        Exomem's.
         """
-        if self.manifest is None and self.intent is None and self.stored_sha256 is None:
+        if (
+            self.manifest is None
+            and self.intent is None
+            and not self.moves_away
+            and self.stored_sha256 is None
+        ):
             return frozenset()
         recorded = frozenset() if self.manifest is None else frozenset({self.manifest.sha256})
         return recorded | self.audited
@@ -601,7 +610,7 @@ class Projector:
         return removed
 
     def _sweep_folder(self, filesystem: held_fs.HeldFilesystem, folder: str) -> int:
-        opened = filesystem.parent(folder, access="mutate")
+        opened = _parent(filesystem, folder, access="mutate")
         if _missing(opened):
             return 0
         removed = 0
@@ -674,6 +683,11 @@ def read_facts(vault_root: Path, rel: str) -> Facts:
             "SELECT sha256, kind FROM store_held WHERE path = ?", (rel,)
         ).fetchone()
         manifest_revision = None if recorded is None else recorded[3]
+        moving = database.execute(
+            "SELECT 1 FROM store_projection_queue WHERE operation = 'move' AND from_path = ? "
+            "LIMIT 1",
+            (rel,),
+        ).fetchone()
         return Facts(
             path=rel,
             intent=None if queued is None else Intent(*queued),
@@ -685,6 +699,7 @@ def read_facts(vault_root: Path, rel: str) -> Facts:
             audited=_audited(database, rel, manifest_revision),
             removed=_removed_since(database, rel, manifest_revision),
             binary=view.binary(rel),
+            moves_away=moving is not None,
         )
 
 
@@ -802,6 +817,16 @@ def _split(rel: str) -> tuple[str, str]:
     return folder, leaf
 
 
+def _parent(
+    filesystem: held_fs.HeldFilesystem, folder: str, *, create: bool = False, access: str = "read"
+) -> held_fs.HeldResult[held_fs.HeldDirectory]:
+    """Hold ``folder``, where "" is the vault root: the held filesystem names it "." and refuses "".
+
+    ``_split`` gives "" for a file at the vault root, so every hold of a folder goes through here.
+    """
+    return filesystem.parent(folder or ".", create=create, access=access)
+
+
 def observe(
     filesystem: held_fs.HeldFilesystem,
     rel: str,
@@ -851,7 +876,7 @@ def _with_file(
 ) -> _Found | None:
     """``use`` of the held file at ``rel``, or None when it is missing; other refusals raise."""
     folder, leaf = _split(rel)
-    opened = filesystem.parent(folder, access="mutate")
+    opened = _parent(filesystem, folder, access="mutate")
     if _missing(opened):
         return None
     with opened.require() as parent:
@@ -948,13 +973,13 @@ def _open_creating(
     filesystem: held_fs.HeldFilesystem, folder: str
 ) -> tuple[held_fs.HeldResult[held_fs.HeldDirectory], list[str]]:
     """Open ``folder`` for a change, making it if need be, with the folders that did not exist."""
-    opened = filesystem.parent(folder, access="mutate")
+    opened = _parent(filesystem, folder, access="mutate")
     if not _missing(opened):
         return opened, []
     absent = [folder]
     above = _split(folder)[0]
     while above:
-        probe = filesystem.parent(above)
+        probe = _parent(filesystem, above)
         if probe.ok:
             probe.require().close()
             break
@@ -962,7 +987,7 @@ def _open_creating(
             probe.require()
         absent.append(above)
         above = _split(above)[0]
-    return filesystem.parent(folder, create=True, access="mutate"), absent
+    return _parent(filesystem, folder, create=True, access="mutate"), absent
 
 
 def _flush(filesystem: held_fs.HeldFilesystem, directory: held_fs.HeldDirectory) -> None:
@@ -992,8 +1017,7 @@ def _flush_folder(filesystem: held_fs.HeldFilesystem, folder: str) -> None:
     """Make the name changes in ``folder`` durable; a folder that does not exist has none."""
     if os.name == "nt":
         return
-    # The held filesystem names its root ".", and it refuses the empty string.
-    opened = filesystem.parent(folder or ".", access="flush")
+    opened = _parent(filesystem, folder, access="flush")
     if _missing(opened):
         return
     with opened.require() as directory:
@@ -1018,7 +1042,7 @@ def _installed(
 def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> None:
     """Remove the file only while it is still the exact file, with the bytes, that was judged."""
     folder, leaf = _split(rel)
-    with filesystem.parent(folder, access="mutate").require() as parent:
+    with _parent(filesystem, folder, access="mutate").require() as parent:
         with filesystem.file(parent, leaf, access="mutate").require() as file:
             if file.identity != expected.identity or _stream_sha256(file) != expected.sha256:
                 raise Deferred("the file changed before it was removed")
@@ -1034,7 +1058,7 @@ def _rename(filesystem: held_fs.HeldFilesystem, old: str, new: str, expected: On
     """
     old_folder, old_leaf = _split(old)
     new_folder, new_leaf = _split(new)
-    with filesystem.parent(old_folder, access="mutate").require() as old_parent:
+    with _parent(filesystem, old_folder, access="mutate").require() as old_parent:
         with filesystem.file(old_parent, old_leaf, access="mutate").require() as file:
             if file.identity != expected.identity or _stream_sha256(file) != expected.sha256:
                 raise Deferred("the file changed before it was renamed")
