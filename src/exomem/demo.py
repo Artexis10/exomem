@@ -210,21 +210,24 @@ def run_demo(
                 echo(f"kept sample vault at: {target}")
         return 0 if success else 1
     finally:
-        if target is not None:
-            # The find step can leave a lexical repair running on a daemon thread. It writes
-            # into the state root, so it must end before the environment and the copy go away.
-            from exomem import lexstore
+        try:
+            if target is not None:
+                # The find step can leave a lexical repair running on a daemon thread. It writes
+                # into the state root, so it must end before the environment and the copy go away.
+                from exomem import lexstore
 
-            lexstore.await_repairs_idle(target)
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        if is_temp and not keep and target is not None:
-            shutil.rmtree(target, ignore_errors=True)
-        if is_temp and not keep and state_root is not None:
-            shutil.rmtree(state_root, ignore_errors=True)
+                lexstore.await_repairs_idle(target)
+        finally:
+            # An interrupt during the wait still restores the environment and removes the copy.
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            if is_temp and not keep and target is not None:
+                shutil.rmtree(target, ignore_errors=True)
+            if is_temp and not keep and state_root is not None:
+                shutil.rmtree(state_root, ignore_errors=True)
 
 
 def main(argv: list[str]) -> int:
