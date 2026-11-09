@@ -100,8 +100,9 @@ def test_a_unit_whose_rows_are_only_new_governed_keys() -> None:
 def test_a_new_governed_row_below_a_nested_heading() -> None:
     document = _parse("# Release outlook\n\n## Claim\n### Detail\n- modality: should\n")
 
-    assert [unit.kind for unit in document.units] == []  # FLIPS slice4: was ["claim"]
-    assert _codes(document.errors) == ["empty_rich_unit"]  # FLIPS slice4: was [] (row not reserved)
+    assert [unit.kind for unit in document.units] == ["claim"]  # CORE: first release keeps the unit
+    assert _codes(document.errors) == []  # CORE until task 4.5 makes it empty_rich_unit
+    assert _codes(document.warnings) == ["empty_rich_unit"]  # FLIPS slice4: was [] (row not reserved)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +232,34 @@ def test_a_plain_beliefs_heading_warns_with_both_repairs_and_still_parses() -> N
     assert warning.severity == "warning"
     assert "credence_holder" in warning.remediation
     assert "rename the heading" in warning.remediation
+
+
+def test_an_empty_beliefs_placeholder_on_an_old_page_warns_and_still_parses() -> None:
+    """Catches an old page whose empty `## Beliefs` heading this release starts refusing."""
+    document = _parse("# Release outlook\n\n## Beliefs\n\n## Next steps\n\nShip it.\n")
+
+    assert document.errors == ()
+    assert _codes(document.warnings) == ["empty_rich_unit"]
+    assert document.units == ()
+
+
+def test_a_bad_reserved_row_under_an_old_beliefs_heading_warns_and_still_parses() -> None:
+    """Catches an old `## Beliefs` section whose ordinary rows this release starts refusing."""
+    document = _parse("# Release outlook\n\n## Beliefs\n- tags: a b\n\nThe team trusts the pipeline.\n")
+
+    assert document.errors == ()
+    assert _codes(document.warnings) == ["incomplete_rich_belief", "invalid_rich_tags"]
+    assert [unit.content for unit in document.units] == ["The team trusts the pipeline."]
+
+
+def test_a_bad_reserved_row_on_a_belief_with_its_rows_is_still_an_error() -> None:
+    """Catches the first-release leniency spreading to a belief written in the new form."""
+    document = _parse(
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n"
+        "- tags: a b\n\nThe release will slip a week.\n"
+    )
+
+    assert [(error.code, error.line) for error in document.errors] == [("invalid_rich_tags", 6)]
 
 
 def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path) -> None:

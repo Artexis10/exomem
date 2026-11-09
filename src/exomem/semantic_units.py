@@ -1025,11 +1025,17 @@ def parse_semantic_units(
                 ),
             )
 
+    first_release_language = language_registry or semantic_language_registry.core_registry()
+
+    def lenient(kind: str, metadata: Mapping[str, str]) -> bool:
+        return _first_release_belief(kind, metadata, first_release_language)
+
     rich_document = semantic_blocks.interpret_semantic_blocks(
         tuple(candidate.heading for candidate in candidates.rich),
         validate=validate,
         registry=relation_registry,
         kind_resolver=kind_resolver,
+        lenient=lenient,
     )
     rich_ranges = tuple((block.line, block.end_line) for block in rich_document.blocks)
     units.extend(_outside_rich_ranges(candidates.compact, rich_ranges))
@@ -1053,6 +1059,8 @@ def parse_semantic_units(
             language=language_registry,
         )
         if validate:
+            if lenient(block.type, block.metadata):
+                unit_errors = [replace(item, severity=_FIRST_RELEASE_SEVERITY) for item in unit_errors]
             errors.extend(item for item in unit_errors if item.severity == "error")
             warnings.extend(item for item in unit_errors if item.severity != "error")
         units.append(unit)
@@ -1102,6 +1110,8 @@ def parse_semantic_units(
                             else resolution.resolved or resolution.key
                         ),
                     )
+                    if unit.form == "rich" and lenient(unit.kind, unit.metadata):
+                        diagnostic = replace(diagnostic, severity=_FIRST_RELEASE_SEVERITY)
                     (warnings if diagnostic.severity == "warning" else errors).append(
                         diagnostic
                     )
@@ -1788,6 +1798,17 @@ _ISO_DATETIME_RE = re.compile(
 # Task 4.5 of `make-epistemic-language-dynamic` turns these into errors one release after the
 # keys became reserved; until then a page written before the keys existed keeps parsing.
 _FIRST_RELEASE_SEVERITY = "warning"
+
+
+def _first_release_belief(
+    kind: str, metadata: Mapping[str, str], language: semantic_language_registry.LanguageRegistryView,
+) -> bool:
+    """A belief unit with none of its rows reads as a page from before the kind: its problems warn."""
+    return language.has(kind, "credence") and not any(
+        key in metadata for key in semantic_blocks.BELIEF_UNIT_METADATA_KEYS
+    )
+
+
 BELIEF_FORM = (
     "Record a degree of belief as its own `## Belief` unit with `- credence_holder: <whose "
     "belief>`, `- credence: <a belief level, or a probability from 0 to 1>`, `- credence_basis: "

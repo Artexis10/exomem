@@ -9,7 +9,7 @@ validation only; no model, sidecar, or graph store is involved.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -58,6 +58,12 @@ GOVERNED_UNIT_METADATA_KEYS = (
 _RESERVED_METADATA_KEYS = frozenset(
     {"category", "id", "tags", "context", "relations", *GOVERNED_UNIT_METADATA_KEYS}
 )
+# The rows reserved before belief and statement keys joined them. A block whose body these
+# leave substantive, and the newly reserved keys empty, parsed on the release before, so it
+# warns in this release. Task 4.5 of make-epistemic-language-dynamic deletes this set.
+_RESERVED_BEFORE_UNIT_ROW_KEYS = _RESERVED_METADATA_KEYS - {
+    *BELIEF_UNIT_METADATA_KEYS, *STATEMENT_UNIT_METADATA_KEYS,
+}
 
 
 @dataclass(frozen=True)
@@ -324,8 +330,12 @@ def interpret_semantic_blocks(
     validate: bool = True,
     registry: relation_registry.RelationRegistry | None = None,
     kind_resolver: Callable[[str], str | SemanticBlockKindResolution | None] | None = None,
+    lenient: Callable[[str, Mapping[str, str]], bool] | None = None,
 ) -> SemanticBlockDocument:
-    """Recognize one selected vocabulary without rescanning heading structure."""
+    """Recognize one selected vocabulary without rescanning heading structure.
+
+    `lenient(kind, metadata)` is true for a block whose problems are warnings in this release.
+    """
     blocks: list[SemanticBlock] = []
     errors: list[SemanticBlockValidationError] = []
     warnings: list[SemanticBlockValidationError] = []
@@ -350,15 +360,28 @@ def interpret_semantic_blocks(
             line=candidate.line, end_line=candidate.end_line, body=candidate.body,
             metadata=dict(candidate.metadata), relations=relations,
         )
+        problems = warnings if lenient is not None and lenient(block_type, block.metadata) else errors
         if candidate.substantive_body:
             blocks.append(block)
+        elif _has_substantive_body(candidate.body, reserved=_RESERVED_BEFORE_UNIT_ROW_KEYS):
+            # Only newly reserved rows fill the body: keep the unit the release before parsed.
+            blocks.append(block)
+            if validate:
+                warnings.append(SemanticBlockValidationError(
+                    code="empty_rich_unit",
+                    message=(
+                        "rich semantic-unit body holds only governed rows; the next release "
+                        "reports this unit as empty"
+                    ),
+                    line=candidate.line, block_id=block.id,
+                ))
         elif validate:
-            errors.append(SemanticBlockValidationError(
+            problems.append(SemanticBlockValidationError(
                 code="empty_rich_unit", message="rich semantic-unit body is empty",
                 line=candidate.line, block_id=block.id,
             ))
         if validate:
-            errors.extend(block_errors)
+            problems.extend(block_errors)
     if validate:
         warnings.extend(_duplicate_id_warnings(blocks))
     return SemanticBlockDocument(blocks=blocks, errors=errors, warnings=warnings)
@@ -376,7 +399,7 @@ def _closes_fence(line: str, fence_char: str, fence_length: int) -> bool:
     )
 
 
-def _has_substantive_body(body: str) -> bool:
+def _has_substantive_body(body: str, *, reserved: frozenset[str] = _RESERVED_METADATA_KEYS) -> bool:
     """Return whether a metadata-stripped rich body contains authored content."""
     fence_char: str | None = None
     fence_length = 0
@@ -398,17 +421,15 @@ def _has_substantive_body(body: str) -> bool:
         if (
             line.strip()
             and _HEADING_RE.match(line) is None
-            and not _is_reserved_metadata_row(line)
+            and not _is_reserved_metadata_row(line, reserved)
         ):
             return True
     return False
 
 
-def _is_reserved_metadata_row(line: str) -> bool:
+def _is_reserved_metadata_row(line: str, reserved: frozenset[str] = _RESERVED_METADATA_KEYS) -> bool:
     match = _METADATA_RE.match(line)
-    return bool(
-        match and normalize_label(match.group(1)) in _RESERVED_METADATA_KEYS
-    )
+    return bool(match and normalize_label(match.group(1)) in reserved)
 
 
 def first_block_body(markdown: str, block_type: str) -> str | None:
