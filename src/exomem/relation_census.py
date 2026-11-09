@@ -70,8 +70,12 @@ _STATUS_KEYS = (
     "unregistered",
     "scope_violation",
 )
+# Debt (K7, C8): a census-only check. `target_kinds` cannot state it, because folders and
+# Sources pages count as evidence too, so the kind list stays with the check.
 _EVIDENTIAL_KINDS = frozenset({"evidence", "result", "metric", "finding", "experiment"})
 _QUESTION_KINDS = ("question", "open_question")
+# Debt (F7): a census-only flag keyed on the family, so an extension in these families
+# already reaches it.
 _EPISTEMIC_FAMILIES = frozenset({"support", "contradiction", "supersession", "duplication"})
 _EVIDENCE_FOLDERS = ("Sources/", "Evidence/")
 _GOVERNANCE_SEGMENT = "/_Governance/"
@@ -498,8 +502,14 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
 
     # The edges a writer authored as a relation (a `## Relations` bullet or a semantic
     # relation), never a body wikilink; the log must name each edge's relation to class it.
-    link_key = relation_registry.link_relation_key()
+    core = relation_registry.core_registry()
     authored = [edge for edge in edges if edge.get("origin") in _AUTHORED_ORIGINS]
+
+    def plain_link(edge: dict) -> bool:
+        # Core meanings are shared; an extension reads through its authoring page's registry.
+        relation = edge["relation"]
+        registry = core if relation in core.core else reader.view.registry_for(edge["source_path"])
+        return registry.has(relation, "plain_link")
 
     def names_relation(edge: dict) -> bool:
         return isinstance(edge.get("relation"), str)
@@ -579,9 +589,9 @@ def _new_edge_cohort(vault_root: Path, reader: Any) -> dict[str, Any]:
         "raw_generic_share": generic_share(edges),
         # Of the relation edges writers authored: a specific relation, and a plain link.
         "specific_share": share(
-            authored, lambda edge: not edge["generic"] and edge["relation"] != link_key, names_relation
+            authored, lambda edge: not edge["generic"] and not plain_link(edge), names_relation
         ),
-        "plain_link_share": share(authored, lambda edge: edge["relation"] == link_key, names_relation),
+        "plain_link_share": share(authored, plain_link, names_relation),
         "endpoint_classes": classes,
         "unreasoned_generic_edges": metric(
             sum(
@@ -910,6 +920,7 @@ class _Row(NamedTuple):
     dst_anchor: str | None
     fragment: str | None  # how a `#fragment` target resolved; None for no fragment
     target_fragment: str | None  # the fragment as authored
+    behaviours: frozenset[str]  # what the relation does, read in its authoring page's registry
 
     @property
     def touches_other(self) -> bool:
@@ -929,14 +940,15 @@ _ROWS_SQL = (
 _POPULATION_SQL = (
     "FROM (SELECT e.src_key, e.dst_key, "
     "exomem_edge_relation({columns}) AS relation_type, "
-    "exomem_edge_status({columns}) AS registry_status "
+    "exomem_edge_status({columns}) AS registry_status, "
+    "exomem_edge_behaves({columns}, 'plain_link') AS plain_link "
     "FROM graph_edges AS e "
     "WHERE e.origin NOT IN ('semantic_unit', 'semantic_block', 'wikilink') "
     "AND exomem_census_eligible(e.source_path)) AS e {{join}}"
     "JOIN graph_nodes AS s ON s.node_key = e.src_key "
     "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
     "WHERE e.registry_status != 'unregistered' AND e.relation_type IS NOT NULL "
-    "AND e.relation_type != 'links_to' AND s.path != d.path "
+    "AND e.plain_link = 0 AND s.path != d.path "
     "AND exomem_census_admitted(s.path) AND exomem_census_admitted(d.path)"
 )
 
@@ -1058,6 +1070,7 @@ class _Reader:
                 dst_anchor,
                 metadata.get("fragment_resolution"),
                 metadata.get("target_fragment"),
+                self.view.behaviours(edge),
             )
 
     def pair_checks(
@@ -1118,13 +1131,17 @@ class _Reader:
         )
 
     def sources_pages(self) -> set[str]:
-        """Pages with an admitted frontmatter `sources:` edge."""
+        """Pages with an admitted edge from the frontmatter field that declares Sources."""
+        from .epistemic_graph import declared_sources_binding
+
+        field, relation = declared_sources_binding()
         found: set[str] = set()
         for source_path, dst_path in self.connection.execute(
             "SELECT e.source_path, d.path FROM graph_edges AS e "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
-            "WHERE e.relation_type = 'derived_from' AND e.origin = 'frontmatter' "
-            "AND e.source_anchor = 'sources'"
+            "WHERE e.relation_type = ? AND e.origin = 'frontmatter' "
+            "AND e.source_anchor = ?",
+            (relation, field),
         ):
             if self.admitted(source_path) and self.admitted(dst_path):
                 found.add(source_path)
@@ -1132,15 +1149,17 @@ class _Reader:
 
     def supersession_chains(self) -> _UnionFind:
         chain = _UnionFind()
+        # A stored core key or a candidate narrows the scan; an extension is stored as a
+        # candidate and read per page, so the served `replaces` behaviour decides.
+        replacing = sorted(relation_registry.core_registry().keys_with("replaces"))
         for src_path, dst_path, source_path in self.connection.execute(
             "SELECT s.path, d.path, e.source_path FROM graph_edges AS e "
             "JOIN graph_nodes AS s ON s.node_key = e.src_key "
             "JOIN graph_nodes AS d ON d.node_key = e.dst_key "
             "WHERE e.origin != 'wikilink' "
-            "AND (e.relation_type = 'supersedes' OR e.registry_status = ?) "
-            f"AND exomem_edge_relation({self._columns}) = 'supersedes' "
-            f"AND exomem_edge_status({self._columns}) != 'unregistered'",
-            (self._candidate,),
+            f"AND (e.relation_type IN ({','.join('?' * len(replacing))}) OR e.registry_status = ?) "
+            f"AND exomem_edge_behaves({self._columns}, 'replaces') = 1",
+            (*replacing, self._candidate),
         ):
             if (
                 src_path != dst_path
@@ -1251,7 +1270,7 @@ def _census_payload(
         typed = (
             row.relation is not None
             and row.status != "unregistered"
-            and row.relation != relation_registry.link_relation_key()
+            and "plain_link" not in row.behaviours
             and row.origin != "wikilink"
         )
         if row.touches_other:
@@ -1266,6 +1285,7 @@ def _census_payload(
             definition = (
                 registry if row.relation in registry.core else reader.view.registry_for(source)
             ).definition(row.relation or "")
+            # Debt (F8): one entity-census count for one family.
             if definition is not None and definition.family == "affiliation":
                 affiliated.add(source)
             _check_row(
@@ -1476,11 +1496,12 @@ def _check_row(
         record("signature_mismatch", row.status == "scope_violation" or bool(outside))
     src_page, dst_page = row.src_page or "", row.dst_page or ""
     same_page = src_page == dst_page
-    if row.relation == "supersedes" and not same_page:
+    if "replaces" in row.behaviours and not same_page:
         newer = _origin_date(reader.pages[src_page].origin_date)
         older = _origin_date(reader.pages[dst_page].origin_date)
         if newer is not None and older is not None:
             record("supersedes_backwards", newer < older)
+    # Debt (K7): the key and its target kinds are one census-only check; see `_EVIDENTIAL_KINDS`.
     if row.relation == "evidenced_by":
         if row.dst_kind == "file":
             relative = dst_page.removeprefix(kb_prefix())
@@ -1488,6 +1509,8 @@ def _check_row(
         else:
             evidential = row.dst_kind in _EVIDENTIAL_KINDS
         record("evidence_target_not_evidential", not evidential)
+    # Debt (K8): `settles` is wrong here, because a `resolves` target is often no question.
+    # The target side reads the `question` trait once the kinds move to the pack.
     if row.relation == "answers":
         if row.dst_kind == "file":
             answered = reader.question_page(dst_page)
@@ -1496,7 +1519,7 @@ def _check_row(
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
         record("same_page_epistemic", same_page)
-    if row.relation == "contradicts" and not same_page:
+    if "opposes" in row.behaviours and not same_page:
         record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
 
 
@@ -1576,7 +1599,8 @@ def sample(
                 not row.in_view
                 or row.source_path not in eligible
                 or row.origin not in _AUTHORED_ORIGINS
-                or row.relation in (None, generic_key, relation_registry.link_relation_key())
+                or row.relation in (None, generic_key)
+                or "plain_link" in row.behaviours
                 or row.status == "unregistered"
             ):
                 continue

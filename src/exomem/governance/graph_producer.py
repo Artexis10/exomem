@@ -76,6 +76,7 @@ def _edges_by_source(
                 projected_graph.ProjectionGraphEdge(
                     source_item_identity=source,
                     target_item_identity=target,
+                    # Debt (wikilink producer): a producer constant; `origins: [wikilink]` already names the relation.
                     relation_type="links_to",
                 )
             )

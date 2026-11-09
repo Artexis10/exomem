@@ -122,7 +122,7 @@ def _edge_facts(
                     candidate_path=neighbor.other_rel,
                     relation_type=neighbor.relation_type,
                     direction=neighbor.direction,
-                    family=neighbor.family,
+                    typed=neighbor.typed,
                 )
             )
         elif neighbor.seed_rel in entity_paths:
@@ -132,7 +132,7 @@ def _edge_facts(
                     candidate_path=neighbor.seed_rel,
                     relation_type=neighbor.relation_type,
                     direction="inbound" if neighbor.direction == "outbound" else "outbound",
-                    family=neighbor.family,
+                    typed=neighbor.typed,
                 )
             )
     return tuple(

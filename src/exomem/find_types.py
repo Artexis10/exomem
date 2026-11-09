@@ -199,6 +199,7 @@ class ParsedPage:
 
     @property
     def superseded_by(self) -> list[str]:
+        # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
         sb = self.frontmatter.get("superseded_by")
         if not sb:
             return []
@@ -206,6 +207,7 @@ class ParsedPage:
 
     @property
     def supersedes(self) -> list[str]:
+        # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
         sv = self.frontmatter.get("supersedes")
         if not sv:
             return []

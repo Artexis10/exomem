@@ -620,11 +620,11 @@ _HYDRATION_ROUTE_PAGES = 7
 _HYDRATION_UNITS_PER_PAGE = 8
 
 
+# Debt (page-type keys): `entity` is a note-type key; the note-type `role` states the fact.
 _ENTITY_TARGETS_SQL = (
     "SELECT d.path, {edge} FROM graph_edges e JOIN graph_nodes d "
     "ON d.node_key = e.dst_page_key "
     "WHERE e.source_path = ? AND d.page_type = 'entity' AND d.path <> ? "
-    "AND COALESCE(e.relation_type, '') <> 'derived_from' "
     "ORDER BY d.path"
 )
 
@@ -649,7 +649,6 @@ def _contributors_sql(type_count: int) -> str:
         "FROM graph_edges e JOIN graph_nodes f "
         "ON f.node_key = ('file:' || e.source_path) AND f.kind = 'file' "
         "WHERE e.dst_page_key = ? AND e.source_path <> ? "
-        "AND COALESCE(e.relation_type, '') <> 'derived_from' "
         f"AND {_NEWER_THAN} "
         f"AND f.page_type IN ({','.join('?' for _ in range(type_count))}) "
         "AND NOT EXISTS (SELECT 1 FROM graph_edges b WHERE b.source_path = ? "
@@ -688,9 +687,10 @@ def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
     for path, *edge_row in graph.execute(
         _ENTITY_TARGETS_SQL.format(edge=epistemic_graph.EDGE_COLUMNS), (rel_path, rel_path)
     ):
-        # Only a link this page's selected meaning authors names an entity.
+        # Only a link this page's selected meaning authors names an entity, and a
+        # Source citation is not one: its page's registry decides, so Python reads it.
         edge = view.edge_row(edge_row)
-        if edge is None or edge.get("relation_type") == "derived_from" or str(path) in linked:
+        if edge is None or view.has(edge, "sources") or str(path) in linked:
             continue
         linked.append(str(path))
         if len(linked) >= _HYDRATION_ENTITIES_PER_PAGE:
@@ -711,12 +711,14 @@ def _declared_sources(
     sources: dict[str, set[str]] = {path: set() for path in paths}
     if not paths:
         return sources
+    from . import epistemic_graph
+
+    field, relation = epistemic_graph.declared_sources_binding()
     marks = ",".join("?" for _ in paths)
     for src_key, source_key in graph.execute(
         f"SELECT src_key, dst_page_key FROM graph_edges WHERE src_key IN ({marks}) "
-        "AND origin = 'frontmatter' AND source_anchor = 'sources' "
-        "AND relation_type = 'derived_from'",
-        [f"file:{path}" for path in paths],
+        "AND origin = 'frontmatter' AND source_anchor = ? AND relation_type = ?",
+        [*(f"file:{path}" for path in paths), field, relation],
     ):
         if visible is None or visible(str(source_key).removeprefix("file:")):
             sources[str(src_key).removeprefix("file:")].add(str(source_key))
@@ -765,13 +767,10 @@ def _hydration_detect(ctx: Context, entity: str, keep=None) -> dict[str, Any] | 
     seen: set[tuple[str, str]] = set()
     for path, src_key, _updated, _origin, exomem_id, title, _status, *edge_row in rows:
         path = str(path)
-        # A candidate its page does not author spends no contributor slot.
+        # A candidate its page does not author spends no contributor slot, and a
+        # Source citation is no contribution (its page's registry decides it).
         edge = view.edge_row(edge_row)
-        if (
-            edge is None
-            or edge.get("relation_type") == "derived_from"
-            or (path, str(src_key)) in seen
-        ):
+        if edge is None or view.has(edge, "sources") or (path, str(src_key)) in seen:
             continue
         seen.add((path, str(src_key)))
         if _governed(ctx, path, keep) is None:
@@ -1752,13 +1751,11 @@ def _live_edge(alias: str) -> str:
 
 
 def _authored_link(alias: str) -> str:
-    """A kept page-to-page link other than a citation."""
+    """A kept page-to-page link other than a Source citation."""
     from . import epistemic_graph
 
     columns = epistemic_graph.edge_columns(alias)
-    return (
-        f"{_live_edge(alias)} AND COALESCE(exomem_edge_relation({columns}), '') <> 'derived_from'"
-    )
+    return f"{_live_edge(alias)} AND exomem_edge_behaves({columns}, 'sources') = 0"
 
 
 _LINKED_SUBJECTS_SQL = (

@@ -61,7 +61,7 @@ Interfaces:
 - `RelationRegistry.keys_with(behaviour)` returns core and extension keys.
 - `RelationRegistry.frontmatter_fields()` and `frontmatter_relation(field)` expose the field binding (see "Frontmatter fields are registry data").
 - The kind registry gets `traits_of(kind)` and `kinds_with(trait)`.
-- SQL readers expand behaviour keys over the admitted instances through `traversal_profiles.relation_query_plan`, as `relation_edges()` does.
+- SQL readers ask `exomem_edge_behaves(EDGE_COLUMNS, behaviour)`, which reads the edge's behaviours through its authoring page's registry. A reader that filters on stored keys expands them through `traversal_profiles.relation_query_plan`, as `relation_edges()` does, or keeps the candidate status, because an extension is stored as a candidate.
 
 ### Inventory decisions
 
@@ -190,6 +190,8 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | Item | Sites | Why it stays |
 |---|---|---|
 | F7 same-page epistemic flag | relation_census 76, 1460 | Census-only. It is family-keyed, so extensions already reach it. |
+| Projected graph lane tier (K16, change 6) | projection_runtime 1825 | A stored projection edge keeps its canonical key and no extension parent, so only a core plain link ranks last. An extension of `links_to` ranks as typed here until the producer stores the parent. |
+| Shared-source copy in the relation queue (K14 fold) | relation_queue 700 | It reads the frontmatter field's stored edges only, while the graph copy also reads page-level extensions. Folding the two changes suggestions and needs its own evidence. It reads the field and relation from the binding. |
 | F8 affiliation count | relation_census 1232 | One entity-census count for one family. |
 | K7 evidence-target check, with C8 `_EVIDENTIAL_KINDS` | relation_census 74, 1447 | Census-only. `target_kinds` cannot express it, because folders and Sources pages count. The kind list stays with the check. |
 | K8 answers-target check (relation side) | relation_census 1454 | Census-only. `settles` is wrong here, because a `resolves` target is often not a question. The target side reads the `question` trait. |
@@ -200,10 +202,10 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | K21 pointer readers | find_types 202, 209; working_set 480, 1163, 2671; stance 77; delete_file 230; replace 436; context_pack 365, 673; memory_context 135; audit 6229, 6370; semantic_contract 4805; working_set_currency 34 | Naming the field tokens is sound. The repeated rule "a successor pointer means not current" is debt. Fold it into one lifecycle predicate that reads the reverse field from the `supersedes` binding. |
 | K22 field-name lists | lexstore 584; episode_capture 54; review_context 37; entity_types 76; governance/bridges 60; governance/egress 812, 856, 5138; working_set_conversation 143; memory_context 136 | Transport and allow-lists. They carry no behaviour. |
 | K24 teaching copy | commands 1600-1608; relation_vocabulary 84 | Prose. Slice 6 teaches from the pack. |
-| C4 and C5 category fallbacks; C6 category leg; C9; C11 | artifact_role_review 84-92; epistemic_graph 14748; audit 6018 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
+| C4 and C5 category fallbacks; C6 category leg; C9; C11; `CONCLUSION_CATEGORIES`; `_CATEGORY_BY_LABEL` | artifact_role_review 84-92; epistemic_graph 14748; audit 6018; context_roles 796; working_set_index 291 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
 | C10 `UNITS_V1` | sensing 245-275 | Frozen instrument (proposal). |
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
-| Page-type keys found on the way | vocabulary_projection 76; dreamer_families 612; artifact_role_state 210 | Note-type keys where the note-type `role` states the fact. Outside this change. |
+| Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
 
 Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, and projection_runtime 1837 (a core-or-extension test).
 
@@ -217,7 +219,7 @@ Extensions, through the parent:
 3. An extension of `answers` or `resolves` feeds `shared_resolution_target` candidates (K1).
 4. An extension of `supersedes` reaches three readers: role review collects its target (K5), the census builds its chain and date check (K6), and the sensed model records it (K11).
 5. The census checks an extension of `contradicts` inside a supersession chain (K9). Stance and the audit already reach it.
-6. An extension of `links_to` ranks as a plain link in referent resolution and projection tiers, and the census skips it (K16 readers, F10 key leg). The graph's `typed` already treats it this way.
+6. An extension of `links_to` ranks as a plain link in referent resolution and the vocabulary pair query, and the census skips it (K16 readers, F10 key leg). The graph's `typed` already treats it this way. The projected graph lane is excluded (see Debt).
 7. An extension or alias of `about_entity` names the subject in restricted working-set admission (K20).
 8. A page-level extension of `derived_from` seeds shared-source candidates. It also stops a frontmatter source from being proposed again as an authored relation (K14, through the binding).
 9. A grandfathered extension whose saved family differs from its parent's follows the parent in every converted family read: lifts, corrects, associative, membership, replaces, plain_link.
@@ -249,7 +251,7 @@ Core parity: these outputs must be identical.
 - Referent and projection tiers, for one plain link and one typed edge.
 - The page claim.
 - The built-in traversal profiles.
-- For each frontmatter field, the graph, the relation facts and activation record the same edge.
+- For each frontmatter field, the graph and the relation facts record the same edge. Activation counts the relation per field and records no edge direction.
 
 Extensions: one per parent, each showing its line in the intended-changes list.
 - `x.backs` (supports), `x.based_on` (derived_from), `x.closes` (resolves), `x.retires` (supersedes), `x.disputes` (contradicts), `x.see_also` (links_to), `x.concerns` (about_entity).
@@ -277,7 +279,7 @@ Kinds:
 - **Unsourced numbers creep in.** Validation refuses a probability without a holder and a basis, with an error that names the missing key.
 - **Display annotations add noise.** `flag_open` marks every open question, hypothesis, prediction and assumption without a verdict. Slice 5 checks on real models that the annotations help, and f38's P arm shows their effect on outcomes.
 - **Belief units add authoring weight.** A separate unit costs more than a row on the claim. In return, each belief keeps its holder, and several holders can disagree on record.
-- **Behaviour keys from `core_registry()` alone miss vault extensions in SQL.** Expand them through `relation_query_plan` over the admitted instances. The graph's resolution reader already does this, but for labels only.
+- **Behaviour keys from `core_registry()` alone miss vault extensions in SQL.** A stored key column holds core keys, and an extension is a candidate that each page interprets. Readers ask `exomem_edge_behaves`, or expand the keys through `relation_query_plan` over the admitted instances.
 - **A non-core key means what its authoring page's instance defines.** A behaviour lookup uses that page's registry, as the census does.
 - **The grandfathered family-mismatch case flips silently.** The fixture holds one such extension.
 - **A partial cutover leaves one concept on mixed family and key reads.** The fixture asserts extension reach in every reader of a behaviour, not in one.

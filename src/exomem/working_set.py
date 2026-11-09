@@ -477,6 +477,7 @@ def _without_lede_repeats(
             and not any(item.provenance.get(key) for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS)
             and not item.provenance.get("corrects")
             and not item.provenance.get("supersedes_targets")
+            # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
             and not item.provenance.get("superseded_by")
             and (item.ref, str(item.provenance.get("source_hash") or "")) not in qualified_sources
         ):
@@ -1160,6 +1161,7 @@ def _provenance(item: LaneItem) -> dict[str, Any]:
 
 
 def _superseded_targets(item: LaneItem) -> tuple[str, ...]:
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     raw = item.provenance.get("superseded_by")
     if isinstance(raw, str):
         return (raw,)
@@ -1605,9 +1607,9 @@ def _task_links(
     One batched read of the graph owner's neighbour API, so the edge store stays its own. A link lists the
     relation, the target's canonical ref and its title, never a body. `by_path` holds only the catalogue
     pages this caller may see, so a target outside it is never named; `visible` is also passed to the
-    owner API, which re-resolves each link in the caller's view. Typed relations rank by the registry's
-    declared `family` (the rule `find_candidates` uses for graph hits), never by relation name; within a
-    rank the owner API's order stands. Returns None while the graph cannot answer.
+    owner API, which re-resolves each link in the caller's view. Typed relations rank above plain links
+    by the registry's `plain_link` behaviour (the rule `find_candidates` uses for graph hits), never by
+    relation name; within a rank the owner API's order stands. Returns None while the graph cannot answer.
     """
     from . import epistemic_graph
 
@@ -2684,6 +2686,7 @@ def _is_current_page(
         return False
     if page is None:
         return False
+    # Debt (K21): naming the field is sound; "a successor pointer means not current" repeats here.
     if getattr(page, "superseded_by", None):
         return False
     frontmatter = page.frontmatter if isinstance(page.frontmatter, Mapping) else {}
@@ -3743,7 +3746,7 @@ def _carry_admission(
     A rich unit proves subject-associated context, never ownership of every
     sentence. Uncovered prose has no such association and cannot be a bypass.
     """
-    from . import find, semantic_language_registry, vault
+    from . import find, relation_registry, semantic_language_registry, vault
 
     scopes = working_set_resolve.possessive_scopes(analysis)
     if not scopes:
@@ -3772,6 +3775,7 @@ def _carry_admission(
         ) if len(matches) == 1 else frozenset()
     restricted = {}
     registries = {}
+    relation_registries = {}
     language = semantic_language_registry.load_registry(vault_root)
     for path, page in pages.items():
         if page is None:
@@ -3794,6 +3798,8 @@ def _carry_admission(
         restricted[path] = tuple(local)
         registries[path] = semantic_language_registry.for_attached_projects(
             language, tuple(find._all_projects(page.frontmatter)))
+        relation_registries[path] = relation_registry.load_for_page(
+            vault_root, path, page.frontmatter)
 
     def admit(path, hit):
         if path not in restricted:
@@ -3804,9 +3810,11 @@ def _carry_admission(
             return False
         # Subject relations must identify the canonical page. A short alias
         # alone cannot prove identity, even when the turn used a unique name.
+        names_subject = relation_registries[path]
         targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
             .split("|", 1)[0].strip().casefold()
-            for relation in hit.relations if relation.get("kind") == "about_entity"}
+            for relation in hit.relations
+            if "names_subject" in names_subject.behaviours_of_label(str(relation.get("kind") or ""))}
         category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
         if category.status not in {"core", "extension", "alias", "unregistered"}:
             return False

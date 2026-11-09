@@ -261,6 +261,27 @@ def test_specific_and_plain_link_shares_count_authored_relations_only(vault: Pat
     assert (cohort["plain_link_share"]["numerator"], cohort["plain_link_share"]["denominator"]) == (1, 3)
 
 
+def test_an_extension_of_the_plain_link_counts_as_a_plain_link(vault: Path) -> None:
+    overlay = vault / "Knowledge Base/_Schema/relation-registry.yaml"
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nextensions:\n"
+        "  x.see_also: {parent: links_to, description: Points to related reading}\n"
+    )
+    _log_added_edges(
+        vault,
+        [
+            {"generic": False, "origin": "markdown_relation", "relation": "x.see_also"},
+            {"generic": False, "origin": "markdown_relation", "relation": "supports"},
+        ],
+    )
+
+    cohort = relation_census.census(vault)["new_edges"]
+
+    assert (cohort["specific_share"]["numerator"], cohort["specific_share"]["denominator"]) == (1, 2)
+    assert (cohort["plain_link_share"]["numerator"], cohort["plain_link_share"]["denominator"]) == (1, 2)
+
+
 def test_specific_and_plain_link_shares_are_unavailable_when_the_log_names_no_relation(
     vault: Path,
 ) -> None:

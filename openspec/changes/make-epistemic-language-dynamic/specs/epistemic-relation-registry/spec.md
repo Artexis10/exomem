@@ -30,7 +30,8 @@ A core relation entry MAY carry `frontmatter_fields`, a map from a page frontmat
 
 #### Scenario: One binding, one edge
 - **WHEN** page A's frontmatter carries `superseded_by: [[B]]`
-- **THEN** the graph, the relation facts and activation each record one `supersedes` edge from B to A
+- **THEN** the graph and the relation facts each record one `supersedes` edge from B to A
+- **AND** activation counts one `supersedes` relation for that field and records no edge direction
 
 #### Scenario: An extension cannot bind a field
 - **WHEN** a proposed extension sets `frontmatter_fields`
