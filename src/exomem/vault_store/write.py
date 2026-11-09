@@ -321,7 +321,8 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
         if want.linked_from is not None:
             gained = inbound_sources(tx, rel) - want.linked_from
             if gained:
-                raise StoreConflict(rel, f"{min(gained)} now links to it")
+                # No name: the page that linked may be one the caller is not allowed to see.
+                raise StoreConflict(rel, "a page now links to it")
 
 
 def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:

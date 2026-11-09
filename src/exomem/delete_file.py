@@ -305,11 +305,17 @@ def _delete_file_local(
     from .governance import egress
 
     visible = egress.restricted_release_filter(vault_root)
-    # A stored page's links are in the store as of the last commit; the disk shows the projection.
-    linked = (
+    # A stored page's links are in the store as of the last commit and the disk shows only its
+    # projection, so the store names the sources it holds and the disk the rest (a note outside
+    # the Knowledge Base). The commit binds the stored sources; the disk ones are checked here,
+    # once, as file mode does.
+    stored_links = (
+        [] if store_writer is None else store_targets.inbound_links(vault_root, rel_path)
+    )
+    linked = stored_links + (
         find_inbound_wikilinks(vault_root, rel_path)
         if store_writer is None
-        else store_targets.inbound_links(vault_root, rel_path)
+        else store_targets.disk_inbound_links(vault_root, rel_path)
     )
     inbound_all = [match for match in linked if visible is None or visible(match.path)]
     inbound_ignored = [m for m in inbound_all if m.path in expected_set]
@@ -441,11 +447,12 @@ def _delete_file_local(
     if curated and allow_curated:
         log_body += f" allow_curated=true (target tree: {curated})."
     if store_writer is not None:
-        assert catalog_before_hash is not None and prior_markdown is not None
+        assert catalog_before_hash is not None
         return _trash_in_store(
             store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
             metadata_bytes=metadata_bytes, source_hash=catalog_before_hash,
-            linked_from=frozenset(match.path for match in linked), prior_markdown=prior_markdown,
+            linked_from=frozenset(match.path for match in stored_links),
+            prior_markdown=prior_markdown,
             log_entry=(today_iso, rel_no_ext, log_body), inbound=len(inbound),
             inbound_ignored=len(inbound_ignored), warnings=warnings,
         )
@@ -832,7 +839,7 @@ def _trash_in_store(
     metadata_bytes: bytes,
     source_hash: str,
     linked_from: frozenset[str],
-    prior_markdown: str,
+    prior_markdown: str | None,
     log_entry: tuple[str, str, str],
     inbound: int,
     inbound_ignored: int,
@@ -867,11 +874,12 @@ def _trash_in_store(
         ) from conflict
     except (CreateOnlyConflict, PathGuardError, OSError) as error:
         raise DeleteFileError("DELETE_FAILED", "Trash placement could not be published") from error
-    from . import due_state
+    if prior_markdown is not None:
+        from . import due_state
 
-    due_state.refresh_after_writes(
-        root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
-    )
+        due_state.refresh_after_writes(
+            root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
+        )
     today_iso, rel_no_ext, body = log_entry
     log_warning = write_log_entry(
         root, date_iso=today_iso, op="delete_file (trash)", rel_path_no_ext=rel_no_ext, body=body

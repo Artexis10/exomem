@@ -8179,6 +8179,7 @@ def find_inbound_wikilinks(
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
+    target_has_no_file: bool = False,
 ) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -8200,11 +8201,17 @@ def find_inbound_wikilinks(
     `visible` is a reader's view (see `egress.visible_page_filter`; `None`
     for the owner): uniqueness is then counted over the pages it admits, as
     in a vault without the others. Only a basename that is shared is decided.
+
+    `target_has_no_file` says the target is a page that the vault holds but has no file yet (a
+    store page that the projector has not written): the basename count includes it, so a bare
+    `[[foo]]` still resolves to it when no other file is named `foo`.
     """
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
-    return _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+    return _select_inbound_wikilinks(
+        snapshot, target_rel_path, visible, target_has_no_file=target_has_no_file
+    )
 
 
 def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
@@ -8350,6 +8357,8 @@ def _select_inbound_wikilinks(
     data: _InboundIndexData,
     target_rel_path: str,
     visible: Callable[[str], bool] | None,
+    *,
+    target_has_no_file: bool = False,
 ) -> list[InboundLink]:
     _target, target_full, target_stripped, target_basename = _inbound_target_forms(
         target_rel_path
@@ -8362,6 +8371,8 @@ def _select_inbound_wikilinks(
             for rel in data.stem_paths.get(target_basename, ())
             if visible(rel)
         )
+    if target_has_no_file:
+        stem_count += 1
     basename_unique = stem_count == 1
 
     candidates: list[_InboundEntry] = []

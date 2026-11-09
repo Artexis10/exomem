@@ -185,6 +185,39 @@ def test_delete_of_a_page_that_a_stored_page_links_to_refuses_before_the_link_ha
     assert stored_bytes(served, forced.trash_path) == GAMMA_TEXT.encode()
 
 
+def test_delete_of_a_page_that_a_note_outside_the_knowledge_base_links_to_refuses(served):
+    """A store delete that trashes a page that a disk-only note links to, as file mode refuses."""
+    store_gamma(served)
+    note = served / "Inbox/daily.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Asked about [[Gamma]] today.\n", encoding="utf-8")
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=GAMMA, confirm=True)
+
+    assert refused.value.code == "INBOUND_LINKS"
+    assert "Inbox/daily.md:1" in refused.value.reason
+    assert revision(served) == start
+    assert tree(served) == before
+
+
+def test_delete_of_a_stored_page_that_is_not_utf8_still_trashes_it(served, writer):
+    """A store delete that fails with a bare AssertionError on bytes that file mode deletes."""
+    latin = "Knowledge Base/Notes/Latin.md"
+    latin_bytes = b"# Caf\xe9 notes\n"
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "seed", puts=(write.PagePut(latin, latin_bytes),)),
+    )
+
+    result = delete_file.delete_file(served, path=latin, confirm=True)
+
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", latin)
+    assert stored_bytes(served, result.trash_path) == latin_bytes
+
+
 def test_delete_of_a_page_that_gains_a_link_after_the_check_refuses_and_commits_nothing(
     served, writer, monkeypatch
 ):
@@ -214,7 +247,8 @@ def test_delete_of_a_page_that_gains_a_link_after_the_check_refuses_and_commits_
         delete_file.delete_file(served, path=GAMMA, confirm=True)
 
     assert refused.value.code == "STALE_DELETE"
-    assert f"{DELTA} now links to it" in refused.value.reason
+    assert "a page now links to it" in refused.value.reason
+    assert DELTA not in refused.value.reason
     assert revision(served) == start + 1, "only the competing commit may have committed"
     assert stored_bytes(served, GAMMA) == GAMMA_TEXT.encode()
     assert tree(served) == before, "the refused commit must roll back the sidecar it published"

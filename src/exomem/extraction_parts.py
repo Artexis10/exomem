@@ -261,8 +261,11 @@ def plan(
     return Plan(tuple(writes), surplus)
 
 
-def _stored_part_rels(vault_root: Path, rels: list[str]) -> list[str]:
-    """The part pages among `rels` that the store holds, which have no file-side removal."""
+def _store_owned_part_rels(vault_root: Path, rels: list[str]) -> list[str]:
+    """The part pages among `rels` that the store owns by path, whether it holds them yet or not.
+
+    The test is ownership: none of these has a file-side removal.
+    """
     from .vault_store import targets as store_targets
 
     return [rel for rel in rels if store_targets.owns_any(vault_root, files=(rel,))]
@@ -290,7 +293,7 @@ def retire(vault_root: Path, pages: tuple[Path, ...]) -> tuple[str, ...]:
     from . import file_watcher, index_sync
 
     rels = {page: page.relative_to(vault_root).as_posix() for page in pages}
-    kept = tuple(_stored_part_rels(vault_root, list(rels.values())))
+    kept = tuple(_store_owned_part_rels(vault_root, list(rels.values())))
     pages = tuple(page for page in pages if rels[page] not in kept)
     if not pages:
         return kept
@@ -676,7 +679,7 @@ def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
                 result.unowned.append(entry.relative_to(root).as_posix())
         removable = [entry.relative_to(root).as_posix() for entry in surplus]
         # The same split `retire` makes, so a dry run and a real run name the same parts.
-        held = _stored_part_rels(root, removable)
+        held = _store_owned_part_rels(root, removable)
         result.unowned += held
         result.removed += [rel for rel in removable if rel not in held]
         if not dry_run:

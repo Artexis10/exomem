@@ -82,6 +82,21 @@ def inbound_links(vault_root: Path, rel: str) -> list[vault.InboundLink]:
     return links
 
 
+def disk_inbound_links(vault_root: Path, rel: str) -> list[vault.InboundLink]:
+    """The links to ``rel`` from pages that the store does not own, found as file mode finds them.
+
+    A note outside the Knowledge Base or in a dot folder is on disk only, so no graph row names it
+    and ``inbound_links`` cannot see it, while file mode counts it. A source that does not resolve
+    stays in the list: a link counted wrongly costs one ``force_orphan``, a link dropped wrongly
+    orphans a reader.
+    """
+    # The stored page may have no file yet, and the index reads a bare `[[name]]` by counting files.
+    found = vault.find_inbound_wikilinks(
+        vault_root, rel, target_has_no_file=not (Path(vault_root) / rel).exists()
+    )
+    return [link for link in found if not owns_any(vault_root, files=(link.path,))]
+
+
 def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
     """Refuse ``operation`` while the vault is in store mode, for a writer whose paths are pages.
 
