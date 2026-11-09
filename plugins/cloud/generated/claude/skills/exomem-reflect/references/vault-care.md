@@ -112,6 +112,17 @@ AND rarely surfaced in `find` AND low inbound-link degree — surfaced for revie
 only, never decayed or down-ranked; hubs/snapshots excluded as expected-to-drift),
 unregistered project keys, and embedding drift.
 
+Two categories report exact duplicates and run only when you ask for them:
+`duplicate_content` (identical bytes in two or more live Sources or Evidence
+pages) and `duplicate_source_url` (one URL captured with different text). Pass
+them in `categories`, for example
+`read_review(operation={'kind': 'audit', 'categories': ['duplicate_content']})`;
+`attention` takes the same `categories`. A default audit and the default
+attention surface skip them, so an old vault's first run cannot bury the daily
+queue. Each `duplicate_content` finding carries the exact `fold-duplicate` step
+for every copy, or says why it offers none. Propose those steps as one curation plan, then preview, confirm
+and apply it ([curation](#curation)); an undo is a compensation plan.
+
 Per-check detail — exactly what each flags, its severity, and the proposed fix —
 is in **`audit-checks.md`**.
 
@@ -176,7 +187,12 @@ Previews one Planning or Records collection's manifest-declared human filenames 
 
 The governed multi-step mode. The agent authors a closed typed plan from explicit context. Exomem validates and fingerprints it, records one exact-plan approval (`expected_plan_fingerprint`), and executes at most one content step per apply or resume. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal.
 
-Page steps cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. Typed `append-record` and `update-record` steps support Records collections that use `markdown-items` or `sqlite`. Store collections require their serving service; if it is unavailable, a prepared run remains resumable. Planning steps remain unsupported.
+Page steps cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. `move`, `delete` and `supersede` keep refusing Sources and Evidence. Two fold steps are the only way the lane retires one of their pages, and each moves bytes to the trash only after it re-checks that identical bytes are held elsewhere:
+
+- `fold-duplicate` folds one copy into a canonical page that holds identical bytes in the same lane. The canonical page gains the copy's families, import mappings and back-references. The copy is marked superseded, and every page that cited it now cites the canonical page. It refuses a copy across lanes, a raw-protected page and bytes that differ. Read the exact step schema in the curation work item.
+- `fold-recap-revisions` moves the superseded recap files of one episode into the history of its live page. Use it for an episode that still has many of them from the earlier layout.
+
+A compensation plan restores the pages and bytes of either fold. Typed `append-record` and `update-record` steps support Records collections that use `markdown-items` or `sqlite`. Store collections require their serving service; if it is unavailable, a prepared run remains resumable. Planning steps remain unsupported.
 
 `hydration_recheck` is a same-identity continuation ordinal (1 to 8). The eighth is closure-only and cannot bind another plan.
 

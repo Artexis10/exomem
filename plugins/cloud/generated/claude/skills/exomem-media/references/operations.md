@@ -93,7 +93,9 @@ Compensation is a separate history-preserving plan. Derive it with
 confirmation before `curation_action="apply-compensation"`. Never treat
 compensation as rollback, reuse a forward approval, grant standing approval, or
 route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
-paths, or trash internals through curation.
+paths, or trash internals through curation page steps. The two fold steps in
+[vault-care](vault-care.md#curation) are the only exception: they retire a
+duplicate Source or Evidence page, or an episode's old recap files.
 
 ## Records
 
@@ -357,7 +359,9 @@ None.
    them: read each, choose its kind, and reclassify it.
 
 ### Edge cases
-- **Duplicate URL.** If a source with the same URL already exists, surface it and ask whether to capture again or link to the existing one.
+- **Same text again.** A text capture whose text a readable Source already holds is not stored again. The result carries `capture_outcome: "reused"`, `duplicate_of` naming the existing Source, and `fields_not_applied`: one row (`field`, `provided`, `kept`) for each field you passed whose value differs from the existing Source's, such as a title or a tag. Nothing is written or merged, so tell the person what the existing Source did not take. A capture that carries its own identity (adoption, correction or episode fields) always writes.
+- **Same URL, other text.** The capture writes a new Source and returns a `same_url` advisory: `count` and up to five earlier Sources (`ref`, `path`, `title`, `captured`). Surface it when the person may want the earlier capture linked or superseded, and keep going otherwise.
+- **`duplicate_check_unavailable`.** The check could not run, so the capture was stored as new. The audit finds any duplicate later ([audit-checks](audit-checks.md#duplicate-content-and-source-urls)).
 - **Very long content.** > ~50KB raw text: capture an excerpt (first ~5KB + "..." + last ~2KB), put full URL in frontmatter, note in body that it's an excerpt.
 - **Sensitive content.** If the source contains anything that looks like credentials, API keys, or unrelated PII: refuse capture, surface the issue, ask for a cleaned re-paste.
 
@@ -612,7 +616,7 @@ preserve_artifacts(..., files=[...],
 `key` is one per hand-over, such as the file name plus a version.
 `selected_file_id` names the handle you hand over; any other supplied handle
 reports `unselected` and creates no artifact. Identical bytes already stored
-report `already_stored` and write nothing. Without a usable direct handle, use
+report `already_stored` and are not stored again (an Evidence hand-over into another family only adds that family to the existing page). Without a usable direct handle, use
 the ordinary upload handoff and report `handoff_required` or `handoff_prepared`
 as non-committing. A token, description, or reconstructed text is not a saved
 artifact.
@@ -651,10 +655,11 @@ need confirmed `restructure_execution`. An independently authored edge follows t
 ### Edge cases
 - **Sensitive content.** If the file contains credentials, API keys, or third-party PII unrelated to the evidence purpose: surface it before writing. Your own PII in your own evidence is fine — it's your data, your vault.
 - **Duplicate filename.** Surface it. Append-only means no overwrite; either rename with a `-v2` suffix or confirm it's the same file already preserved.
+- **Same bytes again.** Identical bytes are stored once in the vault. A hand-over of bytes that an Evidence page already holds, under another scope or category, adds that family to the existing page and stores nothing new: the row answers `already_stored` naming the existing page, with `families` (every family the page now lists, its first folder first) and `family_added: true`. A filename or description you passed that the page does not carry is named in `fields_not_applied` (`{field, provided, kept}`) and is not applied. The same family again answers `already_stored` with `family_added: false` and writes nothing. The page stays in its first folder, so browse a family by its tag filter or the page's `families` list, not by folder. Raw-protected bytes are the exception: each family keeps its own copy.
 - **Wrong scope/category.** If a named scope/category doesn't match the existing structure, surface the existing options and ask before creating new ones.
 
 ### Writes performed
-- One new file in `Evidence/<scope>/<category>/`
+- One new file in `Evidence/<scope>/<category>/`, or nothing new when the bytes are already stored (an existing page may gain a family)
 - Optionally a sidecar `<filename>.md` (when `description` and/or `text` is supplied) — embedded on write
 - Optionally updated `Evidence/<scope>/index.md`
 - Optionally a cross-reference line in a relevant `Sources/` or `Entities/` note (with confirmation)
@@ -951,7 +956,7 @@ this is how you query their values.
 
 ## record_episode/read_episode
 
-Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. Recording again under the same `episode` with changed content adds a revision and retires the previous one; an identical retry writes nothing.
+Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. An episode keeps one page. Recording again under the same `episode` with changed content rewrites that page in place and keeps the previous text, without limit, in the page's history; read it with `read_memory` and `include_history` ([supersession](supersession.md)). An identical retry writes nothing.
 
 ### Preserved materials
 
@@ -1039,8 +1044,8 @@ Every selected file is imported or refused with a per-path code; none is dropped
 ### Lifecycle
 1. `start` scans a subtree read-only and snapshots a candidate inventory (`path`, `include_hidden`). The path is vault-relative: stage a folder outside the vault first with `exomem import <folder>` and start on the path it prints. Pass `collection` to name the collection; a re-staged copy of the same collection under a new path then imports nothing twice. A large folder starts page by page: while a reply carries `next_after`, call `start` again with it as `after` and no `path` or `collection`. `consume=false` keeps staged copies after filing. The whole flow is in [importing](importing.md).
 2. `select` materializes a folder-rule selection server-side (`include`, `exclude`, `overrides`, `include_junk`). An `include` entry is a folder path, or a rule object. `{path, source_kind, domain}` files that folder's items under a registered Source kind and domain. `{path, adopt_as: "note", note_type, project?, domain?}` also makes each Markdown file there a draft note of that registered compiled type (`project` or `domain` where the note leaf needs one for that type; the leaf picks the folder). An unregistered kind or note type, or a type the leaf cannot place, is refused with the selection unchanged.
-3. `plan` previews exact targets, titles, hashes, frontmatter and resolved or unresolved links. It reports `existing_ref` for an item that an earlier import already holds with the same bytes. An own-note item also shows its note target, title, front matter and links, `existing_note` when an earlier run made the note, and `previous_note` when the original changed (the new Source then stands alone).
-4. `apply` copies the validated subset into governed Sources with provenance (`plan_id`; `retry_failed` and `only_paths` narrow a retry), then creates each own-note item's draft note. An own-note item is complete only when its Source and its note exist; `source-applied` marks one whose note is still owed. A note target taken by another page fails the item with `TARGET_OCCUPIED`. A draft note leaves its Source in the review backlog until the note is promoted to live.
+3. `plan` previews exact targets, titles, hashes, frontmatter and resolved or unresolved links. It reports `existing_ref` for an item whose bytes a Source already holds, and plans that item as `already-imported`: no second Source or artifact is written. A repeat of one file inside the plan is a `duplicate-of` item that plans no write. An own-note item also shows its note target, title, front matter and links, `existing_note` when an earlier run made the note, and `previous_note` when the original changed (the new Source then stands alone).
+4. `apply` copies the validated subset into governed Sources with provenance (`plan_id`; `retry_failed` and `only_paths` narrow a retry). An item whose bytes a Source already holds is `already-applied`: the existing Source records the new path in `also_imported_from` (`mapped: true`, counted in the reply's `duplicates.mapped`), and a re-run writes nothing. `duplicates.check_unavailable` counts items stored as new because the check could not run. Apply then creates each own-note item's draft note. An own-note item is complete only when its Source and its note exist; `source-applied` marks one whose note is still owed. A note target taken by another page fails the item with `TARGET_OCCUPIED`. A draft note leaves its Source in the review backlog until the note is promoted to live.
 5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, reports `coverage` (imported, refused, pending extraction, unresolved links, hidden folders counted, notes created, found and failed) and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true). For a staged import it also reports `residual`, the files still staged by reason, and the discard route once the last page is done.
 
 `plan` and `apply` stop inside the request budget. While a result carries `continuation`, call the same action again with that `continuation` and the unchanged other arguments. The run is done when no `continuation` returns and `phase` is `applied`; a stopped call leaves the remaining work in `status`.
@@ -1054,4 +1059,4 @@ Per-run `status` defaults to a compact summary. Detail views (`inventory`, `sele
 
 ## One-shot adoption
 
-One-shot adoption preserves originals. Use `read_import` with `operation.kind="scan-only"` to inspect first. Use `import_memory` with `operation.kind` set to `save-manifest`, `copy-as-sources` or `compile-selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.
+One-shot adoption preserves originals. Use `read_import` with `operation.kind="scan-only"` to inspect first. Use `import_memory` with `operation.kind` set to `save-manifest`, `copy-as-sources` or `compile-selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. `copy-as-sources` skips a file whose bytes the vault already stores (`ALREADY_IMPORTED`, with the existing Source's ref) or an earlier selected file holds (`DUPLICATE_IN_SELECTION`), and records no import mapping. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

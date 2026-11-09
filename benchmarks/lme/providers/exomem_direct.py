@@ -68,6 +68,7 @@ class ExomemDirectProvider:
     def cleanup(self) -> None:
         try:
             try:
+                self._await_background_work()
                 self._close_writer_runtime()
             finally:
                 self._adapter.cleanup()
@@ -83,6 +84,20 @@ class ExomemDirectProvider:
             self._context = None
             self._question_date = None
             self._adapter.last_ingest_results = ()
+
+    def _await_background_work(self) -> None:
+        """Let the product's background graph and catalogue work finish before this case's directories are retired.
+
+        A capture into a fresh vault starts that work on daemon threads, and the threads take lock files under
+        this case's lease directory: retiring the directory under them fails or leaves state behind.
+        """
+        vault = self._adapter._vault
+        if vault is None:
+            return
+        from exomem import graph_sync, lexstore
+
+        if not (graph_sync.drain_active_rebuilds(timeout=60.0) and lexstore.await_repairs_idle(vault, timeout=60.0)):
+            raise RuntimeError("direct provider background work is still active")
 
     def _close_writer_runtime(self) -> None:
         """Retire only this case's in-process leases before its FD is reusable.

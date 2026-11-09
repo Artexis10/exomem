@@ -81,15 +81,21 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # With all of the changes above, the complete local wire measures 170,940 B, so the budget is 170,950 B.
 # The video kind of read_media takes `max_side` as the image kind does, so a caller chooses the frame
 # size: read_media measures 1,790 B and its ceiling rounds to 1,800 B. The total stays within budget.
+# The held listing kind on read_review (133 B) and the held-resolve kind on repair_memory (442 B)
+# let an agent settle an outside edit that raced an Exomem change: read_review measures 7,724 B
+# and repair_memory 6,487 B, so their ceilings round to 7,750 B and 6,500 B. The complete local
+# wire measured 171,400 B with these two kinds alone.
 # The `archive` field on preserve_artifacts keeps a held zip as members that a collection import
 # reads: preserve_artifacts measures 2,405 B and its ceiling rounds to 2,450 B. The complete local
-# wire measures 170,945 B, so the total stays within budget.
+# wire measured 170,945 B with that field alone.
+# With the held kinds and the archive field together, the complete local wire measures 171,520 B,
+# so the budget is 171,550 B.
 # The `file` kind of import_memory adds one variant (kind, path, collection, continuation) and the lead
 # sentence that names it: import_memory measures 6,653 B, 9% over its old size, and its ceiling rounds to
 # 6,700 B. read_import names `file` as the next step and measures 3,119 B, so its ceiling rounds to 3,150 B.
 # The kind replaces a six-call import loop.
-# With every change above, the complete local wire measures 171,567 B, so the budget is 171,600 B.
-TOTAL_BUDGET = 171_600
+# With every change above, the complete local wire measures 172,142 B, so the budget is 172,150 B.
+TOTAL_BUDGET = 172_150
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -137,12 +143,12 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_memory": 3450,
     "read_plans": 2800,
     "read_records": 3350,
-    "read_review": 7600,
+    "read_review": 7750,
     "read_schema": 16700,
     "recall_context": 2950,
     "record_episode": 5500,
     "record_memory": 4600,
-    "repair_memory": 6050,
+    "repair_memory": 6500,
     "review_item_context": 1300,
     "review_memory": 3500,
     "schema_memory": 4200,

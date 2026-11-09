@@ -91,11 +91,12 @@ def recover_from_trash(
     today: dt.date | None = None,
     validate_only: bool = False,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
+    _fold: bool = False,
 ) -> RecoverResult:
     from .media_store import local_originals
 
     with local_originals(vault_root, (trash_path,)):
-        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews)
+        return _recover_from_trash_local(vault_root, trash_path=trash_path, restore_path=restore_path, allow_curated=allow_curated, today=today, validate_only=validate_only, relation_reviews=relation_reviews, _fold=_fold)
 
 
 def _recover_from_trash_local(
@@ -107,6 +108,7 @@ def _recover_from_trash_local(
     today: dt.date | None = None,
     validate_only: bool = False,
     relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
+    _fold: bool = False,
 ) -> RecoverResult:
     try:
         trash_abs, trash_rel = resolve_under_vault(
@@ -256,7 +258,8 @@ def _recover_from_trash_local(
 
     # Append-only / curated guards on the restore destination.
     append_only = in_append_only_tree(restore_rel)
-    if append_only:
+    # Only the undo of a fold restores into Sources: it puts back the exact bytes the fold trashed.
+    if append_only and not _fold:
         raise RecoverError(
             code="APPEND_ONLY",
             reason=(

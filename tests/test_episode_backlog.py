@@ -51,7 +51,7 @@ def _effect(vault: Path) -> dict:
 def test_a_write_keeps_the_stored_rows_as_a_full_rebuild_would_leave_them(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A write that cites a recap, or supersedes one, must refresh the live revision's row
+    """A write that cites a recap, or revises one, must refresh the live page's row
     without a vault-wide rebuild, and agree with the rebuild: a stale row nags about a settled item."""
     due_state.reconcile(vault)
     monkeypatch.setattr(due_state, "reconcile", lambda *_a, **_k: pytest.fail("a write must not rebuild"))
@@ -65,7 +65,7 @@ def test_a_write_keeps_the_stored_rows_as_a_full_rebuild_would_leave_them(
 
     _record(vault, decided=[*lines, "Pay by card"], open=["Pick the paint"])
     ((live, entries),) = _rows(vault).items()
-    assert live == _episodes(vault)[-1].relative_to(vault).as_posix() != first
+    assert live == first == _episodes(vault)[-1].relative_to(vault).as_posix()
     assert entries["open"][0]["due_since"] == _frontmatter(_episodes(vault)[-1])["captured"].date().isoformat()
     assert _rows(vault) == due_state.recompute(vault)["categories"][FAMILY]
 
@@ -106,12 +106,14 @@ def test_a_default_audit_leaves_recaps_out_and_an_explicit_request_lists_them(va
     assert [finding.path for finding in audit.audit(vault, categories=[FAMILY]).findings] == [recap]
 
 
+@pytest.mark.usefixtures("earlier_layout")
 def test_a_restricted_caller_is_not_served_the_stored_rows_and_its_audit_item_ignores_the_withheld_citer(
     vault: Path,
 ) -> None:
     """The stored row counts lines against the owner's view of the citing pages, so serving it to a
     restricted caller would show a count that moves with a page withheld from it. Its own audit
-    already reads as if the page did not exist."""
+    already reads as if the page did not exist. Only an episode that an earlier release left as
+    several files holds a partly cited recap, so the test lays one out."""
     lines = ["Buy the brass lamp", "Ship by rail"]
     first = _record(vault, decided=lines[:1])["source"]["path"]
     _record(vault, decided=lines)
