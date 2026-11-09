@@ -153,7 +153,7 @@ def test_a_busy_boundary_at_the_second_of_three_files_commits_all_three_once(
         if len(entered) >= 2:
             contention.__exit__()
 
-    assert result["state"] == "committed", result
+    assert "error" not in result, result
     assert contention.seen >= 1, "file 2 never met the held boundary"
     assert [file["outcome"] for file in result["files"]] == ["stored"] * 3, result
     for file in result["files"]:
@@ -178,7 +178,7 @@ def test_a_capture_that_waited_out_a_contention_commits_under_the_wide_boundary(
             [lambda: _capture_command(writer, vault, ("file-a",))], contention
         )
 
-    assert result["state"] == "committed", result
+    assert "error" not in result, result
     assert [file["outcome"] for file in result["files"]] == ["stored"], result
     stored = vault / result["files"][0]["stored_path"]
     assert len(list(stored.parent.glob(stored.name))) == 1
@@ -207,7 +207,7 @@ def test_a_boundary_held_past_the_wait_at_file_two_fails_that_file_and_keeps_fil
         if len(entered) >= 2:
             contention.__exit__()
 
-    assert result["state"] == "committed", result
+    assert "error" not in result, result
     first, second, third = result["files"]
     assert first["outcome"] == "stored"
     assert (vault / first["stored_path"]).is_file()

@@ -561,10 +561,10 @@ def test_lease_graph_wait_does_not_finalize_a_degraded_governed_delete(
         (tmp_path / "Knowledge Base/_Governance/deletion-tombstones").glob("*.json")
     )
     assert calls == [1]
-    assert result["status"] == "committed"
+    assert result["diagnostics"]["operational"]["status"] == "committed"
     # The write no longer waits on derived graph work (#576/#588), so it reports
     # `pending`; the graph's own outcome is asserted after joining the flight.
-    assert result["graph_sync"] == "pending"
+    assert result["diagnostics"]["operational"]["graph_sync"] == "pending"
     graph_sync.await_active_rebuild(tmp_path, state_root=tmp_path / "state")
     assert any("remains tombstoned until reconcile" in warning for warning in result["diagnostics"]["warnings"])
     assert len(tombstones) == 1
@@ -627,17 +627,18 @@ def _assert_outer_fanout_failure_terminal(
     calls: list[int],
     observed: list[graph_sync.GraphSyncCheckpoint | None],
 ) -> None:
-    result = manager.invoke(command, (vault,), {}, idempotency_key=key)
-    replay = manager.invoke(command, (vault,), {}, idempotency_key=key)
+    result = manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key=key)
+    replay = manager.invoke(command, (vault,), {"response_detail": "full"}, idempotency_key=key)
 
     assert calls == [1]
-    assert replay == result
+    assert replay == {**result, "replayed": True}
     assert observed == [graph_sync.read_checkpoint(vault)]
     assert observed[0] is not None
-    assert result["status"] == "committed"
-    assert result["graph_sync"] == "failed"
-    assert result["graph_sync_code"] == "GRAPH_SYNC_FANOUT_FAILED"
-    assert result["graph_sync_checkpoint"] == observed[0].checkpoint_sha256
+    operational = result["diagnostics"]["operational"]
+    assert operational["status"] == "committed"
+    assert operational["graph_sync"] == "failed"
+    assert operational["graph_sync_code"] == "GRAPH_SYNC_FANOUT_FAILED"
+    assert operational["graph_sync_checkpoint"] == observed[0].checkpoint_sha256
 
 
 def test_lease_delete_file_outer_fanout_failure_keeps_an_exact_graph_handle(

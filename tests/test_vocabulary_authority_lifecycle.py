@@ -219,7 +219,7 @@ def test_floor_two_pending_session_activation_and_session_revocation(
                 "authorization_session_credential": bearer,
             },
         )
-        assert disclosed["status"] == "committed"
+        assert disclosed["diagnostics"]["operational"]["status"] == "committed"
 
     schema_command = next(
         command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory"
@@ -237,6 +237,7 @@ def test_floor_two_pending_session_activation_and_session_revocation(
         "proposal": {"schema_version": 1, "entity_types": {"venue": venue}},
         "expected_hash": entity_types.load_entity_types(vault).extension_hash,
         "why": "Register the exact reviewed structural meaning.",
+        "response_detail": "full",
     }
     with request_scope(principal), pytest.raises(vocabulary_authority.VocabularyAuthorityDenied) as denied:
         manager.invoke(
@@ -277,8 +278,9 @@ def test_floor_two_pending_session_activation_and_session_revocation(
             idempotency_key="venue-type-v1",
             read_only=False,
         )
-    assert committed["state"] == "committed"
-    assert isinstance(committed.get("receipt_id"), str) and committed["receipt_id"]
+    operational = committed["diagnostics"]["operational"]
+    assert operational["state"] == "committed"
+    assert isinstance(operational.get("receipt_id"), str) and operational["receipt_id"]
     assert "venue:" in registry_path.read_text(encoding="utf-8")
     assert entity_types.load_entity_types(vault).resolve("venue") is not None
 
@@ -303,7 +305,7 @@ def test_floor_two_pending_session_activation_and_session_revocation(
                 "authorization_session_credential": bearer,
             },
         )
-    assert disclosed["status"] == "committed"
+    assert disclosed["diagnostics"]["operational"]["status"] == "committed"
     registry_before_revocation = registry_path.read_bytes()
     control.revoke(principal=principal, body={"authority_id": authority_id})
     guild = {

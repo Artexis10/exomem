@@ -355,9 +355,10 @@ def test_one_notice_is_projected_on_compact_and_replay(tmp_path):
         )
         replay = manager.idempotency.run("vocabulary-replay", "a" * 64, operation)
         compact = mutation_terminal.project_terminal(result)
-        assert compact == mutation_terminal.project_terminal(replay)
+        assert mutation_terminal.project_terminal(replay) == {**compact, "replayed": True}
     assert calls == 1
-    assert compact["state"] == "committed"
+    full = mutation_terminal.project_terminal(result, "full")
+    assert full["diagnostics"]["operational"]["state"] == "committed"
     assert compact["vocabulary_advisory"]["ref"].startswith("exomem://review/vocabulary/")
     assert len(json.dumps(compact["vocabulary_advisory"]).encode()) <= 1024
     assert str(tmp_path) not in json.dumps(compact)
@@ -395,7 +396,7 @@ def test_canonical_command_boundary_delivers_guidance_after_commit(tmp_path):
         first = manager.invoke(command, (tmp_path,), {}, idempotency_key="canonical-write")
         replay = manager.invoke(command, (tmp_path,), {}, idempotency_key="canonical-write")
     assert first["vocabulary_advisory"]["ref"].startswith("exomem://review/vocabulary/")
-    assert replay == first
+    assert replay == {**first, "replayed": True}
     assert calls == 1
 
 

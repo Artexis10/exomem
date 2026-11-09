@@ -119,7 +119,7 @@ def _ask(root: Path, who: RequestPrincipal) -> tuple[set[str], list[str]]:
     """The paths ask_memory returned, and the components its warming marker names."""
     command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "ask_memory")
     with request_scope(who):
-        result = writer_lease.invoke_command(command, root, query=QUERY, limit=20)
+        result = writer_lease.invoke_command(command, root, query=QUERY, limit=20, include_timings=True)
     hits = result["hits"] if isinstance(result, dict) else result
     return {hit["path"] for hit in hits}, (result.get("warming") or {}).get("components", []) if isinstance(result, dict) else []
 

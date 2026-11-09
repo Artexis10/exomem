@@ -109,6 +109,20 @@ def classify(rel: str) -> Ownership:
     return Ownership.BINARY
 
 
+def owns_folder(rel: str) -> bool:
+    """Whether the store owns the files that a folder holds, by the rules ``iter_owned`` walks by.
+
+    A folder below the Knowledge Base folder (or that folder itself) that no dot-named component,
+    collection layer or reserved family takes. It does no I/O.
+    """
+    kb = kb_dirname()
+    if rel != kb and not rel.startswith(kb + "/"):
+        return False
+    if any(_is_dot_name(part) for part in rel[len(kb) + 1:].split("/")):
+        return False
+    return _claimed(rel) is not Ownership.NONE
+
+
 def iter_owned(
     vault_root: Path, *, on_skip: Callable[[Skipped], None] | None = None,
 ) -> Iterator[OwnedFile]:

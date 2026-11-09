@@ -206,10 +206,11 @@ def test_maintain_memory_reaches_a_store_collection_instead_of_answering_not_fou
         plan = writer_lease.invoke_command(maintain, store.root, mode="structured-files", collection=CID)
         receipt = writer_lease.invoke_command(
             maintain, store.root, mode="structured-files", collection=CID, apply=True, plan_id=plan["plan_id"],
-            source_snapshot=plan["source_snapshot"], why="readable filenames")
+            source_snapshot=plan["source_snapshot"], why="readable filenames", response_detail="full")
     store.reconcile_views()
 
     assert [move["to"] for move in plan["moves"]] == [f"{ITEMS}/Ship the importer.md"]
     # The writer lease accepts only the closed structured-files receipt as a committed terminal.
-    assert receipt["state"] == "committed" and receipt["mutated"] is True
+    operational = receipt["diagnostics"]["operational"]
+    assert operational["state"] == "committed" and operational["mutated"] is True
     assert (store.root / ITEMS / "Ship the importer.md").exists()

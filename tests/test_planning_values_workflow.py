@@ -131,29 +131,29 @@ def test_a_vault_status_is_used_classified_archived_and_reverted(
             "why": "plans for later",
         },
     )
-    assert created.get("success") is not False, created
+    assert "error" not in created, created
     views = call("plan_memory", {"action": "inspect", "collection": later})["saved_views"]
     assert "off" in {view["name"] for view in views}
 
     # plan_memory accepts the vault status; due-state and the audit read it as open.
-    assert _add(call, vault, "Batch 1").get("success") is not False
-    assert _triage(call, "Batch 1", "waiting").get("success") is not False
+    assert "error" not in _add(call, vault, "Batch 1")
+    assert "error" not in _triage(call, "Batch 1", "waiting")
     reported = report_event(vault, "Batch 1")
     assert reported["due_state"]["categories"] == {FAMILY: 1}
     assert _open_titles(vault) == {"Batch 1"}
 
     # An open status cannot be archived.
     refused = _archive(call, "Batch 1")
-    assert refused["success"] is False
+    assert "error" in refused
     assert refused["error"]["code"] == "INVALID_PLAN"
 
     # A dropped status settles the item and admits the archive.
-    assert _triage(call, "Batch 1", "parked").get("success") is not False
+    assert "error" not in _triage(call, "Batch 1", "parked")
     assert _open_titles(vault) == set()
     assert due_state_module.served_entries(vault) == []
-    assert _archive(call, "Batch 1").get("success") is not False
+    assert "error" not in _archive(call, "Batch 1")
 
-    assert _add(call, vault, "Batch 2", status="waiting").get("success") is not False
+    assert "error" not in _add(call, vault, "Batch 2", status="waiting")
 
     # The owner reverts the save.
     history = call("schema_memory", {"subject": "planning-values", "operation": "history"})
@@ -187,9 +187,9 @@ def test_a_vault_status_is_used_classified_archived_and_reverted(
             "why": "clarify the title",
         },
     )
-    assert renamed.get("success") is not False, renamed
+    assert "error" not in renamed, renamed
     added = _add(call, vault, "Batch 3", status="waiting")
-    assert added["success"] is False
+    assert "error" in added
     assert added["error"]["code"] == "INVALID_PLAN"
 
 
@@ -242,7 +242,7 @@ def test_registry_parents_bind_only_the_writes_that_depend_on_them(
     added = _add(
         call, vault, "Epic", kind="epic", parent=collections.plan_ref(PLANNING_ID, outcome)
     )
-    assert added.get("success") is not False, added
+    assert "error" not in added, added
 
     # The owner removes the kind, then registers it again under other parents.
     _restore_latest(call, "drop epics")
@@ -263,14 +263,14 @@ def test_registry_parents_bind_only_the_writes_that_depend_on_them(
 
     # Changing the epic's kind would strand its story, so it refuses.
     epic = collections.plan_ref(PLANNING_ID, _guards(call, "Epic")["plan_id"])
-    assert _add(call, vault, "Story", kind="story", parent=epic).get("success") is not False
+    assert "error" not in _add(call, vault, "Story", kind="story", parent=epic)
     rekinded = _update(call, "Epic", {"kind": "initiative"})
-    assert rekinded["success"] is False
+    assert "error" in rekinded
     assert rekinded["error"]["code"] == "INVALID_PLAN_RELATION"
 
     # With both kinds removed, an edit that cannot tighten a parent rule still writes.
     _restore_latest(call, "drop epics and stories")
-    assert _update(call, "Epic", {"commitment": "considering"}).get("success") is not False
+    assert "error" not in _update(call, "Epic", {"commitment": "considering"})
 
     # A caller who cannot read the vault's definitions cannot re-parent or re-kind.
     guards = _guards(call, "Epic")
@@ -295,8 +295,8 @@ def test_a_restricted_reconcile_does_not_reopen_an_item_a_vault_status_settled(
     # Bootstrap names the vault status, which the planning block does not list.
     served = call("bootstrap", {"section": "vocabulary"})["vocabulary"]
     assert "status.shipped" in served["planning-values"]["new"]
-    assert _add(call, vault, "Batch 1").get("success") is not False
-    assert _triage(call, "Batch 1", "shipped").get("success") is not False
+    assert "error" not in _add(call, vault, "Batch 1")
+    assert "error" not in _triage(call, "Batch 1", "shipped")
     due_state_module.reset_emission_state()
     due_state_module.reconcile(vault)
 

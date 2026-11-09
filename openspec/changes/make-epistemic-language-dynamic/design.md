@@ -107,7 +107,7 @@ The 27 built-in kinds in `semantic_blocks.py` move into the shipped pack. `defin
 
 ### Verdicts are state
 
-Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. An experiment page's `outcome:` shares the verdict vocabulary today through one constant, so it follows the registry too: a vault-added verdict is a valid outcome. Outcomes take keys only, and unit verdicts also accept labels, which resolve to the same keys. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing.
+Verdicts become a registry with shipped defaults (abandoned, confirmed, inconclusive, qualified, refuted), labels and descriptions. A vault can add a verdict or translate one. An experiment page's `outcome:` shares the verdict vocabulary today through one constant, so it follows the registry too: a vault-added verdict is a valid outcome. Outcomes take keys only, and unit verdicts also accept labels, which resolve to the same keys. Verdicts carry no behaviours. A verdict changes no lifecycle, standing or rank, as today, and a refuted claim keeps active standing. Role review held three checks on verdict keys that no shipped verdict has (`retracted`, `false`, `failed`). They were unreachable, because validation refused those values, so this change removes them rather than let a vault verdict gain behaviour by its key.
 
 ### Epistemic dimensions
 
@@ -205,6 +205,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | C4 and C5 category fallbacks; C6 category leg; C9; C11; `CONCLUSION_CATEGORIES`; `_CATEGORY_BY_LABEL` | artifact_role_review 84-92; epistemic_graph 14748; audit 6018; context_roles 796; working_set_index 291 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
 | C10 `UNITS_V1` | sensing 245-275 | Frozen instrument (proposal). |
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
+| Vault verdicts in the vault-neutral parse | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column; the `unit` an `observe_memory` result returns | These read the parse that uses the shipped registry, as vault kinds and categories already are there. A vault verdict shows in `metadata.verdict` and in the selected unit view, not in `unit.verdict` of the neutral parse. A vault-registry change does not rebuild the derived stores, as for relations. |
 | Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
 
 Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, and projection_runtime 1837 (a core-or-extension test).
@@ -283,4 +284,4 @@ Kinds:
 - **A non-core key means what its authoring page's instance defines.** A behaviour lookup uses that page's registry, as the census does.
 - **The grandfathered family-mismatch case flips silently.** The fixture holds one such extension.
 - **A partial cutover leaves one concept on mixed family and key reads.** The fixture asserts extension reach in every reader of a behaviour, not in one.
-- **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them.
+- **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them. A vault overlay is not: older code reads a saved `verdicts:` section or a kind's `traits:` as `unknown_field` errors, so every vault category then resolves `registry_invalid`. Rolling back after a vault saves verdicts or kind traits needs those sections removed from its registry first.

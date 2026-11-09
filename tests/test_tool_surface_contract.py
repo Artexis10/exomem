@@ -191,10 +191,11 @@ def test_observe_schema_field_split_renders_one_compact_row(
             "relation_disposition": "reviewed_none",
             "relation_review_hash": semantic["transition_hash"],
             "relation_review_reason": "No honest relation exists in this synthetic page.",
+            "response_detail": "full",
         },
     )
 
-    assert committed["mutated"] is True
+    assert committed["diagnostics"]["operational"]["mutated"] is True
     authored = page.read_text(encoding="utf-8")
     assert "- [operating_constraint] Keep retries bounded #reliability (edge path) ^" in authored
     assert "- [operating_constraint] - [" not in authored
@@ -396,7 +397,8 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
         "title": "MCP-only repair",
         "content": "# MCP-only repair\n\nOrdinary prose only.\n",
     }
-    refusal = _call_tool(mcp, "remember", invalid)
+    # The compact refusal names the finding; its remediation prose rides under `full`.
+    refusal = _call_tool(mcp, "remember", {**invalid, "response_detail": "full"})["diagnostics"]
     assert refusal["success"] is False
     assert refusal["error"]["code"] == "missing_semantic_unit"
     assert refusal["mutated"] is False
@@ -431,9 +433,10 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
             "draft_id": validation["draft_id"],
             "draft_hash": validation["draft_hash"],
             "draft_token": validation["draft_token"],
+            "response_detail": "full",
         },
     )
-    assert committed["mutated"] is True
+    assert committed["diagnostics"]["operational"]["mutated"] is True
     assert (tmp_path / "empty-vault" / committed["path"]).exists()
 
 
@@ -516,7 +519,7 @@ def test_missing_unit_failure_envelope_matches_mcp_rest_and_cli_json(
         "content": "# Facade refusal\n\nOrdinary prose only.\n",
     }
 
-    mcp_payload = _call_tool(mcp, "remember", invalid)
+    mcp_payload = _call_tool(mcp, "remember", {**invalid, "response_detail": "full"})["diagnostics"]
     client = TestClient(mcp.http_app())
     response = client.post(
         "/api/remember",
@@ -598,7 +601,9 @@ def test_observe_final_unit_removal_envelope_matches_all_facades_without_mutatio
         if path.is_file()
     }
 
-    mcp_payload = _call_tool(mcp, "observe_memory", removal)
+    mcp_payload = _call_tool(mcp, "observe_memory", {**removal, "response_detail": "full"})[
+        "diagnostics"
+    ]
     client = TestClient(mcp.http_app())
     response = client.post(
         "/api/observe_memory",
@@ -663,7 +668,7 @@ def test_observe_unrelated_refusals_reach_the_client_as_a_coded_envelope(
         },
     )
 
-    assert result["success"] is False
+    assert set(result) == {"error"}
     assert result["error"]["code"] == "UNIT_REFERENCE_REQUIRED"
 
 

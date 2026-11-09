@@ -287,7 +287,11 @@ def observe_memory(
                 "or author a canonical note-level relation.",
             )
         base_unit = current_unit if proposal_mode == "update" else None
-        normalized_verdict = _resolve_verdict(verdict, base_unit)
+        normalized_verdict = _resolve_verdict(
+            verdict,
+            base_unit,
+            semantic_language_registry.load_for_page(vault_root, editable.rel_path, frontmatter),
+        )
         normalized_check_by = _resolve_check_by(check_by, base_unit)
         normalized_as_of = _resolve_governed_value(
             as_of, base_unit, key="as_of",
@@ -707,13 +711,17 @@ def _canonical_relations(values: list[dict[str, Any]]) -> tuple[tuple[str, str],
     return tuple(relations)
 
 
-def _resolve_verdict(supplied: str | None, current: Any | None) -> str | None:
+def _resolve_verdict(
+    supplied: str | None,
+    current: Any | None,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> str | None:
     """Resolve `verdict` preserve-by-default; an explicit empty string clears it."""
     return _resolve_governed_value(
         supplied,
         current,
         key="verdict",
-        normalize=_canonical_verdict,
+        normalize=lambda value: _canonical_verdict(value, language),
     )
 
 
@@ -764,15 +772,16 @@ def _resolve_governed_value(
     return normalize(str(supplied))
 
 
-def _canonical_verdict(value: str) -> str:
-    verdict = unicodedata.normalize("NFKC", value.strip()).casefold()
-    if verdict not in semantic_units.EPISTEMIC_OUTCOMES:
-        accepted = ", ".join(semantic_units.EPISTEMIC_OUTCOMES)
+def _canonical_verdict(
+    value: str, language: semantic_language_registry.SemanticLanguageRegistry
+) -> str:
+    verdict = language.resolve_verdict(value)
+    if verdict is None:
+        keys = language.verdict_keys()
         raise ObserveMemoryError(
             "INVALID_SEMANTIC_VERDICT",
-            f"verdict must be exactly one of {accepted}",
-            "A verdict is categorical lifecycle state, not a confidence score, "
-            "so a number, percentage, or free-text hedge is never valid.",
+            f"verdict must be exactly one of {', '.join(keys)}, as the key or its label",
+            semantic_units.verdict_remediation(keys),
         )
     return verdict
 

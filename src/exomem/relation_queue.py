@@ -23,6 +23,7 @@ from typing import Any
 
 from . import activation as activation_module
 from . import (
+    agent_refusal,
     context_refs,
     note_types,
     recall_policy,
@@ -283,7 +284,7 @@ class RelationFit:
 #: What the agent does when the queue will not write the generic relation for a pair.
 RELATION_CHOICE_REMEDIATION = (
     "Accept again with requested_relation set to one of the offered relations. When none "
-    "fits, set it to the plain_link relation, or dismiss the candidate."
+    "fits, set it to the plain link relation, the last candidate, or dismiss the candidate."
 )
 
 #: What the agent does when a candidate offers no relation to choose and one is requested anyway.
@@ -326,13 +327,15 @@ def require_relation_choice(
         chosen = selected_relation(vault_root, candidate, requested_relation, source_page=page)
         relation = str(chosen.get("relation_type") or "")
     if registry.is_generic(relation):
+        options = fit.options(candidate, registry=registry, source_page=page)
         raise OpError(
             "RELATION_CHOICE_REQUIRED",
             "the generic relation is not written; name a specific relation or the plain link",
             RELATION_CHOICE_REMEDIATION,
             details={
-                "options": fit.options(candidate, registry=registry, source_page=page),
+                "options": options,
                 "plain_link": registry.link_key,
+                "candidates": agent_refusal.ranked_with_link(options, registry.link_key),
                 "mutated": False,
             },
         )
@@ -1308,7 +1311,11 @@ def _require_offered(
         "VOCABULARY_APPLICATION_INVALID",
         "a relation the candidate does not offer needs a recorded vocabulary choice",
         RELATION_NOT_OFFERED_REMEDIATION if offered else RELATION_NONE_OFFERED_REMEDIATION,
-        details={"options": offered, "mutated": False},
+        details={
+            "options": offered,
+            "candidates": [option["key"] for option in offered],
+            "mutated": False,
+        },
     )
 
 

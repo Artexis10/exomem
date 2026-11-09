@@ -102,8 +102,8 @@ def test_explain_is_opt_in_and_filter_only_profile_is_truthful(tmp_path: Path) -
     assert json.dumps(explicitly_false, ensure_ascii=False) == json.dumps(
         omitted, ensure_ascii=False
     )
-    assert [hit["path"] for hit in omitted] == [newer, older]
-    assert all("ranking_explanation" not in hit for hit in omitted)
+    assert [hit["path"] for hit in omitted["hits"]] == [newer, older]
+    assert all("ranking_explanation" not in hit for hit in omitted["hits"])
 
     explained = commands.op_ask_memory(tmp_path, explain=True, **request)
 
@@ -127,7 +127,7 @@ def test_explain_is_opt_in_and_filter_only_profile_is_truthful(tmp_path: Path) -
     assert profile["lanes"]["vector"]["status"] == "non_applicable"
     assert profile["lanes"]["vector"]["reason"] == "empty_query"
 
-    for final_rank, (hit, plain) in enumerate(zip(explained["hits"], omitted, strict=True), start=1):
+    for final_rank, (hit, plain) in enumerate(zip(explained["hits"], omitted["hits"], strict=True), start=1):
         # Explaining adds `ranking_explanation` and no other field, so no body or unit content.
         assert {name: value for name, value in hit.items() if name != "ranking_explanation"} == plain
         ranking = hit["ranking_explanation"]

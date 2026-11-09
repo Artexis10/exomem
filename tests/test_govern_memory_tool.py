@@ -406,10 +406,10 @@ def test_govern_memory_propose_defaults_to_a_full_committed_terminal(vault: Path
         "reversal",
         "proposal_id",
     } <= diagnostics.keys()
-    assert explicit_full == full
-    assert compact["status"] == "committed"
+    assert explicit_full == {**full, "replayed": True}
+    assert diagnostics["operational"]["status"] == "committed"
     assert "diagnostics" not in compact
-    assert legacy == diagnostics
+    assert legacy == {key: value for key, value in diagnostics.items() if key != "operational"}
     with sqlite3.connect(store.sidecar_path(vault)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM governance_proposals").fetchone()[0] == 1
 

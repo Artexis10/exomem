@@ -3971,6 +3971,11 @@ def _payload_text(payload: Any) -> str:
     return json.dumps(payload, default=str, sort_keys=True).lower()
 
 
+def _write_saved(reply: Any) -> bool:
+    """A write reply says it saved: no refusal, and `mutated` true or, in a compact reply, absent."""
+    return isinstance(reply, dict) and "error" not in reply and reply.get("mutated", True) is not False
+
+
 def _payload_hits(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         values = payload.get("hits") or payload.get("results") or []
@@ -4557,13 +4562,13 @@ async def run_exomem_direct_probes(
                     "INVALID_NOTE" in invalid_error
                     and "status must be 'active' or 'draft'" in invalid_error
                 ),
-                "added": bool(added.get("mutated")),
+                "added": _write_saved(added),
                 "added_generation_exact": (
                     added_read.get("status") == "found"
                     and added.get("unit_ref") in added_refs
                     and "generation one" in _payload_text(added_read).lower()
                 ),
-                "updated": bool(updated.get("mutated")),
+                "updated": _write_saved(updated),
                 "stable_ref_resolves_current_generation": (
                     added.get("unit_ref") == updated.get("unit_ref")
                     and stale_added_read.get("status") == "found"
@@ -4582,7 +4587,7 @@ async def run_exomem_direct_probes(
                     and not _payload_hits(wrong_category_lookup)
                     and updated.get("unit_ref") in updated_refs
                 ),
-                "removed": bool(removed.get("mutated")),
+                "removed": _write_saved(removed),
                 "removed_generation_stale": removed_read.get("status") in {"stale", "missing"},
                 "stale_generation_removed": not _payload_hits(removed_lookup),
                 "replacement_preview_read_only": replacement_preview.get("mutated") is False,
@@ -5252,6 +5257,8 @@ async def run_exomem_direct_probes(
         hits = _payload_hits(payload)
         hit = hits[0] if hits else {}
         unit_ref = str(hit.get("unit_ref") or "")
+        # A hit no longer carries `parent_ref`; a unit ref is `<parent ref>#<anchor>`.
+        parent_ref = str(hit.get("parent_ref") or unit_ref.partition("#")[0])
         parent_path = str(hit.get("parent_path") or hit.get("path") or "")
         exact = await recorder.call(
             "durable-refs",
@@ -5260,11 +5267,11 @@ async def run_exomem_direct_probes(
         )
         return (
             {
-                "parent_ref_stable": str(hit.get("parent_ref") or "").startswith("exomem://"),
+                "parent_ref_stable": parent_ref.startswith("exomem://"),
                 "unit_ref_stable": unit_ref.startswith("exomem://") and "#" in unit_ref,
                 "exact_unit_resolves": exact.get("status") == "found",
             },
-            {"parent_ref": hit.get("parent_ref"), "unit_ref": unit_ref},
+            {"parent_ref": parent_ref or None, "unit_ref": unit_ref},
         )
 
     async def provenance() -> tuple[dict[str, bool], dict[str, Any]]:

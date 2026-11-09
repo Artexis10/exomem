@@ -1285,7 +1285,7 @@ def test_reference_admitted_principal_receives_the_owners_released_hits(
             with principal.request_scope(caller), principal.invocation_scope():
                 hits[name] = ask_memory(query=query, include_timings=False, limit=gate.DEFAULT_LIMIT,
                                         rerank=False, mode="keyword", result_level=level)
-        assert any(hit.get("result_type") == "semantic_unit" for hit in hits["owner"])
+        assert any(hit.get("result_type") == "semantic_unit" for hit in hits["owner"]["hits"])
         assert hits["admitted"] == hits["owner"]
 
 

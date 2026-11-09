@@ -716,12 +716,13 @@ def test_mutation_terminal_projects_one_valid_records_routing_without_changing_t
     )
 
     compact = mutation_terminal.project_terminal(terminal)
+    operational = mutation_terminal.project_terminal(terminal, "full")["diagnostics"]["operational"]
 
     assert compact["records_routing"] == raw["records_routing"]
-    assert compact["state"] == "committed"
-    assert compact["mutated"] is True
     assert compact["path"] == raw["path"]
-    assert compact["warnings_count"] == 0
+    assert operational["state"] == "committed"
+    assert operational["mutated"] is True
+    assert operational["warnings_count"] == 0
 
 
 @pytest.mark.parametrize(

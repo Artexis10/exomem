@@ -635,7 +635,7 @@ def test_a_claim_never_falls_back_to_an_origin_carrier(vault: Path) -> None:
     )
     page = find_module._CACHE.get(page_path, vault)
 
-    claim = claims.extract_claim_for_page(page)
+    claim = claims.extract_claim_for_page(page, vault)
 
     assert "Plain lead paragraph." in claim
     assert "PRIVATEREASON" not in claim

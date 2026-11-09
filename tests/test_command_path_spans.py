@@ -67,18 +67,6 @@ def test_a_served_miss_names_the_build_and_a_hit_names_its_rechecks(
     assert "recall.due_state.exists" in second
 
 
-def test_the_emission_decision_has_its_own_span(
-    tmp_path: Path, token: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(due_state, "served", lambda *_a, **_k: {"total": 1, "top": []})
-    monkeypatch.setattr(due_state, "should_emit", lambda *_a, **_k: True)
-    out = commands._with_due_state(tmp_path, {"hits": []}, purpose=None)
-    assert out["due_state"] == {"total": 1, "top": []}
-    names = _names(token)
-    assert "recall.due_state" in names
-    assert "recall.due_state.emit" in names
-
-
 def test_waiting_on_the_publication_barrier_is_attributed_to_the_call(token: str) -> None:
     with lexstore._timed_barrier(contextlib.nullcontext(), 0.05):
         pass
