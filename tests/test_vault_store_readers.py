@@ -1,0 +1,319 @@
+"""What a store-mode vault's readers answer when the projected Markdown cannot be trusted.
+
+OpenSpec make-vault-store-canonical, design D3, task 3.1 (first half). The vault is the migration
+suite's generated vault, moved into store mode; pages that only the store holds are committed
+through ``write.commit``, as the store thread commits them.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+import pytest
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
+from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
+
+from exomem import __main__ as cli
+from exomem import commands, get_page, lexstore, list_directory, project_keys, warmup
+from exomem import find as find_module
+from exomem import vault as vault_module
+from exomem.vault_store import ownership, write
+from exomem.vocabulary import registry
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
+)
+
+SENTINEL = b"POISONED PROJECTION: a reader served this file instead of the store\n"
+#: How many pages only the store holds; the drill at scale sets it from the environment.
+GENERATED = int(os.environ.get("EXOMEM_READERS_DRILL_PAGES", "40"))
+
+
+def generated_page(index):
+    return (
+        f"Knowledge Base/Notes/Gen/Page-{index:04d}.md",
+        f"---\ntitle: Page {index}\ntype: note\n---\n# Page {index}\n\n"
+        f"The lantern number {index} burns at the lighthouse harbour.\n".encode(),
+    )
+
+
+def corpus_pages(root):
+    return {path.relative_to(root).as_posix() for path in find_module._corpus_walk(root, "kb")}
+
+
+def answers(root, generated):
+    """What find, get_page, a listing and the corpus say about the vault, as plain data."""
+    hits = find_module.find(root, query="lighthouse", limit=15, graph=False, rerank=False)
+    # The full recall tool: its default graph and hybrid ranking read each page via the page cache.
+    asked = commands.op_ask_memory(root, query="lighthouse", limit=15)
+    pages = [
+        get_page.get_page(root, path=rel)
+        for rel in (ALPHA, *(generated_page(index)[0] for index in generated))
+    ]
+    listing = list_directory.list_directory(root, path="Knowledge Base/Notes/Gen")
+    notes = {
+        limit: sorted(
+            (
+                entry.as_dict()
+                for entry in list_directory.list_directory(
+                    root, path="Knowledge Base/Notes", limit=limit
+                ).entries
+            ),
+            key=lambda entry: entry["name"],
+        )
+        for limit in (None, 50)
+    }
+    return {
+        "find": [(hit.path, hit.title, hit.excerpt) for hit in hits],
+        "ask": [(hit["path"], hit.get("title"), hit.get("excerpt")) for hit in asked["hits"]],
+        "notice": asked.get("notice"),
+        "pages": [(page.content, page.content_hash) for page in pages],
+        "listing": sorted(
+            (entry.as_dict() for entry in listing.entries), key=lambda entry: entry["name"]
+        ),
+        "notes": notes,
+        "corpus": sorted(corpus_pages(root)),
+    }
+
+
+#: The states a projected file takes when the store is the page: wrong bytes, none, or a link.
+DAMAGE = ("poisoned", "deleted", "a link into the vault", "a link out of the vault")
+
+
+def damage_every_owned_projection(root, damage):
+    owned = [
+        item.rel
+        for item in ownership.iter_owned(root)
+        if item.ownership is ownership.Ownership.PAGE
+    ]
+    inside = root / "Decoy.md"
+    inside.write_bytes(SENTINEL)
+    outside = root.parent / "outside.md"
+    outside.write_bytes(SENTINEL)
+    for rel in owned:
+        path = root / rel
+        if damage == "poisoned":
+            path.write_bytes(SENTINEL)
+            continue
+        path.unlink()
+        if damage != "deleted":
+            path.symlink_to(inside if damage == "a link into the vault" else outside)
+
+
+# Each case commits GENERATED pages and answers twice; a busy runner can exceed the 60 s default.
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("damage", DAMAGE)
+def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_file_is_damaged(
+    stored, writer, damage, monkeypatch  # noqa: F811
+):
+    """A reader that still takes the file for the page: a stale projection, one that a failed
+    projector left half-written, a missing one or a link at the page's name reaches the person who
+    asks (or drops the page from them), and the store's page does not."""
+    for index in range(GENERATED):
+        rel, body = generated_page(index)
+        write.commit(writer, put(rel, body))
+    sampled = range(0, GENERATED, max(1, GENERATED // 10))
+    find_module.clear_cache()
+    scheduled = []
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: scheduled.append(1))
+    before = answers(stored, sampled)
+    stored_only = f"{generated_page(0)[0].rsplit('/', 1)[0]}/"
+    for answered in (before["find"], before["ask"]):
+        assert len(answered) == 15, "a full page of answers is what this check needs"
+        assert any(hit[0].startswith(stored_only) for hit in answered), (
+            "pages that only the store holds must be among the answers"
+        )
+    # Every lexical lane read the store corpus, so the answer is whole: the reader gets no notice,
+    # and the owner's diagnostics name the routing.
+    assert before["notice"] is None
+    find_module.clear_cache()  # a cached answer would skip the routing that this reads
+    diagnosed = commands.op_ask_memory(stored, query="lighthouse", limit=15, include_timings=True)
+    assert not (diagnosed.get("warming") or {}).get("components")
+    assert diagnosed["timings"]["profile"]["lexical_lanes"] == {
+        "corpus": "store",
+        "catalogue": "bypassed",
+    }
+    assert len(before["listing"]) == GENERATED
+    assert len(before["corpus"]) >= GENERATED + 2
+    for listed in before["notes"].values():
+        assert {"Alpha.md", "Beta.md", "diagram.bin", "Gen"} <= {entry["name"] for entry in listed}
+
+    damage_every_owned_projection(stored, damage)
+    find_module.clear_cache()
+    after = answers(stored, sampled)
+
+    assert after == before
+    assert SENTINEL.decode().strip() not in json.dumps(after)
+    # That repair rebuilds the catalogue from files, so in store mode it would run on every find.
+    assert scheduled == []
+
+
+def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolver(
+    stored, writer  # noqa: F811
+):
+    """A cache that keys on the file's stat never sees a commit that changes no file, so the corpus,
+    the parsed page and a link keep missing the page that was just written."""
+    assert NEW not in corpus_pages(stored)
+    assert find_module._CACHE.get(stored / NEW, stored) is None
+    assert find_module.shared_resolver(stored).title_key_for_path(NEW) is None
+
+    write.commit(writer, put(NEW, EDITED.replace(b"title: Alpha", b"title: Gamma")))
+
+    assert not (stored / NEW).exists()
+    assert NEW in corpus_pages(stored)
+    assert find_module._CACHE.get(stored / NEW, stored).title == "Gamma"
+    assert find_module.shared_resolver(stored).title_key_for_path(NEW) == "gamma"
+
+    write.commit(writer, put(NEW, EDITED.replace(b"title: Alpha", b"title: Delta")))
+
+    assert find_module._CACHE.get(stored / NEW, stored).title == "Delta"
+    assert find_module.shared_resolver(stored).title_key_for_path(NEW) == "delta"
+
+
+def test_warm_and_status_leave_no_sidecar_and_status_reports_the_store(
+    stored, capsys  # noqa: F811
+):
+    """A warm that builds the lexical sidecar from the projected files in a vault whose pages are
+    in the store, or a status that reports nothing of the mode the vault is in."""
+    sidecar = lexstore.lexical_path(stored)
+    sidecar.unlink(missing_ok=True)
+    present = {path for path in stored.rglob("*") if path.is_file()}
+
+    assert warmup.warm_caches(stored, preload_models=False, preload_cpu_caches=True) is not None
+    capsys.readouterr()
+    assert cli._status_main(["--vault", str(stored), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert not sidecar.exists()
+    assert {path for path in stored.rglob("*") if path.is_file()} == present
+    assert report["vault_store"]["mode"] == "store"
+
+
+def test_a_registry_overlay_that_only_the_store_holds_loads_and_follows_its_commits(
+    stored, writer  # noqa: F811
+):
+    """An overlay loader that reads the file's stat takes an overlay with no file for none, so a
+    store-mode vault runs on the shipped pack alone."""
+    rel = "Knowledge Base/_Schema/project-keys.yaml"
+    (stored / rel).unlink()
+    assert not (stored / rel).exists()
+
+    write.commit(writer, put(rel, b"projects:\n  harbour:\n    folder: Harbour\n"))
+    assert "harbour" in project_keys.load_project_registry(stored).project_to_folder
+
+    write.commit(writer, put(rel, b"projects:\n  quay:\n    folder: Quay\n"))
+    keys = project_keys.load_project_registry(stored).project_to_folder
+    assert "quay" in keys and "harbour" not in keys
+
+
+def test_a_note_type_overlay_that_only_the_store_holds_reaches_the_registry_loader(
+    stored, writer  # noqa: F811
+):
+    """The shared registry loader, which keys its cache on the overlay file: it serves the shipped
+    pack for an overlay that the store holds and no file does, and keeps serving it after a
+    commit."""
+    from exomem import note_types
+
+    rel = "Knowledge Base/_Schema/note-types.yaml"
+    assert not (stored / rel).exists()
+    pack = registry.load(note_types.SPEC, stored)
+    document = (
+        b"schema_version: 1\nentries:\n  harbour-log:\n    label: Harbour log\n"
+        b"    description: A log of the harbour.\n"
+        b"    attributes:\n      role: compiled\n      folder: Notes/Harbour\n"
+    )
+
+    write.commit(writer, put(rel, document))
+    served = registry.load(note_types.SPEC, stored)
+
+    assert "harbour-log" in served.entries
+    assert "harbour-log" not in pack.entries
+    assert served.content_hash != pack.content_hash
+    assert vault_module.read_bytes_without_pinning(stored / rel, stored) == document
+
+
+def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A session that starts the file warm-up in a store-mode vault builds its catalogue and drain
+    queues from files that the vault does not have, and its home screen counts a note that only the
+    store holds as none."""
+    from exomem.tui.backend import ExomemBackend
+
+    started = []
+    monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
+    # The lean fallback sets process-wide environment variables, which this test must not leak.
+    monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
+    backend = ExomemBackend(str(stored))
+    assert backend.resolve_vault().initialized
+    notes = backend.corpus_size()["notes"]
+
+    write.commit(writer, put(NEW, EDITED))
+    backend.start_runtime()
+
+    assert not (stored / NEW).exists()
+    after = backend.corpus_size()
+    assert (after["notes"], after["known"]) == (notes + 1, True)
+    assert started == []
+
+
+def test_a_store_mode_listing_hides_only_a_disk_folder_that_holds_nothing_but_stray_pages(
+    stored, writer  # noqa: F811
+):
+    """A listing that takes every folder on disk for a folder of the vault, or that hides a folder a
+    person made: a stray Markdown file at a path that the store owns is no page, so a folder of
+    only such files is not there. An empty folder, one that holds a binary and one that holds a
+    stored page are."""
+    notes = stored / "Knowledge Base/Notes"
+    (notes / "Stray").mkdir()
+    (notes / "Stray/stray.md").write_bytes(b"a file that the store never held\n")
+    (notes / "Pictures").mkdir()
+    (notes / "Pictures/photo.bin").write_bytes(b"\x00\x01")
+    (notes / "Empty").mkdir()
+    (notes / "Nested/Empty").mkdir(parents=True)
+    write.commit(writer, put("Knowledge Base/Notes/Fresh/Page.md", EDITED))
+
+    listing = list_directory.list_directory(stored, path="Knowledge Base/Notes", recursive=True)
+    names = {entry.path.removeprefix("Knowledge Base/Notes/") for entry in listing.entries}
+
+    assert {"Pictures", "Pictures/photo.bin", "Fresh", "Fresh/Page.md"} <= names
+    assert {"Empty", "Nested", "Nested/Empty"} <= names
+    assert not {name for name in names if name.startswith("Stray")}
+
+
+def test_a_page_the_store_deleted_is_not_found_though_a_link_sits_at_its_name(
+    stored, writer  # noqa: F811
+):
+    """A page read that follows a link at the deleted page's name returns the bytes of the page the
+    link points to, as if the deleted page were still there."""
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(ALPHA),)),
+    )
+    (stored / ALPHA).unlink(missing_ok=True)
+    (stored / ALPHA).symlink_to(stored / BETA)
+
+    with pytest.raises(get_page.GetError) as missing:
+        get_page.get_page(stored, path=ALPHA)
+
+    assert missing.value.code == "NOT_FOUND"
+    assert get_page.get_page(stored, path=BETA).content
+
+
+def test_a_broken_state_root_leaves_a_file_vault_a_vault_and_a_bare_folder_not_one(
+    stored  # noqa: F811
+):
+    """A vault probe that asks the store before the disk: a broken state root then fails every
+    start of a vault whose sentinel is on disk, or raises for a directory that is no vault."""
+    from exomem import state_migration, state_paths
+
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(stored))
+    manifest.write_bytes(b"not a manifest")
+
+    assert vault_module._is_vault(stored)
+    for sentinel in stored.rglob(vault_module._SCHEMA_SENTINEL):
+        sentinel.unlink()
+    assert not vault_module._is_vault(stored)

@@ -26,11 +26,14 @@ from dataclasses import replace as dataclass_replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import IO
+from typing import IO, TYPE_CHECKING
 
 from . import call_spans, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import kb_dirname
+
+if TYPE_CHECKING:
+    from .vault_store import read
 
 log = logging.getLogger(__name__)
 
@@ -262,7 +265,10 @@ class GenericTreeEntry:
     """One structurally releasable entry from a retained directory walk."""
 
     relative_path: str
-    identity: held_fs.StableIdentity
+    #: "file" or "directory".
+    kind: str
+    #: None for what only the store holds in a store-mode vault: a page, or a folder of pages.
+    identity: held_fs.StableIdentity | None
     size_bytes: int | None
     mtime: float | None
     markdown: bytes | None = None
@@ -2468,19 +2474,158 @@ def list_generic_tree(
     select: Callable[[list[tuple[str, str]]], Iterable[str]] | None = None,
     require_complete: bool = False,
     checkpoint: request_budget.ReadCheckpoint | None = None,
+    stored: bool = True,
 ) -> tuple[GenericTreeEntry, ...]:
     """Enumerate an ordinary tree while structurally removing private state.
 
     `select` receives every releasable `(relative_path, kind)` in walk order and
     returns the relative paths to open, stat and read; None opens them all.
     `require_complete` refuses ordinary omissions rather than reporting a partial census.
+
+    In a store-mode vault the store lists its pages and the folders that hold them, as
+    `read_generic_bytes` reads them: a stored page is an entry with no identity, and its file is
+    only a projection, or a stray, so the disk's file at a page's path is left out. A folder of
+    the disk is listed unless it holds nothing but stray copies of pages and the store holds no
+    page below it. A census (`require_complete`) is of the disk, and so is a listing with
+    `stored=False`: a caller that binds each entry's file identity cannot take an entry with none.
     """
 
+    listing = None if require_complete or not stored else _stored_tree(vault_root, value, recursive)
+    if listing is not None:
+        return _list_stored_tree(
+            vault_root, value, listing, recursive=recursive, identities=identities,
+            select=select, checkpoint=checkpoint,
+        )
     with open_generic_tree(
         vault_root, value, recursive=recursive, identities=identities,
         select=select, require_complete=require_complete, checkpoint=checkpoint,
     ) as entries:
         return tuple(entries)
+
+
+def _stored_tree(vault_root: Path, value: object, recursive: bool) -> read.Listing | None:
+    """What the store lists below the folder, or None in a file-mode vault: the disk answers."""
+    from .vault_store import mode, read
+
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return None
+    folder = _tree_folder(value)
+    return read.listing(root, "" if folder == "." else folder, recursive)
+
+
+def _list_stored_tree(
+    vault_root: Path,
+    value: object,
+    stored: read.Listing,
+    *,
+    recursive: bool,
+    identities: IdentityCatalogue | None,
+    select: Callable[[list[tuple[str, str]]], Iterable[str]] | None,
+    checkpoint: request_budget.ReadCheckpoint | None,
+) -> tuple[GenericTreeEntry, ...]:
+    """`list_generic_tree` for a store-mode vault: the disk's entries that the store does not own,
+    then the store's pages and folders, offered to ``select`` together.
+    """
+    from .vault_store import read
+
+    root = Path(vault_root)
+    folder = "" if (relative := _tree_folder(value)) == "." else relative
+
+    def under(name: str) -> str:
+        return f"{folder}/{name}" if folder else name
+
+    on_disk: set[str] = set()
+    only_stored: list[str] = []
+    offered_once = False
+
+    def offered(candidates: list[tuple[str, str]]) -> list[str]:
+        nonlocal offered_once
+        offered_once = True
+        kept = [
+            (name, kind)
+            for name, kind in candidates
+            if _disk_entry_listed(root, under(name), kind, name in stored.folders)
+        ]
+        on_disk.update(name for name, _kind in kept)
+        stored_names = [(name, "file") for name in stored.pages if name not in on_disk] + [
+            (name, "directory") for name in stored.folders if name not in on_disk
+        ]
+        everything = kept + stored_names
+        names = [name for name, _kind in everything]
+        chosen = names if select is None else list(select(everything))
+        only_stored.extend(name for name in chosen if name not in on_disk)
+        return [name for name in chosen if name in on_disk]
+
+    try:
+        with open_generic_tree(
+            root, value, recursive=recursive, identities=identities, select=offered,
+            checkpoint=checkpoint,
+        ) as walked:
+            entries = list(walked)
+    except ReservedPathLeafError as error:
+        # A folder that only the store holds has no directory on the disk.
+        if error.code != "MISSING" or offered_once or not (stored.pages or stored.folders):
+            raise
+        entries = []
+        offered([])
+    pages = frozenset(stored.pages)
+    with read.snapshot(root) as view:
+        for name in only_stored:
+            if name not in pages:
+                entries.append(GenericTreeEntry(name, "directory", None, None, None))
+                continue
+            page = view.page(under(name))
+            if page is None:  # committed away since the listing: it is no entry now
+                continue
+            entries.append(
+                GenericTreeEntry(
+                    name, "file", None, page.meta.size, page.meta.mtime_ns / 1e9,
+                    # A file extension is a closed set that the format fixes: it names the format.
+                    page.body if name.casefold().endswith(".md") else None,
+                )
+            )
+    return tuple(entries)
+
+
+def _disk_entry_listed(vault_root: Path, rel: str, kind: str, stored_below: bool) -> bool:
+    """Whether a store-mode listing keeps this entry of the disk: a file that is not a page, or a
+    folder, unless the folder holds nothing but stray copies of pages.
+
+    A file at a path that the store owns as a page is a projection or a stray, and the store
+    decides which pages exist. A folder that holds only such files is what the projection left
+    behind, unless the store holds a page below it. An empty folder is not a stale projection.
+    """
+    from .vault_store import ownership
+
+    if kind != "directory":
+        return ownership.classify(rel) is not ownership.Ownership.PAGE
+    return stored_below or not _holds_only_page_files(vault_root, rel)
+
+
+def _holds_only_page_files(vault_root: Path, folder: str) -> bool:
+    """Whether a folder of the disk holds something, and all of it, at any depth, is a file at a
+    path that the store owns as a page. An empty folder holds nothing and is not one.
+    """
+    from .vault_store import ownership
+
+    names: list[tuple[str, str]] = []
+
+    def record(candidates: list[tuple[str, str]]) -> tuple[str, ...]:
+        names.extend(candidates)
+        return ()
+
+    try:
+        with open_generic_tree(vault_root, folder, recursive=False, select=record) as walked:
+            tuple(walked)
+    except ReservedPathLeafError:
+        return False  # a folder that cannot be read is not shown to hold nothing but strays
+    return bool(names) and all(
+        _holds_only_page_files(vault_root, f"{folder}/{name}")
+        if kind == "directory"
+        else ownership.classify(f"{folder}/{name}") is ownership.Ownership.PAGE
+        for name, kind in names
+    )
 
 
 @contextmanager
@@ -2522,7 +2667,10 @@ def list_generic_names(
     *,
     recursive: bool = True,
 ) -> tuple[tuple[str, str], ...]:
-    """The releasable `(relative_path, kind)` pairs of a tree, reading no file's bytes."""
+    """The releasable `(relative_path, kind)` pairs of a tree, reading no file's bytes.
+
+    A store-mode vault lists as `list_generic_tree` does: its stored pages stand in for their files.
+    """
     names: list[tuple[str, str]] = []
 
     def record(candidates: list[tuple[str, str]]) -> tuple[str, ...]:
@@ -2531,6 +2679,21 @@ def list_generic_names(
 
     list_generic_tree(vault_root, value, recursive=recursive, select=record)
     return tuple(names)
+
+
+def _tree_folder(value: object) -> str:
+    """The folder of a tree listing in its normal form ("." for the vault root), or the refusal that
+    a reserved or unsafe spelling gets.
+    """
+    if value == ".":
+        return "."
+    classified = classify_logical(value)
+    if classified.disposition is PathDisposition.RESERVED:
+        raise ReservedPathLeafError("RESERVED_PATH")
+    if classified.disposition is PathDisposition.INVALID:
+        raise ReservedPathLeafError("UNSAFE_PATH")
+    assert isinstance(value, (str, os.PathLike))
+    return unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
 
 
 def _iter_generic_tree_held(
@@ -2548,16 +2711,7 @@ def _iter_generic_tree_held(
 
     if checkpoint is not None:
         checkpoint()
-    if value == ".":
-        relative = "."
-    else:
-        classified = classify_logical(value)
-        if classified.disposition is PathDisposition.RESERVED:
-            raise ReservedPathLeafError("RESERVED_PATH")
-        if classified.disposition is PathDisposition.INVALID:
-            raise ReservedPathLeafError("UNSAFE_PATH")
-        assert isinstance(value, (str, os.PathLike))
-        relative = unicodedata.normalize("NFKC", os.fspath(value)).replace("\\", "/")
+    relative = _tree_folder(value)
     acquired = held_fs.acquire(Path(vault_root))
     if not acquired.ok:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
@@ -2646,6 +2800,7 @@ def _iter_generic_tree_held(
                             raise ReservedPathLeafError("IO_REFUSED") from error
                     yield GenericTreeEntry(
                         record.relative_path,
+                        "directory",
                         record.identity,
                         None,
                         mtime,
@@ -2717,7 +2872,7 @@ def _iter_generic_tree_held(
                                     continue
                                 require_current()
                                 yield GenericTreeEntry(
-                                    record.relative_path, record.identity, info.st_size,
+                                    record.relative_path, "file", record.identity, info.st_size,
                                     info.st_mtime, markdown,
                                 )
                                 require_current()
@@ -2735,6 +2890,7 @@ def _iter_generic_tree_held(
                         require_current()
                         yield GenericTreeEntry(
                             record.relative_path,
+                            "file",
                             record.identity,
                             info.st_size,
                             info.st_mtime,

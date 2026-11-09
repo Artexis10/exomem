@@ -106,7 +106,7 @@ def list_trash(
         (
             entry.relative_path
             for entry in root_entries
-            if entry.identity.kind == "directory"
+            if entry.kind == "directory"
         ),
         reverse=True,
     )
@@ -128,7 +128,7 @@ def list_trash(
         sidecar_names = {
             child.relative_path
             for child in children
-            if child.identity.kind == "file"
+            if child.kind == "file"
             and child.relative_path.endswith(METADATA_SUFFIX)
         }
         non_sidecars = [

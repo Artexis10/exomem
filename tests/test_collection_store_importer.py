@@ -1060,6 +1060,24 @@ def test_source_ref_must_be_a_released_preserved_ref(store, tmp_path, monkeypatc
 # Policies, resume and crash safety
 
 
+def test_a_small_job_takes_its_turn_while_an_older_long_job_runs(store, monkeypatch):
+    """Defect: the driver spent every tick on the oldest running job, so a three-row import
+    started behind a long one waited until the long one completed."""
+    small(monkeypatch, rows=10)
+    setup(store)
+    long_job = start(store)
+    daily_source = "Knowledge Base/Evidence/wearable/export/daily.csv"
+    setup(store, b"date,steps,resting_hr\n2026-03-01,100,50\n2026-03-02,200,51\n2026-03-03,300,52\n",
+          cid=DAILY, title="Daily", fields=DAILY_FIELDS, path=daily_source)
+    small_job = call(store, cid=DAILY, mode="start", source_ref=daily_source, format="csv", mapping=DAILY_MAPPING)
+    # Live ticks often fit one batch each, so each tick here runs one.
+    run(store, max_batches=1)
+    run(store, max_batches=1)
+    finished = call(store, cid=DAILY, mode="status", continuation=small_job["continuation"])
+    assert (finished["state"], finished["rows"]["imported"]) == ("complete", 3)
+    assert status(store, long_job)["state"] == "running"
+
+
 def test_stop_policy_fails_at_the_first_invalid_row_keeping_earlier_batches(store, monkeypatch):
     """A stop policy that commits the failing batch's earlier rows reports a position that skips nothing."""
     setup(store)
