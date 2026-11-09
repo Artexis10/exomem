@@ -477,6 +477,7 @@ def collect_candidates(
                     degraded_out.append("embeddings")
                 with _span(timings, "vector.search"):
                     chunk_hits = []
+                    incomplete: list[str] = []
                     for source in sources:
                         search = source.select_chunks if isinstance(source, embeddings.EmbeddingIndex) else source.search
                         hits = search(
@@ -487,7 +488,11 @@ def collect_candidates(
                             # a request thread; a one-shot caller has no later
                             # request to serve and keeps the inline load.
                             **(
-                                {"encoded_for": encoded_for, "defer_cold_load": readiness.runtime_managed()}
+                                {
+                                    "encoded_for": encoded_for,
+                                    "defer_cold_load": readiness.runtime_managed(),
+                                    "incomplete_out": incomplete,
+                                }
                                 if isinstance(source, embeddings.EmbeddingIndex)
                                 else {}
                             ),
@@ -498,6 +503,10 @@ def collect_candidates(
                             current = recall_migration.current_in_build(vault_root, idx, {hit[0] for hit in hits})
                             hits = [hit for hit in hits if hit[0] in current]
                         chunk_hits.extend(hits)
+                # Rows that the store does not vouch for answer nothing: that is no proved miss.
+                unproved = bool(incomplete) and not chunk_hits
+                if unproved and degraded_out is not None:
+                    degraded_out.append("embeddings")
                 best_per_file: dict[str, tuple[float, str | ChunkRef]] = {}
                 for fp, _idx, ctext, score in chunk_hits:
                     existing = best_per_file.get(fp)
@@ -510,7 +519,11 @@ def collect_candidates(
                 vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
                 if capture_trace:
                     lane_statuses["vector"] = {
-                        "status": "participated" if vector_ranking else "available_nonmatching",
+                        "status": (
+                            "unavailable" if unproved
+                            else "participated" if vector_ranking else "available_nonmatching"
+                        ),
+                        **({"reason": "coverage_incomplete"} if unproved else {}),
                         "backend": type(idx).__name__,
                         "model": encoded_for.model if isinstance(encoded_for, recall_space.SpaceIdentity) else recall_space.serving_model(idx),
                         "metric": {

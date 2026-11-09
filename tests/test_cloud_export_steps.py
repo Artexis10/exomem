@@ -6,6 +6,7 @@ also runs the real media edge over HTTP and the presigned parts over TLS.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import errno
 import hashlib
 import json
@@ -23,7 +24,7 @@ from exomem import cloud_export, cloud_export_steps, media_store, originals, vau
 from exomem.governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
 from exomem.kbdir import kb_dirname
 from exomem.trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
-from tests.test_cloud_export import CELL, storage  # noqa: F401
+from tests.test_cloud_export import CELL, PartStore, storage  # noqa: F401
 from tests.test_media_collection import Cell, cell  # noqa: F401
 from tests.test_media_store import _offload, _stored, selected_store  # noqa: F401
 
@@ -298,6 +299,37 @@ def test_a_plan_above_the_export_bound_refuses_as_too_large(vault: Path, tmp_pat
         cloud_export_steps.pause(vault, staging, export_id=str(uuid.uuid4()), cell_id=CELL, media_mode=None,
                                  max_bytes=1000)
     assert not (staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.PLAN_NAME).exists()
+
+
+def test_an_evicted_original_above_the_librarys_per_file_default_passes_the_planned_bound(
+        vault: Path, selected_store, storage, tmp_path_factory, monkeypatch):  # noqa: F811
+    """Defect: the pause, the pack or the Cloud verifier keeps the library's 2 GiB per-file default, so an evicted
+    recording above it fails every export that the planned bound covers. The default is scaled down to 1 KiB, so
+    a 4 KiB original stands for one above 2 GiB; the archive layout of a member above 2 GiB is not covered."""
+
+    @dataclasses.dataclass(frozen=True)
+    class ScaledDefaults(vault_portability.PortabilityLimits):
+        max_file_bytes: int = 1024
+
+    monkeypatch.setattr(vault_portability, "PortabilityLimits", ScaledDefaults)
+    monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
+    _path, _reference, data = _evicted(vault, "recording", 4096)
+    assert len(data) > ScaledDefaults().max_file_bytes
+    staging = tmp_path_factory.mktemp("staging")
+    export_id = str(uuid.uuid4())
+
+    with _owner():
+        cloud_export_steps.pause(vault, staging, export_id=export_id, cell_id=CELL, media_mode="served",
+                                 max_bytes=PLENTY)
+        packed = cloud_export_steps.pack(vault, staging, export_id=export_id, cell_id=CELL, part_bytes=64 * 1024**2,
+                                         max_parts=10, max_bytes=PLENTY)
+    PartStore.objects["/archive?versionId=exact"] = (
+        staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.SPOOL_NAME / "part-00001").read_bytes()
+    verified = cloud_export.verify_remote_export(f"{storage['base']}/archive?versionId=exact", cell_id=CELL,
+                                                 archive_bytes=packed["bytes"], archive_sha256=packed["sha256"],
+                                                 max_bytes=PLENTY)
+
+    assert (packed["parts"], packed["evicted"], verified["verified"]) == (1, 1, True)
 
 
 def test_the_pause_copies_between_two_volumes(vault: Path, tmp_path_factory, monkeypatch):

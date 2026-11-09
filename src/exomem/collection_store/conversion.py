@@ -109,8 +109,11 @@ def summary_form(root, operation, current, declared, stored):
             or types.type_for_manifest(proposed).name != declared.name):
         raise RuntimeError("a summary conversion changes only the storage strategy and view mode")
     try:
-        if proposed.view_diagnostics:
-            raise collections.CollectionError(proposed.view_diagnostics[0].code, proposed.view_diagnostics[0].reason)
+        # A saved view the collection already could not serve stays as it was: the conversion changes
+        # only storage, so it refuses only a view that summary mode itself breaks.
+        introduced = [found for found in proposed.view_diagnostics if found not in current.view_diagnostics]
+        if introduced:
+            raise collections.CollectionError(introduced[0].code, introduced[0].reason)
         record_formats.validate_storage_contract(proposed)
         if declared.kind == "intended":
             planning.require_planning_profile(proposed)

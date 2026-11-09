@@ -101,7 +101,7 @@ In the spike, derivation took 391 ms and the transaction 1.23 s at p50 on the re
 
 Every reader of page bytes or derived rows reads the store: lexical, graph, reference and semantic-unit readers, page reads, `find`'s parse cache (keyed by store revision instead of file mtime), the frontmatter reads that governance makes, and the registry overlay loaders that read the schema overlay's YAML files. Row readers keep their query code and point at the store's tables. A byte reader keeps its store-mode answer while the state manifest's stat signature holds, because activation and rollback run offline and each changes the manifest; the write refusal reads both mode records every time. In store mode they drop freshness witnesses, mtime checks and sync-on-first-use repair, because a committed write cannot leave those rows behind.
 
-The lexical catalogue also holds rows for files that the store does not own: notes outside the Knowledge Base folder, files under dot-directories and the collection layers. In store mode nothing refreshes those rows. Tasks 2.2 and 3.1 must give them an owner before store mode serves reads.
+The lexical catalogue also holds rows for files that the store does not own: notes outside the Knowledge Base folder, files under dot-directories and the collection layers. In store mode nothing refreshes those rows. The vector sidecar holds the same kind of rows, and the store-mode semantic drain neither refreshes nor deletes them: it follows the store's audit trail, which names only owned pages, and its census touches only owned paths. Tasks 2.2 and 3.1 must give both kinds of row an owner before store mode serves reads.
 
 ### D4. Markdown is a projection
 

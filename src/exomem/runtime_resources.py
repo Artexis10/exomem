@@ -529,6 +529,14 @@ class SemanticPreparation:
             self.parser_bytes += 2 * expanded
             self.reserve(self.parser_bytes)
 
+    def hold(self, source: bytes) -> None:
+        """Decode the source and charge the parser for it, before anything parses it."""
+        from . import find_corpus
+
+        self.source = source.decode("utf-8")
+        frontmatter = find_corpus.FRONTMATTER_PATTERN.match(self.source)
+        self.reserve_parser(self.source, yaml_text=frontmatter.group(1) if frontmatter else None)
+
     def check_page(self, page: Any, *, vector_dim: int) -> None:
         # Before the existing chunker/parser allocates: count an upper bound
         # of paragraphs, hard-split pieces and one possible unit per line.
@@ -587,7 +595,7 @@ def semantic_preparation(
     expected_hash: str | None = None,
 ):
     """Reserve before source/parse allocations; never wait for memory capacity."""
-    from . import find_corpus, freshness, vault
+    from . import freshness, vault
 
     if check is not None:
         check()
@@ -601,12 +609,8 @@ def semantic_preparation(
         )
         if len(source) != source_bytes or freshness.stat_signature(path) != signature:
             raise OSError("semantic input changed during preparation")
-        preparation.source = source.decode("utf-8")
         preparation.signature = signature
-        frontmatter = find_corpus.FRONTMATTER_PATTERN.match(preparation.source)
-        preparation.reserve_parser(
-            preparation.source, yaml_text=frontmatter.group(1) if frontmatter else None,
-        )
+        preparation.hold(source)
         yield preparation
 
 
