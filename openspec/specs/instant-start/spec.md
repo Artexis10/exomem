@@ -384,7 +384,7 @@ No caller SHALL wait on graph registration without a budget. The budget SHALL de
 
 ### Requirement: Readiness distinguishes serving from cutover
 
-Runtime readiness SHALL keep the serving `ready` status and SHALL additionally report a cutover component set naming the lexical catalog, the embedding model when preload is allowed, the proven graph snapshot, and the semantic corpus context. A standby worker SHALL report which cutover component it is waiting on. After a promotion, readiness SHALL report which cutover components were carried forward from the standby. Queued vocabulary recovery SHALL drain in the background once the graph projection is current.
+Runtime readiness SHALL keep the serving `ready` status and SHALL additionally report a cutover component set naming the lexical catalog, the embedding model when preload is allowed, the graph snapshot, and the semantic corpus context. The graph snapshot component SHALL be ready when the standby proved the snapshot, or when its proof declined because the snapshot is unusable for this build. A standby worker SHALL report which cutover component it is waiting on. After a promotion, readiness SHALL report which cutover components were carried forward from the standby. Queued vocabulary recovery SHALL drain in the background once the graph projection is current.
 
 #### Scenario: A standby reports what it waits on
 - **WHEN** a standby worker has warmed the lexical catalog but not yet proven the graph snapshot

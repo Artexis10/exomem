@@ -1,7 +1,10 @@
 """Write a stored page's bytes into a vault tree (OpenSpec make-vault-store-canonical D4).
 
-Migration's proof, rollback and the projector share this one writer, so each puts a page on disk the same way:
-a temporary file beside the target, made durable when asked, then renamed into place.
+Migration's proof (``verify.py``) and rollback (``rollback.py``) share this one writer, so each
+puts a page on disk the same way: a temporary file beside the target, made durable when asked, then
+renamed into place. The projector (``projector.py``) does not use it: it publishes through the held
+filesystem, which refuses to follow a link and replaces a file only while it is still the file that
+was judged.
 """
 
 from __future__ import annotations
@@ -12,7 +15,8 @@ from pathlib import Path
 
 from .. import vault
 
-#: Beside a target while it is written; a startup sweep removes a leftover (D4).
+#: Beside a target while it is written. This writer has no sweep for a leftover; the projector's own
+#: temporaries are the held filesystem's, and its startup sweep removes those.
 TEMP_PREFIX = ".exomem-projecting-"
 
 

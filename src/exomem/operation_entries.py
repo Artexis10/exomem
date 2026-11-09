@@ -615,7 +615,7 @@ _REMAINING = {
         _row("acknowledge", "import_memory", ("import_id", "paths"), ("import_id",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "read_media": ("media", (
-        _row("video", "read_media", ("path", "max_frames", "start_sec", "end_sec"), ("path",)),
+        _row("video", "read_media", ("path", "max_frames", "start_sec", "end_sec", "max_side"), ("path",)),
         _row("image", "read_media", ("path", "paths", "max_side", "region")),
     )),
     "process_media": ("operation", (

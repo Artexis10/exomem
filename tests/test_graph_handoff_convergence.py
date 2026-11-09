@@ -1812,6 +1812,7 @@ def test_a_graph_schema_bump_settles_the_snapshot_so_the_upgrade_proceeds(
 
     record = service_standby.promote(root, migrated=False)
     assert record["snapshot"] == "unproven"
+    assert record["proof_declined"] == "graph_sync_snapshot_unusable"
     assert "graph_handoff" not in service_standby.carried_warm_components(), (
         "the promoted worker must rebuild the older build's graph, not inherit it"
     )

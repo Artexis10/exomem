@@ -208,7 +208,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         check(tx, change.expect)
         _degrade_moves(tx, change.paths)
         existing = _held_pages(tx, change)
-        now = _timestamp()
+        now = timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
             _put_page(tx, put, revision, audit)
@@ -264,8 +264,22 @@ def _require_safe(rel: str) -> None:
         raise OpError(NOT_OWNED, f"{rel!r} is not a safe vault-relative path") from error
 
 
-def _timestamp() -> str:
+def timestamp() -> str:
+    """The store's one time format, to the second in UTC: queue, audit and held rows all use it."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_manifest(
+    tx: Connection, rel: str, sha256: str, size: int, mtime_ns: int, revision: int
+) -> None:
+    """Record that the file at ``rel`` holds these bytes: the one write of a manifest row."""
+    tx.execute(
+        "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
+        "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
+        (rel, sha256, size, mtime_ns, revision),
+    )
 
 
 def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
@@ -307,6 +321,21 @@ def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:
     queued = tx.execute("SELECT 1 FROM store_projection_queue WHERE path = ?", (rel,)).fetchone()
     held = tx.execute("SELECT 1 FROM store_held WHERE path = ?", (rel,)).fetchone()
     return manifest == (revision, sha256) and queued is None and held is None
+
+
+#: Which audit operations open and end a path's life in the store, as ``_Trail`` records them. A
+#: write, an import, or the new side of a move (the row that names the old path) opens a life; a
+#: delete, or the old side of a move, ends one. The projector reads them to tell the bytes that
+#: Exomem put at a path in its current life from those of an earlier life, which a person may have
+#: restored.
+BEGINS_A_LIFE = (
+    "(operation IN ('write', 'import') OR (operation = 'move' AND from_path IS NOT NULL))"
+)
+ENDS_A_LIFE = "(operation = 'delete' OR (operation = 'move' AND from_path IS NULL))"
+#: A migration or a rollback writes one audit row for the whole vault, with no path. Every path's
+#: life starts after the latest one: the vault ran in file mode in between, so no byte that the
+#: audit trail names from before it is known to be Exomem's.
+RESETS_EVERY_LIFE = "(path IS NULL AND operation IN ('migrate', 'rollback'))"
 
 
 class _Trail:
@@ -360,7 +389,7 @@ class _Trail:
 def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> None:
     digest = hashlib.sha256(put.body).hexdigest()
     on_disk = put.on_disk_mtime_ns is not None
-    mtime_ns = put.on_disk_mtime_ns if on_disk else time.time_ns()
+    mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
     tx.execute(
         "INSERT INTO store_pages(path, body, sha256, size, frontmatter_json, revision, mtime_ns) "
         "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET body = excluded.body, "
@@ -370,13 +399,7 @@ def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> Non
         (put.rel, put.body, digest, len(put.body), frontmatter_json(put.body), revision, mtime_ns),
     )
     if on_disk:
-        tx.execute(
-            "INSERT INTO store_manifest(path, sha256, size, mtime_ns, revision) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(path) DO UPDATE SET sha256 = excluded.sha256, size = excluded.size, "
-            "mtime_ns = excluded.mtime_ns, revision = excluded.revision",
-            (put.rel, digest, len(put.body), mtime_ns, revision),
-        )
+        record_manifest(tx, put.rel, digest, len(put.body), mtime_ns, revision)
         _clear_queued(tx, put.rel)
     audit.wrote(put.rel, digest, queue=not on_disk)
 
