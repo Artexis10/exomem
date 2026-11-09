@@ -241,6 +241,8 @@ def _require_write(root: Path, rel: str, written: bytes | None) -> None:
     A governed write of a page passes the connector boundary's write check on the bytes it
     publishes, so a resolve passes the same check, before it saves or commits anything. A caller
     who may not read the item never gets here: the adapter answers it with ``nothing_held``.
+    The ``_access.yaml`` tiers are not applied: a resolve only chooses between bytes that the
+    person and the store already hold, and a tier refusal would leave the item with no resolution.
     """
     from ..governance import connector_boundary
 
