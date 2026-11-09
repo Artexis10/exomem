@@ -9,6 +9,7 @@ reach the store thread for each command of a caller's workflow. Invented names o
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -213,27 +214,28 @@ def test_a_read_that_reuses_the_due_state_memo_asks_the_store_once_for_its_pages
     """
     root, who = service.root, _who(caller)
     pages = _seed(root, caller)
-    ordinary = "Knowledge Base/Notes/Shared/quorvel-tansid-survey.md"
+    # Fixed, so a run that crosses midnight UTC still reuses the build: the memo is kept per day.
+    now = dt.datetime(2026, 9, 10, 12, tzinfo=dt.UTC)
     due_state.save(root, {
         "version": due_state.SCHEMA_VERSION,
-        "categories": {"predictions": {ordinary: {"open": [{"path": ordinary}]}}},
+        "categories": {"predictions": {SHARED: {"open": [{"path": SHARED}]}}},
         "marker": "store-pages",
     })
 
     def build(vault_root, *, today, now, principal=None, purpose=None, **_inputs):
         # As the real build does: record the verdict the release plane gave each page it asked about.
         keep = egress.release_walk_filter(vault_root, principal=principal, purpose=purpose)
-        asked = {page: True if keep is None else bool(keep(page)) for page in [ordinary, *pages]}
-        return [{"ref": "exomem://memory/1", "kind": "open", "path": ordinary}], None, asked, None
+        asked = {page: True if keep is None else bool(keep(page)) for page in [SHARED, *pages]}
+        return [{"ref": "exomem://memory/1", "kind": "open", "path": SHARED}], None, asked, None
 
     monkeypatch.setattr(due_state, "_served_entries_uncached", build)
     due_state.reset_serve_cache()
     try:
         with request_scope(who):
-            due_state.served_entries(root, principal=who)
+            due_state.served_entries(root, now=now, principal=who)
         store_requests.kwargs.clear()
         with request_scope(who):
-            due_state.served_entries(root, principal=who)
+            due_state.served_entries(root, now=now, principal=who)
     finally:
         due_state.reset_serve_cache()
 
