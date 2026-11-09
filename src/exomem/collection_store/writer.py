@@ -402,8 +402,8 @@ class CollectionWriter:
     def read_snapshot(self, *, mutation=False):
         """Join canonical reads under one SQLite and policy snapshot.
 
-        ``mutation`` reads under the policy a write is held to: a collection withheld in part
-        reads as absent, as the write itself would find it.
+        ``mutation`` reads under the policy a write is held to: a collection that the write would
+        refuse refuses here, with the write's own error.
         """
         self._require_operation_context()
         self.handle.release_cache.check()
@@ -705,6 +705,14 @@ class CollectionWriter:
             (manifest.collection_id, *sorted(held_ids)),
         ).fetchall()
         corrections = [candidate for candidate in held if candidate[4] != "write-refusal"]
+        if self._operation.connector_limited_owner():
+            # The words never depend on whether a row is hidden, so they show the connection none.
+            # A diagnostic is closed to a code and a reason, so the reason carries what to change.
+            diagnostics.insert(0, {
+                "code": governance.CONNECTOR_LIMITED,
+                "reason": "a write that carries these lifecycle guards will be refused, because the host's "
+                          "connector boundary limits this connection and they cover only the rows it can read. "
+                          f"The boundary does not limit a write {governance.UNLIMITED_WRITE_ROUTES}."})
         if pending:
             diagnostics.append({"code": "PROJECTION_PENDING", "reason": "collection views are pending publication"})
         for code in sorted({candidate[5] for candidate in corrections}):
