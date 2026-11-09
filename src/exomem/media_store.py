@@ -1599,7 +1599,7 @@ def _volume_bytes(vault: Path, relatives, largest_offloadable: int) -> tuple[int
             size = os.lstat(vault / relative).st_size
         except FileNotFoundError:
             continue  # A moved or evicted original holds no byte on the volume.
-        if size <= largest_offloadable:
+        if media_capacity.classify(size, largest_offloadable) == media_capacity.OFFLOADABLE:
             count, total = count + 1, total + size
     return count, total
 
