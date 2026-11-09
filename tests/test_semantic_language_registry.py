@@ -458,13 +458,17 @@ def test_the_shipped_traits_sit_on_the_kinds_the_replaced_kind_sets_named() -> N
 
     assert {
         trait: registry.kinds_with(trait)
-        for trait in ("assertion", "page_claim", "procedure", "outcome", "question")
+        for trait in (
+            "assertion", "page_claim", "procedure", "outcome", "question", "credence", "dated_event",
+        )
     } == {
         "assertion": {"claim", "finding", "inference", "hypothesis", "result"},
         "page_claim": {"claim"},
         "procedure": {"procedure"},
         "outcome": {"result"},
         "question": {"open_question"},
+        "credence": {"belief"},
+        "dated_event": {"timeline_event"},
     }
     assert registry.traits_of("result") == {"assertion", "outcome"}
     assert registry.traits_of("decision") == frozenset()

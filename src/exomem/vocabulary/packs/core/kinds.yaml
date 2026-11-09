@@ -24,7 +24,7 @@ kinds:
   pattern: {description: Portable pattern semantic block, heading_aliases: [patterns]}
   record: {description: Portable record semantic block, heading_aliases: [records]}
   case: {description: Portable case semantic block, heading_aliases: [cases]}
-  timeline_event: {description: Portable timeline event semantic block, heading_aliases: [timeline, timelines, timeline_events, events]}
+  timeline_event: {description: Portable timeline event semantic block, heading_aliases: [timeline, timelines, timeline_events, events], traits: [dated_event]}
   requirement: {description: Portable requirement semantic block, heading_aliases: [requirements]}
   action: {description: Portable action semantic block, heading_aliases: [actions, todo, todos]}
   definition: {description: Portable definition semantic block, heading_aliases: [definitions]}
@@ -34,7 +34,7 @@ kinds:
   entity: {description: Portable entity semantic block, heading_aliases: [entities]}
   project: {description: Portable project semantic block, heading_aliases: [projects]}
   media_segment: {description: Portable media segment semantic block, heading_aliases: [media_segments, segments]}
-  belief: {description: Portable belief semantic block, heading_aliases: [beliefs]}
+  belief: {description: Portable belief semantic block, heading_aliases: [beliefs], traits: [credence]}
 # A compact kind has no heading: it is the kind of a unit written as one line, so no `##`
 # heading resolves to it.
 compact_kinds:

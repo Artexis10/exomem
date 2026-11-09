@@ -186,6 +186,41 @@ def test_a_belief_with_a_credence_but_no_holder_is_refused() -> None:
     assert _codes(document.errors) == ["missing_rich_credence_holder"]
 
 
+def _vault_kind(traits: list[str]) -> language_registry.SemanticLanguageRegistry:
+    return language_registry.load_registry(proposal={
+        "schema_version": 1, "categories": {},
+        "kinds": {"forecast": {"description": "A forecast someone holds", "traits": traits}},
+    })
+
+
+def test_a_vault_kind_with_the_credence_trait_holds_a_sourced_probability() -> None:
+    """Catches a vault's own belief kind refused because the parser names `belief` itself."""
+    document = semantic_units.parse_semantic_units(
+        "# Release outlook\n\n## Forecast\n- credence_holder: Platform team\n- credence: 0.7\n"
+        "- credence_basis: Four of the last six releases slipped.\n\nThe release slips a week.\n",
+        path=PATH, language_registry=_vault_kind(["credence"]),
+    )
+
+    (forecast,) = document.units
+    assert document.errors == () and document.warnings == ()
+    assert forecast.kind == "forecast"
+    assert (forecast.credence_holder, forecast.credence) == ("Platform team", "0.7")
+    assert forecast.credence_basis == "Four of the last six releases slipped."
+
+
+def test_a_vault_kind_without_the_credence_trait_refuses_a_credence() -> None:
+    """Catches a credence accepted on a vault kind that never promised the belief rules."""
+    document = semantic_units.parse_semantic_units(
+        "# Release outlook\n\n## Forecast\n- credence_holder: Platform team\n- credence: likely\n\n"
+        "The release slips a week.\n",
+        path=PATH, language_registry=_vault_kind([]),
+    )
+
+    (error,) = document.errors
+    assert error.code == "misplaced_rich_credence"
+    assert "## Belief" in error.remediation
+
+
 def test_a_plain_beliefs_heading_warns_with_both_repairs_and_still_parses() -> None:
     """Catches an old page with a `## Beliefs` section that this release stops parsing."""
     document = _parse("# Release outlook\n\n## Beliefs\n\nThe team trusts the new pipeline.\n")

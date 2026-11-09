@@ -1781,11 +1781,6 @@ def _rich_verdict(
 _DECIMAL = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
 _NUMBER_RE = re.compile(rf"^{_DECIMAL}(?:[eE][+-]?\d+)?$")
 _PERCENT_RE = re.compile(rf"^(?P<number>{_DECIMAL})\s*%$")
-# The language spec ties the credence rows to the core kind `belief`. A vault cannot redefine
-# a core kind, so this names a value the spec fixes, not vocabulary a vault defines.
-_BELIEF_KIND = "belief"
-# The language spec ties `occurred_at` to the core kind `timeline_event`, as `_BELIEF_KIND`.
-_EVENT_KIND = "timeline_event"
 # The shape of an ISO date and time, checked before the calendar parser: a field's format.
 _ISO_DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?$"
@@ -1847,12 +1842,13 @@ def _belief_rows(
     values: dict[str, str | None] = dict.fromkeys(semantic_blocks.BELIEF_UNIT_METADATA_KEYS)
     problems: list[_RowProblem] = []
     present = [key for key in semantic_blocks.BELIEF_UNIT_METADATA_KEYS if key in metadata]
-    if kind != _BELIEF_KIND:
+    if not language.has(kind, "credence"):
         if present:
             problems.append(_RowProblem(
                 present[0], "misplaced_rich_credence",
                 f"{', '.join(present)} {'belongs' if len(present) == 1 else 'belong'} on a "
-                f"belief unit, not on a {kind or 'plain'} unit",
+                f"belief unit ({', '.join(sorted(language.kinds_with('credence')))}), not on a "
+                f"{kind or 'plain'} unit",
                 BELIEF_FORM,
             ))
         return values, problems
@@ -1927,7 +1923,11 @@ def _statement_rows(
     )
     read(
         "occurred_at", _event_time, "an ISO date or date and time, such as 2026-03-01 or "
-        "2026-03-01T14:30", place=None if kind == _EVENT_KIND else f"a {_EVENT_KIND} unit",
+        "2026-03-01T14:30",
+        place=(
+            None if language.has(kind, "dated_event")
+            else f"a dated event unit ({', '.join(sorted(language.kinds_with('dated_event')))})"
+        ),
     )
     read("quantity_value", _number, "a number, such as 42 or 0.95")
     read("quantity_unit", _row_text, "the unit of quantity_value")

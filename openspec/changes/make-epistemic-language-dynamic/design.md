@@ -100,6 +100,8 @@ Kinds need their own set, because a relation behaviour has a source and a target
 | `outcome` | Role review reads the unit as an outcome. The category fallback stays as debt. | C5 kind leg | result |
 | `question` | The graph's shared-open-question generator and the census read the unit as a question. The category leg stays as debt. | C6 kind leg, C7 | open_question |
 | `closable` | `flag_open` marks the unit while no verdict or answer exists. Declared in slice 5 with `flag_open`. | new | open_question, hypothesis, prediction, assumption |
+| `credence` | The unit takes `credence`, `credence_holder` and `credence_basis`, and the belief-unit rules apply to it. Those rows on a unit of another kind are an error (slice 4). | new | belief |
+| `dated_event` | The unit takes `occurred_at`. The row on a unit of another kind warns for one release (slice 4). | new | timeline_event |
 
 A trait never schedules a check. `check_by` already does that on any unit, so a trait for it would duplicate the governed key.
 
@@ -169,7 +171,7 @@ The rejected alternatives were levels only, which keeps the old rule but gives u
 
 - `asserted_by` is a plain name or a link to an entity page. Context presents a unit with it as that party's claim.
 - `modality` takes a modality-registry key: is, should, must, may. Retrieval and context never merge units whose modalities differ.
-- `occurred_at` is a date or a date and time on a `timeline_event`.
+- `occurred_at` is a date or a date and time on a unit with the `dated_event` trait, which ships on `timeline_event`.
 - `quantity_value`, `quantity_unit` and `quantity_error` record one measured quantity. Records remain the place for a series.
 - `inference_mode` takes an inference-mode registry key on a unit with the `assertion` trait.
 
