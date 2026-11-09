@@ -366,7 +366,8 @@ def _released_mutation_diagnostics(result: Any, *, operation: str) -> Any:
     """Validate a full committed terminal from a released build and return its diagnostics.
 
     The compatible-application step runs a released wheel that predates the nested
-    ``diagnostics.operational`` reply: it answers with ``ok``, ``status`` and ``mutated`` at the top.
+    ``diagnostics.operational`` reply: it answers with ``ok``, ``status`` and ``mutated``
+    at the top.
     """
     if (
         not isinstance(result, dict)
