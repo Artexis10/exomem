@@ -347,6 +347,22 @@ def _name_hit(root: Path, hit: Any, *, keep_paths: bool) -> Any:
     return {**hit, "id": found.id} if keep_paths else _renamed(hit, {"path": {"id": found.id}})
 
 
+def _id_as_written(identity: PageIdentity, reply: Mapping[str, Any]) -> str:
+    """The id of the version this reply's own write produced, not of the page as it is now.
+
+    A replayed reply, or one that another writer raced, names a page that has moved on. An id of the
+    current version would let a guarded edit overwrite that other change. A reply that holds no
+    `after_hash` (the pages of a multi-page write, a source) names the current version.
+    """
+    after_hash = reply.get("after_hash")
+    if isinstance(after_hash, str):
+        try:
+            return f"{identity.id.partition('.')[0]}.{page_ids.id_version(after_hash)}"
+        except ValueError:
+            pass
+    return identity.id
+
+
 def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
     source = reply.get("source")
     path = reply.get("path")
@@ -363,7 +379,7 @@ def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
     swaps: dict[str, Mapping[str, Any]] = {}
     moved: dict[str, Any] = {}
     if isinstance(path, str) and path in named:
-        swaps["path"] = {"title": named[path].title, "id": named[path].id}
+        swaps["path"] = {"title": named[path].title, "id": _id_as_written(named[path], reply)}
         moved["path"] = path
     if isinstance(paths, list) and len(named) and all(item in named for item in paths):
         swaps["paths"] = {

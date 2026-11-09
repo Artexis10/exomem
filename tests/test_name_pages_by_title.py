@@ -27,7 +27,7 @@ from test_derived_identifier_egress import (
 )
 from test_mcp_schema_fidelity import TOOL_SURFACE_CONTRACT_PATH, _tool_surface_sha256
 
-from exomem import call_ledger, find, page_names, writer_lease
+from exomem import call_ledger, command_surface, find, page_names, writer_lease
 from exomem import server as server_module
 from exomem import vault as vault_module
 
@@ -218,6 +218,52 @@ def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
     assert "Visible twin." in answers["with"]["Shared plan"]["body"]
     # And an unknown title refuses in the same shape.
     assert answers["with"]["Secret plan"].keys() == answers["with"]["Nonexistent plan"].keys()
+
+
+def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(build) -> None:
+    async def call(client: Client, name: str, arguments: dict[str, Any], key: str) -> dict[str, Any]:
+        meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: key}
+        result = await client.call_tool(name, arguments, meta=meta, raise_on_error=False)
+        assert result.structured_content is not None
+        return result.structured_content
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            created = await _tool(client, "create_note", _new_note("Retry policy"))
+            first_edit = {
+                "path": created["id"],
+                "operation": _replace("bounded", "capped"),
+                "why": "tighten",
+            }
+            first = await call(client, "edit_note", first_edit, "first-edit-key")
+            # Another writer changes the page after the first edit.
+            await call(
+                client,
+                "edit_note",
+                {
+                    "path": created["id"],
+                    "operation": _replace("capped", "limited"),
+                    "why": "tighten more",
+                },
+                "second-edit-key",
+            )
+
+            replayed = await call(client, "edit_note", first_edit, "first-edit-key")
+            assert replayed["id"] == first["id"]
+
+            # The id of the replayed reply cannot guard an edit of the other writer's version.
+            refused = await _tool(
+                client,
+                "edit_note",
+                {
+                    "path": created["id"],
+                    "operation": _replace("limited", "dropped", expected_hash=replayed["id"]),
+                    "why": "overwrite",
+                },
+            )
+            assert refused["error"]["code"] == "STALE_EDIT"
+
+    asyncio.run(run())
 
 
 _FAKE_ID = "aaaaaaa.aaaa"
