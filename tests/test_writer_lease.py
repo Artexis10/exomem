@@ -2495,7 +2495,7 @@ def test_explicit_process_media_hash_yields_global_guard_and_replays_idempotentl
         kwargs,
         implicit_idempotency_scope="principal:test",
     )
-    assert replay == results[0]
+    assert replay == {**results[0], "replayed": True, "mutated": False}
     assert provenance_calls == 1
 
 

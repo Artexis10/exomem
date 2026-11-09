@@ -224,7 +224,7 @@ def test_public_delta_save_replays_without_recommit(
     )
 
     assert first["state"] == "committed"
-    assert replay == first
+    assert replay == {**first, "replayed": True, "mutated": False}
     assert registry_path.read_bytes() == committed_bytes
     assert registry_batches == 1
 

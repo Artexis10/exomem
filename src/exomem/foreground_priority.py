@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from typing import TypeVar
 
@@ -294,6 +294,28 @@ def pass_waited() -> float:
     return budget.waited if budget is not None else 0.0
 
 
+def _wait_limit(started: float, max_wait: float, budget: PassBudget | None) -> float:
+    """Seconds a yield may wait now: `max_wait`, held to the pass's progress floor inside a `bulk()` pass."""
+    limit = max(0.0, max_wait)
+    if budget is None:
+        return limit
+    if started < budget.work_until:
+        return 0.0
+    return min(limit, max(0.0, budget.allowance(started)))
+
+
+def _account_wait(started: float, budget: PassBudget | None, *, released: bool) -> float:
+    """Charge a finished wait to the pass; return its length."""
+    check_cancelled()
+    now = time.monotonic()
+    waited = now - started
+    if budget is not None:
+        budget.waited += waited
+        if not released:
+            budget.after_capped_wait(now, waited)
+    return waited
+
+
 def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """Wait while a foreground request runs, at most `max_wait`; return the wait.
 
@@ -309,23 +331,44 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     if getattr(_local, "depth", 0) or _holds_a_boundary():
         return 0.0
     started = time.monotonic()
-    limit = max(0.0, max_wait)
-    if budget is not None:
-        if started < budget.work_until:
-            return 0.0
-        limit = min(limit, max(0.0, budget.allowance(started)))
-        if limit <= 0.0:
-            return 0.0
+    limit = _wait_limit(started, max_wait, budget)
+    if limit <= 0.0:
+        return 0.0
     with _condition:
         released = _condition.wait_for(_bulk_may_run, timeout=limit)
+    return _account_wait(started, budget, released=released)
+
+
+#: How often `wait_while` asks again. The writer it waits for polls the boundary at this rate
+#: (`mutation_lock`'s default poll interval), so a slower ask would outlast the wait it serves.
+_WAIT_WHILE_POLL_SECONDS = 0.025
+
+
+def wait_while(waiting: Callable[[], bool], *, max_wait: float = MAX_YIELD_SECONDS) -> float:
+    """Wait while `waiting()` is true, at most `max_wait`; return the wait.
+
+    For a wait that no foreground mark covers, such as a writer in another process that polls for the
+    boundary this thread just released. The floors are `yield_to_foreground`'s: the cap, the pass's
+    progress share, and a thread that holds a boundary or runs foreground work never waits. A stop
+    of an owned bulk scope ends the wait. It holds no lock; `waiting` must hold none either.
+    """
     check_cancelled()
-    now = time.monotonic()
-    waited = now - started
-    if budget is not None:
-        budget.waited += waited
-        if not released:
-            budget.after_capped_wait(now, waited)
-    return waited
+    if getattr(_local, "depth", 0) or _holds_a_boundary() or not waiting():
+        return 0.0
+    budget: PassBudget | None = getattr(_local, "budget", None)
+    started = time.monotonic()
+    limit = _wait_limit(started, max_wait, budget)
+    if limit <= 0.0:
+        return 0.0
+    deadline = started + limit
+    released = True
+    while waiting():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            released = False
+            break
+        wait_for_retry(min(_WAIT_WHILE_POLL_SECONDS, remaining))
+    return _account_wait(started, budget, released=released)
 
 
 def _holds_a_boundary() -> bool:

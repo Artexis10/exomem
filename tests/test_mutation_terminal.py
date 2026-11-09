@@ -166,7 +166,8 @@ def test_exact_retry_replays_original_fast_ack_terminal_byte_for_byte(tmp_path) 
     original = manager.idempotency.run("fast-replay", "a" * 64, leaf)
     replay = manager.idempotency.run("fast-replay", "a" * 64, leaf)
 
-    assert replay == original
+    # Byte for byte, except the marker that says the retry wrote nothing.
+    assert replay == {**original, "replayed": True, "mutated": False}
     assert calls == 1
     assert replay["derived_sync"] == "pending"
     assert replay["advisory_result_ref"]
@@ -691,6 +692,7 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
         "ok": True,
         "status": "replayed",
         "mutated": False,
+        "replayed": True,
         "paths": ["Knowledge Base/Records/log.md"],
         "request_id": "11111111-1111-4111-8111-111111111111",
         "receipt_id": "receipt-1",
@@ -1104,7 +1106,7 @@ def test_one_committed_identity_projects_compact_full_and_legacy_without_rerun(
     assert compact["receipt_id"]
     assert compact["idempotency_key"] == "same-public-key"
     assert compact["warnings_count"] == 1
-    assert full == {**compact, "diagnostics": raw}
+    assert full == {**compact, "diagnostics": raw, "replayed": True, "mutated": False}
     assert legacy == raw
     assert "replayed" not in compact
     assert calls == 1

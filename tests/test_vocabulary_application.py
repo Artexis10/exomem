@@ -382,7 +382,7 @@ def test_lease_commits_a_reviewed_edge_only_after_the_canonical_source_changes(t
         first = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="edge-replay")
         replay = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="edge-replay")
     assert calls == 1
-    assert replay == first
+    assert replay == {**first, "replayed": True, "mutated": False}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 
@@ -415,7 +415,7 @@ def test_lease_commits_one_matching_reviewed_application_and_replays_without_lea
         first = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="reviewed-write")
         replay = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="reviewed-write")
     assert calls == 1
-    assert replay == first
+    assert replay == {**first, "replayed": True, "mutated": False}
     applied = VocabularyState(tmp_path).get(item.ref)
     assert applied["state"] == "applied"
     assert len(applied["receipts"]) == 1
@@ -454,7 +454,7 @@ def test_retry_after_a_precommit_error_reuses_the_bound_request(tmp_path):
         completed = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="retryable-reviewed-write")
         replay = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="retryable-reviewed-write")
     assert calls == 2
-    assert replay == completed
+    assert replay == {**completed, "replayed": True, "mutated": False}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 
@@ -494,7 +494,7 @@ def test_committed_terminal_recovers_an_uncertain_direct_application(tmp_path, m
     monkeypatch.setattr(vocabulary_application, "commit", real_commit)
     with library_scope():
         replay = manager.invoke(command, (tmp_path,), kwargs, idempotency_key="uncertain-direct")
-    assert replay == first
+    assert replay == {**first, "replayed": True, "mutated": False}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 

@@ -337,7 +337,7 @@ def test_committed_registry_terminal_recovers_an_uncertain_application(tmp_path:
         replay = manager.invoke(
             _command("schema_memory"), (tmp_path,), arguments, idempotency_key="uncertain-venue", read_only=False
         )
-    assert replay == first
+    assert replay == {**first, "replayed": True, "mutated": False}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 
@@ -398,7 +398,7 @@ def test_completed_registry_terminal_recovers_when_outage_left_the_operation_bou
         replay = manager.invoke(
             _command("schema_memory"), (tmp_path,), arguments, idempotency_key="bound-venue", read_only=False
         )
-    assert replay == first
+    assert replay == {**first, "replayed": True, "mutated": False}
     assert VocabularyState(tmp_path).get(item.ref)["state"] == "applied"
 
 
@@ -529,7 +529,7 @@ def test_relation_registration_preserves_history_and_binds_an_authored_edge(tmp_
             idempotency_key="venue-event-edge",
             read_only=False,
         )
-    assert replay == accepted
+    assert replay == {**accepted, "replayed": True, "mutated": False}
     assert (tmp_path / source).read_text(encoding="utf-8").count("- hosts [[") == 1
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
@@ -722,7 +722,7 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
             idempotency_key="hydration-resume",
             read_only=False,
         )
-    assert replay == resumed
+    assert replay == {**resumed, "replayed": True, "mutated": False}
 
 
 def test_public_terminal_publishes_warming_then_current_vocabulary_work(

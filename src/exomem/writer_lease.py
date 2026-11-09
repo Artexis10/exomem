@@ -24,6 +24,7 @@ import stat
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -59,6 +60,7 @@ from .mutation_terminal import (
     _DERIVED_COMPONENT_NAMES,
     ResponseDetail,
     _CanonicalRequestReplay,
+    as_replay,
     committed_terminal,
     needs_review_terminal,
     project_terminal,
@@ -4234,7 +4236,7 @@ class IdempotencyStore:
                         if isinstance(stored.get("idempotency_key"), str)
                         else None,
                     )
-            return stored
+            return as_replay(stored)
         if disposition == "committed_failure":
             raise stored
         if disposition == "committed_uncertain":
@@ -4486,13 +4488,24 @@ def _receipt_tag(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
+def _nfc(value: Any) -> Any:
+    """Normalise every string in an argument tree, so one text composed two ways is one request."""
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, Mapping):
+        return {_nfc(key): _nfc(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_nfc(item) for item in value]
+    return value
+
+
 def _command_digest(command: Any, kwargs: Mapping[str, Any]) -> str:
     if command.name == "adoption_studio" and kwargs.get("action") != "status":
         # nosemgrep: ep-word-membership -- Status-only schema fields cannot change pre-upgrade mutation identities.
         kwargs = {key: value for key, value in kwargs.items() if key not in ("view", "offset", "limit", "revision")}
     return hashlib.sha256(
         json.dumps(
-            {"command": command.name, "kwargs": kwargs},
+            {"command": command.name, "kwargs": _nfc(kwargs)},
             sort_keys=True,
             separators=(",", ":"),
             default=str,
@@ -4790,6 +4803,12 @@ class _FairCaptureQueue:
         with self._condition:
             return bool(self._line)
 
+    def waiting_behind_head(self) -> int:
+        """Writes in line behind the head. The head is the write that holds the boundary or asks for it
+        in `hold()`, which its own waiter count shows; the rest wait here, where no count sees them."""
+        with self._condition:
+            return max(0, len(self._line) - 1)
+
     def enter_line(self) -> object:
         """Take a place at the back of the line; never blocks."""
         ticket = object()
@@ -4992,6 +5011,10 @@ class LeaseManager:
             poll_interval_seconds=self._mutation_poll_interval_seconds,
             kind=kind,
             name=name,
+            # A keyed write in line waits outside `hold()`: the holder must still see it.
+            queued_writers=self._capture_queue.waiting_behind_head
+            if kind == COORDINATOR_VAULT_BOUNDARY
+            else None,
         )
 
     @contextmanager
@@ -5306,6 +5329,14 @@ class LeaseManager:
                     # _mutation_boundary has bumped the generation. Keep exact
                     # receipt custody visible before any waiting writer enters.
                     _timed_handoff(session)
+
+    def writers_waiting(self, vault_root: os.PathLike[str] | str) -> int:
+        """Interactive writers that wait for this vault's boundary now, in this process or another.
+
+        For a long mutation that can end its call between two committed units, so that a writer waiting
+        for the boundary commits when it releases (`VaultMutationCoordinator.waiter_count`).
+        """
+        return self._mutation_coordinator_for(vault_root).waiter_count()
 
     def lend_boundary(
         self,

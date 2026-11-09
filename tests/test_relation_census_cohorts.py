@@ -159,7 +159,7 @@ def test_new_edges_follow_real_writes_not_page_age_or_reindex(
     with request_scope(owner_principal(surface="mcp")):
         written = bound(**arguments)
         replay = bound(**arguments)
-    assert replay == written
+    assert replay == {**written, "replayed": True, "mutated": False}
     # Respelling an edge during a real edit resolves to the same stable endpoint.
     commands.op_edit_memory(
         vault,

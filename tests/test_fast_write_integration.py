@@ -533,7 +533,9 @@ def test_expired_acknowledgement_does_not_wait_for_status_io(
     assert terminal["status"] == "committed" and terminal["derived_sync"] == "pending"
     assert "deadlineprobe" in (vault / arguments["rel_path"]).read_text()
     assert arguments["rel_path"] in _keyword(vault, "deadlineprobe")
-    assert _governed_write(manager, vault, **arguments, idempotency_key="expired-status") == terminal
+    assert _governed_write(manager, vault, **arguments, idempotency_key="expired-status") == {
+        **terminal, "replayed": True, "mutated": False
+    }
     assert _drain(vault) > 0
 
 
@@ -595,7 +597,9 @@ def test_own_note_continuations_leave_time_for_mandatory_custody(
             arguments["continuation"] = continuation
         terminal = manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}")
         assert clock["now"] - began <= request_budget.MCP_REQUEST_BUDGET_SECONDS
-        assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == terminal
+        assert manager.invoke(command, (vault,), arguments, idempotency_key=f"paced-notes-{call}") == {
+            **terminal, "replayed": True, "mutated": False
+        }
         continuation = results[-1].get("continuation")
         if not continuation:
             break
@@ -612,6 +616,7 @@ def _import_three_sources_while(
     hold,
     *,
     proof_seconds: float = 0.0,
+    borrows: bool = True,
 ) -> dict:
     """Import three Sources, one chunk each, while `hold(receipt)` waits on the boundary.
 
@@ -678,8 +683,10 @@ def _import_three_sources_while(
         if len(committed) == 1:
             waiting.start()
             waited = time.monotonic() + 10
-            while not boundary.waiter_count():  # the second chunk starts once the holder waits
-                assert time.monotonic() < waited, "the holder never waited on the boundary"
+            # A derived proof waits to borrow the boundary, and the second chunk starts once it does.
+            # A background hold only waits behind the import, so it needs no wait of its own.
+            while borrows and boundary.next_borrower_deadline() is None:
+                assert time.monotonic() < waited, "the holder never waited to borrow the boundary"
                 time.sleep(0.005)
         if len(committed) == 2:
             waiting.join(timeout=10)
@@ -743,7 +750,7 @@ def test_a_background_holder_cannot_borrow_the_boundary_of_an_import(
         ):
             return "held"
 
-    held = _import_three_sources_while(vault, tmp_path, monkeypatch, scan)
+    held = _import_three_sources_while(vault, tmp_path, monkeypatch, scan, borrows=False)
 
     assert held["outcome"] == "MUTATION_BUSY"
     assert held["applied"] == 3
@@ -1016,7 +1023,7 @@ def test_media_import_returns_with_durable_custody_unless_explicitly_disabled(
     pages = {path: path.read_bytes() for path in (vault / "Knowledge Base").rglob("*.md")}
     assert manager.invoke(
         command, (vault,), arguments, idempotency_key="import-media-custody"
-    ) == terminal
+    ) == {**terminal, "replayed": True, "mutated": False}
     assert {path: path.read_bytes() for path in pages} == pages
     assert media_jobs.MediaJobStore(vault).get_by_binary(artifact).id == job.id
 
@@ -1191,7 +1198,7 @@ def test_exact_replay_returns_the_original_terminal(
     second = _governed_write(
         manager, vault, rel_path=rel, source=source, idempotency_key="lane5-replay"
     )
-    assert second == first
+    assert second == {**first, "replayed": True, "mutated": False}
 
 
 # --------------------------------------------------------------------------- #

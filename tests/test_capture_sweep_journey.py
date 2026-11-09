@@ -182,8 +182,8 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
     assert "capture_sweep" not in quirk
 
     # 4. Replay. An acknowledgement the client never received is retried under the
-    #    same idempotency key. Each replay returns its ORIGINAL terminal byte for
-    #    byte -- so no second page, no second relation fact, and no second
+    #    same idempotency key. Each replay returns its ORIGINAL terminal, marked
+    #    as a replay -- so no second page, no second relation fact, and no second
     #    advisory: the meeting replay carries the block it already carried, and
     #    the quirk replay carries none, exactly as each did the first time.
     clock.advance(30)
@@ -201,8 +201,8 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
         slug="booking-lead-time",
         key="journey-quirk",
     )
-    assert meeting_replay == meeting
-    assert quirk_replay == quirk
+    assert meeting_replay == {**meeting, "replayed": True, "mutated": False}
+    assert quirk_replay == {**quirk, "replayed": True, "mutated": False}
     assert "capture_sweep" not in quirk_replay
 
     notes = sorted(

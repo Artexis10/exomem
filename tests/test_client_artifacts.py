@@ -722,7 +722,7 @@ def test_eight_artifacts_keep_ordered_receipt_and_replay_once(
         command, tmp_path, scope="case", category="raw", files=files, idempotency_key="eight-files"
     )
 
-    assert first == replay
+    assert replay == {**first, "replayed": True, "mutated": False}
     assert [row["file_id"] for row in first["files"]] == [file["file_id"] for file in files]
     assert first["summary"] == {"stored": 8, "already_stored": 0, "failed": 0}
     assert first["warnings_count"] == 1

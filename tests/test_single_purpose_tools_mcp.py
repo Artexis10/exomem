@@ -288,7 +288,8 @@ def test_a_retry_across_spellings_with_one_key_replays_one_write(build, vault) -
 
     first, retry, changed = _session(build(), scenario)
 
-    assert first["ok"] is True and retry == first
+    assert first["ok"] is True
+    assert retry == {**first, "replayed": True, "mutated": False}
     assert retry["idempotency_key"] == first["idempotency_key"] == "k-1"
     assert "IDEMPOTENCY_KEY_REUSED" in json.dumps(changed)
 

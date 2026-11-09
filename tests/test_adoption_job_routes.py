@@ -84,7 +84,8 @@ def test_mcp_collection_adoption_keeps_rules_continuations_retries_and_recorded_
         fields = {"run_id": run_id, "include": [{"path": "Legacy", "source_kind": "book", "domain": "media"}]}
         first = await _call(client, "import_memory", {"operation": {"kind": "select", **fields}}, key="adoption-select")
         retry = await _call(client, "adoption_studio", {"action": "select", **fields}, key="adoption-select")
-        assert first["ok"] is True and retry == first
+        assert first["ok"] is True
+        assert retry == {**first, "replayed": True, "mutated": False}
 
         planned = await change("plan", run_id=run_id)
         assert planned["continuation"]

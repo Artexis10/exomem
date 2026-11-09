@@ -406,7 +406,7 @@ def test_govern_memory_propose_defaults_to_a_full_committed_terminal(vault: Path
         "reversal",
         "proposal_id",
     } <= diagnostics.keys()
-    assert explicit_full == full
+    assert explicit_full == {**full, "replayed": True, "mutated": False}
     assert compact["status"] == "committed"
     assert "diagnostics" not in compact
     assert legacy == diagnostics

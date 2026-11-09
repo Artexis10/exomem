@@ -631,7 +631,7 @@ def _assert_outer_fanout_failure_terminal(
     replay = manager.invoke(command, (vault,), {}, idempotency_key=key)
 
     assert calls == [1]
-    assert replay == result
+    assert replay == {**result, "replayed": True, "mutated": False}
     assert observed == [graph_sync.read_checkpoint(vault)]
     assert observed[0] is not None
     assert result["status"] == "committed"
