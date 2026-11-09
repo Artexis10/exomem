@@ -977,6 +977,55 @@ def test_eviction_survives_real_reconciliation_and_deletion_fanout(vault: Path, 
         assert source.stream.read() == b"original video bytes"
 
 
+def test_evicted_originals_stay_stored_through_the_restart_scan_watcher_and_container_recovery(vault: Path, selected_store):
+    """Defect: a consumer that tests file existence directly takes an evicted original for a deleted one.
+
+    The worker's restart scan then leaves a pending extraction unqueued, the watcher's reconcile tie-break
+    routes the original as deleted, and explicit container recovery writes a member's bytes back onto the volume.
+    """
+    import base64
+    import io
+
+    from test_document_containers import container_bytes
+
+    from exomem import (
+        file_watcher,
+        media_jobs,
+        media_processing,
+        media_store,
+        media_worker,
+        preserve,
+    )
+
+    ledger = media_jobs.MediaJobStore(vault)
+    report = vault / preserve.preserve(vault, scope="Test", category="documents", filename="report.pdf",
+                                       content_base64=base64.b64encode(b"pending pdf bytes").decode()).path
+    media_processing.reconcile_media(vault, report)
+    _offload(vault, report)
+    container = preserve.preserve_stream(vault, scope="Examples", category="Documents", filename="bundle.asice",
+                                         stream=io.BytesIO(container_bytes([("one.pdf", b"pdf member bytes")])))
+    member = vault / container.document_container["payloads"][0]
+    _offload(vault, vault / container.path)
+    _offload(vault, member)
+    for original in (report, member):
+        ledger.retire_ocr(original, "test")
+        assert media_store.evict(vault, original)
+    companions = {original: original.with_name(original.name + ".md").read_bytes() for original in (report, member)}
+
+    assert media_worker.MediaWorker(vault, execution_mode="inline")._scan_pending_ocr() == 1
+    assert ledger.get_by_binary(report).do_ocr
+    file_watcher.FileWatcher(vault)._dispatch_reconcile_delta([str(report)], [str(report)])
+    assert ledger.get_by_binary(report).do_ocr
+    assert media_processing.reconcile_media(vault, vault / container.path, explicit=True).state != media_jobs.FAILED
+
+    for original, data in ((report, b"pending pdf bytes"), (member, b"pdf member bytes")):
+        assert not original.exists()
+        assert originals.original_state(vault, original).state == "evicted"
+        assert original.with_name(original.name + ".md").read_bytes() == companions[original]
+        with media_store.open_original(vault, original) as source:
+            assert source.stream.read() == data
+
+
 def test_hydration_reservation_bounds_concurrency(vault: Path, selected_store, monkeypatch):
     import threading
     from concurrent.futures import ThreadPoolExecutor
