@@ -14,7 +14,8 @@ import ssl
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -1800,13 +1801,26 @@ def preserve_artifacts(
     adoption: Mapping[str, object] | None = None,
     transcriptions: list[Mapping[str, object]] | tuple = (),
     raw_protection: bool = False,
+    archive: str | None = None,
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard.
 
     A transcription is written only with its original: as the extracted text
     of the original's own page, in the same write that stores the bytes. An
     original that is already stored or that fails records no transcription.
+
+    With `archive="members"` each file is a held zip, kept as its members
+    exactly as `/upload` with `archive=members` keeps it; see `_preserve_members`.
     """
+    if archive is not None and (adoption is not None or transcriptions):
+        # Either would be dropped silently: an adoption commits the zip's own bytes,
+        # and a members preservation has no original page to carry a transcription.
+        raise OpError(
+            "INVALID_PRESERVE",
+            "archive=members takes neither adoption nor transcriptions",
+            "Preserve the held zip with archive alone, or drop archive to keep the zip as one file.",
+            details={"field": "archive", "accepted_form": "archive with scope, category and held files"},
+        )
     if adoption is not None:
         if transcriptions:
             _refuse_transcriptions("transcriptions are not accepted with an adoption")
@@ -1846,6 +1860,17 @@ def preserve_artifacts(
             if not isinstance(file.get("download_url"), str) or not file["download_url"].strip():
                 raise SafeFetchError("INVALID_FILE", "download_url is required")
             _content_type(file.get("mime_type"))
+            if archive is not None:
+                from .held_uploads import is_held_reference
+
+                if not is_held_reference(file["download_url"]):
+                    # The manifest records what verified the zip's SHA-256 (`upload` or `session`);
+                    # a fetched attachment had neither, so only a held upload can be kept as members.
+                    raise SafeFetchError(
+                        "INVALID_FILE",
+                        "archive=members takes a held upload: send the zip with "
+                        "transfer_artifact(operation=upload, hold=true) and pass that handle",
+                    )
             staged[index] = stage_artifact(
                 file, budget, batch_deadline=batch_deadline, vault_root=vault_root, lane="evidence", index=index
             )
@@ -1862,6 +1887,19 @@ def preserve_artifacts(
         wanted_hashes=frozenset(artifact.sha256 for artifact in staged.values()),
     )
     refusals: list[OpError] = []
+    body_started = False
+
+    @contextmanager
+    def commit_guard() -> Iterator[None]:
+        nonlocal body_started
+        with manager.absorbing_mutation_guard(
+            vault_root,
+            request_id=active_mutation_request_id(),
+            operation="preserve_artifacts_commit",
+        ):
+            body_started = True
+            yield
+
     try:
         for index, artifact in staged.items():
             body_started = False
@@ -1873,6 +1911,11 @@ def preserve_artifacts(
                     and len(artifact.content_type) > _MAX_CONTENT_TYPE_CHARS
                 ):
                     raise SafeFetchError("INVALID_FILE", "staged file metadata is invalid")
+                if archive is not None:
+                    outcomes[index] = _preserve_members(
+                        vault_root, artifact, scope=scope, category=category, guard=commit_guard
+                    )
+                    continue
                 # After staging, before the commit boundary: a retry under a new
                 # identity must report what is already there rather than write a
                 # second copy of one fact into an append-only tree. Nothing is
@@ -1911,29 +1954,23 @@ def preserve_artifacts(
                         }
                     continue
                 transcription = transcribed.get(index)
-                with manager.absorbing_mutation_guard(
-                    vault_root,
-                    request_id=active_mutation_request_id(),
-                    operation="preserve_artifacts_commit",
-                ):
-                    body_started = True
-                    with artifact.path.open("rb") as stream:
-                        result = preserve_stream(
-                            vault_root,
-                            scope=scope,
-                            category=category,
-                            filename=artifact.filename,
-                            stream=stream,
-                            content_type=artifact.content_type,
-                            max_bytes=budget.max_file_bytes,
-                            raw_protection=raw_protection,
-                            media_pending=True,
-                            **(
-                                {"text": transcription, "text_origin": "client"}
-                                if transcription
-                                else {}
-                            ),
-                        )
+                with commit_guard(), artifact.path.open("rb") as stream:
+                    result = preserve_stream(
+                        vault_root,
+                        scope=scope,
+                        category=category,
+                        filename=artifact.filename,
+                        stream=stream,
+                        content_type=artifact.content_type,
+                        max_bytes=budget.max_file_bytes,
+                        raw_protection=raw_protection,
+                        media_pending=True,
+                        **(
+                            {"text": transcription, "text_origin": "client"}
+                            if transcription
+                            else {}
+                        ),
+                    )
                 mark_active_mutation_committed()
                 payload = result.as_dict()
                 warnings = list(payload.get("warnings") or [])
@@ -2005,6 +2042,42 @@ def preserve_artifacts(
         # Nothing began, so the call stays retryable under its own key instead of recording a failure.
         raise refusals[0]
     return _batch_result(outcomes)
+
+
+def _preserve_members(
+    vault_root: Path,
+    artifact: StagedArtifact,
+    *,
+    scope: str,
+    category: str,
+    guard: Callable[[], object],
+) -> dict:
+    """Keep one held zip as its members, exactly as `/upload` with `archive=members` keeps it.
+
+    Members and manifest are always owner-only, whatever `raw_protection` says. A zip
+    already kept in this family is `already_stored` and writes no member again; an
+    import reads the members through the returned manifest `path`.
+    """
+    from . import archive_members
+
+    try:
+        with artifact.path.open("rb") as stream:
+            receipt, _stored = archive_members.preserve_members(
+                vault_root,
+                guard=guard,
+                scope=scope,
+                category=category,
+                filename=artifact.filename,
+                stream=stream,
+                max_bytes=artifact.size,
+                verified="upload",
+                sha256=artifact.sha256,
+            )
+    except archive_members.ArchiveError as error:
+        return _failed(artifact.file_id, SafeFetchError(error.code, error.reason))
+    mark_active_mutation_committed()
+    receipt.pop("sidecar_path", None)
+    return {"file_id": artifact.file_id, **receipt}
 
 
 #: A transcription is a page of text, not a document dump.

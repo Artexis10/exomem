@@ -113,8 +113,8 @@ def contract() -> dict[str, Any]:
         "import_request": {
             "mode": "preview, start, status or cancel",
             "source_ref": (
-                "vault path of a preserved Sources or Evidence file, or of an export manifest; "
-                "preview and start"
+                "vault path of a preserved Sources or Evidence file, or of an export manifest, "
+                "which preserve_artifacts returns for a held zip with archive=members; preview and start"
             ),
             "format": (
                 f"{', '.join(FORMATS)}; csv is RFC 4180 UTF-8 with a header row; json-document "
