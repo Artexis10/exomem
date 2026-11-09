@@ -28,6 +28,8 @@ The wait holds no lock. It can lengthen a job by at most the cap per hold; it ca
 
 The unit-sidecar phase and the embedding phase ran one hold over every item. They now run through `apply_in_holds`: a hold takes batches of items and ends after `HOLD_SECONDS`, when a writer waits, or when a stop is requested. Each batch re-reads under the hold what it applies, as before. The phase hold labels are single tokens (`reconcile_units`), because the holder label sanitiser maps a label with a space to `unknown`.
 
+The batches cost the job time. Every hold ends with a commit-generation bump, so readers re-validate their cached stamps, and a phase now bumps once per second of work, plus once per early end for a waiting writer, instead of once. The embedding phase refreshed every drifted page in one call; it now calls the refresh once per batch of 4 pages, so the fixed cost of each call repeats. The cost buys writer latency.
+
 The other phases keep one hold. Their work is bounded by a constant or by seconds: the manifest, lifecycle cleanup, indexes, the graph build's own flight, derived-receipt batches (at most 256), references and receipts. They are reported as debt, not changed here.
 
 ### D5. Windows keeps a process-local signal
@@ -36,7 +38,7 @@ The other phases keep one hold. Their work is bounded by a constant or by second
 
 ### D6. Replay marker and digest
 
-`_replay` returns the stored terminal with `replayed: true` and `mutated: false`. `request_id` and `receipt_id` stay those of the original commit, so the reply names the receipt of the write it replays. The implicit digest hashes the arguments with every string in Unicode NFC. FastMCP has already applied schema defaults to the arguments, so they need no second pass. The window stays 600 s, and the spec is corrected.
+`_replay` returns the stored terminal with `replayed: true`. `mutated`, `request_id` and `receipt_id` stay those of the original commit, so the reply names the write it replays. The marker leaves `mutated` alone because the egress filter binds the parent of a confined unit write on it. The implicit digest hashes the arguments with every string in Unicode NFC. FastMCP has already applied schema defaults to the arguments, so they need no second pass. The window stays 600 s, and the spec is corrected.
 
 Skipped: `repeat_of`, a field that lets an agent repeat a write on purpose. An agent that repeats on purpose changes the arguments or waits out the window, and the field adds a schema entry to every write tool.
 
@@ -45,3 +47,8 @@ Skipped: `repeat_of`, a field that lets an agent repeat a write on purpose. An a
 - An import under a steady stream of writes returns one chunk per call. Each call makes progress, so the import finishes.
 - The handoff wait delays a maintenance job by at most the cap per release, and only while a writer waits.
 - A writer in another process that never gets served keeps the signal for its wait bound; the handoff wait ends at the cap.
+
+## Known residuals
+
+- Within 24 hours of the upgrade, a retry under an explicit key whose text is not in Unicode NFC gets `IDEMPOTENCY_KEY_REUSED`. The receipt stored before the upgrade holds a digest of the text as sent, and the new digest normalises it first. A retry under a new key commits.
+- An import apply interrupted before the upgrade, with paths in NFD, gets `IMPORT_RECOVERY_UNRESOLVED` on resume, for the same reason: its stored request digest predates the normalisation.

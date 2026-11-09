@@ -15,7 +15,7 @@ A retry after a lost reply replays the original commit, but the reply is the sam
 - A waiter counts for yielding only when it is interactive. A machine hold, a maintenance job and a borrower of a lent boundary do not count. The keyed writes queued behind the head of the capture line do count. A waiter in another process counts.
 - After a hold that ended for a waiter, a maintenance job, the reconcile phases and the drain turns wait while a writer still waits, within the existing foreground-priority floors, before they take the boundary again. The wait holds no lock and never runs on the collection store thread.
 - The reconcile phases for unit sidecars and embeddings run in short holds that each end after one second or when an interactive writer waits. Every hold names its phase.
-- A reply to a replayed write carries `replayed: true`, `mutated: false` and the receipt of the original commit. The implicit-retry digest treats one text in two Unicode compositions as one request. The retry-safe-mutations spec states the 600 s window that the code uses.
+- A reply to a replayed write carries `replayed: true`, and its `mutated` and receipt stay those of the original commit. The implicit-retry digest treats one text in two Unicode compositions as one request. The retry-safe-mutations spec states the 600 s window that the code uses.
 
 No wait is lengthened, no governed write is queued, the boundary is not lent to canonical writers, and no outbox is added.
 
@@ -30,6 +30,6 @@ No wait is lengthened, no governed write is queued, the boundary is not lent to 
 ## Impact
 
 - Code: `adoption_run.py`, `mutation_lock.py`, `foreground_priority.py`, `maintenance_jobs.py`, `reconcile.py`, `derived_drain.py`, `writer_lease.py`, `mutation_terminal.py`.
-- Behaviour: an import call may return after one chunk when writers wait, so a large import takes more calls. A replayed reply gains `replayed` and reports `mutated: false`.
+- Behaviour: an import call may return after one chunk when writers wait, so a large import takes more calls. A replayed reply gains `replayed`.
 - Windows: the cross-process waiter signal stays process-local, as before.
-- Undo: revert the change. No data format changes.
+- Undo: revert the change. No stored file format changes. The request digest of a write whose text is not in Unicode NFC changes, so the design lists two residuals for the first 24 hours after the upgrade.
