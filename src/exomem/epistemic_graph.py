@@ -2261,11 +2261,15 @@ def _resolver_topology_fingerprint(
 def derive_row_tables(vault_root: Path, conn: sqlite3.Connection) -> int:
     """Fill the graph row tables on ``conn`` from the vault's Markdown files, as a cold rebuild.
 
-    ``conn`` already holds the schema that ``create_row_schema`` made. Store mode compares what this
+    ``conn`` already holds the schema that ``create_row_schema`` made and the catalogue rows that
+    ``lexstore.derive_catalogue_rows`` derived from the same files. Store mode compares what this
     derives with the rows it copied in. It owns no transaction and writes no availability marker.
     Returns the number of pages it indexed.
     """
-    resolver = find_module.recall_resolver_snapshot(vault_root)
+    # The resolver comes from those rows, not from the state root's sidecar: a sidecar that trails
+    # the files would resolve the links of this cold pass the way it resolved them before.
+    entries = conn.execute("SELECT path, title FROM pages WHERE in_vault = 1").fetchall()
+    resolver = vault_module.WikilinkResolver.from_entries(vault_root, entries)
     return EpistemicGraphIndex(vault_root)._derive_pages(conn, resolver)
 
 
@@ -2402,22 +2406,52 @@ def write_page_graph_rows(
     _bump_generation(conn)
 
 
+def drop_page_graph_rows(conn: sqlite3.Connection, rel: str) -> None:
+    """Remove the rows that the page's own bytes derived, and no others.
+
+    The caller owns the transaction.
+
+    Edges that other pages authored toward ``rel`` stay: they derive from those pages' bytes, and
+    `dependent_paths` names the pages to re-derive when ``rel`` goes.
+    """
+    EpistemicGraphIndex._drop_own_rows(conn, rel)
+    _bump_generation(conn)
+
+
+def _fragment_link_sources(sources: Iterable[tuple[str, str]]) -> set[str]:
+    """The pages among `(source, raw_target)` pairs whose raw target names a `#` fragment.
+
+    A fragment lands on a unit that the target's own bytes decide, so such a page re-derives
+    whenever its target changed, even when no title or existence moved.
+    """
+    return {source for source, raw_target in sources if "#" in raw_target}
+
+
 def dependent_paths(
     conn: sqlite3.Connection,
     rels: Iterable[str],
     resolvers: Iterable[vault_module.WikilinkResolver],
+    *,
+    fragments_only: bool = False,
 ) -> set[str]:
     """The pages, outside ``rels``, whose links depend on a key that ``rels`` add, remove or rename.
 
     Reads the stored `graph_dependencies` of ``conn`` by every path, stem and title key that a
     change to ``rels`` can move. A shared stem over-matches and a dependent is never missed.
     Each resolver names the titles of ``rels`` in one state of the vault. Pass the state that
-    holds a new page and the state that held a removed or renamed page.
+    holds a new page and the state that held a removed or renamed page. ``fragments_only`` keeps
+    the pages that link with a `#` fragment: the only ones that a change to a page's bytes alone
+    (no new, removed or renamed page, and no title change) re-derives.
     """
     changed = set(rels)
     keys = _dependency_changed_keys(changed, *resolvers)
     sources = EpistemicGraphIndex._dependency_sources_for_keys(conn, keys)
-    return {source for source, _raw_target in sources} - changed
+    found = (
+        _fragment_link_sources(sources)
+        if fragments_only
+        else {source for source, _raw_target in sources}
+    )
+    return found - changed
 
 
 class EpistemicGraphIndex:
@@ -6333,6 +6367,7 @@ class EpistemicGraphIndex:
                 return None
             if indexed_hashes is not None and indexed_hashes.get(rel) != source_signature[3]:
                 return None
+            # The resolver's title rule (`WikilinkResolver.from_entries`): stripped, lowered.
             title = page.title.strip().lower() if page.title.strip() else None
             if resolver.title_key_for_path(rel) != title:
                 return None
@@ -6866,7 +6901,7 @@ class EpistemicGraphIndex:
         moved.
         """
         sources = cls._dependency_sources_for_keys(conn, _dependency_changed_keys(rels, resolver))
-        return {source for source, raw_target in sources if "#" in raw_target} - rels
+        return _fragment_link_sources(sources) - rels
 
     def _queue_graph_repair(
         self,
@@ -12693,8 +12728,27 @@ def _landing_on_disk(vault_root: Path) -> Callable[[str, str], tuple[str, str, d
     return lambda canonical, fragment: _relation_destination(vault_root, canonical, fragment)
 
 
+def landing_from_bytes(
+    vault_root: Path, page_bytes: Callable[[str], bytes]
+) -> Callable[[str, str], tuple[str, str, dict[str, str]]]:
+    """The landing answer for a caller that holds the pages' bytes.
+
+    ``page_bytes(rel)`` returns the exact bytes of the page at that vault-relative path, or raises
+    ``FileNotFoundError`` when it has none.
+
+    A store-mode commit answers from the pages of its own transaction, which no file holds yet.
+    """
+    return lambda canonical, fragment: _relation_destination(
+        vault_root, canonical, fragment, page_bytes=page_bytes
+    )
+
+
 def _relation_destination(
-    vault_root: Path, canonical: str, fragment: str
+    vault_root: Path,
+    canonical: str,
+    fragment: str,
+    *,
+    page_bytes: Callable[[str], bytes] | None = None,
 ) -> tuple[str, str, dict[str, str]]:
     """Where a relation edge lands, and what the author should be told.
 
@@ -12712,6 +12766,7 @@ def _relation_destination(
         # Shared rows land on the neutral candidate; readers re-resolve the
         # fragment against the target page's selected interpretation.
         selected=False,
+        page_bytes=page_bytes,
     )
     metadata = {"target_fragment": fragment}
     if resolved.drift is None:
@@ -13208,12 +13263,15 @@ def _current_page_unit(
     *,
     parent_ref: str | None = None,
     selected: bool = True,
+    page_bytes: Callable[[str], bytes] | None = None,
 ) -> _PageUnit:
     """Resolve a unit on `rel` from the page's current bytes, never from the sidecar.
 
     The one owner of that read. A caller holding a `parent_ref` (the sidecar's
     claim about who owns the page) has it proved against the bytes; a caller
     holding only a path and a fragment lets the page name its own parent.
+    ``page_bytes`` supplies the page's bytes for a caller that holds them (`landing_from_bytes`);
+    without it the page is read as the vault holds it.
     """
 
     def unanswered(status: str, drift: str) -> _PageUnit:
@@ -13226,8 +13284,10 @@ def _current_page_unit(
     if _records_suppressed_path(vault_root, rel) or not _recall_path_allowed(vault_root, rel):
         return unanswered("missing", "suppressed_record_parent")
     try:
-        source = vault_module.read_bytes_without_pinning(
-            path, vault_root=vault_root
+        source = (
+            vault_module.read_bytes_without_pinning(path, vault_root=vault_root)
+            if page_bytes is None
+            else page_bytes(rel)
         ).decode("utf-8")
     except FileNotFoundError:
         return unanswered("missing", "missing_parent")

@@ -7435,7 +7435,10 @@ class LeaseManager:
                 resubmission=received,
                 deadline=wait.deadline,
             )
-            server = store_runtime.route(command.name, injected[0], kwargs) if wait.absorbed else routed
+            server = (
+                store_runtime.route(command.name, injected[0], kwargs, write=True)
+                if wait.absorbed else routed
+            )
             token = _ACTIVE_STORE_ATTEMPT.set(current)
             try:
                 if server is None:
@@ -8590,11 +8593,13 @@ def _collection_store_thread(func):
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
                 if not (read_only or import_status) and _writes_absorb_contention():
-                    routed = store_runtime.route(command.name, injected[0], kwargs)
+                    routed = store_runtime.route(command.name, injected[0], kwargs, write=True)
                     if routed is not None:
                         return get_manager()._attempt_store_write(func, command, injected, kwargs, routed)
                     return func(command, *injected, **kwargs)
-                routing = store_runtime.route_with_proof(command.name, injected[0], kwargs)
+                routing = store_runtime.route_with_proof(
+                    command.name, injected[0], kwargs, write=not (read_only or import_status)
+                )
                 server = routing.server
                 if server is not None:
                     return server.call(
