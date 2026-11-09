@@ -1095,8 +1095,11 @@ def test_rule_d_a_window_whose_create_meets_another_open_import_stops_at_once_an
     assert rig.run()["import_ids"] == [first] and rig.cloud.all_sent() == ["a01.bin", "a02.bin"]
 
 
-@pytest.mark.parametrize("requested, observed", [("uploaded", "importing"), ("discard_requested", "failed")])
-def test_rule_a_a_window_keeps_its_import_while_cloud_holds_its_earlier_attempt_open_or_done(rig, requested, observed):
+@pytest.mark.parametrize("requested, observed, says", [
+    ("uploaded", "importing", "holds the whole upload of window 1"),  # Rule (g): the attempt lands its declared member set.
+    ("discard_requested", "failed", "earlier attempt of this window"),
+])
+def test_rule_a_a_window_keeps_its_import_while_cloud_holds_its_earlier_attempt_open_or_done(rig, requested, observed, says):
     """Rule (a): catches a new import ID while the earlier attempt is open or done, which lands the window twice or loops."""
     _stop_with_cloud_importing_slowly_then_change_a_member(rig)
     before = _first_window(rig)["import_id"]
@@ -1105,7 +1108,7 @@ def test_rule_a_a_window_keeps_its_import_while_cloud_holds_its_earlier_attempt_
     with pytest.raises(CloudImportError) as stop:
         rig.run(poll_seconds=0.001)
 
-    assert stop.value.resume and "earlier attempt of this window" in stop.value.message
+    assert stop.value.resume and says in stop.value.message
     assert _first_window(rig)["import_id"] == before and _first_window(rig)["attempts"] == []
     assert len(rig.cloud.rows) == 1
 
@@ -1420,6 +1423,82 @@ def test_a_series_record_whose_window_folder_is_not_the_clis_own_stops_the_run_a
 
     assert record.exists() and list(rig.tmp.glob("checkpoint/window-*/archive.age"))
     assert stop.value.code == "SERIES_RECORD_DAMAGED" and NOT_IN_EXOMEM in stop.value.message
+
+
+# -- Task 5.4.21: a window that lands its declared member set (rule (g) in cloud_import_windows.py)
+
+
+def test_verify_a_member_change_after_a_stop_in_the_middle_of_the_parts_lands_the_old_content_once_and_reports_it_sent(rig):
+    """Rule (g): catches a member that the resumed copy lands with its old content while the run says it was not sent."""
+    rig.files(a01__bin=800, a02__bin=800)
+
+    def drop_the_second_part(request):
+        if request.url.path.endswith("/2"):
+            _network_error()
+        return FakeCloud._storage(rig.cloud, request)
+
+    rig.cloud._storage = drop_the_second_part
+    with pytest.raises(CloudImportError):
+        rig.run()
+    del rig.cloud._storage
+    old = _first_window(rig)["import_id"]
+    before = (rig.source / "a02.bin").read_bytes()
+    (rig.source / "a02.bin").write_bytes(b"changed after the stop")
+
+    result = rig.run(file=True)  # The cell files the window, so only the change can keep the source.
+
+    assert rig.cloud.completed == [old] and rig.cloud.members[old]["a02.bin"] == before
+    assert result["not_sent"] == [] and result["sent_before_change"] == ["a02.bin"]
+    assert result["keep_source"]["keep"] and "1 files were sent with their content from before a change" in rig.said()
+
+
+def test_verify_a_member_change_that_empties_a_window_past_upload_keeps_the_window_and_reports_its_members_sent(rig):
+    """Rule (g): catches an emptied window that the record drops while Cloud lands its old content."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    for held in rig.tmp.glob("checkpoint/window-*/*"):
+        held.unlink()  # No copy is left to resume: only Cloud holds the window's upload.
+    before = {name: (rig.source / name).read_bytes() for name in ("a01.bin", "a02.bin")}
+    for name in before:
+        (rig.source / name).write_bytes(b"changed after the upload")
+
+    with pytest.raises(CloudImportError) as stop:
+        rig.run()
+    assert stop.value.code == "WINDOW_IMPORTING" and stop.value.resume and NOT_IN_EXOMEM in stop.value.message
+    assert "action import_cancel" in stop.value.message  # The import holds the cell, so the stop names how to end it now.
+    rig.cloud.release()  # Cloud finishes the import, and the cell lists its receipt.
+
+    result = rig.run()
+
+    assert result["import_ids"] == [old] and rig.cloud.completed == [old]
+    assert {name: rig.cloud.members[old][name] for name in before} == before
+    assert result["not_sent"] == [] and result["sent_before_change"] == ["a01.bin", "a02.bin"]
+
+
+def test_verify_a_member_change_that_cloud_lands_before_the_rerun_is_reported_sent_and_keeps_the_source(rig):
+    """Rule (g): catches a window that lands from the cell's receipt, so no send sees the change and the CLI frees the source."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    before = (rig.source / "a02.bin").read_bytes()
+    (rig.source / "a02.bin").write_bytes(b"changed while Cloud imports")
+    rig.cloud.release()  # Cloud finishes the import before the rerun, and the cell lists its receipt.
+
+    result = rig.run(file=True)  # The cell files the window, so only the change can keep the source.
+
+    assert rig.cloud.completed == [old] and rig.cloud.members[old]["a02.bin"] == before
+    assert result["not_sent"] == [] and result["sent_before_change"] == ["a02.bin"]
+    assert result["keep_source"]["keep"] and "no longer need to keep the source" not in rig.said()
+
+
+def test_a_member_change_after_the_person_deletes_the_copy_of_a_completed_upload_waits_for_cloud_and_lands_once(rig):
+    """Rule (g): catches a run that stops although its checkpoint records the completed upload, so it can wait for Cloud."""
+    old = _stop_after_complete_while_cloud_imports(rig)
+    for held in rig.tmp.glob("checkpoint/window-*/archive.age"):
+        held.unlink()  # The person deletes the encrypted copy for space; the checkpoint still records the completed upload.
+    (rig.source / "a02.bin").write_bytes(b"changed while Cloud imports")
+    rig.cloud.read_count = 0  # Cloud finishes the import on the third read of its row.
+
+    result = rig.run(poll_seconds=0.001)
+
+    assert rig.cloud.completed == [old] and result["sent_before_change"] == ["a02.bin"]
 
 
 # -- Filing each landed window

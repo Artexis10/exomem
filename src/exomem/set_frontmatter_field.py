@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import project_keys, semantic_writes, temporal, vocabulary_resolution
+from . import page_ids, project_keys, semantic_writes, temporal, vocabulary_resolution
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
     EXCLUDED_FIELD_CODE,
@@ -223,13 +223,19 @@ def set_frontmatter_field(
         _validate_frontmatter(text, new_text)
 
     project_plan = _plan_project_keys(vault_root, field, value)
+    # A short id names a version by a tail of its hash, which the preflight's full-hash guard cannot
+    # compare. The preflight is this door's admission, so the id is compared only after it, against
+    # the bytes read above: a caller it refuses learns nothing of the page's version.
+    by_id = expected_hash is not None and page_ids.is_page_id(expected_hash)
     try:
         preflight = semantic_writes.preflight_existing(
             vault_root,
             path=rel_path,
             after_source=new_text,
             operation="edit",
-            expected_before_hash=expected_hash or guard.expected_content_hash,
+            expected_before_hash=guard.expected_content_hash
+            if by_id
+            else expected_hash or guard.expected_content_hash,
             transition_token=semantic_transition_token,
             relation_disposition=relation_disposition,
             relation_review_hash=relation_review_hash,
@@ -239,6 +245,16 @@ def set_frontmatter_field(
         )
     except semantic_writes.SemanticWriteError as error:
         raise SetFrontmatterError(error.code, error.reason) from error
+    if by_id and not page_ids.guard_matches(
+        str(expected_hash), guard.expected_content_hash or ""
+    ):
+        raise SetFrontmatterError(
+            code="STALE_EDIT",
+            reason=(
+                f"{rel_path} changed on disk since you read it (expected_hash mismatch). "
+                "Re-read the page with `get` and retry the edit against the current content."
+            ),
+        )
 
     if validate_only:
         return SetFrontmatterValidation(

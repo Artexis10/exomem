@@ -731,8 +731,11 @@ def test_new_stdio_server_recalls_the_canonical_update_after_capture_closes(tmp_
                 journey="session-close", step="find-canonical-page",
             )
             assert outcome == "ok", record
-            hit = next(hit for hit in found["hits"] if hit["path"].endswith(ROUTINE))
-            outcome, page, record = await calls.call("read_memory", {"operation": {"kind": "page", "path": hit.get("ref") or hit["path"]}}, journey="session-close", step="read-canonical-page")
+            hit = next(hit for hit in found["hits"] if hit["title"] == "Sunday meal-prep routine")
+            outcome, page, record = await calls.call(
+                "read_memory", {"operation": {"kind": "page", "path": hit["id"]}},
+                journey="session-close", step="read-canonical-page",
+            )
             assert outcome == "ok", record
             assert page["path"].endswith(ROUTINE)
             assert "Friday evening" in page["body"]

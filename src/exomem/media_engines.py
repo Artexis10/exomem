@@ -122,7 +122,7 @@ def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
     return out
 
 
-def unavailable_next_action() -> str:
+def unavailable_next_action(module: str | None = None) -> str:
     """The next action of a job whose engine cannot load.
 
     A Cloud tenant cannot install software, so a Cloud cell reports the engine as
@@ -130,4 +130,6 @@ def unavailable_next_action() -> str:
     """
     if cloud_cell.cloud_mode_enabled():
         return "wait: this media engine is unavailable on this deployment until the operator restores it"
+    if module is not None:
+        return f"install the media dependency that provides the {module} module, then retry"
     return "install the required media dependency, then retry"

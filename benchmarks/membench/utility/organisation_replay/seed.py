@@ -223,6 +223,7 @@ async def _create_note(
         "draft_id": draft.get("draft_id"),
         "draft_hash": draft.get("draft_hash"),
         "draft_token": draft.get("draft_token"),
+        "response_detail": "full",
     }
     # The draft says whether its commit needs a relation review: a vault's
     # first page bootstraps without one, and the product refuses a review there.
@@ -238,10 +239,17 @@ async def _create_note(
 
 
 def _landed_path(answer: object) -> str | None:
-    for name in PATH_FIELDS:
-        value = answer.get(name) if isinstance(answer, dict) else None
-        if isinstance(value, str) and value:
-            return value
+    """The vault path of the page a full-detail write answer names.
+
+    A compact write answer names the page by title and id; `response_detail="full"` keeps its
+    path under `diagnostics.operational`, so the seed asks for that level where it checks a path.
+    """
+    operational = answer.get("diagnostics", {}).get("operational") if isinstance(answer, dict) else None
+    for layer in (answer, operational):
+        for name in PATH_FIELDS:
+            value = layer.get(name) if isinstance(layer, dict) else None
+            if isinstance(value, str) and value:
+                return value
     return None
 
 
@@ -295,6 +303,7 @@ async def seed_session(
                 "entity_type": entity["type"],
                 "name": entity["title"],
                 "summary": entity["body"],
+                "response_detail": "full",
             },
         )
         build.entities.append(
