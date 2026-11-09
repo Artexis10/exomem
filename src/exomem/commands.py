@@ -6543,6 +6543,7 @@ def op_get_video_frames(
     max_frames: int = 8,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    max_side: int | Literal["original"] | None = None,
 ) -> ToolResult:
     """View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.
 
@@ -6558,28 +6559,31 @@ def op_get_video_frames(
     Args:
         path: Vault-relative path to a video file
             (`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`).
-        max_frames: Maximum frames to return. Default 8, hard-capped
-            server-side (16); out-of-range values clamp silently and the
-            metadata reports `max_frames_effective`. Each frame costs
-            image tokens — prefer a time window over raising this.
+        max_frames: Maximum frames to return. Default 8, capped by the
+            `video_frames_tool_cap` setting (16); out-of-range values clamp
+            silently and the metadata reports `max_frames_effective`. Each
+            frame costs image tokens — prefer a time window over raising this.
         start_sec: Optional window start in seconds — sample at/after this
             timestamp only.
         end_sec: Optional window end in seconds — sample before this
             timestamp only (clamped to the video's duration).
+        max_side: Frame long side in pixels, or "original". Default: the
+            `video_frames_max_side` setting (768). Cloud keeps 768.
 
     Returns:
         A metadata block {path, duration_sec, start_sec, end_sec,
         frame_count, frames: [{index, timestamp_sec}], candidates,
-        dedup_dropped, max_frames_effective} followed by one JPEG image
-        content block per frame in `frames[].index` order (longest side
-        ≤768px).
+        dedup_dropped, max_frames_effective, max_side_effective, and
+        not_shown when the call's byte limit left frames out} followed by
+        one JPEG image content block per frame in `frames[].index` order.
 
     Errors:
         INVALID_PATH (escapes vault or empty); NOT_FOUND (no such file);
         NOT_A_VIDEO (not a video extension); BAD_RANGE (invalid window);
         VIDEO_DEPS_MISSING (server installed without the media extra);
         NO_DECODABLE_FRAMES (corrupt/streamless video, or a window on a
-        video of unknown duration).
+        video of unknown duration); IMAGE_MAX_SIDE_INVALID (bad max_side);
+        FRAME_TOO_LARGE (one frame exceeds the call's byte limit).
     """
     # Local reads gate before extraction. Cloud's preparation handshake supplies
     # the exact retained source proof before the worker decodes anything.
@@ -6593,6 +6597,7 @@ def op_get_video_frames(
             max_frames=max_frames,
             start_sec=start_sec,
             end_sec=end_sec,
+            max_side=max_side,
         )
     except video_frames_module.VideoFramesError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -6608,7 +6613,11 @@ def op_get_video_frames(
         "candidates": result.candidates,
         "dedup_dropped": result.dedup_dropped,
         "max_frames_effective": result.max_frames_effective,
+        "max_side_effective": result.max_side_effective or "original",
     }
+    if result.not_shown:
+        # Left out at the call's byte limit, in time order: a window that starts at the first one shows them.
+        meta["not_shown"] = list(result.not_shown)
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
         + [FastMCPImage(data=f.jpeg, format="jpeg").to_image_content() for f in result.frames],
@@ -9794,6 +9803,7 @@ def op_read_media(
         max_frames=max_frames,
         start_sec=start_sec,
         end_sec=end_sec,
+        max_side=max_side,
     )
 
 

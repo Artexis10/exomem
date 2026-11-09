@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.168.0](https://github.com/Artexis10/exomem/compare/v0.167.0...v0.168.0) (2026-11-09)
+
+
+### Features
+
+* **approvals:** let the owner approve procedures that agents may follow ([#2579](https://github.com/Artexis10/exomem/issues/2579)) ([d980000](https://github.com/Artexis10/exomem/commit/d9800009ef9ef7799729d57b545e11445d47e8bc))
+* **cloud:** export a cell in a short pause, a pack and an upload ([#2577](https://github.com/Artexis10/exomem/issues/2577)) ([02d9430](https://github.com/Artexis10/exomem/commit/02d943047c30025eda92dfc5e0ffc403e3c9c9e2))
+* **context:** show each task lead's links in the hook and record which links were offered ([#2593](https://github.com/Artexis10/exomem/issues/2593)) ([58c2867](https://github.com/Artexis10/exomem/commit/58c2867be5ebfae44fc0eb0b5ae1b1de5da249fa))
+* **relations:** read relation behaviours from the registry instead of keys and families ([#2594](https://github.com/Artexis10/exomem/issues/2594)) ([b75b3a4](https://github.com/Artexis10/exomem/commit/b75b3a4210ebac59f236713ef2bec03d146dcb90))
+
+
+### Bug Fixes
+
+* **collections:** shorten the cutover stop window and repair what a converted vault reads ([#2598](https://github.com/Artexis10/exomem/issues/2598)) ([91789a9](https://github.com/Artexis10/exomem/commit/91789a98db262551d869927b9ef402908d22ea6c))
+* **indexes:** skip write temporaries when counting Sources and Notes ([#2590](https://github.com/Artexis10/exomem/issues/2590)) ([0d6260f](https://github.com/Artexis10/exomem/commit/0d6260fdf9a622b5876c17bb1cbb2482b9b9e16c))
+* **recall:** stop the task method search in time to serve the leads already found ([#2589](https://github.com/Artexis10/exomem/issues/2589)) ([15e17b4](https://github.com/Artexis10/exomem/commit/15e17b46b64d2ba26b37384cfc10939b88efaa9f))
+
+
+### Performance
+
+* **lexstore:** keep the parents a stopped method-unit statistics build interpreted ([#2597](https://github.com/Artexis10/exomem/issues/2597)) ([399c086](https://github.com/Artexis10/exomem/commit/399c0864a67ad48e03ad9679a3b7f0710aa6c110))
+* **promotions:** resolve proof links through the shared writer index ([#2591](https://github.com/Artexis10/exomem/issues/2591)) ([52ac01b](https://github.com/Artexis10/exomem/commit/52ac01b8699b58b43691fd50856b8d4f454f29a0))
+* **standby:** warm the method-unit statistics before promotion ([#2592](https://github.com/Artexis10/exomem/issues/2592)) ([ff39495](https://github.com/Artexis10/exomem/commit/ff394952bf6012096ccfe489db2572a54e2ee8e5))
+
 ## [0.167.0](https://github.com/Artexis10/exomem/compare/v0.166.0...v0.167.0) (2026-11-08)
 
 

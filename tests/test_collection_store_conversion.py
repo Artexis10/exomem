@@ -82,9 +82,26 @@ def settled(root, cid):
         return not summary.publication_outstanding(reader, cid)
 
 
-def convert(root, collection):
+def convert_now(root, collection):
+    """One conversion attempt, for a test of what the conversion refuses."""
     with request_scope(OWNER):
         return conversion.convert(root, collection, why="cutover to summary storage")
+
+
+def convert(root, collection):
+    """Convert, retrying the refusal that asks for a retry once edit-back and publication settle.
+
+    Publication of a fresh item view can reopen a settled collection by itself, so waiting for
+    `settled` and then converting still races. The refusal leaves no state, so a retry is safe.
+    """
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            return convert_now(root, collection)
+        except collections.CollectionError as error:
+            if error.code != "COLLECTION_CONVERSION_OUTSTANDING" or time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
 
 
 def serve(root, monkeypatch):
@@ -338,7 +355,7 @@ def test_conversion_refuses_while_a_view_edit_is_unsettled(served, monkeypatch):
     time.sleep(1)
     edited = root / item
     edited.write_text(edited.read_text().replace("title: One", "title: Edited"))
-    refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
+    refused(lambda: convert_now(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
     assert edited.exists() and "title: Edited" in edited.read_text()
 
 
@@ -466,7 +483,7 @@ def test_conversion_refuses_while_an_edit_to_the_manifest_view_is_unsettled(serv
     manifest = root / WORK
     edited = manifest.read_text() + "\nA note the owner added outside the store.\n"
     manifest.write_text(edited)
-    refused(lambda: convert(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
+    refused(lambda: convert_now(root, WORK), "COLLECTION_CONVERSION_OUTSTANDING")
     assert store(root, "SELECT view_mode FROM collections WHERE collection_id=?", CID) == [("items",)]
     assert manifest.read_text() == edited and item_files(root, WORK)
 

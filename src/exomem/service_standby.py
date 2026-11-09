@@ -223,10 +223,10 @@ def cutover_components() -> dict[str, str]:
 
     with _lock:
         # Settled, not adopted, for the reason `semantic_corpus` is below. A
-        # snapshot proved unusable by this build, such as one from an older
-        # graph schema, never becomes adoptable. The promoted worker rebuilds it
-        # whether it cut over or cold started. Promotion records it `unproven`
-        # and carries no graph handoff.
+        # snapshot that this build found unusable, such as one from an older
+        # graph schema, does not become adoptable by waiting. The promoted
+        # worker rebuilds it whether it cut over or cold started. Promotion
+        # records it `unproven` with the decline and carries no graph handoff.
         snapshot_ready = _proved_token is not None or bool(
             _adoption is not None and _adoption.conclusive
         )
@@ -1236,6 +1236,10 @@ def _promote_owned(
     covered_generation: Any = None
     if proved is None:
         record["snapshot"] = "unproven"
+        if adoption is not None and adoption.reason:
+            # Names why: a proved schema change reads differently from a proof
+            # that never finished.
+            record["proof_declined"] = adoption.reason
     elif migrated:
         # The offline migrator is the only writer between the two workers, and
         # it ran. Re-run the whole proof rather than compare a checkpoint pair

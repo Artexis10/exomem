@@ -442,7 +442,7 @@ class GraphNeighbor:
 
     @property
     def typed(self) -> bool:
-        """A registered relation that is not a plain link; it ranks before plain links."""
+        """A relation with a type that does not carry `plain_link`; it ranks before plain links."""
         return bool(self.relation_type) and not self.plain_link
 
 
@@ -1172,6 +1172,10 @@ RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
 RECOVERY_DECLINE_NO_SIDECAR = "no_sidecar"
 RECOVERY_DECLINE_NO_BARRIER = "no_barrier"
 RECOVERY_DECLINE_PUBLICATION_REFUSED = "publication_refused"
+
+#: Adoption declines that `adopt_published_snapshot` names and a standby reads.
+ADOPTION_DECLINE_GRAPH_DISABLED = "graph_disabled"
+ADOPTION_DECLINE_SNAPSHOT_UNUSABLE = "graph_sync_snapshot_unusable"
 
 _RECOVERY_DECLINE_LOCK = threading.Lock()
 _RECOVERY_DECLINES: dict[str, str] = {}
@@ -3628,7 +3632,7 @@ class EpistemicGraphIndex:
         from . import graph_drain
 
         if not graph_enabled():
-            return SnapshotAdoption(False, reason="graph_disabled")
+            return SnapshotAdoption(False, reason=ADOPTION_DECLINE_GRAPH_DISABLED)
         # Sampled before the proof: see `freshness.adopt_recall_origin`.
         sampled_generation = freshness.recall_generation(self.vault_root, "vault")
         conn = self._open_read_snapshot(require_current_projection=False)
@@ -6364,7 +6368,7 @@ class EpistemicGraphIndex:
         contention persists.
         """
         if not graph_enabled() or not self.path.exists():
-            return "graph_sync_snapshot_unusable"
+            return ADOPTION_DECLINE_SNAPSHOT_UNUSABLE
         conn: sqlite3.Connection | None = None
         try:
             conn = self._connect_existing(readonly=True, check_same_thread=False)
@@ -6397,7 +6401,9 @@ class EpistemicGraphIndex:
             )
         )
         return (
-            "graph_sync_predecessor_unreadable" if structural else "graph_sync_snapshot_unusable"
+            "graph_sync_predecessor_unreadable"
+            if structural
+            else ADOPTION_DECLINE_SNAPSHOT_UNUSABLE
         )
 
     def _graph_sync_predecessor_state(
@@ -8612,8 +8618,8 @@ class EpistemicGraphIndex:
             positioned = _neighbor_rows(
                 None if keep is None else view, seed_rel_by_key, batches
             )
-            # Each edge takes its authoring page's selected meaning before any
-            # family is reported; a candidate no page emits is no neighbour.
+            # Each edge takes its authoring page's selected meaning before its
+            # behaviours are read; a candidate no page emits is no neighbour.
             for direction, batch in positioned.items():
                 for position, seed_key, other_path, stored in batch:
                     seed_rel = seed_rel_by_key.get(seed_key)
@@ -10974,20 +10980,26 @@ class SnapshotAdoption:
 
     @property
     def conclusive(self) -> bool:
-        """Whether this decline holds for as long as this build runs.
+        """Whether waiting is not expected to make this snapshot adoptable.
 
-        Waiting cannot turn such a snapshot into an adoptable one. Only a
-        whole-vault rebuild repairs it, and the worker that owns the vault runs
-        that rebuild.
+        The proof found graph work off, or the sidecar absent, another build's
+        or corrupt. Only a whole-vault rebuild repairs that, and the worker that
+        owns the vault runs it. A rare transient can read the same way, such as
+        an access policy file caught between delete and write. The promoted
+        worker's warm then runs the adoption in full, so a wrong verdict costs
+        one full handoff, not a refused upgrade.
         """
         return not self.adopted and self.reason in _CONCLUSIVE_DECLINES
 
 
-#: The adoption declines that no wait can change. They are a closed set of this
-#: module's own reason tokens: graph work is off, or `_declined_snapshot_state`
-#: proved the sidecar absent, another build's or corrupt. Every other decline
-#: may clear when the serving worker publishes or drains.
-_CONCLUSIVE_DECLINES = frozenset({"graph_disabled", "graph_sync_snapshot_unusable"})
+#: The adoption declines that waiting is not expected to clear. They are a
+#: closed set of this module's own reason tokens: graph work is off, or
+#: `_declined_snapshot_state` found the sidecar absent, another build's or
+#: corrupt. Every other decline may clear when the serving worker publishes or
+#: drains.
+_CONCLUSIVE_DECLINES = frozenset(
+    {ADOPTION_DECLINE_GRAPH_DISABLED, ADOPTION_DECLINE_SNAPSHOT_UNUSABLE}
+)
 
 
 _REBUILD_LOCK = threading.Lock()
