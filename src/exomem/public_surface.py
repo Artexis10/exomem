@@ -232,7 +232,9 @@ class PublicSurface:
         if door is None:
             raise OpError("INVALID_OPERATION", f"{name} is not a tool of this server.")
         operations = {op.name: op for op in self.door_operations(name, commands)}
-        operation, fields, tool_fields = _door_call(name, body, operations)
+        elsewhere = {op.name: other for other in DOORS.values() if other != name
+                     for op in self.door_operations(other, commands)}
+        operation, fields, tool_fields = _door_call(name, body, operations, elsewhere)
         op = operations[operation]
         nested = {"operation": {"kind": op.kind, **fields}, **tool_fields}
         wire = {**nested, **carried}
@@ -390,9 +392,13 @@ def _wire_refusal(name: str, error: Exception, *, tool: WireTool | None = None):
 
 
 def _door_call(
-    door: str, body: Mapping[str, Any], operations: Mapping[str, DoorOp],
+    door: str, body: Mapping[str, Any], operations: Mapping[str, DoorOp], elsewhere: Mapping[str, str] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
-    """The operation name, its fields and the tool-level fields of one door call."""
+    """The operation name, its fields and the tool-level fields of one door call.
+
+    `elsewhere` maps an operation of the other door to that door, so a read sent to the write door
+    (or the reverse) is refused with the tool that serves it.
+    """
     from .cli_ops import OpError
 
     writes = door == DOORS["write"]
@@ -403,9 +409,13 @@ def _door_call(
         refusal.writes = writes
         raise refusal
     if operation not in operations:
-        refusal = OpError("INVALID_OPERATION", f"{door} has no operation {operation!r}.",
-                          details={"candidates": get_close_matches(operation, sorted(operations), n=5)
-                                   or sorted(operations)[:5]})
+        served_by = (elsewhere or {}).get(operation)
+        refusal = OpError("INVALID_OPERATION",
+                          f"{operation} is an operation of {served_by}." if served_by
+                          else f"{door} has no operation {operation!r}.",
+                          details=None if served_by else {
+                              "candidates": get_close_matches(operation, sorted(operations), n=5)
+                              or sorted(operations)[:5]})
         refusal.writes = writes
         raise refusal
     fields = body.get("arguments")

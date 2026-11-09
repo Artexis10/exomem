@@ -35,7 +35,7 @@ A note write over MCP SHALL accept one `unlinked_reason`. The server SHALL bind 
 
 ### Requirement: A Row Query Returns The Id That A Row Write Takes
 
-A row that query_records or query_plan_items returns SHALL carry its short id as `id`. Where the collection declares a field named `id`, the row SHALL keep that field and carry the short id as `row_id`. edit_record and edit_plan_item SHALL accept the short id under either name. A query that names its columns SHALL return the named columns and the id, and no version field.
+A row that query_records or query_plan_items returns SHALL carry its short id as `id`. Where the collection declares a field named `id`, the row SHALL keep that field and carry the short id as `row_id`. edit_record and edit_plan_item SHALL accept the short id under either name. A query that names its columns SHALL return the named columns and still carry the id on every row.
 
 #### Scenario: A collection with its own id field keeps it
 - **WHEN** a collection declares an `id` column and a client queries its rows
