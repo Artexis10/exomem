@@ -1861,13 +1861,46 @@ def test_bound_remember_replays_after_terminal_acknowledgement_loss(
 
     with pytest.raises(asyncio.CancelledError):
         bound(**kwargs)
-    replay = bound(**kwargs)
+    replay = bound(**kwargs, response_detail="full")
 
     assert replay["path"] == validation["destination"]
     assert (vault / replay["path"]).is_file()
     assert list((vault / replay["path"]).parent.glob("acknowledgement-safe-save*.md")) == [
         vault / replay["path"]
     ]
+    # The agent lost the first reply, so this reply is the only one it reads. It must say that
+    # the commit it names happened earlier; `mutated` stays that commit's outcome.
+    operational = replay["diagnostics"]["operational"]
+    assert replay["replayed"] is True
+    assert operational["mutated"] is True
+    assert operational["state"] == "committed"
+    assert operational["receipt_id"]
+
+
+def test_the_same_text_in_another_unicode_composition_replays(tmp_path: Path) -> None:
+    calls = 0
+
+    def leaf(vault: Path, *, title: str) -> dict:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return {"title": title}
+
+    command = SimpleNamespace(name="edit_memory", leaf=leaf, read_only=False, executor="cell")
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+
+    def send(title: str) -> dict:
+        return manager.invoke(
+            command, (tmp_path / "vault",), {"title": title}, implicit_idempotency_scope="session:test"
+        )
+
+    composed, decomposed = "Caf\u00e9 notes", "Cafe\u0301 notes"
+    send(composed)
+    send(decomposed)
+
+    assert calls == 1
+    send("Cafe notes")
+    assert calls == 2
 
 
 def test_reviewed_transition_commits_when_the_clock_ticks_between_calls(

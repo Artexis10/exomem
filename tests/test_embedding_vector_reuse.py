@@ -227,6 +227,41 @@ def test_service_claims_need_their_own_publication_after_being_enabled(live, mon
     assert cold is not None and not cold.current(vault, claims_required=True)
 
 
+def test_a_vault_claim_kind_publishes_the_checksum_its_claim_row_holds(live, monkeypatch) -> None:
+    """The write path checks the claim with the vault's kinds, as the claim row does.
+
+    A vault kind with the `page_claim` trait names the page's claim. When the write path read
+    the shipped kinds only, it computed another checksum than the row, so every publish of
+    such a page reported `embedding_auxiliary_failed`.
+    """
+    from exomem import claims, semantic_language_registry
+
+    vault, target, _encoder = live
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
+    semantic_language_registry.save_registry(vault, {
+        "schema_version": 1,
+        "categories": {},
+        "kinds": {"thesis": {"description": "A page's one claim", "traits": ["page_claim"]}},
+    })
+    target.write_text(
+        _source(["- [config_rule] Keep WAL enabled #sqlite ^obs-aaaa1111"])
+        + "\n## Thesis\n\nWarm caches cut tail latency.\n",
+        encoding="utf-8",
+    )
+
+    status = embeddings.upsert_after_write_status(vault, [target])
+
+    assert (status.status, status.code) == ("completed", "embedding_upsert_completed")
+    with sqlite3.connect(claims.sidecar_path(vault)) as connection:
+        claim, checksum = connection.execute(
+            "SELECT claim_text, checksum FROM claims WHERE file_path = ?", (PAGE,)
+        ).fetchone()
+    assert "Warm caches cut tail latency." in claim
+    assert status.publication.claim_checksum == checksum
+
+
 def test_cold_claim_publication_refuses_another_encoder_space(live, monkeypatch) -> None:
     """A matching checksum/width cannot complete claims rejected by recall."""
     from exomem import claims, recall_space
@@ -272,7 +307,7 @@ def test_claim_publication_and_reuse_follow_their_own_space_during_migration(liv
     pages = {target: (page, freshness.stat_signature(target))}
     claims.upsert_claims_after_write(vault, [target], pages=pages)
     assert embeddings.get_embedding_index(vault).dim == 384
-    proof = dataclasses.replace(original, claims_enabled=True, claim_checksum=claims.claim_checksum_for_page(page))
+    proof = dataclasses.replace(original, claims_enabled=True, claim_checksum=claims.claim_checksum_for_page(page, vault_root=vault))
     assert proof.current(vault, claims_required=True)
     cold = embeddings.reconstruct_publication(vault, target)
     assert cold is not None and cold.current(vault, claims_required=True)

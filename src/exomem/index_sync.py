@@ -891,6 +891,9 @@ def full_upsert_succeeded(vault_root: Path, replaced: list[Path], report: object
         or report.reconcile_required
     ):
         return False
+    if not report.eligible_paths and not report.paths_truncated and not report.components:
+        # Every written path is one no index reads (`_Schema/`, `_trash/`, ...): nothing is owed.
+        return True
     if (
         len(report.components) != len(_FULL_UPSERT_COMPONENTS)
         or {component.component for component in report.components} != _FULL_UPSERT_COMPONENTS

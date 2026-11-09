@@ -43,8 +43,9 @@ from exomem import (
     writer_lease,
 )
 from exomem.collection_store import capability, connection, custody, replica, schema
+from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import migrate, mode, ownership
+from exomem.vault_store import migrate, mode, ownership, write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -359,6 +360,26 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     # A vault that returned to file mode migrates again, and the store keeps its history across both.
     assert migrate_apply(vault) == 0
     assert mode.store_mode_active(vault)
+
+
+def test_a_rollback_export_names_the_page_that_a_moved_page_came_from(vault, tmp_path):
+    """An export that drops the source of a move cannot say where a page came from."""
+    assert migrate_apply(vault) == 0
+    moved = "Knowledge Base/Notes/Moved.md"
+    (vault / ALPHA).rename(vault / moved)
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        write.commit(
+            CollectionWriter(vault, handle),
+            write.StoreChange(
+                write.Origin.GOVERNED, "test", moves=(write.PageMove(ALPHA, moved, on_disk=True),)
+            ),
+        )
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    audit = [
+        json.loads(line) for line in (tmp_path / "export/audit.jsonl").read_text().splitlines()
+    ]
+    trail = {(entry["path"], entry["from_path"]) for entry in audit if entry["operation"] == "move"}
+    assert trail == {(ALPHA, None), (moved, ALPHA)}
 
 
 def test_a_person_edit_made_after_the_migration_blocks_the_rollback_until_it_is_exported(

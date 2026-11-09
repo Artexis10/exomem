@@ -172,6 +172,7 @@ _ENVELOPE_KEYS = (
     "next_action",
     "request_id",
     "receipt_id",
+    "replayed",
 )
 
 #: The wire fields that say how a write went for an operator or a program: outcome flags,
@@ -438,16 +439,19 @@ def _path_projection(result: Any) -> dict[str, Any]:
 def _adoption_control_projection(leaf: Mapping[str, Any]) -> dict[str, Any]:
     """The import flow's control signals, which the compact reply must not hide.
 
-    Without them the reply that must stop (`apply_stop`), that has a next page (`next_after`)
-    or that leaves staged files with the person (`finish.residual`) has the shape of ordinary
-    progress. Each field is built by `adoption_run` and is small: `apply_stop` has five keys,
+    Without them the reply that must stop (`apply_stop`), that has a next page (`next_after`),
+    that yielded the boundary to a waiting write (`stop_reason`) or that leaves staged files with
+    the person (`finish.residual`) has the shape of ordinary progress. Each field is built by
+    `adoption_run` and is small: `stop_reason` is one token, `apply_stop` has five keys,
     `next_actions` holds at most five entries of three strings, and `residual` counts files by a
     closed set of reasons. The inventory and the plan items are not copied. `residual` stays under
     `finish` because the next actions name it as `finish.residual`.
     """
     kept: dict[str, Any] = {
         key: leaf[key]
-        for key, kind in (("next_after", str), ("apply_stop", Mapping), ("next_actions", list))
+        for key, kind in (
+            ("next_after", str), ("apply_stop", Mapping), ("next_actions", list), ("stop_reason", str)
+        )
         if isinstance(leaf.get(key), kind)
     }
     finish = leaf.get("finish")
@@ -1891,6 +1895,18 @@ def with_fast_acknowledgement(
     return frozen
 
 
+def as_replay(terminal: Any) -> Any:
+    """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
+
+    `mutated`, `request_id` and `receipt_id` stay those of the commit it replays: the egress
+    filter binds a unit write's parent on `mutated`, so a replay must not change it. Anything that
+    is not a terminal passes through.
+    """
+    if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
+        return terminal
+    return {**terminal, "replayed": True}
+
+
 def replayed_terminal(
     leaf_result: Any,
     *,
@@ -1918,6 +1934,7 @@ def replayed_terminal(
         "ok": True,
         "status": "replayed",
         "mutated": False,
+        "replayed": True,
     }
     if recorded_replay:
         terminal.update(state="settled", terminal=True)

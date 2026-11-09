@@ -2940,7 +2940,7 @@ def test_process_media_selected_batch_replays_without_reconciliation(
         idempotency_key="selected-media-replay",
     )
 
-    assert replay == first
+    assert replay == {**first, "replayed": True}
     assert calls == 1
     assert first["paths"] == [relative]
     assert first["media_results"] == [
@@ -3000,7 +3000,7 @@ def test_selected_media_retry_without_canonical_commit_has_a_settled_terminal(
         idempotency_key="selected-queue-retry",
     )
 
-    assert replay == compact
+    assert replay == {**compact, "replayed": True}
     operational = first["diagnostics"]["operational"]
     assert operational["ok"] is True
     assert operational["state"] == "settled"

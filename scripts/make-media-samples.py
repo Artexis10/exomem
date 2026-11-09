@@ -5,12 +5,12 @@ to a phrase that find's lexical presence check must find in its extracted text.
 The Cloud image build (`Dockerfile`, stage `cloud`) and
 `scripts/check-media-samples.py` read it.
 
-The script needs the document libraries, Pillow, pillow-heif, python-docx and a CJK font. Run it
+The script needs the document libraries, Pillow, pillow-heif, pidng, python-docx and a CJK font. Run it
 in a throwaway container, not on the host:
 
     docker run --rm -v "$PWD:/w" -w /w python:3.12-slim sh -c \
       "apt-get update && apt-get install -y fonts-noto-cjk fonts-dejavu-core && \
-       pip install pillow pillow-heif==1.8.1 pymupdf python-docx openpyxl python-pptx odfdo && \
+       pip install pillow pillow-heif==1.8.1 pidng pymupdf python-docx openpyxl python-pptx odfdo && \
        python scripts/make-media-samples.py tests/fixtures/media-samples"
 """
 
@@ -46,6 +46,7 @@ PHRASES = {
 }
 
 PHRASES["ocr-eng.heic"] = PHRASES["ocr-eng.png"]
+PHRASES["ocr-eng.dng"] = PHRASES["ocr-eng.png"]
 
 OCR_LINES = {
     "ocr-eng.png": [
@@ -105,6 +106,48 @@ def _heic(source: Path, target: Path) -> None:
         from_pillow(image.convert("RGB")).save(
             target, quality=90, enc_params={"x265:pools": "1", "x265:frame-threads": "1"}
         )
+
+
+def _dng(source: Path, target: Path) -> None:
+    """A camera raw of `source` as a phone shot in portrait records it.
+
+    The sensor data is `source` turned a quarter turn anticlockwise and sampled through an RGGB
+    colour filter at 12 bits; orientation 6 tells a decoder to turn it back upright.
+    """
+    import numpy as np
+    from pidng.core import RAW2DNG, DNGTags, Tag
+    from pidng.defs import CalibrationIlluminant, CFAPattern, DNGVersion, PhotometricInterpretation
+    from PIL import Image
+
+    with Image.open(source) as image:
+        rgb = np.asarray(image.convert("RGB").rotate(90, expand=True), dtype=np.uint16)
+    height, width = rgb.shape[0] // 2 * 2, rgb.shape[1] // 2 * 2
+    rgb = rgb[:height, :width]
+    mosaic = np.empty((height, width), dtype=np.uint16)
+    mosaic[0::2, 0::2] = rgb[0::2, 0::2, 0]
+    mosaic[0::2, 1::2] = rgb[0::2, 1::2, 1]
+    mosaic[1::2, 0::2] = rgb[1::2, 0::2, 1]
+    mosaic[1::2, 1::2] = rgb[1::2, 1::2, 2]
+    tags = DNGTags()
+    for tag, value in (
+        (Tag.ImageWidth, width), (Tag.ImageLength, height), (Tag.TileWidth, width), (Tag.TileLength, height),
+        # TIFF orientation 6: the stored rows are the upright image's right-hand column.
+        (Tag.Orientation, 6),
+        (Tag.PhotometricInterpretation, PhotometricInterpretation.Color_Filter_Array),
+        (Tag.SamplesPerPixel, 1), (Tag.BitsPerSample, 16),
+        (Tag.CFARepeatPatternDim, [2, 2]), (Tag.CFAPattern, CFAPattern.RGGB),
+        (Tag.BlackLevel, 0), (Tag.WhiteLevel, 4095),
+        # An identity colour matrix and a neutral white point keep the sample's colours as drawn.
+        (Tag.ColorMatrix1, [[1, 1], [0, 1], [0, 1], [0, 1], [1, 1], [0, 1], [0, 1], [0, 1], [1, 1]]),
+        (Tag.CalibrationIlluminant1, CalibrationIlluminant.D65),
+        (Tag.AsShotNeutral, [[1, 1], [1, 1], [1, 1]]), (Tag.BaselineExposure, [[0, 1]]),
+        (Tag.Make, "Exomem"), (Tag.Model, "Synthetic sample"),
+        (Tag.DNGVersion, DNGVersion.V1_4), (Tag.DNGBackwardVersion, DNGVersion.V1_2),
+    ):
+        tags.set(tag, value)
+    writer = RAW2DNG()
+    writer.options(tags, path="", compress=False)
+    writer.convert(mosaic << 4, filename=str(target.with_suffix("")))
 
 
 def _epub(path: Path, phrase: str) -> None:
@@ -212,6 +255,7 @@ def main(out: Path) -> None:
 
     _png(out / "ocr-eng.png", OCR_LINES["ocr-eng.png"], font=LATIN_FONT)
     _heic(out / "ocr-eng.png", out / "ocr-eng.heic")
+    _dng(out / "ocr-eng.png", out / "ocr-eng.dng")
     _png(out / "ocr-est.png", OCR_LINES["ocr-est.png"], font=LATIN_FONT)
     _png(out / "ocr-jpn.png", OCR_LINES["ocr-jpn.png"], font=CJK_FONT)
     _png(out / "ocr-jpn-vert.png", OCR_LINES["ocr-jpn-vert.png"], font=CJK_FONT, vertical=True)

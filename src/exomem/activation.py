@@ -34,7 +34,6 @@ ACTIVATION_CATEGORIES: tuple[str, ...] = (
     "relation_debt",
 )
 
-_ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})
 _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|[^\]\n]+)?\]\]")
 
 
@@ -97,10 +96,7 @@ def scan(vault_root: Path) -> ActivationScan:
         measurement = _measure_page(
             page,
             definitions.snapshots["relations"].typed,
-            language_registry=semantic_language_registry.for_attached_projects(
-                definitions.snapshots["categories"].typed,
-                semantic_index.page_projects(page.frontmatter),
-            ),
+            language=definitions.snapshots["categories"].typed,
         )
         meta = {
             "signal_version": _signal_version(page),
@@ -311,13 +307,17 @@ def _measure_page(
     page: Any,
     registry: relation_registry.RelationRegistry,
     *,
-    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> dict[str, Any]:
+    from . import semantic_index
+
     project = _page_project(page.frontmatter)
     document = semantic_units.parse_semantic_units(
         page.body,
         validate=False,
-        language_registry=language_registry,
+        language_registry=semantic_language_registry.for_attached_projects(
+            language, semantic_index.page_projects(page.frontmatter)
+        ),
         relation_registry=registry,
         include_legacy_relations=True,
         retain_unknown_relations=True,
@@ -326,7 +326,7 @@ def _measure_page(
     )
 
     return measure_document(
-        document, registry, project=project, page_type=page.page_type,
+        document, registry, language=language, project=project, page_type=page.page_type,
         body_wikilinks=len(find_body_wikilinks(page.body)),
         frontmatter_counts=frontmatter_link_counts(page.frontmatter),
     )
@@ -343,10 +343,14 @@ def frontmatter_link_counts(frontmatter: dict[str, Any]) -> dict[str, int]:
 
 def measure_document(
     document: semantic_units.SemanticUnitDocument | semantic_units.SelectedStructure,
-    registry: relation_registry.RelationRegistry, *, project: str | None,
+    registry: relation_registry.RelationRegistry, *,
+    language: semantic_language_registry.SemanticLanguageRegistry, project: str | None,
     page_type: str | None, body_wikilinks: int, frontmatter_counts: dict[str, int],
 ) -> dict[str, Any]:
-    """Reduce selected authored occurrences through one activation arithmetic owner."""
+    """Reduce selected authored occurrences through one activation arithmetic owner.
+
+    `language` is the page's own registry, so a vault kind with the `assertion` trait counts.
+    """
     registered: list[str] = []
     unregistered: list[dict[str, str | int]] = []
     for relation in document.note_relations:
@@ -391,9 +395,7 @@ def measure_document(
         if not registry.has(binding.relation, "plain_link"):
             registered.extend([binding.relation] * count)
 
-    assertion_blocks = sum(
-        1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
-    )
+    assertion_blocks = sum(1 for unit in document.rich_units if language.has(unit.kind, "assertion"))
     provenance_relations = sum(1 for kind in registered if registry.has(kind, "sources"))
     unique_unknown = {
         (str(item["label"]), str(item["anchor"])): item for item in unregistered

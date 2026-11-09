@@ -65,6 +65,23 @@ def test_yield_waits_until_the_request_finishes() -> None:
     assert foreground_priority.in_flight() == 0
 
 
+def test_wait_while_ends_with_the_condition_and_never_outlasts_its_cap() -> None:
+    """A writer in another process cannot hold a job off the boundary for longer than the cap."""
+    still_waiting = [True]
+    threading.Timer(0.3, still_waiting.clear).start()
+    waited = foreground_priority.wait_while(lambda: bool(still_waiting), max_wait=5.0)
+    assert 0.2 <= waited < 2.0
+
+    started = time.monotonic()
+    waited = foreground_priority.wait_while(lambda: True, max_wait=0.3)
+    assert 0.25 <= waited < 2.0
+    assert time.monotonic() - started < 2.0
+
+    # A foreground thread, such as a CLI maintenance run, waits too, for the same cap.
+    with foreground_priority.foreground():
+        assert 0.25 <= foreground_priority.wait_while(lambda: True, max_wait=0.3) < 2.0
+
+
 def test_overlapping_requests_hold_bulk_work_until_the_last_one_ends() -> None:
     first_in = threading.Event()
     second_in = threading.Event()
@@ -396,6 +413,7 @@ def test_a_thread_holding_a_mutation_boundary_never_pauses(tmp_path: Path) -> No
             with foreground_priority.bulk():
                 started = time.monotonic()
                 assert foreground_priority.yield_to_foreground(max_wait=1.0) == 0.0
+                assert foreground_priority.wait_while(lambda: True, max_wait=1.0) == 0.0
                 assert list(foreground_priority.yielding_in_bulk(["a"])) == ["a"]
                 assert time.monotonic() - started < 0.2
     finally:
