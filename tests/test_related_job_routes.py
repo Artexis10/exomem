@@ -8,22 +8,21 @@ from exomem.command_surface import resolve_invocation
 
 
 @pytest.mark.parametrize(
-    "tool,operation,command,flat",
+    "command,flat,tool,operation",
     [
-        ("bootstrap", {"kind": "writer-status"}, "coordination_status", {}),
-        ("bootstrap", {"kind": "settings"}, "configure_memory", {"action": "inspect"}),
-        ("read_memory", {"kind": "graph", "max_nodes": 12}, "viewer_map", {"max_nodes": 12}),
-        ("prepare_note", {"kind": "compile", "sources": []}, "compile_source", {"sources": []}),
-        ("read_media", {"kind": "status", "path": "Evidence/clip.mp4"}, "process_media",
-         {"operation": "status", "path": "Evidence/clip.mp4"}),
-        ("change_session_access", {"kind": "revoke", "grant_id": "g"}, "govern_memory",
-         {"operation": "revoke", "grant_id": "g"}),
+        ("coordination_status", {}, "inspect_memory", "writer.status"),
+        ("configure_memory", {"action": "inspect"}, "inspect_memory", "settings.inspect"),
+        ("viewer_map", {"max_nodes": 12}, "inspect_memory", "graph.map"),
+        ("compile_source", {"sources": []}, "inspect_memory", "sources.compile"),
+        ("process_media", {"operation": "status", "path": "Evidence/clip.mp4"}, "inspect_memory",
+         "media.status"),
+        ("govern_memory", {"operation": "revoke", "grant_id": "g"}, "manage_memory", "access.revoke"),
     ],
 )
-def test_related_job_routes_keep_the_original_execution_identity(tool, operation, command, flat):
-    selected, actual = resolve_invocation(tool, {"operation": operation}, commands.PRODUCT_COMMANDS)
-    assert (selected.name, actual) == (command, flat)
-    assert operation_entries.spell_call(command, flat, "nested") == (tool, {"operation": operation})
+def test_related_job_routes_keep_the_original_execution_identity(command, flat, tool, operation):
+    spelled_tool, arguments = operation_entries.spell_call(command, flat, "public")
+    assert (spelled_tool, arguments["operation"]) == (tool, operation)
+    assert operation_entries.unspell_call(spelled_tool, arguments, "public") == (command, flat)
 
 
 def test_same_name_flat_compatibility_keeps_its_original_route():
@@ -59,12 +58,9 @@ def test_mixed_same_name_calls_do_not_fall_back_to_legacy():
 @pytest.mark.parametrize("scope", [pytest.param({}, id="omitted"), {"scope": None}, {"scope": "session"}])
 def test_optional_grant_scope_keeps_exact_cross_spelling_arguments(scope):
     grouped = {"operation": "grant", "token": "t", **scope}
-    tool, args = operation_entries.spell_call("govern_memory", grouped, "nested")
-    assert tool == "grant_session_access"
-    selected, flat = resolve_invocation(tool, args, commands.PRODUCT_COMMANDS)
-    assert selected.name == "govern_memory"
-    assert flat == grouped
-    assert operation_entries.unspell_call(tool, args, "nested") == ("govern_memory", grouped)
+    tool, args = operation_entries.spell_call("govern_memory", grouped, "public")
+    assert (tool, args["operation"]) == ("manage_memory", "access.grant")
+    assert operation_entries.unspell_call(tool, args, "public") == ("govern_memory", grouped)
 
 
 def test_query_filter_schema_comes_from_the_existing_query_contract():
