@@ -258,6 +258,7 @@ def observe_memory(
     frontmatter, body, _ = vault.parse_frontmatter(editable.original_text)
     target_anchor: str | None = None
     removed_unit = None
+    dropped_relations: tuple[tuple[str, str], ...] = ()
     if proposal_mode == "remove":
         assert current_unit is not None
         after_body = _remove_unit(
@@ -294,6 +295,13 @@ def observe_memory(
                 "or author a canonical note-level relation.",
             )
         base_unit = current_unit if proposal_mode == "update" else None
+        if base_unit is not None:
+            # `relations` replaces on update, so a call that omits one removes it.
+            dropped_relations = tuple(
+                pair
+                for pair in ((item.kind, item.target) for item in base_unit.relations)
+                if pair not in normalized_relations
+            )
         normalized_verdict = _resolve_verdict(
             verdict,
             base_unit,
@@ -529,6 +537,7 @@ def observe_memory(
             unit=proposed_unit,
             removed_unit=removed_unit,
             semantic=preflight.as_dict(),
+            dropped_relations=dropped_relations,
         )
 
     try:
@@ -587,6 +596,7 @@ def observe_memory(
         unit=final_unit,
         removed_unit=removed_unit,
         semantic=committed.as_dict(),
+        dropped_relations=dropped_relations,
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
@@ -1125,6 +1135,28 @@ def _assert_round_trip(
         )
 
 
+#: How many dropped relations the outcome sentence names before it counts the rest.
+_DROPPED_RELATIONS_NAMED = 5
+
+
+def _dropped_relations_outcome(dropped: tuple[tuple[str, str], ...]) -> str:
+    """The sentence for an update that removes relations its unit had, and how to keep them.
+
+    A prose-only update of a belief drops its `assesses` relation, so the belief then warns that
+    it names no claim; this names the relation that went and the repair.
+    """
+    named = "; ".join(f"{kind}: {target}" for kind, target in dropped[:_DROPPED_RELATIONS_NAMED])
+    more = len(dropped) - _DROPPED_RELATIONS_NAMED
+    if more > 0:
+        named += f"; and {more} more"
+    many = len(dropped) > 1
+    return (
+        f"This update drops {len(dropped)} relation{'s' if many else ''} the unit had ({named}). "
+        f"An update replaces a unit's relations: pass `relations` again to keep "
+        f"{'them' if many else 'it'}."
+    )
+
+
 def _result(
     *,
     operation: str,
@@ -1135,6 +1167,7 @@ def _result(
     unit: Any | None,
     removed_unit: Any | None,
     semantic: dict[str, Any],
+    dropped_relations: tuple[tuple[str, str], ...] = (),
     timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
@@ -1145,6 +1178,11 @@ def _result(
         "after_hash": after_hash,
         "semantic": semantic,
     }
+    if dropped_relations:
+        value["relations_dropped"] = [
+            {"kind": kind, "target": target} for kind, target in dropped_relations
+        ]
+        value["outcome"] = _dropped_relations_outcome(dropped_relations)
     if timings is not None:
         value["timings"] = timings
     if unit is not None:

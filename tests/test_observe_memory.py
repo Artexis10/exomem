@@ -1151,3 +1151,81 @@ def test_a_blocked_edit_names_the_one_call_fix_and_no_other_route(tmp_path: Path
     assert "validate_only" not in message
     assert "operation=validate" not in message
     assert "fix: Fix:" not in message
+
+
+_BELIEF_PAGE_BODY = (
+    "# Observe\n\n## Belief\n- id: b1\n- credence_holder: Dana\n- credence: likely\n"
+    "- relations: assesses: [[Observe]]\n\nDana thinks the release holds.\n\n"
+    "## Relations\n\n- links_to [[Other]]\n"
+)
+
+
+def _write_belief_page(root: Path) -> Path:
+    """The belief page, beside the page its `## Relations` link names."""
+    _write_page(
+        root,
+        rel="Knowledge Base/Notes/Insights/other.md",
+        source=_page_source("# Other\n\nExisting prose.\n").replace(
+            PAGE_ID, "00000000-0000-4000-8000-000000000099"
+        ),
+    )
+    return _write_page(root, source=_page_source(_BELIEF_PAGE_BODY))
+
+
+def _belief_unit(root: Path):
+    state = semantic_index.current_parent_index_state(root, PAGE)
+    return next(unit for unit in state.document.units if unit.kind == "belief")
+
+
+def test_a_prose_only_belief_update_names_the_assesses_relation_it_drops(tmp_path: Path) -> None:
+    """Catches a belief that silently loses its claim: the update replaces `relations`."""
+    page = _write_belief_page(tmp_path)
+    unit = _belief_unit(tmp_path)
+
+    with request_scope(owner_principal(surface="cli")):
+        result = commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+            kind="belief", category="belief", content="Dana thinks the release mostly holds.",
+        )
+
+    assert result["relations_dropped"] == [{"kind": "assesses", "target": "[[Observe]]"}]
+    assert "assesses: [[Observe]]" in result["outcome"]
+    assert "pass `relations` again" in result["outcome"]
+    warnings = [item["code"] for item in result["semantic"]["contract_result"]["warnings"]]
+    assert "missing_rich_assessed_claim" in warnings
+
+
+def test_a_belief_update_that_resends_its_relations_reports_nothing_dropped(tmp_path: Path) -> None:
+    """Catches an outcome that cries wolf when the caller kept every relation."""
+    page = _write_belief_page(tmp_path)
+    unit = _belief_unit(tmp_path)
+
+    with request_scope(owner_principal(surface="cli")):
+        result = commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+            kind="belief", category="belief", content="Dana thinks the release mostly holds.",
+            relations=[{"kind": "assesses", "target": "[[Observe]]"}],
+        )
+
+    assert "outcome" not in result and "relations_dropped" not in result
+
+
+def test_the_hosted_update_summary_carries_the_dropped_relation(tmp_path: Path) -> None:
+    """Catches the sentence living in the raw result while the surface the agent reads omits it."""
+    from exomem import writer_lease
+
+    page = _write_belief_page(tmp_path)
+    unit = _belief_unit(tmp_path)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "observe_memory")
+
+    with request_scope(owner_principal(surface="cli")):
+        result = writer_lease.invoke_command(
+            command, tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+            kind="belief", category="belief", content="Dana thinks the release mostly holds.",
+        )
+
+    assert result["user_summary"].startswith("Updated")
+    assert "drops 1 relation the unit had (assesses: [[Observe]])" in result["user_summary"]
