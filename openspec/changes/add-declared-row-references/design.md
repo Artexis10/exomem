@@ -55,18 +55,20 @@ Each reference that a query names reads `resolved` or `unresolved` on every retu
 - the target row is withheld;
 - the target's natural-key field is withheld from the caller by field release.
 
-A withheld target is indistinguishable from a missing one, the same rule as CQ4. A query that names a reference to a withheld or missing target collection is refused with the generic `COLLECTION_NOT_FOUND`, as CQ4 requires. Any path, `related` expansion, filter or inverse expansion over a source field the caller cannot read is refused with `QUERY_FIELD_UNAVAILABLE`, because expanding it would reveal the value through the target row. `inspect` computes resolution counts and unresolved values under the caller's view, and omits inbound declarations whose source field is withheld from the caller.
+A withheld target is indistinguishable from a missing one, the same rule as CQ4. A forward reference whose target key field is withheld reads `unresolved`; the query engine's location rule carries this as its one exception, because a refusal would reveal that the key exists. A filter, grouping or inverse expansion that depends on a withheld target key refuses with `QUERY_FIELD_UNAVAILABLE`, because listing the rows that name a target would reveal its key. A query names a reference when it lists it in `related` or uses a dotted path through it. Selecting the raw source value is not naming it, so existing reads stay unchanged. A query that names a reference to a withheld or missing target collection is refused with the generic `COLLECTION_NOT_FOUND`, as CQ4 requires. Any path, `related` expansion, filter or inverse expansion over a source field the caller cannot read is refused with `QUERY_FIELD_UNAVAILABLE`, because expanding it would reveal the value through the target row. `inspect` computes resolution counts and unresolved values under the caller's view, and omits inbound declarations whose source field is withheld from the caller.
 
 ### D5. One query: expand, filter and total
 
 A row query gains two things. `related` names declared references to expand into each row. A dotted path through a single-valued reference, such as `site.name`, works in select, filter and grouping, as the amended CQ4 states. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the release-qualified visible-state basis of the source and of each target collection, and refuses once any of them changed. A change to rows hidden from the caller never invalidates that caller's cursor.
 
-Totals need two things that do not exist today: reductions with a filter, and a result that carries rows and totals together. `combined` forces the base-row path, never the rollup. It reports three counts:
+Totals need three things that do not exist today: reductions with a filter, a per-aggregate `where` so that one query can sum one field and count the rows matching a condition, and a result that carries rows and totals together. The amended query engine adds the per-aggregate `where`. `combined` forces the base-row path, never the rollup. It reports four values:
 
 - `count`: the rows combined;
 - `unresolved_rows`: combined rows where a reference the query names did not resolve;
 - `excluded_unresolved`: base rows that a reference filter excluded only because their reference did not resolve, whatever the cause;
-- `unresolved_values`: a bounded list of the distinct values that did not resolve, with their counts, so an agent can recognise an old key after a rename.
+- `unresolved_values`: a bounded list of the distinct values that did not resolve, with their counts, so an agent can recognise an old key after a rename. Like every bounded list in this design (import warnings and `inspect` included), it carries `truncated` and the total distinct count.
+
+A filter through a path uses three-valued logic. A row whose reference does not resolve is excluded, and counted in `excluded_unresolved`, only when the whole filter is unknown for it. In `any: [site.name = X, hours > 5]`, a row with an unresolved site and 6 hours still matches.
 
 The row page and its cursor name the combined rows. So after a site rename, "hours at site X" is not a silent zero: `excluded_unresolved` counts the rows that no longer resolve, and `unresolved_values` shows the old key among them.
 
@@ -74,7 +76,7 @@ The motivating question becomes one call on the diary:
 
 1. Filter on `site.name`.
 2. Expand `site` and `skills.skill_id`.
-3. Sum `hours` and count the entries whose leave-day field is true.
+3. Sum `hours`, and count the entries with an aggregate whose own `where` keeps only rows whose leave-day field is true.
 
 ### D6. Warn on write, never refuse
 
