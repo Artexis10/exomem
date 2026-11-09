@@ -212,7 +212,8 @@ def test_the_server_instructions_ask_for_a_record_and_stay_short() -> None:
     assert "record_episode" in text and "episode_memory" not in text
     assert "stopping points" in text and "reuse `episode`" in text and "left open" in text
     assert "not authority" in text
-    assert len(text) <= 900, len(text)
+    # 900 -> 960 on 2026-11-09: advice on the user's own systems counts as clear relevance.
+    assert len(text) <= 960, len(text)
 
 
 @pytest.mark.parametrize("packet_mode", ["anchors", "maps"])

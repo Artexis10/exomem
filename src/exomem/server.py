@@ -747,7 +747,8 @@ def _find_call_summary(message) -> str:
 SERVER_INSTRUCTIONS = (
     "This server is the user's long-term governed memory. Named tools belong to this server. "
     'Reuse live policy; bootstrap first if absent/stale. Connection grants no recall/save. off: '
-    'explicit-only; light: clear relevance. When recall is warranted, recall_context once '
+    "explicit-only; light: clear relevance, incl. advice on the user's own systems/projects/health. "
+    'When recall is warranted, recall_context once '
     'initially, turn verbatim; skip a turn whose Exomem working set a hook already injected. Echo '
     'continuity unchanged. Follow `next_action` when present. `conversation` (see the tool): '
     'relevant excerpts, never full history. New evidence/task: trigger=task_refresh, keep turn, use '

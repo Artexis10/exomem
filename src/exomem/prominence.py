@@ -218,6 +218,11 @@ _GLOBAL_STANCE_CAPTURE = (
     "Authorize each promoted unit; keep scoped rules local. "
 )
 
+#: A correction the user states is durable at once: an uncorrected note keeps recommending what the
+#: user already found wrong, and recall returns it as authoritative. Command-free, so a reduced
+#: surface keeps it.
+_CORRECTION_CAPTURE = "When the user says stored advice failed or a claim is wrong, correct or supersede that note now."
+
 #: The durable-baseline doctrine that `balanced` and `maximal` share word for word, and the
 #: activation `capture_policy` block repeats. Product doctrine, not vault data: one source, so
 #: bootstrap and the per-turn carrier cannot state different classes or routes.
@@ -799,7 +804,7 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
     return {
         "disposition": disposition,
         "link_acceptance": link_acceptance,
-        "say": f"{meaning} {link} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}",
+        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_DELIVERY_CAPTURE}",
     }
 
 
