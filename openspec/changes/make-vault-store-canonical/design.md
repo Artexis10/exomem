@@ -115,8 +115,10 @@ The watcher stays, but its job shrinks to one question: does a file's hash diffe
 
 - If the store revision equals the manifest revision and no intent is queued, the file imports as a governed write (D2) with outside-editor provenance.
 - Otherwise the outside bytes become a held correction, and neither version is overwritten. This generalises the collection views' edit-back to pages.
-- An outside delete becomes a held deletion.
-- A rename arrives as a delete plus a new file. When the new file's hash equals the deleted file's manifest hash in the same sweep, it imports as a governed move; otherwise both halves follow the rules above.
+- An outside delete of a page becomes a held deletion. The hold clears when the file returns with the manifest's bytes or with bytes that Exomem wrote in the path's current life.
+- A binary is disk-canonical: the store holds its path, hash and size, and no bytes. A hold would keep nothing, so an outside change, delete or rename of a binary imports as an audited record change. A binary is held only when an Exomem delete of it is queued and the file differs.
+- A rename arrives as a delete plus a new file. When the new file's hash equals the deleted file's manifest hash in the same sweep, it imports as a governed move; otherwise both halves follow the rules above. A binary's rename pairs by its hash in the same way.
+- A path whose store life has ended (a page that Exomem deleted or moved away, a binary that Exomem deleted) has no bytes of Exomem's: a file restored there is a person's new file and imports.
 
 Exomem's own projections match the manifest, so self-write echo suppression disappears. The spike's reconcile pass implements this check. Over today's production logs, edits from outside Exomem cannot be counted, because the watcher records them only in memory and at debug level. Store mode makes them auditable.
 

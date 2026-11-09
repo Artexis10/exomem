@@ -30,7 +30,7 @@ from test_vault_store_projector import NOTES, commit, put, rows
 from exomem import file_watcher, server_runtime
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
-from exomem.vault_store import importer, projector, read, write
+from exomem.vault_store import importer, ownership, projector, read, write
 
 # The generated vault and the store fixtures are the sibling suites' own: pytest finds a fixture by
 # its name in this module, and an alias keeps a test's argument from shadowing an import.
@@ -381,11 +381,10 @@ def _import_and_die(environment, root, countdown):
     os._exit(0)
 
 
-def test_a_binary_that_changes_is_recorded_and_one_that_disappears_is_held(
-    stored, writer, importing
-):
-    """An importer that forgets a changed binary's new hash, drops its record when a person
-    deletes the file, or records a binary that a queued store delete is about to remove."""
+def test_a_binary_that_changes_or_disappears_is_recorded_from_the_disk(stored, writer, importing):
+    """An importer that forgets a changed binary's new hash, keeps the record of a binary that a
+    person deleted, holds a delete that has no bytes to keep, or records a binary that a queued
+    store delete is about to remove."""
     (stored / DIAGRAM).write_bytes(DIAGRAM_BYTES + b"edited")
     fresh = f"{NOTES}/new-diagram.bin"
     (stored / fresh).write_bytes(b"\x00\x01\x02")
@@ -401,17 +400,42 @@ def test_a_binary_that_changes_is_recorded_and_one_that_disappears_is_held(
     (stored / DIAGRAM).unlink()
     gone = importing.import_paths([DIAGRAM])
 
-    assert gone.held == [DIAGRAM]
-    assert rows(stored, "SELECT kind, body FROM store_held WHERE path = ?", DIAGRAM) == [
-        ("delete", None)
-    ]
-    assert len(rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM)) == 1
+    assert (gone.removed, gone.held) == ([DIAGRAM], [])
+    assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM) == []
+    assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+    assert rows(
+        stored, "SELECT operation FROM store_projection_queue WHERE path = ?", DIAGRAM
+    ) == [], "a queued delete would remove the file that a person restores next"
+    assert rows(
+        stored, "SELECT origin FROM store_audit WHERE operation = 'delete' AND path = ?", DIAGRAM
+    ) == [("outside editor",)]
 
     commit(writer, binary_deletes=(write.BinaryDelete(fresh),))
     (stored / fresh).write_bytes(b"\x09\x09")
     raced = importing.import_paths([fresh])
     assert raced.held == [fresh], "a changed file under a queued delete is held, not recorded"
+    assert rows(stored, "SELECT kind, body, sha256 FROM store_held WHERE path = ?", fresh) == [
+        ("edit", None, sha(b"\x09\x09"))
+    ]
     assert (stored / fresh).read_bytes() == b"\x09\x09"
+
+
+def test_a_renamed_binary_moves_its_record_by_hash(stored, importing):
+    """An importer that records a renamed binary as a new file and a deleted one, or pairs two
+    binaries that only share a name."""
+    renamed = f"{NOTES}/renamed-diagram.bin"
+    (stored / DIAGRAM).rename(stored / renamed)
+
+    report = importing.import_paths([DIAGRAM, renamed])
+
+    assert report.moved == {renamed: DIAGRAM} and report.held == [] and report.removed == []
+    assert rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", renamed) == [
+        (sha(DIAGRAM_BYTES),)
+    ]
+    assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM) == []
+    assert rows(stored, "SELECT COUNT(*) FROM store_projection_queue") == [(0,)]
+    assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+    assert importing.sweep().settled == 0
 
 
 def test_an_edit_too_large_to_copy_is_held_by_its_hash_and_stays_on_disk(
@@ -475,6 +499,124 @@ def test_a_markdown_file_the_store_does_not_own_is_noted_for_a_lexical_refresh(s
     layer.write_bytes(original.replace(b"a", b"e", 1) if b"a" in original else original + b" ")
     importing.sweep()
     assert importing.take_refresh() == [UNOWNED], "the sweep finds a stale row without an event"
+
+
+def test_a_file_restored_where_the_stores_life_of_the_path_ended_is_imported(
+    stored, writer, projecting, importing
+):
+    """An importer that takes the bytes of a deleted, moved or removed path for Exomem's own, so
+    that a person's restore is neither imported nor held and the store never learns of it."""
+    original = {rel: (stored / rel).read_bytes() for rel in (ALPHA, BETA, DIAGRAM)}
+    moved = f"{NOTES}/Archive/Alpha.md"
+    commit(
+        writer,
+        deletes=(write.PageDelete(BETA),),
+        moves=(write.PageMove(ALPHA, moved),),
+        binary_deletes=(write.BinaryDelete(DIAGRAM),),
+    )
+    projecting.run_pass()
+    assert not any((stored / rel).exists() for rel in (ALPHA, BETA, DIAGRAM))
+    for rel, body in original.items():
+        (stored / rel).write_bytes(body)
+
+    report = importing.import_paths([ALPHA, BETA, DIAGRAM])
+
+    assert sorted(report.imported) == sorted([ALPHA, BETA, DIAGRAM]) and report.held == []
+    for rel in (ALPHA, BETA):
+        stored_body = rows(stored, "SELECT body FROM store_pages WHERE path = ?", rel)
+        assert stored_body == [(original[rel],)]
+    assert rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", DIAGRAM) == [
+        (sha(DIAGRAM_BYTES),)
+    ]
+    assert sorted(path for path, _ in imports(stored)) == sorted([ALPHA, BETA, DIAGRAM])
+    projecting.run_pass()
+    assert {rel: (stored / rel).read_bytes() for rel in original} == original
+
+
+def test_a_held_delete_clears_when_the_file_comes_back_with_exomems_bytes(stored, importing):
+    """An importer that leaves a deleted page held after the person restored it, so that the hold
+    waits for a review that has nothing to decide, or that drops a held delete when the file comes
+    back with other bytes."""
+    original = (stored / ALPHA).read_bytes()
+    (stored / ALPHA).unlink()
+    assert importing.import_paths([ALPHA]).held == [ALPHA]
+
+    (stored / ALPHA).write_bytes(original)
+    by_event = importing.import_paths([ALPHA])
+
+    assert (by_event.cleared, by_event.held, by_event.imported) == ([ALPHA], [], [])
+    assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+    assert imports(stored) == [], "the bytes are the store's own: nothing is imported"
+
+    (stored / ALPHA).unlink()
+    assert importing.sweep().held == [ALPHA]
+    (stored / ALPHA).write_bytes(original)
+    assert importing.sweep().cleared == [ALPHA], "the sweep sees a restore with the recorded bytes"
+    assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+
+    (stored / ALPHA).unlink()
+    importing.import_paths([ALPHA])
+    (stored / ALPHA).write_bytes(PERSON)
+    importing.import_paths([ALPHA])
+    assert rows(stored, "SELECT kind, body FROM store_held WHERE path = ?", ALPHA) == [
+        ("edit", PERSON)
+    ], "other bytes replace the held delete, and a person's bytes are kept"
+
+
+def test_a_clean_sweep_counts_every_path_it_examined_as_unchanged(stored, importing):
+    """A report whose `unchanged` counts only some of the paths that were read, so that a sweep of
+    a whole vault reads as if it had looked at a handful."""
+    owned = sum(1 for _ in ownership.iter_owned(stored))
+    unowned = [
+        path
+        for (path,) in rows(stored, "SELECT path FROM pages WHERE content_hash IS NOT NULL")
+        if not importing.takes(path) and ownership.is_markdown(path)
+    ]
+    assert owned > 1 and unowned, "the generated vault has owned files and an unowned page"
+
+    report = importing.sweep()
+
+    assert importing.take_refresh() == []
+    assert (report.settled, report.unchanged) == (0, owned + len(unowned))
+
+
+def test_a_sweep_does_not_hash_a_binary_that_shows_the_version_it_hashed_before(
+    stored, importing, monkeypatch
+):
+    """A sweep that reads every binary of the vault each interval, however large, or one that
+    trusts a version so far that it misses an edit that keeps the file's size."""
+    digests = []
+    real = hashlib.file_digest
+
+    def counting(*arguments, **options):
+        digests.append(1)
+        return real(*arguments, **options)
+
+    monkeypatch.setattr(hashlib, "file_digest", counting)
+    binaries = sum(
+        1
+        for found in ownership.iter_owned(stored)
+        if ownership.classify(found.rel) is ownership.Ownership.BINARY
+    )
+    assert binaries >= 1
+
+    first = importing.sweep()
+    first_reads = len(digests)
+    digests.clear()
+    second = importing.sweep()
+
+    assert first_reads - len(digests) == binaries, "the second sweep hashed no unchanged binary"
+    assert (first.settled, second.settled) == (0, 0) and second.unchanged == first.unchanged
+    body = bytearray(DIAGRAM_BYTES)
+    body[0] ^= 0xFF
+    (stored / DIAGRAM).write_bytes(bytes(body))
+
+    third = importing.sweep()
+
+    assert third.imported == [DIAGRAM], "an edit that keeps the size changes the version"
+    assert rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", DIAGRAM) == [
+        (sha(bytes(body)),)
+    ]
 
 
 # -- the watcher -----------------------------------------------------------------------------------
@@ -592,3 +734,122 @@ def test_the_service_gives_its_watcher_an_importer_only_for_a_store_mode_vault(
     assert migrate_apply(vault) == 0
 
     assert isinstance(server_runtime._create_file_watcher(vault)._importer, importer.Importer)
+
+
+# -- two threads, and a file that changes between a read and its commit ----------------------------
+
+
+def test_an_event_import_waits_for_a_sweep_in_flight_and_the_store_keeps_the_newest_bytes(
+    stored, store_thread, monkeypatch
+):
+    """An importer whose sweep and event import overlap, so that a commit carries bytes that the
+    other has since replaced and the store ends at the older ones."""
+    settling = importer.Importer(stored, run=store_thread.run)
+    real, paused, release = projector.observe, threading.Event(), threading.Event()
+
+    def observe(filesystem, rel, **how):
+        found = real(filesystem, rel, **how)
+        if rel == ALPHA and how.get("keep_body") and threading.current_thread().name == "sweeper":
+            if not paused.is_set():
+                paused.set()
+                assert release.wait(60), "the sweep was never released"
+        return found
+
+    monkeypatch.setattr(projector, "observe", observe)
+    (stored / ALPHA).write_bytes(PERSON)
+    reports = {}
+    sweeper = threading.Thread(
+        target=lambda: reports.update(sweep=settling.sweep()), name="sweeper"
+    )
+    sweeper.start()
+    assert paused.wait(60), "the sweep reads the first save and stops before its commit"
+    (stored / ALPHA).write_bytes(LATER)
+    eventer = threading.Thread(
+        target=lambda: reports.update(event=settling.import_paths([ALPHA])), name="eventer"
+    )
+    eventer.start()
+    eventer.join(1.0)
+    assert eventer.is_alive(), "the event import runs only after the sweep has settled"
+
+    release.set()
+    sweeper.join(60)
+    eventer.join(60)
+
+    assert read.owned_bytes(stored, ALPHA) == LATER == (stored / ALPHA).read_bytes()
+    assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+    assert reports["sweep"].unjudged == {ALPHA: importer.CHANGED_WHILE_READ}
+    assert reports["event"].imported == [ALPHA]
+    assert settling.sweep().settled == 0
+
+
+def test_a_commit_of_bytes_read_before_a_newer_governed_write_is_skipped(
+    stored, store_thread, monkeypatch
+):
+    """An importer that commits a person's older save over a governed write that was projected
+    after the importer read the file, so that the store loses its newest page."""
+    settling = importer.Importer(stored, run=store_thread.run)
+    projection = projector.Projector(stored, run=store_thread.run)
+    original = (stored / ALPHA).read_bytes()
+    real, interleaved = projector.observe, []
+
+    def observe(filesystem, rel, **how):
+        found = real(filesystem, rel, **how)
+        if rel == ALPHA and how.get("keep_body") and not interleaved:
+            interleaved.append(rel)
+            (stored / ALPHA).write_bytes(original)  # the person reverts their save
+            store_thread.run(lambda w: commit(w, **put(ALPHA, STORE_BYTES)))
+            projection.run_pass()  # the governed write reaches the file before the commit
+        return found
+
+    monkeypatch.setattr(projector, "observe", observe)
+    (stored / ALPHA).write_bytes(PERSON)
+
+    report = settling.import_paths([ALPHA])
+
+    assert report.unjudged == {ALPHA: importer.CHANGED_WHILE_READ} and report.imported == []
+    assert read.owned_bytes(stored, ALPHA) == STORE_BYTES == (stored / ALPHA).read_bytes()
+    assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+    assert imports(stored) == []
+    assert settling.import_paths([ALPHA]).settled == 0
+
+
+def test_a_running_watcher_hands_an_imported_binary_to_media_processing(
+    stored, store_thread, monkeypatch
+):
+    """A watcher that imports a media file into the store but never gives it to media processing,
+    so that its preview and transcript never follow an outside change, or that gives it a file
+    that the media store is writing or has proven."""
+    from exomem import media_processing, media_store
+
+    plain, proven, busy = (f"{NOTES}/{name}.png" for name in ("plain", "proven", "busy"))
+    reconciled, asked = [], {}
+
+    def managed_event(vault, path):
+        rel = path.relative_to(vault).as_posix()
+        asked[rel] = asked.get(rel, 0) + 1
+        if rel == proven:
+            return "suppress"
+        return "defer" if rel == busy and asked[rel] == 1 else None
+
+    monkeypatch.setattr(media_store, "managed_event", managed_event)
+    monkeypatch.setattr(
+        media_processing, "reconcile_media", lambda vault, path, **options: reconciled.append(path)
+    )
+    watching = file_watcher.FileWatcher(
+        stored, debounce_seconds=0.2, importer=importer.Importer(stored, run=store_thread.run)
+    )
+    assert watching.start()
+    try:
+        assert watching.wait_until_seeded(120)
+        for rel in (plain, proven, busy):
+            (stored / rel).write_bytes(b"\x89PNG" + rel.encode())
+        wait_for(
+            lambda: {stored / plain, stored / busy} <= set(reconciled),
+            "media processing of the imported files",
+        )
+        for rel in (plain, proven, busy):
+            assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", rel) != []
+    finally:
+        watching.stop()
+    assert stored / proven not in reconciled, "the media store proved these bytes already"
+    assert asked[busy] >= 2, "a deferred file is asked about again, not dropped"

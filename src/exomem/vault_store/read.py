@@ -162,9 +162,8 @@ def walk_member(rel: str) -> bool:
     page. That is the gap: this keeps the rule's path tests (the reserved registry, the excluded
     scan folders, the Markdown suffix), and ``ownership.classify`` already keeps out a conflict copy.
     """
-    # A file extension is a closed set that the format fixes; it names the format, not the meaning.
     return (
-        rel.lower().endswith(".md")
+        ownership.is_markdown(rel)
         and not reserved_paths.classify_logical(rel).blocked
         and not vault.in_excluded_scan_dir(rel)
     )

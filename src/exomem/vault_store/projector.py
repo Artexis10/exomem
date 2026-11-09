@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from .. import held_fs, vault
 from ..collection_store import preview, runtime
@@ -49,9 +49,15 @@ STOP_TIMEOUT_SECONDS = 15.0
 #: The most that a hold copies into the store. A held edit is one SQLite blob; a file above this
 #: stays on disk, untouched, and is held by its hash alone. The hash, not the size, says whose.
 HELD_BODY_LIMIT = 64 * 1024 * 1024
+#: The two kinds of ``store_held`` row, which the table's own CHECK fixes: a person's changed bytes,
+#: and a person's delete.
+HELD_EDIT = "edit"
+HELD_DELETE = "delete"
 
 #: Runs bookkeeping where the store's writer lives: ``run(work)`` calls ``work(writer)`` there.
 Runner = Callable[[Callable[["CollectionWriter"], None]], None]
+
+_Found = TypeVar("_Found")
 
 
 class StoreNotServed(RuntimeError):
@@ -115,6 +121,8 @@ class Facts:
     held: bool
     #: The hash of the bytes that the hold keeps, or None when nothing is held at this path.
     held_sha256: str | None
+    #: ``HELD_EDIT`` or ``HELD_DELETE`` for the hold at this path, or None when nothing is held.
+    held_kind: str | None
     #: Hashes of the bytes that the audit trail shows Exomem wrote or recorded here, which a kill
     #: may have put on disk before the manifest heard of them: those after the manifest's revision,
     #: or with no manifest, those of this path's current life. For a binary, whose file the store
@@ -135,7 +143,13 @@ class Facts:
 
     @property
     def own_hashes(self) -> frozenset[str]:
-        """The hashes of a file that Exomem put at this path and that a person did not change."""
+        """The hashes of a file that Exomem put at this path and that a person did not change.
+
+        With no manifest row, no queued intent and nothing stored, Exomem's life at this path has
+        ended: a file with bytes of that life is a person's restore, so none are Exomem's.
+        """
+        if self.manifest is None and self.intent is None and self.stored_sha256 is None:
+            return frozenset()
         recorded = frozenset() if self.manifest is None else frozenset({self.manifest.sha256})
         return recorded | self.audited
 
@@ -151,6 +165,9 @@ class OnDisk:
     permissions: int | None
     #: The file's bytes, read only for a hold, which keeps them.
     body: bytes | None = None
+    #: The held version (identity, size, mtime, change time) that this read saw; a later read that
+    #: finds another version knows that the file changed in between.
+    version: held_fs.FileVersion | None = None
 
 
 @dataclass(slots=True)
@@ -350,7 +367,7 @@ class Projector:
             self._hold(
                 report,
                 facts.path,
-                "delete",
+                HELD_DELETE,
                 base_revision=manifest.revision,
                 store_revision=page.revision,
                 sha256=manifest.sha256,
@@ -471,7 +488,7 @@ class Projector:
         self._hold(
             report,
             facts.path,
-            "edit",
+            HELD_EDIT,
             base_revision=None if facts.manifest is None else facts.manifest.revision,
             store_revision=store_revision,
             sha256=kept.sha256,
@@ -653,7 +670,9 @@ def read_facts(vault_root: Path, rel: str) -> Facts:
         recorded = database.execute(
             "SELECT sha256, size, mtime_ns, revision FROM store_manifest WHERE path = ?", (rel,)
         ).fetchone()
-        held = database.execute("SELECT sha256 FROM store_held WHERE path = ?", (rel,)).fetchone()
+        held = database.execute(
+            "SELECT sha256, kind FROM store_held WHERE path = ?", (rel,)
+        ).fetchone()
         manifest_revision = None if recorded is None else recorded[3]
         return Facts(
             path=rel,
@@ -662,6 +681,7 @@ def read_facts(vault_root: Path, rel: str) -> Facts:
             manifest=None if recorded is None else Manifest(*recorded),
             held=held is not None,
             held_sha256=None if held is None else held[0],
+            held_kind=None if held is None else held[1],
             audited=_audited(database, rel, manifest_revision),
             removed=_removed_since(database, rel, manifest_revision),
             binary=view.binary(rel),
@@ -783,15 +803,53 @@ def _split(rel: str) -> tuple[str, str]:
 
 
 def observe(
-    filesystem: held_fs.HeldFilesystem, rel: str, *, keep_body: bool = False
+    filesystem: held_fs.HeldFilesystem,
+    rel: str,
+    *,
+    keep_body: bool = False,
+    trusted: tuple[held_fs.FileVersion, str] | None = None,
 ) -> OnDisk | None:
     """The file at ``rel`` with its hash, or None when no file is there.
 
     The hash is streamed, so a file of any size costs no memory. With ``keep_body`` the bytes come
-    too, unless the file is above ``HELD_BODY_LIMIT``. A refusal other than absence raises
-    ``HeldFsError``: a symlink, an unreadable folder or a name that differs only by case is not
-    something to judge, and the intent stays queued.
+    too, unless the file is above ``HELD_BODY_LIMIT``. A caller that hashed a version before passes
+    it as ``trusted`` with that hash, and a file that still shows that exact version is not read
+    again. A refusal other than absence raises ``HeldFsError``: a symlink, an unreadable folder or
+    a name that differs only by case is not something to judge, and the intent stays queued.
     """
+
+    def read_file(file: held_fs.HeldFile) -> OnDisk:
+        version = file.version()
+        body = None
+        if trusted is not None and trusted[0] == version and not keep_body:
+            digest = trusted[1]
+        elif keep_body and version.size <= HELD_BODY_LIMIT:
+            body = filesystem.read(file, max_bytes=HELD_BODY_LIMIT).require()
+            digest = hashlib.sha256(body).hexdigest()
+        else:
+            digest = _stream_sha256(file)
+        return OnDisk(
+            sha256=digest,
+            size=version.size,
+            mtime_ns=version.mtime_ns,
+            identity=file.identity,
+            permissions=_permissions(file),
+            body=body,
+            version=version,
+        )
+
+    return _with_file(filesystem, rel, read_file)
+
+
+def witness(filesystem: held_fs.HeldFilesystem, rel: str) -> held_fs.FileVersion | None:
+    """The file's held version without reading its bytes, or None when no file is there."""
+    return _with_file(filesystem, rel, lambda file: file.version())
+
+
+def _with_file(
+    filesystem: held_fs.HeldFilesystem, rel: str, use: Callable[[held_fs.HeldFile], _Found]
+) -> _Found | None:
+    """``use`` of the held file at ``rel``, or None when it is missing; other refusals raise."""
     folder, leaf = _split(rel)
     opened = filesystem.parent(folder, access="mutate")
     if _missing(opened):
@@ -801,21 +859,7 @@ def observe(
         if _missing(found):
             return None
         with found.require() as file:
-            version = file.version()
-            body = None
-            if keep_body and version.size <= HELD_BODY_LIMIT:
-                body = filesystem.read(file, max_bytes=HELD_BODY_LIMIT).require()
-                digest = hashlib.sha256(body).hexdigest()
-            else:
-                digest = _stream_sha256(file)
-            return OnDisk(
-                sha256=digest,
-                size=version.size,
-                mtime_ns=version.mtime_ns,
-                identity=file.identity,
-                permissions=_permissions(file),
-                body=body,
-            )
+            return use(file)
 
 
 def _stream_sha256(file: held_fs.HeldFile) -> str:

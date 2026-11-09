@@ -53,7 +53,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **THEN** status reports the number of queued files and the age of the oldest one
 
 ### Requirement: Outside edits return through a base-revision check
-In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
+In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete of a page SHALL become a held deletion, never a silent delete of canonical content. A binary file is canonical on disk and the store records only its hash and size, so an outside change, delete or rename of a binary SHALL import as an audited record change; Exomem SHALL hold a binary only when an Exomem delete of it is queued and the file differs.
 
 #### Scenario: A clean outside edit imports
 - **WHEN** a person edits a projected page in Obsidian and no Exomem write to that page is pending
@@ -68,6 +68,15 @@ In store mode, a file the store owns whose hash differs from the projection mani
 #### Scenario: An outside delete is held
 - **WHEN** a projected page disappears from disk without an Exomem delete
 - **THEN** the store keeps the page and records a held deletion for review
+
+#### Scenario: A held deletion clears when the page returns
+- **WHEN** a person restores the file of a held deletion with the bytes that Exomem last projected
+- **THEN** the held deletion is removed and nothing is imported
+
+#### Scenario: An outside delete of a binary imports
+- **WHEN** a binary file disappears from disk without an Exomem delete
+- **THEN** the store removes the binary's record in an audited import, and holds nothing
+- **AND** a binary renamed outside Exomem keeps its record under the new path, paired by its hash
 
 ### Requirement: Semantic units are first-class store rows
 In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes and SHALL NOT write anchors into a page. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.

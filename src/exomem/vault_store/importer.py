@@ -12,12 +12,19 @@ The importer reads those changes from the disk and settles each one for its path
   the ``Expect(revision, projected=True)`` of the commit that adopts the bytes: the manifest
   names the stored revision and bytes, no projection is queued, and nothing is held.
 * A change that races an Exomem change, or lands on a held path, is held with the person's latest
-  bytes. One row stands for each path and keeps its first detection time.
+  bytes. One row stands for each path and keeps its first detection time. A person's delete of a
+  page is held too, and the hold clears when the file returns with Exomem's own bytes.
+* A binary is disk-canonical: the store records its path, hash and size and holds no bytes, so a
+  hold would keep nothing. An outside change, delete or rename of a binary imports as an audited
+  record change. A binary is held only when an Exomem delete of it is queued and the file differs.
 
 The importer never writes, replaces or removes a file. A path that it cannot judge stays as it is.
 It reads the disk on the caller's thread and runs each decision on the store thread, one commit
 for each path, so a kill between two paths leaves the earlier ones settled and the later ones to
-the next sweep, which repeats nothing: every decision is made again from the hashes.
+the next sweep, which repeats nothing: every decision is rederived from the hashes. One lock lets
+one ``import_paths`` or ``sweep`` run at a time, and the store thread never takes it. The store
+thread also looks at each file again just before it commits what an earlier read saw, and leaves
+a path whose file changed in between to the next event or sweep.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from typing import TYPE_CHECKING, TypeVar
 from .. import held_fs
 from ..cli_ops import OpError
 from . import ownership, projector, read, write
-from .projector import Facts, OnDisk, Runner
+from .projector import HELD_DELETE, HELD_EDIT, Facts, OnDisk, Runner
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -43,6 +50,9 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _Item = TypeVar("_Item")
+
+#: What ``ImportReport.unjudged`` says of a file that changed between a read and its commit.
+CHANGED_WHILE_READ = "the file changed after it was read"
 
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
@@ -58,21 +68,28 @@ class Verdict(enum.Enum):
     ADOPT = enum.auto()
     #: A projected file is missing and Exomem did not remove it: a person deleted it.
     GONE = enum.auto()
+    #: A held delete whose file is back with Exomem's own bytes: nothing is left to review.
+    CLEAR = enum.auto()
 
 
 def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
     """Whether the file at a path is a person's change, from the store's facts and one disk read.
 
-    A held path is already settled for a person: bytes that the hold already keeps are nothing new,
-    a later change replaces the held bytes, and a later delete leaves the held row as it is.
+    A held page is already settled for a person: bytes that the hold already keeps are nothing new,
+    a later change replaces the held bytes, and a later delete leaves the held row as it is. A hold
+    of a delete is the exception that clears, because the file is back and nothing was lost. A
+    binary's hold keeps no bytes, so it settles nothing.
     """
+    page = ownership.classify(facts.path) is ownership.Ownership.PAGE
     if disk is None:
         # A removal that Exomem queued or made, whose manifest write a kill lost, is not an outside
         # delete: ``removed`` is the audit trail's own word for it. A page that the store dropped
         # is the same, and a path that was never projected has no file to lose.
-        if facts.held or facts.removed or facts.stored_sha256 is None:
+        if (facts.held and page) or facts.removed or facts.stored_sha256 is None:
             return Verdict.OWN
         return Verdict.GONE if _was_projected(facts) else Verdict.OWN
+    if facts.held_kind == HELD_DELETE and disk.sha256 in facts.own_hashes:
+        return Verdict.CLEAR
     if disk.sha256 in facts.own_hashes or disk.sha256 in (facts.stored_sha256, facts.held_sha256):
         return Verdict.OWN
     return Verdict.ADOPT
@@ -85,22 +102,33 @@ def _was_projected(facts: Facts) -> bool:
 
 @dataclass(slots=True)
 class ImportReport:
-    """What one import or sweep settled, by path; ``unjudged`` names paths it could not judge."""
+    """What one import or sweep settled, by path; ``unjudged`` names paths it left alone."""
 
     #: Paths whose bytes or record the store now holds from the disk, a rename's new path included.
     imported: list[str] = field(default_factory=list)
-    #: Each renamed page as ``new path -> old path``.
+    #: Each renamed path as ``new path -> old path``.
     moved: dict[str, str] = field(default_factory=dict)
     #: Paths held for a person to resolve: a racing edit, a delete, or a file too large to copy.
     held: list[str] = field(default_factory=list)
-    #: Paths that carried no change.
+    #: Binaries whose outside delete the store now records.
+    removed: list[str] = field(default_factory=list)
+    #: Held deletes that cleared because the file came back with Exomem's own bytes.
+    cleared: list[str] = field(default_factory=list)
+    #: Every path that was examined and carried no change, whatever its kind.
     unchanged: int = 0
-    #: A path the importer left alone, with the reason: a refusal of the file system or the store.
+    #: A path the importer left alone, with the reason: a refusal of the file system or the store,
+    #: or a file that changed after it was read.
     unjudged: dict[str, str] = field(default_factory=dict)
 
     @property
     def settled(self) -> int:
-        return len(self.imported) + len(self.moved) + len(self.held)
+        return (
+            len(self.imported)
+            + len(self.moved)
+            + len(self.held)
+            + len(self.removed)
+            + len(self.cleared)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +146,7 @@ class _Rename:
     src: str
     dst: str
     disk: OnDisk
+    page: bool
 
 
 class Importer:
@@ -126,8 +155,14 @@ class Importer:
     def __init__(self, vault_root: Path, *, run: Runner | None = None) -> None:
         self._root = Path(vault_root)
         self._run = run or projector.store_thread_runner(self._root)
+        # One settle at a time: two that overlap could each commit bytes that the other has since
+        # replaced. The store thread never takes this lock, so a settle that waits on it cannot
+        # deadlock with the job that it waits for.
+        self._exclusive = threading.Lock()
         self._refresh_lock = threading.Lock()
         self._refresh: set[str] = set()
+        #: The version and hash of each binary that the last sweep found equal to its record.
+        self._clean: dict[str, tuple[held_fs.FileVersion, str]] = {}
 
     @staticmethod
     def takes(rel: str) -> bool:
@@ -142,32 +177,50 @@ class Importer:
         """Settle each path that an event named; ``moves`` maps a new path to its old path.
 
         A move event is a hint that pairs two paths; it never decides alone. A rename is imported as
-        a rename only when the old file is gone and the new file holds the old page's exact bytes.
+        a rename only when the old file is gone and the new file holds the old file's exact bytes.
+        An event always hashes the file: only a sweep trusts a binary's unchanged version.
         """
         report = ImportReport()
-        with self._filesystem() as filesystem:
+        with self._exclusive, self._filesystem() as filesystem:
             self._settle(filesystem, sorted(set(rels)), dict(moves or {}), report)
         return report
 
     def sweep(self) -> ImportReport:
         """Hash every file that the store owns and settle what differs from the store's records.
 
-        The hash is the only test, so an edit that keeps a file's size and modification time is
-        caught as any other. A stored path with no file is judged missing only when the walk that
-        looked for it was whole: a folder or file that the walk could not read leaves its paths as
-        they are.
+        The hash is the only test for a page, so an edit that keeps a file's size and modification
+        time is caught as any other. A binary that still shows the version that the last sweep
+        hashed (identity, size, modification and change time) is not read again: a binary can be
+        large, and its change time moves with every write. A stored path with no file is judged
+        missing only when the walk that looked for it was whole: a folder or file that the walk
+        could not read leaves its paths as they are.
         """
         report = ImportReport()
         skipped: list[ownership.Skipped] = []
-        with self._filesystem() as filesystem:
+        with self._exclusive, self._filesystem() as filesystem:
             known = self._known_hashes()
+            held_deletes = self._held_deletes()
             seen: set[str] = set()
+            clean: dict[str, tuple[held_fs.FileVersion, str]] = {}
             differing: list[str] = []
             for owned in ownership.iter_owned(self._root, on_skip=skipped.append):
-                seen.add(owned.rel)
-                disk = self._observe(filesystem, owned.rel, report)
-                if disk is not None and disk.sha256 not in known.get(owned.rel, ()):
-                    differing.append(owned.rel)
+                rel = owned.rel
+                seen.add(rel)
+                binary = ownership.classify(rel) is ownership.Ownership.BINARY
+                disk = self._observe(
+                    filesystem, rel, report, trusted=self._clean.get(rel) if binary else None
+                )
+                if disk is None:
+                    continue
+                # A held delete is settled even when the file is back with the recorded bytes: only
+                # the settle can tell a person's restore from a file that was never missing.
+                if disk.sha256 in known.get(rel, ()) and rel not in held_deletes:
+                    report.unchanged += 1
+                    if binary and disk.version is not None:
+                        clean[rel] = (disk.version, disk.sha256)
+                else:
+                    differing.append(rel)
+            self._clean = clean
             missing = [rel for rel in known if rel not in seen and not _below_any(rel, skipped)]
             self._settle(filesystem, sorted({*differing, *missing}), {}, report)
             self._sweep_unowned(filesystem, report)
@@ -186,13 +239,14 @@ class Importer:
         with held_fs.acquire(projector.anchor(self._root)).require() as filesystem:
             yield filesystem
 
+    @staticmethod
     def _observe(
-        self,
         filesystem: held_fs.HeldFilesystem,
         rel: str,
         report: ImportReport,
         *,
         keep_body: bool = False,
+        trusted: tuple[held_fs.FileVersion, str] | None = None,
     ) -> OnDisk | None:
         """The file at ``rel``, or None when it is missing or the file system will not show it.
 
@@ -200,7 +254,7 @@ class Importer:
         deleted file: ``unjudged`` keeps it visible, and the path is looked at again next time.
         """
         try:
-            return projector.observe(filesystem, rel, keep_body=keep_body)
+            return projector.observe(filesystem, rel, keep_body=keep_body, trusted=trusted)
         except (held_fs.HeldFsError, OSError) as refusal:
             report.unjudged[rel] = getattr(refusal, "code", type(refusal).__name__)
             return None
@@ -215,6 +269,14 @@ class Importer:
                 for path, sha256 in view.connection.execute(f"SELECT path, sha256 FROM {table}"):
                     known[path].add(sha256)
         return {path: frozenset(hashes) for path, hashes in known.items()}
+
+    def _held_deletes(self) -> frozenset[str]:
+        """The paths with a held delete, which a sweep settles whatever bytes the file holds."""
+        with read.snapshot(self._root) as view:
+            rows = view.connection.execute(
+                "SELECT path FROM store_held WHERE kind = ?", (HELD_DELETE,)
+            )
+            return frozenset(path for (path,) in rows)
 
     # -- judging and settling ---------------------------------------------------------------------
 
@@ -243,25 +305,39 @@ class Importer:
         renamed = {path for rename in renames for path in (rename.src, rename.dst)}
         singles = [rel for rel in looks if rel not in renamed]
         # A rename that the store refused is two changes, each held to its own path's rule.
-        for rename in self._apply_renames(renames, report):
+        for rename in self._apply_renames(filesystem, renames, report):
             singles.extend((rename.src, rename.dst))
         for chunk in _chunks(sorted(singles), APPLY_BATCH):
             units: list[tuple[str, OnDisk | None]] = []
             for rel in chunk:
-                # The bytes are read only for a change, which an import or a hold then keeps.
-                disk = self._observe(filesystem, rel, report, keep_body=True)
+                disk = self._bytes_to_keep(filesystem, looks[rel], report)
                 if rel not in report.unjudged:
                     units.append((rel, disk))
-            self._apply(units, report)
+            self._apply(filesystem, units, report)
 
-    def _apply_renames(self, renames: list[_Rename], report: ImportReport) -> list[_Rename]:
+    def _bytes_to_keep(
+        self, filesystem: held_fs.HeldFilesystem, look: _Look, report: ImportReport
+    ) -> OnDisk | None:
+        """The disk read that a decision commits: a page's changed bytes are read for the commit.
+
+        A binary is recorded by hash and size, and a delete or a clearing needs no bytes, so those
+        keep the read that judged them. The bytes of a page come from one read with their hash.
+        """
+        page = ownership.classify(look.rel) is ownership.Ownership.PAGE
+        if look.verdict is not Verdict.ADOPT or not page:
+            return look.disk
+        return self._observe(filesystem, look.rel, report, keep_body=True)
+
+    def _apply_renames(
+        self, filesystem: held_fs.HeldFilesystem, renames: list[_Rename], report: ImportReport
+    ) -> list[_Rename]:
         """Commit each rename; return the ones that the store refused."""
         refused: list[_Rename] = []
         for chunk in _chunks(renames, APPLY_BATCH):
 
             def work(writer: CollectionWriter, chunk: list[_Rename] = chunk) -> None:
                 for rename in chunk:
-                    if self._commit_rename(writer, rename):
+                    if self._commit_rename(writer, filesystem, rename):
                         report.moved[rename.dst] = rename.src
                     else:
                         refused.append(rename)
@@ -269,35 +345,74 @@ class Importer:
             self._run(work)
         return refused
 
-    def _commit_rename(self, writer: CollectionWriter, rename: _Rename) -> bool:
+    def _commit_rename(
+        self, writer: CollectionWriter, filesystem: held_fs.HeldFilesystem, rename: _Rename
+    ) -> bool:
         source = projector.read_facts(self._root, rename.src)
-        if source.manifest is None:
+        stored = source.manifest if rename.page else source.binary
+        if stored is None or not self._same_files(filesystem, rename):
             return False
-        change = write.StoreChange(
-            write.Origin.OUTSIDE_EDITOR,
-            "an outside rename",
-            moves=(write.PageMove(rename.src, rename.dst, on_disk=True),),
-            expect={
-                rename.src: write.Expect(revision=source.manifest.revision, projected=True),
-                rename.dst: write.Expect(absent=True),
-            },
-        )
+        if rename.page:
+            change = write.StoreChange(
+                write.Origin.OUTSIDE_EDITOR,
+                "an outside rename",
+                moves=(write.PageMove(rename.src, rename.dst, on_disk=True),),
+                expect={
+                    rename.src: write.Expect(revision=stored.revision, projected=True),
+                    rename.dst: write.Expect(absent=True),
+                },
+            )
+        else:
+            # The store has no binary move: the new record and the old one's removal are one commit.
+            change = write.StoreChange(
+                write.Origin.OUTSIDE_EDITOR,
+                "an outside rename",
+                binaries=(write.BinaryRecord(rename.dst, rename.disk.sha256, rename.disk.size),),
+                binary_deletes=(write.BinaryDelete(rename.src),),
+                expect={
+                    rename.src: write.Expect(revision=stored.revision, sha256=source.stored_sha256),
+                    rename.dst: write.Expect(absent=True),
+                },
+            )
         try:
             write.commit(writer, change)
         except write.StoreConflict:
             return False
+        if not rename.page:
+            self._tidy_binary(writer, rename.src, rename.dst, removed=rename.src)
         return True
 
-    def _apply(self, units: list[tuple[str, OnDisk | None]], report: ImportReport) -> None:
+    @staticmethod
+    def _same_files(filesystem: held_fs.HeldFilesystem, rename: _Rename) -> bool:
+        """Whether the old file is still gone and the new file still the one that was read."""
+        try:
+            return (
+                projector.witness(filesystem, rename.src) is None
+                and projector.witness(filesystem, rename.dst) == rename.disk.version
+            )
+        except (held_fs.HeldFsError, OSError):
+            return False
+
+    def _apply(
+        self,
+        filesystem: held_fs.HeldFilesystem,
+        units: list[tuple[str, OnDisk | None]],
+        report: ImportReport,
+    ) -> None:
         def work(writer: CollectionWriter) -> None:
             for rel, disk in units:
-                self._settle_one(writer, rel, disk, report)
+                self._settle_one(writer, filesystem, rel, disk, report)
 
         if units:
             self._run(work)
 
     def _settle_one(
-        self, writer: CollectionWriter, rel: str, disk: OnDisk | None, report: ImportReport
+        self,
+        writer: CollectionWriter,
+        filesystem: held_fs.HeldFilesystem,
+        rel: str,
+        disk: OnDisk | None,
+        report: ImportReport,
     ) -> None:
         """Decide one path inside the store thread's job, from facts read now: commit or hold."""
         facts = projector.read_facts(self._root, rel)
@@ -305,44 +420,57 @@ class Importer:
         if verdict is Verdict.OWN:
             report.unchanged += 1
             return
+        if not self._unchanged_since_read(filesystem, rel, disk, report):
+            return
         page = ownership.classify(rel) is ownership.Ownership.PAGE
-        if verdict is Verdict.GONE:
-            recorded = facts.manifest.sha256 if facts.manifest else facts.stored_sha256
-            assert recorded is not None
-            self._hold(writer, rel, "delete", facts, recorded, None, report)
-            return
-        assert disk is not None
-        keepable = disk.body is not None or not page
-        if facts.held or not keepable or (not page and facts.intent is not None):
-            # A held path stays held, and a file too large to copy has no bytes to import.
-            self._hold(writer, rel, "edit", facts, disk.sha256, disk.body, report)
-            return
-        change = self._import_change(rel, page, facts, disk)
-        try:
-            write.commit(writer, change)
-        except write.StoreConflict:
-            self._hold(writer, rel, "edit", facts, disk.sha256, disk.body, report)
-        except OpError as refusal:
-            if refusal.code != write.NOT_OWNED:
-                raise
-            report.unjudged[rel] = refusal.code
+        if verdict is Verdict.CLEAR:
+            self._clear_held_delete(writer, rel)
+            report.cleared.append(rel)
+        elif verdict is Verdict.GONE:
+            if page:
+                recorded = facts.manifest.sha256 if facts.manifest else facts.stored_sha256
+                assert recorded is not None
+                self._hold(writer, rel, HELD_DELETE, facts, recorded, None, report)
+            else:
+                self._remove_binary(writer, rel, facts, report)
         else:
-            report.imported.append(rel)
+            assert disk is not None
+            if page:
+                self._import_page(writer, rel, facts, disk, report)
+            else:
+                self._import_binary(writer, rel, facts, disk, report)
 
     @staticmethod
-    def _import_change(rel: str, page: bool, facts: Facts, disk: OnDisk) -> write.StoreChange:
-        reason = "an outside change"
-        if not page:
-            expect = (
-                write.Expect(absent=True)
-                if facts.binary is None
-                else write.Expect(revision=facts.binary.revision, sha256=facts.binary.sha256)
-            )
-            record = write.BinaryRecord(rel, disk.sha256, disk.size)
-            return write.StoreChange(
-                write.Origin.OUTSIDE_EDITOR, reason, binaries=(record,), expect={rel: expect}
-            )
-        assert disk.body is not None
+    def _unchanged_since_read(
+        filesystem: held_fs.HeldFilesystem, rel: str, disk: OnDisk | None, report: ImportReport
+    ) -> bool:
+        """Whether the file is still the one that the earlier read saw: the last look before commit.
+
+        A commit of bytes read earlier could replace a newer change, so a file whose identity, size
+        or times moved is left for the next event or sweep, which reads it afresh.
+        """
+        try:
+            now = projector.witness(filesystem, rel)
+        except (held_fs.HeldFsError, OSError) as refusal:
+            report.unjudged[rel] = getattr(refusal, "code", type(refusal).__name__)
+            return False
+        if now == (None if disk is None else disk.version):
+            return True
+        report.unjudged[rel] = CHANGED_WHILE_READ
+        return False
+
+    def _import_page(
+        self,
+        writer: CollectionWriter,
+        rel: str,
+        facts: Facts,
+        disk: OnDisk,
+        report: ImportReport,
+    ) -> None:
+        # A held path stays held, and a file too large to copy has no bytes to import.
+        if facts.held or disk.body is None:
+            self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, disk.body, report)
+            return
         base = facts.manifest or facts.page
         # One test says whether the store has moved since the file was projected: the commit's own.
         expect = (
@@ -351,9 +479,98 @@ class Importer:
             else write.Expect(revision=base.revision, projected=True)
         )
         put = write.PagePut(rel, disk.body, on_disk_mtime_ns=disk.mtime_ns)
-        return write.StoreChange(
-            write.Origin.OUTSIDE_EDITOR, reason, puts=(put,), expect={rel: expect}
+        change = write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR, "an outside change", puts=(put,), expect={rel: expect}
         )
+        try:
+            write.commit(writer, change)
+        except write.StoreConflict:
+            self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, disk.body, report)
+        except OpError as refusal:
+            self._not_owned(rel, refusal, report)
+        else:
+            report.imported.append(rel)
+
+    def _import_binary(
+        self,
+        writer: CollectionWriter,
+        rel: str,
+        facts: Facts,
+        disk: OnDisk,
+        report: ImportReport,
+    ) -> None:
+        if facts.intent is not None:
+            # An Exomem removal is queued and the file is not the one it names: keep the race.
+            self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, None, report)
+            return
+        expect = (
+            write.Expect(absent=True)
+            if facts.binary is None
+            else write.Expect(revision=facts.binary.revision, sha256=facts.binary.sha256)
+        )
+        change = write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR,
+            "an outside change",
+            binaries=(write.BinaryRecord(rel, disk.sha256, disk.size),),
+            expect={rel: expect},
+        )
+        try:
+            write.commit(writer, change)
+        except write.StoreConflict:
+            self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, None, report)
+        except OpError as refusal:
+            self._not_owned(rel, refusal, report)
+        else:
+            self._tidy_binary(writer, rel)
+            report.imported.append(rel)
+
+    def _remove_binary(
+        self, writer: CollectionWriter, rel: str, facts: Facts, report: ImportReport
+    ) -> None:
+        binary = facts.binary
+        assert binary is not None
+        change = write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR,
+            "an outside delete",
+            binary_deletes=(write.BinaryDelete(rel),),
+            expect={rel: write.Expect(revision=binary.revision, sha256=binary.sha256)},
+        )
+        try:
+            write.commit(writer, change)
+        except write.StoreConflict:
+            self._hold(writer, rel, HELD_DELETE, facts, binary.sha256, None, report)
+        except OpError as refusal:
+            self._not_owned(rel, refusal, report)
+        else:
+            self._tidy_binary(writer, rel, removed=rel)
+            report.removed.append(rel)
+
+    @staticmethod
+    def _not_owned(rel: str, refusal: OpError, report: ImportReport) -> None:
+        if refusal.code != write.NOT_OWNED:
+            raise refusal
+        report.unjudged[rel] = refusal.code
+
+    @staticmethod
+    def _tidy_binary(writer: CollectionWriter, *paths: str, removed: str | None = None) -> None:
+        """Settle what a binary's commit leaves behind, in one transaction.
+
+        A hold on a binary keeps no bytes, so an import that settles the path ends it. A delete
+        that the commit queued has no file left to remove: a file that a person restores before
+        the projector runs must not be taken away.
+        """
+        with writer.handle.transaction() as tx:
+            tx.executemany("DELETE FROM store_held WHERE path = ?", [(path,) for path in paths])
+            if removed is not None:
+                tx.execute(
+                    "DELETE FROM store_projection_queue WHERE path = ? AND operation = 'delete'",
+                    (removed,),
+                )
+
+    @staticmethod
+    def _clear_held_delete(writer: CollectionWriter, rel: str) -> None:
+        with writer.handle.transaction() as tx:
+            tx.execute("DELETE FROM store_held WHERE path = ? AND kind = ?", (rel, HELD_DELETE))
 
     def _hold(
         self,
@@ -392,8 +609,7 @@ class Importer:
         are refreshed from the file. A file with no row is noted only when the corpus walk reaches
         it.
         """
-        # A file extension is a closed set that the format fixes: it names the format, not meaning.
-        if not rel.lower().endswith(".md"):
+        if not ownership.is_markdown(rel):
             return
         disk = self._observe(filesystem, rel, report)
         if rel in report.unjudged:
@@ -406,6 +622,8 @@ class Importer:
             return
         if disk is None or row is None or disk.sha256 != row[0]:
             self._note_refresh(rel)
+        else:
+            report.unchanged += 1
 
     def _sweep_unowned(self, filesystem: held_fs.HeldFilesystem, report: ImportReport) -> None:
         """Compare each lexical row of an unowned Markdown file with the file's hash."""
@@ -415,12 +633,15 @@ class Importer:
             ).fetchall()
         for rel, content_hash in rows:
             owned = ownership.classify(rel) is not ownership.Ownership.NONE
-            # A file extension is a closed set that the format fixes; it names no meaning.
-            if owned or not rel.lower().endswith(".md"):
+            if owned or not ownership.is_markdown(rel):
                 continue
             disk = self._observe(filesystem, rel, report)
-            if rel not in report.unjudged and (disk is None or disk.sha256 != content_hash):
+            if rel in report.unjudged:
+                continue
+            if disk is None or disk.sha256 != content_hash:
                 self._note_refresh(rel)
+            else:
+                report.unchanged += 1
 
     def _note_refresh(self, rel: str) -> None:
         with self._refresh_lock:
@@ -438,49 +659,52 @@ def _chunks(items: list[_Item], size: int) -> Iterator[list[_Item]]:
 
 
 def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[_Rename]:
-    """The renames among a batch: an old page that is gone and a new page with its exact bytes.
+    """The renames among a batch: an old file that is gone and a new file with its exact bytes.
 
-    A move event names its pair. Without one, a gone page and a new file pair only when each is the
-    only one in the batch with those bytes, so that two copies of one page cannot swap identities.
+    A move event names its pair. Without one, a gone file and a new file pair only when each is the
+    only one in the batch with those bytes, so that two copies of one file cannot swap identities.
+    A page pairs with a page and a binary with a binary.
     """
     gone = {
         rel: look
         for rel, look in looks.items()
-        if look.verdict is Verdict.GONE and look.facts.page is not None
+        if look.verdict is Verdict.GONE and look.facts.stored_sha256 is not None
     }
     created = {
         rel: look
         for rel, look in looks.items()
         if look.verdict is Verdict.ADOPT
-        and look.facts.page is None
+        and look.facts.stored_sha256 is None
         and look.facts.manifest is None
         and not look.facts.held
-        and ownership.classify(rel) is ownership.Ownership.PAGE
     }
 
     def same_bytes(src: str, dst: str) -> bool:
-        stored = gone[src].facts.page
         disk = created[dst].disk
-        return stored is not None and disk is not None and stored.sha256 == disk.sha256
+        return (
+            disk is not None
+            and gone[src].facts.stored_sha256 == disk.sha256
+            and ownership.classify(src) is ownership.classify(dst)
+        )
 
     pairs: dict[str, str] = {}
     for dst, src in hints.items():
         if dst in created and src in gone and src not in pairs.values() and same_bytes(src, dst):
             pairs[dst] = src
-    by_stored: dict[str, list[str]] = defaultdict(list)
+    by_stored: dict[tuple[ownership.Ownership, str], list[str]] = defaultdict(list)
     for rel, look in gone.items():
-        if rel not in pairs.values() and look.facts.page is not None:
-            by_stored[look.facts.page.sha256].append(rel)
-    by_disk: dict[str, list[str]] = defaultdict(list)
+        if rel not in pairs.values() and look.facts.stored_sha256 is not None:
+            by_stored[(ownership.classify(rel), look.facts.stored_sha256)].append(rel)
+    by_disk: dict[tuple[ownership.Ownership, str], list[str]] = defaultdict(list)
     for rel, look in created.items():
         if rel not in pairs and look.disk is not None:
-            by_disk[look.disk.sha256].append(rel)
-    for sha256, sources in by_stored.items():
-        targets = by_disk.get(sha256, [])
+            by_disk[(ownership.classify(rel), look.disk.sha256)].append(rel)
+    for key, sources in by_stored.items():
+        targets = by_disk.get(key, [])
         if len(sources) == 1 and len(targets) == 1:
             pairs[targets[0]] = sources[0]
     return [
-        _Rename(src, dst, disk)
+        _Rename(src, dst, disk, ownership.classify(dst) is ownership.Ownership.PAGE)
         for dst, src in sorted(pairs.items())
         if (disk := created[dst].disk) is not None
     ]

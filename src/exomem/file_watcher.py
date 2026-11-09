@@ -1298,11 +1298,12 @@ class FileWatcher:
         """
         if self._importer is None:
             return None
+        from .vault_store import ownership
+
         rel = self._rel(path)
         if rel is None:
             return None
-        # A file extension is a closed set that the format fixes; it names no meaning.
-        if self._importer.takes(rel) or rel.lower().endswith(".md"):
+        if self._importer.takes(rel) or ownership.is_markdown(rel):
             return rel
         return None
 
@@ -1445,17 +1446,20 @@ class FileWatcher:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         self._resolve_held_publication_intents()
+        if self._importer is not None:
+            # First, so that a binary it imports reaches the media loop below in this same batch.
+            self._import_pending()
         with self._lock:
             managed = self._managed_media_events
             self._managed_media_events = {}
         for path, deleted in managed.items():
-            self._record(path, deleted=deleted)
+            if self._importer is None:
+                self._record(path, deleted=deleted)
+            else:
+                self._hand_to_media(path)
         media, ups, del_rels, pending_epoch, access_policy = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)
-        if self._importer is not None:
-            self._import_pending()
-            return
         if not (media or ups or del_rels):
             return
 
@@ -1501,15 +1505,43 @@ class FileWatcher:
 
     def _after_import(self, report: ImportReport) -> None:
         """Tell the caches that read a changed path that the store now holds new bytes there."""
+        from .vault_store import ownership
         from .vocabulary import invalidate as invalidate_vocabulary
 
         for rel in (*report.imported, *report.moved, *report.moved.values()):
             invalidate_vocabulary(self._vault_root, path=rel)
+        for rel in (*report.imported, *report.moved):
+            if ownership.classify(rel) is ownership.Ownership.BINARY:
+                self._hand_to_media(self._vault_root / rel)
         if report.settled or report.unjudged:
             log.info(
-                "file watcher: imported %d, renamed %d, held %d, left %d outside change(s)",
-                len(report.imported), len(report.moved), len(report.held), len(report.unjudged),
+                "file watcher: imported %d, renamed %d, held %d, removed %d, cleared %d, "
+                "left %d outside change(s)",
+                len(report.imported), len(report.moved), len(report.held), len(report.removed),
+                len(report.cleared), len(report.unjudged),
             )
+
+    def _hand_to_media(self, path: Path) -> None:
+        """Give an imported binary to media processing, as file mode gives it a changed media file.
+
+        The store keeps a binary's record and the disk keeps its bytes, so the derived media rows
+        (a preview, a transcript) are a person's outside change's to refresh. A file that the
+        media store is writing is deferred, and one whose cache bytes it proves is left alone.
+        """
+        from . import media_store
+
+        if not self._is_kb(path) or media_processing.classify_media(path) is None:
+            return
+        disposition = media_store.managed_event(self._vault_root, path)
+        if disposition == "suppress":
+            return
+        with self._lock:
+            if disposition == "defer":
+                self._managed_media_events[path] = False
+            else:
+                self._pending_media.add(path)
+            self._last_change = time.monotonic()
+        self._wake.set()
 
     def _reconcile_access_policy(self, pending_epoch: int) -> None:
         """Reproject one observed `_access.yaml` edit before clearing its barrier."""
