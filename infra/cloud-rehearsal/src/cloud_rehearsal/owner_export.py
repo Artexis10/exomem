@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
-from cellctl.export_layout import legacy_job_name
+from cellctl.export_layout import STEPS, job_name, legacy_job_name, staging_claim_name
 from cellctl.manifests import namespace_name
 
 from .infra import STAGING_BUCKET, docker_labels
@@ -43,6 +43,31 @@ from exomem.vault_portability import verify_export_archive
 archive = verify_export_archive('/fixture/export.zip', expected_cell_id=sys.argv[1])
 print(json.dumps({'sha256': archive.archive_sha256, 'files': len(archive.manifest['files'])}))
 """
+
+
+def export_leftovers(ctx: Context, cell_id: str, export_id: str) -> list[str]:
+    """The export's Jobs, their pods and its staging claim that remain in the
+    cell namespace. cellctl removes each of them once the export has ended."""
+
+    namespace = namespace_name(cell_id)
+    jobs = {legacy_job_name(export_id), *(job_name(export_id, step) for step in STEPS)}
+
+    def listed(kind: str) -> list[dict]:
+        return ctx.kube_json("get", kind, "--namespace", namespace)["items"]
+
+    return [
+        *(f"job/{job['metadata']['name']}" for job in listed("jobs") if job["metadata"]["name"] in jobs),
+        *(
+            f"pod/{pod['metadata']['name']}"
+            for pod in listed("pods")
+            if pod["metadata"].get("labels", {}).get("batch.kubernetes.io/job-name") in jobs
+        ),
+        *(
+            f"persistentvolumeclaim/{claim['metadata']['name']}"
+            for claim in listed("persistentvolumeclaims")
+            if claim["metadata"]["name"] == staging_claim_name(export_id)
+        ),
+    ]
 
 
 async def run_export(ctx: Context, verifier_image: str, *, timeout_seconds: float = 600) -> dict:
@@ -137,19 +162,15 @@ async def run_export(ctx: Context, verifier_image: str, *, timeout_seconds: floa
 
         packed_row = await until(packed)
         await until(ready)
-        jobs = ctx.kube_json("get", "jobs", "--namespace", namespace_name(cell_id))["items"]
-        if any(job["metadata"]["name"] == legacy_job_name(export_id) for job in jobs):
-            raise StepFailure("the completed export still has a Job")
-        pods = ctx.kube_json(
-            "get",
-            "pods",
-            "--namespace",
-            namespace_name(cell_id),
-            "--selector",
-            f"batch.kubernetes.io/job-name={legacy_job_name(export_id)}",
-        )["items"]
-        if pods:
-            raise StepFailure("the completed export still has pods")
+
+        async def removed():
+            # cellctl records the export ready before it deletes the verification Job. Kubernetes
+            # removes a Job's pods after the Job, and a claim after the pods that use it.
+            record["export_leftovers"] = export_leftovers(ctx, cell_id, export_id)
+            return not record["export_leftovers"]
+
+        await until(removed)
+        record["checks"]["export_objects_removed"] = True
         shown = await display()
         if shown.get("export_id") != export_id or shown.get("state") != "ready":
             raise StepFailure("the owner API does not report this export ready before expiry")

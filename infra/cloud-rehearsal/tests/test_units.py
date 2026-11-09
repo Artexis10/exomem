@@ -497,6 +497,41 @@ def test_owner_export_cannot_qualify_a_node() -> None:
     assert run.to_json()["outcome"]["gates_node"] is False
 
 
+@pytest.mark.parametrize("leftover", ["step job", "step pod", "staging claim", None])
+def test_owner_export_names_each_object_a_completed_export_left(leftover) -> None:
+    """A step Job, its pod or the staging claim left after the export is named; the cell's own objects are not."""
+    import uuid
+    from types import SimpleNamespace
+
+    from cellctl.export_layout import PACK, VERIFY, job_name, staging_claim_name
+
+    from cloud_rehearsal import owner_export
+
+    export_id, other_export = str(uuid.uuid4()), str(uuid.uuid4())
+    verify = job_name(export_id, VERIFY)
+    listed = {
+        "jobs": [{"metadata": {"name": job_name(other_export, PACK)}}],
+        "pods": [
+            {"metadata": {"name": "exomem-0", "labels": {}}},
+            {"metadata": {"name": "other-pack", "labels": {"batch.kubernetes.io/job-name": job_name(other_export, PACK)}}},
+        ],
+        "persistentvolumeclaims": [{"metadata": {"name": "cell-data"}}, {"metadata": {"name": staging_claim_name(other_export)}}],
+    }
+    expected = {
+        "step job": ("jobs", {"name": verify}, f"job/{verify}"),
+        "step pod": ("pods", {"name": "verify-pod", "labels": {"batch.kubernetes.io/job-name": verify}}, "pod/verify-pod"),
+        "staging claim": ("persistentvolumeclaims", {"name": staging_claim_name(export_id)},
+                          f"persistentvolumeclaim/{staging_claim_name(export_id)}"),
+    }
+    named = []
+    if leftover is not None:
+        kind, metadata, name = expected[leftover]
+        listed[kind].append({"metadata": metadata})
+        named.append(name)
+    ctx = SimpleNamespace(kube_json=lambda _get, kind, *_args: {"items": listed[kind]})
+    assert owner_export.export_leftovers(ctx, "a" * 26, export_id) == named
+
+
 @pytest.mark.parametrize("provisioned", [False, True])
 def test_requested_owner_export_must_run_and_pass(monkeypatch, provisioned) -> None:
     """Neither skipped provisioning nor a failed export may pass harness-check."""
