@@ -261,6 +261,31 @@ def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path
     assert "- credence: likely" in page.read_text(encoding="utf-8")
 
 
+def test_observe_memory_refuses_a_new_belief_it_cannot_give_a_holder(tmp_path: Path) -> None:
+    """Catches the writer adding a `## Belief` that names no holder, which reads as nobody's."""
+    page = tmp_path / PATH
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntitle: Release outlook\ntype: insight\nstatus: active\n"
+        "exomem_id: 33333333-3333-4333-8333-333333333333\nupdated: 2026-10-01\n---\n\n"
+        "# Release outlook\n\nThe release ships in May.\n",
+        encoding="utf-8",
+    )
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="UNSUPPORTED_SEMANTIC_KIND") as refused:
+        commands.op_observe_memory(
+            tmp_path, path=PATH, operation="add", category="fact", kind="belief",
+            content="The release will slip a week.",
+            expected_hash=vault_module.content_hash(before.decode("utf-8")),
+        )
+
+    remediation = str(refused.value).split("Remediation: ", 1)[1]
+    for named in ("## Belief", "credence_holder", "edit_memory"):
+        assert named in remediation
+    assert page.read_bytes() == before
+
+
 # ---------------------------------------------------------------------------
 # Statement rows
 # ---------------------------------------------------------------------------
