@@ -215,11 +215,12 @@ def _canary_result(result, expected, *, diagnostics=None) -> tuple[str, str | No
     data = result.data
     if not isinstance(data, (dict, list)):
         return "error", "malformed-terminal"
-    # Public OpError and activation fields are product protocol shapes.
+    # Public refusal and activation fields are product protocol shapes. A compact refusal carries
+    # a top-level `error` mapping; the full envelope also carries `success: false`.
     envelope = data if isinstance(data, dict) else {}
     outcome = (
         "refused"
-        if envelope.get("success") is False
+        if envelope.get("success") is False or isinstance(envelope.get("error"), dict)
         else "abstained"
         if envelope.get("abstained") is True
         else "ok"

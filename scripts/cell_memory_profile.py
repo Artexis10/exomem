@@ -693,12 +693,12 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
                 while time.monotonic() < deadline:
                     attempts += 1
                     result = await call(client, "ask_memory", {"query": QUERY})
-                    error = result.get("error") if result.get("success") is False else None
+                    error = result.get("error")
                     code = (error or {}).get("code")
                     if code != "RETRIEVAL_INDEX_WARMING":
                         break
-                    retry_ms = (error or {}).get("retry_after_ms") or 250
-                    await asyncio.sleep(max(0.25, retry_ms / 1000))
+                    retry_s = ((error or {}).get("retry") or {}).get("after_s") or 0.25
+                    await asyncio.sleep(max(0.25, retry_s))
                 served = code is None and isinstance(result.get("hits"), list)
                 ok &= served
                 settle = await asyncio.to_thread(_settle, args.settle_seconds)
@@ -711,7 +711,8 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
                         error_code=code,
                         attempts=attempts,
                         hits=len(result.get("hits") or []),
-                        degraded=sorted(str(lane) for lane in result.get("degraded") or []),
+                        # The agent reply folds warming and degraded state into one `notice` sentence.
+                        notice=result.get("notice"),
                         **settle,
                     )
                 )
@@ -719,9 +720,15 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
                 result = await call(
                     client,
                     "remember",
-                    {"content": WRITE_BODY, "title": WRITE_TITLE, "status": "draft"},
+                    {
+                        "content": WRITE_BODY,
+                        "title": WRITE_TITLE,
+                        "status": "draft",
+                        "response_detail": "full",
+                    },
                 )
-                committed = result.get("state") == "committed"
+                operational = (result.get("diagnostics") or {}).get("operational") or {}
+                committed = operational.get("state") == "committed"
                 ok &= committed
                 settle = await asyncio.to_thread(_settle, args.settle_seconds, vault)
                 points.append(

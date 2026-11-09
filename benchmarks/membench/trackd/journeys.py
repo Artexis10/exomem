@@ -288,6 +288,9 @@ def _envelope_ok(payload: dict | None) -> bool:
 
 def _hit_paths(payload: dict | None) -> list[str]:
     data = _data(payload)
+    if isinstance(data, dict):
+        # ask_memory answers `{user_summary, hits, ...}`.
+        data = data.get("hits")
     if not isinstance(data, list):
         return []
     return [hit.get("path", "") for hit in data if isinstance(hit, dict)]

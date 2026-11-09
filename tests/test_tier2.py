@@ -1238,7 +1238,6 @@ def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:
         {"path": rel, "why": "x", "field": "confidence", "value": 0.99},
         run_middleware=True,
     ))
-    assert refusal.structured_content["success"] is False
     assert refusal.structured_content["error"]["code"] == "EXCLUDED_FIELD"
     assert "confidence" not in note.read_text(encoding="utf-8")
 

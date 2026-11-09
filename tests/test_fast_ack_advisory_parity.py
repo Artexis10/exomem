@@ -208,10 +208,11 @@ def _run(tmp_path: Path, root: Path, *, fast: bool, monkeypatch) -> list[dict]:
             terminal = manager.invoke(
                 SimpleNamespace(name=command, leaf=leaf, read_only=False),
                 (root,),
-                {"response_detail": "compact"},
+                {"response_detail": "full"},
                 idempotency_key=None,
                 mutation_request_id=str(uuid.uuid4()),
             )
+            terminal = terminal["diagnostics"]["operational"]
             assert terminal["status"] == "committed", (label, terminal)
             deferred = None
             if fast:
@@ -274,13 +275,14 @@ def _leased(tmp_path: Path, root: Path, command: str, call) -> dict:
         result = call(vault_root)
         return {"path": result.path, "warnings": list(result.warnings)}
 
-    return manager.invoke(
+    terminal = manager.invoke(
         SimpleNamespace(name=command, leaf=leaf, read_only=False),
         (root,),
-        {"response_detail": "compact"},
+        {"response_detail": "full"},
         idempotency_key=None,
         mutation_request_id=str(uuid.uuid4()),
     )
+    return terminal["diagnostics"]["operational"]
 
 
 def test_an_edit_that_leaves_the_body_alone_takes_no_advisory_custody(

@@ -230,7 +230,7 @@ def test_pre_score_soft_failures_keep_fused_order_and_truthful_counts(
         explain=True,
     )
 
-    assert [hit["path"] for hit in result["hits"]] == [hit["path"] for hit in baseline]
+    assert [hit["path"] for hit in result["hits"]] == [hit["path"] for hit in baseline["hits"]]
     profile = result["retrieval_profile"]["rerank"]
     assert (profile["decision"], profile["reason"]) == (decision, reason)
     assert profile["scorer_input_count"] == 0
@@ -273,7 +273,7 @@ def test_failed_bounded_reranking_keeps_fused_order_and_exact_reason(
         explain=True,
     )
 
-    assert [hit["path"] for hit in result["hits"]] == [hit["path"] for hit in baseline]
+    assert [hit["path"] for hit in result["hits"]] == [hit["path"] for hit in baseline["hits"]]
     profile = result["retrieval_profile"]["rerank"]
     assert (profile["decision"], profile["reason"]) == (decision, reason)
     assert profile["candidate_limit_requested"] == 5
@@ -308,7 +308,7 @@ def test_score_application_failure_is_transactional_without_partial_evidence(
         explain=True,
     )
 
-    assert [hit["path"] for hit in result["hits"]] == [hit["path"] for hit in baseline]
+    assert [hit["path"] for hit in result["hits"]] == [hit["path"] for hit in baseline["hits"]]
     profile = result["retrieval_profile"]["rerank"]
     assert (profile["decision"], profile["reason"], profile["ran"]) == (
         "failed",

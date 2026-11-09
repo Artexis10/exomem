@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from exomem import capture_sweep, commands, writer_lease
+from exomem.mutation_terminal import CAPTURE_SWEEP_NEXT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -146,7 +147,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
     # 1. Recall. A read is not a durable write: it neither emits the advisory nor
     #    consumes the quiet interval.
     recalled = commands.op_ask_memory(vault, query=CLIENT_ENTITY, mode="keyword")
-    assert isinstance(recalled, list)
+    assert recalled["hits"]
 
     # 2. The agent captures the object it was thinking about. This is the first
     #    durable write of the episode, so the response asks for one bounded pass.
@@ -157,16 +158,14 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
         slug="client-meeting-slot",
         key="journey-meeting",
     )
-    assert meeting["status"] == "committed"
-    sweep = meeting["capture_sweep"]
-    assert sweep["boundary"] == "quiet-interval"
-    assert sweep["rule"]
-    assert sweep["consider"]
+    assert meeting["user_summary"].startswith("Saved")
+    assert meeting["next_action"] == CAPTURE_SWEEP_NEXT
+    assert "capture_sweep" not in meeting
 
     # The booking system is named on the committed page and has no page of its
     # own; the client organisation has one, so it is not an unpaged mention.
-    assert BOOKING_SYSTEM in sweep["unpaged_mentions"]
-    assert CLIENT_ENTITY not in sweep["unpaged_mentions"]
+    assert BOOKING_SYSTEM in meeting["unpaged_mentions"]
+    assert CLIENT_ENTITY not in meeting["unpaged_mentions"]
 
     # 3. The agent acts on it and writes the adjacent operational quirk — the
     #    fact the dogfood episode lost. The second write inside the interval is
@@ -179,7 +178,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
         slug="booking-lead-time",
         key="journey-quirk",
     )
-    assert "capture_sweep" not in quirk
+    assert "next_action" not in quirk
 
     # 4. Replay. An acknowledgement the client never received is retried under the
     #    same idempotency key. Each replay returns its ORIGINAL terminal byte for
@@ -203,7 +202,7 @@ def test_one_episode_captures_its_object_then_is_told_to_sweep_for_the_rest(
     )
     assert meeting_replay == meeting
     assert quirk_replay == quirk
-    assert "capture_sweep" not in quirk_replay
+    assert "next_action" not in quirk_replay
 
     notes = sorted(
         page.relative_to(vault).as_posix()
@@ -229,7 +228,7 @@ def test_a_quiet_prominence_level_writes_the_same_pages_and_says_nothing(
         vault, content=_meeting_content(), title=MEETING_TITLE, slug="client-meeting-slot"
     )
 
-    assert "capture_sweep" not in meeting
+    assert "next_action" not in meeting
     assert (vault / meeting["path"]).is_file()
 
 
@@ -259,9 +258,8 @@ def test_a_broken_advisory_never_breaks_a_page_write(
         vault, content=_meeting_content(), title=MEETING_TITLE, slug="client-meeting-slot"
     )
 
-    assert result["status"] == "committed"
-    assert result["mutated"] is True
-    assert "capture_sweep" not in result
+    assert result["user_summary"].startswith("Saved")
+    assert "next_action" not in result
     assert (vault / result["path"]).is_file()
 
 

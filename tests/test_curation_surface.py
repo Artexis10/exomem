@@ -298,11 +298,12 @@ def test_curation_completed_replay_uses_shared_noop_terminal(tmp_path: Path) -> 
     ).invoke(
         command,
         (tmp_path,),
-        {"mode": "curation", "curation_action": "resume"},
+        {"mode": "curation", "curation_action": "resume", "response_detail": "full"},
     )
 
-    assert result["status"] == "replayed"
-    assert result["mutated"] is False
+    operational = result["diagnostics"]["operational"]
+    assert operational["status"] == "replayed"
+    assert operational["mutated"] is False
     assert result["outcome"] == "replayed"
 
 
@@ -353,13 +354,14 @@ def test_standalone_writer_executes_curation_with_digest_operation_identity(
             "plan_id": proposed["plan_id"],
             "expected_plan_fingerprint": proposed["plan_fingerprint"],
             "why": "Approve the immutable multilingual plan.",
+            "response_detail": "full",
         },
         read_only=False,
         idempotency_key="standalone-curation-apply",
     )
 
     assert applied["phase"] == "completed"
-    assert len(applied["operation_id"]) == 64
+    assert len(applied["diagnostics"]["operational"]["operation_id"]) == 64
     assert (
         vault / "Knowledge Base/Notes/Insights/standalone-curation-unicode.md"
     ).read_text(encoding="utf-8").endswith(

@@ -84,7 +84,7 @@ def test_a_notice_one_stdio_connection_created_is_told_to_the_next_connection_no
             if (outcome.get("error") or {}).get("code") != "MUTATION_WARMING":
                 break
             await asyncio.sleep(1)
-        assert outcome.get("ok") is True, outcome
+        assert outcome and "error" not in outcome, outcome
         return await read(client)
 
     async def read(client: Client) -> dict[str, int]:

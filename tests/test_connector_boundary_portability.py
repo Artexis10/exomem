@@ -98,7 +98,7 @@ def test_restore_installs_protection_without_source_clients_and_waits_for_destin
         committed = writer_lease.invoke_command(
             command, destination, operation="commit", proposal_id=proposal["diagnostics"]["proposal_id"],
         )
-    assert committed["status"] == "committed"
+    assert committed["diagnostics"]["operational"]["status"] == "committed"
     assert egress.quick_page_visible(destination, PUBLIC, principal=who)
     assert not egress.quick_page_visible(destination, PRIVATE, principal=who)
 

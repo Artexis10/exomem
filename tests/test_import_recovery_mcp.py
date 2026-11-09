@@ -383,7 +383,7 @@ def test_replan_after_prepublication_refusal_has_no_phantom_interruption(vault, 
                 "kind": "apply", "run_id": run_id, "plan_id": refreshed["plan"]["plan_id"]},
                 "response_detail": "full"}, raise_on_error=False,
                 meta={command_surface.MCP_IDEMPOTENCY_META_KEY: "refreshed-plan"})
-            assert not result.is_error and result.structured_content.get("success") is not False, result
+            assert not result.is_error and "error" not in result.structured_content, result
             summary = adoption_run.status(vault, run_id=run_id, view="summary")
             assert summary["phase"] == "applied" and summary["remaining"] == 0
             assert summary["interrupted"] is False
@@ -600,7 +600,7 @@ def test_crashed_apply_resumes_same_mcp_identity_without_duplicate_sources(vault
             recovered = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
             assert not recovered.is_error, recovered
             assert "MUTATION_OUTCOME_UNKNOWN" not in json.dumps(recovered.structured_content)
-            assert recovered.structured_content.get("success") is not False
+            assert "error" not in recovered.structured_content
             run_bytes = adoption_run.AdoptionRunStore(vault)._run_file(run["run_id"]).read_bytes()
             replayed = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
             assert not replayed.is_error
@@ -684,14 +684,14 @@ def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypa
         async with Client(server.build_server(require_auth=False)) as client:
             meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: "note-terminal-crash"}
             first = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
-            assert fired and first.structured_content["success"] is False
+            assert fired and "error" in first.structured_content
             assert first.structured_content["error"]["code"] == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
             new_notes = set(_notes(vault)) - initial_notes
             assert len(new_notes) == 1
             note_bytes = {path: path.read_bytes() for path in new_notes}
             recovered = await client.call_tool("import_memory", arguments, raise_on_error=False, meta=meta)
             assert not recovered.is_error, recovered
-            assert recovered.structured_content.get("success") is not False, recovered
+            assert "error" not in recovered.structured_content, recovered
             persisted = store.load(run_id)
             assert persisted["phase"] == "applied"
             assert persisted["outcomes"]["Coll/Journal/entry.md"]["note"]["target_path"]

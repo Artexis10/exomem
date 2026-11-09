@@ -104,9 +104,10 @@ def test_dispatcher_reports_committed_collection_and_held_lifecycle(store):
                 _command("record_memory"), store.root, action=action,
                 response_detail="full", **kwargs,
             )
-        assert result["status"] == "committed"
-        assert mutation_terminal.valid_collection_receipt(result["diagnostics"])
-        return result["diagnostics"]
+        assert result["diagnostics"]["operational"]["status"] == "committed"
+        receipt = {key: value for key, value in result["diagnostics"].items() if key != "operational"}
+        assert mutation_terminal.valid_collection_receipt(receipt)
+        return receipt
 
     invoke("create", manifest_path=manifest_path(), manifest_text=manifest_text(),
            why="create", scaffold=False)
@@ -139,8 +140,8 @@ def test_dispatched_store_append_parses_no_unchanged_manifest_and_fans_out_nothi
                 _command("record_memory"), store.root, action=action,
                 response_detail="full", **kwargs,
             )
-        assert result["status"] == "committed"
-        return result["diagnostics"]
+        assert result["diagnostics"]["operational"]["status"] == "committed"
+        return {key: value for key, value in result["diagnostics"].items() if key != "operational"}
 
     invoke("create", manifest_path=manifest_path(), manifest_text=manifest_text(),
            why="create", scaffold=False)
