@@ -163,12 +163,25 @@ def visible_links(
     from ..governance import egress
 
     visible = egress.restricted_release_filter(vault_root)
-    owner = egress.file_mode_restricted_caller(vault_root, None) is None
+    owner = caller_is_owner(vault_root)
     return {
         rel: [link for link in check.links if visible is None or visible(link.path)]
         + (check.unimported if owner else [])
         for rel, check in checks.items()
     }
+
+
+def caller_is_owner(vault_root: Path) -> bool:
+    """Whether nothing is withheld from the calling writer, by a policy or by RAW.
+
+    A store-mode writer asks this, not whether ``restricted_release_filter`` returned a filter: a
+    bound store filters every caller, the owner too. The principal and its authority decide it, as
+    they do in file mode. Only the owner hears of a file that the store has not imported, and only
+    the owner reads a row report that may name a page withheld from others.
+    """
+    from ..governance import egress
+
+    return egress.file_mode_restricted_caller(vault_root, None) is None
 
 
 #: The reasons a page-only store form refuses, each named once for the page and the folder forms.

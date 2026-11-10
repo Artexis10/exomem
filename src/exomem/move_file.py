@@ -908,7 +908,11 @@ def _move_file_local(
         inbound = [hit for hit in inbound if visible(hit.path)]
 
     warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
-    if stored_check is not None and stored_check.unimported and visible is None:
+    if (
+        stored_check is not None
+        and stored_check.unimported
+        and store_targets.caller_is_owner(vault_root)
+    ):
         # A file that nothing imported has no store page to rewrite; it keeps its link. Only the
         # owner hears of it: no policy covers such a file yet.
         warnings.append(
@@ -1526,7 +1530,7 @@ def _move_file_local(
                     "reconcile_required": False,
                     "reconcile_guidance": None,
                 }
-                if egress.file_mode_restricted_caller(vault_root, None) is None
+                if store_targets.caller_is_owner(vault_root)
                 else None
             ),
         )

@@ -29,6 +29,7 @@ from test_vault_store_bypass_writers import (
     new_files,
     store_delta,
     store_gamma,
+    unimported_note,
 )
 from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows, tree
@@ -37,6 +38,11 @@ from exomem import delete_directory, delete_file, move_file, recover_from_trash,
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
+from exomem.governance.principal import (
+    library_scope,
+    most_restrictive_principal,
+    request_scope,
+)
 from exomem.vault_store import (
     availability,
     batch,
@@ -332,6 +338,33 @@ def test_a_validated_and_a_committed_move_of_a_governed_page_refuse_alike(served
 
     assert revision(served) == start
     assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+
+
+@pytest.mark.parametrize(
+    ("caller", "warnings"),
+    [
+        (
+            library_scope,
+            ["1 file(s) that the store has not imported yet keep their link to the old path"],
+        ),
+        (lambda: request_scope(most_restrictive_principal(surface="rest")), []),
+    ],
+    ids=["owner", "restricted"],
+)
+def test_only_the_owner_hears_that_an_unimported_note_keeps_its_link_after_a_move(
+    served, caller, warnings
+):
+    """A move that hides from the owner a link it left pointing at the old path, or tells a
+    restricted mover about a file that no policy covers yet."""
+    store_gamma(served)
+    unimported_note(served)
+
+    with caller():
+        result = move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
+
+    assert result.warnings == warnings
+    mine = served / "Knowledge Base/Notes/Mine.md"
+    assert "[[Gamma]]" in mine.read_text(encoding="utf-8"), "the move rewrites no file"
 
 
 def test_a_recovery_after_a_delete_restores_the_page_and_its_rows_and_drops_the_sidecar(
