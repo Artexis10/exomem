@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate, _without_response_id
+from test_activation_log import _rows
+from test_activation_log import activation_log as activation_log  # noqa: F401  (the pytest fixture)
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_context_catalogue import _built, _page, _source_schema, _write
@@ -465,7 +467,8 @@ def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path
         with original(root, path, **kwargs) as source:
             prepared.append(path)
             if path.name == "z-matching-reference.md":
-                budget.deadline = time.monotonic()
+                # The activation runs on its own budget beneath this one; expire the one it reads.
+                request_budget.current().deadline = time.monotonic()
             yield source
     monkeypatch.setattr(runtime_resources, "semantic_preparation", expires)
     token = request_budget.set_current(budget)
@@ -584,6 +587,258 @@ def test_a_slow_method_search_leaves_time_to_serve_the_leads_already_found(
     assert lead in {item["source_ref"] for item in task["candidates"]}
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
+
+
+def _clock_at(monkeypatch: pytest.MonkeyPatch, start: float = 1000.0) -> list[float]:
+    """Replace the request budget's clock with one the test advances, so a starved host takes no real time."""
+    from types import SimpleNamespace
+
+    from exomem import request_budget
+
+    clock = [start]
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    return clock
+
+
+def _activate_within(vault: Path, seconds: float, **kwargs):
+    """One activation under a request budget of `seconds`, with the budget it left for the caller to read."""
+    from exomem import request_budget
+
+    budget = request_budget.RequestBudget(seconds=seconds)
+    token = request_budget.set_current(budget)
+    try:
+        return _activate(vault, **kwargs), budget
+    finally:
+        request_budget.reset_current(token)
+
+
+def test_a_deadline_during_projection_serves_the_leads_already_projected(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved host once ran past the deadline here or dropped every lead; the leads read before it must still be served."""
+    from exomem import context_task
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    pages = {
+        _page(
+            vault,
+            f"alignment-visit-{number}",
+            body="Inspect the optical alignment before the workshop.\n",
+        )
+        for number in range(3)
+    }
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert pages <= {item["source_ref"] for item in unhurried["task_context"]["candidates"]}
+
+    clock = _clock_at(monkeypatch)
+    project = context_task.project_source
+    projected: list[str] = []
+
+    def starves_after_the_first_lead(root, source_ref, *args, **kwargs):
+        source = project(root, source_ref, *args, **kwargs)
+        if not projected:
+            projected.append(source_ref)
+            clock[0] += 60.0  # the host was starved for the CPU while this lead was read
+        return source
+
+    monkeypatch.setattr(context_task, "project_source", starves_after_the_first_lead)
+    packet, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert len(projected) == 1
+    assert [item["source_ref"] for item in task["candidates"]] == projected
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert not packet.get("abstained") and packet["map"]
+
+
+def test_a_deadline_during_the_catalogue_scan_stops_the_scan_and_keeps_the_map(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved host once ran this scan to its end however late; it stops, and a half-read catalogue gives no lead."""
+    from exomem import request_budget
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    # One check per entry, so the scan has a middle to stop in.
+    monkeypatch.setattr(request_budget, "CHECKPOINT_EVERY", 1)
+    for number in range(3):
+        _page(
+            vault,
+            f"alignment-visit-{number}",
+            body="Inspect the optical alignment before the workshop.\n",
+        )
+    catalogue = _built(vault)
+    total = len(catalogue.task_entries())
+    catalogue.close()
+    assert total > 3
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert unhurried["task_context"]["candidates"]
+
+    clock = _clock_at(monkeypatch)
+    entries = context_catalogue.ContextCatalogue.task_entries
+    pulled: list[int] = []
+
+    def starves_in_the_third_entry(self):
+        for position, entry in enumerate(entries(self)):
+            pulled.append(position)
+            if position == 2:
+                clock[0] += 60.0
+            yield entry
+
+    monkeypatch.setattr(
+        context_catalogue.ContextCatalogue, "task_entries", starves_in_the_third_entry
+    )
+    packet, budget = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert len(pulled) == 3
+    assert task["state"] == "partial" and task["candidates"] == []
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert "working_set.task_context_entries" in budget.truncated
+    assert not packet.get("abstained") and packet["map"]
+
+
+def test_a_deadline_during_the_text_query_stops_it_short_of_the_deadline_and_serves_the_route_lead(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A starved host once let this query run on past the deadline; it stops early enough to project the lead already routed."""
+    import sqlite3
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    _seed_structure(vault)
+    manifest = "Knowledge Base/Records/Depot Stock/_collection.md"
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Where can I query depot stock observations?"
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert manifest in {item["source_ref"] for item in unhurried["task_context"]["candidates"]}
+
+    clock = _clock_at(monkeypatch)
+    store_type = type(lexstore.get_store(vault))
+    query = store_type._bm25_query
+    outcomes: list[str] = []
+
+    def stalls_past_the_query_share(self, conn, *args, **kwargs):
+        # Only the task text query keeps raw material and leaves navigation out; no other lane asks for that pair.
+        if kwargs.get("exclude_navigation") and not kwargs.get("exclude_raw_material"):
+            # 12 s of the 15 s the activation gets: past what the query may spend, with the projection reserve still unspent.
+            clock[0] += 12.0
+            try:
+                conn.execute(
+                    "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500000) "
+                    "SELECT count(*) FROM n"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                outcomes.append("interrupted")
+                raise
+            outcomes.append("finished")
+        return query(self, conn, *args, **kwargs)
+
+    monkeypatch.setattr(store_type, "_bm25_query", stalls_past_the_query_share)
+    packet, budget = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert outcomes == ["interrupted"]
+    assert manifest in {item["source_ref"] for item in task["candidates"]}
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert "working_set.task_context_text" in budget.truncated
+    assert not packet.get("abstained") and packet["map"]
+
+
+def test_a_deadline_spent_by_the_turn_slice_marks_task_context_partial_and_keeps_the_map(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the turn slice on, a starved slice compile once left task context "unavailable" with no reason given."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    for number in range(3):
+        _page(
+            vault,
+            f"alignment-visit-{number}",
+            body="Inspect the optical alignment before the workshop.\n",
+        )
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert unhurried["task_context"]["candidates"]
+
+    clock = _clock_at(monkeypatch)
+    compile_slice = commands._compile_guarded_activation
+
+    def starved_slice(*args, **kwargs):
+        compiled = compile_slice(*args, **kwargs)
+        clock[0] += 60.0  # the host was starved for the CPU while the turn slice compiled
+        return compiled
+
+    monkeypatch.setattr(commands, "_compile_guarded_activation", starved_slice)
+    packet, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert not packet.get("abstained") and packet["map"]
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert task["candidates"] == []
+
+
+def test_an_activation_stops_at_its_own_deadline_inside_a_longer_request_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, activation_log: Path
+) -> None:
+    """A request that allows 50 s gave its activation all of them; it now gets the configured seconds and the row says so."""
+    import sqlite3
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_BUDGET_SECONDS", "2")
+    _seed_structure(vault)
+    manifest = "Knowledge Base/Records/Depot Stock/_collection.md"
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Where can I query depot stock observations?"
+    clock = _clock_at(monkeypatch)
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert manifest in {item["source_ref"] for item in unhurried["task_context"]["candidates"]}
+
+    store_type = type(lexstore.get_store(vault))
+    query = store_type._bm25_query
+    outcomes: list[str] = []
+
+    def stalls_past_the_activation_deadline(self, conn, *args, **kwargs):
+        # Only the task text query keeps raw material and leaves navigation out; no other lane asks for that pair.
+        if kwargs.get("exclude_navigation") and not kwargs.get("exclude_raw_material"):
+            # 3 s: past the activation's 2 s, 47 s short of what the request allows.
+            clock[0] += 3.0
+            try:
+                conn.execute(
+                    "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500000) "
+                    "SELECT count(*) FROM n"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                outcomes.append("interrupted")
+                raise
+            outcomes.append("finished")
+        return query(self, conn, *args, **kwargs)
+
+    monkeypatch.setattr(store_type, "_bm25_query", stalls_past_the_activation_deadline)
+    packet, budget = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert outcomes == ["interrupted"]
+    assert packet.get("abstained") is False and packet["map"]
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert packet["request_budget"]["seconds"] == 2.0
+    assert budget.remaining() > 40.0
+    assert "working_set.task_context_text" in budget.truncated
+    served, limited = _rows(activation_log)
+    assert served["activation_result"]["budget_limited"] is False
+    assert limited["outcome"] == "served"
+    assert limited["activation_result"] == {"abstained": False, "reason": None, "budget_limited": True}
+    assert limited["budget"]["seconds"] == 2.0
+    assert "working_set.task_context_text" in limited["budget"]["truncated"]
 
 
 def test_the_short_activation_door_still_runs_the_method_search(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

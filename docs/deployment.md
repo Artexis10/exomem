@@ -1411,6 +1411,32 @@ Any value other than `off` serves the slice. A value other than `on` or `off`
 also logs one warning, `invalid EXOMEM_ACTIVATION_TURN_SLICE; using on`. The
 setting has no effect in the `anchors` mode.
 
+### Activation time limit
+
+An MCP `recall_context` call (the `activate_context` command) stops looking for
+more context after `EXOMEM_ACTIVATION_BUDGET_SECONDS` seconds, 15 by default,
+or one second before the MCP request budget ends when that is sooner. The packet
+then serves what the call already found: the map, and any leads that the call
+reached. The `task_context` block is `partial` with `budget` as the reason, and
+the packet has a `request_budget` block that names what the call left out. If
+the limit arrives before the map is built, the call returns its budget
+abstention instead. On a host that is short of CPU, that can happen because the
+freshness check that comes before the map takes time in proportion to the vault.
+A call that finishes within the limit returns the packet it always returned.
+
+To change the limit, set the variable to a positive number of seconds in the
+service environment and restart the service in the same way as for
+`EXOMEM_ACTIVATION_TURN_SLICE`. A value that is not a positive number logs one
+warning and the call uses the default. The setting has no effect in the
+`anchors` mode, which still abstains when the request budget ends. It does not
+change the REST and CLI doors, which keep their own shorter limit.
+
+Each row of `logs/activations.jsonl` records `activation_result` (whether the
+call abstained and whether a budget limited it) and `budget` (seconds, remaining
+milliseconds, and the stages skipped or cut). `budget` is null when no budget
+was bound to the call, and `activation_result` is null when the packet cannot be
+observed.
+
 ### Task context and live methods
 
 The `task_context` block supplies bounded leads from admitted catalogue carriers,

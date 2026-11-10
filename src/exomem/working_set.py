@@ -1481,11 +1481,19 @@ def task_candidates(
     )
     from .governance import egress
 
+    entries = []
     with find_types.timing_span(timings, "working_set.task_context_entries"):
         page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-        entries = [entry for entry in catalogue.task_entries() if entry.path
-                   and context_views._admits(entry, caller.visible)
-                   and (page_visible is None or page_visible(entry.path))]
+        try:
+            for position, entry in enumerate(catalogue.task_entries()):
+                if position and not position % request_budget.CHECKPOINT_EVERY:
+                    budget_checkpoint("working_set.task_context_entries")
+                if (entry.path and context_views._admits(entry, caller.visible)
+                        and (page_visible is None or page_visible(entry.path))):
+                    entries.append(entry)
+        except BudgetExhausted:
+            # A prefix of the catalogue would quietly narrow the allowed set, so a stopped scan gives no lead.
+            return [], [{"role": "task_context", "reason": "budget"}]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
@@ -1565,12 +1573,21 @@ def task_candidates(
             for path, _score in hits[:limit]:
                 add(path, origin)
             continue
-        with find_types.timing_span(timings, "working_set.task_context_text"):
+        # A lead the route already found must still be projected, so the query may spend only what that leaves.
+        with (
+            find_types.timing_span(timings, "working_set.task_context_text"),
+            request_budget.leaving(request_budget.task_projection_reserve(len(found))),
+            lexstore.stopping_at_budget(),
+        ):
             result = lexstore.search_bm25_result(
                 vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
                 allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
                 exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
             )
+        if result.readiness.status == lexstore.DEADLINE_STATUS:
+            missing.append({"role": "task_context", "reason": "budget"})
+            note_stopped("working_set.task_context_text")
+            break
         if not result.readiness.complete:
             # A lexical index still catching up after a cutover or a write must not also silence the dense reading.
             missing.append({"role": "task_context", "reason": "lane_failed"})
@@ -1622,9 +1639,7 @@ def task_candidates(
         method_seconds = time.monotonic() - started
         if methods.readiness.status == lexstore.DEADLINE_STATUS:
             missing.append({"role": "task_context", "reason": "budget"})
-            budget = request_budget.current()
-            if budget is not None:
-                budget.note_truncated("working_set.task_context_methods")
+            note_stopped("working_set.task_context_methods")
             break
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
@@ -2626,6 +2641,27 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
         return False
     budget.note_skipped(stage)
     return True
+
+
+def note_stopped(stage: str) -> None:
+    """Record on the request budget that `stage` started and stopped at the deadline."""
+    budget = request_budget.current()
+    if budget is not None:
+        budget.note_truncated(stage)
+
+
+def budget_checkpoint(stage: str) -> None:
+    """Stop a stage that is already running once the request can no longer afford the next unit of it.
+
+    A CPU-bound loop calls this every `request_budget.CHECKPOINT_EVERY` items, where `budget_exhausted` only
+    guards the boundary before a stage starts. It raises `BudgetExhausted`, which each optional stage catches
+    and turns into a partial result, and records the stage as truncated so the response names it.
+    """
+    budget = request_budget.current()
+    if budget is None or budget.can_afford(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS):
+        return
+    note_stopped(stage)
+    raise BudgetExhausted(stage)
 
 
 def band_audience_allowed(vault_root: Path) -> bool:
@@ -4733,6 +4769,7 @@ def _compile_packet(
                     ),
                     row_lexicons=row_lexicons,
                     retrieval_without=retrieval_without if retrieval_paths else None,
+                    checkpoint=lambda: budget_checkpoint("working_set.resolve"),
                 )
 
             candidates = _candidates(rows)

@@ -29,7 +29,7 @@ import re
 import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
@@ -7013,6 +7013,7 @@ def op_activate_context(
     intent_resolution = {"status": "unavailable"} if trigger == "task_refresh" else None
     # Finalization and logging share the leaf's budget, including error paths.
     bound_token = None
+    activation_scope = ExitStack()
     try:
         from .collection_store import ownership
 
@@ -7042,6 +7043,17 @@ def op_activate_context(
                             bound_token = request_budget_module.set_current(
                                 request_budget_module.RequestBudget(
                                     seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+                                )
+                            )
+                        elif (
+                            request_budget_module.current() is not None
+                            # The anchors rollback keeps its abstention for an exhausted budget; only maps serves what it found.
+                            and working_set_runtime_module.activation_packet_mode() == "maps"
+                        ):
+                            # A request that carries a deadline gives the activation its own, nearer one.
+                            activation_scope.enter_context(
+                                request_budget_module.capped(
+                                    request_budget_module.activation_budget_seconds()
                                 )
                             )
                         # Owed before the body runs, so its characters come out of the map's budget
@@ -7133,6 +7145,8 @@ def op_activate_context(
                        for name, stage in observation_timings.stages.items() if "ms" in stage],
             )
         finally:
+            # After the row, so it reads the leaf's budget; before the caller, so the request's budget names what the leaf left out.
+            activation_scope.close()
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
 
