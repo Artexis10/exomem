@@ -3235,6 +3235,7 @@ def op_find(
                     timings=timings,
                     purpose=purpose,
                     strip_for=strip_for,
+                    dimension_groups=group_blocks,
                 )
                 if active_budget is not None and context_pack_module.DEADLINE_TRUNCATION in (
                     pack_obj.get("truncation") or []
