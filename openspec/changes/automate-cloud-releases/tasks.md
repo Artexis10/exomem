@@ -3,6 +3,7 @@
 - [ ] 1.0 Read the matching pick-by-problem rows of the engineering primary-source roster for retry budgets, rollout windows and deploy custody. Cite them in design.md. Verify: design.md cites each row, or records a design change that a row forces. It catches an implementation that repeats a design flaw the roster names.
 - [ ] 1.1 Substrate (separate repository): add the gateway hold and the upstream timeouts to the cloud handler (D5).
   - Reuse the prepared-body reader of `cloud-artifacts.ts` and its 1 MiB cap for every request while the hold budget is above 0. Stream a larger body without a hold.
+  - Size the reader's buffer from `content-length` when the header is present, with the 1 MiB cap as the bound.
   - Retry only on a connect error, listed by its documented error codes, at the interval with jitter, until the budget runs out. Then answer `503 CELL_NOT_READY` with `Retry-After`.
   - Count held requests against their own caps. Take an in-flight slot when the cell accepts. Stop at once when the client leaves.
   - Add the connect timeout, the header timeout that answers `504 CELL_TIMEOUT`, and the idle bound on a streamed body.
@@ -13,6 +14,7 @@
   - a request during a 5-second refusal gets the cell's answer, which catches a hold that still answers `503` at once;
   - a cell that closes the connection after the first request byte gets no retry, which catches a tool call that runs twice;
   - a body one byte over the cap is not held and is still forwarded whole, which catches unbounded buffering and a truncated body;
+  - a 1 KiB body with its `content-length` gets a buffer of that size, not 1 MiB, which catches a full-cap allocation on every request;
   - a full per-tenant hold cap answers `503` with `Retry-After`, while another tenant's request proceeds, which catches one tenant's restart starving others;
   - an accepted held request with no free in-flight slot gets the in-flight cap's answer and frees its hold slot, which catches a hold slot that leaks;
   - a client abort stops the retries, which catches retries that outlive the client;
@@ -22,6 +24,8 @@
 - [ ] 1.2 Render the gateway hold and timeout values from `cloudGateway.hold.*` and `cloudGateway.upstream.*` into the gateway's environment. Extend C3's pinned environment set and the chart schema. Verify: the chart test that pins the gateway environment passes with the new names. It catches a value that the chart never renders, which would stop the gateway at its next deploy.
 - [ ] 1.3 Substrate (separate repository): add the image history, the rollout view and the narrower deploy principal (D1).
   - Record each digest the first time it becomes `cell_image`, with its release tag and the time. Require the tag for a digest new to the history.
+  - Add an idempotent seed: every published release's cell image digest and tag, the live `cell_image` and `last_good_image`, and each cell's observed and desired images. A digest that matches no published release gets no tag.
+  - Grant `cellctl`'s database role read access to the history table.
   - Refuse a deploy-token `PUT` whose digest the history holds, with `CELL_IMAGE_SEEN`.
   - Add `GET /api/exomem/admin/cloud-release/rollout`: `cell_image` and its tag, the pause and its code, `canary_on_target` from the canary row's observed image and readiness, and counts. No cell or tenant ID.
   - Narrow the deploy principal to the rollout view, and to `PUT` with `cellImage` and `release` alone.
@@ -29,6 +33,9 @@
 
   Verify with route tests:
   - the deploy token with a digest that was `cell_image` before gets `CELL_IMAGE_SEEN`, and `cell_image` does not change, which catches a merge that re-deploys a withdrawn release;
+  - after the seed, a deploy-token `PUT` with a release digest published before the history shipped gets `CELL_IMAGE_SEEN`, which catches a workflow bug that picks an older release on ship day;
+  - a second seed run adds no row and changes no tag, which catches a re-seed at migration step 6 that rewrites history;
+  - `cellctl`'s role can read the history table and cannot write it, which catches a forward-only rule that cannot map any image;
   - the admin token can set an earlier digest, which catches a history that blocks a person's withdrawal;
   - the deploy token with `clearRolloutPause` gets a refusal, and the rollout row does not change, which catches automation that can clear a pause;
   - the deploy token with `cellId` and `cellDesiredImage` gets a refusal, which catches automation that can pin one tenant's image;
@@ -41,7 +48,7 @@
 - [ ] 1.5 Add hourly traffic counts to the cloud cell (D4).
   - Keep the counts file under `/data/host`, outside `/data/vault`.
   - Add `inflight` and `last_request_age_seconds` to the readiness `traffic` block.
-  - Serve the history on `/health/traffic-history`, with `retention_hours` and two integer arrays.
+  - Serve the history on `/health/traffic-history`, with `retention_hours` and two integer arrays. Add the path to the shared protocol module, `infra/cellctl/src/cellctl/cell_readiness.py`, and update its note on the health-only listener.
   - Checkpoint the SQLite databases and sync at the stop signal (D6).
 
   Verify with tests:
@@ -57,6 +64,7 @@
   - a history that is quietest at 04:00 UTC gives `4 history`, which catches a window that picks the busiest hour;
   - coverage below the minimum gives a default hour with the source `default`, which catches a window computed from one day of data;
   - 1,000 unmeasured cell IDs spread across the default range, and none lands in the nightly backup window, which catches a fleet-wide default hour;
+  - three fixed cell IDs give fixed expected default hours from SHA-256 of the cell ID, in a fresh process each, which catches a per-process `hash()` that moves windows at every restart;
   - a default range that overlaps the backup window is refused, which catches a configuration that rolls cells during stopped backups;
   - an hour with no observed seconds never wins, which catches a down hour chosen as the quietest;
   - tied hours follow the cell-ID hash and stay the same across recomputes, which catches every tied cell choosing hour 0;
@@ -94,13 +102,17 @@
   - `cellctl.upgradeWindow.enabled: false` selects candidates as before this change, which catches a rollback switch that does nothing.
 - [ ] 1.9 After task 1.7 ships, add per-node concurrency after the canary (D4). Keep the fleet-wide block on any restore hold. Verify with reconcile tests:
   - with a concurrency of 1, two due cells on one node give one attempt, and a due cell on another node also starts, which catches a count that is fleet-wide or unbounded;
-  - while the canary differs from its pinned target, no other attempt starts on any node, which catches an image that reaches tenants before the canary;
+  - while the canary's image differs from its target (`desired_image` or `cell_image`), no other attempt starts on any node, which catches an image that reaches tenants before the canary;
+  - a canary that is behind its target but not eligible (stopped, not Ready, refused or in backoff) blocks every tenant attempt, including a tenant with an older `candidate-since`, which catches a tenant that pins a new image before the canary ran it;
+  - a canary whose attempt ended on an older pin, while `cell_image` moved on, blocks every tenant attempt until it runs the new target, which catches a finished pin read as "canary on target";
   - a restore hold on one node blocks new attempts on every node, which catches a silent relaxation of today's restore rule.
 - [ ] 1.10 Add the barrier file `infra/contracts/upgrade-barriers-v1.json`, its JSON schema, its CI check and the chart's copy (D3).
   - Seed the 0.147.0 entry. Read the release history for earlier secret-registry changes, and add each as `operator-step`.
   - State the author rule in `CONTRIBUTING.md`, and add the entry to its review checklist.
   - Add the forward-only rule to `cellctl`: decide a crossing attempt from the previous image's and the pinned target's releases, through the image history and the chart's barrier file.
-  - Add the `forward-only-held` phase. `cellctl` never re-applies a target in it, and a person's clear of the pause ends it.
+  - Add the `forward-only-held` phase. `cellctl` never re-applies a target in it, and keeps the attempt's restore point. A person's clear of the pause ends it, and `cellctl` deletes the held snapshot and clone before the new attempt.
+  - Count an unmapped previous image as older than every entry, and an unmapped target as newer.
+  - Refuse an attempt whose target maps to a release before a one-way `cell` entry that the previous image is past. Pause the rollout with `UPGRADE_BACKWARD_CROSSING`, and keep the cell on its current image.
 
   Verify:
   - the CI check fails on an entry whose runbook section does not exist, which catches a barrier with no step that a person can follow;
@@ -108,6 +120,9 @@
   - the chart test fails when the chart's copy differs from the source, which catches a barrier that `cellctl` never sees;
   - a reconcile test: a cell on a pre-barrier image whose target is two releases past a one-way `cell` entry misses Ready. The rollout pauses, the cell stays stopped with `UPGRADE_FORWARD_ONLY`, and no restore Job runs. It catches a restore onto external state that the previous image cannot read;
   - a reconcile test: a previous image with no history row counts as pre-barrier, which catches an unknown image that restores across a barrier;
+  - a reconcile test: an unmapped per-cell `desired_image` on a cell past a one-way entry is a crossing attempt, and a miss holds, which catches an unmapped target that restores across a barrier;
+  - a reconcile test: `cell_image` set back to a release before a one-way entry that a cell is past starts no attempt, keeps the cell serving, and pauses with `UPGRADE_BACKWARD_CROSSING`, which catches a withdrawal that moves cells back across a one-way change;
+  - a reconcile test: the forward-only hold keeps the attempt's restore point while it lasts, which catches a hold that leaves a person no state to restore by hand;
   - a reconcile test: passes after the forward-only miss apply no target and keep 0 replicas, which catches a hold that restarts the failed target every deadline;
   - a reconcile test: after a person clears the pause, one new attempt starts toward the current target, which catches a hold that no action can end.
 - [ ] 1.11 Add the four rollout alerts to `cellctl` (D8). Add the three thresholds to the observability contract and the chart. Verify with tests:
@@ -133,6 +148,7 @@
   - record the first platform Deployment, with every barrier entry at or below the live release in `barriers_crossed`;
   - list `barriers_crossed` when an upgrade crosses a barrier;
   - read a paused rollout, clear it with the admin token, and end a forward-only hold;
+  - forbid a withdrawal across a one-way `cell` barrier, say to fix forward, and explain `UPGRADE_BACKWARD_CROSSING`;
   - for a key rotation, wait for every cell's render digest before the retire step, and name the bypass for an urgent re-render;
   - add the derived quiet hour per tenant to the list of data that the platform keeps, in Substrate's Cloud privacy documentation.
 
@@ -140,7 +156,8 @@
 
 ## 2. Phase 1 rehearsal
 
-- [ ] 2.1 With the operator's approval, rehearse a release end to end on the rehearsal cluster, with a disposable canary and two disposable cells. Verify:
+- [ ] 2.1 With the operator's approval, rehearse a release end to end on the rehearsal cluster, with a disposable canary and two disposable cells. Start from a real tag publish, not a manual dispatch. If the tag run's completion starts no `cloud-deploy` run, add an explicit `gh workflow run cloud-deploy.yml --ref main` step to the release workflow's tag run, and repeat. Verify:
+  - a real tag publish starts `cloud-deploy`, which catches a `workflow_run` trigger that a run started with `github.token` never fires;
   - the workflow sets the image, the canary rolls at once, and each other cell rolls only in its window, after its idle minutes;
   - a client that calls a tool every second through each switch sees no error within the budget, and the run records the waits;
   - a second `cell_image` during a disposable cell's attempt leaves that attempt on its pinned target;
@@ -162,11 +179,11 @@
   - a missing snapshot falls back to the off-site backup. With neither, the row records `RESTORE_FAILED`, and no image starts. It catches a guess onto an unrestored volume;
   - a `cellctl` restart at each step resumes from the annotations, which catches an attempt that loses its restore point on restart.
 - [ ] 3.2 Drop `forget --prune` from the pre-upgrade backup of a cell without snapshot support, and keep its nightly prune. Verify: a test of `_backup_source` shows no retention for that cell's upgrade hold, and retention for its nightly backup. It catches a prune that holds restic's exclusive lock inside the stop.
-- [ ] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot` and the fallback order. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
+- [ ] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot`, the fallback order, and the forward-only hold's kept snapshot and clone. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
 
 ## 4. Phase 3: platform upgrade command (D7)
 
-- [ ] 4.1 Make `cellctl` refuse to start when a column that it reads or writes is missing, and expose the same check for the command. Verify: a test against a schema without one column stops the start and names the column. It catches a controller that acts on half a schema.
+- [ ] 4.1 Make `cellctl` refuse to start when a table or column that it reads or writes is missing or unreadable, the image history included. Expose the same check for the command. Verify: a test against a schema without one column, and one without the read grant on the history table, stops the start and names the gap. It catches a controller that acts on half a schema.
 - [ ] 4.2 Add `infra/scripts/platform_upgrade.py` with the machine review, the upgrade, the verify step, the platform Deployment record and the dispatch. Verify with tests on recorded tool output:
   - each failing review step stops the command before any change, which catches an upgrade that runs past a failed check;
   - a secret contract change with no barrier entry stops the command, which catches an operator-step release applied without its step;

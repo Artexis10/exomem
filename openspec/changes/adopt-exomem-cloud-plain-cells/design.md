@@ -294,11 +294,11 @@ Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A C
 
 *Amendment, 2026-11-10.* `automate-cloud-releases` changes this section in six places:
 
-- a workflow sets `cell_image` after each attested release, and Substrate refuses it any digest that was `cell_image` before (its D1);
+- a workflow sets `cell_image` after each attested release, and Substrate refuses it any digest in its image history, which a seed fills with every earlier release (its D1);
 - each attempt pins its target, and a pause ends every attempt that has not applied it (its D4);
 - after the canary, a cell starts an attempt only inside its own upgrade window, later with a per-node limit (its D4);
 - a local cell's restore point becomes a volume snapshot taken after the stop (its D6);
-- an attempt that crosses a one-way cell barrier holds without a restore (its D3);
+- an attempt that crosses a one-way cell barrier holds without a restore, and an attempt back across one is refused (its D3);
 - a person still clears a pause; the automation never does.
 
 That change's design and its `cloud-cell` delta hold the new rules.

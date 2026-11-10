@@ -54,6 +54,8 @@ A new workflow, `.github/workflows/cloud-deploy.yml`, runs on two events:
 - the release workflow completes with success on a release tag. Only a run on a `v*` tag publishes, so the trigger filters on `workflow_run.head_branch`. A push to `main` that publishes nothing therefore starts no run;
 - a dispatch on `main`, with no inputs. The platform upgrade command and the runbook's manual upgrade end with `gh workflow run cloud-deploy.yml --ref main` (D2).
 
+The release workflow's tag run starts from a dispatch with `github.token`. GitHub may not start another workflow from such a run's completion, and task 2.1 proves the trigger from a real tag publish. If no `workflow_run` arrives, the release workflow's tag run ends with an explicit dispatch of `cloud-deploy` on `main` instead. GitHub starts a run from a `workflow_dispatch` that `github.token` sends.
+
 Each run acts only on the newest published release. Steps:
 
 1. Read the cell image digest that the newest release published.
@@ -76,7 +78,16 @@ The workflow prints error codes and counts only. It prints no cell ID, no tenant
 **Image history (Substrate).** Substrate records each digest the first time it becomes `cell_image`, with its release tag and the time. The deploy principal may set only a digest that the history does not hold. Substrate refuses any other request with `CELL_IMAGE_SEEN` and writes nothing.
 - A rerun, a bug or a changed workflow on `main` therefore cannot move the fleet backwards.
 - After a person withdraws release N by setting `cell_image` back to A with the admin token, later merges cannot set N again. The next new release moves the fleet forward.
-- The admin token may set any digest. A new digest from either token carries its release tag, so that every history row maps a digest to a release (D3).
+- The admin token may set any digest. A new digest from either token carries its release tag, so that every row that a token writes maps a digest to a release (D3).
+
+**The seed.** Migration step 1 seeds the history before the deploy principal can use it. The seed adds:
+- every published release's cell image digest, with its tag;
+- the live `cell_image` and `last_good_image`;
+- each cell's observed and desired images.
+
+A seeded digest that matches no published release has no tag, so the forward-only rule treats it as unmapped (D3). The seed is idempotent, and migration step 6 runs it again before it adds the token. The history then holds every digest that was ever `cell_image`, so the guarantees above hold from the first workflow run.
+
+`cellctl`'s database role gets a read grant on the history table. Its column and table check (D7) includes the table.
 
 **Rollout view (Substrate).** A new `GET /api/exomem/admin/cloud-release/rollout` returns a bounded, fixed-size answer:
 - `cell_image` and its release tag;
@@ -151,8 +162,8 @@ A JSON schema checks the file in CI, and each `runbook` link must resolve. The f
 - A `cell` entry that is `one-way` changes state outside the cell's volume, or D6's restore would undo it. A restore to any earlier image then runs that image against migrated state.
 
 **The forward-only rule** keys on the image that the cell ran before the attempt, not on the target. When an attempt starts, `cellctl` decides whether it is a crossing attempt:
-1. It maps the previous image and the pinned target to releases through the image history. `cellctl` reads that table from the control database.
-2. A digest with no history row predates the history, or came from a person's per-cell `desired_image`. It counts as older than every entry, so its attempt holds rather than restores.
+1. It maps the previous image and the pinned target to releases through the image history. `cellctl` reads that table from the control database, with its read grant (D1).
+2. A previous image that maps to no release counts as older than every entry, so its attempt holds rather than restores. A target that maps to no release counts as newer than every entry. A person's per-cell `desired_image` past a barrier therefore never restores across it.
 3. The attempt crosses when a `one-way` `cell` entry in the chart's barrier file lies between the two releases.
 
 The rule needs no list of digests. The phase-1 chart ships the barrier file, so the rule holds from phase 1, without the phase-3 command. A barrier crossed by any later digest still counts, because the rule compares releases, not one target.
@@ -160,11 +171,19 @@ The rule needs no list of digests. The phase-1 chart ships the barrier file, so 
 **The forward-only hold.** When a crossing attempt misses Ready, `cellctl`:
 - pauses the rollout, records `UPGRADE_FORWARD_ONLY`, and alerts (D8);
 - keeps the cell stopped under its upgrade hold, with the phase `forward-only-held`;
-- neither restores the volume nor starts the previous image.
+- neither restores the volume nor starts the previous image;
+- keeps the attempt's restore point until the hold ends: its snapshot and clone, or its off-site backup. A person's manual restore then uses the attempt's own state (task 3.3).
 
 `cellctl` never re-applies a target for a cell in `forward-only-held`. The phase replaces today's rule that reads 0 replicas as "target not applied". The hold ends only by a person's action:
-- The person fixes forward: sets a fixed release as `cell_image` with the admin token, then clears the pause. Clearing the pause ends the hold, and `cellctl` starts one new attempt toward the current target. That attempt is again a crossing attempt, so a second miss holds again and waits for a person.
+- The person fixes forward: sets a fixed release as `cell_image` with the admin token, then clears the pause. Clearing the pause ends the hold. `cellctl` deletes the held attempt's snapshot and clone, because the quota admits one clone, and starts one new attempt toward the current target. That attempt is again a crossing attempt, so a second miss holds again and waits for a person.
 - Or the person restores the cell by hand with `docs/runbooks/cloud-operator-restore.md`, sets its `desired_image`, then clears the pause.
+
+After task 1.9 ships, several cells can be in the forward-only hold at once. One clear of the pause ends every such hold.
+
+**No backward crossing.** A person's withdrawal can move a cell back across a one-way `cell` entry. `cellctl` knows both releases, so it refuses that attempt itself:
+- An attempt whose target maps to a release before an entry that the previous image is past is refused.
+- `cellctl` starts nothing, keeps the cell on its current image, and pauses the rollout with `UPGRADE_BACKWARD_CROSSING`.
+- The runbook forbids a withdrawal across a one-way barrier and says to fix forward.
 
 **Authors.** Every pull request that adds a one-way or operator-step change adds its entry in the same pull request.
 - `CONTRIBUTING.md`, which every author reads before a commit, states the rule and names the file. Its review checklist asks for the entry.
@@ -197,9 +216,9 @@ The counts are content-free. The gateway already sees the time of each request. 
 2. Coverage is the observed seconds divided by the lookback's seconds. Below `minCoverage`, the window is the cell's default hour, with the source `default`.
 3. Otherwise, compute each hour of the day's rate: requests divided by observed seconds, over the buckets of that hour. Skip an hour with no observed seconds.
 4. The window is the hour with the lowest rate, with the source `history`.
-5. Break a tie by a stable hash of the cell ID, so that cells with equal quiet hours spread across them.
+5. Break a tie by a fixed digest of the cell ID, so that cells with equal quiet hours spread across them.
 
-**The default hour** is not one hour for the fleet. A stable hash of the cell ID picks one hour from `defaultHourStart` up to `defaultHourEnd`, which may wrap past midnight. `cellctl` refuses to start when that range overlaps the nightly backup window that `within_backup_window` defines. Unmeasured cells therefore spread over many hours, and none of them upgrades during the nightly stopped backups.
+**The default hour** is not one hour for the fleet. A fixed digest of the cell ID, SHA-256, picks one hour from `defaultHourStart` up to `defaultHourEnd`, which may wrap past midnight. `cellctl` refuses to start when that range overlaps the nightly backup window that `within_backup_window` defines. The digest is never Python's per-process `hash()`, which changes at each start. Unmeasured cells therefore spread over many hours, and none of them upgrades during the nightly stopped backups.
 
 **The cache.**
 - `cellctl` writes the window to the StatefulSet annotation `exomem.io/upgrade-window`, as `<hour> history` or `<hour> default`, with the UTC day in `exomem.io/upgrade-window-at`.
@@ -231,8 +250,9 @@ Further rules:
 - **Render-digest re-applies obey the due set.** A digest change restarts the cell like an upgrade. Today they run one cell at a time fleet-wide, by cell ID. A step that retires a previous key version therefore waits for observed convergence: every cell's applied render digest equals the new one. The runbook's bypass for an urgent credential re-render sets `cellctl.upgradeWindow.enabled: false` for its duration.
 
 **Concurrency.**
+- In every phase, while the canary's image differs from its target (`desired_image` or `cell_image`), only the canary's attempt runs. A canary that is behind and cannot start, because it is stopped, not Ready, refused or in backoff, blocks every tenant attempt, as today (`rollout.py`). The canary's pin never relaxes this rule: after its attempt ends on an older pin, it is behind its target again.
 - Phase 1 keeps one attempt fleet-wide, as today, and adds windows, pins and the pause abort.
-- After pinning and the pause abort ship, task 1.9 adds per-node concurrency. While the canary's image differs from its pinned target, only the canary's attempt runs. After that, at most `cellctl.upgradeConcurrencyPerNode` cells per node carry an upgrade hold. A cell's node is the node that its row last observed.
+- After pinning and the pause abort ship, task 1.9 adds per-node concurrency. After the canary runs its target, at most `cellctl.upgradeConcurrencyPerNode` cells per node carry an upgrade hold. A cell's node is the node that its row last observed.
 - Any restore hold still blocks every new attempt fleet-wide, as today. Relocations after a node loss and failed attempts are rare, and they need the operator's attention more than throughput.
 - Hourly backup holds keep their own per-node slots. A cell carries one hold at a time.
 - Why: cells cluster by time zone, so many cells share a quiet hour. One attempt fleet-wide gives about 20 to 30 attempts per hour (est.).
@@ -266,6 +286,7 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 - When the hold budget is above 0, the handler prepares the body of every request, not only of transfer and artifact requests.
 - A body over the cap streams as today, and that request is never held.
 - The cap stays in one place, the existing constant. This change adds no second reader and no second cap.
+- The reader sizes its buffer from `content-length` when the header is present, with the 1 MiB cap as the bound. Today it allocates the full 1 MiB for every prepared request.
 - Response bodies always stream.
 
 **When to retry.** The gateway retries only on a connect error, when no byte reached the cell: a refused connection, a reset before the connection opened, a DNS failure for the cell's Service, or the connect timeout. The code lists these by the documented Node and undici error codes, a closed set. It never retries after the connection opened, because the cell may have acted.
@@ -362,7 +383,7 @@ The command reads the live release from Helm's release metadata, not from the pl
 - Then create the platform Deployment for the tag, with `barriers_crossed`, in the state `success`. A failed upgrade records the state `failure`.
 - After a success, dispatch `cloud-deploy` with `gh workflow run cloud-deploy.yml --ref main`.
 
-**`cellctl` refuses a missing column.** At start, `cellctl` checks every column it reads or writes, and refuses to start when one is missing. A schema mismatch then fails the new pod, and `--atomic` keeps the old controller.
+**`cellctl` refuses a missing column.** At start, `cellctl` checks every table and column it reads or writes, the image history included, and refuses to start when one is missing. A schema mismatch then fails the new pod, and `--atomic` keeps the old controller.
 
 **Why.** The runbook's upgrade has many manual steps with judgment points. One command makes the review repeatable and records the outcome.
 
@@ -441,11 +462,14 @@ These steps are not in this change's first phases.
   - No pass lists history across cells.
 - **Throughput.**
   - An attempt takes about 2–3 minutes (est.). In phase 1 one attempt runs fleet-wide, about 20–30 an hour (est.). After task 1.9, each node runs that many.
-  - A busy cell is due only in its last `forceMinutes`, when one slot rolls about 3–5 cells (est.). A cell that misses its window goes first in its next one, because the due set is ordered oldest candidate first. If all 43 cells on a node share one hour, each cell rolls within about two days (est.).
+  - Idle cells roll within about two days (est.), even when all 43 cells on a node share one hour.
+  - A busy cell is due only in its last `forceMinutes`, when one slot rolls about 3–5 cells (est.). So 43 busy cells that share one hour take about 9–14 days (est.).
+  - The order is fair: a cell that misses its window goes first in its next one, because the due set is ordered oldest candidate first.
+  - `cellctl.upgradeWindow.forceMinutes` raises the busy rate, and `cellctl.upgradeConcurrencyPerNode` multiplies it after task 1.9.
   - Unmeasured cells spread over the default range, not one hour.
   - A catalogue identity release rolls about 7 cells per node-hour (est.).
 - **Gateway latency.**
-  - With the hold on, a normal request gains one buffered read of at most 1 MiB, and no extra round trip.
+  - With the hold on, a normal request gains one buffered read of at most 1 MiB, sized from `content-length`, and no extra round trip.
   - Only a request that meets a restart waits, and for at most the hold budget.
   - The hold caps protect the in-flight slots of other tenants. Buffered bodies take at most 48 MiB at the proposed caps.
   - No numeric latency budget exists for the gateway route yet. Task 1.4 records one from the clients' timeouts.
@@ -464,6 +488,7 @@ These steps are not in this change's first phases.
 | Platform gate (D2) | A cell image on a platform that lacks its controller or chart | Tenants get the release later. The operator runs a platform upgrade |
 | Barrier stop (D3) | A one-way or operator-step crossing without its step | The same as the platform gate |
 | Forward-only hold (D3) | Restoring a volume onto external state that the previous image cannot read | The cell stays down until a person fixes forward or restores by hand |
+| Backward-crossing refusal (D3) | A withdrawal that restores a cell's image across a one-way change | The fleet pauses. A person fixes forward with a new `cell_image` |
 | Pause abort (D4) | An un-canaried or paused target reaching more cells | An aborted cell restarts on its current image and tries again later |
 | Hold caps (D5) | A restart that exhausts other tenants' slots | A held request gets `503` with `Retry-After` sooner |
 | Missing-column refusal (D7) | A controller that acts on half a schema | `--atomic` keeps the old controller. The operator migrates first |
@@ -474,7 +499,7 @@ These steps are not in this change's first phases.
 - **A request inside the cell during its stop** fails without a retry. The idle rule makes this rare. The cell drains its in-flight requests at termination (unverified).
 - **About half of releases wait for a person** until the deploy tier ships (D2).
 - **The platform Deployment is a mistake guard** (D2). A false record moves cells early, and D6's canary restore limits the harm.
-- **Windows cluster.** A node whose cells share one quiet hour needs about two days for each cell (est.). The stalled alert reports a cell that stays behind.
+- **Windows cluster.** A node whose cells share one quiet hour needs about two days for idle cells, and about 9–14 days for busy cells (est.). The stalled alert reports a cell that stays behind, and `forceMinutes` raises the busy rate (Scale).
 - **A default hour may be busy** for a new cell's tenant. It lasts until the cell observes enough of its lookback.
 - **Daylight saving** moves a local quiet hour by one UTC hour. The daily recompute follows it after the lookback.
 - **A forward-only failure** keeps the cell down until a person acts (D3).
@@ -483,12 +508,12 @@ These steps are not in this change's first phases.
 
 ## Migration Plan
 
-1. Ship Substrate: the deploy principal's narrower scope, the image history, the rollout view, and the gateway hold with its budget at 0.
+1. Ship Substrate: the deploy principal's narrower scope, the image history with its seed (D1), `cellctl`'s read grant, the rollout view, and the gateway hold with its budget at 0.
 2. Release the cell's traffic counts and history path, so that history starts.
 3. Release `cellctl`'s pins, pause abort, window, due set and alerts, with one attempt fleet-wide. Run the platform upgrade by hand.
 4. Record the first platform Deployment with the runbook's `gh api` call. It names the live release and lists every barrier entry at or below it as crossed.
 5. Set the hold budget to its first value, and run the measurement of task 1.4.
-6. Create the `cloud-deploy` environment with its branch policy, and add `EXOMEM_DEPLOY_TOKEN` and the receiver capability.
+6. Run the history seed again. Then create the `cloud-deploy` environment with its branch policy, and add `EXOMEM_DEPLOY_TOKEN` and the receiver capability.
 7. Rehearse a release end to end on a disposable cell (task 2.1).
 8. Release per-node concurrency (task 1.9). Then ship the restore point (phase 2), then the platform upgrade command (phase 3).
 

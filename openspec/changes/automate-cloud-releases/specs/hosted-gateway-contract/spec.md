@@ -2,7 +2,7 @@
 
 ### Requirement: The gateway holds a request while its cell restarts
 
-When the gateway cannot connect to a running cell and no byte reached it, it SHALL retry the same cell at a configured interval with jitter, until a configured budget runs out. It SHALL then answer `503 CELL_NOT_READY` with `Retry-After`. It SHALL hold only a request whose body fits the gateway's existing prepared-body cap, and SHALL buffer it through that same reader. It SHALL never retry after a connection opened. Held requests SHALL count against their own configured caps, not the in-flight caps, until the cell accepts the connection. A held request that the cell accepts SHALL then need a free in-flight slot. A budget of 0 SHALL turn the hold off.
+When the gateway cannot connect to a running cell and no byte reached it, it SHALL retry the same cell at a configured interval with jitter, until a configured budget runs out. It SHALL then answer `503 CELL_NOT_READY` with `Retry-After`. It SHALL hold only a request whose body fits the gateway's existing prepared-body cap, and SHALL buffer it through that same reader. The reader SHALL size its buffer from `content-length` when the header is present, up to the cap. It SHALL never retry after a connection opened. Held requests SHALL count against their own configured caps, not the in-flight caps, until the cell accepts the connection. A held request that the cell accepts SHALL then need a free in-flight slot. A budget of 0 SHALL turn the hold off.
 
 #### Scenario: The cell returns within the budget
 
