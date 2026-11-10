@@ -8,7 +8,7 @@
 ## 3. Write
 - [x] 3.1 Count `old_text` in the shown body first, then in the stored body, for the public tool shape, in the surgical edit, the batch edit and the validate-only preview.
 - [x] 3.2 Normalize a `[[Title]]` in an observation unit to the path form, and return its unresolved-link warnings.
-- [x] 3.3 Put back the stored bytes of each link that `new_text` repeats unchanged from the matched text.
+- [x] 3.3 Put back the stored bytes of each link that `new_text` repeats unchanged from the matched text, without normalizing them, where the link is live in the page.
 
 ## 4. Proof
 - [x] 4.1 Test each render branch, the inverse map, the refused cut, and the public tool shape end to end.

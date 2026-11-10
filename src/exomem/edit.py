@@ -76,6 +76,7 @@ from .vault import (
     read_guarded_text,
     render_frontmatter_document,
     render_title_links,
+    rewritable_link_ranges,
     writer_link_visibility,
     yaml_flow_list,
 )
@@ -309,7 +310,7 @@ def edit(
             )
             match_count = found.count
             matches = _match_contexts(found.shown or body, old_string)  # type: ignore[arg-type]
-            if match_count == 0 or (match_count > 1 and not replace_all):
+            if match_count == 0 or found.cuts or (match_count > 1 and not replace_all):
                 return EditValidation(
                     path=rel_path,
                     validate_only=True,
@@ -739,14 +740,15 @@ def render_editable(editable: _Editable, body: str, fm_text: str) -> str:
 class OldStringMatch:
     """Where `old_string` is in a body: its occurrences, counted as the surgical replace will use them."""
 
+    #: Occurrences as the caller reads the page, those inside a link's title included.
     count: int
-    #: Stored ranges of the occurrences, when the body shown with its links by title holds
-    #: `old_string`. None when the stored bytes are what was counted.
+    #: Stored ranges of the occurrences an edit may replace. None when the stored bytes were counted
+    #: as they are: a caller that never saw the shown form.
     ranges: tuple[tuple[int, int], ...] | None = None
-    #: Per occurrence in `ranges`: the `(shown, stored)` text of each link it holds, in order.
+    #: Per occurrence in `ranges`: each link it holds as `(text new_string may repeat, stored bytes)`.
     links: tuple[tuple[tuple[str, str], ...], ...] = ()
-    #: An occurrence in the shown body starts or ends inside a link, so no stored bytes stand for it.
-    cuts_link: bool = False
+    #: Occurrences in the shown body that start or end inside a link, so no stored bytes stand for them.
+    cuts: int = 0
     #: The shown body that `ranges` came from, for the lines an occurrence spans.
     shown: str = ""
 
@@ -762,8 +764,9 @@ def match_old_string(
     An agent on the public tool shape reads `[[Title]]` where the file holds the page's path, and
     cannot see the path's bytes. It is counted in the shown body, where the text outside a link is
     the stored text, and each occurrence maps back to the stored bytes it stands for. Failing that, a
-    snippet in the stored form is counted in the stored bytes. Any other caller counts the stored
-    bytes only. `resolver` is called only when a link may be shown by title.
+    snippet in the stored form is counted in the stored bytes, minus any occurrence that only part
+    covers a link the agent cannot see. Any other caller counts the stored bytes only. `resolver` is
+    called only when a link may be shown by title.
     """
     stored = OldStringMatch(body.count(old_string))
     if not old_string or not capabilities.shows_links_by_title() or "[[" not in body:
@@ -775,41 +778,69 @@ def match_old_string(
         return stored
     ranges: list[tuple[int, int]] = []
     links: list[tuple[tuple[str, str], ...]] = []
+    cuts = 0
     at = view.text.find(old_string)
     while at != -1:
         end = at + len(old_string)
         stored_range = view.stored_range(at, end)
         if stored_range is None:
-            return OldStringMatch(0, cuts_link=True)
-        ranges.append(stored_range)
-        links.append(
-            tuple(
-                (view.text[shown_start:shown_end], body[stored_start:stored_end])
-                for stored_start, stored_end, shown_start, shown_end in view.links_in(at, end)
+            cuts += 1
+        else:
+            ranges.append(stored_range)
+            links.append(
+                tuple(
+                    (view.text[shown_start:shown_end], body[stored_start:stored_end])
+                    for stored_start, stored_end, shown_start, shown_end in view.links_in(at, end)
+                )
             )
-        )
         at = view.text.find(old_string, end)
-    if not ranges:
-        return stored
-    return OldStringMatch(len(ranges), tuple(ranges), tuple(links), shown=view.text)
+    if cuts or ranges:
+        return OldStringMatch(len(ranges) + cuts, tuple(ranges), tuple(links), cuts, view.text)
+    # Not in the shown body: a snippet in the stored form, as a read with no resolver resident shows
+    # it. An occurrence inside the path of a link shown by title is text the agent never saw.
+    ranges, links = [], []
+    at = body.find(old_string)
+    while at != -1:
+        end = at + len(old_string)
+        inside = view.links_in_stored(at, end)
+        if inside is not None:
+            ranges.append((at, end))
+            links.append(tuple((body[start:stop], body[start:stop]) for start, stop, _, _ in inside))
+        at = body.find(old_string, end)
+    return OldStringMatch(len(ranges), tuple(ranges), tuple(links))
 
 
-def _restore_repeated_links(new_string: str, links: tuple[tuple[str, str], ...]) -> str:
-    """`new_string` with each link of the matched text that it repeats unchanged put back as stored.
+def _restore_repeated_links(
+    body: str, start: int, end: int, new_string: str, links: tuple[tuple[str, str], ...]
+) -> list[tuple[str, bool]]:
+    """`new_string` in pieces: text to normalize, and the stored bytes of each repeated link.
 
-    An untouched link keeps its stored bytes, so it is not resolved by title again.
+    A link of the matched text that `new_string` repeats unchanged keeps its stored bytes, so it is
+    not resolved by title again and is not normalized. It counts only where it is a live link in the
+    page as edited (`body[start:end]` replaced), so a link that `new_string` quotes in code stays
+    as written, and a snippet that starts inside a code span is read in its page.
     """
-    pieces: list[str] = []
+    if not links:
+        return [(new_string, False)]
+    candidate = body[:start] + new_string + body[end:]
+    live = [
+        (found_start - start, found_end - start)
+        for found_start, found_end in rewritable_link_ranges(candidate)
+        if found_start >= start and found_end <= start + len(new_string)
+    ]
+    pieces: list[tuple[str, bool]] = []
     cursor = 0
-    for shown, stored in links:
-        at = new_string.find(shown, cursor)
-        if at == -1:
-            continue
-        pieces.append(new_string[cursor:at])
-        pieces.append(stored)
-        cursor = at + len(shown)
-    pieces.append(new_string[cursor:])
-    return "".join(pieces)
+    next_live = 0
+    for text, stored_bytes in links:
+        for index in range(next_live, len(live)):
+            link_start, link_end = live[index]
+            if new_string[link_start:link_end] == text:
+                pieces.append((new_string[cursor:link_start], False))
+                pieces.append((stored_bytes, True))
+                cursor, next_live = link_end, index + 1
+                break
+    pieces.append((new_string[cursor:], False))
+    return pieces
 
 
 def replace_old_string(
@@ -829,8 +860,9 @@ def replace_old_string(
     chosen = range(len(found.ranges)) if replace_all else range(1)
     for index in reversed(chosen):
         start, end = found.ranges[index]
-        stored = _restore_repeated_links(new_string, found.links[index])
-        body = body[:start] + normalized(stored) + body[end:]
+        pieces = _restore_repeated_links(body, start, end, new_string, found.links[index])
+        inserted = "".join(text if kept else normalized(text) for text, kept in pieces if text)
+        body = body[:start] + inserted + body[end:]
     return body
 
 
@@ -862,7 +894,7 @@ def apply_surgical_replace(
     )
     found = match_old_string(body, old_string, vault_root, resolver_of)
     count = found.count
-    if count == 0:
+    if count == 0 or count == found.cuts:
         raise EditError(
             code="STRING_NOT_FOUND",
             missing=["old_string"],
@@ -872,9 +904,19 @@ def apply_surgical_replace(
                 "first to copy the snippet verbatim."
                 + (
                     " It starts or ends inside a link; include each link it touches whole."
-                    if found.cuts_link
+                    if found.cuts
                     else ""
                 )
+            ),
+        )
+    if found.cuts:
+        raise EditError(
+            code="AMBIGUOUS_MATCH",
+            missing=["old_string"],
+            reason=(
+                f"`old_string` occurs {count}×{where}{which}, {found.cuts} of them inside the title "
+                "of a link, which an edit cannot change; refusing to guess which. Add surrounding "
+                "text to select only the occurrence outside the link."
             ),
         )
     if count > 1 and not replace_all:

@@ -221,9 +221,47 @@ def test_a_snippet_is_counted_where_the_agent_sees_it_not_in_a_path_it_cannot_se
 
 
 @pytest.mark.usefixtures("public_shape")
+def test_a_stored_snippet_is_not_matched_inside_a_path_the_agent_cannot_see(vault: Path) -> None:
+    # "budget" is not on the page as shown ("Budget" is), but it is in the path of the link.
+    target = _page(vault, "retry-budget", "Retry Budget")
+    body = f"The Retry Budget caps load. See [[{target}]].\n"
+
+    with pytest.raises(edit.EditError) as slipped:
+        edit.apply_surgical_replace(body, "budget", "allowance", False, vault)
+    with pytest.raises(edit.EditError) as in_path:
+        edit.apply_surgical_replace(body, "Insights", "Ideas", True, vault)
+
+    assert slipped.value.code == in_path.value.code == "STRING_NOT_FOUND"
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_snippet_that_is_also_inside_a_link_title_is_refused_as_ambiguous(vault: Path) -> None:
+    target = _page(vault, "retry-budget", "Retry Budget")
+    body = f"Retry the call. See [[{target}]].\n"
+
+    with pytest.raises(edit.EditError) as refused:
+        edit.apply_surgical_replace(body, "Retry", "Repeat", True, vault)
+
+    assert refused.value.code == "AMBIGUOUS_MATCH"
+    assert "inside the title of a link" in refused.value.reason
+
+
+@pytest.mark.usefixtures("public_shape")
 def test_a_link_the_edit_leaves_alone_keeps_its_stored_bytes(vault: Path) -> None:
-    # The snippet starts inside a code span, so on its own its backticks pair around the link:
-    # written back by title, the link would be skipped as code and stored as a raw title.
+    # A bare-stem link is not the canonical path form: put back as stored, it is not normalized.
+    _page(vault, "alpha-slug", "Alpha Title")
+    body = "Cap of 30 s, see [[alpha-slug]].\n"
+
+    edited, _ = edit.apply_surgical_replace(
+        body, "Cap of 30 s, see [[Alpha Title]]", "Cap of 10 s, see [[Alpha Title]]", False, vault
+    )
+
+    assert edited == "Cap of 10 s, see [[alpha-slug]].\n"
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_snippet_that_starts_inside_a_code_span_still_keeps_its_link(vault: Path) -> None:
+    # On its own the snippet's backticks pair around the link, but in the page the link is live.
     target = _page(vault, "alpha-slug", "Alpha Title")
     body = f"Flags `a` then [[{target}]] and `b`.\n"
 
@@ -232,6 +270,18 @@ def test_a_link_the_edit_leaves_alone_keeps_its_stored_bytes(vault: Path) -> Non
     )
 
     assert edited == f"Flags `z` then [[{target}]] and `b`.\n"
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_link_the_edit_quotes_in_code_stays_as_written(vault: Path) -> None:
+    target = _page(vault, "alpha-slug", "Alpha Title")
+    body = f"See [[{target}]] now.\n"
+
+    edited, _ = edit.apply_surgical_replace(
+        body, "See [[Alpha Title]] now", "Write `[[Alpha Title]]` now", False, vault
+    )
+
+    assert edited == "Write `[[Alpha Title]]` now.\n"
 
 
 def test_a_caller_that_never_saw_the_shown_form_edits_the_stored_bytes(vault: Path) -> None:

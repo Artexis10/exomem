@@ -180,11 +180,11 @@ def multi_edit(
             found = match_old_string(work, old, vault_root, resolver_of)
             count = found.count
             previews.append({"index": i, "match_count": count, "replace_all": ra})
-            if count == 0 or (count > 1 and not ra):
+            if count == 0 or found.cuts or (count > 1 and not ra):
                 fully_renderable = False
             # Apply (raw — normalization is irrelevant to a count preview) so
             # later pairs see realistic state.
-            if count >= 1:
+            if count >= 1 and not found.cuts:
                 work = replace_old_string(work, found, old, new, ra)
         semantic: dict | None = None
         if fully_renderable:

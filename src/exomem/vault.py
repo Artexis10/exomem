@@ -9155,6 +9155,14 @@ def _rewritable_wikilinks(text: str) -> list[re.Match[str]]:
     return [match for match in matches if not inside(match.start(), match.end())]
 
 
+def rewritable_link_ranges(text: str) -> list[tuple[int, int]]:
+    """The `(start, end)` of each link in `text` that a write reads as a live link.
+
+    A link in code, a fence or an origin carrier is not one.
+    """
+    return [(match.start(), match.end()) for match in _rewritable_wikilinks(text)]
+
+
 def normalize_body_wikilinks(
     body: str,
     vault_root: Path,
@@ -9239,6 +9247,15 @@ class TitleLinkView:
         first = bisect.bisect_left(self.spans, start, key=operator.itemgetter(2))
         last = bisect.bisect_right(self.spans, end, key=operator.itemgetter(3))
         return self.spans[first:last]
+
+    def links_in_stored(self, start: int, end: int) -> tuple[tuple[int, int, int, int], ...] | None:
+        """The rewritten links wholly inside the stored range `[start, end)`; None if it cuts one."""
+        first = bisect.bisect_right(self.spans, start, key=operator.itemgetter(1))
+        last = bisect.bisect_left(self.spans, end, key=operator.itemgetter(0))
+        inside = self.spans[first:last]
+        if inside and (inside[0][0] < start or inside[-1][1] > end):
+            return None
+        return inside
 
     def _stored_offset(self, shown: int) -> int | None:
         index = bisect.bisect_right(self.spans, shown, key=operator.itemgetter(2)) - 1
