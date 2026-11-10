@@ -18,13 +18,13 @@ available. It keeps the contract simple:
 If the Exomem skill has already been loaded, follow it. Otherwise call:
 
 ```text
-bootstrap(profile="compact")
+read_instructions(profile="compact")
 ```
 
 Do this once at the start of a session for generic MCP clients, hosted chat
 clients, Cursor, Codex, ChatGPT, scripts, and future clients that only see tool
-schemas. Use `bootstrap(profile="full")` when the client needs examples. Use
-`bootstrap(profile="diagnostics")` only for speed, ranking, cache, CPU/GPU,
+schemas. Use `read_instructions(profile="full")` when the client needs examples. Use
+`read_instructions(profile="diagnostics")` only for speed, ranking, cache, CPU/GPU,
 rerank, or packed-context questions.
 
 ## The rule
@@ -353,11 +353,11 @@ content-read smoke-tested before their new digest is marked verified.
 | Client | Connection | Behavioral layer |
 | --- | --- | --- |
 | Claude Code | Local MCP via setup or manual config | Exomem skill, optional hooks |
-| Codex CLI | `codex mcp add ...` | `AGENTS.md`, optional hooks, `bootstrap()` fallback |
-| ChatGPT or hosted chat clients | Remote MCP/connector when supported | Custom instructions plus `bootstrap()` |
-| claude.ai web/mobile | Remote connector | Custom instructions plus `bootstrap()` |
-| Cursor, Windsurf, Gemini, generic MCP clients | Stdio or remote MCP config | `bootstrap()` at session start |
-| Scripts and custom chatbots | MCP, REST, or CLI | Cache `bootstrap()` per process/session |
+| Codex CLI | `codex mcp add ...` | `AGENTS.md`, optional hooks, `read_instructions()` fallback |
+| ChatGPT or hosted chat clients | Remote MCP/connector when supported | Custom instructions plus `read_instructions()` |
+| claude.ai web/mobile | Remote connector | Custom instructions plus `read_instructions()` |
+| Cursor, Windsurf, Gemini, generic MCP clients | Stdio or remote MCP config | `read_instructions()` at session start |
+| Scripts and custom chatbots | MCP, REST, or CLI | Cache `read_instructions()` (REST and CLI: `bootstrap`) per process/session |
 
 ## Copyable instruction block
 
@@ -370,7 +370,7 @@ Trim the tone line to your preference.
 ```text
 Use Exomem for eligible durable preferences, personal baselines, governed knowledge, sources, evidence, decisions, and reusable conclusions. Keep temporary working context in the current conversation.
 
-Without a loaded skill, call bootstrap(profile="compact") once per session and follow it.
+Without a loaded skill, call read_instructions(profile="compact") once per session and follow it.
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
@@ -481,7 +481,7 @@ Use the standard stdio config shape:
 After connecting, ask the agent to call:
 
 ```text
-bootstrap(profile="compact")
+read_instructions(profile="compact")
 ```
 
 ## Hosted chat clients
@@ -508,11 +508,11 @@ only when you ask.
 For ChatGPT Personal Plugins, follow the exact OAuth-only settings and
 tool-surface refresh gate in [remote-quickstart.md](remote-quickstart.md#chatgpt-personal-plugin-oauth-only).
 
-If the hosted client cannot reliably call `bootstrap()` on its own, start a new
+If the hosted client cannot reliably call `read_instructions()` on its own, start a new
 chat with:
 
 ```text
-Call Exomem bootstrap(profile="compact") once, then use that contract for this
+Call Exomem read_instructions(profile="compact") once, then use that contract for this
 chat. Do not search the KB unless this turn touches my prior projects, notes,
 decisions, sources, failures, experiments, or domains.
 ```
@@ -552,7 +552,7 @@ exomem doctor
 exomem install-hook --check
 ```
 
-Then ask the client to call `bootstrap(profile="compact")`. A good response
+Then ask the client to call `read_instructions(profile="compact")`. A good response
 includes a `contract_version`, server compute policy, tool defaults, and the
 search/save workflow. Ask one known vault question next and confirm it uses
 `search_memory` before answering.
