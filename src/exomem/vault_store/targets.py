@@ -201,7 +201,7 @@ _NOT_HELD = (
 def _carries_more(body: bytes | None) -> bool:
     """Whether a page names an original or further parts that move with it.
 
-    A page whose frontmatter does not parse names neither, as file mode reads it.
+    A page whose frontmatter does not parse names neither: the store form then moves its bytes.
     """
     from .. import extraction_parts
 
