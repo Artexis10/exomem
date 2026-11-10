@@ -161,6 +161,9 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
         include = " ".join(str(matrix["include"]).split())
         assert "needs.scope.outputs.full != 'true'" in include
         assert "fromJSON(needs.scope.outputs.changed_tests_include)" in include
+        # The changed tests run on the full run's newest runtime, so a runtime bump updates both.
+        scope_step = next(step for step in workflow["jobs"]["scope"]["steps"] if step.get("id") == "docs-scope")
+        assert f', "{scope_step["env"]["CHANGED_TESTS_PYTHON"]}"]' in versions
 
     command = _run_step(job)["run"]
     assert f"--splits={shards}" in command
@@ -827,7 +830,11 @@ def test_changed_tests_selection_keeps_the_tier_and_ignore_rules(monkeypatch: py
     tui_directory = workflow["env"]["EXOMEM_TUI_TEST_DIRECTORY"]
     assert '--ignore="$EXOMEM_TUI_TEST_DIRECTORY"' in run
     serial_module = core_job["env"]["EXOMEM_SERIAL_CORE_MODULE"]
-    harness_module = (ROOT / "tests" / "harness_modules.txt").read_text(encoding="utf-8").split()[0]
+    harness_module = next(
+        line
+        for line in (ROOT / "tests" / "harness_modules.txt").read_text(encoding="utf-8").splitlines()
+        if line.startswith("tests/")
+    )
     tui_module = next((ROOT / tui_directory).glob("test_*.py")).relative_to(ROOT).as_posix()
     core_module = "tests/test_ci_reliability_contract.py"
     monkeypatch.setenv("EXOMEM_CHANGED_TESTS", " ".join((core_module, harness_module, serial_module, tui_module)))
