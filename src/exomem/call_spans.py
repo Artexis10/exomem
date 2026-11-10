@@ -33,6 +33,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+try:
+    import resource
+except ImportError:  # Windows has no resource module, so spans there carry no thread_waits.
+    resource = None
+
 from . import recall_timing
 
 #: Unique per call, unlike the client-supplied request id, so concurrent calls
@@ -72,7 +77,14 @@ THREAD_CPU_US = "thread_cpu_us"
 #: is a wait on a lock, I/O, SQLite or another process; process CPU far above
 #: thread CPU says other threads ran meanwhile, not that they blocked this one.
 PROCESS_CPU_US = "process_cpu_us"
-CPU_FIELDS = frozenset({THREAD_CPU_US, PROCESS_CPU_US})
+#: How many times the executing thread gave up the CPU to wait over the span (Linux voluntary
+#: context switches). A thread that waits for the GIL gives it up about once per switch interval
+#: (5 ms), so a long wait with many switches is GIL contention, and a long wait with a few is one
+#: lock, I/O or SQLite wait. Absent where the platform does not count them per thread.
+THREAD_WAITS = "thread_waits"
+CPU_FIELDS = frozenset({THREAD_CPU_US, PROCESS_CPU_US, THREAD_WAITS})
+# RUSAGE_THREAD is Linux only; elsewhere the thread's waits are not counted.
+_RUSAGE_THREAD = getattr(resource, "RUSAGE_THREAD", None)
 # These fixed measurements describe projection I/O as integer counts and byte totals.
 PROJECTION_SAVE_ATTEMPTS = "save_attempts"
 PROJECTION_SAVES = "saves"
@@ -230,20 +242,30 @@ def _warn_rejected_field_key(key: str) -> None:
     )
 
 
-def cpu_started() -> tuple[int, int] | None:
-    """The thread and process CPU clocks at a span's start; None outside an MCP call."""
+def _thread_waits() -> int | None:
+    """The executing thread's voluntary context switches so far; None where they are not counted."""
+    if _RUSAGE_THREAD is None:
+        return None
+    return resource.getrusage(_RUSAGE_THREAD).ru_nvcsw
+
+
+def cpu_started() -> tuple[int, int, int | None] | None:
+    """The thread and process CPU clocks and the thread's waits at a span's start; None outside an MCP call."""
     if MCP_CALL_TOKEN.get() is None:
         return None
-    return time.thread_time_ns(), time.process_time_ns()
+    return time.thread_time_ns(), time.process_time_ns(), _thread_waits()
 
 
-def cpu_fields(started: tuple[int, int]) -> dict[str, int]:
+def cpu_fields(started: tuple[int, int, int | None]) -> dict[str, int]:
     """The CPU metadata fields for a span that began at `started`."""
-    thread_ns, process_ns = started
-    return {
+    thread_ns, process_ns, waits = started
+    fields = {
         THREAD_CPU_US: (time.thread_time_ns() - thread_ns) // 1000,
         PROCESS_CPU_US: (time.process_time_ns() - process_ns) // 1000,
     }
+    if waits is not None and (now := _thread_waits()) is not None:
+        fields[THREAD_WAITS] = now - waits
+    return fields
 
 
 @recall_timing.collect_span

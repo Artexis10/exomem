@@ -1503,4 +1503,6 @@ def test_a_span_with_every_field_slot_used_keeps_both_cpu_readings(
     _drive("remember", {"content": "x"}, leaf)
     spans = {span["name"]: span for span in _rows(ledger_dir)[-1]["spans"]}
     fields = spans["derived.full"]["fields"]
-    assert set(fields) == {"a", "b", "c", "d", "e", "thread_cpu_us", "process_cpu_us"}
+    measured = {"a", "b", "c", "d", "e"}
+    # thread_waits is counted only where the platform counts a thread's own waits.
+    assert measured | {"thread_cpu_us", "process_cpu_us"} <= set(fields) <= measured | call_spans.CPU_FIELDS
