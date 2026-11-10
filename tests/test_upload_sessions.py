@@ -27,7 +27,7 @@ import httpx
 import pytest
 from held_boundary import held_boundary
 
-from exomem import server, upload_sessions
+from exomem import server, upload_sessions, vocabulary_effects
 from exomem.governance import principal as principal_module
 
 TUS = {"Tus-Resumable": "1.0.0", "Authorization": "Bearer sekret"}
@@ -421,38 +421,43 @@ def test_an_incomplete_source_rollback_retains_the_upload_without_another_captur
     assert [page.name for page in folder.glob("partial-*.md")] == ["partial-1.md"]
 
 
-@pytest.mark.parametrize("filename", ["recording.wav", "original.md"])
-def test_an_unsupported_write_format_is_visible_before_a_source_upload(vault, monkeypatch, filename) -> None:
-    """Transport must not advertise or receive bytes for an original that the active writer cannot accept."""
-    from types import SimpleNamespace
+@pytest.mark.parametrize(("filename", "data"), [
+    ("field-notes.md", b"---\ntitle: Field notes\n---\n# Field notes\n\nSee [[Unrelated page]].\n"),
+    ("dataset.bin", b"\0" * (vocabulary_effects.MAX_IMAGE_BYTES + 1)),  # Above what the gate reads into memory.
+], ids=["markdown", "over-image-bound"])
+def test_an_activated_vault_commits_an_uploaded_source_with_its_original(
+    vault, warm_managed_cell, monkeypatch, filename, data,
+) -> None:
+    """An activated vault keeps a Source's original as opaque bytes beside the page, whatever its format or size."""
+    from test_vocabulary_authority import (
+        _activate,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
 
-    from exomem import commands, vocabulary_authority
+    from exomem import (
+        activation_manifest,
+        commands,
+        epistemic_graph,
+        vocabulary_admission,
+        vocabulary_authority,
+    )
+    from exomem.governance.principal import library_scope
 
-    client = _client(vault, monkeypatch)
-    monkeypatch.setenv("EXOMEM_BASE_URL", "https://example.invalid")
-    monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
-
-    class ActiveAuthority:
-        def runtime_status(self):
-            return SimpleNamespace(mode="v2")
-
-    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda root: ActiveAuthority())
-    handoff = commands.op_transfer_artifact(vault, operation="upload", lane="source")
-    assert "resumable" not in handoff
-    assert handoff["resumable_unavailable"]["code"] == "SOURCE_UPLOAD_UNAVAILABLE"
-    metadata = {"filename": filename, "sha256": "a" * 64, "source_kind": "session"}
-    created = client.request("POST", "/upload/sessions", headers={
-        **TUS, "Authorization": "Bearer " + handoff["token"], "Upload-Length": "100",
-        "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
-    })
-    assert created.status_code == 400, created.text
-    assert _parts(vault) == []
-    assert not (vault / "Knowledge Base" / "Evidence" / "Device" / "Uploads").exists()
-
-
-def test_a_v1_vault_advertises_and_admits_a_source_session_above_the_activated_image_bound(vault, monkeypatch) -> None:
-    """The image bound belongs to activated writes; an ordinary vault must keep its large Source uploads."""
-    from exomem import commands, vocabulary_effects
+    install_unit_session_boundary(monkeypatch)
+    with library_scope():
+        activation_manifest.ensure_manifest(vault)
+    warm_managed_cell(vault)
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    authority = _store(vault)
+    _activate(authority, _principal())
+    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _root: authority)
+    # Admission binds its authority factory at import, so a patched class alone leaks between tests.
+    for admission in (vocabulary_admission.runtime_admission, vocabulary_admission.require_mutation_admission):
+        monkeypatch.setitem(admission.__kwdefaults__, "authority_factory", lambda _root: authority)
+    assert authority.runtime_status().mode == "v2"
 
     client = _client(vault, monkeypatch)
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://example.invalid")
@@ -460,63 +465,23 @@ def test_a_v1_vault_advertises_and_admits_a_source_session_above_the_activated_i
     monkeypatch.delenv(upload_sessions.MAX_BYTES_ENV, raising=False)
     handoff = commands.op_transfer_artifact(vault, operation="upload", lane="source")
     assert handoff["resumable"]["max_bytes"] == upload_sessions.DEFAULT_MAX_BYTES
-    metadata = {"filename": "recording.wav", "sha256": "a" * 64, "source_kind": "session"}
+    metadata = {"filename": filename, "sha256": hashlib.sha256(data).hexdigest(),
+                "source_kind": "session", "title": "Uploaded original"}
     created = client.request("POST", "/upload/sessions", headers={
-        **TUS, "Authorization": "Bearer " + handoff["token"],
-        "Upload-Length": str(vocabulary_effects.MAX_IMAGE_BYTES + 1),
+        **TUS, "Authorization": "Bearer " + handoff["token"], "Upload-Length": str(len(data)),
         "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()),
     })
     assert created.status_code == 201, created.text
+    location, secret = created.headers["location"], created.headers["exomem-upload-secret"]
+    assert _patch(client, location, secret, 0, data).status_code == 204
+    state = _settled(client, location, secret)
 
-
-def test_an_activated_vault_refuses_an_over_bound_source_upload_without_reading_it(vault, monkeypatch) -> None:
-    """A large original is refused from its staged size; reading it into memory first would be the oversized allocation."""
-    import os
-    from types import SimpleNamespace
-
-    from exomem import upload_tokens, vocabulary_authority, vocabulary_effects, vocabulary_gate
-
-    client = _client(vault, monkeypatch)
-
-    class ActiveAuthority:
-        def runtime_status(self, now=None):
-            return SimpleNamespace(mode="v2")
-
-    class CountingOS:
-        """`os` as the gate sees it, counting the bytes that it reads from files above and within the bound."""
-
-        within_bound = above_bound = 0
-
-        def read(self, descriptor, count):
-            chunk = os.read(descriptor, count)
-            if os.fstat(descriptor).st_size > vocabulary_effects.MAX_IMAGE_BYTES:
-                self.above_bound += len(chunk)
-            else:
-                self.within_bound += len(chunk)
-            return chunk
-
-        def __getattr__(self, name):
-            return getattr(os, name)
-
-    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda root: ActiveAuthority())
-    counting = CountingOS()
-    monkeypatch.setattr(vocabulary_gate, "os", counting)
-    token = upload_tokens.mint("sekret", scope=upload_tokens.upload_scope("source"))
-
-    def post(data: bytes) -> httpx.Response:
-        values = {"filename": "recording.wav", "sha256": hashlib.sha256(data).hexdigest(),
-                  "source_kind": "session", "title": "A recording"}
-        return client.request("POST", "/upload", headers={"Authorization": "Bearer " + token},
-                              files={"file": (values["filename"], data)}, data=values)
-
-    # The gate reads what it judges, which shows the counter observes it; the size bound is not a blanket refusal.
-    within = post(b"\0" * 1024)
-    assert within.status_code == 400 and "byte bound" not in within.text, within.text
-    assert counting.within_bound >= 1024
-
-    over = post(b"\0" * (vocabulary_effects.MAX_IMAGE_BYTES + 1))
-    assert over.status_code == 400 and "byte bound" in over.text, over.text
-    assert counting.above_bound == 0
+    assert state["state"] == "committed", state
+    receipt = state["receipt"]
+    assert (vault / receipt["path"]).is_file()
+    assert (vault / receipt["artifact_path"]).read_bytes() == data
+    if filename.endswith(".md"):
+        assert receipt["artifact_path"].endswith(".md.txt")
 
 
 def test_a_missing_or_wrong_secret_answers_as_an_unknown_session(vault, monkeypatch) -> None:

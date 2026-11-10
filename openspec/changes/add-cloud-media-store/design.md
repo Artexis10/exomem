@@ -298,7 +298,7 @@ Unknown canonical outcomes retain the upload without allocating another Source p
 The receipt reports semantic compilation as unassessed; extraction does not establish a compiled conclusion.
 Uploaders reconcile an uncertain part against its accepted offset before repeating writes, and reduce subsequent part sizes after interruption.
 The gateway route and its acceptance remain task 5.3; local Source support does not prove Cloud delivery.
-Activated vocabulary image handling remains a resource and compatibility gap for large binaries until task 5.3.3 proves that boundary.
+Under activated vocabulary, a Source original is opaque content bound to its Source page: the writer neither reads nor classifies its bytes, so only the ordinary Source size ceiling bounds it.
 
 The job ledger is the job architecture. A Postgres-backed task queue such as Procrastinate was considered and does not fit: a cell runs on SQLite and holds no Postgres.
 

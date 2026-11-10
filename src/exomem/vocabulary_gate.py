@@ -183,18 +183,6 @@ class _BatchAuthority:
             self.closed = True
 
 
-def artifact_admission(vault_root: Path, *, size: int | None = None, is_markdown: bool = False) -> int | None:
-    """Check format compatibility and return its byte bound, without granting authority."""
-    status = vocabulary_authority.VocabularyAuthority(vault_root).runtime_status()
-    if status.mode == "v1":
-        return
-    if status.mode != "v2":
-        raise vocabulary_authority.VocabularyAuthorityUnavailable("artifact write-format compatibility is unavailable")
-    if vocabulary_effects.image_format_refusals(is_markdown=is_markdown, size=size):
-        raise vocabulary_authority.VocabularyAuthorityDenied("artifact input has an unsupported structural format")
-    return vocabulary_effects.MAX_IMAGE_BYTES
-
-
 def _stage_bytes(artifact) -> bytes:
     # These images already fail classification; refuse before allocating their complete contents.
     limit = vocabulary_effects.MAX_IMAGE_BYTES
@@ -229,6 +217,16 @@ def _auxiliary_roles(root: Path, images, manifest) -> dict[str, str]:
         ) from error
 
 
+def _declared_originals(root: Path, manifest) -> dict[str, str]:
+    from . import vocabulary_auxiliaries
+    try:
+        return vocabulary_auxiliaries.declared_originals(root, manifest)
+    except ValueError as error:
+        raise vocabulary_authority.VocabularyAuthorityDenied(
+            "derived auxiliary declaration changed"
+        ) from error
+
+
 def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifest=None) -> _BatchAuthority | None:
     """Acquire authority before the first canonical destination replacement."""
     if vault_root is None:
@@ -242,6 +240,8 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         raise vocabulary_authority.VocabularyAuthorityUnavailable("activated authority is unavailable")
     from .kbdir import kb_dirname
 
+    originals = _declared_originals(root, auxiliary_manifest)
+    unmatched = set(originals)
     candidates = []
     for (final, _workspace, artifact), snapshot in zip(staged, snapshots, strict=True):
         try:
@@ -254,9 +254,18 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
             if not vault._batch_state_target(root, final):
                 raise vocabulary_authority.VocabularyAuthorityDenied("unclassified external write") from None
             continue
+        if relative in originals:
+            # A Source original is opaque content under its page: it has no structural effect, so its
+            # bytes are neither read nor classified. It binds only as new bytes of its declared digest.
+            if snapshot is not None or artifact.content_hash != originals[relative]:
+                raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
+            unmatched.discard(relative)
+            continue
         if relative.startswith(f"{kb_dirname()}/_Governance/curation/runs/"):
             continue  # Existing curation artifact guards still apply.
         candidates.append((relative, artifact, snapshot))
+    if unmatched:
+        raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
     if not candidates:
         return None
     images = tuple(
@@ -267,7 +276,10 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         )
         for relative, artifact, snapshot in candidates
     )
-    roles = _auxiliary_roles(root, images, auxiliary_manifest)
+    roles = {
+        path: role for path, role in _auxiliary_roles(root, images, auxiliary_manifest).items()
+        if path not in originals
+    }
     if roles:
         images = tuple(
             vocabulary_effects.CanonicalWriteImage(

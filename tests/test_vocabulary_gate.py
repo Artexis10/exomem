@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import vault, vocabulary_authority, vocabulary_gate
+from exomem import vault, vocabulary_admission, vocabulary_authority, vocabulary_gate
 from exomem.governance.principal import library_scope, request_scope
 
 
@@ -330,3 +330,73 @@ def test_v2_mixed_registry_addition_and_existing_definition_change_refuses_atomi
     ):
         vault.batch_atomic_write([vault.PlannedWrite(target, after)], vault_root=root, post_commit_fanout=False)
     assert target.read_text(encoding="utf-8") == before
+
+
+def _activated_root(tmp_path, monkeypatch):
+    from test_vocabulary_authority import (
+        _activate,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
+
+    install_unit_session_boundary(monkeypatch)
+    root = tmp_path / "vault"
+    root.mkdir()
+    authority = _store(root)
+    _activate(authority, _principal())
+    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _: authority)
+    # Admission binds its authority factory at import, so a patched class alone leaks between tests.
+    for admission in (vocabulary_admission.runtime_admission, vocabulary_admission.require_mutation_admission):
+        monkeypatch.setitem(admission.__kwdefaults__, "authority_factory", lambda _root: authority)
+    return root
+
+
+def _prepared(data: bytes) -> vault.PreparedBinaryContent:
+    import hashlib
+    import io
+
+    return vault.PreparedBinaryContent(io.BytesIO(data), len(data), hashlib.sha256(data).hexdigest())
+
+
+def test_v2_source_original_whose_bytes_changed_after_its_declaration_is_refused(tmp_path, monkeypatch):
+    """The original is opaque, so its declared digest is the only thing that binds it to its Source page."""
+    from exomem import vocabulary_auxiliaries
+
+    root = _activated_root(tmp_path, monkeypatch)
+    page = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt.md", "---\ntype: source\n---\n# Notes\n",
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    original = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt", _prepared(b"# Notes as uploaded\n"),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    bound = vocabulary_auxiliaries.seal(
+        root, primary=page, derived=[(vocabulary_auxiliaries.SOURCE_ORIGINAL, original)],
+    )
+    original.content = _prepared(b"# Other notes swapped in before the commit\n")
+
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="declared Source original changed",
+    ):
+        vault.batch_atomic_write(
+            [page, original], vault_root=root, post_commit_fanout=False, _vocabulary_auxiliaries=bound,
+        )
+    assert not page.path.exists()
+    assert not original.path.exists()
+
+
+def test_v2_generic_write_of_a_non_markdown_file_without_a_source_page_is_refused(tmp_path, monkeypatch):
+    root = _activated_root(tmp_path, monkeypatch)
+    original = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt", _prepared(b"# Notes as uploaded\n"),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="current supported evidence",
+    ):
+        vault.batch_atomic_write([original], vault_root=root, post_commit_fanout=False)
+    assert not original.path.exists()
+

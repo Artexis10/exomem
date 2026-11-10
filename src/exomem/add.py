@@ -41,6 +41,7 @@ from . import (
     source_taxonomy,
     tag_variants,
     temporal,
+    vocabulary_auxiliaries,
     vocabulary_resolution,
 )
 from .kbdir import kb_prefix
@@ -813,24 +814,30 @@ def add(
     from .governance import connector_boundary
 
     effect_admitted = connector_boundary.effect_admission(vault_root)
+    # Derived navigation and log outputs of this capture, bound to its page like every other writer's.
+    derived: list[tuple[str, PlannedWrite]] = [
+        (role, write) for role, write in (
+            ("index", PlannedWrite(
+                path=indexes.sources_index_path(vault_root), content=update.sources_index_content,
+                guard=update.sources_index_guard,
+            )),
+            ("index", PlannedWrite(path=kb / "index.md", content=top_index_final, guard=update.top_index_guard)),
+            ("operation-log", PlannedWrite(path=kb / "log.md", content=update.log_content, guard=update.log_guard)),
+        )
+        if effect_admitted(write.path)
+    ]
+    derived.extend(("index", write) for write in sub_writes)
     writes = [
         PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
-        *(
-            write for write in (
-                PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
-                PlannedWrite(path=kb / "index.md", content=top_index_final),
-                PlannedWrite(path=kb / "log.md", content=update.log_content),
-            )
-            if effect_admitted(write.path)
-        ),
+        *(write for _role, write in derived),
     ]
-    writes.extend(sub_writes)
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
     writes.extend(supersede_writes)
     if raw_protection:
         # Global index/log prose cannot carry the protected title or byte identity.
         writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
+        derived = []
     if correction_plan is not None:
         writes[0].create_only = True
         writes[0].expected_hash = MISSING_CONTENT_HASH
@@ -853,12 +860,14 @@ def add(
     # path becomes visible before the page (and any adoption receipt it owns)
     # can publish in the same rollback set.
     artifact_stream = None
+    originals: list[PlannedWrite] = []
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
         binary_write, artifact_stream = artifact_binary_write(
             artifact.staged_path, artifact_path, artifact_digest, artifact_size
         )
         writes.append(binary_write)
+        originals.append(binary_write)
 
     # The registry the domain resolved against must still be the one on disk.
     # A registration rewrites it in this batch under its own content guard.
@@ -884,7 +893,13 @@ def add(
             container_metadata = container_plan.metadata()
             writes[0].content = document_containers.annotate(source_md, "document_container", container_metadata)
             writes.extend(container_plan.writes)
+            originals.extend(write for write in container_plan.writes if isinstance(write.content, PreparedBinaryContent))
             core_paths.update(write.path for write in container_plan.writes)
+        # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
+        bound_outputs = vocabulary_auxiliaries.seal(
+            vault_root, primary=writes[0],
+            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
+        )
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
@@ -913,12 +928,14 @@ def add(
                 vault_root=vault_root,
                 required_guards=required_guards,
                 post_commit_fanout=False,
+                _vocabulary_auxiliaries=bound_outputs,
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
+                               _vocabulary_auxiliaries=bound_outputs,
                                _validate_prepared_bindings=validate_bindings,
                                _prepare=prepare_final if _prepare is not None else None)
     except _NativePrepared:

@@ -1335,3 +1335,46 @@ def test_run_manifest_body_carries_counts_and_the_run_reference_only(
     assert leaked == [], f"run manifest body names per-item detail: {leaked}"
     assert "```json" not in body
     assert "Machine-Readable" not in body
+
+
+def test_an_activated_vault_imports_several_legacy_files_as_sources(vault, warm_managed_cell, monkeypatch):
+    """Catches an import refused because the index and log update its pages share is classified as authored edges."""
+    from test_vocabulary_authority import (
+        _activate,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
+
+    from exomem import (
+        activation_manifest,
+        epistemic_graph,
+        vocabulary_admission,
+        vocabulary_authority,
+    )
+    from exomem.governance.principal import library_scope
+
+    legacy = {"Legacy/brief.md": b"# Brief\n\nShort.\n", "Legacy/notes.md": b"# Notes\n\nPlain.\n"}
+    for relative, data in legacy.items():
+        (vault / relative).parent.mkdir(parents=True, exist_ok=True)
+        (vault / relative).write_bytes(data)
+    install_unit_session_boundary(monkeypatch)
+    with library_scope():
+        activation_manifest.ensure_manifest(vault)
+    warm_managed_cell(vault)
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    authority = _store(vault)
+    _activate(authority, _principal())
+    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _root: authority)
+    for admission in (vocabulary_admission.runtime_admission, vocabulary_admission.require_mutation_admission):
+        monkeypatch.setitem(admission.__kwdefaults__, "authority_factory", lambda _root: authority)
+
+    with library_scope():
+        report = adopt_module.adopt(vault, mode="copy-as-sources", selected_paths=sorted(legacy), today=dt.date(2026, 7, 7))
+
+    copied = report["copy"]["copied_sources"]
+    assert [item["original_path"] for item in copied] == sorted(legacy)
+    assert all((vault / item["source_path"]).is_file() for item in copied)
+    recent = (vault / "Knowledge Base/Sources/index.md").read_text(encoding="utf-8")
+    assert all(item["source_path"].removesuffix(".md").rsplit("/", 1)[-1] in recent for item in copied)

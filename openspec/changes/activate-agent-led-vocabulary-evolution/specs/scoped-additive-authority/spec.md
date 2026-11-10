@@ -99,7 +99,7 @@ Existing grants SHALL retain their exact scope; upgrades, entity creation and pr
 
 Each v2 additive structural mutation SHALL validate authority at the canonical leaf immediately before its commit under the same serialization boundary used for the mutation. Exact approval SHALL bind the canonical action payload, target versions and registry hashes; a standing grant SHALL bind its current generation and resolved effects. Authority checks SHALL cover typed tools, generic file writers, imports, schema saves and every equivalent route that can produce those effects. A preview, cached bootstrap, review disposition or previous step's approval SHALL NOT substitute for the live check.
 
-Effect classification SHALL compare the complete proposed result with current canonical state and independently authorize every effect. A type-addition grant SHALL authorize new definitions only, not edits to existing aliases, parents, guidance, status, replacement fields or other existing definition data. If a single atomic save mixes authorized additions with any unauthorized effect, the entire save SHALL refuse with zero changes; it SHALL NOT silently prune, partially apply or relabel the mixed payload as additive.
+Effect classification SHALL compare the complete proposed result with current canonical state and independently authorize every effect. A Source's original artifact, of any media type, SHALL be opaque content bound to its Source page in the same atomic write: it carries no structural effect and SHALL NOT be refused as an unsupported change. The capture's index and operation-log writes SHALL be derived outputs bound to the Source page by their exact guarded bytes, as every other writer's are. The Source page SHALL be classified as usual, and any other non-Markdown write SHALL keep failing closed. A type-addition grant SHALL authorize new definitions only, not edits to existing aliases, parents, guidance, status, replacement fields or other existing definition data. If a single atomic save mixes authorized additions with any unauthorized effect, the entire save SHALL refuse with zero changes; it SHALL NOT silently prune, partially apply or relabel the mixed payload as additive.
 
 Entity creation that includes authored connections SHALL require `edge.add` authority for those effects in addition to `entity.create`. A writer that also introduces a project key or another vocabulary outside the declared additive set SHALL require that effect's separately owned authority; it SHALL NOT treat vocabulary registration as index hygiene or infer it from the enclosing entity grant. If the deployment cannot authorize that effect, the complete atomic write SHALL refuse and offer a separately reviewed path.
 
@@ -114,6 +114,12 @@ Revocation and commit SHALL have a defined ordering: a commit serialized after r
 
 - **WHEN** a caller uses a generic file route to create an entity or alter a registry in a v2 vault
 - **THEN** the same effect classification and authority gate apply as on the typed tool
+
+#### Scenario: A Source keeps its original as opaque content
+
+- **WHEN** a v2 vault captures a Source with a Markdown original
+- **THEN** the Source, its original and its index and log updates commit
+- **AND** a generic writer that creates the same non-Markdown file without a Source page is refused
 
 #### Scenario: A registry addition conceals an existing-definition edit
 
