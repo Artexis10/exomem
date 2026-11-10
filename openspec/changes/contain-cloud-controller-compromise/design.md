@@ -304,7 +304,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 
 **The custodian.**
 - It runs as its own small Deployment, with its own service account, in its own namespace. It uses the controller's image with its own command: a separate image would add a publish and attestation pipeline without reducing what the custodian can do, because its power comes from its service account and key. That namespace is outside every namespace that admission rule 1 lets `cellctl` write. The same chart check as the lock extender's enforces this.
-- It runs on a node that runs no cell. A default-deny NetworkPolicy lets it reach only the API server and the object store. It takes no inbound traffic.
+- It runs on the control-plane node (`keyCustodian.nodeSelector`). On a platform with one node, that node also runs every cell: see the Residual bullet on a platform with one node. A default-deny NetworkPolicy lets it reach only the API server and the object store. It takes no inbound traffic.
 - It receives its key through a Secret reference, never as a literal environment value, because `cellctl` can list pods cluster-wide.
 - It writes one Secret of its own in each cell namespace, `cell-object-store-key`, and no other Secret. Admission limits its writes to that name, because RBAC `resourceNames` cannot limit `create`. It never reads `cell-credentials`.
 - Admission rule 7 already keeps `cellctl` off every Secret name except its own, so `cellctl` cannot read a key through a patch response. The closed pod template (D3) mounts `cell-object-store-key` only in the subcommands that need it.
@@ -338,6 +338,7 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - Until phase 1 ships, `cellctl`'s key reaches everything listed above.
 - Until D3 is in force, a compromised `cellctl` can render a Job in a cell namespace that reads `cell-object-store-key` through a Secret reference and leaks it. This adds nothing to today, when `cellctl` unwraps every per-cell key; D3 removes the route.
 - After phase 1, a compromised custodian or node can still create any key in the cell-data account. Such a key can extend locks without bound or remove the default retention. The split does not shrink this, because there is no subset rule. The watcher reports such a key, but it cannot undo an extension.
+- On a platform with one node, the custodian shares that node with every cell. A compromised cell that escapes its container is then a compromised node, as the previous bullet describes: it can reach the custodian's pod network and its service-account token, because the pod sets `automountServiceAccountToken: true`, and the cells set no runtime class. The operator accepted this on 2026-11-02. It closes when the cells run on a server that does not run the custodian, or in a sandbox runtime.
 - Keys created ahead of time outside the cluster would remove key creation from the cluster. That option stays open (Open Questions).
 
 ## Early check evidence

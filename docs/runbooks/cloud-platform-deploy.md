@@ -24,7 +24,7 @@ Prepare one private values file for the release. It must set:
 - `platformJobs.image` to the current Cloud cell image,
   `ghcr.io/artexis10/exomem@sha256:<digest>`. The scheduler, its collector and
   alert evaluator run their mounted scripts on it.
-- the reviewed Cloud values: `cellctl`, `cloudGateway`, `cloudIngress`,
+- the reviewed Cloud values: `cellctl`, `cellData`, `cloudGateway`, `cloudIngress`,
   `artifactBroker`, `edge`, `capacity` and `cells`.
 
 
@@ -201,20 +201,121 @@ infra/scripts/apply_active_sops_secrets.py \
 
 ## Render and upgrade the release
 
-Apply the namespaces and upgrade the reviewed release:
+Helm loads the chart's own `values.yaml` as the defaults, so pass only the private values file.
+Do not add `--values infra/helm/platform/values.yaml`. That second pass turns the default
+`cellStorage.local.maxCellGib: null` into a deleted key, and the schema then refuses the render with
+`missing property 'maxCellGib'`.
+
+### Review the release
+
+Run these steps before every upgrade. `EXOMEM_UPGRADE_DIR` is a private directory outside the repository.
+A render holds the private values, so keep it out of tickets and chat.
 
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
-helm template exomem-platform infra/helm/platform --namespace exomem-platform \
-  --values infra/helm/platform/values.yaml \
-  --values "$EXOMEM_PLATFORM_VALUES" \
-  --show-only templates/namespaces.yaml | kubectl apply -f -
-
-helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
-  --values infra/helm/platform/values.yaml \
-  --values "$EXOMEM_PLATFORM_VALUES" \
-  --atomic --wait --timeout 10m
+: "${EXOMEM_UPGRADE_DIR:?set a private upgrade directory outside the repository}"
+umask 077
 ```
+
+1. Build the chart dependencies. The script registers each chart repository, then runs `helm dependency build`.
+
+   ```bash
+   uv run --frozen python infra/scripts/helm_dependencies.py infra/helm/platform
+   ```
+
+   Expect one archive in `infra/helm/platform/charts/` for each dependency in `Chart.yaml`.
+   A missing archive stops every render, even for a dependency that is off.
+2. Render the new release without the cluster.
+
+   ```bash
+   helm template exomem-platform infra/helm/platform --namespace exomem-platform \
+     --values "$EXOMEM_PLATFORM_VALUES" > "$EXOMEM_UPGRADE_DIR/new.yaml"
+   ```
+
+   Expect no error. A schema error names the key to change.
+3. Save the manifest of the live release.
+
+   ```bash
+   helm get manifest exomem-platform --namespace exomem-platform > "$EXOMEM_UPGRADE_DIR/live.yaml"
+   ```
+
+4. Compare the two manifests. Name each added, removed or changed object, and each workload whose pod template changes.
+
+   ```bash
+   diff -u "$EXOMEM_UPGRADE_DIR/live.yaml" "$EXOMEM_UPGRADE_DIR/new.yaml"
+   ```
+
+   Expect only changes that the release should make. `helm template` cannot read the cluster, so its render can add
+   the scheduler's state ConfigMaps that the live release omits. Accept only those extra objects.
+5. Run a server-side dry run of the upgrade.
+
+   ```bash
+   helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
+     --values "$EXOMEM_PLATFORM_VALUES" --dry-run=server
+   ```
+
+   Expect the rendered release, with nothing changed. A refusal by an admission policy or a `lookup` check names the object.
+
+### Cross the per-cell root key change
+
+**Warning:** an upgrade that moves cellctl from before 0.147.0 to 0.147.0 or later converts each cell's backup key
+once. Neither `helm rollback` nor `--atomic` undoes the conversion.
+
+On a cell's first manifest apply, cellctl makes a per-cell root key and wraps it under the backup master key.
+It then wraps the cell's backup password under that root and sets `backup_key_version` to 1. The code is
+`_resolve_secret_material` in `infra/cellctl/src/cellctl/reconcile.py`. The password does not change, so the backup
+repositories stay readable. A cellctl before 0.147.0 unwraps `backup_key_wrapped` with the backup master key, so it
+cannot unwrap a converted cell. A rollback restores that older cellctl but not the control database.
+The safe undo is to fix forward: correct the cause and run the upgrade again.
+
+If the upgrade crosses 0.147.0, do these steps first.
+
+1. Run this read-only query as the cellctl database role.
+
+   ```bash
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT column_name FROM information_schema.columns WHERE table_name = 'exomem_cloud_cells' ORDER BY column_name"
+   ```
+
+   Expect every name in `CELL_COLUMNS` in `infra/cellctl/src/cellctl/db.py`. The information schema lists only the columns
+   that the role can read. A missing name means that a Substrate migration is pending: stop.
+2. Save the key columns of every cell as a read-only dump.
+
+   ```bash
+   psql "$EXOMEM_CELLCTL_DSN" --csv --command "SELECT cell_id, backup_key_wrapped, backup_key_version, cell_root_key_wrapped, cell_root_key_version FROM exomem_cloud_cells ORDER BY cell_id" > "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+   ```
+
+   Expect one row for each cell, with `cell_root_key_wrapped` empty on every row. The file holds wrapped keys: never print or commit it.
+   It is evidence for a repair, not an undo.
+3. Omit `--atomic` from the upgrade command below. A failed wait then leaves the new cellctl running.
+4. If the wait fails, count the converted cells before you act.
+
+   ```bash
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT count(*) FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL"
+   ```
+
+   If the count is 0, run `helm rollback exomem-platform`, then count again. If the count is above 0, fix forward and never roll back.
+
+Expected result: after the upgrade, `cell_root_key_wrapped` holds a value and `backup_key_version` is 1 for every cell that
+cellctl has re-rendered.
+
+### Upgrade the release
+
+1. Apply the namespaces.
+
+   ```bash
+   helm template exomem-platform infra/helm/platform --namespace exomem-platform \
+     --values "$EXOMEM_PLATFORM_VALUES" --show-only templates/namespaces.yaml | kubectl apply -f -
+   ```
+
+2. Upgrade the release. Omit `--atomic` only as "Cross the per-cell root key change" says.
+
+   ```bash
+   helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
+     --values "$EXOMEM_PLATFORM_VALUES" \
+     --atomic --wait --timeout 10m
+   ```
+
+   Expect `Release "exomem-platform" has been upgraded.` Then run "Verify" below.
 
 Do not run this upgrade while a cell restore runs
 ([cloud-operator-restore.md](cloud-operator-restore.md)).
