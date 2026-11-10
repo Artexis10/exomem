@@ -1831,13 +1831,11 @@ def _stopping_at_budget(function):
 def _carry_stopped() -> NoReturn:
     """Leave the carry because the request budget is spent.
 
-    `BudgetExhausted` reaches the compile's own handler, which abstains `unavailable` with the budget's
-    report, as for any stage; a carry that returned nothing would read as "the turn names nothing".
+    The carry has started, so it is recorded as truncated, not skipped. `BudgetExhausted` reaches the
+    compile's own handler, which abstains `unavailable` with the budget's report, as for any stage; a carry
+    that returned nothing would read as "the turn names nothing".
     """
-    from . import request_budget
-
-    if (budget := request_budget.current()) is not None:
-        budget.note_skipped(working_set.CARRY_STAGE)
+    working_set.note_stopped(working_set.CARRY_STAGE)
     raise working_set.BudgetExhausted(working_set.CARRY_STAGE)
 
 
@@ -2926,6 +2924,9 @@ def serve(
     # Retain this request's coverage, but never cache a transient lookup failure.
     if any(entry.get("reason") in {"lane_failed", "task_lookup_unavailable", "task_lookup_budget"}
            for entry in packet.get("missing", ())):
+        return packet
+    # A carry that the request budget refused is this call's clock, not the vault's: a later call has its own.
+    if working_set.ANCHORS_BUDGET_GAP in packet.get("missing", ()):
         return packet
     if not cacheable:
         return packet

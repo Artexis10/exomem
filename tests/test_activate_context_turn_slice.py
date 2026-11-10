@@ -507,7 +507,9 @@ def test_a_carry_that_finds_the_budget_spent_skips_the_slice_and_names_the_stage
             request_budget.reset_current(token)
     assert not packet.get("abstained")
     assert packet["turn_slice"]["state"] == "skipped" and packet["turn_slice"]["items"] == []
-    assert working_set.CARRY_STAGE in packet["request_budget"]["skipped"]
+    # The carry had started when the deadline stopped it, so the budget names it as truncated, not skipped.
+    assert working_set.CARRY_STAGE in packet["request_budget"]["truncated"]
+    assert working_set.CARRY_STAGE not in packet["request_budget"]["skipped"]
     observed = activation_result.Observation()
     observed.capture(packet)
     assert observed.result["budget_limited"] is True
@@ -516,6 +518,65 @@ def test_a_carry_that_finds_the_budget_spent_skips_the_slice_and_names_the_stage
     unhurried = _activate(vault, turn=CARRY_TURN)
     assert [item["ref"] for item in unhurried["turn_slice"]["items"]] == [CARRY_PAGE]
     assert packet["map"] == unhurried["map"]
+
+
+def test_a_carry_the_budget_refuses_with_time_to_spare_skips_the_slice_rather_than_calling_it_empty(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A carry that the budget refuses to start leaves the compile `unresolved` with no anchor, which the slice
+    once read as a turn that names nothing; the slice did not look, and says so."""
+    from test_working_set_carry import (
+        CARRY_PAGE,
+        CARRY_TURN,
+        _seed_carry_pages,
+        seed_ordinary_notes,
+    )
+
+    from exomem import request_budget
+
+    _seed_carry_pages(vault)
+    seed_ordinary_notes(vault)
+    _structured(vault)
+    _cold()
+    exhausted = working_set.budget_exhausted
+
+    def refuses_the_carry(stage, *args, **kwargs):
+        if stage != working_set.CARRY_STAGE:
+            return exhausted(stage, *args, **kwargs)
+        request_budget.current().note_skipped(stage)
+        return True
+
+    with monkeypatch.context() as patched:
+        patched.setattr(working_set, "budget_exhausted", refuses_the_carry)
+        token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+        try:
+            packet = _activate(vault, turn=CARRY_TURN)
+        finally:
+            request_budget.reset_current(token)
+    assert not packet.get("abstained")
+    assert packet["turn_slice"]["state"] == "skipped" and packet["turn_slice"]["items"] == []
+    # The control: the same call with the carry allowed names the carried page, under the same map.
+    _cold()
+    unhurried = _activate(vault, turn=CARRY_TURN)
+    assert [item["ref"] for item in unhurried["turn_slice"]["items"]] == [CARRY_PAGE]
+    assert packet["map"] == unhurried["map"]
+
+
+def test_the_slice_still_serves_its_leads_inside_the_short_activation_door(vault: Path) -> None:
+    """The hook's doors bind 6 s; a reserve for task discovery sized for the 50 s request budget would leave the
+    slice no time to compile on every turn."""
+    from exomem import request_budget
+
+    _structured(vault)
+    token = request_budget.set_current(
+        request_budget.RequestBudget(seconds=request_budget.ACTIVATION_DOOR_BUDGET_SECONDS)
+    )
+    try:
+        packet = _activate(vault, turn=SLED_TURN)
+    finally:
+        request_budget.reset_current(token)
+    assert packet["turn_slice"]["state"] == "ready"
 
 
 @pytest.mark.parametrize(

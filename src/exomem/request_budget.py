@@ -95,12 +95,19 @@ ACTIVATION_BUDGET_SECONDS: float | None = None
 ACTIVATION_BUDGET_ENV_VAR = "EXOMEM_ACTIVATION_BUDGET_SECONDS"
 
 
-def task_projection_reserve(leads: int) -> float:
-    """Seconds the task method search leaves for projecting `leads` found leads; none when there are none."""
+def task_context_reserve() -> float:
+    """Seconds the turn slice leaves for task discovery, so that a slow slice cannot spend the whole budget and
+    leave the call with the map alone. It is the projection reserve's own share of the current budget (1.5 s on
+    the 6 s door); none when no budget is bound."""
     budget = current()
-    if budget is None or leads <= 0:
+    if budget is None:
         return 0.0
     return min(TASK_PROJECTION_RESERVE_SECONDS, budget.seconds * TASK_PROJECTION_RESERVE_SHARE)
+
+
+def task_projection_reserve(leads: int) -> float:
+    """Seconds the task method search leaves for projecting `leads` found leads; none when there are none."""
+    return task_context_reserve() if leads > 0 else 0.0
 
 #: Operators may lengthen or shorten the origin budget. Clients may not: the
 #: client that most needs the bound is the one that cannot be trusted to set

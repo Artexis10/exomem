@@ -7782,6 +7782,7 @@ def _op_activate_context_body(
             reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
             # Cooperative stage checks leave time for the map's mandatory guard; a synchronous stage can overrun.
+            # Task discovery leaves its own reserve around this call when it runs after the slice.
             with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
                 compiled = _compile_guarded_activation(
                     vault_root,
