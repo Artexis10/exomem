@@ -399,8 +399,18 @@ def test_v2_generic_write_of_a_non_markdown_file_without_a_source_page_is_refuse
 
 
 
-def test_v2_source_original_declared_as_a_markdown_page_is_refused(activated_vault):
-    """A page declared as an original would skip classification, so its entity and links would land ungoverned."""
+@pytest.mark.parametrize(
+    "smuggled_name",
+    [
+        # A page declared as an original would skip classification, so its entity and links would land ungoverned.
+        "smuggled.md",
+        # Windows reads `smuggled.md.` as `smuggled.md`.
+        "smuggled.md.",
+        # Another Source's container custody is not this page's to write.
+        "other.asice.documents/" + "ab" * 32 + ".pdf",
+    ],
+)
+def test_v2_source_original_outside_its_source_is_refused(activated_vault, smuggled_name):
     import dataclasses
 
     from exomem import vocabulary_auxiliaries
@@ -411,7 +421,7 @@ def test_v2_source_original_declared_as_a_markdown_page_is_refused(activated_vau
         create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
     )
     smuggled = vault.PlannedWrite(
-        root / "Knowledge Base/Sources/Sessions/smuggled.md",
+        root / "Knowledge Base/Sources/Sessions" / smuggled_name,
         _prepared(b"---\nentity_type: guild\n---\n# Smuggled\n\nSee [[Unrelated page]].\n"),
         create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
     )
@@ -422,7 +432,7 @@ def test_v2_source_original_declared_as_a_markdown_page_is_refused(activated_vau
     forged = dataclasses.replace(
         vocabulary_auxiliaries.seal(root, primary=page, derived=[]),
         entries=(vocabulary_auxiliaries.DerivedAuxiliary(
-            vocabulary_auxiliaries.SOURCE_ORIGINAL, "Knowledge Base/Sources/Sessions/smuggled.md",
+            vocabulary_auxiliaries.SOURCE_ORIGINAL, f"Knowledge Base/Sources/Sessions/{smuggled_name}",
             None, smuggled.content.sha256,
         ),),
     )
@@ -434,6 +444,51 @@ def test_v2_source_original_declared_as_a_markdown_page_is_refused(activated_vau
         )
     assert not page.path.exists()
     assert not smuggled.path.exists()
+
+
+def test_v2_capture_that_links_to_a_missing_page_is_refused_cleanly(activated_vault):
+    """Reading the identity of a page that does not exist crashed the classifier instead of refusing the link."""
+    from exomem import add
+    from exomem import schema as schema_module
+
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="current supported evidence",
+    ):
+        add.add(
+            activated_vault, schema_module.load_source_schema(activated_vault),
+            content="See [[Unrelated page]] for the rest.", title="Linked notes", source_type="session",
+        )
+    assert not list((activated_vault / "Knowledge Base/Sources/Sessions").glob("*linked-notes*"))
+
+
+def test_v2_new_page_without_an_identity_that_links_to_an_existing_page_is_refused_cleanly(activated_vault):
+    """The classifier read the new page's identity from disk before the write had created it."""
+    page = vault.PlannedWrite(
+        activated_vault / "Knowledge Base/Notes/linked.md",
+        "---\ntitle: Linked\n---\n# Linked\n\nSee [[Ada Lovelace]].\n",
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="current supported evidence",
+    ):
+        vault.batch_atomic_write([page], vault_root=activated_vault, post_commit_fanout=False)
+    assert not page.path.exists()
+
+
+def test_v2_internal_write_of_a_page_into_the_episode_journal_folder_is_classified(activated_vault):
+    """The episode journal folder passes the gate only for the store's JSON, so a page there keeps its links governed."""
+    from exomem import episode_store
+
+    page = vault.PlannedWrite(
+        episode_store.EpisodeStore(activated_vault).root / "smuggled.md",
+        "---\ntitle: Smuggled\n---\n# Smuggled\n\nSee [[Unrelated page]].\n",
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="current supported evidence",
+    ):
+        vault.batch_atomic_write([page], vault_root=activated_vault, post_commit_fanout=False)
+    assert not page.path.exists()
 
 
 def test_v2_refuses_an_undeclared_write_above_the_image_bound_without_reading_it(tmp_path, monkeypatch):

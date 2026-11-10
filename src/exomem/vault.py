@@ -26,6 +26,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import Context, ContextVar, copy_context
@@ -9378,7 +9379,7 @@ def render_title_links(
 # ---------------- log helpers ----------------
 
 
-_LOG_WIKILINK_RE = re.compile(r"!?\[\[(.+?)\]\]")
+_LOG_WIKILINK_TOKEN = re.compile(r"\[\[|\]\]|\n")
 
 
 def escape_wikilinks_for_log(text: str) -> str:
@@ -9389,13 +9390,42 @@ def escape_wikilinks_for_log(text: str) -> str:
     broken_wikilink audit then re-flags — a self-inflicted drift class. Render
     any `[[...]]` / `![[...]]` as backticked code so it stays inert while the
     referenced text is preserved.
+
+    One left-to-right scan pairs each `]]` with the earliest unpaired `[[` before it on its line,
+    with at least one character between them. A paired `[[` (and a `!` just before it) and its `]]`
+    become backticks, so no `[[` is left before a `]]` on any line, however the brackets nest. A
+    regex substitution repeated until stable gave the same text on ordinary lines, but nested or
+    unclosed brackets made it quadratic.
     """
-    # One pass can leave an inner `[[` paired with an outer `]]`, and a stray backtick then shifts
-    # the code span that hid it. Each pass removes one bracket pair, so repeat until none is left.
-    previous = None
-    while text != previous:
-        previous, text = text, _LOG_WIKILINK_RE.sub(lambda m: f"`{m.group(1)}`", text)
-    return text
+    if "[[" not in text:
+        return text
+    pieces: list[str] = []
+    # Each unpaired `[[` on this line, earliest first: its index in `pieces` and its end in `text`.
+    opened: deque[tuple[int, int]] = deque()
+    position = 0
+    while (match := _LOG_WIKILINK_TOKEN.search(text, position)) is not None:
+        start, token = match.start(), match.group()
+        pieces.append(text[position:start])
+        position = match.end()
+        if token == "\n":
+            opened.clear()
+        elif token == "[[":
+            opened.append((len(pieces), position))
+        elif opened:
+            if opened[0][1] == start:
+                # `[[]]` holds nothing, so only a `]]` one character later can close it: `[[]]]`.
+                if not text.startswith("]", position):
+                    pieces.append(token)
+                    continue
+                pieces.append("]")
+                position += 1
+            index, _end = opened.popleft()
+            pieces[index] = "`"
+            pieces[index - 1] = pieces[index - 1].removesuffix("!")
+            token = "`"
+        pieces.append(token)
+    pieces.append(text[position:])
+    return "".join(pieces)
 
 
 def document_newline(text: str) -> str:

@@ -533,6 +533,8 @@ def classify_additive_effects(
             identifier = memory_refs.normalize_id(state.frontmatter.get(memory_refs.ID_FIELD))
             if identifier is not None:
                 return memory_refs.memory_ref(identifier)
+            if indexed[path].before is None:
+                return None  # A page this batch creates has no stored identity to read.
         return identity_reader(path) if identity_reader is not None else None
 
     unavailable: list[ClassificationReason] = []
@@ -542,9 +544,13 @@ def classify_additive_effects(
         if fact.canonical_relation is None or fact.registry_status in {"unregistered", "deprecated", "scope_violation"}:
             unavailable.append(ClassificationReason("edge_not_currently_registered", fact.authored_path))
             continue
+        # An unresolved target names no page, so there is no identity to read for it.
+        if fact.target_status != "resolved":
+            unavailable.append(ClassificationReason("edge_endpoint_unavailable", fact.authored_path))
+            continue
         source = ref_for(fact.logical_source_path)
         target = ref_for(fact.logical_target_path)
-        if source is None or target is None or fact.target_status != "resolved":
+        if source is None or target is None:
             unavailable.append(ClassificationReason("edge_endpoint_unavailable", fact.authored_path))
             continue
         effects.append(Effect("edge.add", fact.authored_path, key=fact.identity, details={"source": source, "target": target, "relation": fact.canonical_relation}))
