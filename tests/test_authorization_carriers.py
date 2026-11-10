@@ -195,7 +195,7 @@ def test_duplicate_sensitive_header_is_removed_and_marked_invalid() -> None:
 
 
 def test_cli_fd_reader_is_bounded_one_shot_and_does_not_close_caller_fd() -> None:
-    from exomem.governance.authorization_transport import read_cli_authorization_fd
+    from exomem.governance.credential_carrier import read_cli_authorization_fd
 
     read_fd, write_fd = os.pipe()
     try:
@@ -218,7 +218,7 @@ def test_cli_fd_reader_is_bounded_one_shot_and_does_not_close_caller_fd() -> Non
 @pytest.mark.parametrize("payload", [BEARER.encode() + b"x", b"not-a-bearer"])
 def test_cli_fd_reader_marks_oversized_or_malformed_input_invalid(payload: bytes) -> None:
     from exomem.governance import authorization_request
-    from exomem.governance.authorization_transport import read_cli_authorization_fd
+    from exomem.governance.credential_carrier import read_cli_authorization_fd
 
     read_fd, write_fd = os.pipe()
     try:
