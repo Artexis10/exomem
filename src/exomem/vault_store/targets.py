@@ -8,8 +8,9 @@ the disk for the rest. A writer whose store form does not exist yet refuses thro
 
 from __future__ import annotations
 
+import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -149,6 +150,20 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     return checks
 
 
+#: The reasons a page-only store form refuses, each named once for the page and the folder forms.
+_NOT_A_PAGE = "only a Markdown page is held by the store, and a file's bytes stay on disk"
+_GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
+_CARRIES_MORE = "its stored original or its part pages move with it, and they have no store form"
+_FILES_ON_DISK = "the folder holds files whose bytes stay on disk, and they have no store form"
+
+
+def _carries_more(fm: Mapping[str, object]) -> bool:
+    """Whether a page's frontmatter names an original or further parts that move with the page."""
+    from .. import extraction_parts
+
+    return "stored_object" in fm or extraction_parts.count_of(fm) > 1
+
+
 def page_only_form_gap(
     vault_root: Path,
     rel: str,
@@ -169,19 +184,54 @@ def page_only_form_gap(
 
     # `.md` fixes the page format; any other file is a binary whose bytes stay on disk.
     if not all(path.lower().endswith(".md") for path in (rel, destination or rel)):
-        return "only a Markdown page is held by the store, and a file's bytes stay on disk"
+        return _NOT_A_PAGE
     if lifecycle.policy_governs_anything(vault_root):
-        return "a governance policy is declared, and its tombstones and receipts go to files"
+        return _GOVERNED
     # The folder is a dot folder, on disk, except for a page marked raw, whose parts are pages.
     parts_folder = extraction_parts.folder_for(Path(rel)).as_posix()
     if (
         paired
-        or "stored_object" in fm
-        or extraction_parts.count_of(fm) > 1
+        or _carries_more(fm)
         or (Path(vault_root) / parts_folder).is_dir()
         or read.holds_folder(vault_root, parts_folder)
     ):
-        return "its stored original or its part pages move with it, and they have no store form"
+        return _CARRIES_MORE
+    return None
+
+
+def folder_form_gap(
+    vault_root: Path, folder: str, pages: Mapping[str, Mapping[str, object]]
+) -> str | None:
+    """Why a store-mode vault cannot move this folder of pages yet, or None when it has a store form.
+
+    ``pages`` maps each page that the store holds below ``folder`` to its frontmatter. The folder's
+    store form moves those pages and nothing else, so a folder that also holds a file whose bytes
+    stay on disk, or a page that carries its original or its part pages, refuses before anything
+    changes. The disk is listed by name once: a Markdown file there is the store's to judge, as a
+    page's projection or a file not imported yet, so only a file of another owner refuses.
+    """
+    from .. import extraction_parts
+    from ..governance import lifecycle
+
+    root = Path(vault_root)
+    if lifecycle.policy_governs_anything(root):
+        return _GOVERNED
+    with read.snapshot(root) as view:
+        if view.holds_binaries_under(f"{folder}/"):
+            return _FILES_ON_DISK
+    for current, _folders, names in os.walk(root / folder):
+        base = Path(current).relative_to(root).as_posix()
+        if any(
+            ownership.classify(f"{base}/{name}") is not ownership.Ownership.PAGE for name in names
+        ):
+            return _FILES_ON_DISK
+    # A raw-marked page's parts are pages in a sibling folder, which is then one of these folders.
+    held = {parent.as_posix() for rel in pages for parent in Path(rel).parents}
+    if any(
+        _carries_more(fm) or extraction_parts.folder_for(Path(rel)).as_posix() in held
+        for rel, fm in pages.items()
+    ):
+        return _CARRIES_MORE
     return None
 
 
@@ -192,6 +242,7 @@ def active_catalog_gap(
     error_class: Callable[..., Exception],
     writes: tuple[vault.PlannedWrite, ...] = (),
     removals: tuple = (),
+    content_paths: tuple[str, ...] = (),
 ) -> None:
     """Refuse a store-mode lifecycle write while the vault's catalog publication is active.
 
@@ -206,7 +257,11 @@ def active_catalog_gap(
 
     try:
         target = catalog_publication.prepare_catalog_membership_batch(
-            vault_root, writes=writes, removals=removals, now=int(time.time())
+            vault_root,
+            writes=writes,
+            removals=removals,
+            content_paths=content_paths,
+            now=int(time.time()),
         )
     except catalog_publication.CatalogPublicationError as error:
         raise error_class(

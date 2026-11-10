@@ -31,7 +31,7 @@ from test_vault_store_bypass_writers import (
 from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows, tree
 
-from exomem import move_file, semantic_contract
+from exomem import delete_file, move_file, recover_from_trash, semantic_contract
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
@@ -330,3 +330,73 @@ def test_a_validated_and_a_committed_move_of_a_governed_page_refuse_alike(served
 
     assert revision(served) == start
     assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+
+
+def test_a_recovery_after_a_delete_restores_the_page_and_its_rows_and_drops_the_sidecar(
+    served, writer
+):
+    """A recovery that loses the page's rows, leaves the sidecar's record for the importer to find
+    as a file with no page, or that validates other semantics than it then commits."""
+    store_gamma(served)
+    rows_before = gamma_rows(served)
+    trashed = delete_file.delete_file(served, path=GAMMA, confirm=True)
+    assert read.page_exists(served, trashed.trash_path)
+    before = tree(served)
+
+    validation = recover_from_trash.recover_from_trash(
+        served, trash_path=trashed.trash_path, validate_only=True
+    )
+    assert tree(served) == before and read.page_exists(served, trashed.trash_path)
+    result = recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+
+    assert result.restored_path == GAMMA
+    assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+    assert not read.page_exists(served, trashed.trash_path)
+    assert gamma_rows(served) == rows_before
+    assert store_rows(
+        served, "SELECT 1 FROM store_binaries WHERE path = ?", trashed.trash_meta_path
+    ) == []
+    assert {**result.semantic, "mutated": False} == validation.semantic
+    assert new_files(before, served) == set(), "the projector, not the recovery, changes files"
+    report = projector.Projector(served, run=lambda work: work(writer)).run_pass()
+    assert (report.held, report.deferred) == (0, {})
+    assert not (served / trashed.trash_meta_path).exists()
+    assert (served / GAMMA).read_bytes() == GAMMA_TEXT.encode()
+
+
+def test_a_recovery_of_a_trashed_page_that_a_competing_commit_changed_refuses_and_keeps_it(
+    served, writer, monkeypatch
+):
+    """A recovery that restores bytes it never read, or that half-applies when the store refuses."""
+    store_gamma(served)
+    trashed = delete_file.delete_file(served, path=GAMMA, confirm=True)
+    race_after_check(
+        monkeypatch, writer, {"puts": (write.PagePut(trashed.trash_path, b"# Gamma, raced\n"),)}
+    )
+    start = revision(served)
+
+    with pytest.raises(recover_from_trash.RecoverError) as refused:
+        recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+
+    assert refused.value.code == "PATH_GUARD_CHANGED"
+    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert read.owned_bytes(served, trashed.trash_path) == b"# Gamma, raced\n"
+    assert not read.page_exists(served, GAMMA)
+    assert store_rows(
+        served, "SELECT 1 FROM store_binaries WHERE path = ?", trashed.trash_meta_path
+    ) != [], "the sidecar's record stays with the entry it describes"
+
+
+def test_a_recovery_onto_a_page_that_now_exists_refuses_and_keeps_both(served):
+    """A recovery that overwrites the page that took the trashed page's place."""
+    store_gamma(served)
+    trashed = delete_file.delete_file(served, path=GAMMA, confirm=True)
+    store_gamma(served)
+    start = revision(served)
+
+    with pytest.raises(recover_from_trash.RecoverError) as refused:
+        recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+
+    assert refused.value.code == "DEST_EXISTS"
+    assert revision(served) == start
+    assert read.page_exists(served, trashed.trash_path)

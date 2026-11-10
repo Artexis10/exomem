@@ -1410,6 +1410,12 @@ class PathGuard:
         return _store_guard(rel, _stored_sha256(Path(vault_root), rel))
 
     @classmethod
+    def of_stored(cls, target: str, sha256: str | None) -> PathGuard:
+        """Guard a stored page by the hash that the caller read in its own store snapshot, or by
+        its absence there when ``sha256`` is None: a folder's pages then cost no query each."""
+        return _store_guard("/".join(_safe_guard_target(target)), sha256)
+
+    @classmethod
     def capture(
         cls,
         vault_root: Path,
@@ -4090,6 +4096,11 @@ def _allowed_census_names(directory: Path, allowed_changes: Iterable[Path]) -> f
         if relative.parts:
             names.add(relative.parts[0])
     return frozenset(names)
+
+
+#: The most entries that one folder transition binds: the census of each folder that a directory
+#: recovery reads, and the pages that a store-mode folder trash or recovery moves in one transaction.
+DIRECTORY_TRANSITION_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)
