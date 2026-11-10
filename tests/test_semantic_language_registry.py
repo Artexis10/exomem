@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import semantic_labels
 from exomem import semantic_language_registry as language_registry
 from exomem import vault as vault_module
 from exomem.semantic_units import parse_semantic_units
@@ -457,13 +458,17 @@ def test_the_shipped_traits_sit_on_the_kinds_the_replaced_kind_sets_named() -> N
 
     assert {
         trait: registry.kinds_with(trait)
-        for trait in ("assertion", "page_claim", "procedure", "outcome", "question")
+        for trait in (
+            "assertion", "page_claim", "procedure", "outcome", "question", "credence", "dated_event",
+        )
     } == {
         "assertion": {"claim", "finding", "inference", "hypothesis", "result"},
         "page_claim": {"claim"},
         "procedure": {"procedure"},
         "outcome": {"result"},
         "question": {"open_question"},
+        "credence": {"belief"},
+        "dated_event": {"timeline_event"},
     }
     assert registry.traits_of("result") == {"assertion", "outcome"}
     assert registry.traits_of("decision") == frozenset()
@@ -528,12 +533,12 @@ def test_a_saved_vault_kind_keeps_its_traits(tmp_path: Path) -> None:
 def test_the_shipped_verdicts_resolve_by_key_and_label_without_a_vault_entry() -> None:
     registry = language_registry.core_registry()
 
-    assert registry.verdict_keys() == (
+    assert registry.label_keys(semantic_labels.VERDICTS) == (
         "abandoned", "confirmed", "inconclusive", "qualified", "refuted",
     )
-    assert registry.resolve_verdict("  Refuted ") == "refuted"
-    assert registry.resolve_verdict("probably-wrong") is None
-    assert registry.resolve_verdict("0.7") is None
+    assert registry.resolve_label(semantic_labels.VERDICTS, "  Refuted ") == "refuted"
+    assert registry.resolve_label(semantic_labels.VERDICTS, "probably-wrong") is None
+    assert registry.resolve_label(semantic_labels.VERDICTS, "0.7") is None
 
 
 def test_a_vault_adds_a_verdict_and_labels_a_shipped_one_in_another_language() -> None:
@@ -550,16 +555,16 @@ def test_a_vault_adds_a_verdict_and_labels_a_shipped_one_in_another_language() -
     )
 
     assert registry.findings == ()
-    assert "retracted" in registry.verdict_keys()
-    assert registry.resolve_verdict("retracted by AUTHORS") == "retracted"
-    assert registry.resolve_verdict("Retirado pelos autores") == "retracted"
-    assert registry.resolve_verdict("kumottu") == "refuted"
+    assert "retracted" in registry.label_keys(semantic_labels.VERDICTS)
+    assert registry.resolve_label(semantic_labels.VERDICTS, "retracted by AUTHORS") == "retracted"
+    assert registry.resolve_label(semantic_labels.VERDICTS, "Retirado pelos autores") == "retracted"
+    assert registry.resolve_label(semantic_labels.VERDICTS, "kumottu") == "refuted"
     # The vault's Finnish label sits beside the shipped English one.
-    assert registry.verdict_definitions()["refuted"].labels == (
+    assert registry.label_definitions(semantic_labels.VERDICTS)["refuted"].labels == (
         ("en", "Refuted"), ("fi", "Kumottu"),
     )
-    assert registry.verdict_definitions()["refuted"].description == (
-        language_registry.core_registry().verdict_definitions()["refuted"].description
+    assert registry.label_definitions(semantic_labels.VERDICTS)["refuted"].description == (
+        language_registry.core_registry().label_definitions(semantic_labels.VERDICTS)["refuted"].description
     )
 
 
@@ -597,7 +602,7 @@ def test_a_malformed_verdict_is_refused_and_hides_every_vault_verdict(verdicts, 
 
     assert code in [item["code"] for item in registry.findings]
     # The shipped verdicts always resolve; the vault's own wait for a clean registry.
-    assert registry.verdict_keys() == language_registry.core_registry().verdict_keys()
+    assert registry.label_keys(semantic_labels.VERDICTS) == language_registry.core_registry().label_keys(semantic_labels.VERDICTS)
 
 
 def test_a_vault_entry_that_redescribes_a_shipped_verdict_is_ignored_with_a_warning() -> None:
@@ -613,10 +618,10 @@ def test_a_vault_entry_that_redescribes_a_shipped_verdict_is_ignored_with_a_warn
         ("core_verdict_shadowed", "warning")
     ]
     # The rest of the vault's verdicts still resolve; the shadowing entry adds nothing.
-    assert registry.resolve_verdict("Retracted by authors") == "retracted"
-    assert registry.resolve_verdict("Kumottu") is None
-    assert registry.verdict_definitions()["refuted"] == (
-        language_registry.core_registry().verdict_definitions()["refuted"]
+    assert registry.resolve_label(semantic_labels.VERDICTS, "Retracted by authors") == "retracted"
+    assert registry.resolve_label(semantic_labels.VERDICTS, "Kumottu") is None
+    assert registry.label_definitions(semantic_labels.VERDICTS)["refuted"] == (
+        language_registry.core_registry().label_definitions(semantic_labels.VERDICTS)["refuted"]
     )
     # A save keeps the entry as the vault wrote it.
     assert language_registry.registry_proposal(registry) == proposal
@@ -634,5 +639,117 @@ def test_a_saved_vault_verdict_keeps_its_labels_and_description(tmp_path: Path) 
 
     reloaded = language_registry.load_registry(tmp_path)
     assert reloaded.findings == ()
-    assert reloaded.resolve_verdict("Retracted by authors") == "retracted"
+    assert reloaded.resolve_label(semantic_labels.VERDICTS, "Retracted by authors") == "retracted"
     assert language_registry.registry_proposal(reloaded) == proposal
+
+
+# ---------------------------------------------------------------------------
+# Belief levels, modalities and inference modes share the verdicts' mechanism
+# ---------------------------------------------------------------------------
+
+
+def test_the_shipped_levels_modalities_and_modes_resolve_by_key_and_label() -> None:
+    """Catches a registry whose pack is missing or unread: a unit row could never validate."""
+    registry = language_registry.core_registry()
+
+    assert registry.label_keys(semantic_labels.BELIEF_LEVELS) == (
+        "likely", "near_certain", "plausible", "speculative",
+    )
+    assert registry.resolve_label(semantic_labels.BELIEF_LEVELS, "Near-certain") == "near_certain"
+    assert registry.resolve_label(semantic_labels.MODALITIES, " SHOULD ") == "should"
+    assert registry.resolve_label(semantic_labels.MODALITIES, "likely") is None
+    assert (
+        registry.resolve_label(semantic_labels.INFERENCE_MODES, "statistical inference")
+        == "statistical_inference"
+    )
+
+
+def test_a_vault_extends_each_new_registry_and_a_collision_stays_inside_one_registry() -> None:
+    """Catches a vault section that is ignored, or a label check that leaks across registries."""
+    registry = language_registry.load_registry(
+        proposal={
+            **_proposal(),
+            "belief_levels": {"remote": {"labels": {"en": "Remote"}, "description": "Barely"}},
+            "modalities": {"should": {"labels": {"fi": "Pitäisi"}}},
+            # `Likely` is a belief level, not an inference mode, so it collides with nothing here.
+            "inference_modes": {"guess": {"labels": {"en": "Likely"}, "description": "A guess"}},
+        }
+    )
+
+    assert registry.findings == ()
+    assert registry.resolve_label(semantic_labels.BELIEF_LEVELS, "remote") == "remote"
+    assert registry.resolve_label(semantic_labels.MODALITIES, "pitäisi") == "should"
+    assert registry.resolve_label(semantic_labels.INFERENCE_MODES, "Likely") == "guess"
+
+    colliding = language_registry.load_registry(
+        proposal={
+            **_proposal(),
+            "inference_modes": {"proof": {"labels": {"en": "Deduction"}, "description": "Proof"}},
+        }
+    )
+    assert [(item["code"], item["path"]) for item in colliding.findings] == [
+        ("inference_mode_label_collision", "inference_modes.proof.labels.en"),
+    ]
+
+
+@pytest.mark.parametrize("label", ["0.7", "70 %"], ids=["number", "percentage"])
+def test_a_belief_level_labelled_like_a_probability_is_refused(label: str) -> None:
+    """Catches a level label that turns `- credence: 0.7` into a level, so it needs no basis."""
+    registry = language_registry.load_registry(
+        proposal={
+            **_proposal(),
+            "belief_levels": {"fair": {"labels": {"en": label}, "description": "Fairly sure"}},
+        }
+    )
+
+    assert [(item["code"], item["path"]) for item in registry.findings] == [
+        ("belief_level_label_probability", "belief_levels.fair.labels.en"),
+    ]
+
+
+def test_removing_an_entry_that_only_labels_a_shipped_key_is_no_drop() -> None:
+    """Catches a save refused for dropping a Finnish label, when the shipped key still resolves."""
+    current = language_registry.load_registry(
+        proposal=_proposal(
+            verdicts={
+                "refuted": {"labels": {"fi": "Kumottu"}},
+                "retracted": {"labels": {"en": "Retracted"}, "description": "Withdrawn"},
+            }
+        )
+    )
+    candidate = language_registry.load_registry(proposal=_proposal())
+
+    dropped = language_registry.dropped_label_findings(current, candidate)
+
+    assert [finding["code"] for _labels, finding in dropped] == ["verdicts_dropped"]
+    assert "retracted" in dropped[0][1]["detail"]
+    assert "refuted" not in dropped[0][1]["detail"]
+
+
+def test_a_language_tag_in_any_case_is_one_language() -> None:
+    """Catches `pt-BR` or `zh-Hant` refused as no language tag, as the shape check once did."""
+    registry = language_registry.load_registry(
+        proposal=_proposal(
+            verdicts={"refuted": {"labels": {"pt-BR": "Refutado", "zh-Hant": "已駁斥"}}}
+        )
+    )
+
+    assert registry.findings == ()
+    assert dict(registry.label_definitions(semantic_labels.VERDICTS)["refuted"].labels) == {
+        "en": "Refuted", "pt-br": "Refutado", "zh-hant": "已駁斥",
+    }
+    assert registry.resolve_label(semantic_labels.VERDICTS, "refutado") == "refuted"
+
+
+def test_an_unquoted_norwegian_tag_is_refused_with_the_quoting_fix() -> None:
+    """Catches the YAML trap: `no:` loads as False and once reported a baffling bad tag."""
+    proposal = yaml.safe_load(
+        "schema_version: 1\ncategories: {}\nkinds: {}\n"
+        "verdicts:\n  refuted:\n    labels:\n      no: Tilbakevist\n"
+    )
+
+    registry = language_registry.load_registry(proposal=proposal)
+
+    [finding] = registry.findings
+    assert finding["code"] == "invalid_label"
+    assert "quote the tag" in finding["detail"]

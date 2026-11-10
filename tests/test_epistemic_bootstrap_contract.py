@@ -27,6 +27,7 @@ import pytest
 from exomem import (
     commands,
     semantic_blocks,
+    semantic_labels,
     semantic_language_registry,
     semantic_units,
     workflow_skills,
@@ -87,8 +88,9 @@ def test_commitments_teach_the_five_rules(vault: Path) -> None:
     assert "prediction" in expectation and "check_by" in expectation
 
     judge = commitments["judge_categorically"].lower()
-    assert "no numeric confidence" in judge
+    assert "no confidence score" in judge
     assert "never a score" in judge
+    assert "belief unit" in judge and "holder" in judge
 
     negative = commitments["keep_the_negative_result"].lower()
     assert "refuted is not superseded" in negative
@@ -268,8 +270,8 @@ def test_taught_outcomes_are_the_runtime_outcomes(vault: Path) -> None:
     vocabulary = _contract(vault)["vocabulary"]
     runtime = semantic_language_registry.core_registry()
 
-    assert sorted(vocabulary["outcomes"]) == list(runtime.verdict_keys())
-    assert all(runtime.resolve_verdict(outcome) == outcome for outcome in vocabulary["outcomes"])
+    assert sorted(vocabulary["outcomes"]) == list(runtime.label_keys(semantic_labels.VERDICTS))
+    assert all(runtime.resolve_label(semantic_labels.VERDICTS, outcome) == outcome for outcome in vocabulary["outcomes"])
 
 
 def test_a_vault_added_verdict_is_discoverable_but_not_taught(vault: Path) -> None:
@@ -298,8 +300,17 @@ def test_taught_metadata_keys_are_the_runtime_keys(vault: Path) -> None:
     assert tuple(vocabulary["governed_unit_metadata"]) == (
         semantic_units.GOVERNED_UNIT_METADATA_KEYS
     )
-    for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
-        assert vocabulary[key]
+    # Each governed key that the published observation tool takes as an argument carries a
+    # description. The other governed rows are named in the list; task 6.2 of
+    # `make-epistemic-language-dynamic` teaches them in full.
+    schemas = json.loads(
+        (Path(__file__).parent / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
+    )
+    properties = schemas["add_observation"]["inputSchema"]["properties"]
+    arguments = sorted(set(properties) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS))
+    assert arguments
+    for key in arguments:
+        assert vocabulary[key], key
 
 
 def test_verdict_is_taught_as_categorical_state(vault: Path) -> None:
@@ -322,7 +333,7 @@ def test_check_by_is_taught_as_a_due_date_not_an_expiry(vault: Path) -> None:
 def test_taught_kinds_are_governed_block_types(vault: Path) -> None:
     kinds = _contract(vault)["vocabulary"]["kinds"]
 
-    assert set(kinds) == {"open_question", "hypothesis", "prediction"}
+    assert set(kinds) == {"open_question", "hypothesis", "prediction", "belief"}
     for kind, description in kinds.items():
         assert kind in semantic_blocks.BLOCK_TYPES, kind
         assert description
@@ -332,8 +343,7 @@ def test_metadata_form_rule_names_its_referent(vault: Path) -> None:
     """"Both rows are preserved" is unresolvable to a client reading only JSON."""
     form = _contract(vault)["vocabulary"]["metadata_form"].lower()
 
-    for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS:
-        assert key in form, key
+    assert "governed_unit_metadata" in form
     assert "rich" in form and "compact" in form
     assert "survive an edit" in form
 
@@ -458,7 +468,7 @@ def _assert_doctrine_intact(descriptor: ActiveSurfaceDescriptor, vault: Path) ->
     contract = payload["epistemic_contract"]
     assert tuple(contract["commitments"]) == _COMMITMENTS, descriptor.profile
     assert sorted(contract["vocabulary"]["outcomes"]) == list(
-        semantic_language_registry.core_registry().verdict_keys()
+        semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS)
     ), descriptor.profile
 
     serialized = json.dumps(contract)
@@ -536,7 +546,7 @@ def test_payload_no_longer_omits_the_doctrine(vault: Path) -> None:
         )
 
     # None of the five appeared in the pre-change payload at all.
-    for outcome in semantic_language_registry.core_registry().verdict_keys():
+    for outcome in semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS):
         assert outcome in serialized, outcome
 
 

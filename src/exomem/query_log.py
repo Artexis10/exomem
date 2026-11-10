@@ -402,7 +402,9 @@ def log_activation_call(
     resolved anchor refs (omitted in content-private hosted mode), the recent
     entries counted per reason, continuity, and whether `episode_due` rode
     along, and the conversation's presence: its `generation.conversation` state
-    and the counts of its surviving `recent` entries and refs. Never recorded:
+    and the counts of its surviving `recent` entries and refs, the content-free
+    `activation_result` and the leaf's `budget` (stage names and milliseconds, null
+    when no budget was bound). Never recorded:
     the turn or any hash of it, any conversation text or hash of it, unit, statement or
     title text, the continuity token, the raw session, or any identity beyond
     a hash. Nothing in `usage` reads this file.
@@ -425,13 +427,14 @@ def log_activation_call(
     if _disabled():
         return
     try:
-        from . import command_surface, privacy_log
+        from . import activation_result, command_surface, privacy_log, request_budget
         from .governance.principal import OWNER_AUDIENCE, effective_principal
 
         principal = effective_principal()
         audience = str(principal.audience_id or "")
         observed = command_surface.mcp_caller_identity()
         declared = declared_client(client)
+        budget = request_budget.current()
         body = packet if isinstance(packet, Mapping) else {}
         generation = body.get("generation") if isinstance(body.get("generation"), Mapping) else {}
         abstention = body.get("abstention") if isinstance(body.get("abstention"), Mapping) else {}
@@ -467,6 +470,9 @@ def log_activation_call(
             "recent": recent,
             "continuity": generation.get("continuity"),
             "episode_due": "episode_due" in body,
+            # What the call ledger records for the same call: null is unknown, never "not limited".
+            "activation_result": activation_result.of_packet(packet),
+            "budget": budget.as_ledger_block() if budget is not None else None,
             "conversation": {
                 "state": str((conversation or {}).get("state") or "absent"),
                 "recent": int((conversation or {}).get("recent") or 0),

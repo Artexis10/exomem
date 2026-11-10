@@ -40,6 +40,7 @@ from .. import structured_collections as collections
 from ..governance import connector_boundary
 from ..governance.principal import effective_principal
 from ..planning_values import PlanningValues
+from ..query_engine import reference_report
 from ..query_engine.indexes import IndexDeclarationError
 from . import (
     aliases,
@@ -53,6 +54,7 @@ from . import (
     governance,
     index_migrations,
     log_view,
+    reference_declarations,
     references,
     rollups,
     schema,
@@ -605,7 +607,11 @@ class CollectionWriter:
                 authorize_path=self._operation.allows_file,
             )
             # Recipient inspection cannot publish full-state guards or import provenance; owners retain them below.
+            references = (reference_report.check_collection(self.root, self.handle.path,
+                                                          manifest.collection_id)
+                          if collections.declared_references(field_plan.manifest.schema) else [])
             return {"kind": "collection", "report_only": True,
+                    "references": references,
                     "contract": record_governance._inspection_contract(field_plan.manifest),
                     "snapshot": snapshot,
                     "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
@@ -725,8 +731,12 @@ class CollectionWriter:
                                     "migration": migration})
         guards = {"expected_manifest_hash": manifest.manifest_version.hash,
                   "expected_container_hash": self._container(row) if complete else visible_snapshot}
+        references = (reference_report.check_collection(self.root, self.handle.path,
+                                                        manifest.collection_id)
+                      if collections.declared_references(field_plan.manifest.schema) else [])
         payload = {
             "kind": "collection", "report_only": True,
+            "references": references,
             "contract": record_governance._inspection_contract(manifest),
             "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
@@ -2159,31 +2169,7 @@ class CollectionWriter:
                 admission.check(identity, digest, replay)
             if replay is not None:
                 return replay
-            manifest = collections.parse_manifest_bytes(
-                self.root, manifest_path, manifest_text.encode()
-            )
-            declared = types.type_for_manifest(manifest)
-            if self._facade_profile is not None and manifest.semantic_profile != self._facade_profile:
-                raise collections.CollectionError(
-                    "PLANNING_PROFILE_REQUIRED" if self._facade_profile == "planning" else "RECORDS_PROFILE_REQUIRED",
-                    f"{self._facade_profile.title()} collection is required",
-                )
-            if self._facade_profile == "planning" and scaffold:
-                manifest_text = planning._with_default_scaffold(
-                    manifest_text, manifest, vault_root=self.root
-                )
-                manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
-            if declared.kind == "intended":
-                planning.require_planning_profile(manifest)
-            records._refuse_excluded_manifest_fields(manifest)
-            record_formats.validate_storage_contract(manifest)
-            if manifest.storage.strategy == "dataset":
-                raise collections.CollectionError(
-                    "READ_ONLY_COLLECTION", "datasets remain file-canonical"
-                )
-            if manifest.view_diagnostics:
-                diagnostic = manifest.view_diagnostics[0]
-                raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+            manifest, manifest_text, declared = self._prepare_create(manifest_path, manifest_text, scaffold)
             try:
                 connector_boundary.require_create(self.root, manifest.path)
                 connector_boundary.require_create(self.root, manifest.storage.source)
@@ -2263,6 +2249,41 @@ class CollectionWriter:
         writer_lease.mark_active_mutation_committed()
         records._refresh_manifest_due_state(self.root, manifest)
         return receipt
+
+    def _prepare_create(self, manifest_path, manifest_text, scaffold):
+        """Every check on a new collection's manifest that reads no store state a create would write.
+
+        Returns the parsed manifest, its text (a Planning scaffold may add to it) and its type.
+        """
+        manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
+        declared = types.type_for_manifest(manifest)
+        if self._facade_profile is not None and manifest.semantic_profile != self._facade_profile:
+            raise collections.CollectionError(
+                "PLANNING_PROFILE_REQUIRED" if self._facade_profile == "planning" else "RECORDS_PROFILE_REQUIRED",
+                f"{self._facade_profile.title()} collection is required",
+            )
+        if self._facade_profile == "planning" and scaffold:
+            manifest_text = planning._with_default_scaffold(manifest_text, manifest, vault_root=self.root)
+            manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
+        if declared.kind == "intended":
+            planning.require_planning_profile(manifest)
+        records._refuse_excluded_manifest_fields(manifest)
+        record_formats.validate_storage_contract(manifest)
+        if manifest.storage.strategy == "dataset":
+            raise collections.CollectionError("READ_ONLY_COLLECTION", "datasets remain file-canonical")
+        if manifest.view_diagnostics:
+            diagnostic = manifest.view_diagnostics[0]
+            raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+        reference_declarations.require_targets(self._operation, manifest)
+        return manifest, manifest_text, declared
+
+    def validate_create(self, manifest_path, manifest_text, *, scaffold=True):
+        """Refuse a new manifest that create would refuse for its own content, with create's error.
+
+        Reads under the policy a create is held to and writes nothing.
+        """
+        with self.read_snapshot(mutation=True):
+            self._prepare_create(manifest_path, manifest_text, scaffold)
 
     def _new_item_key_scheme(self, manifest) -> str:
         """The item key scheme a collection takes at creation; the store fixes it for the collection's life.
@@ -2912,7 +2933,8 @@ class CollectionWriter:
             for key, values, _, path, before, _ in plans:
                 advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
                                                       values=values, previous=json.loads(before["values_json"]) if before else None)
-        return {"due_state": advisory, **result} if advisory else result
+        result = {"due_state": advisory, **result} if advisory else result
+        return self._reference_check(result, manifest, [values for _, values, *_ in plans])
 
     def _item_carriers(self, result, manifest, *, path, key, values, previous=None):
         """Refresh derived state only after a new item write has committed."""
@@ -2924,7 +2946,20 @@ class CollectionWriter:
         )
         sweep = records._capture_sweep_carrier(self.root, manifest, key=key)
         result = {"due_state": advisory, **result} if advisory else result
-        return {"capture_sweep": sweep, **result} if sweep else result
+        result = {"capture_sweep": sweep, **result} if sweep else result
+        return self._reference_check(result, manifest, [values] if values is not None else [])
+
+    def _reference_check(self, result, manifest, rows: list):
+        """Report unresolved declared references of the committed rows; never fails the write."""
+        if not collections.declared_references(manifest.schema):
+            return result
+        report = reference_report.check_values(self.root, self.handle.path,
+                                               manifest.collection_id, rows)
+        if report is None:
+            return result
+        result = {**result, "reference_check": report}
+        warns = reference_report.warnings(report)
+        return records._with_warnings(result, warns) if warns else result
 
     def append_record(
         self,
@@ -3440,10 +3475,28 @@ class CollectionWriter:
         if refused is not None:
             raise refused
         records._refuse_excluded_manifest_fields(proposed)
+        kept = {item.dotted for item in collections.declared_references(proposed.schema)}
+        dropped = {item.dotted: item for item in collections.declared_references(current.schema)
+                   if item.dotted not in kept}
+        # A view that still names a removed reference is the revise's problem, not the
+        # view's: the caller must drop both in the same revise.
+        in_use = [diagnostic for diagnostic in proposed.view_diagnostics
+                  if diagnostic.code == "SAVED_VIEW_REFERENCE_UNDECLARED" and diagnostic.reference in dropped]
+        if in_use:
+            declaration = dropped[in_use[0].reference]
+            raise collections.CollectionError(
+                "REFERENCE_IN_USE",
+                "a saved view uses this reference; remove or revise those views in the same revise",
+                {"field": f"{declaration.location}.references",
+                 "views": sorted({diagnostic.location.split(".", 1)[-1] for diagnostic in in_use}),
+                 "expected": "no saved view naming the reference",
+                 "example": f"drop the view, or its {declaration.dotted} fields, in the same revise"},
+            )
         if proposed.view_diagnostics:
             diagnostic = proposed.view_diagnostics[0]
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)
         record_formats.validate_storage_contract(proposed)
+        reference_declarations.require_targets(self._operation, proposed, current)
         if declared.kind == "intended":
             planning.require_planning_profile(proposed)
         plans = {

@@ -7,10 +7,11 @@ links the commit re-resolves. It reads the transaction's own tables for pages (a
 page that the store does not own), so a reader that sees the commit sees its rows, and a kill leaves
 no row without its page.
 
-The registries (traversal profiles, the type basis) are the exception: the owners' builders read
-them from disk, while the schema overlay under ``_Schema`` is store-owned. A batch that writes
-``_Schema`` therefore derives its pages with the previous registry, and the background job that
-the design gives the registry state re-derives them afterwards.
+The registries (traversal profiles, the type basis) and the access policy are the exception: the
+owners' builders read them from disk, while the schema overlay under ``_Schema`` is store-owned. A
+batch that writes the overlay therefore derives its pages with the previous registry, and the
+background job in ``rederive.py`` settles the rows afterwards, one ``rederive_pages`` batch at a
+time.
 
 The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.page_graph_rows``,
 ``memory_refs.identity_row``); this module only says which bytes, which resolver and which pages.
@@ -61,20 +62,44 @@ def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[s
     ``existing`` is the set of the change's page paths that the store held before the commit, which
     tells a new page from an edited one.
     """
-    _Derivation(tx, Path(root), change, existing).run()
+    _Derivation(
+        tx,
+        Path(root),
+        written=[*(put.rel for put in change.puts), *(move.dst for move in change.moves)],
+        removed=[
+            *(delete.rel for delete in change.deletes),
+            *(move.src for move in change.moves),
+        ],
+        refreshed=list(change.refresh),
+        existing=existing,
+    ).run()
+
+
+def rederive_pages(tx: Connection, root: Path, rels: list[str]) -> None:
+    """Derive the rows of the stored pages at ``rels`` again from their own bytes.
+
+    The registry job calls it once the registries and the access policy that the builders read have
+    changed. Every page counts as one that the store already held, so a page whose title is the same
+    re-resolves only the links that name one of its units, as an edit of its bytes would.
+    """
+    _Derivation(
+        tx, Path(root), written=[], removed=[], refreshed=list(rels), existing=frozenset(rels)
+    ).run()
 
 
 class _Derivation:
     def __init__(
-        self, tx: Connection, root: Path, change: StoreChange, existing: frozenset[str]
+        self,
+        tx: Connection,
+        root: Path,
+        *,
+        written: list[str],
+        removed: list[str],
+        refreshed: list[str],
+        existing: frozenset[str],
     ) -> None:
-        self.tx, self.root, self.change, self.existing = tx, root, change, existing
-        self.written = [*(put.rel for put in change.puts), *(move.dst for move in change.moves)]
-        self.removed = [
-            *(delete.rel for delete in change.deletes),
-            *(move.src for move in change.moves),
-        ]
-        self.refreshed = list(change.refresh)
+        self.tx, self.root, self.existing = tx, root, existing
+        self.written, self.removed, self.refreshed = written, removed, refreshed
 
     # ------------------------------------------------------------------ sources
 
@@ -204,7 +229,9 @@ class _Derivation:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
         found = self.source(rel)
-        if found is not None:
+        # File mode builds the graph from the Knowledge Base walk alone: a refreshed page outside it
+        # has lexical rows and no graph rows, or it would get a node under a path that has no file.
+        if found is not None and lexstore.page_membership(rel)[0]:
             raw, mtime_ns = found
             page, state = self.parse(rel, raw, mtime_ns)
             if page is not None and state is not None:

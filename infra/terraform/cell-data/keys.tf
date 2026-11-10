@@ -20,3 +20,13 @@ resource "b2_application_key" "cellctl_backup_list" {
   bucket_ids   = [b2_bucket.cell_backups.bucket_id]
   capabilities = ["listBuckets", "listFiles"]
 }
+
+# The out-of-cluster key watcher lists each deleted cell's backup prefix with this key
+# (automate-cell-storage-deletion D4). No in-cluster component holds it, so a compromised cluster
+# cannot blind the watcher's view of a purge.
+resource "b2_application_key" "key_watcher_backup_list" {
+  key_name   = "exomem-cell-data-key-watcher-backup-list"
+  bucket_ids = [b2_bucket.cell_backups.bucket_id]
+  # B2 capability names are protocol tokens: listFiles lists versions, start entries and hide markers.
+  capabilities = ["listFiles"]
+}

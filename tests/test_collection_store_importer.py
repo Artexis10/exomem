@@ -563,18 +563,25 @@ def test_target_becoming_mixed_release_pauses_the_job(store, monkeypatch):
     )
 
 
+def _granted_client(store, tmp_path, monkeypatch, *, audience="principal:person-1", protected=()):
+    """The principal a host grant lets write Records, bound to its client but not yet to a login."""
+    from granted_writer import grant_writer
+
+    return grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
+                        capture_paths=["Knowledge Base/Records"], protected=protected, audience=audience)(audience)
+
+
 def _granted_import_client(store, tmp_path, monkeypatch, *, audience="principal:person-1", protected=()):
     """A real host grant and revocable transport session for the import's initiating client."""
     import asyncio
     from dataclasses import replace
 
-    from granted_writer import CLIENT, ISSUER, grant_writer
+    from granted_writer import CLIENT, ISSUER
 
     from exomem import auth_sessions, server_auth
     from exomem.governance.principal import OriginSessionBinding
 
-    bound = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
-                         capture_paths=["Knowledge Base/Records"], protected=protected, audience=audience)(audience)
+    bound = _granted_client(store, tmp_path, monkeypatch, audience=audience, protected=protected)
     authority = auth_sessions.SessionAuthority.local(
         directory=tmp_path / "origin-sessions", signing_root="temporary-import-signing-root",
         issuer=ISSUER, audience=f"{ISSUER}/mcp", clock=lambda: NOW + 2,
@@ -612,8 +619,8 @@ def _session_at(store, at, ttl):
     )
 
 
-def test_grant_expiry_pauses_and_is_never_extended(store, tmp_path, monkeypatch):
-    """A job that caches its initial grant keeps writing after the session expires."""
+def test_grant_expiry_pauses_as_time_cap_and_is_never_extended(store, tmp_path, monkeypatch):
+    """A job that caches its initial grant keeps writing after the session expires, or pauses with no deadline shown."""
     from dataclasses import replace
 
     setup(store)
@@ -625,7 +632,9 @@ def test_grant_expiry_pauses_and_is_never_extended(store, tmp_path, monkeypatch)
     job = start(store, who)
     run(store, max_batches=1)
     committed = count(store.connection)
-    expired = who.verified_authorization_session.expires_at + 1
+    expiry = who.verified_authorization_session.expires_at
+    shown = status(store, job, who)["window"]["expires_at"]
+    expired = expiry + 1
     monkeypatch.setattr("time.time", lambda: expired)
     run(store)
     run(store)
@@ -633,11 +642,9 @@ def test_grant_expiry_pauses_and_is_never_extended(store, tmp_path, monkeypatch)
     renewed = _session_at(store, expired, 120)
     renewed = replace(renewed, client_binding=bound.client_binding, origin_session=bound.origin_session)
     result = status(store, job, renewed)
-    assert (result["state"], result["reason"], result["rows"]["imported"]) == (
-        "partial",
-        "authority_lost",
-        committed,
-    )
+    assert shown == importer()._iso(expiry) == result["window"]["expires_at"]
+    assert (result["state"], result["reason"], result["rows"]["imported"]) == ("partial", "time_cap", committed)
+    assert "authorization session" in result["message"]
     assert who.verified_authorization_session.session_id not in json.dumps(result)
     call(store, renewed, mode="start", continuation=job["continuation"])
     run(store)
@@ -713,24 +720,27 @@ def test_host_takeover_reproves_the_bound_source_hash(store, monkeypatch, change
 
 def test_status_after_a_restart_reports_what_a_fresh_check_finds(store, tmp_path, monkeypatch):
     """A restarted host reading only the durable row reports running for a job its next batch pauses."""
+    import asyncio
     from dataclasses import replace
+
+    from exomem import auth_sessions
+    from exomem.governance.principal import OriginSessionBinding
 
     setup(store)
     small(monkeypatch)
-    bound, _, _, _ = _granted_import_client(store, tmp_path, monkeypatch)
-    session(store, monkeypatch, paths="Unrelated/**")
-    who = _session_at(store, NOW, 60)
-    who = replace(who, client_binding=bound.client_binding, origin_session=bound.origin_session)
+    who, authority, bearer, _ = _granted_import_client(store, tmp_path, monkeypatch)
     job = start(store, who)
     run(store, max_batches=1)
     path = store.handle.path
     store.handle.close()
     with connection.open_writer(path, lease_check=lambda: True) as handle:
         intact = status(store, job, who, handle=handle)
-        expired = who.verified_authorization_session.expires_at + 1
-        monkeypatch.setattr("time.time", lambda: expired)
-        renewed = _session_at(store, expired, 120)
-        renewed = replace(renewed, client_binding=bound.client_binding, origin_session=bound.origin_session)
+        asyncio.run(authority.revoke_bearer(bearer, reason="test logout"))
+        _, origin = asyncio.run(authority.issue(
+            client_id=who.client_binding.client_id, scopes=["exomem:read", "exomem:write"],
+            identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="import-reader"),
+        ))
+        renewed = replace(who, origin_session=OriginSessionBinding(origin.session_id, origin.generation, origin.audience))
         lapsed = status(store, job, renewed, handle=handle)
         resumed = call(
             store, renewed, handle=handle, mode="start", continuation=job["continuation"]
@@ -1281,6 +1291,36 @@ def test_a_store_refusal_pauses_the_job_until_the_store_accepts_writes(store, mo
     assert result["rows"]["imported"] == count(store.connection) == len(valid(iter_exercises()))
 
 
+def test_a_writer_coordinator_timeout_pauses_the_job_instead_of_failing_it(store, monkeypatch):
+    """A coordinator that times out once for a few seconds ends an hour-long import that cannot continue."""
+    from exomem.cli_ops import OpError
+    from exomem.collection_store.writer import CollectionWriter
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+
+    def unreachable(self, *args, **kwargs):
+        raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "writer coordinator could not confirm authority: timed out")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(CollectionWriter, "_write_item", unreachable)
+        assert run(store)["errors"] == 1
+    paused = status(store, job)
+    assert (paused["state"], paused["reason"], paused["error"]["code"]) == (
+        "partial",
+        "store_unavailable",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+    )
+    assert count(store.connection) == paused["rows"]["imported"] == committed
+    run(store)
+    result = status(store, job)
+    assert (result["state"], result["error"]) == ("complete", None)
+    assert result["rows"]["imported"] == count(store.connection) == len(valid(iter_exercises()))
+
+
 def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(store, monkeypatch):
     """Batch boundaries decide which duplicate wins, and whether a stop-policy job fails."""
     rows = [{"id": f"r{i}", "kind": "first"} for i in range(12)]
@@ -1694,3 +1734,330 @@ def test_a_revoked_import_origin_keeps_rows_and_checkpoint_until_valid_continuat
     run(store)
     assert status(store, job, renewed)["state"] == "complete"
     assert count(store.connection) == len(valid(iter_exercises()))
+
+
+# A login that outlives its access token (OpenSpec run-import-jobs-under-the-login-grant)
+
+
+class _Clock:
+    """A session store's clock that a test moves; an access token's expiry is read from it."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+class _Login:
+    """A granted client's real login over an in-memory session store, with a clock the test moves."""
+
+    def __init__(self, store, tmp_path, monkeypatch, *, expiring=True, client_id=None):
+        from granted_writer import CLIENT, ISSUER
+        from test_auth_sessions import AtomicMemoryStore
+
+        from exomem import auth_sessions, server_auth
+
+        self.expiring, self.client_id = expiring, client_id or CLIENT
+        self.base = _granted_client(store, tmp_path, monkeypatch)
+        self.clock = _Clock(NOW + 2)
+        self.raw = AtomicMemoryStore()
+        self.raw.clock = self.clock
+        self.authority = auth_sessions.SessionAuthority(
+            storage=self.raw, signing_root="temporary-import-signing-root", issuer=ISSUER,
+            audience=f"{ISSUER}/mcp", clock=self.clock,
+        )
+        monkeypatch.setenv("EXOMEM_BASE_URL", ISSUER)
+        monkeypatch.setattr(server_auth, "build_session_authority", lambda **kwargs: self.authority)
+        self.sign_in()
+
+    def sign_in(self):
+        """A new session for the same client, as a later login or a refreshed token gives."""
+        import asyncio
+        from dataclasses import replace
+
+        from exomem import auth_sessions
+        from exomem.governance.principal import OriginSessionBinding
+
+        identity = auth_sessions.SessionIdentity(github_user_id=42, github_login="import-reader")
+        scopes = ["exomem:read", "exomem:write"]
+        if self.expiring:
+            self.bearer, self.origin, self.refresh = asyncio.run(self.authority.issue_offline(
+                client_id=self.client_id, scopes=[*scopes, "offline_access"], identity=identity,
+            ))
+        else:
+            self.bearer, self.origin = asyncio.run(self.authority.issue(
+                client_id=self.client_id, scopes=scopes, identity=identity,
+            ))
+            self.refresh = None
+        self.who = replace(self.base, issuer_family="mcp-oauth", origin_session=OriginSessionBinding(
+            self.origin.session_id, self.origin.generation, self.origin.audience))
+        return self.who
+
+
+def _rows_and_checkpoint(store):
+    return (
+        store.connection.execute("SELECT * FROM items ORDER BY row_id").fetchall(),
+        store.connection.execute("SELECT checkpoint_json FROM import_jobs").fetchone()[0],
+    )
+
+
+def _hours_later(monkeypatch, hours):
+    import time
+
+    later = time.time() + hours * 3600
+    monkeypatch.setattr("time.time", lambda: later)
+
+
+def test_an_import_outlives_the_access_token_that_started_it(store, tmp_path, monkeypatch):
+    """A job that rechecks its origin as a request does pauses an hour in, though nothing was revoked."""
+    import asyncio
+
+    from exomem import auth_sessions
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    rechecks = []
+    recheck = auth_sessions.SessionAuthority.revalidate_login
+
+    async def counted(self, **binding):
+        rechecks.append(binding["session_id"])
+        return await recheck(self, **binding)
+
+    monkeypatch.setattr(auth_sessions.SessionAuthority, "revalidate_login", counted)
+    login = _Login(store, tmp_path, monkeypatch)
+    job = start(store, login.who)
+    run(store, max_batches=1)
+    login.clock.now = login.origin.expires_at + 3 * 3600
+    _hours_later(monkeypatch, 3)
+    binding = {"session_id": login.origin.session_id, "generation": login.origin.generation,
+               "client_id": login.origin.client_id}
+    assert asyncio.run(login.authority.validate_binding(**binding)) is None
+    run(store, max_batches=1)
+    running = status(store, job, login.who)
+    assert running["state"] == "running" and "expires_at" not in running["window"]
+    assert running["window"]["runs_while"] == "login_active" and "login" in running["message"]
+    run(store)
+    result = status(store, job, login.who)
+    assert (result["state"], result["rows"]["imported"]) == ("complete", count(store.connection))
+    assert count(store.connection) == len(valid(iter_exercises()))
+    assert len(rechecks) >= result["batches"]
+
+
+@pytest.mark.parametrize("ending", ["logout", "family-revoked", "refresh-reuse", "generation-change", "identity-disallowed"])
+def test_ending_the_login_pauses_the_next_batch_without_advancing_the_checkpoint(
+    store, tmp_path, monkeypatch, ending,
+):
+    """A job that vouches for a login by its access token alone keeps importing after its owner ended it."""
+    import asyncio
+
+    from exomem import auth_sessions
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    login = _Login(store, tmp_path, monkeypatch)
+    job = start(store, login.who)
+    run(store, max_batches=1)
+    before = _rows_and_checkpoint(store)
+    authority = login.authority
+    if ending == "logout":
+        asyncio.run(authority.revoke_bearer(login.bearer, reason="test logout"))
+    elif ending == "family-revoked":
+        asyncio.run(authority.revoke_bearer(login.refresh, reason="test revocation"))
+    elif ending == "refresh-reuse":
+        asyncio.run(authority.rotate_refresh(login.refresh, client_id=login.client_id, scopes=["offline_access"]))
+        login.clock.now += auth_sessions.REFRESH_RETRY_GRACE_SECONDS + 1
+        with pytest.raises(auth_sessions.InvalidRefreshToken):
+            asyncio.run(authority.rotate_refresh(login.refresh, client_id=login.client_id, scopes=["offline_access"]))
+    elif ending == "generation-change":
+        asyncio.run(authority.replace_generation())
+    else:
+        authority.allowed_github_user_id = 99
+    run(store)
+    assert _rows_and_checkpoint(store) == before
+    paused = status(store, job, login.who)
+    assert (paused["state"], paused["reason"]) == ("partial", "authority_lost")
+    for identifier in (login.origin.session_id, login.origin.family_id, login.client_id):
+        assert identifier not in json.dumps(paused)
+
+
+def test_a_login_of_another_client_than_the_bound_one_pauses_before_the_first_batch(store, tmp_path, monkeypatch):
+    """A job that matches a session by id alone accepts another client's login for the bound client."""
+    setup(store)
+    small(monkeypatch, rows=2)
+    login = _Login(store, tmp_path, monkeypatch, client_id="another-client")
+    job = start(store, login.who)
+    run(store)
+    paused = status(store, job, login.who)
+    assert (paused["state"], paused["reason"], paused["rows"]["imported"]) == ("partial", "authority_lost", 0)
+    assert count(store.connection) == 0
+
+
+def test_only_the_principal_that_started_a_job_continues_it_from_a_current_login(store, tmp_path, monkeypatch):
+    """A job paused by a logout resumes from the same row for its own principal, and for no other."""
+    import asyncio
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    login = _Login(store, tmp_path, monkeypatch)
+    job = start(store, login.who)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+    asyncio.run(login.authority.revoke_bearer(login.bearer, reason="test logout"))
+    run(store)
+    for other in (OTHER, owner_principal(surface="mcp")):
+        assert refused(call, store, other, mode="start", continuation=job["continuation"]).code == "IMPORT_JOB_NOT_FOUND"
+    assert status(store, job, login.who)["state"] == "partial" and count(store.connection) == committed
+    resumed = call(store, login.sign_in(), mode="start", continuation=job["continuation"])
+    assert resumed["state"] == "running"
+    run(store)
+    result = status(store, job, login.who)
+    assert (result["state"], result["rows"]["imported"]) == ("complete", len(valid(iter_exercises())))
+    assert count(store.connection) == len(valid(iter_exercises())) and import_txns(store.connection) == result["batches"]
+
+
+def test_a_session_without_an_expiry_runs_past_an_hour_until_it_is_revoked(store, tmp_path, monkeypatch):
+    """A fixed one-hour window stops a local-ingress import that its still-active session allows."""
+    import asyncio
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    login = _Login(store, tmp_path, monkeypatch, expiring=False)
+    job = start(store, login.who)
+    run(store, max_batches=1)
+    _hours_later(monkeypatch, 2)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+    assert committed > 2 and status(store, job, login.who)["state"] == "running"
+    asyncio.run(login.authority.revoke_bearer(login.bearer, reason="test revocation"))
+    run(store)
+    paused = status(store, job, login.who)
+    assert (paused["state"], paused["reason"], count(store.connection)) == ("partial", "authority_lost", committed)
+
+
+def test_a_job_without_a_login_the_service_can_recheck_keeps_the_one_hour_window(store, monkeypatch):
+    """Dropping the window for every job leaves a stdio import running with no one able to end it."""
+    import datetime as dt
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    who = owner_principal(surface="mcp")
+    job = start(store, who)
+    run(store, max_batches=1)
+    running = status(store, job, who)
+    window = running["window"]
+    assert (dt.datetime.fromisoformat(window["expires_at"]) - dt.datetime.fromisoformat(window["started_at"])
+            ).total_seconds() == importer().JOB_WINDOW_SECONDS
+    _hours_later(monkeypatch, 1.1)
+    run(store)
+    paused = status(store, job, who)
+    assert (paused["state"], paused["reason"], paused["window"]) == ("partial", "time_cap", window)
+    assert "one-hour" in paused["message"]
+    assert call(store, who, mode="start", continuation=job["continuation"])["state"] == "running"
+
+
+def test_a_cloud_cells_login_keeps_the_one_hour_window(store, monkeypatch):
+    """A job keyed on having an origin session drops the window for a login only the gateway can vouch for."""
+    from exomem import cloud_cell, cloud_origin
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    cell = "abcdefghijklmnop"
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", cell)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "example-credential-" * 3)
+    request = cloud_origin.RequestOrigin(cloud_origin.Origin(
+        tenant_id="tenant-1", cell_id=cell, client_id="gateway-client", grant_id="grant-1",
+        family_id="family-1", resource="https://cloud.example.test"), None)
+    with cloud_origin.bound(request):
+        who = cloud_origin.with_origin(RequestPrincipal(
+            audience_id="owner", surface="mcp", issuer_family=cloud_cell.issuer_family(cell)))
+        job = start(store, who)
+        run(store, max_batches=1)
+        assert "expires_at" in status(store, job, who)["window"]
+        _hours_later(monkeypatch, 1.1)
+        run(store)
+        paused = status(store, job, who)
+    assert (paused["state"], paused["reason"]) == ("partial", "time_cap")
+
+
+@pytest.mark.parametrize("pause", ["between-batches", "during-settlement"])
+def test_an_unreadable_session_store_pauses_the_job_as_store_unavailable_until_it_answers(
+    store, tmp_path, monkeypatch, pause,
+):
+    """A store read failure taken as a revoked login ends a healthy import and demands a continuation."""
+    import time as clock_module
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    login = _Login(store, tmp_path, monkeypatch)
+    job = start(store, login.who)
+    run(store, max_batches=1)
+    before = _rows_and_checkpoint(store)
+    if pause == "between-batches":
+        login.raw.fail_get = True
+        assert run(store, max_batches=1)["errors"] == 1
+    else:
+        settle = importer()._Settlement.__call__
+
+        def fail_after_rows_are_staged(settlement, writer, result):
+            login.raw.fail_get = True
+            return settle(settlement, writer, result)
+
+        with monkeypatch.context() as transaction:
+            transaction.setattr(importer()._Settlement, "__call__", fail_after_rows_are_staged)
+            assert run(store, max_batches=1)["errors"] == 1
+    assert _rows_and_checkpoint(store) == before
+    paused = status(store, job, login.who)
+    assert (paused["state"], paused["reason"], paused["error"]["code"]) == (
+        "partial", "store_unavailable", "IMPORT_SESSION_STORE_UNAVAILABLE")
+    login.raw.fail_get = False
+    monkeypatch.setattr(importer(), "time", _Monotonic(clock_module.monotonic() + 3600))
+    run(store)
+    result = status(store, job, login.who)
+    assert (result["state"], result["error"]) == ("complete", None)
+    assert count(store.connection) == len(valid(iter_exercises()))
+
+
+class _Monotonic:
+    """The importer's ``time`` module with a monotonic clock a test moves."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def monotonic(self):
+        return self.now
+
+    def __getattr__(self, name):
+        import time
+
+        return getattr(time, name)
+
+
+def test_a_session_store_that_stays_unreadable_is_retried_on_a_bounded_backoff(store, tmp_path, monkeypatch):
+    """A tick that repeats the lookup for every blocked job spends the store's timeout on each one."""
+    setup(store)
+    small(monkeypatch, rows=2)
+    login = _Login(store, tmp_path, monkeypatch)
+    start(store, login.who)
+    run(store, max_batches=1)
+    clock = _Monotonic(1000.0)
+    monkeypatch.setattr(importer(), "time", clock)
+    login.raw.fail_get = True
+    lookups = []
+
+    def waits():
+        """Seconds of waiting before the job reads the store again, to the second."""
+        before = len(login.raw.calls)
+        for elapsed in range(int(importer().UNREADABLE_RETRY_MAX_SECONDS) + 2):
+            run(store)
+            if len(login.raw.calls) > before:
+                return elapsed
+            clock.now += 1
+        raise AssertionError("the job never read the store again")
+
+    run(store)
+    for _ in range(7):
+        lookups.append(waits())
+    assert lookups[0] == importer().UNREADABLE_RETRY_SECONDS
+    assert lookups == sorted(lookups) and lookups[-1] == importer().UNREADABLE_RETRY_MAX_SECONDS

@@ -10,12 +10,19 @@ An account may also pin a media watch (`collect-released-media` D4). With a seco
 list-only key, limited to the media bucket, the watcher counts the hide markers of
 the pinned window and alerts when they exceed the pinned budget.
 
+The pinned set may also pin a deletion watch (`automate-cell-storage-deletion` D4). The
+watcher then reads the set of deleted cells from a Substrate endpoint, lists each deleted
+cell's prefix in the backup and media buckets, and reports each cell's purge state to the
+receiver: pending, hidden, or confirmed, and an anomaly when the purge stalls or comes early.
+
 The pinned set is data, held in the `KEY_WATCHER_PINNED_SET` secret: this public
 repository holds no key ID, bucket name or account ID. Output is value-free. It
-prints account labels, reason tokens and counts only, because CI logs are public.
+prints account labels, reason tokens and counts only, because CI logs are public. A cell ID
+goes only into an alert name that the receiver gets, never into the log.
 
 Exit status: 0 when no alert is active and every delivery succeeded; 1 when a
-drift alert is active or a delivery failed; 2 when the configuration is invalid;
+drift alert or a deletion anomaly is active or a delivery failed (a pending or hidden
+deletion is the normal course and keeps the run green); 2 when the configuration is invalid;
 3 on an unexpected error. Exit 2 and 3 send no heartbeat, and neither does a run with a
 failed check delivery, so the receiver also reports a run that did not finish reporting.
 """
@@ -32,7 +39,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, TextIO
@@ -79,13 +86,31 @@ _BUCKET_TOKENS = (BUCKET_MISSING, BUCKET_SETTING_DRIFT)
 MEDIA_HIDE_BURST = "MEDIA_HIDE_BURST"
 MEDIA_LISTING_FAILURE = "MEDIA_LISTING_FAILURE"
 MEDIA_TOKENS = (MEDIA_HIDE_BURST, MEDIA_LISTING_FAILURE)
-# B2's documented file-version action for a hide marker, a protocol token.
+# automate-cell-storage-deletion D4: only a pinned set with a deletion watch sends these.
+PURGE_KEY_UNEXPECTED = "PURGE_KEY_UNEXPECTED"
+DELETIONS_UNKNOWN = "DELETIONS_UNKNOWN"
+DELETION_LISTING_FAILURE = "DELETION_LISTING_FAILURE"
+# Each of these goes to the receiver as `<token>:<cell id>`.
+CELL_DELETION_PENDING = "CELL_DELETION_PENDING"
+CELL_DELETION_HIDDEN = "CELL_DELETION_HIDDEN"
+CELL_DELETION_ANOMALY = "CELL_DELETION_ANOMALY"
+CELL_TOKENS = (CELL_DELETION_PENDING, CELL_DELETION_HIDDEN, CELL_DELETION_ANOMALY)
+ACCOUNT_TOKENS = (*ALERT_TOKENS, PURGE_KEY_UNEXPECTED, *MEDIA_TOKENS)
+# B2's documented file-version actions, protocol tokens.
 HIDE_ACTION = "hide"
+UPLOAD_ACTION = "upload"
+START_ACTION = "start"
+DAY_SECONDS = 86_400
+# The spec's version bound: a hide may land one day after `purge_after`, and the provider may
+# delete a version two days after it is due (automate-cell-storage-deletion D4).
+HIDE_LATENESS_SECONDS = DAY_SECONDS
+PROVIDER_DELAY_SECONDS = 2 * DAY_SECONDS
 
 # A cell prefix is `cells/<cell id>/`. The cell id is the 16-character base32 body of
 # cellctl's namespace rule `exo-cell-[a-z2-7]{16}`. That protocol fixes the shape, so a
 # regex over this closed form is sound; it checks a format, not what anyone meant.
-_CELL_PREFIX = re.compile(r"cells/[a-z2-7]{16}/")
+_CELL_ID = re.compile(r"[a-z2-7]{16}")
+_CELL_PREFIX = re.compile(rf"cells/({_CELL_ID.pattern})/")
 _ACCOUNT_LABEL = re.compile(r"[a-z0-9-]{1,32}")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 _BUCKET_SETTING_FIELDS = frozenset(
@@ -147,6 +172,38 @@ class Account:
 
 
 @dataclass(frozen=True)
+class DeletionWatch:
+    """The deletion watch. `account` holds the per-cell keys and, as its per-cell bucket, the backups.
+    `media_account` holds the media watch, or is None on a platform without a media bucket. The
+    retention and the media grace come from those buckets' pinned settings, so they live in one place."""
+
+    account: str
+    media_account: str | None
+    backup_key_id_env: str
+    backup_key_env: str
+    purge_capabilities: frozenset[str]
+    skew_seconds: int
+    backup_bucket_id: str
+    retention_days: int
+    media_grace_days: int | None
+
+
+@dataclass(frozen=True)
+class PinnedSet:
+    accounts: list[Account]
+    deletions: DeletionWatch | None
+
+
+@dataclass(frozen=True)
+class Deletion:
+    """One cell of Substrate's deletion set; times are Unix seconds."""
+
+    iat: int
+    purge_after: int
+    stopped_at: int | None
+
+
+@dataclass(frozen=True)
 class Session:
     api_url: str
     token: str
@@ -189,14 +246,18 @@ def _parse_bucket_settings(value: Any, path: str) -> dict[str, Any]:
     return settings
 
 
-def parse_pinned_set(raw: str) -> list[Account]:
+def parse_pinned_set(raw: str) -> PinnedSet:
     if not raw.strip():
         raise ConfigError("the pinned set is empty")
     try:
         document = json.loads(raw)
     except ValueError as exc:
         raise ConfigError("the pinned set is not JSON") from exc
-    document = _exact_object(document, {"schema_version", "accounts"}, "pinned set")
+    top = {"schema_version", "accounts"}
+    # The deletion watch is optional, so a pinned set written before it still parses.
+    if isinstance(document, dict) and "deletions" in document:
+        top.add("deletions")
+    document = _exact_object(document, top, "pinned set")
     if type(document["schema_version"]) is not int or document["schema_version"] != SCHEMA_VERSION:
         raise ConfigError("pinned set: unsupported schema_version")
     if not isinstance(document["accounts"], list) or not document["accounts"]:
@@ -251,7 +312,8 @@ def parse_pinned_set(raw: str) -> list[Account]:
                 media=media,
             )
         )
-    return accounts
+    deletions = _parse_deletions(document["deletions"], accounts) if "deletions" in document else None
+    return PinnedSet(accounts, deletions)
 
 
 def _parse_media(value: Any, buckets: Mapping[str, Any], path: str) -> MediaWatch:
@@ -268,6 +330,61 @@ def _parse_media(value: Any, buckets: Mapping[str, Any], path: str) -> MediaWatc
         raise ConfigError(f"{path}.window_hours: expected a whole number of hours, one or more")
     return MediaWatch(item["bucket_id"], item["key_id_env"], item["key_env"], item["hide_budget"],
                       item["window_hours"])
+
+
+def _retention_days(retention: Any, path: str) -> int:
+    period = _dig(retention, "period")
+    if not (isinstance(period, dict) and period.get("unit") == "days"
+            and type(period.get("duration")) is int and period["duration"] >= 1):
+        raise ConfigError(f"{path}: the backup bucket's default retention is not pinned in days")
+    return period["duration"]
+
+
+def _hide_grace_days(rules: list[Any], path: str) -> int:
+    whole = [rule for rule in rules if isinstance(rule, dict) and rule.get("fileNamePrefix") == ""]
+    days = whole[0].get("daysFromHidingToDeleting") if len(whole) == 1 else None
+    if type(days) is not int or days < 1:
+        raise ConfigError(f"{path}: the media bucket pins no whole-bucket rule that deletes hidden versions")
+    return days
+
+
+def _parse_deletions(value: Any, accounts: list[Account]) -> DeletionWatch:
+    path = "deletions"
+    fields = {"account", "media_account", "backup_key_id_env", "backup_key_env", "purge_capabilities",
+              "skew_margin_minutes"}
+    item = _exact_object(value, fields, path)
+    by_label = {account.label: account for account in accounts}
+    account = by_label.get(item["account"]) if isinstance(item["account"], str) else None
+    if account is None or account.per_cell is None:
+        raise ConfigError(f"{path}.account: not a pinned account with a per-cell shape")
+    for name in ("backup_key_id_env", "backup_key_env"):
+        if not isinstance(item[name], str) or not _ENV_NAME.fullmatch(item[name]):
+            raise ConfigError(f"{path}.{name}: invalid environment name")
+    capabilities = frozenset(_string_list(item["purge_capabilities"], f"{path}.purge_capabilities"))
+    if capabilities == account.per_cell.capabilities:
+        raise ConfigError(f"{path}.purge_capabilities: the purge shape must differ from the per-cell shape")
+    skew = item["skew_margin_minutes"]
+    if type(skew) is not int or skew < 0:
+        raise ConfigError(f"{path}.skew_margin_minutes: expected a whole number, zero or more")
+    retention = _retention_days(account.buckets[account.per_cell.bucket_id]["defaultRetention"], f"{path}.account")
+    grace = None
+    if item["media_account"] is not None:
+        media_account = by_label.get(item["media_account"]) if isinstance(item["media_account"], str) else None
+        if media_account is None or media_account.media is None:
+            raise ConfigError(f"{path}.media_account: not a pinned account with a media watch")
+        rules = media_account.buckets[media_account.media.bucket_id]["lifecycleRules"]
+        grace = _hide_grace_days(rules, f"{path}.media_account")
+    return DeletionWatch(
+        account=account.label,
+        media_account=item["media_account"],
+        backup_key_id_env=item["backup_key_id_env"],
+        backup_key_env=item["backup_key_env"],
+        purge_capabilities=capabilities,
+        skew_seconds=skew * 60,
+        backup_bucket_id=account.per_cell.bucket_id,
+        retention_days=retention,
+        media_grace_days=grace,
+    )
 
 
 def receiver_capability(url: str) -> str:
@@ -383,13 +500,17 @@ def list_keys(opener: Opener, session: Session) -> list[dict[str, Any]]:
     raise ApiError("key listing did not end")
 
 
-def count_hides_since(opener: Opener, session: Session, bucket_id: str, since_ms: int) -> int:
-    """The hide markers in the bucket whose upload time is `since_ms` or later, over every page.
+def iter_versions(
+    opener: Opener, session: Session, bucket_id: str, prefix: str | None = None
+) -> Iterator[dict[str, Any]]:
+    """Every file version in the bucket, or under the prefix, over every page.
 
-    The time decides only what this watcher counts; no clock decides a hide.
+    A caller that stops at an ApiError has seen only part of the listing, and must treat the
+    whole listing as failed.
     """
-    hides = 0
     body: dict[str, Any] = {"bucketId": bucket_id, "maxFileCount": FILE_PAGE_SIZE}
+    if prefix is not None:
+        body["prefix"] = prefix
     for _ in range(MAX_FILE_PAGES):
         page = _api_post(opener, session, "b2_list_file_versions", body)
         entries = page.get("files")
@@ -398,19 +519,24 @@ def count_hides_since(opener: Opener, session: Session, bucket_id: str, since_ms
         for entry in entries:
             if not (
                 isinstance(entry, dict)
+                and isinstance(entry.get("fileName"), str)
                 and isinstance(entry.get("action"), str)
                 and type(entry.get("uploadTimestamp")) is int
             ):
                 raise ApiError("unexpected file entry")
-            if entry["action"] == HIDE_ACTION and entry["uploadTimestamp"] >= since_ms:
-                hides += 1
+            yield entry
         next_name, next_id = page.get("nextFileName"), page.get("nextFileId")
         if next_name is None and next_id is None:
-            return hides
+            return
         if not (isinstance(next_name, str) and next_name and isinstance(next_id, str) and next_id):
             raise ApiError("unexpected file cursor")
         body = {**body, "startFileName": next_name, "startFileId": next_id}
     raise ApiError("file listing did not end")
+
+
+def _cell_of(name: str) -> str | None:
+    match = _CELL_PREFIX.match(name)
+    return match.group(1) if match else None
 
 
 def list_buckets(opener: Opener, session: Session) -> list[dict[str, Any]]:
@@ -450,7 +576,14 @@ def _near_miss(key: Mapping[str, Any], shape: PerCell) -> bool:
     )
 
 
-def evaluate_keys(account: Account, keys: list[dict[str, Any]]) -> set[str]:
+def evaluate_keys(
+    account: Account,
+    keys: list[dict[str, Any]],
+    purge: frozenset[str] | None = None,
+    deleted: frozenset[str] = frozenset(),
+) -> set[str]:
+    """`purge` is the purge shape's capabilities when this account holds the deletion watch, and
+    `deleted` the deletion set, empty when the watcher could not read it."""
     active: set[str] = set()
     if account.pinned_key_ids - {key["applicationKeyId"] for key in keys}:
         active.add(PINNED_KEY_MISSING)
@@ -462,6 +595,15 @@ def evaluate_keys(account: Account, keys: list[dict[str, Any]]) -> set[str]:
             if key["namePrefix"] in prefixes:
                 active.add(DUPLICATE_PREFIX_KEY)
             prefixes.add(key["namePrefix"])
+        elif (
+            purge is not None
+            and account.per_cell is not None
+            and _matches_per_cell(key, PerCell(account.per_cell.bucket_id, purge))
+        ):
+            # The custodian mints a purge key only for a deleted cell. Without the set, every
+            # purge key is reported, because none can be shown to belong to a deletion.
+            if _cell_of(key["namePrefix"]) not in deleted:
+                active.add(PURGE_KEY_UNEXPECTED)
         elif account.per_cell is not None and _near_miss(key, account.per_cell):
             active.add(PER_CELL_KEY_SHAPE)
         else:
@@ -544,8 +686,15 @@ def evaluate_buckets(account: Account, buckets: list[dict[str, Any]]) -> set[str
     return active
 
 
-def check_account(account: Account, environ: Mapping[str, str], opener: Opener) -> dict[str, bool]:
-    """Map each reason token whose check ran to whether it is active.
+def check_account(
+    account: Account,
+    environ: Mapping[str, str],
+    opener: Opener,
+    purge: frozenset[str] | None = None,
+    deleted: frozenset[str] = frozenset(),
+) -> tuple[dict[str, bool], list[dict[str, Any]] | None]:
+    """Map each reason token whose check ran to whether it is active, and return the key
+    listing, None when it failed.
 
     A check that could not run reports nothing: sending "inactive" would clear a live
     drift alert while the watcher is blind. The failure token carries that state.
@@ -557,12 +706,15 @@ def check_account(account: Account, environ: Mapping[str, str], opener: Opener) 
             raise ApiError("credential missing")
         session = authorize(opener, key_id, key)
     except ApiError:
-        return {AUTH_FAILURE: True}
+        return {AUTH_FAILURE: True}, None
     states = {AUTH_FAILURE: False}
     listing_failed = False
+    keys = None
+    tokens = _KEY_TOKENS if purge is None else (*_KEY_TOKENS, PURGE_KEY_UNEXPECTED)
     try:
-        key_alerts = evaluate_keys(account, list_keys(opener, session))
-        states.update({token: token in key_alerts for token in _KEY_TOKENS})
+        keys = list_keys(opener, session)
+        key_alerts = evaluate_keys(account, keys, purge, deleted)
+        states.update({token: token in key_alerts for token in tokens})
     except ApiError:
         listing_failed = True
     try:
@@ -571,27 +723,150 @@ def check_account(account: Account, environ: Mapping[str, str], opener: Opener) 
     except ApiError:
         listing_failed = True
     states[LISTING_FAILURE] = listing_failed
-    return states
+    return states, keys
 
 
 def check_media(
-    media: MediaWatch, environ: Mapping[str, str], opener: Opener, now: datetime
-) -> tuple[dict[str, bool], int | None]:
-    """The media tokens whose check ran, and the hide count of the window, None when unknown.
+    media: MediaWatch,
+    environ: Mapping[str, str],
+    opener: Opener,
+    now: datetime,
+    deleted: frozenset[str] = frozenset(),
+    watched: frozenset[str] = frozenset(),
+) -> tuple[dict[str, bool], int | None, dict[str, list[dict[str, Any]]] | None]:
+    """The media tokens whose check ran, the hide count of the window, None when unknown, and
+    the versions under each watched cell's prefix, None when the listing failed.
 
-    A blind watch sends no burst state: "inactive" would clear a live burst alert.
+    The count skips the hides under a deleted cell's prefix: a purge hides every name of
+    the cell, and that is no burst. A blind watch sends no burst state: "inactive" would
+    clear a live burst alert.
     """
     key_id = environ.get(media.key_id_env, "")
     key = environ.get(media.key_env, "")
     since_ms = int(now.timestamp() * 1000) - media.window_hours * 3_600_000
+    hides = 0
+    found: dict[str, list[dict[str, Any]]] = {cell: [] for cell in watched}
     try:
         if not key_id or not key:
             raise ApiError("credential missing")
         session = authorize(opener, key_id, key)
-        hides = count_hides_since(opener, session, media.bucket_id, since_ms)
+        for entry in iter_versions(opener, session, media.bucket_id):
+            cell = _cell_of(entry["fileName"])
+            if cell in found:
+                found[cell].append(entry)
+            if entry["action"] == HIDE_ACTION and entry["uploadTimestamp"] >= since_ms and cell not in deleted:
+                hides += 1
     except ApiError:
-        return {MEDIA_LISTING_FAILURE: True}, None
-    return {MEDIA_LISTING_FAILURE: False, MEDIA_HIDE_BURST: hides > media.hide_budget}, hides
+        return {MEDIA_LISTING_FAILURE: True}, None, None
+    return {MEDIA_LISTING_FAILURE: False, MEDIA_HIDE_BURST: hides > media.hide_budget}, hides, found
+
+
+# --- automate-cell-storage-deletion D4: the deletion watch -----------------------
+
+
+def _read_deletions(opener: Opener, url: str) -> dict[str, Deletion]:
+    if not url.startswith("https://") or any(ch.isspace() for ch in url) or not receiver_capability(url):
+        raise ApiError("the deletion set URL is missing or not an https URL with a capability")
+    payload = _call_json(opener, urllib.request.Request(url, headers={"Accept": "application/json"}))
+    if set(payload) != {"schema_version", "cells"} or payload["schema_version"] != SCHEMA_VERSION:
+        raise ApiError("unexpected deletion set")
+    cells: dict[str, Deletion] = {}
+    for entry in payload["cells"] if isinstance(payload["cells"], list) else [None]:
+        if not (
+            isinstance(entry, dict)
+            and set(entry) == {"cell_id", "iat", "purge_after", "stopped_at"}
+            and isinstance(entry["cell_id"], str)
+            and _CELL_ID.fullmatch(entry["cell_id"])
+            and entry["cell_id"] not in cells
+            and type(entry["iat"]) is int
+            and type(entry["purge_after"]) is int
+            and (entry["stopped_at"] is None or type(entry["stopped_at"]) is int)
+        ):
+            raise ApiError("unexpected deletion set entry")
+        cells[entry["cell_id"]] = Deletion(entry["iat"], entry["purge_after"], entry["stopped_at"])
+    return cells
+
+
+def read_deletion_set(environ: Mapping[str, str], opener: Opener) -> dict[str, Deletion] | None:
+    """Substrate's deletion set, None when the watcher could not read it in full. The URL's last
+    segment is the watcher's receiver capability, the only capability that the endpoint accepts."""
+    try:
+        return _read_deletions(opener, environ.get("KEY_WATCHER_DELETIONS_URL", ""))
+    except ApiError:
+        return None
+
+
+def list_backup_prefixes(
+    watch: DeletionWatch, environ: Mapping[str, str], opener: Opener, cells: frozenset[str]
+) -> dict[str, list[dict[str, Any]]] | None:
+    """The backup versions under each cell's prefix, None when any listing failed.
+
+    Each run lists every cell in the set: the watcher keeps no state, and only a listing shows
+    whether a cell has left its window. The key is authorized even with no cell to list, so a
+    refused key shows before the first deletion.
+    """
+    key_id = environ.get(watch.backup_key_id_env, "")
+    key = environ.get(watch.backup_key_env, "")
+    try:
+        if not key_id or not key:
+            raise ApiError("credential missing")
+        session = authorize(opener, key_id, key)
+        return {
+            cell: list(iter_versions(opener, session, watch.backup_bucket_id, f"cells/{cell}/"))
+            for cell in sorted(cells)
+        }
+    except ApiError:
+        return None
+
+
+def cell_states(
+    deletion: Deletion,
+    entries: list[dict[str, Any]],
+    keys: list[dict[str, Any]],
+    watch: DeletionWatch,
+    now: int,
+) -> dict[str, bool] | None:
+    """The cell's per-cell alerts, derived again from what exists now; None once the cell has
+    left its watch window. `entries` holds the versions under the cell's prefix in both buckets,
+    and `keys` the keys whose name prefix lies under it."""
+    newest: dict[str, tuple[int, bool]] = {}
+    hides: list[int] = []
+    versions = False
+    for entry in entries:
+        action, at = entry["action"], entry["uploadTimestamp"] // 1000
+        if action == HIDE_ACTION:
+            hides.append(at)
+        if action in (UPLOAD_ACTION, START_ACTION):
+            versions = True
+        if action != START_ACTION:
+            # A name is current when its newest entry, apart from `start` entries, is an upload.
+            # On a tie the upload wins, so an unclear name counts as still current.
+            seen, candidate = newest.get(entry["fileName"]), (at, action == UPLOAD_ACTION)
+            newest[entry["fileName"]] = candidate if seen is None else max(seen, candidate)
+    remains = any(current for _, current in newest.values()) or bool(keys)
+    margin = max(watch.media_grace_days or 0, watch.retention_days + 1) * DAY_SECONDS
+    # Anchored at the newest hide, so a purge that a hold or an outage delayed is still watched to its end.
+    bound = max(deletion.purge_after + HIDE_LATENESS_SECONDS, max(hides, default=0)) + margin + PROVIDER_DELAY_SECONDS
+    if now >= bound + DAY_SECONDS and not remains:
+        return None
+    pending = now < deletion.purge_after or remains
+    early = False
+    if deletion.stopped_at is not None:
+        opens = max(deletion.iat, deletion.stopped_at) + watch.skew_seconds
+        closes = deletion.purge_after - watch.skew_seconds
+        early = any(opens <= at < closes for at in hides)
+    anomaly = (
+        (remains and now >= deletion.purge_after + HIDE_LATENESS_SECONDS)
+        or (versions and now >= bound)
+        or early
+        # A cell with no stop time never opens its early-hide window; the alert shows the missing report.
+        or (deletion.stopped_at is None and now >= deletion.purge_after)
+    )
+    return {
+        CELL_DELETION_PENDING: pending,
+        CELL_DELETION_HIDDEN: not pending and versions,
+        CELL_DELETION_ANOMALY: anomaly,
+    }
 
 
 # --- Receiver delivery ----------------------------------------------------------
@@ -645,6 +920,10 @@ def deliver(opener: Opener, url: str, alert: str, active: bool, stamp: str) -> b
 # --- Run ------------------------------------------------------------------------
 
 
+def _keys_under(keys: list[dict[str, Any]], cell: str) -> list[dict[str, Any]]:
+    return [key for key in keys if (key.get("namePrefix") or "").startswith(f"cells/{cell}/")]
+
+
 def run(
     environ: Mapping[str, str],
     opener: Opener,
@@ -653,7 +932,7 @@ def run(
     err: TextIO,
 ) -> int:
     try:
-        accounts = parse_pinned_set(environ.get("KEY_WATCHER_PINNED_SET", ""))
+        pinned = parse_pinned_set(environ.get("KEY_WATCHER_PINNED_SET", ""))
         url = parse_alert_url(environ.get("KEY_WATCHER_ALERT_URL", ""))
     except ConfigError as exc:
         print(f"configuration invalid: {exc}", file=err)
@@ -661,21 +940,55 @@ def run(
 
     utc = now.astimezone(UTC)
     day, hour = utc.strftime("%Y-%m-%d"), utc.strftime("%Y-%m-%dT%H")
+    watch = pinned.deletions
+    deletions = read_deletion_set(environ, opener) if watch is not None else None
+    # An unread set is empty here, so every hide counts and every purge key is reported.
+    deleted = frozenset(deletions or ())
+    # A cell's window opens at its grant's `iat`.
+    watched = frozenset(cell for cell, deletion in (deletions or {}).items() if deletion.iat <= utc.timestamp())
+    cell_keys: list[dict[str, Any]] | None = None
+    cell_media: dict[str, list[dict[str, Any]]] | None = {}
     # Evaluate every account before any delivery: the heartbeat then proves that all of them ran.
     results = []
-    for account in accounts:
-        states = check_account(account, environ, opener)
+    for account in pinned.accounts:
+        holds_cells = watch is not None and account.label == watch.account
+        purge = watch.purge_capabilities if watch is not None and holds_cells else None
+        states, keys = check_account(account, environ, opener, purge, deleted)
+        if holds_cells:
+            cell_keys = keys
         hides = None
         if account.media is not None:
-            media_states, hides = check_media(account.media, environ, opener, utc)
+            holds_media = watch is not None and account.label == watch.media_account
+            media_states, hides, found = check_media(
+                account.media, environ, opener, utc, deleted, watched if holds_media else frozenset()
+            )
             states |= media_states
+            if holds_media:
+                cell_media = found
         results.append((account, states, hides))
+
+    deletion_states: dict[str, bool] = {}
+    cells: dict[str, dict[str, bool]] = {}
+    if watch is not None:
+        deletion_states[DELETIONS_UNKNOWN] = deletions is None
+        if deletions is not None:
+            backups = list_backup_prefixes(watch, environ, opener, watched)
+            # Per-cell states come only from a run that read every listing in full.
+            if backups is None or cell_keys is None or cell_media is None:
+                deletion_states[DELETION_LISTING_FAILURE] = True
+            else:
+                deletion_states[DELETION_LISTING_FAILURE] = False
+                for cell in sorted(watched):
+                    state = cell_states(deletions[cell], backups[cell] + cell_media.get(cell, []),
+                                        _keys_under(cell_keys, cell), watch, int(utc.timestamp()))
+                    if state is not None:
+                        cells[cell] = state
 
     active_total = 0
     deliveries: list[tuple[str, bool, str]] = []
     for account, states, hides in results:
         label = account.label
-        active_tokens = [token for token in (*ALERT_TOKENS, *MEDIA_TOKENS) if states.get(token)]
+        active_tokens = [token for token in ACCOUNT_TOKENS if states.get(token)]
         active_total += len(active_tokens)
         print(
             f"account {label}: {len(active_tokens)} active ({', '.join(active_tokens) or 'none'})",
@@ -689,9 +1002,30 @@ def run(
             )
         deliveries += [
             (f"{label}:{token}", states[token], hour if states[token] else day)
-            for token in (*ALERT_TOKENS, *MEDIA_TOKENS)
+            for token in ACCOUNT_TOKENS
             if token in states
         ]
+    if watch is not None:
+        active_total += sum(deletion_states.values())
+        deliveries += [(token, active, hour if active else day) for token, active in deletion_states.items()]
+        # Counts only: a cell ID goes to the receiver in an alert name, never to the public log.
+        if deletions is None:
+            print(f"deletions: unknown ({DELETIONS_UNKNOWN})", file=out)
+        elif deletion_states[DELETION_LISTING_FAILURE]:
+            print(f"deletions: {len(deletions)} in the set; a listing failed ({DELETION_LISTING_FAILURE}), "
+                  "so no cell changed state", file=out)
+        else:
+            counts = {token: sum(state[token] for state in cells.values()) for token in CELL_TOKENS}
+            confirmed = sum(
+                not state[CELL_DELETION_PENDING] and not state[CELL_DELETION_HIDDEN] for state in cells.values()
+            )
+            print(f"deletions: {len(deletions)} in the set, {len(cells)} watched: "
+                  f"{counts[CELL_DELETION_PENDING]} pending, {counts[CELL_DELETION_HIDDEN]} hidden, "
+                  f"{confirmed} confirmed, {counts[CELL_DELETION_ANOMALY]} anomalous", file=out)
+        for cell, state in cells.items():
+            # Pending and hidden are the normal course of a deletion and keep the run green.
+            active_total += state[CELL_DELETION_ANOMALY]
+            deliveries += [(f"{token}:{cell}", state[token], hour if state[token] else day) for token in CELL_TOKENS]
 
     delivered = sum(deliver(opener, url, *delivery) for delivery in deliveries)
     # The heartbeat vouches that every account was evaluated and reported. After a failed

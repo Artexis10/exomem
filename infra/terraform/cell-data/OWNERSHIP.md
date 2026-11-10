@@ -1,7 +1,7 @@
 # Cell-data ownership
 
 Owns only the Backblaze B2 cell-data member account's storage and keys: the locked
-cell backup bucket, the export and import staging bucket, and three purpose-scoped
+cell backup bucket, the export and import staging bucket, and four purpose-scoped
 application keys. It never owns another account's resource, the Hetzner server,
 Cloudflare, Kubernetes objects, or tenant records. Production changes use the
 `cell-data/` remote-state key, and its credentials belong to the member account only.
@@ -19,8 +19,10 @@ so it can mint any capability within this account. The out-of-cluster key watche
 settings, and every per-cell key shape. A change to a key capability or a bucket
 setting here needs a matching change to the watcher's pinned set. The `cellctl`
 keys cannot create keys: one reaches only the staging bucket, and one only lists
-backup files.
+backup files. The watcher's backup key holds only `listFiles` on the backup bucket.
+The watcher lists each deleted cell's backup prefix with it, and no in-cluster
+component holds it.
 
-Keys are created here only for the three roles above. The watcher's own list-only
-keys, and the key that applies this root when it is not the account's master key,
-are operator-created and are listed in the watcher's pinned set.
+Keys are created here only for the four roles above. The watcher's account-level
+list-only key, and the key that applies this root when it is not the account's master
+key, are operator-created. The watcher's pinned set lists every one of these keys.

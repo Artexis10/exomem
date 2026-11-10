@@ -169,6 +169,38 @@ subjects:
   - kind: ServiceAccount
     name: cellctl
     namespace: {{ .Values.cellctl.namespace }}
+---
+# automate-cell-storage-deletion D1: cellctl relays each deletion grant into one
+# ConfigMap in its own namespace, with the media edge on or off: the key
+# custodian reads it either way. A create request carries no resource name, so
+# admission (exomem-cellctl-scope) confines it to that name and its one key.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cellctl-cell-deletions
+  namespace: {{ .Values.cellctl.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["exomem-cell-deletions"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cellctl-cell-deletions
+  namespace: {{ .Values.cellctl.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cellctl-cell-deletions
+subjects:
+  - kind: ServiceAccount
+    name: cellctl
+    namespace: {{ .Values.cellctl.namespace }}
 {{- if .Values.mediaEdge.enabled }}
 ---
 # add-cloud-media-store D6: cellctl publishes the media edge's active set, one
@@ -584,7 +616,7 @@ spec:
         - port: 8769
           protocol: TCP
     {{- end }}
-    # Each cell's readiness for the cell-recall-lagging alert, from the cell's
+    # Each cell's readiness for the readiness alerts, from the cell's
     # health-only port alone. cellctl derives every cell bearer, so the cell
     # port, which carries MCP, stays the gateway's. Selected as the gateway
     # selects cells (cloud-gateway.yaml): runtime pods, never Job pods.
@@ -707,23 +739,27 @@ spec:
     # but for the cluster-scoped Retain patch rule 11 confines.
     - expression: >-
         {{ if $relocation }}request.resource.resource == 'persistentvolumes' || {{ end -}}
-        {{ if .Values.mediaEdge.enabled }}(request.resource.resource == 'configmaps' &&
-          request.namespace == {{ .Values.cellctl.namespace | quote }}) || {{ end -}}
+        (request.resource.resource == 'configmaps' &&
+          request.namespace == {{ .Values.cellctl.namespace | quote }}) ||
         variables.namespaceName.matches('{{ include "exomem.cellNamespacePattern" . }}'){{ if and $local $storage.local.reservations }} ||
         {{ include "exomem.familySecretScope" . | nindent 8 }}{{ end }}
-      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>{{ if .Values.mediaEdge.enabled }}, or the media edge active set in its own namespace{{ end }}{{ if and $local $storage.local.reservations }}, or an immutable family capability in the reservation namespace{{ end }}.
-    {{- if .Values.mediaEdge.enabled }}
-    # add-cloud-media-store D6: the one ConfigMap cellctl writes is the media edge's
-    # active set. It holds the two active-set keys and no other, and is never deleted
-    # (rule 6 denies a ConfigMap delete).
+      message: cellctl may write only inside a cell namespace named exo-cell-<16 base32 cell id>, or the deletion grants{{ if .Values.mediaEdge.enabled }} and the media edge active set{{ end }} in its own namespace{{ if and $local $storage.local.reservations }}, or an immutable family capability in the reservation namespace{{ end }}.
+    # automate-cell-storage-deletion D1 and add-cloud-media-store D6: cellctl writes
+    # two ConfigMaps, both in its own namespace. The relayed deletion grants hold the
+    # one key grants.json, with the media edge on or off. The media edge's active
+    # set, only with the edge on, holds the two active-set keys. Each holds no other
+    # key, and neither is ever deleted (rule 6 denies a ConfigMap delete).
     - expression: >-
         request.resource.resource != 'configmaps' || request.operation == 'DELETE' ||
-        (variables.target.metadata.name == 'exomem-media-edge-active-set' &&
-          (!has(variables.target.data) ||
-            variables.target.data.all(k, k in ['active-set.json', 'credential-epochs.json'])) &&
-          !has(variables.target.binaryData))
-      message: cellctl may write only the ConfigMap exomem-media-edge-active-set, with the keys active-set.json and credential-epochs.json.
-    {{- end }}
+        (request.namespace == {{ .Values.cellctl.namespace | quote }} && !has(variables.target.binaryData) &&
+          ((variables.target.metadata.name == 'exomem-cell-deletions' &&
+            (!has(variables.target.data) || variables.target.data.all(k, k in ['grants.json'])))
+          {{- if .Values.mediaEdge.enabled }} ||
+          (variables.target.metadata.name == 'exomem-media-edge-active-set' &&
+            (!has(variables.target.data) ||
+              variables.target.data.all(k, k in ['active-set.json', 'credential-epochs.json'])))
+          {{- end }}))
+      message: cellctl may write only the ConfigMap exomem-cell-deletions, with the key grants.json{{ if .Values.mediaEdge.enabled }}, or the ConfigMap exomem-media-edge-active-set, with the keys active-set.json and credential-epochs.json{{ end }}.
     # 2. A namespace cellctl creates or updates must carry the restricted
     # Pod Security labels at the platform's pinned version (v1.35, as every
     # other platform namespace and cellctl's own renderer use), so cellctl can

@@ -18,7 +18,17 @@ import datetime as dt
 from dataclasses import asdict, replace
 
 from .. import capabilities, item_keys
-from . import cursors, reductions, runtime, typed_rows, validation
+from ..structured_collections import declared_references
+from . import (
+    cursors,
+    ir,
+    reductions,
+    reference_resolution,
+    reference_rows,
+    runtime,
+    typed_rows,
+    validation,
+)
 from .runtime import QueryError, QueryLimits
 
 VERSION = 1
@@ -70,7 +80,13 @@ def _profile(raw) -> str:
     return profile if profile in validation.PROFILES else "interactive"
 
 
-def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
+def _names_reference(query) -> bool:
+    """Whether the query names a reference: a ``related`` entry or a dotted path through one."""
+    return bool(query.related) or any(field.alias is not None for field in ir.fields(query))
+
+
+def run(writer, selector: str, raw, *, facade_profile: str,
+        view: str | None = None, view_identity: str | None = None) -> dict:
     """Validate ``raw`` against the admitted collection and run it in its mode and profile.
 
     Link values pass the legacy query's own projector, so a link to a page the
@@ -86,7 +102,7 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
     with runtime.read_session(writer.root, writer.handle.path, limits=limits) as session:
         # The session's own authorization snapshot decides links, as it decides rows.
         operation = session._authorization
-        with session._manifest(collection_id) as (manifest, basis, _, _):
+        with session._manifest(collection_id) as (manifest, basis, _, uniform):
             links = frozenset(name for name, spec in manifest.schema.fields.items()
                               if _LinkProjector.carries_links(spec))
             withheld = session._field_plans[collection_id].item_key_withheld
@@ -96,26 +112,78 @@ def run(writer, selector: str, raw, *, facade_profile: str) -> dict:
             # a cold build that runs past it fails the query with QUERY_TIMEOUT, never drops the link.
             session.project_with(_LinkProjector.create(writer.root, manifest, policy=operation.policy,
                                                        authorize_path=operation.allows_file), fields=links)
-        result = validation.normalize_query(raw, declarations={collection_id: declaration}, collection=collection_id)
+        bound_refs: dict = {}
+
+        def references(source_cid, dotted):
+            """Bind one declared reference and describe its target to the validator."""
+            bound = bound_refs.get((source_cid, dotted))
+            if bound is None:
+                lookup = session.admit_lookup(source_cid)
+                declared = next((item for item in declared_references(lookup.manifest.schema)
+                                 if item.dotted == dotted), None)
+                if declared is None:
+                    head = dotted.split(".", 1)[0]
+                    # An admitted field without a declaration is an unknown path; a withheld
+                    # one reads exactly like an undeclared one.
+                    if head in lookup.manifest.schema.fields:
+                        raise QueryError("QUERY_FIELD_UNKNOWN", "no declared reference")
+                    raise QueryError("QUERY_FIELD_UNAVAILABLE", "this field is not available to resolve")
+                bound = bound_refs[source_cid, dotted] = reference_resolution.bind(
+                    session, source_cid, dotted)
+            plan = session._field_plans[bound.collection_id]
+            target_links = frozenset(
+                name for name, spec in bound.manifest.schema.fields.items()
+                if _LinkProjector.carries_links(spec))
+            return {"ref": bound.collection_id, "many": bound.many, "type": bound.basis.type_name,
+                    "declaration": typed_rows.declaration(
+                        bound.manifest, bound.basis, projected=target_links,
+                        item_key_withheld=plan.item_key_withheld)}
+
+        result = validation.normalize_query(raw, declarations={collection_id: declaration},
+                                            collection=collection_id, references=references)
         if result.findings:
-            raise Refusal(result.findings[0])
+            finding = result.findings[0]
+            if view is not None and finding.target_side:
+                # The view crossed into another collection that no longer offers the
+                # field or reference to this caller — it is stale, not malformed.
+                # One fixed text, so a removed and a withheld dependency read the same.
+                finding = validation.Finding(
+                    "SAVED_VIEW_STALE", finding.at, "a reference or field another collection offers you", (),
+                    "This view depends on a reference or field that another collection "
+                    "no longer offers you; revise the view.", finding.retryable)
+            raise Refusal(finding)
         query = result.query
+        view_meta = {"view": {"name": view, "identity": view_identity}} if view is not None else {}
+        named = _names_reference(query)
+        filtered_reduction = query.aggregate is not None and (
+            named or query.where is not None
+            or any(value.where is not None for value in query.aggregate.values))
         if query.mode == "compose":
             # Compose reads no values, but refuses every shape and profile the other modes refuse.
-            if query.aggregate is None:
+            if named or filtered_reduction:
+                reference_rows.check_shape(session, query, bound_refs, manifest=manifest)
+            elif query.aggregate is None:
                 typed_rows.check_shape(replace(query, mode="execute"), manifest, basis, item_key_withheld=withheld)
             else:
                 reductions.check_shape(query, manifest, limits)
-            return {"source": asdict(query.source), "query_version": query.version,
+            return {**view_meta, "source": asdict(query.source), "query_version": query.version,
                     "schema_version": manifest.schema.version, "mode": "compose",
                     "kind": "rows" if query.aggregate is None else "groups",
                     "fingerprint": cursors._hash(replace(query, page=replace(query.page, after=None))),
                     "execution_profile": limits.profile, "bounds": limits.bounds()}
         if query.aggregate is not None:
-            return session.reduce(query, as_of=query.as_of)
+            if filtered_reduction:
+                return {**view_meta, **reference_rows.reduce(
+                    session, query, bound_refs, basis=basis,
+                    uniform=uniform, manifest=manifest, as_of=query.as_of)}
+            return {**view_meta, **session.reduce(query, as_of=query.as_of)}
+        if named:
+            return {**view_meta, **reference_rows.run(
+                session, query, bound_refs, basis=basis,
+                uniform=uniform, manifest=manifest, as_of=query.as_of)}
         if query.mode == "execute":
-            return cursors.execute_page(session, query, as_of=query.as_of)
-        return _admitted_rows(session, query, limits)
+            return {**view_meta, **cursors.execute_page(session, query, as_of=query.as_of)}
+        return {**view_meta, **_admitted_rows(session, query, limits)}
 
 
 def _admitted_rows(session, query, limits) -> dict:
@@ -200,23 +268,33 @@ def chapter(name: str | None) -> dict:
             "mode": {"compose": "validate and fingerprint; reads no values",
                      "explain": "release, access path, declared index or rollup, bounds",
                      "preview": "explain plus what the plan reads: visit_charge for rows (admission's charge "
-                                "against bounds.max_row_visits), admitted_rows or rollup_buckets for groups",
+                                "against bounds.max_row_visits, plus an estimated lookup per row for each reference "
+                                "named), admitted_rows or rollup_buckets for groups",
                      "dry_run": "admission and preparation without result rows",
                      "execute": "the default; one page of rows or groups"},
             "execution_profile": {name: {**bounds, **({"concurrent_per_store": runtime.MAX_ANALYTICS_SESSIONS}
                                                       if name == "analytics" else {})}
                                   for name, bounds in runtime.PROFILES.items()},
-            "select": f"up to {limits['select']} declared fields; default every declared field",
-            "where": {"leaf": {"field": "<declared field>", "op": sorted(validation._OPS), "value": "<typed>"},
+            "select": f"up to {limits['select']} declared fields; default every declared field; "
+                      "a dotted path through a single-valued declared reference selects a target field",
+            "related": "up to 8 entries naming declared references to expand per row; a string, or "
+                       "{field: <dotted declaration>, limit: 1-50 (default 10)} bounding many-valued expansion",
+            "where": {"leaf": {"field": "<declared field or reference path>", "op": sorted(validation._OPS),
+                               "value": "<typed>"},
                       "combine": ["all", "any", "not"], "max_leaves": limits["predicate_leaves"],
-                      "max_depth": limits["boolean_depth"], "max_in_values": limits["membership_values"]},
+                      "max_depth": limits["boolean_depth"], "max_in_values": limits["membership_values"],
+                      "references": "a path through up to 2 single-valued declared references; a leaf whose "
+                                    "reference did not resolve is unknown under three-valued logic; "
+                                    "where is allowed on a reduction and forces the base-row path"},
             "order_by": f"up to {limits['order_by']} of {{field, direction: asc|desc, nulls: first|last}}",
-            "group_by": {"max": limits["group_by"], "key": {"field": "<declared field>",
+            "group_by": {"max": limits["group_by"], "key": {"field": "<declared field or reference path>",
                                                              "bucket": list(validation.BUCKETS),
                                                              "from": "inclusive local date, bucketed key only",
                                                              "to": "inclusive local date, bucketed key only"}},
             "aggregates": {"max": limits["aggregates"], "alias": {"op": ["count", "sum", "avg", "min", "max",
-                                                                         "latest"], "field": "<declared field>"}},
+                                                                         "latest"], "field": "<declared field>",
+                                                                 "where": "optional per-aggregate filter "
+                                                                          "over base and path fields"}},
             "page": {"limit": {"default": limits["page_default"], "rows": limits["row_page"],
                                "groups": limits["group_page"]},
                      "after": "next_cursor from the previous page of the same query"},
@@ -229,6 +307,13 @@ def chapter(name: str | None) -> dict:
                        "as_of", "source", "query_version", "schema_version", "execution_profile", "bounds"],
             "groups": "also plan (strategy, reason, release, rollup, basis with from/to), flagged_rows and "
                       "flagged_scope: rows whose local day is unknown, counted over the collection, never guessed",
+            "references": "a row that names references carries references: {<chain>: resolved|unresolved|none} "
+                          "and related: {<entry>: expanded rows}; a related row omits fields the caller "
+                          "cannot read; a group key that did not resolve is listed in the group's unresolved",
+            "combined": "every query that names references or filters a reduction carries combined: count, "
+                        "unresolved_rows, excluded_unresolved and unresolved_values (bounded, with truncated "
+                        "and total); on a grouped result groups come whole on every page while "
+                        "returned/has_more/next_cursor page the combined rows",
             "local_day": "a bucketed datetime uses its declared offset field; without one, its own numeric offset",
             "links": "a link to a page the caller cannot read is omitted from the row",
         },
@@ -241,9 +326,9 @@ def chapter(name: str | None) -> dict:
                                     "QUERY_INPUT_LIMIT", "QUERY_ARGUMENT_CONFLICT", "QUERY_UNAVAILABLE",
                                     *_REPAIRS})},
         "unavailable": [
-            "joins, having, text and graph",
+            "joins, having, text and graph: use dotted reference paths instead of joins",
             "percentile and distinct_count",
-            "where on a grouped query: use group_by[n].from/to",
+            "a path through a many-valued reference: expand it in related",
             "execution_profile analytics on row queries",
             "filter, sort or join on a link field: QUERY_FIELD_UNAVAILABLE",
             "the graph chapter: QUERY_CAPABILITY_UNAVAILABLE",

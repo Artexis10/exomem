@@ -1831,13 +1831,11 @@ def _stopping_at_budget(function):
 def _carry_stopped() -> NoReturn:
     """Leave the carry because the request budget is spent.
 
-    `BudgetExhausted` reaches the compile's own handler, which abstains `unavailable` with the budget's
-    report, as for any stage; a carry that returned nothing would read as "the turn names nothing".
+    The carry has started, so it is recorded as truncated, not skipped. `BudgetExhausted` reaches the
+    compile's own handler, which abstains `unavailable` with the budget's report, as for any stage; a carry
+    that returned nothing would read as "the turn names nothing".
     """
-    from . import request_budget
-
-    if (budget := request_budget.current()) is not None:
-        budget.note_skipped(working_set.CARRY_STAGE)
+    working_set.note_stopped(working_set.CARRY_STAGE)
     raise working_set.BudgetExhausted(working_set.CARRY_STAGE)
 
 
@@ -2725,6 +2723,37 @@ def serve(
     except Exception:  # noqa: BLE001 - a ref that cannot be decided is not disclosed
         log.warning("continuity visibility check failed; dropping the refs", exc_info=True)
         continuity_refs = frozenset()
+
+    def _abstain_unavailable() -> dict[str, Any]:
+        if intent_resolution is not None:
+            intent_resolution["status"] = "unavailable"
+        return working_set.abstained_packet(
+            reason=UNAVAILABLE,
+            max_chars=limit,
+            generation={
+                "freshness_key": _key_text(freshness_key),
+                "index_generation": index.generation(),
+                # The token WAS evaluated on this path, so its real state is
+                # reported rather than the pre-index placeholder.
+                "continuity": continuity_state,
+                **registry.generation_block(),
+                **conventions_registry.generation_block(),
+            },
+        )
+
+    def _abstain_for_budget() -> dict[str, Any]:
+        from . import request_budget
+
+        packet = _abstain_unavailable()
+        active_budget = request_budget.current()
+        block = active_budget.as_response_block() if active_budget is not None else None
+        if block is not None:
+            packet["request_budget"] = block
+        return packet
+
+    # A boundary only: the projection fold is never interrupted, so what it caches is always a complete build.
+    if working_set.budget_exhausted("working_set.heat"):
+        return _abstain_for_budget()
     with working_set._span(timings, "working_set.heat"):
         heat_profile = working_set_heat.profile(root)
         owner = working_set_heat._owner_request()
@@ -2825,23 +2854,6 @@ def serve(
     if cached is not None and status_basis.matches(cached[1]):
         return copy.deepcopy(cached[0])
 
-    def _abstain_unavailable() -> dict[str, Any]:
-        if intent_resolution is not None:
-            intent_resolution["status"] = "unavailable"
-        return working_set.abstained_packet(
-            reason=UNAVAILABLE,
-            max_chars=limit,
-            generation={
-                "freshness_key": _key_text(freshness_key),
-                "index_generation": index.generation(),
-                # The token WAS evaluated on this path, so its real state is
-                # reported rather than the pre-index placeholder.
-                "continuity": continuity_state,
-                **registry.generation_block(),
-                **conventions_registry.generation_block(),
-            },
-        )
-
     try:
         packet = working_set.compile_packet(
             root,
@@ -2875,14 +2887,7 @@ def serve(
         # otherwise log this expected, request-shaped outcome as a WARNING
         # with a full stack trace every time a client's clock simply ran out.
         log.info("activation skipped %s for the request budget", exc)
-        packet = _abstain_unavailable()
-        from . import request_budget
-
-        active_budget = request_budget.current()
-        block = active_budget.as_response_block() if active_budget is not None else None
-        if block is not None:
-            packet["request_budget"] = block
-        return packet
+        return _abstain_for_budget()
     except Exception:  # noqa: BLE001 - the whole operation is additive and abstains
         log.warning("activation compilation failed; abstaining", exc_info=True)
         return _abstain_unavailable()
@@ -2919,6 +2924,9 @@ def serve(
     # Retain this request's coverage, but never cache a transient lookup failure.
     if any(entry.get("reason") in {"lane_failed", "task_lookup_unavailable", "task_lookup_budget"}
            for entry in packet.get("missing", ())):
+        return packet
+    # A carry that the request budget refused is this call's clock, not the vault's: a later call has its own.
+    if working_set.ANCHORS_BUDGET_GAP in packet.get("missing", ()):
         return packet
     if not cacheable:
         return packet

@@ -17,7 +17,13 @@ from ..structured_collections import _MAX_ITEM_KEY_BYTES
 from . import ir, typed_sql
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
-from .typed_rows import AdmittedQuery, execute_rows, indexed_relation, logical_item_key
+from .typed_rows import (
+    AdmittedQuery,
+    decode_item_key,
+    execute_rows,
+    indexed_relation,
+    logical_item_key,
+)
 
 _MAX_TOKEN_BYTES = 4096
 _TOKEN_KEYS = frozenset({"v", "query", "principal", "schema", "authorization", "visible", "lineage", "as_of", "boundary"})
@@ -82,6 +88,25 @@ def _codec(session):
         raise QueryError("QUERY_UNAVAILABLE") from error
 
 
+def freeze(session, query, as_of):
+    """The codec, opened payload and frozen instant of a reduction or reference query's page.
+
+    A continuation keeps its first page's ``as_of``; a request that names a different one is refused.
+    The codec and payload are None on a first page.
+    """
+    codec = payload = None
+    if query.page.after is not None:
+        codec = _codec(session)
+        payload = codec.open(query.page.after)
+    try:
+        frozen = parse_instant(payload["as_of"] if payload else as_of or dt.datetime.now(dt.UTC).isoformat())
+        if payload is not None and as_of is not None and parse_instant(as_of).isoformat() != frozen.isoformat():
+            raise QueryError("QUERY_CURSOR_INVALID")
+    except ValueError as error:
+        raise QueryError("QUERY_VALUE_INVALID", "as_of is an RFC 3339 instant") from error
+    return codec, payload, frozen
+
+
 def with_rows(session, collection_id: str, visible: str) -> str:
     """``visible`` also bound to a derived collection's row position, so a batch inside an open
     member stales a continuation; the store's own rows keep their basis unchanged."""
@@ -89,15 +114,20 @@ def with_rows(session, collection_id: str, visible: str) -> str:
     return visible if position is None else _hash([visible, position])
 
 
-def _visible(admitted, dependencies):
-    plan = admitted.session._field_plans[admitted.query.source.ref]
-    if admitted.uniform and dependencies - {"item_key"} <= plan.whole_fields:
-        basis = query_freshness.uniform_basis(admitted.session.connection, admitted.query.source.ref, dependencies)
+def visible_basis(session, collection_id: str, *, uniform: bool, layout, dependencies) -> str:
+    """The release-qualified visible-state digest of ``dependencies`` on one collection.
+
+    Uniform release over whole fields binds the maintained freshness basis; anything else binds a
+    bounded digest of each released row's admitted dependency values, so a change to a row the caller
+    cannot read leaves the basis unchanged.
+    """
+    plan = session._field_plans[collection_id]
+    if uniform and dependencies - {"item_key"} <= plan.whole_fields:
+        basis = query_freshness.uniform_basis(session.connection, collection_id, dependencies)
         if basis is None:
             raise QueryError("QUERY_UNAVAILABLE")
         return _hash(basis)
-    session = admitted.session
-    base = session.admit(admitted.query.source.ref)
+    base = session.admit(collection_id)
     count = base.visible_count
     if count is None or count + session._estimated_visits > session.limits.max_row_visits:
         raise QueryError("QUERY_COST_LIMIT")
@@ -105,7 +135,7 @@ def _visible(admitted, dependencies):
     digest = hashlib.sha256(b"exomem.typed-visible-dependencies.v1\0")
     cursor = session.connection.execute(
         f"SELECT i.row_id,i.item_key FROM {base.items} i WHERE i.collection_id=? AND {base.membership_sql} "
-        "ORDER BY i.row_id", (admitted.query.source.ref,),
+        "ORDER BY i.row_id", (collection_id,),
     )
     with closing(session.fetch(cursor)) as batches:
         for batch in batches:
@@ -113,17 +143,23 @@ def _visible(admitted, dependencies):
                 session.check()
                 if key is None:
                     raise QueryError("QUERY_COST_LIMIT")
+                key = decode_item_key(layout, key)
                 try:
                     values = session.selected_values(
-                        row_id, admitted.layout, set(dependencies) - {"item_key"},
+                        row_id, layout, set(dependencies) - {"item_key"},
                         max_bytes=min(_MAX_DECODE_BYTES, session.limits.max_temp_bytes), check=session.check,
                     )
                     selected = [(path, path in values, values.get(path)) for path in sorted(dependencies) if path != "item_key"]
-                    digest.update(_json([logical_item_key(admitted, key), selected]).encode() + b"\n")
+                    digest.update(_json([key, selected]).encode() + b"\n")
                 except (ValueError, TypeError, RecursionError) as error:
                     raise QueryError("QUERY_COST_LIMIT") from error
                 session.check()
     return digest.hexdigest()
+
+
+def _visible(admitted, dependencies):
+    return visible_basis(admitted.session, admitted.query.source.ref, uniform=admitted.uniform,
+                         layout=admitted.layout, dependencies=dependencies)
 
 
 def caller_binding(session, query) -> dict[str, str]:
@@ -135,6 +171,11 @@ def caller_binding(session, query) -> dict[str, str]:
     def collect(value):
         if isinstance(value, ir.Field):
             dependencies.add(value.path)
+            if value.alias is not None:
+                # A reference path depends on its first hop's source field.
+                dependencies.add(value.alias.split(".", 1)[0])
+        elif isinstance(value, ir.Related):
+            dependencies.add(value.path.split(".", 1)[0])
         elif is_dataclass(value):
             for field in fields(value):
                 collect(getattr(value, field.name))

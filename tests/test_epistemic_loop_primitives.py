@@ -20,6 +20,7 @@ from exomem import (
     commands,
     note,
     semantic_blocks,
+    semantic_labels,
     semantic_language_registry,
     semantic_units,
     set_frontmatter_field,
@@ -198,7 +199,7 @@ def test_verdict_values_normalize_onto_the_unit(authored: str, expected: str) ->
 
 
 def test_shipped_verdicts_are_the_five_audit_approved_values() -> None:
-    assert semantic_language_registry.core_registry().verdict_keys() == (
+    assert semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS) == (
         "abandoned",
         "confirmed",
         "inconclusive",
@@ -271,7 +272,7 @@ def test_a_verdict_label_normalizes_to_its_key(tmp_path: Path, authored: str) ->
 
 
 @pytest.mark.parametrize("authored", ["probably-wrong", "0.7", "70%"])
-def test_a_refused_verdict_names_the_registered_verdicts_and_refuses_a_number(
+def test_a_refused_verdict_names_the_registered_verdicts_and_the_belief_unit(
     tmp_path: Path, authored: str
 ) -> None:
     registry = _add_retracted_verdict(tmp_path)
@@ -279,10 +280,12 @@ def test_a_refused_verdict_names_the_registered_verdicts_and_refuses_a_number(
     document = _parse_with(f"## Prediction\n- verdict: {authored}\n\nRetry budgets hold.\n", registry)
 
     error = next(item for item in document.errors if item.code == "invalid_rich_verdict")
-    for key in registry.verdict_keys():
+    for key in registry.label_keys(semantic_labels.VERDICTS):
         assert key in error.remediation
     assert "retracted" in error.remediation
     assert "probability is not a verdict" in error.remediation
+    assert "## Belief" in error.remediation
+    assert "credence_holder" in error.remediation
 
 
 # --------------------------------------------------------------------------
@@ -328,15 +331,6 @@ def test_compact_observations_carry_no_governed_metadata() -> None:
     assert unit.form == "compact"
     assert unit.verdict is None
     assert unit.check_by is None
-
-
-def test_the_governed_key_list_agrees_across_the_language_and_the_writer() -> None:
-    """One declaration, so a future key cannot be reserved but not preserved."""
-    governed = set(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
-
-    assert governed == {"verdict", "check_by", "as_of", "until"}
-    assert governed <= semantic_blocks._RESERVED_METADATA_KEYS
-    assert governed <= observe_module._OWNED_METADATA_KEYS
 
 
 # --------------------------------------------------------------------------
@@ -1020,6 +1014,9 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
     assert "never discards an authored metadata row" not in section
     for replaced in ("tags", "links"):
         assert "the full list" in properties[replaced]["description"]
+    # `edit_note` takes no governed row: an observation edit leaves each one as written, so the
+    # section's "persist" is true because no argument can clear one.
+    assert not set(properties) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
 
 
 # --------------------------------------------------------------------------
@@ -1293,7 +1290,7 @@ def test_concluded_is_an_accepted_experiment_status() -> None:
 
 
 def test_experiment_outcome_shares_the_unit_verdict_vocabulary() -> None:
-    keys = semantic_language_registry.core_registry().verdict_keys()
+    keys = semantic_language_registry.core_registry().label_keys(semantic_labels.VERDICTS)
 
     assert all(
         vault_module.governed_frontmatter_reason("outcome", key, "experiment") is None

@@ -1,0 +1,57 @@
+{
+  "incident": "2026-11-09: an agent repeated stored advice after the user had reported that it did not work. The cases reproduce the mechanism with an invented example.",
+  "cases": [
+    {
+      "id": "capture-reported-failure",
+      "about": "The user reports that stored advice failed. The note that holds the advice must be corrected in the session.",
+      "seed": {
+        "title": "Speeding up git status in the monorepo",
+        "note_type": "insight",
+        "content": "## Findings\n\n- [finding] When `git status` is slow in the monorepo, run `git config core.untrackedCache true` to cache the untracked-file scan.\n"
+      },
+      "prompt": "fyi that untrackedCache setting for the slow git status in the monorepo doesn't help. tried it on three checkouts today and status still takes about 20 seconds",
+      "pass": {
+        "seed_corrected": true
+      }
+    },
+    {
+      "id": "recall-before-advice",
+      "about": "The vault holds the corrected advice. An advice question about the user's own setup must recall first and must not repeat the failed step.",
+      "seed": {
+        "title": "Speeding up git status in the monorepo",
+        "note_type": "insight",
+        "content": "## Findings\n\n- [finding] When `git status` is slow in the monorepo, run `git config core.untrackedCache true` to cache the untracked-file scan.\n\n## Correction (2026-11-08)\n\n- [finding] The `core.untrackedCache` setting does not help: tried on three checkouts, and status still took about 20 seconds. Do not recommend it. What helped instead: `git config core.fsmonitor true`, and a sparse checkout of the services in use.\n"
+      },
+      "prompt": "git status is really slow in my monorepo, what do I do?",
+      "pass": {
+        "called_any": [
+          "recall_context",
+          "search_memory",
+          "read_page"
+        ],
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "recommends_untracked_cache": {
+                "type": "boolean",
+                "description": "True if the answer tells the user to enable git's untracked cache (core.untrackedCache or `git update-index --untracked-cache`) as a step to try."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "recommends_untracked_cache",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "recommends_untracked_cache": false
+          }
+        }
+      }
+    }
+  ]
+}

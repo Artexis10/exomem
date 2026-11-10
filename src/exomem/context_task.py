@@ -26,6 +26,7 @@ from . import (
     memory_refs,
     procedure_approval,
     provenance,
+    request_budget,
     runtime_resources,
     semantic_index,
     semantic_units,
@@ -166,9 +167,17 @@ class SourceProjection:
     ref: str | None = None
 
 
+class TaskDeadline(TimeoutError):
+    """The request deadline arrived while task sources were prepared, as distinct from any other timeout."""
+
+
 def _deadline_check() -> None:
     if working_set.budget_exhausted("working_set.task_context"):
-        raise TimeoutError("task source preparation is unavailable")
+        raise TaskDeadline("task source preparation is unavailable")
+
+
+def _serve_without_deadline() -> None:
+    """The final guard re-reads only leads already served, so a deadline that has passed must not drop them."""
 
 
 def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
@@ -401,27 +410,49 @@ def compile_context(
     with find_types.timing_span(timings, "working_set.methods"):
         reset = _revalidate(root, held, caller, sources)
     block = empty(reset=reset)
-    covered, protected = prepare_slice() if prepare_slice is not None else (frozenset(), 0)
+    if prepare_slice is not None:
+        # The slice compiles first and must leave discovery its reserve; a slow slice would otherwise spend the
+        # whole budget and leave the call with the map alone.
+        with request_budget.leaving(request_budget.task_context_reserve()):
+            covered, protected = prepare_slice()
+    else:
+        covered, protected = frozenset(), 0
     # Reserve the possible continuation-capacity reset before admitting complete projections.
     allowance = max_chars - protected - (len(RESET_ADVICE) + 1 if held and not reset else 0)
     if not turn.strip() and not conversation.focus:
         return block
     if working_set.budget_exhausted("working_set.task_context"):
-        return empty("unavailable", reset=bool(held))
+        # The map is already served and held methods were just revalidated: the block says the deadline cut
+        # discovery short, and keeps the revalidated methods instead of resetting them for a budget reason.
+        _add_missing(block, "budget")
+        block["state"] = "partial"
+        return block
     try:
-        with find_types.timing_span(timings, "working_set.task_context"):
-            discovered, missing = working_set.task_candidates(
-                root, catalogue=catalogue, caller=caller, turn=turn,
-                focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
-                index_token=index_token, projections=sources, timings=timings,
-            )
+        try:
+            with find_types.timing_span(timings, "working_set.task_context"):
+                discovered, missing = working_set.task_candidates(
+                    root, catalogue=catalogue, caller=caller, turn=turn,
+                    focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
+                    index_token=index_token, projections=sources, timings=timings,
+                )
+        except TaskDeadline:
+            # The released corpus ran out of time before it ranked anything; a prefix would bias the ranking, so
+            # no lead is served, and the revalidated methods stand as at the boundary above.
+            _add_missing(block, "budget")
+            block["state"] = "partial"
+            return block
         block["missing"] = missing
         candidates = []
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
         for candidate in discovered:
-            with find_types.timing_span(timings, "working_set.task_context_projection"):
-                source = project_source(root, candidate["source_ref"], caller, cache=sources)
+            try:
+                with find_types.timing_span(timings, "working_set.task_context_projection"):
+                    source = project_source(root, candidate["source_ref"], caller, cache=sources)
+            except TaskDeadline:
+                # The leads already projected are complete; the rest stay unread and the block says so.
+                _add_missing(block, "budget")
+                break
             if source is None:
                 _add_missing(block, "lane_failed")
                 continue
@@ -564,7 +595,9 @@ def guarded(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) ->
                 if expected is None:
                     return empty("partial", reset=True)
                 if path not in sources:
-                    sources[path] = project_source(root, path, caller, expected_hash=expected)
+                    sources[path] = project_source(
+                        root, path, caller, expected_hash=expected, check=_serve_without_deadline,
+                    )
                 source = sources[path]
                 if (source is None or source.version != item["source_version"]
                         or (method and (source.methods is None or item["ref"] not in source.methods))):

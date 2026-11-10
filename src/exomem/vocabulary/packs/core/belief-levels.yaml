@@ -1,0 +1,13 @@
+# The belief levels Exomem ships: how strongly a holder believes a claim, said in words. A belief
+# unit's `credence` names one of these levels, or states a probability from 0 to 1 together
+# with a `credence_basis`. A vault adds levels or labels in the `belief_levels` section of
+# `_Schema/semantic-language-registry.yaml`. A level carries labels and a description and no
+# behaviour. `labels` maps a language tag to the label in that language. Parsing accepts the key
+# or any label, after NFKC normalisation and casefolding, keeps the stated text and matches on
+# the key.
+schema_version: 1
+belief_levels:
+  speculative: {labels: {en: Speculative}, description: The holder thinks the claim could be true but has little to go on.}
+  plausible: {labels: {en: Plausible}, description: The holder finds the claim reasonable but has real doubt.}
+  likely: {labels: {en: Likely}, description: The holder thinks the claim is more likely true than false.}
+  near_certain: {labels: {en: Near-certain}, description: The holder thinks the claim is almost surely true.}

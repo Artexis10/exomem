@@ -76,7 +76,6 @@ FIXTURE_PATH = (
     / "sequence3"
     / "f27-lifecycle-routing-replay.yaml"
 )
-PROMINENCE_DOC = REPO_ROOT / "docs" / "prominence.md"
 PLUGIN_DIR = REPO_ROOT / "plugins" / "claude-code"
 
 #: Candidate executables, in preference order.
@@ -421,15 +420,17 @@ def refuse_unsafe_out_dir(out_dir: Path) -> Path:
 # --------------------------------------------------------------------------
 
 
-def custom_instructions_block(level: str) -> tuple[str, str]:
+def custom_instructions_block(level: str, repo_root: Path = REPO_ROOT) -> tuple[str, str]:
     """The documented prominence block, read out of the doc that publishes it.
 
     Returned with the citation it was read from. Restating the block here would
     let the benchmark drift from the instructions users are actually given, and
-    the drift would look like a product result.
+    the drift would look like a product result. ``repo_root`` names another
+    checkout whose own doc is read, for an arm that runs that checkout.
     """
 
-    lines = PROMINENCE_DOC.read_text(encoding="utf-8").splitlines()
+    doc = repo_root / "docs" / "prominence.md"
+    lines = doc.read_text(encoding="utf-8").splitlines()
     heading = f"### {level.capitalize()}"
     for index, line in enumerate(lines):
         if not line.startswith(heading):
@@ -438,15 +439,12 @@ def custom_instructions_block(level: str) -> tuple[str, str]:
             if lines[start].startswith("```"):
                 for end in range(start + 1, len(lines)):
                     if lines[end].startswith("```"):
-                        citation = (
-                            f"{PROMINENCE_DOC.relative_to(REPO_ROOT).as_posix()}:"
-                            f"{start + 2}-{end}"
-                        )
+                        citation = f"{doc.relative_to(repo_root).as_posix()}:{start + 2}-{end}"
                         return "\n".join(lines[start + 1 : end]) + "\n", citation
                 break
         break
     raise JourneySetupError(
-        f"{PROMINENCE_DOC.name} carries no fenced block under {heading!r}; the "
+        f"{doc.name} carries no fenced block under {heading!r}; the "
         "arm cannot be configured with the instructions the docs publish"
     )
 

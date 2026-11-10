@@ -1112,8 +1112,9 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
                                                   settings=("--set", "keyCustodian.enabled=true"))
         if document["kind"] not in {"Deployment", "NetworkPolicy"}
     ]
-    assert {"Namespace", "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "ValidatingAdmissionPolicy",
-            "ValidatingAdmissionPolicyBinding"} == {document["kind"] for document in custodian_documents}
+    assert {"Namespace", "ServiceAccount", "ClusterRole", "ClusterRoleBinding", "Role", "RoleBinding",
+            "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"} == {
+        document["kind"] for document in custodian_documents}
     _kubectl(k3s.name, ["apply", "--filename=-"], documents=custodian_documents)
     _wait_for(lambda: "typeChecking" in json.loads(_kubectl(
         k3s.name, ["get", "validatingadmissionpolicy", "exomem-key-custodian-scope", "--output=json"]
@@ -1916,6 +1917,36 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         assert denied_custodian.returncode != 0, described
         assert "exomem-key-custodian-scope" in denied_custodian.stderr, (described, denied_custodian.stderr)
 
+    # automate-cell-storage-deletion D2: the purge gets a cell's namespace directly, reads the relayed grants
+    # and records each finished purge, by create and then update, in its own ConfigMap and nowhere else.
+    print("[3.10] scenario: the key custodian gets a namespace, reads the grants and writes only its done marks")
+    assert _can_i(CUSTODIAN_USERNAME, "get", f"namespaces/{namespace}") == "yes"
+    assert _can_i(CUSTODIAN_USERNAME, "get", "configmaps/exomem-cell-deletions", "--namespace", "exomem-cloud") == "yes"
+    assert _can_i(CUSTODIAN_USERNAME, "get", "configmaps/exomem-media-edge-active-set",
+                  "--namespace", "exomem-cloud") == "no"
+
+    def _custodian_config_map(name: str, data: dict[str, str]) -> dict[str, Any]:
+        return {"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": name, "namespace": "exomem-key-custody"}, "data": data}
+
+    done_marks = _custodian_config_map("exomem-key-custodian-purges", {"done.json": "[]"})
+    _kubectl(k3s.name, ["create", "--filename=-", f"--as={CUSTODIAN_USERNAME}"], documents=[done_marks])
+    done_marks["data"]["done.json"] = json.dumps([cell_id])
+    _kubectl(k3s.name, ["replace", "--filename=-", f"--as={CUSTODIAN_USERNAME}"], documents=[done_marks])
+    for described, (verb, document) in {
+        "the chart's grant keys and hold list beside its done marks":
+            ("create", _custodian_config_map("exomem-cell-deletion-policy", {"hold-cells.json": "[]"})),
+        "its done marks with a second key":
+            ("replace", _custodian_config_map("exomem-key-custodian-purges", {"done.json": "[]", "extra": "[]"})),
+    }.items():
+        print(f"[3.10] scenario: admission denies the key custodian writing {described}")
+        denied_custodian = _kubectl(
+            k3s.name, [verb, "--dry-run=server", "--filename=-", f"--as={CUSTODIAN_USERNAME}"],
+            documents=[document], check=False,
+        )
+        assert denied_custodian.returncode != 0, described
+        assert "exomem-key-custodian-scope" in denied_custodian.stderr, (described, denied_custodian.stderr)
+
     # === scenario: live NetworkPolicy enforcement (not just admission). ===
 
     print("[3.10] scenario: a second cell converges; cross-cell and DNS/egress denial, gateway-can-reach")
@@ -2412,6 +2443,59 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
     fourth["spec"]["egress"].append(copy.deepcopy(fourth["spec"]["egress"][2]))
     denied = dry_run(fourth)
     assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, denied.stderr
+
+
+@pytest.mark.parametrize("edge", [False, True], ids=["edge off", "edge on"])
+def test_cellctl_may_write_only_the_deletion_grants_config_map_and_its_one_key(k3s: K3sCluster, edge: bool) -> None:
+    """automate-cell-storage-deletion D1: admission rule 1's exception for the relayed deletion grants holds with
+    the media edge on or off, and admits that one ConfigMap name and key alone. Each write is a create, which
+    cellctl's Role grants for any ConfigMap name, so each refusal is admission's."""
+
+    edge_settings = (
+        "--set", "artifactBroker.enabled=true",
+        "--set-string", f"artifactBroker.image={STANDIN_REPOSITORY}@sha256:{'a' * 64}",
+        "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
+        "--set-json", f'artifactBroker.cellIds=["{_cell_id()}"]',
+        "--set", "mediaEdge.enabled=true",
+        "--set-string", "mediaEdge.endpoint=http://10.43.0.30:8769",
+        "--set-string", "mediaEdge.bucket=media-bucket",
+        "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
+        "--set-json", f'mediaEdge.cellIds=["{_cell_id()}"]',
+    ) if edge else ()
+    documents = _render_platform("templates/cellctl.yaml", settings=edge_settings)
+    _apply_server_side(k3s.name, [{"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "exomem-cloud"}}])
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+
+    def config_map(name: str, data: dict[str, str], **extra: object) -> dict[str, Any]:
+        return {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": name, "namespace": "exomem-cloud"},
+                "data": data, **extra}
+
+    def created(manifest: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-",
+                                   "--as=system:serviceaccount:exomem-cloud:cellctl"], documents=[manifest], check=False)
+
+    grants = config_map("exomem-cell-deletions", {"grants.json": "[]"})
+    active_set = config_map("exomem-media-edge-active-set", {"active-set.json": "{}", "credential-epochs.json": "{}"})
+
+    def policy_settled() -> bool:
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        # Another test's render may still be in force; wait until the active set follows this one's switch.
+        return created(grants).returncode == 0 and (created(active_set).returncode == 0) == edge
+
+    _wait_for(policy_settled, timeout=60, description="admission to follow this render's media edge switch")
+    for refused in (
+        config_map("exomem-cell-deletions", {"grants.json": "[]", "other.json": "[]"}),
+        config_map("exomem-cell-deletions", {"grants.json": "[]"}, binaryData={"grants.bin": "AA=="}),
+        config_map("another-config-map", {"grants.json": "[]"}),
+        *([] if edge else [active_set]),
+    ):
+        result = created(refused)
+        assert result.returncode != 0 and "exomem-cellctl-scope" in result.stderr, (refused, result.stderr)
 
 
 def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) -> None:

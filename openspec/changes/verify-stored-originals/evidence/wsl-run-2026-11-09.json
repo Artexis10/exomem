@@ -1,0 +1,44 @@
+{
+ "source": "one-off measurement script on a WSL install, 2026-11-09; synthetic vault",
+ "record": {
+  "originals": 2000,
+  "mean_bytes": 1000000,
+  "notes": 20000,
+  "seed_seconds": 1564.8,
+  "original_bytes": 1963559452,
+  "walk_rebuild": {
+   "seconds": 10.17,
+   "cpu_seconds": 5.92,
+   "found": 2000
+  },
+  "pass_first_unbudgeted_capped": {
+   "seconds": 176.51,
+   "cpu_seconds": 6.35,
+   "rehashed_bytes": 1963559452,
+   "outcomes": {
+    "verified": 2000
+   },
+   "mib_per_second": 10.6
+  },
+  "pass_default_budget": {
+   "seconds": 6.43,
+   "cpu_seconds": 0.25,
+   "budget_bytes": 67108864,
+   "rehashed_bytes": 66940951,
+   "outcomes": {
+    "verified": 80
+   }
+  },
+  "walk_again": {
+   "seconds": 58.75,
+   "cpu_seconds": 10.72,
+   "found": 2000
+  },
+  "defaults": {
+   "pass_seconds": 3600.0,
+   "cycle_seconds": 2592000.0,
+   "read_rate_bytes": 33554432.0,
+   "walk_seconds": 86400.0
+  }
+ }
+}

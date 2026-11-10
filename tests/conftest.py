@@ -1156,6 +1156,8 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # The suite serves the shipped turn slice (on). An exported rollback setting must not decide it;
     # a test that needs a slice-free maps packet opts out with `no_turn_slice` below.
     monkeypatch.delenv("EXOMEM_ACTIVATION_TURN_SLICE", raising=False)
+    # The suite serves the shipped activation budget; an exported setting must not decide it.
+    monkeypatch.delenv("EXOMEM_ACTIVATION_BUDGET_SECONDS", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.
@@ -1176,6 +1178,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # process-global caches from a test that has already finished.
     # `tests/test_recall_resolver_warm.py` deletes this var to exercise it.
     monkeypatch.setenv("EXOMEM_DISABLE_RESOLVER_WARM", "1")
+    # The fixity thread would hash and restore files in each short-lived tmp vault the suite
+    # serves. `tests/test_original_fixity.py` deletes this var to exercise it.
+    monkeypatch.setenv("EXOMEM_DISABLE_ORIGINAL_FIXITY", "1")
     # A cold due-state projection now heals in a daemon thread so an ordinary
     # read never pays a vault-wide audit. Production is one long-lived process;
     # this suite creates hundreds of short-lived tmp vaults, so make that warm

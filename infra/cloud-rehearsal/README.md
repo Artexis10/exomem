@@ -118,7 +118,7 @@ A person's agent brings a large, realistic folder into a Cloud cell, then a seco
 For each folder the run does what an agent does:
 1. Run `exomem cloud import <folder>` in the CLI container, as in the native import above.
 2. Poll `observe_transfer` until the import is `done`.
-3. File with the `manage_memory` operation `imports.file`: repeat `file` with the continuation of each reply until `filing` is `done` or `stopped`. The first folder starts with one `start` that bootstraps the Knowledge Base of the fresh cell; `file` carries on that run. Every call keeps the default, compact reply, and the run reads its control fields from it. The compact reply omits the inventory, the recorded stage and the filed count, so the run reads `read_import` status for each page when `file` is done. If the compact `done` reply drops the residual that the run holds, the `compact_reply` criterion fails.
+3. File with the `manage_memory` operation `imports.file`: repeat `file` with the continuation of each reply until `filing` is `done` or `stopped`. The first folder starts with one `start` that bootstraps the Knowledge Base of the fresh cell; `file` carries on that run. Every call keeps the default, compact reply, and the run reads its control fields from it. The compact reply omits the inventory, the recorded stage and the filed count, so the run reads the `inspect_memory` operation `imports.status` with `view: "full"` for each page when `file` is done. If the compact `done` reply drops the residual that the run holds, the `compact_reply` criterion fails.
 4. Read the residual, then call `transfer_memory` with `import_discard` and `confirm=true`.
 5. Wait for the index queues to empty, then read the Sources back.
 
@@ -213,6 +213,15 @@ A requested stage failure exits 2, including with `--harness-check`.
 
 Ordinary governed writes do not initialize signed standalone custody, so signed custody recovery remains unproved.
 This stage does not qualify production storage, the systemd launcher, natural restic failures or other signal paths.
+
+## Original fixity
+
+`--original-fixity` proves `verify-stored-originals` tasks 5.1 and 5.2. It runs only on demand, as the `original-fixity` mode of the `Cloud rehearsal` workflow, after steps 1 and 2.
+The stage seeds stored originals and plain notes in the synthetic owner's cell. It measures one table rebuild and two passes, then damages one original.
+It then runs the two blocks of the restore runbook's "Restore one original" as written, and checks that the next pass and the cell's readiness count no unresolved original.
+The stage's `runbook_deviations` list each place where the rehearsal differs from an operator's run.
+Seeding costs about 3 seconds per original on a GitHub runner, so the default 1,000 originals take about an hour of the job's 150 minutes.
+Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_kib` to change the fixture.
 
 ## Report
 

@@ -319,6 +319,17 @@ def _restricting_scope_ids(policy: policy_module.Policy) -> set[str]:
     }
 
 
+def policy_governs_anything(vault_root: Path) -> bool:
+    """Whether a governance policy could cover some item: blocked, or any rule declared.
+
+    The store-mode lifecycle writers ask this, because they write no tombstone or receipt: they
+    serve a vault whose policy is empty, and name a refusal for any other. It is the coarse form of
+    ``_is_governed``, which also reads each item's scope, and a false "yes" costs a refusal.
+    """
+    policy = policy_module.load(vault_root)
+    return policy.blocked or not policy.empty
+
+
 def _is_governed(vault_root: Path, manifest: tuple[ManifestItem, ...]) -> bool:
     policy = policy_module.load(vault_root)
     if policy.blocked:

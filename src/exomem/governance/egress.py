@@ -3006,6 +3006,12 @@ def annotate_hits(
             # have been permitted, so it is withheld rather than released.
             withheld.add(rel_path)
             continue
+        if getattr(hit, "dataset_value", False) and decision.level < LEVEL_FULL:
+            # A dataset value is raw content, read by `query_dataset` only at the full level.
+            # Below it the hit is dropped, never an excerpt and never a notice: a notice would
+            # tell a reader who may not read the rows that a value matched.
+            withheld.add(rel_path)
+            continue
         if decision.level >= RELEASE_FLOOR:
             hit.decision = decision
             permitted.append(hit)
@@ -7747,13 +7753,13 @@ def restricted_release_filter(
     """
     if bound_writer(vault_root) is not None:
         return release_walk_filter(vault_root, principal=principal, purpose=purpose)
-    who = _file_mode_restricted_caller(vault_root, principal)
+    who = file_mode_restricted_caller(vault_root, principal)
     if who is None:
         return None
     return release_walk_filter(vault_root, principal=who, purpose=purpose)
 
 
-def _file_mode_restricted_caller(
+def file_mode_restricted_caller(
     vault_root: Path, principal: RequestPrincipal | None
 ) -> RequestPrincipal | None:
     """The file-mode caller that something could be withheld from, or `None`.
@@ -7792,7 +7798,7 @@ def caller_restricted(
     del purpose  # every purpose gets a filter or none alike
     return (
         bound_writer(vault_root) is not None
-        or _file_mode_restricted_caller(vault_root, principal) is not None
+        or file_mode_restricted_caller(vault_root, principal) is not None
     )
 
 

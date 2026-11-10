@@ -252,6 +252,39 @@ def test_cellctl_judges_the_recall_lag_in_the_answer_a_cell_builds() -> None:
     assert cell_readiness.recall_lag_verdict(caught_up, after=timedelta(minutes=10)) is False
 
 
+def test_cellctl_counts_damaged_originals_from_an_answer_that_names_no_file_and_stays_ready() -> None:
+    """Defect: the originals block drifts from cellctl's reader, leaks a path off the
+    cell, or makes one damaged file take a serving cell out."""
+
+    def answer(originals: dict[str, object]) -> dict:
+        return build_runtime_readiness(
+            coordination={
+                "enabled": False,
+                "role": "standalone",
+                "replica_id": None,
+                "coordinator_healthy": True,
+            },
+            release="1.2.3",
+            mcp_tool_surface_sha256="d" * 64,
+            originals=originals,
+        )
+
+    damaged = answer({"state": "measured", "unresolved": 2, "path": "Evidence/must-not-leak.pdf"})
+    clean = answer({"state": "measured", "unresolved": 0})
+    before_first_pass = answer({"state": "unknown"})
+    # A stale pass keeps its time but never its old count.
+    stale = answer({"state": "unknown", "last_pass_at": "2026-11-01T06:00:00+00:00", "unresolved": 3})
+
+    assert damaged["status"] == "ready"
+    assert damaged["originals"] == {"state": "measured", "unresolved": 2}
+    assert "must-not-leak" not in repr(damaged)
+    assert cell_readiness.originals_verdict(json.dumps(damaged).encode()) is True
+    assert cell_readiness.originals_verdict(json.dumps(clean).encode()) is False
+    assert cell_readiness.originals_verdict(json.dumps(before_first_pass).encode()) is None
+    assert stale["originals"] == {"state": "unknown", "last_pass_at": "2026-11-01T06:00:00+00:00"}
+    assert cell_readiness.originals_verdict(json.dumps(stale).encode()) is None
+
+
 def test_ready_retrieval_catalog_admits_runtime_readiness() -> None:
     snapshot = build_runtime_readiness(
         coordination={

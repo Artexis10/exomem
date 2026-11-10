@@ -50,6 +50,7 @@ from .decide import (
     relocation_volume,
     storage_receipt,
 )
+from .deletion_relay import RelayMemory, relay_grants
 from .errors import describe_error as _describe_error
 from .export_layout import (
     PACK,
@@ -314,11 +315,13 @@ class LoopMemory:
     media_metered_for: dict[str, datetime | None] = field(default_factory=dict)
     media_meter_retry_at: dict[str, datetime] = field(default_factory=dict)
     media_meter_failures: dict[str, int] = field(default_factory=dict)
-    # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
-    # process fills it from every deleted row, so a restart never loses the alert; the receiver
-    # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
+    # D9: deleted old cells whose clean-up in the old bucket is not yet alerted. The first pass of a
+    # process fills it from every deleted row that kept its key ID, so a restart never loses the alert;
+    # the receiver folds a repeat. A deleted row stays in the database, so no state is kept elsewhere.
     cleanup_pending: set[str] = field(default_factory=set)
     cleanup_seeded: bool = False
+    # automate-cell-storage-deletion D1: what the grant relay learned from its listings.
+    relay: RelayMemory = field(default_factory=RelayMemory)
     # Task 2.8 and D10: each platform alert's state last delivered (absent:
     # nothing yet this process) and when a failed delivery may be tried again,
     # and the stale cells last logged.
@@ -342,6 +345,11 @@ class LoopMemory:
     recall_read_at: datetime | None = None
     recall_verdicts: dict[str, bool] = field(default_factory=dict)
     recall_logged: tuple[list[str], list[str]] = field(default_factory=lambda: ([], []))
+    # The cell-originals-damaged alert, judged from the same readiness answers:
+    # each serving cell's last definite verdict (cell_readiness.originals_verdict)
+    # and the cells last logged. A restart forgets them, as above.
+    originals_verdicts: dict[str, bool] = field(default_factory=dict)
+    originals_logged: list[str] = field(default_factory=list)
     # D10: what each local cell's latest measured hourly backup found (a
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
@@ -519,6 +527,9 @@ class ClusterConfig:
     # Whether the schema has the media key columns. run_loop observes it on each connect; it is
     # never configured.
     media_key_columns: bool = False
+    # automate-cell-storage-deletion D1: whether the schema has Substrate's `deletion_grant` column. run_loop
+    # observes it on each connect; without it the relay leaves the grants' ConfigMap as it stands.
+    deletion_grant_column: bool = False
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -669,6 +680,8 @@ class ClusterGateway:
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
+    def read_cell_deletions(self) -> dict[str, str] | None: ...  # pragma: no cover
+    def apply_cell_deletions(self, manifest: dict) -> None: ...  # pragma: no cover
     def media_edge_evidence(self, url: str) -> EdgeEvidence: ...  # pragma: no cover
 
 
@@ -1420,9 +1433,9 @@ async def reconcile_once(
     backup_listing=None,
     media_listing=None,
 ) -> bool:
-    """One pass. `backup_listing` only lists a new cell's locked backups, and `media_listing` only the media
-    bucket's prefixes for the physical meter. Returns whether the next one
-    is due at the fast cadence:
+    """One pass. `backup_listing` lists a new cell's locked backups, and `media_listing` the media bucket's
+    prefixes for the physical meter. Both also list a deleted cell's prefix for its grant's relay. Returns
+    whether the next one is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
 
@@ -1457,8 +1470,8 @@ async def reconcile_once(
         await db.write_capacity_snapshot(connection, capacities={}, observed_at=now)
     rows = await db.select_all_rows(connection, media_keys=cluster_config.reads_media_keys)
     if not memory.cleanup_seeded:
-        memory.cleanup_pending |= {row.cell_id for row in rows
-                                   if row.desired_state == "deleted" and row.observed_state == "deleted"}
+        memory.cleanup_pending |= {row.cell_id for row in rows if row.desired_state == "deleted"
+                                   and row.observed_state == "deleted" and row.b2_key_id is not None}
         memory.cleanup_seeded = True
     committed = frozenset(row.cell_id for row in rows if not (
         row.desired_state == "deleted" and row.observed_state == "deleted"
@@ -1640,6 +1653,10 @@ async def reconcile_once(
 
     await _cleanup_alerts(cluster, cluster_config, memory, now)
     await _media_physical_meter(cluster, cluster_config, rows, memory, media_listing, now)
+    if cluster_config.deletion_grant_column:
+        stored = await db.select_deletion_grants(connection)
+        await asyncio.to_thread(relay_grants, cluster, stored, now, memory.relay, backup_listing=backup_listing,
+                                media_listing=media_listing, media_bucket=cluster_config.media_edge is not None)
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -1756,9 +1773,10 @@ async def _deliver_alert(
 async def _cleanup_alerts(
     cluster: ClusterGateway, cluster_config: ClusterConfig, memory: LoopMemory, now: datetime
 ) -> None:
-    """D9: one alert per cell this process deleted, naming only its id. It fires and stays: the
-    key and the cell's backup files (locked for a new cell, in the old bucket for an old one) are the
-    operator's to remove, and cellctl cannot read the provider's key listing to see when that is done."""
+    """D9: one alert per old cell this process deleted, naming only its id. It fires and stays: the key and
+    the backup files in the old bucket are the operator's to remove, and cellctl cannot read that account's
+    listings to see when that is done. A new cell's prefixes are purged on its deletion grant
+    (automate-cell-storage-deletion D6)."""
 
     for cell_id in sorted(memory.cleanup_pending):
         alert = alerts.cleanup_pending_alert(cell_id)
@@ -2007,10 +2025,35 @@ async def _cell_health_alerts(
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.DISK_LOW_ALERT, firing, now)
 
-    await _recall_lag_alert(cluster, cluster_config, rows, observations, now, memory, after=thresholds.recall_lag_after)
+    await _readiness_alerts(cluster, cluster_config, rows, observations, now, memory, after=thresholds.recall_lag_after)
 
 
-async def _recall_lag_alert(
+def _readiness_verdicts(
+    previous: dict[str, bool],
+    serving: set[str],
+    addresses: dict[str, str],
+    answers: dict[str, bytes],
+    judge: Callable[[bytes], bool | None],
+    alert: str,
+) -> tuple[dict[str, bool], dict[str, bool | None]]:
+    """One alert's verdicts from this read: each serving cell keeps its last
+    definite verdict through an answer that cannot be judged, and a cell that
+    leaves service forgets it. Returns the kept verdicts and this read's."""
+
+    latest: dict[str, bool | None] = {}
+    for cell in addresses:
+        try:
+            latest[cell] = judge(answers[cell]) if cell in answers else None
+        except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
+            logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
+                         alert, cell, _describe_error(error))
+            latest[cell] = None
+    verdicts = {cell: verdict for cell, verdict in previous.items() if cell in serving}
+    verdicts.update((cell, verdict) for cell, verdict in latest.items() if verdict is not None)
+    return verdicts, latest
+
+
+async def _readiness_alerts(
     cluster: ClusterGateway,
     cluster_config: ClusterConfig,
     rows: list[CellRow],
@@ -2020,14 +2063,17 @@ async def _recall_lag_alert(
     *,
     after: timedelta,
 ) -> None:
-    """cell-recall-lagging: each serving cell's readiness answer, read from
-    its health-only port at most once a RECALL_LAG_INTERVAL, says whether its
-    recall serves a catalogue that has stayed unchanged and behind for
-    `after`. The age is the cell's own, so a cellctl restart restarts no
-    clock. An answer that cannot be judged (none, or a lag too young) keeps
-    the cell's last definite verdict: it says nothing new, and a stalled cell's
-    last verdict is the stall. A cell that leaves service forgets its verdict.
-    Nothing is read with no receiver to tell."""
+    """cell-recall-lagging and cell-originals-damaged, from each serving
+    cell's readiness answer, read from its health-only port at most once a
+    RECALL_LAG_INTERVAL.
+
+    The answer says whether the cell's recall serves a catalogue that has stayed
+    unchanged and behind for `after`. The age is the cell's own, so a cellctl
+    restart restarts no clock. It also counts the cell's missing or damaged
+    stored originals. An answer that cannot be judged (none, a lag too young,
+    or no fixity pass yet) keeps the cell's last definite verdict: it says
+    nothing new, and a stalled cell's last verdict is the stall. A cell that
+    leaves service forgets its verdicts. Nothing is read with no receiver to tell."""
 
     if cluster_config.alert_delivery_secret is None:
         return
@@ -2049,18 +2095,11 @@ async def _recall_lag_alert(
             except Exception as error:  # noqa: BLE001 - every cell then reads as unjudged
                 logger.error("cellctl: %s: no cell readiness could be read: %s", alerts.RECALL_LAG_ALERT,
                              _describe_error(error))
-        latest: dict[str, bool | None] = {}
-        for cell in addresses:
-            try:
-                latest[cell] = cell_readiness.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
-            except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
-                logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
-                             alerts.RECALL_LAG_ALERT, cell, _describe_error(error))
-                latest[cell] = None
-        verdicts = {cell: verdict for cell, verdict in memory.recall_verdicts.items() if cell in serving}
-        verdicts.update((cell, verdict) for cell, verdict in latest.items() if verdict is not None)
+        verdicts, latest = _readiness_verdicts(
+            memory.recall_verdicts, serving, addresses, answers,
+            lambda body: cell_readiness.recall_lag_verdict(body, after=after), alerts.RECALL_LAG_ALERT)
         memory.recall_verdicts = verdicts
-        lagging = alerts.recall_lagging_cells(rows, verdicts)
+        lagging = alerts.flagged_cells(rows, verdicts)
         unjudged = sorted(cell for cell in serving if latest.get(cell) is None)
         if (lagging, unjudged) != memory.recall_logged:
             memory.recall_logged = (lagging, unjudged)
@@ -2074,9 +2113,24 @@ async def _recall_lag_alert(
                 logger.info("cellctl: %s: %d serving cell(s) could not be read, or lag for less than %d seconds; "
                             "each keeps its last verdict: %s", alerts.RECALL_LAG_ALERT, len(unjudged), seconds,
                             ", ".join(unjudged))
-    firing = alerts.recall_lagging(rows, memory.recall_verdicts)
+        memory.originals_verdicts, _latest = _readiness_verdicts(
+            memory.originals_verdicts, serving, addresses, answers, cell_readiness.originals_verdict,
+            alerts.ORIGINALS_DAMAGED_ALERT)
+        damaged = alerts.flagged_cells(rows, memory.originals_verdicts)
+        if damaged != memory.originals_logged:
+            memory.originals_logged = damaged
+            if damaged:
+                logger.warning("cellctl: %s: %d serving cell(s) count a missing or damaged stored original: %s",
+                               alerts.ORIGINALS_DAMAGED_ALERT, len(damaged), ", ".join(damaged))
+            else:
+                logger.info("cellctl: %s: no judged serving cell counts a missing or damaged stored original",
+                            alerts.ORIGINALS_DAMAGED_ALERT)
+    firing = alerts.any_flagged(rows, memory.recall_verdicts)
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.RECALL_LAG_ALERT, firing, now)
+    firing = alerts.any_flagged(rows, memory.originals_verdicts)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.ORIGINALS_DAMAGED_ALERT, firing, now)
 
 
 def _note_cell_health(
@@ -3270,6 +3324,7 @@ async def run_loop(
     stop: asyncio.Event | None = None,
     heartbeat_path: str = DEFAULT_HEARTBEAT_PATH,
     backup_listing=None,
+    media_listing=None,
 ) -> None:
     """D4: poll, plus LISTEN on a direct session. The poll comes after
     FAST_POLL_INTERVAL_SECONDS while a pass reports a transition and after
@@ -3303,6 +3358,8 @@ async def run_loop(
                     if not await db.try_advisory_lock(connection):
                         raise RuntimeError("cellctl advisory lock is held by another writer")
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
+                    cluster_config = dataclass_replace(
+                        cluster_config, deletion_grant_column=await db.has_deletion_grant_column(connection))
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
                 except MediaKeyColumnsMissing:
                     # A deploy-order fault, not an outage: stop, so the rollout fails where it started.
@@ -3332,6 +3389,7 @@ async def run_loop(
                     config=config,
                     memory=memory,
                     backup_listing=backup_listing,
+                    media_listing=media_listing,
                 )
                 if not fast:
                     interval = IDLE_POLL_INTERVAL_SECONDS

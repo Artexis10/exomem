@@ -1,0 +1,101 @@
+{
+  "description": "Deletion grants (automate-cell-storage-deletion D1) that every grant verifier must accept or refuse alike: the media edge's in src/exomem and the key custodian's in cellctl. Each case is signed once with throwaway Ed25519 keys whose private halves were discarded; add a case by signing a new set of keys. Verify with both public_keys pinned, as during a key rotation.",
+  "public_keys": [
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAWWBFtGO6Ld2Z8nIh403NwE6lFYFHxaGX3g6JAU83dO8=\n-----END PUBLIC KEY-----\n",
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfGWDMNxxvk3CmJ2PMoSCNcBdSEBoHgZO4F8d8DThUkc=\n-----END PUBLIC KEY-----\n"
+  ],
+  "grants": [
+    {
+      "case": "signed with the current key",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwfQ.rmA8HO8owoMg5iipArDKvLvOea-oFsyo5ILIrr_twwIJ9OXEqR-HNS7oXV8DqT5yZBhnZf0oC2MV16DbCiviBA",
+      "accepted": {
+        "cell_id": "a2b3c4d5e6f7g2h3",
+        "iat": 1790000000,
+        "purge_after": 1790604800
+      }
+    },
+    {
+      "case": "signed with the next key",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDIiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwfQ.-OyQXN6BcaIqpQy2IaQri9_56MoOkuYctuAESNEbgrIQLMwxjVYI2ce3KPij3-37ikAXVUwQmLuCQtUCA1yxBw",
+      "accepted": {
+        "cell_id": "a2b3c4d5e6f7g2h3",
+        "iat": 1790000000,
+        "purge_after": 1790604800
+      }
+    },
+    {
+      "case": "signed with a key that is not pinned",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwfQ.y9pJck5UskYnJeJ5QFb6MfbPzlfUUx75u4Bwq2t55H6Kb5Nb-NigEMIeDXNh_rANQ72zt14V3q8RIeFlgkR3AA",
+      "accepted": null
+    },
+    {
+      "case": "carries exp",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwLCJleHAiOjQxMDI0NDQ4MDB9.jkru313idttgX8LSbeIJTAlTBS53uqulxWLNxYQM1wRFQrhhCPXPTm-Dd_exA9YX82qN-jgXCrYHd-OQZYi4Dg",
+      "accepted": null
+    },
+    {
+      "case": "names another audience",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tbWVkaWEtZWRnZSIsImlhdCI6MTc5MDAwMDAwMCwianRpIjoiZ3JhbnQtMDAwMSIsImNlbGxfaWQiOiJhMmIzYzRkNWU2ZjdnMmgzIiwicHVyZ2VfYWZ0ZXIiOjE3OTA2MDQ4MDB9.pmoOzpM6bGru7KkjE3wIX741boTceOi3FSGfLFPNtmgcR_W6l8D9eEgFVn5HtiHtmADJdvFTNG3g_Tl4BPmICw",
+      "accepted": null
+    },
+    {
+      "case": "has no jti",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImNlbGxfaWQiOiJhMmIzYzRkNWU2ZjdnMmgzIiwicHVyZ2VfYWZ0ZXIiOjE3OTA2MDQ4MDB9.B_zA3MZ6PFUlOVP-ZYbFkojtHUDDGYnB8aHCi_LR9XpLB8oSYDLq1B05K8rVpweX3g6dAECExhzDpwVilUUoCw",
+      "accepted": null
+    },
+    {
+      "case": "has a purge_after equal to its iat",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwMDAwMDAwfQ.STKUaaxAF13tNVR-1MdS9KEFSrE6fvlT5D0hMj2Vqi5jXikIcy3Lhl7sPhnRQuCLA5hYeUoh4hYnMWF0xWQmDQ",
+      "accepted": null
+    },
+    {
+      "case": "has a grace of exactly one day",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDMiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwMDg2NDAwfQ.p8ZiKiZeX3LiZp-01bwxJzvcYl7SQKMvQEflVEvzP-QRBXmDso0iDJp_9K-ui4BTvZ-XQH73HyB0EaJ24lXBCA",
+      "accepted": {
+        "cell_id": "a2b3c4d5e6f7g2h3",
+        "iat": 1790000000,
+        "purge_after": 1790086400
+      }
+    },
+    {
+      "case": "has a grace one second short of a day",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwMDg2Mzk5fQ.3k3HAwGaSPTXjmfyz7QWkIjXfycrQbb5wR7EAU150DY3adbBeokWKDBD5ggVWCFQwrb6UKb3LWMaHKSw2ss8Aw",
+      "accepted": null
+    },
+    {
+      "case": "has a purge_after that is not an integer",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwLjB9.MLphO_wxmpQHnM20xSHsaoqn9jkvVqQo4DM_VlE8ZK7Ir2VS64uPjXgzmpndXoENLVn-WRPjV9GKiQW08xK6DA",
+      "accepted": null
+    },
+    {
+      "case": "has an iat that is not an integer",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAuNSwianRpIjoiZ3JhbnQtMDAwMSIsImNlbGxfaWQiOiJhMmIzYzRkNWU2ZjdnMmgzIiwicHVyZ2VfYWZ0ZXIiOjE3OTA2MDQ4MDB9.b3JkjBu86OjV7FQ9vtJ5LI-qMibaYYqu1jTzP7_nD_R87pX6_WjTCXuAb0fd3lnQQNmnx90cDmCeafLg9CnnDg",
+      "accepted": null
+    },
+    {
+      "case": "names a cell ID of the wrong shape",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiLi4vYTJiM2M0ZDVlNmY3ZyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwfQ.-S_v-2LWA2NpD4tg4bsfkm05BXXHI7A1U8_SkQ58znENA1hfgysiLBQ9EXOSCMZttqifFhpTopSlKMmdxvaNCQ",
+      "accepted": null
+    },
+    {
+      "case": "has a header type other than JWT",
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImF0K2p3dCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwfQ.UMSsH2Aq-sW6YMAgJHHtJimaQyHE3Kq_34JFRgmG5Dgk9evLTyr5ZNeMmD2izKQnG5RdHUV9i4_gQWMocDgSCw",
+      "accepted": null
+    },
+    {
+      "case": "is signed with HS256 instead of EdDSA",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJleG9tZW0tY2VsbC1kZWxldGUiLCJpYXQiOjE3OTAwMDAwMDAsImp0aSI6ImdyYW50LTAwMDEiLCJjZWxsX2lkIjoiYTJiM2M0ZDVlNmY3ZzJoMyIsInB1cmdlX2FmdGVyIjoxNzkwNjA0ODAwfQ.RK3OZoxbWQIjCS_-zaOw4qxsvuIvWIgvppCNoIW0Bvs",
+      "accepted": null
+    },
+    {
+      "case": "is not a token",
+      "token": "not-a-token",
+      "accepted": null
+    },
+    {
+      "case": "is not a string",
+      "token": 42,
+      "accepted": null
+    }
+  ]
+}

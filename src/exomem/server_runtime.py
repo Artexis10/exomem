@@ -156,6 +156,7 @@ class LocalRuntimeActivation:
         self.matrix_warmup: threading.Thread | None = None
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
+        self.original_fixity: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -293,6 +294,7 @@ class LocalRuntimeActivation:
             ("graph drain", self._start_graph_drain),
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
+            ("original fixity", self._start_original_fixity),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -381,6 +383,10 @@ class LocalRuntimeActivation:
             from . import graph_drain
 
             graph_drain.stop(worker=self.graph_drain)
+        if self.original_fixity is not None:
+            from . import original_fixity
+
+            original_fixity.stop(worker=self.original_fixity)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -452,6 +458,14 @@ class LocalRuntimeActivation:
 
     def _start_graph_drain(self, vault_root: Path) -> None:
         self.graph_drain = _start_graph_drain(vault_root)
+
+    def _start_original_fixity(self, vault_root: Path) -> None:
+        """Its own thread, not the media worker's: `EXOMEM_DISABLE_MEDIA_EXTRACTION`
+        removes that worker, and originals still need verifying. `_start_component`
+        logs a failed start and the transport carries on."""
+        from . import original_fixity
+
+        self.original_fixity = original_fixity.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
         """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""
@@ -1190,7 +1204,13 @@ def _create_file_watcher(vault_root: Path) -> Any | None:
     from . import file_watcher as file_watcher_module
 
     try:
-        return file_watcher_module.FileWatcher(vault_root)
+        from .vault_store import importer, mode
+
+        # A store-mode vault's files are the store's projection: the watcher hands what it sees to
+        # the importer. A file-mode vault, and one whose mode records disagree, keeps its own path.
+        store_mode = mode.store_mode_active(vault_root)
+        store_importer = importer.Importer(vault_root) if store_mode else None
+        return file_watcher_module.FileWatcher(vault_root, importer=store_importer)
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher unavailable; core service continuing: %s", exc)
         return None

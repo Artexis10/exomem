@@ -48,7 +48,7 @@ NOW_MS = int(NOW.timestamp() * 1000)
 ROOT = b"r" * 32
 
 # Fixtures of the reconcile tests: the staging bucket as an empty fake, and the cleanup alerts sent.
-delivered, staging = test_reconcile.delivered, test_reconcile.staging
+staging = test_reconcile.staging
 
 
 def _signing_key() -> Ed25519PrivateKey:
@@ -868,11 +868,10 @@ async def _media_store_of(fleet: Fleet, cell_id: str) -> dict:
 
 @pytest.mark.parametrize("edge_says", ["unreadable", "still the set that lists the cell"])
 async def test_a_deleted_cell_stays_deleting_until_the_edge_serves_a_set_without_it(
-    cell_db, delivered: list[tuple[str, bool]], staging, edge_says: str,
+    cell_db, staging, edge_says: str,
 ) -> None:
-    # The operator's media clean-up may start once the alert fires, so no upload may land after it.
+    # A row reads deleted only once the edge serves a set without the cell, so no upload can land after it.
     fleet = await _fleet(cell_db, CANARY)
-    _alerting(fleet)
     try:
         await fleet.run()
         fleet.cluster.reported = fleet.cluster.serving()
@@ -886,7 +885,7 @@ async def test_a_deleted_cell_stays_deleting_until_the_edge_serves_a_set_without
         for minute in (6, 7, 8):
             await fleet.run(NOW + timedelta(minutes=minute))
         waiting = (await fleet.rows())[CANARY]
-        assert (waiting.observed_state, delivered) == ("deleting", [])
+        assert waiting.observed_state == "deleting"
         # Key retirement does not wait for the edge: the media key is gone while the deletion still waits.
         assert waiting.media_key_wrapped is None and waiting.content_keys_retired_at is not None
 
@@ -895,7 +894,6 @@ async def test_a_deleted_cell_stays_deleting_until_the_edge_serves_a_set_without
         await fleet.run(NOW + timedelta(minutes=10))
         done = (await fleet.rows())[CANARY]
         assert done.observed_state == "deleted"
-        assert delivered == [(f"cell-storage-cleanup-pending-{CANARY}", True)]
         # The proof stays with the row: the generation and set the edge was seen to serve without the cell.
         assert await _media_store_of(fleet, CANARY) == {
             "revoke_requested_at": (NOW + timedelta(minutes=5)).isoformat(),
@@ -907,11 +905,10 @@ async def test_a_deleted_cell_stays_deleting_until_the_edge_serves_a_set_without
 
 
 async def test_a_restarted_cellctl_keeps_a_deleted_cell_waiting_for_the_edge(
-    cell_db, delivered: list[tuple[str, bool]], staging,
+    cell_db, staging,
 ) -> None:
     # After the first pass the published set no longer names the cell; only the row still says it was admitted.
     fleet = await _fleet(cell_db, CANARY)
-    _alerting(fleet)
     try:
         await fleet.run()
         await _delete(fleet, CANARY, NOW + timedelta(minutes=5))
@@ -920,24 +917,22 @@ async def test_a_restarted_cellctl_keeps_a_deleted_cell_waiting_for_the_edge(
         fleet.memory = reconcile.LoopMemory()
         for minute in (6, 7):
             await fleet.run(NOW + timedelta(minutes=minute))
-        assert ((await fleet.rows())[CANARY].observed_state, delivered) == ("deleting", [])
+        assert (await fleet.rows())[CANARY].observed_state == "deleting"
 
         fleet.cluster.reported = fleet.cluster.serving()
         await fleet.run(NOW + timedelta(minutes=8))
         await fleet.run(NOW + timedelta(minutes=9))
         assert (await fleet.rows())[CANARY].observed_state == "deleted"
-        assert delivered == [(f"cell-storage-cleanup-pending-{CANARY}", True)]
     finally:
         await fleet.close()
 
 
 async def test_a_deleted_cell_waits_for_the_edge_when_its_own_pass_fails_after_the_set_drops_it(
-    cell_db, delivered: list[tuple[str, bool]], staging,
+    cell_db, staging,
 ) -> None:
     # The pass publishes a set without the cell before it reconciles the cell. If that row fails there, the
     # next pass sees a set without the cell, so the row must already say that the edge may have admitted it.
     fleet = await _fleet(cell_db, CANARY)
-    _alerting(fleet)
     app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
     try:
         await fleet.run()
@@ -962,24 +957,22 @@ async def test_a_deleted_cell_waits_for_the_edge_when_its_own_pass_fails_after_t
         for minute in (7, 8):
             await fleet.run(NOW + timedelta(minutes=minute))
         assert fleet.cluster.reported == listing_the_cell
-        assert ((await fleet.rows())[CANARY].observed_state, delivered) == ("deleting", [])
+        assert (await fleet.rows())[CANARY].observed_state == "deleting"
 
         fleet.cluster.reported = fleet.cluster.serving()
         await fleet.run(NOW + timedelta(minutes=9))
         await fleet.run(NOW + timedelta(minutes=10))
         assert (await fleet.rows())[CANARY].observed_state == "deleted"
-        assert delivered == [(f"cell-storage-cleanup-pending-{CANARY}", True)]
     finally:
         await app.close()
         await fleet.close()
 
 
 async def test_a_deleted_cell_the_edge_never_admitted_does_not_wait_for_the_edge(
-    cell_db, delivered: list[tuple[str, bool]], staging,
+    cell_db, staging,
 ) -> None:
     # A cell outside the selection has no media object, and an edge that is away must not hold its deletion.
     fleet = await _fleet(cell_db, CANARY, OTHER)
-    _alerting(fleet)
     try:
         await fleet.run()
         assert OTHER not in fleet.cluster.published()["cells"]
@@ -988,7 +981,6 @@ async def test_a_deleted_cell_the_edge_never_admitted_does_not_wait_for_the_edge
         await fleet.run(NOW + timedelta(minutes=6))
 
         assert (await fleet.rows())[OTHER].observed_state == "deleted"
-        assert delivered == [(f"cell-storage-cleanup-pending-{OTHER}", True)]
     finally:
         await fleet.close()
 

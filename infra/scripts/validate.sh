@@ -110,6 +110,9 @@ uvx --from "mypy==${MYPY_VERSION}" mypy \
   --follow-imports skip --ignore-missing-imports --check-untyped-defs \
   "${infra_dir}"/scripts/*.py
 shellcheck "${script_dir}"/*.sh
+# The grant fixture holds JWTs signed by throwaway keys whose private halves were
+# discarded, so its tokens grant nothing; it is the one file the scan skips.
 "${trivy_bin}" fs --scanners secret --exit-code 1 --no-progress \
+  --skip-files infra/contracts/cell-deletion-grants-v1.json \
   --skip-dirs .git --skip-dirs .venv --skip-dirs .venv-hosted-ci \
   --skip-dirs .terraform --skip-dirs '**/__pycache__' --skip-dirs charts "${repo_root}"

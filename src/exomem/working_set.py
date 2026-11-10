@@ -235,6 +235,9 @@ RETRIEVAL_CARRY_BUDGET_MULTIPLE = 2.5
 
 #: The request-budget stage name of the retrieval carry, on both rungs (phrase and title).
 CARRY_STAGE = "working_set.carry"
+#: The `missing` entry of an `unresolved` abstention whose retrieval carry the request budget refused to start.
+#: It says the compile did not look, which the turn slice must not read as "the turn names nothing".
+ANCHORS_BUDGET_GAP = {"role": "anchors", "reason": "budget"}
 
 #: A stem is DISTINCTIVE when it occurs on no more than this share of the
 #: indexed pages. Corpus-relative on purpose: "rare" is a statement about
@@ -461,7 +464,10 @@ def _without_lede_repeats(
     twice, charged twice, and reported as a second reference where there is
     one page. The page-level item already carries it, so the fragment goes.
     Keep qualified units: the page does not carry their metadata, authored
-    dates or correction links. Different lifecycles are not interchangeable.
+    dates or correction links. A unit with a `modality` row is one of them, so
+    a norm never folds into a lede that states what is, and a unit with
+    `asserted_by` stays that party's claim. Different lifecycles are not
+    interchangeable.
     Other units and the same sentence on another page are kept.
     """
     ledes: dict[str, list[tuple[str, str]]] = {}
@@ -1481,11 +1487,19 @@ def task_candidates(
     )
     from .governance import egress
 
+    entries = []
     with find_types.timing_span(timings, "working_set.task_context_entries"):
         page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
-        entries = [entry for entry in catalogue.task_entries() if entry.path
-                   and context_views._admits(entry, caller.visible)
-                   and (page_visible is None or page_visible(entry.path))]
+        try:
+            for position, entry in enumerate(catalogue.task_entries()):
+                if position and not position % request_budget.CHECKPOINT_EVERY:
+                    budget_checkpoint("working_set.task_context_entries")
+                if (entry.path and context_views._admits(entry, caller.visible)
+                        and (page_visible is None or page_visible(entry.path))):
+                    entries.append(entry)
+        except BudgetExhausted:
+            # A prefix of the catalogue would quietly narrow the allowed set, so a stopped scan gives no lead.
+            return [], [{"role": "task_context", "reason": "budget"}]
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
@@ -1565,12 +1579,21 @@ def task_candidates(
             for path, _score in hits[:limit]:
                 add(path, origin)
             continue
-        with find_types.timing_span(timings, "working_set.task_context_text"):
+        # A lead the route already found must still be projected, so the query may spend only what that leaves.
+        with (
+            find_types.timing_span(timings, "working_set.task_context_text"),
+            request_budget.leaving(request_budget.task_projection_reserve(len(found))),
+            lexstore.stopping_at_budget(),
+        ):
             result = lexstore.search_bm25_result(
                 vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
                 allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
                 exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
             )
+        if result.readiness.status == lexstore.DEADLINE_STATUS:
+            missing.append({"role": "task_context", "reason": "budget"})
+            note_stopped("working_set.task_context_text")
+            break
         if not result.readiness.complete:
             # A lexical index still catching up after a cutover or a write must not also silence the dense reading.
             missing.append({"role": "task_context", "reason": "lane_failed"})
@@ -1622,9 +1645,7 @@ def task_candidates(
         method_seconds = time.monotonic() - started
         if methods.readiness.status == lexstore.DEADLINE_STATUS:
             missing.append({"role": "task_context", "reason": "budget"})
-            budget = request_budget.current()
-            if budget is not None:
-                budget.note_truncated("working_set.task_context_methods")
+            note_stopped("working_set.task_context_methods")
             break
         if not methods.readiness.complete:
             missing.append({"role": "task_context", "reason": "lane_failed"})
@@ -2628,6 +2649,27 @@ def budget_exhausted(stage: str, *, reserve: float | None = None) -> bool:
     return True
 
 
+def note_stopped(stage: str) -> None:
+    """Record on the request budget that `stage` started and stopped at the deadline."""
+    budget = request_budget.current()
+    if budget is not None:
+        budget.note_truncated(stage)
+
+
+def budget_checkpoint(stage: str) -> None:
+    """Stop a stage that is already running once the request can no longer afford the next unit of it.
+
+    A CPU-bound loop calls this every `request_budget.CHECKPOINT_EVERY` items, where `budget_exhausted` only
+    guards the boundary before a stage starts. It raises `BudgetExhausted`, which each optional stage catches
+    and turns into a partial result, and records the stage as truncated so the response names it.
+    """
+    budget = request_budget.current()
+    if budget is None or budget.can_afford(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS):
+        return
+    note_stopped(stage)
+    raise BudgetExhausted(stage)
+
+
 def band_audience_allowed(vault_root: Path) -> bool:
     """Whether this request's principal may have semantic band evidence.
 
@@ -3059,18 +3101,20 @@ def _carry_groups_by_retrieval(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
-) -> tuple[tuple[tuple[str, float], ...], ...]:
+) -> tuple[tuple[tuple[str, float], ...], ...] | None:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
     Same refusals, same budget rule, same bounded catalogue. `skip_terms` is
     the words a resolved anchor already consumed, so a turn that resolved one
-    thing only asks about what else it said.
+    thing only asks about what else it said. `None` means the request budget
+    refused the carry before it asked anything (noted on the budget); `()`
+    means it asked and the turn named nothing, which is a different answer.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if budget_exhausted(
         CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
-        return ()
+        return None
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -3230,7 +3274,7 @@ def _title_named_anchors(
     index: working_set_index.WorkingSetIndex | None = None,
     exclude: frozenset[str] = frozenset(),
     query_context=None,
-) -> tuple[tuple[dict[str, Any], ...], tuple[tuple[str, float], ...] | None]:
+) -> tuple[tuple[dict[str, Any], ...], tuple[tuple[str, float], ...] | None] | None:
     """The pages an unresolved turn names by their title in ordinary words,
     as `retrieval_named` anchor entries, for an abstention the carry named
     nothing in (`working_set_runtime.title_listing`), and that query's ranked
@@ -3246,12 +3290,13 @@ def _title_named_anchors(
     budget rule, readiness refusals and timing span are the carry's own; a
     page the caller may not see, or one the packet already lists (`exclude`),
     is dropped before the `RETRIEVAL_CARRY_MAX_DOMAINS` cap, so it never
-    takes a slot.
+    takes a slot. `None` means the request budget refused the listing before it
+    asked anything (noted on the budget), which is not "no page is named".
     """
     if budget_exhausted(
         CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
-        return (), None
+        return None
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -4733,6 +4778,7 @@ def _compile_packet(
                     ),
                     row_lexicons=row_lexicons,
                     retrieval_without=retrieval_without if retrieval_paths else None,
+                    checkpoint=lambda: budget_checkpoint("working_set.resolve"),
                 )
 
             candidates = _candidates(rows)
@@ -5147,6 +5193,9 @@ def _compile_packet(
     # Set when the carry below named no page at all, which is the one turn the
     # final abstention lists title-named pages for (`_title_named_anchors`).
     carry_named_nothing = False
+    # Set when the request budget refused a retrieval rung before it asked anything: the abstention then
+    # says so, since nothing was asked and the turn did not name nothing.
+    budget_refused = False
     query_context = None
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         from . import working_set_runtime
@@ -5164,7 +5213,9 @@ def _compile_packet(
             status_basis=status_basis,
             query_context=query_context,
         )
-        carry_named_nothing = not groups
+        budget_refused = groups is None
+        groups = groups or ()
+        carry_named_nothing = not groups and not budget_refused
         domains, _contested = named_domains(groups)
         every: dict[str, float] = {}
         for group in groups:
@@ -5325,7 +5376,7 @@ def _compile_packet(
         # agent to pick; nothing is served from it and the turn stays
         # `unresolved`.
         listed = tuple(anchor.as_dict() for anchor in resolution.anchors)
-        titled, title_window = (
+        title_listing = (
             _title_named_anchors(
                 root,
                 turn=turn,
@@ -5343,6 +5394,8 @@ def _compile_packet(
             if carry_named_nothing
             else ((), None)
         )
+        budget_refused = budget_refused or title_listing is None
+        titled, title_window = title_listing or ((), None)
         # A turn that abstains with nothing listed may still list pages two
         # independent readings agree on (`related_pages`). Nothing is served.
         related: tuple[dict[str, Any], ...] = ()
@@ -5351,6 +5404,7 @@ def _compile_packet(
             not anchor
             and not analysis.referential
             and carry_named_nothing
+            and not budget_refused
             and not resolution.anchors
             and not titled
             and analysis.content_words
@@ -5373,6 +5427,7 @@ def _compile_packet(
             ambiguity=resolution.ambiguity,
             missing=(
                 *(({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else ()),
+                *((dict(ANCHORS_BUDGET_GAP),) if budget_refused else ()),
                 *related_missing,
             ),
             recent_context=recent,
@@ -5589,7 +5644,8 @@ def _named_beside(
         )
     except BudgetExhausted:
         groups = ()  # the carry yielded to the deadline (noted on the budget); the resolved material stands
-    domains, _contested = named_domains(groups, exclude=frozenset(exclude))
+    # A carry the budget refused (`None`) names nothing beside what resolved, and the resolved material stands.
+    domains, _contested = named_domains(groups or (), exclude=frozenset(exclude))
     if not domains:
         return (), (), (), tuple(dict(role) for role in selected_roles)
     try:

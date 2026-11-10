@@ -1,0 +1,14 @@
+# The inference modes Exomem ships: how a unit's conclusion was reached. A unit whose kind has the
+# `assertion` trait may name one in its `inference_mode` row. A vault adds modes or labels in the
+# `inference_modes` section of `_Schema/semantic-language-registry.yaml`. A mode carries labels
+# and a description and no behaviour. `labels` maps a language tag to the label in that language.
+# Parsing accepts the key or any label, after NFKC normalisation and casefolding, and stores the
+# key.
+schema_version: 1
+inference_modes:
+  deduction: {labels: {en: Deduction}, description: The conclusion follows necessarily from its premises.}
+  induction: {labels: {en: Induction}, description: The conclusion generalises from observed cases.}
+  abduction: {labels: {en: Abduction}, description: The conclusion is the best explanation of what was observed.}
+  analogy: {labels: {en: Analogy}, description: The conclusion carries over from a similar case.}
+  statistical_inference: {labels: {en: Statistical inference}, description: The conclusion is drawn from data by a statistical method.}
+  testimony: {labels: {en: Testimony}, description: The conclusion rests on what a source reported.}

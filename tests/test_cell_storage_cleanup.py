@@ -1,4 +1,4 @@
-"""The operator's clean-up of a deleted cell's object-store key and backup files.
+"""The operator's clean-up of a deleted cell's legacy backup files, and the rescue of its hidden files.
 
 HTTP is injected at the transport. `FakeB2` answers B2 native API v4 and knows no other version,
 so a script that lists keys through v3 would see none and fail the first test.
@@ -10,7 +10,6 @@ import importlib.util
 import io
 import json
 import sys
-from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +19,6 @@ PREFIX = f"cells/{CELL_ID}/"
 BUCKET_ID = "fixture-locked-bucket"
 MEDIA_BUCKET_ID = "fixture-media-bucket"
 ENV = {"CELL_CLEANUP_B2_KEY_ID": "fixture-id", "CELL_CLEANUP_B2_APPLICATION_KEY": "fixture-key"}
-FIRST_DRY_RUN = date(2026, 11, 1)
-NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
 
 
 def _load_script():
@@ -122,8 +119,8 @@ class FakeB2:
 
 class FakeMediaB2(FakeB2):
     """The media bucket's versions as state, three to a page. A removal changes what the next listing shows,
-    so a final dry run proves absence. The provider's delete call leaves an unfinished large file in place,
-    as the ruling assumes; only the cancel call removes it."""
+    so a later dry run proves what is left. The provider's delete call leaves an unfinished large file in
+    place; only the cancel call removes it."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -156,10 +153,9 @@ class FakeMediaB2(FakeB2):
         return response
 
 
-def _run(argv: list[str], *, now: datetime = NOW, env: dict[str, str] = ENV, b2: FakeB2 | None = None,
-         ) -> tuple[int, str, FakeB2]:
+def _run(argv: list[str], *, env: dict[str, str] = ENV, b2: FakeB2 | None = None) -> tuple[int, str, FakeB2]:
     b2, out = b2 or FakeB2(), io.StringIO()
-    status = cleanup.main(argv, env, opener=b2, now=now, out=out)
+    status = cleanup.main(argv, env, opener=b2, out=out)
     return status, out.getvalue(), b2
 
 
@@ -192,78 +188,49 @@ def test_founder_apply_deletes_every_version_under_the_prefix_and_only_the_key_l
     assert "files_found=3 files_deleted=3" in output
 
 
-def test_a_dry_run_counts_the_backup_files_and_names_the_date_the_grace_runs_from() -> None:
-    """Defect: a count that waits for the grace hides from the operator that files remain."""
-    status, output, b2 = _run([CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID])
-
-    assert (status, b2.changes()) == (0, [])
-    assert "files_found=2 files_hidden=0 hide=waiting first_dry_run=2026-11-01 grace_ends=2026-11-08" in output
-
-
-def test_backups_stay_visible_through_the_grace_and_only_current_files_are_hidden_after_it() -> None:
-    """Defect: hiding a deleted cell's backups at once removes the owner's chance to ask for them."""
-    argv = [CELL_ID, "--account", "cell-data", "--apply", "--bucket-id", BUCKET_ID,
-            "--first-dry-run", FIRST_DRY_RUN.isoformat()]
-    _, output, b2 = _run(argv, now=NOW + timedelta(days=5, hours=23))
-    assert "files_found=2 files_hidden=0 hide=waiting" in output and "grace_ends=2026-11-08" in output
-    assert [endpoint for endpoint, _ in b2.changes()] == ["b2_delete_key"]  # the key goes at once
-
-    _, output, b2 = _run(argv, now=NOW + timedelta(days=6, hours=12))
-    assert b2.changes()[1:] == [
-        ("b2_hide_file", {"bucketId": BUCKET_ID, "fileName": PREFIX + "pack-1"}),
-        ("b2_hide_file", {"bucketId": BUCKET_ID, "fileName": PREFIX + "pack-3"}),
-    ]
-    assert "files_found=2 files_hidden=2 hide=due" in output
-
-
 MEDIA = [CELL_ID, "--account", "media", "--bucket-id", MEDIA_BUCKET_ID]
 
 
-def test_a_media_dry_run_counts_versions_and_unfinished_files_apart_and_changes_nothing() -> None:
-    """Defect: a count that folds unfinished uploads into versions, or leaves them out, lets the final dry run
-    report an empty prefix while uploaded parts still occupy and bill the bucket."""
+def test_a_media_dry_run_counts_uploads_hide_markers_and_unfinished_files_apart_and_changes_nothing() -> None:
+    """Defect: a count that folds hide markers into uploads tells the operator that a purged cell's media is
+    still current, or hides that a rescue is still possible."""
     status, output, b2 = _run(MEDIA, b2=FakeMediaB2())
 
     assert (status, b2.changes()) == (0, [])
-    assert "files_found=4 files_deleted=0 unfinished_found=1 unfinished_cancelled=0 delete=waiting" in output
-    assert "first_dry_run=2026-11-01 grace_ends=2026-11-08" in output
+    assert "mode=dry-run uploads_found=3 hides_found=1 hides_deleted=0 unfinished_found=1" in output
     assert "b2_list_keys" not in [endpoint for endpoint, _ in b2.posts]  # the media bucket has no per-cell key
 
 
-def test_media_versions_stay_through_the_grace_then_go_and_unfinished_uploads_are_cancelled() -> None:
-    """Defect: deleting at once removes the owner's chance to ask for the only copy; deleting an unfinished
-    upload instead of cancelling it leaves its parts in the bucket, which only a later dry run shows."""
-    argv = [*MEDIA, "--apply", "--first-dry-run", FIRST_DRY_RUN.isoformat()]
+def test_rescue_deletes_every_hide_marker_and_no_upload_or_unfinished_entry() -> None:
+    """Defect: a rescue that deletes an `upload` entry destroys the only copy of the media it was run to keep;
+    one that misses a marker on a later page leaves that file hidden until the provider deletes it."""
     b2 = FakeMediaB2()
-    _, output, b2 = _run(argv, now=NOW + timedelta(days=5, hours=23), b2=b2)
-    assert (b2.changes(), "delete=waiting" in output) == ([], True)
+    b2.versions.insert(4, {"fileName": PREFIX + "video-2", "fileId": "video-2-hidden", "action": "hide"})
 
-    status, output, b2 = _run(argv, now=NOW + timedelta(days=6, hours=12), b2=b2)
+    status, output, b2 = _run([*MEDIA, "--rescue"], b2=b2)
+
     assert status == 0
     assert b2.changes() == [
-        ("b2_cancel_large_file", {"fileId": "video-1-unfinished"}),
         ("b2_delete_file_version", {"fileName": PREFIX + "image-1", "fileId": "image-1-hidden"}),
-        ("b2_delete_file_version", {"fileName": PREFIX + "image-1", "fileId": "image-1-live"}),
-        ("b2_delete_file_version", {"fileName": PREFIX + "image-2", "fileId": "image-2-live"}),
-        ("b2_delete_file_version", {"fileName": PREFIX + "video-2", "fileId": "video-2-live"}),
+        ("b2_delete_file_version", {"fileName": PREFIX + "video-2", "fileId": "video-2-hidden"}),
     ]
-    assert "files_found=4 files_deleted=4 unfinished_found=1 unfinished_cancelled=1 delete=due" in output
-
-    _, output, _ = _run(MEDIA, now=NOW + timedelta(days=6, hours=13), b2=b2)
-    assert "files_found=0 files_deleted=0 unfinished_found=0" in output
+    assert "mode=rescue uploads_found=3 hides_found=2 hides_deleted=2 unfinished_found=1" in output
+    _, output, _ = _run(MEDIA, b2=b2)
+    assert "uploads_found=3 hides_found=0" in output
 
 
 def test_bad_input_stops_before_any_provider_call() -> None:
+    """Defect: an operator who follows an old runbook deletes a held cell's files at once with an apply mode
+    that the executors replaced, or the operator's key leaks into a shared terminal."""
     cell_data = [CELL_ID, "--account", "cell-data", "--bucket-id", BUCKET_ID]
     for argv, env in (
         (["not-a-cell-id", "--account", "founder", "--bucket-id", BUCKET_ID], ENV),
         ([CELL_ID, "--account", "founder"], ENV),  # the old bucket's ID is not guessed
-        ([*cell_data, "--apply"], ENV),  # the grace must start from the operator's own date
-        ([*cell_data, "--first-dry-run", "2026-11-02"], ENV),  # a date after today starts no grace
-        ([*cell_data, "--first-dry-run", "1 November"], ENV),
-        ([CELL_ID, "--account", "cell-data", "--first-dry-run", "2026-11-01"], ENV),
-        ([*MEDIA, "--apply"], ENV),  # the media grace starts from the operator's own date too
-        ([CELL_ID, "--account", "media"], ENV),  # the media bucket's ID is not guessed
+        ([*cell_data, "--apply"], ENV),  # the key custodian purges the backups
+        ([*MEDIA, "--apply"], ENV),  # the media edge purges the media
+        ([*cell_data, "--first-dry-run", "2026-11-01"], ENV),  # the grace now lives in the deletion grant
+        ([*FOUNDER, "--rescue"], ENV),  # the legacy bucket has no executor that hides
+        ([CELL_ID, "--account", "media", "--rescue"], ENV),  # the media bucket's ID is not guessed
         (FOUNDER, {}),
     ):
         status, output, b2 = _run(argv, env=env)

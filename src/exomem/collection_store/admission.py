@@ -581,6 +581,8 @@ def continue_past(session, runtime, token, preview, *, why):
     the abandoned publication's workspace and republishes. Returns the publication, the
     new identity and what happened to that workspace; the caller renews once it published.
     """
+    from ..vault_store import marker as vault_marker
+
     if not runtime.retire_idle_handle():
         raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
     abandoned = preview["abandoned_publication"]
@@ -589,6 +591,9 @@ def continue_past(session, runtime, token, preview, *, why):
             (predecessor,) = conn.execute("SELECT value FROM store_meta WHERE key=?", (
                 schema.META_LAST_PUBLISHED_REPLICA_SHA256,)).fetchone() or (None,)
             identity = owner.record_fork(conn, preview, why=why, token=token)
+            # The fork keeps this store, so it carries the newest store-mode decision of either
+            # side.
+            vault_marker.merge_replica(conn, session.root)
         runtime.rebind(identity)
         kept = None if abandoned is None else replica.discard_abandoned_publication(
             session.root, writer.handle, abandoned, predecessor=predecessor,
@@ -1411,7 +1416,17 @@ def _publication_authority(session, token):
     return check
 
 
+def publish_current_epoch(session, writer, token):
+    """Publish the vault replica from ``writer``'s store now, under the caller's lease and boundary.
+
+    A store-mode step uses it to put a decision in the replica before it acts on that decision.
+    The result's ``status`` is ``published`` or the reason that it was not.
+    """
+    return _publish_current_epoch(session, writer, token)
+
+
 def _publish_current_epoch(session, writer, token, *, unchanged=None):
+    from ..vault_store import marker as vault_marker
     from . import legacy_originals
 
     manager = session.manager
@@ -1423,7 +1438,8 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
     if (unchanged is not None
             and replica.published_evidence(legacy_originals.metadata(writer.connection)) == unchanged.evidence
             and takeover.replica_witness(session.root) == unchanged.witness
-            and not legacy_originals.needs_replica_copy(session.root, writer.connection)):
+            and not legacy_originals.needs_replica_copy(session.root, writer.connection)
+            and not vault_marker.replica_stale(session.root, writer.connection)):
         # The replica already carries this head under the stored epoch, which every later
         # grant exceeds; a new epoch would only force a copy no adopter reads (A3). No copy
         # is made, so no new published head needs checking against the chain.
@@ -1441,7 +1457,8 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
         conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (schema.META_LEASE_EPOCH, str(token)))
         conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (authority.MARKER_REQUIRED, "1"))
     # A same-head archive backfill must survive loss of the live store before views replace its sources.
-    force = legacy_originals.needs_replica_copy(session.root, writer.connection)
+    force = (legacy_originals.needs_replica_copy(session.root, writer.connection)
+             or vault_marker.replica_stale(session.root, writer.connection))
     published = replica.publish_replica(session.root, writer.handle, authority_check=check, deadline=deadline,
                                        **({"force": True} if force else {}))
     if published.status == "published":

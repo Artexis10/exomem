@@ -597,11 +597,14 @@ async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
     """The run as `imports.status` reports it, with what the compact `imports.*` replies leave out.
 
     The flow reads its control fields from the compact replies, as an agent does. The measurements also need
-    the inventory, the recorded stage and the finish count. A read changes nothing and keeps those replies
-    compact, where `detail: "full"` would wrap each reply in the terminal envelope and add a payload per call.
+    the inventory, the recorded stage and the finish count, which only the `full` view carries; the default view
+    is a bounded summary. A read changes nothing and keeps those replies compact, where `detail: "full"` would wrap
+    each reply in the terminal envelope and add a payload per call.
     """
     body, _ = await agent.call(
-        "inspect_memory", {"operation": "imports.status", "arguments": {"run_id": run_id}}, kind="status"
+        "inspect_memory",
+        {"operation": "imports.status", "arguments": {"run_id": run_id, "view": "full"}},
+        kind="status",
     )
     return body
 
@@ -653,9 +656,11 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
         if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
             problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
         consumed += int(recorded.get("consumed") or 0)
-        # A done reply carries the residual of the newest page's own `finish`; a newest page that closed has none to compare.
+        # A done reply re-reads the newest page's residual from the stage; a newest page that closed has none to compare.
+        # Only `finish` removes empty folders, so only its residual counts them: that count is left out of the comparison.
+        held = {key: value for key, value in (recorded.get("residual") or {}).items() if key != "removed_empty_folders"}
         if reply["filing"] == "done" and page["run_id"] == reply["run_id"] and recorded \
-                and recorded.get("residual") != (reply.get("filed") or {}).get("residual"):
+                and (held or None) != (reply.get("filed") or {}).get("residual"):
             problems["compact_reply"].append(
                 f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "

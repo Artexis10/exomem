@@ -285,16 +285,55 @@ than imply that its population exactly expands the bootstrap advisory.
 
 Budgeted read-only activation SHALL return a packet or its existing budget abstention within the existing absolute deadline, including packet finalization. Deadline handling SHALL reuse the existing budget and safe deferral paths. An overrun SHALL be a failed deadline observation and an unresolved repair. Canonical mutation immunity MUST NOT apply to read-only activation.
 
+When the operator sets `EXOMEM_ACTIVATION_BUDGET_SECONDS`, an activation inside an MCP request budget SHALL also carry its own, nearer deadline: that many seconds after the activation starts, and never later than one second before the request's own deadline. Unset, or set to a value that is not a positive number (which SHALL log one warning), the activation SHALL run on the request's own deadline. In the `maps` packet mode, an activation that reaches its deadline while it discovers task leads SHALL serve the map and the leads it has already found, SHALL mark the `task_context` block `partial` with a `budget` entry in `missing`, SHALL name what it left out in the packet's `request_budget` block, and SHALL NOT abstain. A stage that is mid-read at the deadline SHALL stop at its next check and serve nothing that it half-read. The turn slice's compile (the heat ranking, resolution, the retrieval carry and the slice guard) SHALL stop early enough to leave task discovery its reserve when discovery runs after it: one stage reserve plus the task-context reserve before the activation's deadline. A caller whose task discovery does not run SHALL keep that time for the slice. A `maps` activation that reaches that earlier deadline in the slice's compile SHALL skip the turn slice, name the stage that stopped (the retrieval carry is recorded as truncated, not skipped, because it had started) and serve the map. Task discovery then gets only the time left, and reports `partial` with a `budget` entry when it runs out. An activation that reaches the deadline before its map is built, and every activation in the `anchors` packet mode, SHALL keep the existing budget abstention. Activations without an MCP request budget (REST, CLI and in-process doors) SHALL keep their existing limits.
+
 #### Scenario: A read-only activation exhausts its budget
 
-- **WHEN** a read-only activation cannot afford its remaining work within the absolute deadline
+- **WHEN** a read-only activation cannot afford its remaining work within the absolute deadline, because its map is not built or the packet mode is `anchors`
 - **THEN** it returns its existing budget abstention, including finalization, within that deadline
+
+#### Scenario: An activation reaches its own deadline inside a longer request budget
+
+- **WHEN** the operator set `EXOMEM_ACTIVATION_BUDGET_SECONDS` to `15`, and a `maps` activation inside a 50-second request budget has used its 15 seconds while it discovers task leads
+- **THEN** it returns the map and the leads found so far, with `task_context.state` of `partial` and `{"role": "task_context", "reason": "budget"}` in `missing`
+- **AND** `abstained` is false, and the request's own budget names the stages that stopped
+
+#### Scenario: The deadline arrives in the retrieval carry
+
+- **WHEN** the operator set `EXOMEM_ACTIVATION_BUDGET_SECONDS` to `15`, and the deadline of the turn slice's compile arrives while the retrieval carry runs, with the activation's own deadline still ahead
+- **THEN** the packet carries the map that an unhurried call carries, `turn_slice.state` is `skipped`, and the carry is named in `request_budget.truncated`
+- **AND** task discovery still runs, so `task_context.candidates` holds the leads it found, and the activation log row has `outcome` of `served` and `activation_result.budget_limited` of true
+
+#### Scenario: The operator sets the activation deadline
+
+- **WHEN** `EXOMEM_ACTIVATION_BUDGET_SECONDS` is set to `2` and the service restarts
+- **THEN** an activation inside the request budget stops looking for context two seconds after it starts
+- **AND** a value such as `soon` or `-1` logs one warning, and the activation runs on the request's own deadline
+
+#### Scenario: A request nearer its end than the activation deadline
+
+- **WHEN** the request has less than the activation's seconds left
+- **THEN** the activation ends one second before the request's deadline, as the request's own budget would
 
 #### Scenario: A reproduction exceeds the deadline
 
 - **WHEN** a bounded isolated activation reproduction returns after its absolute deadline
 - **THEN** its deadline observation is failed and the repair remains open
 - **AND** merely reporting the overrun or skipping later work does not satisfy the deadline requirement
+
+### Requirement: The activation log records the budget outcome
+
+Each row that the activation log appends SHALL carry `activation_result` and `budget`. `activation_result` SHALL hold the same content-free observation that the call ledger records for the call: whether it abstained, the closed reason, and whether a budget limited it; it SHALL be null when the packet cannot be observed. `budget` SHALL hold the seconds the activation had, the milliseconds left, and the names of the stages skipped or truncated, never a query or content; it SHALL be null when no budget was bound to the call. A served packet that a budget limited SHALL keep `outcome` of `served`.
+
+#### Scenario: A limited activation is visible in its row
+
+- **WHEN** an activation serves a partial packet because its deadline arrived
+- **THEN** its row has `outcome` of `served`, `activation_result.budget_limited` of true, and the stopped stages in `budget.skipped` or `budget.truncated`
+
+#### Scenario: A call without a bound budget has no budget block
+
+- **WHEN** an activation runs in process with no budget bound
+- **THEN** its row has `budget` of null, and `activation_result.budget_limited` of false
 
 ### Requirement: Deadline handling preserves canonical custody
 

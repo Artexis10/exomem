@@ -1,0 +1,13 @@
+# The modalities Exomem ships: whether a unit states what is the case or what ought to be. A
+# unit's `modality` row names one of them; a unit without the row states what is. A vault adds
+# modalities or labels in the `modalities` section of `_Schema/semantic-language-registry.yaml`.
+# A modality carries labels and a description and no behaviour. Context never merges two units
+# whose modalities differ. `labels` maps a language tag to the label in that language.
+# Parsing accepts the key or any label, after NFKC normalisation and casefolding, and stores the
+# key.
+schema_version: 1
+modalities:
+  is: {labels: {en: Is}, description: The unit states what is the case.}
+  should: {labels: {en: Should}, description: The unit states what ought to be the case as a recommendation or norm.}
+  must: {labels: {en: Must}, description: The unit states what is required.}
+  may: {labels: {en: May}, description: The unit states what is permitted or possible.}

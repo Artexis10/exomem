@@ -1,0 +1,28 @@
+{{- /*
+automate-cell-storage-deletion D1 and D5: the grant public keys and the hold list, in each namespace whose
+executor purges a deleted cell: the key custodian's for the backups, and cellctl's, where the media edge runs.
+A pod mounts only a ConfigMap of its own namespace, so each one gets a copy of the same values. Neither
+executor can write this ConfigMap: cellctl's admission names the only ConfigMaps it may write in its
+namespace, and the custodian's admission names its own done marks.
+*/ -}}
+{{- $namespaces := list }}
+{{- if .Values.keyCustodian.enabled }}
+{{- $namespaces = append $namespaces .Values.keyCustodian.namespace }}
+{{- end }}
+{{- if .Values.mediaEdge.enabled }}
+{{- $namespaces = append $namespaces .Values.cellctl.namespace }}
+{{- end }}
+{{- range $namespaces }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-cell-deletion-policy
+  namespace: {{ . }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: exomem-cloud
+data:
+  grant-public-keys.json: {{ $.Values.cellDeletion.grantPublicKeys | toJson | quote }}
+  hold-cells.json: {{ $.Values.cellDeletion.holdCells | toJson | quote }}
+{{- end }}

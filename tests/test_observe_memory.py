@@ -1156,7 +1156,7 @@ def test_a_blocked_edit_names_the_one_call_fix_and_no_other_route(tmp_path: Path
 def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stale-id refusal names the unit's current id, so a released view must read every id as unknown."""
+    """A stale-id refusal names a unit's current id, so a released view reads each id as unknown."""
     from types import SimpleNamespace
 
     from exomem.governance import egress

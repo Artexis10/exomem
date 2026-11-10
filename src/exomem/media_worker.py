@@ -88,7 +88,7 @@ from .vault import (
     post_commit_batch_fanout,
     read_guarded_text,
 )
-from .writer_lease import get_manager
+from .writer_lease import TRANSIENT_WRITER_CODES, get_manager
 
 log = logging.getLogger(__name__)
 
@@ -122,20 +122,7 @@ _LANGUAGE_ACTION = (
 _COMPUTE_RUNTIME_ACTION = (
     "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
 )
-_TRANSIENT_OPERATION_CODES = frozenset(
-    {
-        "MUTATION_BUSY",
-        "MUTATION_LOCK_UNAVAILABLE",
-        "WRITER_COORDINATOR_UNAVAILABLE",
-        # Deliberately transient too. A misconfigured coordinator URL is not
-        # fixed by asking again, but it IS fixed by an operator without
-        # restarting anything -- so the caller waits rather than crashing. What
-        # changes is only how often it asks; see the recheck cadence below.
-        "WRITER_COORDINATOR_CONTRACT_ABSENT",
-        "WRITER_FENCED",
-        "WRITER_LEASE_REQUIRED",
-    }
-)
+_TRANSIENT_OPERATION_CODES = TRANSIENT_WRITER_CODES
 _FOLLOWER_RECHECK_SECONDS = 5.0
 #: A coordinator URL that answers but does not serve the lease contract returns
 #: the same answer to every request, so the follower cadence buys nothing and
@@ -1430,7 +1417,7 @@ class MediaWorker:
                 return False
             assert isinstance(handoff, DeferredGraphCompletion)
         self._complete_deferred_graph_completion(handoff, receipts)
-        extraction_parts.retire(self._vault_root, surplus)
+        self._retire_surplus_parts(surplus)
         return True
 
     def _extraction_writes(
@@ -2557,10 +2544,16 @@ class MediaWorker:
             parent_receipted_handoff=True,
         ):
             return
-        extraction_parts.retire(self._vault_root, surplus)
+        self._retire_surplus_parts(surplus)
         self._store.finalize_result(
             result, requeue_remaining=result.kind in {"extraction", "pending"}
         )
+
+    def _retire_surplus_parts(self, surplus: tuple[Path, ...]) -> None:
+        """Retire the surplus part pages; a stored part that stays is logged, not raised."""
+        kept = extraction_parts.retire(self._vault_root, surplus)
+        if kept:
+            log.info("%s", extraction_parts.kept_note(kept))
 
     def _publish_pending_for_changed_binary(
         self, result: media_jobs.MediaJobResult, *, expected_sidecar: str | None
