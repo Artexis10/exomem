@@ -49,10 +49,10 @@ Headings inside fenced code blocks are ignored by the parser.
 The shipped kinds are the entries of `src/exomem/vocabulary/packs/core/kinds.yaml`.
 Each entry has its labels, its heading aliases and the traits that state what code
 does with it. A vault adds kinds, and labels in any language, in
-`_Schema/semantic-language-registry.yaml`. To list every kind that a `##` heading
-can name in a vault, run `schema_memory(subject="categories", operation="infer")`
-and read `kinds`: each entry gives its `key`, its `labels` and whether it is
-`shipped`.
+`_Schema/semantic-language-registry.yaml`. To list every kind in a vault, run
+`read_schema(operation={'kind': 'infer', 'subject': 'categories'})` and read
+`kinds`: each entry gives its `key`, its `labels` and whether it is `shipped`. The
+list also holds the compact kind `observation`, which no heading names.
 
 A heading names a kind by its key, one of its heading aliases or one of its labels.
 When a vault gives `claim` the label `Väite` in Finnish, `## Väite` is a `claim`

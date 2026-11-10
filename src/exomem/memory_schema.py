@@ -1210,7 +1210,8 @@ def infer_category_registry(
             ]
             for labels in semantic_labels.REGISTRIES
         },
-        # Every kind a `##` heading can name, with the labels that name it in each language.
+        # Every kind with its labels in each language. A `##` heading names each rich kind; a
+        # compact kind, such as `observation`, is in the list too, and no heading names it.
         "kinds": [
             _label_entry(definition) for definition in registry.kind_label_definitions().values()
         ],

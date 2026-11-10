@@ -288,7 +288,7 @@ class SemanticLanguageRegistry:
     # Each label registry's effective entries and its folded-spelling index, built on first
     # use. The registry is immutable and one instance serves a whole pass, so a unit row
     # resolves by one lookup instead of a rebuild. The kinds are one more entry under
-    # `KINDS_SECTION`, indexed by heading form.
+    # `_KINDS_CACHE_KEY`, indexed by heading form.
     _label_cache: dict[str, tuple[dict[str, LabelDefinition], dict[str, str]]] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )

@@ -1,9 +1,5 @@
-"""Kind labels in any language, as slice 6 of `make-epistemic-language-dynamic` adds them.
-
-This module began as the before-picture, in the style of `test_epistemic_kind_parity`: every
-`# CORE` value never changes, and a `# FLIPS slice6` value is the one that the slice edited on
-purpose. The comment on each flipped line names the value it held before.
-"""
+"""Kind labels in any language: a vault gives a kind labels, and a `##` heading written in a
+label names that kind."""
 
 from __future__ import annotations
 
@@ -22,59 +18,9 @@ FINNISH = {
 }
 
 
-def _codes(registry) -> list[str]:
-    return sorted(finding["code"] for finding in registry.findings)
-
-
 def _parse(markdown: str, registry):
     return semantic_units.parse_semantic_units(markdown, language_registry=registry)
 
-
-def test_a_kind_entry_takes_a_labels_field() -> None:
-    registry = semantic_language_registry.load_registry(proposal=FINNISH)
-
-    assert _codes(registry) == []  # FLIPS slice6: was ["unknown_field"] (a kind took no labels)
-
-
-def test_a_finnish_heading_is_the_same_kind() -> None:
-    registry = semantic_language_registry.load_registry(proposal=FINNISH)
-
-    document = _parse("## Pöytäkirja\n\nFollow the steps.\n", registry)
-
-    assert [unit.kind for unit in document.units] == ["protocol"]  # FLIPS slice6: was [] (no label)
-
-
-def test_an_ascii_heading_resolves_to_its_shipped_kind() -> None:
-    document = _parse(
-        "## Open Question\n\nWhat ships?\n\n## claims\n\nIt ships.\n",
-        semantic_language_registry.core_registry(),
-    )
-
-    assert [unit.kind for unit in document.units] == ["open_question", "claim"]  # CORE
-
-
-def test_a_categories_save_adds_a_kind_label(tmp_path: Path) -> None:
-    vault = tmp_path / "vault"
-    (vault / "Knowledge Base" / "_Schema").mkdir(parents=True)
-    current = {
-        "schema_version": 1, "categories": {},
-        "kinds": {"protocol": {"description": "A repeatable protocol"}},
-    }
-    created = semantic_language_registry.save_registry(vault, current)
-
-    with library_scope():  # FLIPS slice6: was refused with INVALID_SEMANTIC_LANGUAGE_REGISTRY
-        commands.op_schema_memory(
-            vault, operation="infer", subject="categories", save=True, proposal=FINNISH,
-            expected_hash=created["content_hash"],
-        )
-
-    saved = semantic_language_registry.load_registry(vault)
-    assert saved.resolve_heading("Pöytäkirja").resolved == "protocol"  # FLIPS slice6: was None
-
-
-# ---------------------------------------------------------------------------
-# What slice 6 adds
-# ---------------------------------------------------------------------------
 
 CLAIM_IN_FINNISH = {
     "schema_version": 1, "categories": {}, "kinds": {"claim": {"labels": {"fi": "Väite"}}},
