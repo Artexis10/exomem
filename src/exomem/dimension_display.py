@@ -13,6 +13,11 @@ Each behaviour reads only closed schema values, so a vault dimension that names 
 - `show_origin` gives a unit an `origin`: `by` is its `asserted_by` or `credence_holder`, and `from`
   names the targets of the edges whose relation has the `sources` behaviour and that start at the
   unit or at its page.
+- `order_in_time` sorts a group by `occurred_at`, earliest first, with undated units after the
+  dated ones. Each edge between two members whose relation has the `earlier_than_target` or
+  `later_than_target` behaviour then orders its two ends, by a stable topological sort that keeps
+  the first order wherever no edge decides. Units whose edges form a cycle keep their first order,
+  and the group names them as an order conflict.
 
 A behaviour changes only order and marks; it never removes a unit. Every mark comes from the edges
 that the request read in its caller's view (`epistemic_dimensions.read_edges`), so a page withheld
@@ -24,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -42,6 +48,7 @@ EDGE_BEHAVIOURS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "flag_open": ("settles",),
         "lead_with_current": ("replaces",),
         "show_origin": ("sources",),
+        "order_in_time": ("earlier_than_target", "later_than_target"),
     }
 )
 #: The mark each counting display behaviour puts on a unit; a group counts the units that carry it.
@@ -111,6 +118,8 @@ class _EdgeIndex:
     settled: frozenset[End] = frozenset()
     successors: Mapping[End, tuple[End, ...]] = field(default_factory=dict)
     sources: Mapping[End, tuple[End, ...]] = field(default_factory=dict)
+    # Each order edge as its (earlier end, later end).
+    before: tuple[tuple[End, End], ...] = ()
 
     @classmethod
     def build(
@@ -119,6 +128,7 @@ class _EdgeIndex:
         settled: set[End] = set()
         successors: dict[End, list[End]] = {}
         sources: dict[End, list[End]] = {}
+        before: list[tuple[End, End]] = []
         for edge in edges:
             behaviours = _behaviours_of(relations, edge) & wanted
             if not behaviours:
@@ -131,10 +141,15 @@ class _EdgeIndex:
                 successors.setdefault(target, []).append(source)
             if "sources" in behaviours:
                 sources.setdefault(source, []).append(target)
+            if "earlier_than_target" in behaviours:
+                before.append((source, target))
+            if "later_than_target" in behaviours:
+                before.append((target, source))
         return cls(
             frozenset(settled),
             {end: tuple(found) for end, found in successors.items()},
             {end: tuple(found) for end, found in sources.items()},
+            tuple(before),
         )
 
 
@@ -188,6 +203,11 @@ def display(
         marks.append(mark)
 
     order = list(range(len(units)))
+    conflict: tuple[int, ...] = ()
+    if "order_in_time" in behaviours:
+        order = _by_time(units)
+        if known:
+            order, conflict = _by_edges(order, units, index)
     if "lead_with_current" in behaviours:
         # A stable partition: each side keeps the order it had.
         order = [i for i in order if "replaced" not in marks[i]] + [
@@ -198,7 +218,7 @@ def display(
         for behaviour, counted in COUNTED_MARKS.items():
             if behaviour in behaviours:
                 counts[counted] = sum(counted in mark for mark in marks)
-    return GroupView(tuple(order), tuple(marks), (), known, counts)
+    return GroupView(tuple(order), tuple(marks), conflict, known, counts)
 
 
 def _is_open(unit: DisplayUnit, index: _EdgeIndex, language: SemanticLanguageRegistry) -> bool:
@@ -233,3 +253,86 @@ def _origin(unit: DisplayUnit, index: _EdgeIndex, name, *, known: bool) -> dict[
             if len(found) > ORIGIN_CAP:
                 origin["more"] = len(found) - ORIGIN_CAP
     return origin
+
+
+def _instant(value: str | None) -> datetime | None:
+    """`occurred_at` as one comparable instant: a date at its start, a time with an offset in UTC.
+    None when the value is absent or no ISO date or date and time."""
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(UTC).replace(tzinfo=None)
+    return moment
+
+
+def _by_time(units: Sequence[DisplayUnit]) -> list[int]:
+    """The units' indices, dated ones earliest first, then the undated ones in their given order."""
+    instants = [_instant(unit.occurred_at) for unit in units]
+    dated = sorted(
+        (i for i, instant in enumerate(instants) if instant is not None),
+        key=lambda i: (instants[i], i),
+    )
+    return dated + [i for i, instant in enumerate(instants) if instant is None]
+
+
+def _by_edges(
+    order: list[int], units: Sequence[DisplayUnit], index: _EdgeIndex
+) -> tuple[list[int], tuple[int, ...]]:
+    """`order` changed only where an order edge between two members decides, and the members whose
+    edges form a cycle.
+
+    A cycle's members are one component that keeps its first order. The components are then sorted
+    topologically, taking at each step the waiting component that comes first in `order`.
+    """
+    reached: dict[End, list[int]] = {}
+    for i, unit in enumerate(units):
+        for end in unit.ends:
+            reached.setdefault(end, []).append(i)
+    later: dict[int, set[int]] = {i: set() for i in order}
+    for earlier_end, later_end in index.before:
+        for earlier in reached.get(earlier_end, ()):
+            later[earlier].update(i for i in reached.get(later_end, ()) if i != earlier)
+    if not any(later.values()):
+        return order, ()
+
+    def reachable(start: int) -> set[int]:
+        seen: set[int] = set()
+        stack = [start]
+        while stack:
+            for nxt in later[stack.pop()]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        return seen
+
+    reach = {i: reachable(i) for i in order}
+    # Each component is named by its first member in `order`.
+    component: dict[int, int] = {}
+    for i in order:
+        if i not in component:
+            for j in order:
+                if j == i or (j in reach[i] and i in reach[j]):
+                    component.setdefault(j, i)
+    waiting_on: dict[int, set[int]] = {c: set() for c in component.values()}
+    for i, after in later.items():
+        for j in after:
+            if component[i] != component[j]:
+                waiting_on[component[j]].add(component[i])
+    position = {i: p for p, i in enumerate(order)}
+    pending = sorted(waiting_on, key=position.__getitem__)
+    placed: set[int] = set()
+    result: list[int] = []
+    while pending:
+        # The condensed graph has no cycle, so some pending component always waits on none.
+        ready = next(c for c in pending if waiting_on[c] <= placed)
+        pending.remove(ready)
+        placed.add(ready)
+        result.extend(i for i in order if component[i] == ready)
+    sizes: dict[int, int] = {}
+    for c in component.values():
+        sizes[c] = sizes.get(c, 0) + 1
+    return result, tuple(i for i in order if sizes[component[i]] > 1)

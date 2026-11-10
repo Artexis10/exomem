@@ -261,3 +261,56 @@ def test_show_origin_names_the_holder_and_at_most_three_sources() -> None:
         context_refs.vault_ref(f"Knowledge Base/Sources/Paper {n}.md") for n in range(3)
     )])
     assert origin["from"] == every[:3]
+
+
+T = "Knowledge Base/Notes/Timeline.md"
+
+
+def test_order_in_time_sorts_by_date_then_lets_each_order_edge_decide() -> None:
+    """The spec's "Stated order survives compilation" and "A follows edge orders the same way", on
+    the function's inputs. Catches undated events sorted to the front, an offset time compared as
+    text, or an edge that moves an event past others that no edge orders."""
+    units = (
+        _unit(T, "launch", "timeline_event", occurred_at="2026-03-01"),
+        _unit(T, "kickoff", "timeline_event", occurred_at="2026-01-10T23:30-05:00"),
+        _unit(T, "review", "timeline_event"),
+        _unit(T, "retro", "timeline_event"),
+        _unit(T, "planning", "timeline_event", occurred_at="2026-01-11T02:00+00:00"),
+    )
+    edges = (
+        UnitEdge(T, "review", T, "launch", "precedes"),
+        UnitEdge(T, "retro", T, "launch", "follows"),
+    )
+
+    view = _show(units, ["order_in_time"], edges)
+
+    # Kickoff is 04:30 UTC on 11 January, after planning at 02:00.
+    assert [units[i].node for i in view.order] == ["planning", "kickoff", "review", "launch", "retro"]
+    assert view.order_conflict == ()
+    # Without edges the group still orders by date, and says the edge state is unknown.
+    unknown = _show(units, ["order_in_time"], (), status="warming")
+    assert [units[i].node for i in unknown.order] == [
+        "planning", "kickoff", "launch", "review", "retro",
+    ]
+    assert unknown.edges_known is False
+
+
+def test_order_in_time_keeps_the_date_order_of_a_cycle_and_names_it() -> None:
+    """Catches a cycle of `precedes` edges that loops, drops its units, or reorders them silently."""
+    units = (
+        _unit(T, "a", "timeline_event", occurred_at="2026-03-01"),
+        _unit(T, "b", "timeline_event", occurred_at="2026-02-01"),
+        _unit(T, "c", "timeline_event", occurred_at="2026-01-01"),
+        _unit(T, "d", "timeline_event", occurred_at="2026-04-01"),
+    )
+    edges = (
+        UnitEdge(T, "a", T, "b", "precedes"),
+        UnitEdge(T, "b", T, "c", "precedes"),
+        UnitEdge(T, "c", T, "a", "precedes"),
+        UnitEdge(T, "d", T, "c", "precedes"),
+    )
+
+    view = _show(units, ["order_in_time"], edges)
+
+    assert [units[i].node for i in view.order] == ["d", "c", "b", "a"]
+    assert sorted(units[i].node for i in view.order_conflict) == ["a", "b", "c"]
