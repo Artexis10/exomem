@@ -581,6 +581,8 @@ def continue_past(session, runtime, token, preview, *, why):
     the abandoned publication's workspace and republishes. Returns the publication, the
     new identity and what happened to that workspace; the caller renews once it published.
     """
+    from ..vault_store import marker as vault_marker
+
     if not runtime.retire_idle_handle():
         raise CollectionStoreError(takeover.BUSY, "the live store is still borrowed")
     abandoned = preview["abandoned_publication"]
@@ -589,6 +591,9 @@ def continue_past(session, runtime, token, preview, *, why):
             (predecessor,) = conn.execute("SELECT value FROM store_meta WHERE key=?", (
                 schema.META_LAST_PUBLISHED_REPLICA_SHA256,)).fetchone() or (None,)
             identity = owner.record_fork(conn, preview, why=why, token=token)
+            # The fork keeps this store, so it carries the newest store-mode decision of either
+            # side.
+            vault_marker.merge_replica(conn, session.root)
         runtime.rebind(identity)
         kept = None if abandoned is None else replica.discard_abandoned_publication(
             session.root, writer.handle, abandoned, predecessor=predecessor,
@@ -1411,6 +1416,15 @@ def _publication_authority(session, token):
     return check
 
 
+def publish_current_epoch(session, writer, token):
+    """Publish the vault replica from ``writer``'s store now, under the caller's lease and boundary.
+
+    A store-mode step uses it to put a decision in the replica before it acts on that decision.
+    The result's ``status`` is ``published`` or the reason that it was not.
+    """
+    return _publish_current_epoch(session, writer, token)
+
+
 def _publish_current_epoch(session, writer, token, *, unchanged=None):
     from ..vault_store import marker as vault_marker
     from . import legacy_originals
@@ -1430,7 +1444,6 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
         # grant exceeds; a new epoch would only force a copy no adopter reads (A3). No copy
         # is made, so no new published head needs checking against the chain.
         head = json.loads(unchanged.evidence[0])
-        vault_marker.settle(session.root, writer.handle)
         with manager._report_lock:
             session.require(token)
             manager._collection_store.record_admission(token)
@@ -1451,7 +1464,6 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
     if published.status == "published":
         if chain.verify_store_chain(writer.connection) != (published.commit_seq, published.head_hash):
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "publication did not reach current head")
-        vault_marker.settle(session.root, writer.handle)
         with manager._report_lock:
             session.require(token)
             manager._collection_store.record_admission(token)
