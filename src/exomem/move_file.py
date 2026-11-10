@@ -66,7 +66,6 @@ from .vault import (
     write_log_entry,
 )
 from .vault_store import availability as store_availability
-from .vault_store import batch as store_batch
 from .vault_store import read as store_read
 from .vault_store import targets as store_targets
 
@@ -1326,6 +1325,7 @@ def _move_file_local(
                 The projector renames the file afterwards. A changed source, a link gained since
                 the scan, or a taken destination refuses the whole commit with nothing changed.
                 """
+                from .vault_store import batch as store_batch
                 from .vault_store.write import Expect, PageMove, StoreConflict
 
                 bound_destination.recheck(vault_root)
@@ -1495,6 +1495,8 @@ def _move_file_local(
     if store_writer is not None:
         # The store transaction holds the move, its rows and its link rewrites; there is no file
         # fan-out, and the projector moves the files.
+        from .vault_store import batch as store_batch
+
         log_warning = write_log_entry(
             vault_root,
             date_iso=today.isoformat(),
