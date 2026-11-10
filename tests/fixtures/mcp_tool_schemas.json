@@ -276,7 +276,8 @@
             "accept",
             "dismiss",
             "snooze",
-            "reopen"
+            "reopen",
+            "competing"
           ],
           "type": "string"
         },
@@ -289,7 +290,7 @@
         },
         "relation": {
           "type": "string",
-          "description": "accept: the relation to record, when the suggestion offers several."
+          "description": "accept: the relation to record, if several are offered."
         },
         "vocabulary_ref": {
           "type": "string",

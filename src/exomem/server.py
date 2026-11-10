@@ -12,7 +12,7 @@ import gc
 import logging
 import os
 import time
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from copy import copy
 from pathlib import Path
 from typing import Any
@@ -76,6 +76,24 @@ class PreferredToolDiscovery(Transform):
         return original if original is not None else self.public_tools.get(name)
 
 
+@contextmanager
+def _fault_names_public_tool(internal: str, public: str):
+    """Make an uncoded fault name the tool that the agent called, not the command it was renamed to.
+
+    FastMCP prefixes a fault with `Error calling tool '<name>'`, and the call carries the grouped
+    command's name by then. The prefix is the framework's fixed text, so this swaps one name for the other.
+    """
+    from fastmcp.exceptions import ToolError
+
+    try:
+        yield
+    except ToolError as error:
+        prefix, text = f"Error calling tool {internal!r}", str(error)
+        if not text.startswith(prefix):
+            raise
+        raise ToolError(f"Error calling tool {public!r}{text[len(prefix):]}") from error
+
+
 class PublicCommandNameMiddleware(Middleware):
     """Bind public tool calls to stable command identities before authorization and tracing.
 
@@ -117,7 +135,8 @@ class PublicCommandNameMiddleware(Middleware):
         name = context.message.name
         if name in self.passthrough:
             command = resolve_command(self.passthrough[name], self.commands)
-            return await call_next(context.copy(message=context.message.model_copy(update={"name": command.name})))
+            with _fault_names_public_tool(command.name, name):
+                return await call_next(context.copy(message=context.message.model_copy(update={"name": command.name})))
         if name not in self.listed:
             await refuse_unverified_credential(self.vault_root, context)
             # NotFoundError would reach the client as the framework's fixed "Unknown tool" text,
@@ -153,7 +172,7 @@ class PublicCommandNameMiddleware(Middleware):
                 command, error.rendering, getattr(error, "wire_arguments", arguments), passthrough=passthrough
             )
         message = context.message.model_copy(update={"name": command.name, "arguments": flat})
-        with rendering_scope(name, refusal, writes=writes):
+        with _fault_names_public_tool(command.name, name), rendering_scope(name, refusal, writes=writes):
             return await call_next(context.copy(message=message))
 
 

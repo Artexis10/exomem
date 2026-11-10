@@ -61,7 +61,12 @@ The audit SHALL register an `unreflected_outcomes` category. For each Records ma
 snooze, and reopen actions, binding decisions to the review ID and signal
 fingerprint. Newly returned items SHALL echo their source hint for bounded
 revalidation. Relation identities SHALL remain namespaced so triage never
-resolves an activation or attention item, or vice versa.
+resolves an activation or attention item, or vice versa. For a contradiction pair it SHALL also
+accept the `competing` decision, which records the competing-alternatives stance.
+
+#### Scenario: A contradiction pair is held as competing alternatives
+- **WHEN** an agent calls `decide_review_item` with `decision` `competing` on a contradiction pair's id
+- **THEN** the pair records the competing-alternatives stance, as the audit's fix text directs
 
 #### Scenario: Dismissed candidate stays gone
 - **WHEN** a candidate is dismissed and the unchanged queue is reread

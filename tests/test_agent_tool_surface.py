@@ -204,6 +204,30 @@ def test_an_agent_accepts_a_suggested_relation_by_review_item_id(build, vault) -
     assert "birch]]" in acorn.read_text(encoding="utf-8").partition("## Relations")[2]
 
 
+def test_an_agent_holds_two_contradicting_pages_as_competing_alternatives(build, vault) -> None:
+    from exomem import epistemic_graph, find
+
+    notes = vault / "Knowledge Base" / "Notes" / "Insights"
+    front = "---\ntype: insight\nstatus: active\ncreated: 2026-01-01\nupdated: 2026-01-01\n---\n\n"
+    (notes / "rival-a.md").write_text(
+        f"{front}# rival-a\n\nCap retries at 3.\n\n## Relations\n\n- contradicts [[Knowledge Base/Notes/Insights/rival-b]]\n",
+        encoding="utf-8")
+    (notes / "rival-b.md").write_text(f"{front}# rival-b\n\nNever cap retries.\n", encoding="utf-8")
+    find.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    async def scenario(client):
+        pair = (await _call(client, "list_review_items", {"queue": "contradiction"}))["items"][0]
+        decided = await _call(client, "decide_review_item", {
+            "review_item": pair["id"], "decision": "competing", "why": "Both hold in different deployments"})
+        return decided, await _call(client, "list_review_items", {"queue": "contradiction"})
+
+    decided, after = _session(build(), scenario)
+
+    assert "error" not in decided, decided
+    assert after["state_summary"]["competing"] == 1 and after["state_summary"]["open"] == 0
+
+
 def test_a_review_item_id_read_before_the_page_changed_is_refused(build, vault) -> None:
     acorn = _seed_relation_candidate(vault)
 
@@ -379,3 +403,104 @@ def test_download_files_hands_off_two_originals_by_title_without_changing_the_va
     assert [item["artifact"]["file_name"] for item in handoff["artifacts"]] == ["first.txt", "second.txt"]
     assert all(item["deliveries"]["https"]["url"].startswith("https://capture.example/download") for item in handoff["artifacts"])
     assert before == _evidence_bytes(vault)
+
+
+def _routes(node, found: list[dict] | None = None) -> list[dict]:
+    """Every `{"tool": ..., "args": ...}` route that a reply carries, wherever it nests."""
+    found = [] if found is None else found
+    if isinstance(node, dict):
+        if isinstance(node.get("tool"), str):
+            found.append(node)
+        for value in node.values():
+            _routes(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            _routes(value, found)
+    return found
+
+
+def _enum_values(prop: dict) -> set | None:
+    """The values that a property's schema lists, directly or in one branch of a nullable union."""
+    values = set(prop.get("enum", ()))
+    for branch in prop.get("anyOf", ()):
+        values |= set(branch.get("enum", ()))
+    return values or None
+
+
+def _route_faults(route: dict, schemas: dict[str, dict]) -> list[str]:
+    """Why a listed tool would refuse the route's arguments, judged by its input schema."""
+    schema = schemas.get(route["tool"])
+    if schema is None:
+        return [f"{route['tool']} is not a listed tool"]
+    properties = schema["properties"]
+    arguments = route.get("args", route.get("arguments")) or {}
+    faults = [f"{route['tool']} takes no {key}" for key in arguments if key not in properties]
+    for key, value in arguments.items():
+        allowed = _enum_values(properties.get(key, {}))
+        if allowed is not None and value not in allowed:
+            faults.append(f"{route['tool']} takes {key} from {sorted(allowed)}, not {value!r}")
+    return faults
+
+
+def test_every_route_a_public_reply_carries_names_a_listed_tool_and_arguments_it_takes(
+    build, monkeypatch, tmp_path
+) -> None:
+    import dreamer_fixture as fx
+
+    from exomem import capabilities, dreamer, dreamer_store, freshness
+
+    freshness.clear()
+    dreamer.reset_for_tests()
+    dreamer_store.clear_reader_memo()
+    vault = fx.build(tmp_path)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    assert all(result.stop_reason != "error" for result in fx.run_to_quiet(vault))
+    # The competing stance of a contradiction pair is the one decision that no write reply carries yet.
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+    )
+    with capabilities.active_surface(public):
+        audit_fix = capabilities.active_call_route("triage_memory", {"action": "competing", "item_id": "<id>"})
+
+    async def scenario(client):
+        schemas = {tool.name: tool.inputSchema for tool in await client.list_tools()}
+        replies = [
+            await _call(client, "read_instructions", {"profile": "full"}),
+            await _call(client, "create_note", {
+                "title": "Retry budget", "type": "insight", "detail": "full",
+                "content": "# Retry budget\n\n## Observations\n\n- [operating constraint] Cap retries at 3 #reliability\n",
+                "unlinked_reason": "A standalone test note.",
+            }),
+        ]
+        replies.append(await _call(client, "list_review_items", {"queue": "upkeep"}))
+        return schemas, replies
+
+    try:
+        schemas, replies = _session(build(), scenario)
+    finally:
+        dreamer.reset_for_tests()
+        freshness.clear()
+        dreamer_store.clear_reader_memo()
+
+    routes = [route for reply in replies for route in _routes(reply)] + [audit_fix]
+    faults = [fault for route in routes for fault in _route_faults(route, schemas)]
+
+    assert not faults, faults
+    assert not [reply for reply in replies if "error" in reply], replies
+    # A route reply that carried no route would pass vacuously, so each spelling the surface re-writes must appear.
+    assert {"edit_note", "decide_review_item", "create_note", "search_memory"} <= {route["tool"] for route in routes}
+
+
+def test_an_uncoded_fault_names_the_tool_the_agent_called_not_the_command_behind_it(build, monkeypatch) -> None:
+    def refuse(command, *args, **kwargs):
+        raise RuntimeError("[withheld]")
+
+    monkeypatch.setattr(writer_lease, "invoke_command", refuse)
+
+    async def scenario(client):
+        return await _call(client, "read_page", {"page": "Retry with a fixed interval"})
+
+    reply = _session(build(), scenario)
+
+    assert reply["is_error"] is True
+    assert "'read_page'" in reply["text"] and "read_memory" not in reply["text"], reply

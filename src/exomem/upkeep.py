@@ -228,6 +228,8 @@ def serve(
 
     fingerprint = str(row.get("fingerprint") or "")
     item_id = review_ids.item_id({"ref": ref, "fingerprint": fingerprint})
+    if kind == dreamer_families.LINK_KIND:
+        route = _accept_route(route, item_id)
     return {
         "ref": ref,
         "id": item_id,
@@ -274,6 +276,23 @@ def _dispose(item_id: str | None) -> dict[str, Any]:
 
     route = capabilities.active_call_route("triage_memory", {"action": "dismiss", "item_id": item_id})
     return {**route, "actions": ["dismiss", "snooze"]}
+
+
+def _accept_route(route: dict[str, Any], item_id: str | None) -> dict[str, Any]:
+    """The accept call of a link item, named by its id on a surface that lists decide_review_item.
+
+    The stored route names the relation ref, the page path and the fingerprint, which that tool
+    does not take. The id carries the ref and the fingerprint, and the decision binds them at the leaf.
+    """
+    from . import capabilities
+
+    if item_id is None or capabilities.current_tool_shape() == "grouped":
+        return route
+    chosen = {key: route["args"][key] for key in ("requested_relation",) if key in route["args"]}
+    spelled = capabilities.active_call_route(
+        "connect_memory", {"operation": "accept-relation", "item_id": item_id, **chosen}
+    )
+    return {**spelled, **({"choose": route["choose"]} if "choose" in route else {})}
 
 
 def _visible_route(route: dict[str, Any], keep) -> dict[str, Any]:

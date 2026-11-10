@@ -185,11 +185,15 @@ def project_call_routes(value: Any, *, strict: bool = True) -> Any:
         return result
     from .public_surface import public_surface
 
-    if not public_surface().carries(tool):
-        return result
-    operations = operation_entries.OPERATIONS.get(tool)
     argument_key = "arguments" if "arguments" in result else "args"
     arguments = result.get(argument_key)
+    if not public_surface().carries(tool):
+        # A typed tool's name is no grouped command, yet an authored route may call it with grouped arguments.
+        command = public_surface().authored_command(tool, arguments) if isinstance(arguments, dict) else None
+        if command is None:
+            return result
+        tool = command
+    operations = operation_entries.OPERATIONS.get(tool)
     if arguments is None:
         fields = (operations.every_field() | ({operations.selector} if operations.selector else set())
                   if operations is not None else set())

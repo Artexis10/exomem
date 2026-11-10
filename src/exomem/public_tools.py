@@ -856,7 +856,7 @@ def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
                              **_given({"categories": wire.get("categories"), "limit": wire.get("limit")})}
 
 
-Decision = Literal["accept", "dismiss", "snooze", "reopen"]
+Decision = Literal["accept", "dismiss", "snooze", "reopen", "competing"]
 
 #: The decisions that triage one item; `accept` records a relation and takes the connection route.
 _TRIAGE_DECISIONS = tuple(decision for decision in get_args(Decision) if decision != "accept")
@@ -867,7 +867,7 @@ class DecideReviewItem(Wire):
     decision: Decision
     until: str | None = Field(default=None, description="snooze: YYYY-MM-DD.")
     why: str | None = None
-    relation: str | None = Field(default=None, description="accept: the relation to record, when the suggestion offers several.")
+    relation: str | None = Field(default=None, description="accept: the relation to record, if several are offered.")
     vocabulary_ref: str | None = Field(default=None, description="accept: the vocabulary decision that names a relation the suggestion lacks.")
     vocabulary_fingerprint: str | None = Field(default=None, description="accept: that decision's fingerprint.")
     detail: Detail | None = _DETAIL

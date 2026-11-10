@@ -318,6 +318,18 @@ class PublicSurface:
         return (command in PASSTHROUGH_COMMANDS or command in self._renderings
                 or any(route.command == command for tool in self.tools.values() for route in tool.routes))
 
+    def authored_command(self, tool: str, arguments: Mapping[str, Any]) -> str | None:
+        """The grouped command that an authored route names by a typed tool's name, or None.
+
+        Guidance authors a route as a grouped call, and the grouped catalog names a command by the
+        typed tool's name (`edit_note`, `create_note`, `search_memory`). A route whose arguments
+        the typed tool already takes is spelled, and stays as it is.
+        """
+        wire = self.tools.get(tool)
+        if wire is None or set(arguments) <= set(wire.model.model_fields):
+            return None
+        return wire.routes[0].command
+
     def tools_for(self, command: str, effect: Effect | None = None) -> tuple[str, ...]:
         """The tools that carry some operation of a grouped command, one side if asked."""
         if command in PASSTHROUGH_COMMANDS:
