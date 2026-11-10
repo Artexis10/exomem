@@ -1,7 +1,7 @@
 ## 1. Specification
 
 - [x] 1.1 Write the proposal, the design, the first catalogue and the delta. Validate strictly with the CI-pinned OpenSpec.
-- [ ] 1.2 Agree the open questions in design.md with the owner: the registered family, seed custody, the first round's budget, model prose, shape numbers and public release.
+- [ ] 1.2 Agree the open questions in design.md with the owner. Standing, seed custody and audience were answered on 2026-11-10; the first round's budget, model prose and shape numbers are decided before the slice that needs each.
 - [ ] 1.3 Agree the seams with the neighbours: `add-epistemic-task-bench` for the project format and the gold-evidence arm, `make-epistemic-language-dynamic` task 5.4 for the vault seeds, and `add-sensed-epistemic-model` for the training export.
 
 ## 2. Slice 1: catalogue and world core, with no model
@@ -35,6 +35,7 @@
 - [ ] 5.4 Write the membench projection. Check: membench's span lint passes on the derived spans, and the existing runner reads the corpus unchanged.
 - [ ] 5.5 Add the dials to the round plan. Check: a plan with an undeclared dial is refused, and the manifest records each dial's value.
 - [ ] 5.6 State the cost. Then play the hand-written development project and a generated one in one window, and record where they agree and disagree by dimension.
+- [ ] 5.7 Add the neutral export for other products' own harnesses, with its documentation. Check: a world read back from the export holds the same statements and keys, and the export names no Exomem kind, relation or field.
 
 ## 6. Slice 3: minds, chance and adversaries
 
@@ -51,7 +52,6 @@
 - [ ] 7.2 Add the training export. Check: it refuses a world that is not `train`, and a round refuses a sensor trained on a `dev` or `heldout` digest.
 - [ ] 7.3 Add the media and language packs. Check: a profile without support reads `unsupported`, never zero.
 - [ ] 7.4 Add compound threads. Check: each declares both phenomena, and the mutation check passes for each part.
-- [ ] 7.5 Add the neutral export for other products' own harnesses.
 
 ## 8. Delivery
 

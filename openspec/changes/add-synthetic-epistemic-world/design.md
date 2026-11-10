@@ -223,7 +223,7 @@ Keys carry the value, its accepted forms, the trap values, the behaviours and th
 - A fairness gate runs on the adapter side: the neutral artefacts, parsed by each product's own grammar, must yield no typed unit and no typed relation. The world's text then gives no product a head start.
 - Every projection writes a parity report, as membench's native renderers do: each fact is represented, degraded or unsupported.
 - Arm `F` receives the same sessions, files and learning instruction as `P`.
-- A later neutral export lets another product's own team run a world. This repository authors no competitor integration and publishes no cross-product table.
+- A neutral export, built in slice 2, lets another product's own team run a world. This repository authors no competitor integration and publishes no cross-product table.
 - 101 of the 516 entries name an outside work as lineage. The other 415 come from this project. A report states the share of its probes that come from each group, so a reader can discount the home-defined ones.
 
 ### 12. Cost is designed in
@@ -381,9 +381,9 @@ MemoryAgentBench, LongMemEval and FrontierMemory stay outside calibration runs. 
 Each slice is useful alone. `tasks.md` gives each task's check.
 
 1. **Slice 1: generated development projects and vault seeds.** The loader, the world core, seven mechanisms at one hop, three packs, the template renderer at three levels, the f38 projection with the `G` arm, and the vault seed. It builds the 60 entries marked `s1`, which cover f38's 11 dimensions and its stable probes.
-2. **Slice 2: implied change and the model-free layer.** The four deeper implicitness levels with bridges, cascades, order, quantities and rules, the membench projection, the dials and the concordance check.
+2. **Slice 2: implied change and the model-free layer.** The four deeper implicitness levels with bridges, cascades, order, quantities and rules, the membench projection, the neutral export, the dials and the concordance check.
 3. **Slice 3: minds, chance and adversaries.** Nested holders, the chance and causal models, the policy view, the model-prose renderer with its check, the independent review and the registration amendment.
-4. **Slice 4: scale and reach.** The large world, the training export, media and other languages, compound threads and the neutral export.
+4. **Slice 4: scale and reach.** The large world, the training export, media and other languages, and compound threads.
 
 ## Risks / Trade-offs
 
@@ -397,9 +397,14 @@ Each slice is useful alone. `tasks.md` gives each task's check.
 
 ## Open Questions
 
-1. Should generated worlds become their own registered family, as decision 9 proposes, or stay a development instrument until the owner decides otherwise?
-2. Who holds a held-out seed, and where? The design assumes the evaluator custody that f38 uses.
-3. Which budget covers the first outcome round: the capped low-cost actor, or subscription turns?
-4. May the model-prose renderer run at all in slice 3, given its metered cost, or should surface banks grow first?
-5. May aggregate shape numbers from a real vault calibrate the large-world profile? They are counts and distributions, and they would enter the repository.
-6. Is the benchmark meant for others to run one day? A public release needs the neutral export and an outside reviewer earlier.
+The owner answered on 2026-11-10:
+
+1. **Standing.** Decision 9 stands, kept lean. The review, the concordance round and the amendment are one-time steps before generated worlds may decide, not gates on every run. The review is the adversarial review that every change gets, with the fairness brief. The concordance check is one development round. The amendment is a short registration in the existing protocol.
+2. **Seed custody.** Evaluator custody outside the repository, as f38 uses.
+3. **Audience.** Build the benchmark so that others could run it: product-neutral, self-contained and documented from the first slice, with the neutral export no later than slice 2. Whether to publish is decided after the first results and an outside fairness audit.
+
+Still open, each decided before the slice that needs it:
+
+4. Which budget covers the first outcome round: the capped low-cost actor, subscription turns or API credits? The round states its cost first.
+5. May the model-prose renderer run in slice 3, given its cost, or should surface banks grow first?
+6. Where do the large-world profile's shape numbers come from? The options are a private file, computed from a real vault and read at run time, numbers committed in the repository, or invented distributions. Decided before slice 4.
