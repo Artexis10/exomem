@@ -303,7 +303,7 @@ If the upgrade crosses 0.147.0, do "Before the upgrade", then "Upgrade the relea
    ```
 
    Expect one row, with the status `deployed`.
-4. Note the time of the copy in UTC. "After the backup key conversion" uses it.
+4. Note the time of the copy as `date -u +%FT%TZ` prints it. "After the backup key conversion" uses it.
 5. Use the command without `--atomic` in "Upgrade the release". A failed wait then leaves the new cellctl running.
 
 #### If the upgrade fails
@@ -427,7 +427,7 @@ A copy would keep the key of a cell after its deletion, and defeat the key expir
 A cell with local storage backs up each hour. Another cell backs up once a day, in the window that
 `cells.backupWindow` sets. Its default is 02:00 to 05:00 UTC.
 
-1. Note the time when the last cell pod is Ready after the upgrade, in UTC. Call it the rollout end.
+1. Note the time when the last cell pod is Ready, as `date -u +%FT%TZ` prints it. Call it the rollout end.
 2. Note the time of the temporary copy from "Before the upgrade", in UTC. Call it the copy time.
 3. Put the copy time in this query. Run it until each `last_backup_at` is after the rollout end.
 
@@ -439,12 +439,16 @@ A cell with local storage backs up each hour. Another cell backs up once a day, 
 4. After 26 hours, read the recent cellctl log for each cell that still has no such backup.
 
    ```bash
-   kubectl --namespace exomem-cloud logs deployment/cellctl --since=2h | grep -F '<cell id>'
+   kubectl --namespace exomem-cloud logs deployment/cellctl --since-time=<rollout end> | grep -F '<cell id>'
    ```
 
+   If the cellctl pod restarted since the rollout end, run the command again with `--previous`.
+   A cell with nightly backups logs a failure only inside its backup window. Finding no line is not a cause.
+
    cellctl unwraps the backup key before it makes the backup Job. A failed unwrap makes no Job, only this log line.
-5. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Fix forward from it.
-6. For any other cause, record it for that cell and continue.
+5. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Stop here.
+6. For any other cause that you found, record it for that cell and continue.
+   If you found no cause, keep the copy and wait for the next backup window.
 7. Delete the temporary copy of the key columns.
 
    ```bash

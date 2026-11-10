@@ -257,19 +257,20 @@ prints `0`.
 3. Run the queries of steps 2 and 3 of "Prepare release A" again. Expect no rows.
 4. Do steps 1 and 3 of "Upgrade the release" in the same runbook. Step 3 has no `--atomic`.
 5. If the upgrade fails, do "If the upgrade fails" in the same runbook.
-   After a rollback, stop and do not run release B. Find the cause, then start again at step 1.
-6. Wait until `cellctl` is Ready. Its liveness probe restarts the pod when its heartbeat file is older than 120 seconds.
+6. After a rollback, stop. Do not run release B.
+7. After a rollback, find the cause of the failure. Then start again at step 1.
+8. Wait until `cellctl` is Ready. Its liveness probe restarts the pod when its heartbeat file is older than 120 seconds.
    `kubectl --namespace exomem-cloud get pods --selector app.kubernetes.io/name=cellctl`
-7. Wait until each cell pod is replaced once. Allow up to 10 minutes for each cell.
+9. Wait until each cell pod is replaced once. Allow up to 10 minutes for each cell.
    `kubectl get pods --all-namespaces --selector app.kubernetes.io/name=exomem-cell`
-8. Note the time when the last cell pod is Ready, in UTC. It is the rollout end.
-9. Do "Verify" in the same runbook.
-10. Read the `cellctl` pod again. If `RESTARTS` is above 0, find the cause before release B.
-11. Compare the converted cells with all cells, for each desired state.
+10. Note the time when the last cell pod is Ready, as `date -u +%FT%TZ` prints it. It is the rollout end.
+11. Do "Verify" in the same runbook.
+12. Read the `cellctl` pod again. If `RESTARTS` is above 0, find the cause before release B.
+13. Compare the converted cells with all cells, for each desired state.
    `psql "$EXOMEM_CELLCTL_DSN" --command "SELECT desired_state, count(*) AS cells, count(cell_root_key_wrapped) AS converted FROM exomem_cloud_cells GROUP BY desired_state ORDER BY desired_state"`
 
 Expected result: the `cellctl` pod is Ready and has 0 restarts. Every cell pod is Ready and was replaced once.
-In the query of step 11, `converted` equals `cells` for each `running` and `read_only` row, and it is 0 for `deleted`.
+In the query of step 13, `converted` equals `cells` for each `running` and `read_only` row, and it is 0 for `deleted`.
 A `stopped` cell converts when it next starts. The temporary copy of the key columns stays until release B ends.
 
 ### Run release B
