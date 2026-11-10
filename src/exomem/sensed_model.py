@@ -1043,7 +1043,7 @@ def run_tick(
         _follow_active(store, conn, ledger, active, label_map_version, report, halt)
         _ingest(store, conn, ledger, active, label_map_version, report, halt)
         cosine = _follow_cosine(vault_root, store, conn)
-        _follow_pages(
+        rel_changed, rel_removed = _follow_pages(
             vault_root,
             store,
             conn,
@@ -1056,27 +1056,23 @@ def run_tick(
             now,
             cosine,
         )
-        # The relation producer's changed set is the tick's own detection,
-        # computed before _follow_pages advances the `pages` table.
-        rel_changed = sorted(
-            path
-            for path, sig in seen.items()
-            if (conn.execute("SELECT sig FROM pages WHERE path=?", (path,)).fetchone()
-                or (None,))[0] != sig
-        )
-        rel_removed = sorted(
-            path
-            for (path,) in conn.execute("SELECT path FROM pages")
-            if path not in seen
-        )
         _follow_seeding(store, conn, seen)
         # Submissions use their own producer connection; the tables they leave
-        # are applied inside the write transaction below.
-        relation_result = _relation_producer(vault_root, conn, rel_changed, rel_removed, report)
-        with store.write(conn):
-            _relation_bookkeeping(conn, rel_removed, relation_result)
-            _retire_satisfied(conn, ledger)
-            _relation_ingest(conn, ledger)
+        # are applied inside the write transaction below. Without an admitted
+        # instrument no relation-sensor query or write runs at all.
+        from . import sensing_llm
+
+        if sensing_llm.active_instruments():
+            relation_result = _relation_producer(
+                vault_root, conn, rel_changed, rel_removed, report
+            )
+            with store.write(conn):
+                _relation_bookkeeping(conn, rel_removed, relation_result)
+                _retire_satisfied(conn, ledger)
+                _relation_ingest(conn, ledger)
+        else:
+            with store.write(conn):
+                _retire_satisfied(conn, ledger)
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
         log.warning("sensed model: tick failed", exc_info=True)
         report.stop = "error"
@@ -1320,13 +1316,14 @@ _BUDGET_STOPS = frozenset({"pages", "cpu", "wall"})
 
 def _follow_pages(
     vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now, cosine
-) -> None:
+) -> tuple[list[str], list[str]]:
+    """The pair pass; returns the tick's changed and removed paths."""
     fingerprint, theta = cosine
     known = {str(path): (None if sig is None else str(sig)) for path, sig in conn.execute("SELECT path, sig FROM pages")}
     changed = sorted(path for path, sig in seen.items() if known.get(path, "\0") != sig)
     removed = sorted(path for path in known if path not in seen)
     if not changed and not removed:
-        return
+        return (changed, removed)
     from . import dreamer_families
 
     ctx = dreamer_families.Context(vault_root=Path(vault_root), store=None, conn=None, now=now)
@@ -1388,6 +1385,7 @@ def _follow_pages(
             applied[rel] = vectors
     finally:
         ctx.close()
+    return (changed, removed)
 
 
 def _own_vectors(facts: PageFacts | None, vectors: Mapping[str, Any]) -> dict[str, Any]:

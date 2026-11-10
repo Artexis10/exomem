@@ -133,18 +133,29 @@ def _plain(text: str) -> str:
     return _SPACE.sub(" ", rendered).strip()
 
 
-def _body_lines(vault_root: Path, rel_path: str) -> list[str]:
-    """The page's body lines from its raw bytes (frontmatter split, no parse).
+def _page_raw(vault_root: Path, rel_path: str, expected_hash: str) -> str | None:
+    """A page's raw text when it matches the hash the graph published.
 
-    OPEN CONTRACT QUESTION: the published graph does not carry the page body
-    (file-node text is the title). Reading the file is the current behaviour
-    pending a published body source with the same line numbering the graph's
-    anchors use.
+    The producer may read page files for its chosen sources and their link
+    targets only; the read is honourable only while it describes the same
+    bytes the graph hashed (`source_hash` is `content_hash` of the raw text).
+    A mismatch means the graph is behind the file: the page is skipped and
+    retried once the graph catches up.
     """
     try:
         raw = (Path(vault_root) / rel_path).read_text(encoding="utf-8")
     except OSError:
-        return []
+        return None
+    if vault_module.content_hash(raw) != expected_hash:
+        return None
+    return raw
+
+
+def _body_lines(vault_root: Path, page: _GraphPage) -> list[str] | None:
+    """The page's body lines, or None while the file is ahead of the graph."""
+    raw = _page_raw(vault_root, page.rel_path, page.source_hash)
+    if raw is None:
+        return None
     _frontmatter, body, _span = vault_module.parse_frontmatter(raw)
     return unicodedata.normalize("NFC", str(body)).splitlines()
 
@@ -188,7 +199,7 @@ def excerpt(vault_root: Path, conn: sqlite3.Connection, page: _GraphPage,
     """`page-excerpt-v1`: title, then body minus relation statements, links
     rendered as display text, whitespace-collapsed, cut at 900 chars."""
     if lines is None:
-        lines = _body_lines(vault_root, page.rel_path)
+        lines = _body_lines(vault_root, page) or []
     drop = _relation_lines(conn, page.rel_path) | _section_lines(conn, page.rel_path)
     body = _plain("\n".join(
         line for index, line in enumerate(lines, start=1) if index not in drop
@@ -330,13 +341,15 @@ def build_requests(
 ) -> list[tuple[str, sensing.SenseRequest, dict[str, Any]]]:
     """`(request_key, request, row)` per link. `row` is the relation_sensed row."""
     registry = fit.registry(source)
-    body = _body_lines(vault_root, source.rel_path)
+    body = _body_lines(vault_root, source)
+    if body is None:
+        return []  # file ahead of the graph: skipped, retried on a later tick
     source_text = excerpt(vault_root, conn, source, lines=body)
     out: list[tuple[str, sensing.SenseRequest, dict[str, Any]]] = []
     for link in links[:LINKS_PER_PAGE]:
         target = _file_node(conn, link.target)
-        if target is None:
-            continue
+        if target is None or _body_lines(vault_root, target) is None:
+            continue  # target missing or ahead of the graph: only this link drops
         target_text = excerpt(vault_root, conn, target)
         link_text = link_line(body, link.line) if link.kind == "wikilink" else ""
         candidate = {
@@ -489,12 +502,25 @@ def ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> int:
 
     active = sensing_llm.active_instruments()
     entry = sensing.QUESTIONS[sensing.RELATION_TYPE]
+    inactive = ",".join("?" for _ in active) or "''"
+    # A persisted keyset cursor walks the pending rows over ticks, so rows
+    # beyond the first INGEST_BATCH fill too and no row starves the rest.
+    cursor = str(sensed_model._get_meta(conn, "relation_ingest_cursor") or "")
     rows = conn.execute(
         "SELECT request_key, input_key, instrument_id FROM relation_sensed "
-        "WHERE verdict IS NULL OR instrument_id NOT IN (%s) LIMIT ?"
-        % (",".join("?" for _ in active) or "''"),
-        (*active, INGEST_BATCH),
+        "WHERE (verdict IS NULL OR instrument_id NOT IN (%s)) "
+        "AND request_key > ? ORDER BY request_key LIMIT ?" % inactive,
+        (*active, cursor, INGEST_BATCH),
     ).fetchall()
+    if not rows:
+        rows = conn.execute(
+            "SELECT request_key, input_key, instrument_id FROM relation_sensed "
+            "WHERE (verdict IS NULL OR instrument_id NOT IN (%s)) "
+            "ORDER BY request_key LIMIT ?" % inactive,
+            (*active, INGEST_BATCH),
+        ).fetchall()
+    if rows:
+        sensed_model._set_meta(conn, "relation_ingest_cursor", str(rows[-1][0]))
     filled = 0
     for request_key, input_key, old_instrument in rows:
         verdict = reading = instrument = None

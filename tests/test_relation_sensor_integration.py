@@ -244,3 +244,119 @@ def test_question_scoped_refusal_keeps_pair_relation(tmp_path: Path, monkeypatch
     refusal = status["refusals"].get(sensing.RELATION_TYPE)
     assert refusal and refusal["reason"] == "no-admitted-sensor-model"
     assert sensing.PAIR_RELATION not in (status.get("refusals") or {})
+
+
+def test_page_ahead_of_the_graph_is_skipped(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    assert _jobs(vault)
+    # Edit the file without re-publishing the graph: its hash now mismatches.
+    (vault / sf.WINTER).write_text(
+        (vault / sf.WINTER).read_text(encoding="utf-8") + "\nnew line\n",
+        encoding="utf-8",
+    )
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    fit = relation_queue.RelationFit(vault)
+    source = relation_sensor._file_node(conn, sf.WINTER)
+    links = relation_sensor.plain_links(conn, fit.registry(source), source)
+    assert relation_sensor.build_requests(vault, conn, fit, source, links) == []
+    conn.close()
+
+
+def test_target_ahead_of_the_graph_drops_only_that_link(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    fit = relation_queue.RelationFit(vault)
+    source = relation_sensor._file_node(conn, sf.WINTER)
+    links = relation_sensor.plain_links(conn, fit.registry(source), source)
+    # Push the target file ahead of its published hash; the source still builds
+    # nothing since its only link points there.
+    (vault / sf.SEAL).write_text(
+        (vault / sf.SEAL).read_text(encoding="utf-8") + "\nnew line\n",
+        encoding="utf-8",
+    )
+    assert relation_sensor.build_requests(vault, conn, fit, source, links) == []
+    # And a source pointing at a still-current target still builds.
+    source2 = relation_sensor._file_node(conn, sf.DENIAL)
+    links2 = relation_sensor.plain_links(conn, fit.registry(source2), source2)
+    # DENIAL also links only to the stale SEAL: nothing builds for it either.
+    assert relation_sensor.build_requests(vault, conn, fit, source2, links2) == []
+    conn.close()
+
+
+def test_no_admitted_model_issues_no_relation_queries(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        sensed_model,
+        "_relation_producer",
+        lambda *a, **k: calls.append(a) or {"submitted": 0, "pages": [], "cursor": None},
+    )
+    monkeypatch.setattr(
+        sensed_model,
+        "_relation_ingest",
+        lambda *a, **k: calls.append(a),
+    )
+    monkeypatch.setattr(
+        sensed_model,
+        "_relation_bookkeeping",
+        lambda *a, **k: calls.append(a),
+    )
+    sf.settle(vault)
+    assert calls == []
+
+
+def test_ingest_cursor_walks_starved_rows(tmp_path: Path, monkeypatch) -> None:
+    """Rows beyond the batch bound fill on a later tick, not never."""
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    conn = sensed_model._producer_connection(vault)
+    rows = []
+    for index in range(300):
+        key = f"k{index:04d}"
+        rows.append((key, "s.md", f"t{index}.md", "a", "wikilink", None, None, None, None,
+                     "d" * 64, f"input-{index}"))
+    conn.executemany(
+        "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.close()
+
+    # Readings exist only for the last 25 rows.
+    answered = {f"input-{i}" for i in range(275, 300)}
+
+    from exomem import sensing_ledger
+
+    class FakeReading:
+        instrument_id = IDENTITY.instrument_id
+        reading_id = "r1"
+        vectors = {"answer": [0.9, 0.05, 0.05]}
+        verdict = sensing.Verdict("supports", 0.9)
+        columns = ("supports", "refines", "none")
+
+    monkeypatch.setattr(
+        sensing_ledger, "by_input_key",
+        lambda ledger, q, key: [FakeReading()] if key in answered else [],
+    )
+    monkeypatch.setattr(relation_sensor, "INGEST_BATCH", 50)
+    conn = sensed_model._producer_connection(vault)
+    ledger = sqlite3.connect(":memory:")  # presence only; by_input_key is stubbed
+    conn.execute("BEGIN IMMEDIATE")
+    relation_sensor.ingest(conn, ledger)
+    conn.execute("COMMIT")
+    first = conn.execute(
+        "SELECT count(*) FROM relation_sensed WHERE verdict='supports'").fetchone()[0]
+    conn.execute("BEGIN IMMEDIATE")
+    for _ in range(6):
+        relation_sensor.ingest(conn, ledger)
+    conn.execute("COMMIT")
+    second = conn.execute(
+        "SELECT count(*) FROM relation_sensed WHERE verdict='supports'").fetchone()[0]
+    conn.close()
+    assert first <= 50
+    assert second == 25
