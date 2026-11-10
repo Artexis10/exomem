@@ -82,27 +82,34 @@ The deletion watch lets the key watcher report each deleted cell's purge (`autom
 Do this before the purge is turned on, after "Pin the media watch". Agree the change with the owner of
 `contain-cloud-controller-compromise` first, because that change owns the pinned set.
 
-1. Apply the cell-data root and the durability root with the operator's approval. Expect one new key in each:
-   `key_watcher_backup_list` and `cloud_media_edge_list`.
-2. Set the watcher's backup list key from the cell-data outputs `key_watcher_backup_list_application_key_id`
-   and `key_watcher_backup_list_application_key`. Each command asks for its value.
-   `gh secret set B2_WATCHER_BACKUP_LIST_KEY_ID --env key-watcher`
-   `gh secret set B2_WATCHER_BACKUP_LIST_KEY --env key-watcher`
-3. Set the address of Substrate's deletion set. It must end with the same capability as `KEY_WATCHER_ALERT_URL`.
-   `gh secret set KEY_WATCHER_DELETIONS_URL --env key-watcher`
-4. Open your copy of the current pinned set.
-5. In the `cell-data` account, add the ID from `key_watcher_backup_list_application_key_id` to `pinned_key_ids`.
-6. In the `founder` account, add the ID from `cloud_media_edge_list_application_key_id` to `pinned_key_ids`.
-7. Add the deletion watch at the top level, with the skew margin that you chose (the design proposes 60 minutes):
+1. Plan the cell-data root to a saved plan with `infra/scripts/plan.sh`. Expect one add, `key_watcher_backup_list`, and no other change.
+2. If the platform has the media watch, plan the durability root with `-target='b2_application_key.cloud_media_edge_list[0]'`.
+   A full durability plan can hold other changes. Expect one add.
+3. Apply each saved plan with `infra/scripts/apply_saved_plan.sh` and the operator's approval.
+4. Store the watcher's backup list key in BWS prod: pipe each cell-data output into `bwsx-secret set --project prod <name> --format opaque-line`.
+   Use `EXOMEM_KEY_WATCHER_BACKUP_LIST_B2_KEY_ID` for `key_watcher_backup_list_application_key_id`, and `EXOMEM_KEY_WATCHER_BACKUP_LIST_B2_KEY` for `key_watcher_backup_list_application_key`.
+5. Pipe each value from BWS into its GitHub secret:
+   `bwsx-run EXOMEM_KEY_WATCHER_BACKUP_LIST_B2_KEY_ID -- sh -c 'printf "%s" "$EXOMEM_KEY_WATCHER_BACKUP_LIST_B2_KEY_ID"' | gh secret set B2_WATCHER_BACKUP_LIST_KEY_ID --env key-watcher`
+   Do the same for `EXOMEM_KEY_WATCHER_BACKUP_LIST_B2_KEY` into `B2_WATCHER_BACKUP_LIST_KEY`.
+6. Set the address of Substrate's deletion set. It has the same capability as `KEY_WATCHER_ALERT_URL`:
+   `bwsx-run EXOMEM_KEY_WATCHER_ALERT_URL -- sh -c 'printf "%s" "$EXOMEM_KEY_WATCHER_ALERT_URL"' | sed 's#/api/exomem/alerts/#/api/exomem/cell-deletions/#' | gh secret set KEY_WATCHER_DELETIONS_URL --env key-watcher`
+7. Open your copy of the current pinned set.
+8. In the `cell-data` account, add the ID from `key_watcher_backup_list_application_key_id` to `pinned_key_ids`.
+9. If you applied step 2, add the ID from `cloud_media_edge_list_application_key_id` to `pinned_key_ids` in the `founder` account.
+10. Add the deletion watch at the top level, with the skew margin that you chose (the design proposes 60 minutes):
    `"deletions": {"account": "cell-data", "media_account": "founder", "backup_key_id_env": "B2_WATCHER_BACKUP_LIST_KEY_ID", "backup_key_env": "B2_WATCHER_BACKUP_LIST_KEY", "purge_capabilities": ["listFiles", "writeFiles"], "skew_margin_minutes": <minutes>}`
    On a platform without the media watch, set `media_account` to `null`.
-8. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
-9. Run the watcher once: `gh workflow run b2-key-watcher.yml`.
+11. Parse the file with the watcher before you write it. Run this in `infra/scripts`:
+   `python3 -c 'import sys, b2_key_watcher as w; w.parse_pinned_set(open(sys.argv[1]).read())' <your file>`
+   Expect no output.
+12. Write the value back: `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+13. Keep the written file as your current copy, and the copy before it for undo. Keep both private, and outside any scratch folder.
+14. Run the watcher once: `gh workflow run b2-key-watcher.yml`.
    Expect `0 active` for both accounts and a line `deletions: <n> in the set, <w> watched: ...`.
 
 The watcher reads the backup retention from the backup bucket's pinned `defaultRetention`, and the media
 grace from the media bucket's pinned lifecycle rule. It refuses a `purge_capabilities` equal to the per-cell
-shape. Until step 8, the watcher reports the new keys as unpinned. Until Substrate serves the deletion set,
+shape. Until step 12, the watcher reports the new keys as unpinned. Until Substrate serves the deletion set,
 expect `deletions: unknown (DELETIONS_UNKNOWN)` and that alert. A pinned set without `deletions` still
 parses, and its watcher watches no deletion.
 
