@@ -3774,6 +3774,7 @@ def _carried_packet(
     carried_by: str = "retrieval",
     pages: Sequence[tuple[str, float]] = (),
     visible: Callable[[str], bool] | None = None,
+    display_edges: working_set_marks.EdgeView | None = None,
     contacts: Mapping[str, set[tuple[int, int]]] | None = None,
     unresolved_anchors: Sequence[Mapping[str, Any]] = (),
     retrieval_eligible: Callable[[frozenset[str]], frozenset[str]] | None = None,
@@ -3881,7 +3882,7 @@ def _carried_packet(
                 recent_context=recent_context,
                 status_basis=status_basis,
                 visible=visible,
-                display_edges=_display_edges(vault_root, visible, purpose, freshness_snapshot),
+                display_edges=display_edges,
             )
 
         packet = build()
@@ -4319,6 +4320,7 @@ def _follow_up_packet(
     index: working_set_index.WorkingSetIndex | None,
     recent_context: Sequence[Mapping[str, Any]],
     visible: Callable[[str], bool] | None = None,
+    display_edges: working_set_marks.EdgeView | None = None,
     row: Any = None,
     carried_by: str = "follow_up",
     status_basis: lifecycle_statuses.Basis | None = None,
@@ -4354,6 +4356,7 @@ def _follow_up_packet(
             evidence=evidence,
             carried_by=carried_by,
             visible=visible,
+            display_edges=display_edges,
             status_basis=status_basis,
         )
         listed = {
@@ -4439,7 +4442,7 @@ def _follow_up_packet(
                     recent_context=recent_context,
                     status_basis=status_basis,
                     visible=visible,
-                    display_edges=_display_edges(vault_root, visible, purpose, freshness_snapshot),
+                    display_edges=display_edges,
                 )
     if packet is not None:
         return packet
@@ -4687,6 +4690,8 @@ def _compile_packet(
     visible = reader if reader is not None else _reader_view(root, purpose)
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
+    # The turn slice reads only a packet's anchors, so its compile reads no edges for marks.
+    display_edges = None if leads_only else _display_edges(root, visible, purpose, freshness_snapshot)
     # "Missing or stale profiles SHALL report their state": `current` (live
     # watcher, complete delta), `partial` (no watcher: governed activity only),
     # `seeded`, `behind` (a reconcile is pending) or `empty`. The session start
@@ -5053,6 +5058,7 @@ def _compile_packet(
                 evidence=("continuity", "recency") if hot.from_token else ("recency",),
                 carried_by="continuity" if hot.from_token else "recency",
                 visible=visible,
+                display_edges=display_edges,
                 status_basis=status_basis,
             )
             if packet is not None:
@@ -5118,6 +5124,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                display_edges=display_edges,
                 status_basis=status_basis,
             )
         if pages:
@@ -5178,6 +5185,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                display_edges=display_edges,
                 retrieval_eligible=retrieval_eligible,
                 status_basis=status_basis,
             )
@@ -5240,6 +5248,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                display_edges=display_edges,
                 carried_by="conversation",
                 status_basis=status_basis,
             )
@@ -5333,6 +5342,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                display_edges=display_edges,
                 contacts=contacts,
                 unresolved_anchors=tuple(item.as_dict() for item in resolution.anchors),
                 retrieval_eligible=retrieval_eligible,
@@ -5397,6 +5407,7 @@ def _compile_packet(
                 index=index,
                 recent_context=recent,
                 visible=visible,
+                display_edges=display_edges,
                 status_basis=status_basis,
             )
         if overlapping:
@@ -5439,6 +5450,7 @@ def _compile_packet(
                 evidence=("agent_choice",),
                 carried_by="agent_choice",
                 visible=visible,
+                display_edges=display_edges,
                 status_basis=status_basis,
             )
             if packet is not None:
@@ -5648,7 +5660,7 @@ def _compile_packet(
             promoted_paths=promoted_paths,
             status_basis=status_basis,
             visible=visible,
-            display_edges=_display_edges(root, visible, purpose, freshness_snapshot),
+            display_edges=display_edges,
         )
     return packet
 
