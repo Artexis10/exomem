@@ -110,6 +110,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     the local token that sent it, so the MCP connection must use that same local
     token. `--lane source` holds it for `save_source`; `--scope S --category C`
     preserves straight to Evidence.
+  - **A folder to import (personal server):** the route is in [importing](importing.md).
   - **Sandbox clients (claude.ai, Claude desktop chat, Cowork; no file handle, no
     local token):** only with the user's opt-in (code execution on, the Exomem host
     allowed for network access, a fresh conversation), hold the bytes with the

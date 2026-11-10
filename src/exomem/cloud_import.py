@@ -47,6 +47,7 @@ import shutil
 import sys
 import tarfile
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -61,11 +62,16 @@ IMPORT_STAGING_UNAVAILABLE = "IMPORT_STAGING_UNAVAILABLE"
 DEFAULT_MAX_MEMBERS = 500_000
 DEFAULT_RESERVE_BYTES = 256 * 1024 * 1024
 RESERVE_BYTES_ENV = "EXOMEM_IMPORT_RESERVE_BYTES"
+#: What may follow the end-of-archive block when a caller stops reading there: tar pads to a whole record.
+END_WINDOW_BYTES = 2 * tarfile.RECORDSIZE
 
+_FSYNC_WORKERS = 16
 _NAME_MAX_BYTES = 255
 _PATH_MAX_BYTES = 4096
 _CHUNK = 1024 * 1024
 _FILE_TYPES = frozenset({tarfile.REGTYPE, tarfile.AREGTYPE})
+#: Errors that say the member's own name cannot be stored here, so the same archive fails again. Anything else may pass.
+NAME_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL, errno.EILSEQ, errno.EEXIST, errno.ENOTDIR, errno.EISDIR})
 _LINK_TYPES = frozenset({tarfile.SYMTYPE, tarfile.LNKTYPE})
 _FILE_FLAGS = (
     os.O_WRONLY
@@ -90,6 +96,8 @@ class ArchiveRefused(Exception):
         self.reason = reason
         self.member_index = member_index
         self.retry = retry
+        # The name of the member that was refused. Only a local caller reads it; `as_dict` never prints it.
+        self.member: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -114,11 +122,63 @@ def reserve_bytes_from_env() -> int:
     return int(raw) if raw.isascii() and raw.isdigit() else DEFAULT_RESERVE_BYTES
 
 
+@dataclass(frozen=True, slots=True)
+class ReadPolicy:
+    """How strictly `unpack_stream` reads. The defaults are the Cloud job's: any tar compression, read to EOF."""
+
+    #: `tarfile`'s stream mode. `r|` reads a plain tar, for a caller that decompresses only what it allows.
+    mode: str = "r|*"
+    #: Stop `END_WINDOW_BYTES` past the end block, so padding after it is never read. Cloud reads to EOF for its decryptor.
+    stop_after_end: bool = False
+    #: Refuse two names that differ only in letter case: a vault may sit on a case-insensitive volume.
+    portable_paths: bool = False
+    #: The most bytes `tarfile` may read to parse one header and the pax, long-name and sparse headers chained to it.
+    max_header_bytes: int | None = None
+    #: Flush with `os.sync`, as the Cloud job does. False flushes only the files and directories this unpack wrote.
+    host_wide_sync: bool = True
+
+
 def free_bytes(path: Path) -> int:
     """Bytes an unprivileged writer can still use on `path`'s filesystem."""
 
-    status = os.statvfs(path)
-    return status.f_bavail * status.f_frsize
+    return shutil.disk_usage(path).free
+
+
+def _fsync_file(path: str) -> None:
+    with open(path, "rb+") as staged:
+        os.fsync(staged.fileno())
+
+
+def _fsync_directory(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def flush_to_disk(root: Path, *, host_wide: bool = True) -> None:
+    """Put every file under `root` on disk.
+
+    `host_wide` uses `os.sync` where the platform has it. Otherwise, or when it is False, each file is fsynced and,
+    where a directory can be opened, each directory too, so that a request flushes what it wrote and not the whole host.
+    """
+
+    sync = getattr(os, "sync", None)
+    if host_wide and sync is not None:
+        sync()
+        return
+    files: list[str] = []
+    directories: list[str] = []
+    for directory, _, names in os.walk(root):
+        directories.append(directory)
+        files.extend(os.path.join(directory, name) for name in names)
+    # One fsync after another costs a journal commit each (about 5 ms per file measured on a local volume,
+    # so 65,536 entries would pass the request budget); concurrent ones share a commit.
+    with ThreadPoolExecutor(max_workers=_FSYNC_WORKERS) as pool:
+        list(pool.map(_fsync_file, files))
+        if hasattr(os, "O_DIRECTORY"):  # Windows cannot open a directory; the name is the portable test for POSIX
+            list(pool.map(_fsync_directory, directories))
 
 
 def unpack_stream(
@@ -132,6 +192,7 @@ def unpack_stream(
     expect_bytes: int | None = None,
     free_space: Callable[[Path], int] = free_bytes,
     on_file: Callable[[str, int, str], None] | None = None,
+    policy: ReadPolicy | None = None,
 ) -> UnpackResult:
     """Unpack a tar stream into `staging`, which must not exist yet.
 
@@ -148,7 +209,8 @@ def unpack_stream(
     followed it, the counts match any the sender declared, and the input was
     consumed to EOF. The caller still commits the staging directory only if
     its decryptor also exited cleanly: age authenticates its final chunk only
-    at EOF.
+    at EOF. A `policy` that stops after the end block replaces "consumed to
+    EOF" with "nothing but zeros in the window after the end block".
 
     On any refusal or error the staging directory is removed and the
     exception propagates; a directory this call did not create is never
@@ -162,15 +224,19 @@ def unpack_stream(
             os.chmod(staging, 0o700)
         except OSError:
             raise ArchiveRefused(IMPORT_STAGING_UNAVAILABLE, "staging") from None
+    policy = policy or ReadPolicy()
+    header = _end_tracking_header(policy.max_header_bytes)
     try:
         result = _unpack_into(
             stream,
             staging,
+            header,
             max_bytes=max_bytes,
             max_members=max_members,
             reserve_bytes=reserve_bytes,
             free_space=free_space,
             on_file=on_file,
+            policy=policy,
         )
         if expect_files is not None and result.files != expect_files:
             raise ArchiveRefused(ARCHIVE_UNREADABLE, "count", result.members)
@@ -179,9 +245,11 @@ def unpack_stream(
         if staging is not None:
             # The caller commits with a rename and then deletes the
             # ciphertext, so the files must be on disk before success.
-            os.sync()
+            flush_to_disk(staging, host_wide=policy.host_wide_sync)
         return result
-    except BaseException:
+    except BaseException as error:
+        if isinstance(error, ArchiveRefused):
+            error.member = header.member
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -194,31 +262,41 @@ def _blocks(size: int) -> int:
 def _unpack_into(
     stream: BinaryIO,
     staging: Path | None,
+    header: type[tarfile.TarInfo],
     *,
     max_bytes: int,
     max_members: int,
     reserve_bytes: int,
     free_space: Callable[[Path], int],
     on_file: Callable[[str, int, str], None] | None,
+    policy: ReadPolicy,
 ) -> UnpackResult:
     kinds: dict[tuple[str, ...], bool] = {(): True}  # path -> is a directory
+    # folded path -> the spelling that claimed it; None when the policy lets two spellings of a name coexist
+    spellings: dict[tuple[str, ...], tuple[str, ...]] | None = {} if policy.portable_paths else None
     directory_times: list[tuple[tuple[str, ...], float]] = []
     total = files = members = 0
     expected_offset = 0
-    header = _end_tracking_header()
     try:
-        archive = tarfile.open(fileobj=stream, mode="r|*", tarinfo=header)
+        # In stream mode `open` reads the first member's headers, so a refusal can arise here too.
+        archive = tarfile.open(fileobj=stream, mode=policy.mode, tarinfo=header)
+    except ArchiveRefused:
+        raise
     except Exception:  # noqa: BLE001 -- any parser failure is an unreadable archive
         raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", 0) from None
     with archive:
         while True:
+            header.member = None
             try:
                 member = archive.next()
+            except ArchiveRefused:
+                raise
             except Exception:  # noqa: BLE001 -- the message may quote archive content
                 raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", members + 1) from None
             if member is None:
                 break
             members += 1
+            header.member = member.name
             if members > max_members:
                 raise ArchiveRefused(ARCHIVE_TOO_LARGE, "members", members)
             # A member that does not start where the previous one ended means
@@ -242,7 +320,7 @@ def _unpack_into(
                 if kinds.get(parts) is False:
                     raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "duplicate", members)
                 with _filesystem_errors(members):
-                    _ensure_directory(staging, parts, kinds, members)
+                    _ensure_directory(staging, parts, kinds, members, spellings)
                 directory_times.append((parts, member.mtime))
                 continue
 
@@ -252,7 +330,8 @@ def _unpack_into(
             if total > max_bytes:
                 raise ArchiveRefused(ARCHIVE_TOO_LARGE, "bytes", members)
             with _filesystem_errors(members):
-                _ensure_directory(staging, parts[:-1], kinds, members)
+                _ensure_directory(staging, parts[:-1], kinds, members, spellings)
+                _claim_spelling(spellings, parts, members)
                 if staging is not None and member.size > free_space(staging) - reserve_bytes:
                     raise ArchiveRefused(STORAGE_ALLOWANCE_EXCEEDED, "space", members)
                 source = archive.extractfile(member)
@@ -274,18 +353,17 @@ def _unpack_into(
             # proves nothing is missing.
             raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members)
         try:
-            while chunk := archive.fileobj.read(_CHUNK):
-                if chunk.strip(tarfile.NUL):
-                    raise ArchiveRefused(ARCHIVE_UNREADABLE, "trailing", members)
+            _read_trailer(archive.fileobj, header.end_offset if policy.stop_after_end else None, members)
         except ArchiveRefused:
             raise
         except Exception:  # noqa: BLE001 -- a bad trailer is an unreadable archive
             raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members) from None
-    try:
-        while stream.read(_CHUNK):
-            pass  # a compressed stream's trailer; the decryptor must reach EOF
-    except OSError:
-        raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members) from None
+    if not policy.stop_after_end:
+        try:
+            while stream.read(_CHUNK):
+                pass  # a compressed stream's trailer; the decryptor must reach EOF
+        except OSError:
+            raise ArchiveRefused(ARCHIVE_UNREADABLE, "truncated", members) from None
     if staging is not None:
         for parts, mtime in sorted(directory_times, key=lambda item: len(item[0]), reverse=True):
             _set_mtime(staging.joinpath(*parts), mtime)
@@ -293,25 +371,65 @@ def _unpack_into(
     return UnpackResult(members=members, files=files, directories=directories, bytes=total)
 
 
-def _end_tracking_header() -> type[tarfile.TarInfo]:
-    """A `TarInfo` class that records where the end-of-archive block arrived."""
+def _read_trailer(stream: BinaryIO, end_offset: int | None, members: int) -> None:
+    """Require zeros after the end block: up to EOF, or with `end_offset` only up to `END_WINDOW_BYTES` past it."""
+
+    while True:
+        size = _CHUNK if end_offset is None else min(_CHUNK, end_offset + END_WINDOW_BYTES - stream.tell())
+        if size <= 0 or not (chunk := stream.read(size)):
+            return
+        if chunk.strip(tarfile.NUL):
+            raise ArchiveRefused(ARCHIVE_UNREADABLE, "trailing", members)
+
+
+class _HeaderReads:
+    """The stream as one header and its chained headers see it: all their reads together may ask for `limit` bytes."""
+
+    def __init__(self, stream: BinaryIO, limit: int) -> None:
+        self._stream = stream
+        self._left = limit
+
+    def read(self, size: int) -> bytes:
+        # `tarfile` reads a pax or long-name header whole and a sparse map block by block, as the archive declares.
+        self._left -= max(size, 0)
+        if self._left < 0:
+            raise ArchiveRefused(ARCHIVE_TOO_LARGE, "header")
+        return self._stream.read(size)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._stream, name)
+
+
+def _end_tracking_header(max_header_bytes: int | None = None) -> type[tarfile.TarInfo]:
+    """A `TarInfo` class that records where the end-of-archive block arrived, and bounds a header's size."""
 
     class _Header(tarfile.TarInfo):
         end_seen = False
         end_offset = -1
+        member: str | None = None  # the name of the member being checked; None between members
 
         @classmethod
         def fromtarfile(cls, source: tarfile.TarFile) -> tarfile.TarInfo:
             # An all-zero header block raises EOFHeaderError; a stream that
             # simply stops raises EmptyHeaderError. `TarFile.next` returns
             # None for both, so this is the only place they differ.
-            position = source.fileobj.tell()
+            stream = source.fileobj
+            position = stream.tell()
+            # `tarfile` parses the headers chained to this one by calling back into itself, through this method
+            # before Python 3.14 and past it from then on, so the first call alone owns the count.
+            counted = False
+            if max_header_bytes is not None and not isinstance(stream, _HeaderReads):
+                source.fileobj = _HeaderReads(stream, max_header_bytes)
+                counted = True
             try:
                 return super().fromtarfile(source)
             except tarfile.EOFHeaderError:
                 cls.end_seen = True
                 cls.end_offset = position
                 raise
+            finally:
+                if counted:
+                    source.fileobj = stream
 
     return _Header
 
@@ -327,7 +445,7 @@ def _filesystem_errors(index: int) -> Iterator[None]:
     except OSError as error:
         if error.errno in (errno.ENOSPC, errno.EDQUOT):
             raise ArchiveRefused(STORAGE_ALLOWANCE_EXCEEDED, "space", index) from None
-        if error.errno in (errno.ENAMETOOLONG, errno.EINVAL, errno.EILSEQ):
+        if error.errno in NAME_ERRNOS:
             raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "name", index) from None
         raise ArchiveRefused(IMPORT_STAGING_UNAVAILABLE, "write", index) from None
 
@@ -357,11 +475,24 @@ def _relative_parts(name: str, index: int) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def _claim_spelling(
+    spellings: dict[tuple[str, ...], tuple[str, ...]] | None, parts: tuple[str, ...], index: int,
+) -> None:
+    """Refuse a path that differs only in letter case from one already claimed."""
+
+    if spellings is None:
+        return
+    folded = tuple(part.casefold() for part in parts)
+    if spellings.setdefault(folded, parts) != parts:
+        raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "duplicate", index)
+
+
 def _ensure_directory(
     staging: Path | None,
     parts: tuple[str, ...],
     kinds: dict[tuple[str, ...], bool],
     index: int,
+    spellings: dict[tuple[str, ...], tuple[str, ...]] | None = None,
 ) -> None:
     for depth in range(1, len(parts) + 1):
         prefix = parts[:depth]
@@ -370,6 +501,7 @@ def _ensure_directory(
             continue
         if known is False:
             raise ArchiveRefused(ARCHIVE_MEMBER_REFUSED, "not_directory", index)
+        _claim_spelling(spellings, prefix, index)
         if staging is not None:
             directory = staging.joinpath(*prefix)
             os.mkdir(directory, 0o700)
