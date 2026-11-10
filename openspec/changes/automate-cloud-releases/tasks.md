@@ -27,12 +27,14 @@
   - Add an idempotent seed: every published release's cell image digest and tag, the live `cell_image` and `last_good_image`, and each cell's observed and desired images. A digest that matches no published release gets no tag.
   - Grant `cellctl`'s database role read access to the history table.
   - Refuse a deploy-token `PUT` whose digest the history holds, with `CELL_IMAGE_SEEN`.
+  - Refuse a deploy-token `PUT` whose release tag is older than the current `cell_image` tag, with `CELL_RELEASE_OLDER`.
   - Add `GET /api/exomem/admin/cloud-release/rollout`: `cell_image` and its tag, the pause and its code, `canary_on_target` from the canary row's observed image and readiness, and counts. No cell or tenant ID.
   - Narrow the deploy principal to the rollout view, and to `PUT` with `cellImage` and `release` alone.
   - Add a receiver capability that the alert receiver accepts only for the job `cloud-deploy`, with no missed-run schedule.
 
   Verify with route tests:
   - the deploy token with a digest that was `cell_image` before gets `CELL_IMAGE_SEEN`, and `cell_image` does not change, which catches a merge that re-deploys a withdrawn release;
+  - the deploy token with a skipped release older than the current `cell_image` tag gets `CELL_RELEASE_OLDER`, which catches a workflow bug that picks a release the platform gate once held;
   - after the seed, a deploy-token `PUT` with a release digest published before the history shipped gets `CELL_IMAGE_SEEN`, which catches a workflow bug that picks an older release on ship day;
   - a second seed run adds no row and changes no tag, which catches a re-seed at migration step 6 that rewrites history;
   - `cellctl`'s role can read the history table and cannot write it, which catches a forward-only rule that cannot map any image;
@@ -133,7 +135,7 @@
   - `cellctl` refuses to start without a threshold, which catches a deploy whose alerts are silently off.
 - [ ] 1.12 Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
   - an unattested digest sets nothing, which catches a pushed image that reaches the fleet;
-  - a `CELL_IMAGE_SEEN` answer ends the run as success with nothing set, which catches a red run on every merge after a withdrawal;
+  - a `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER` answer ends the run as success with nothing set, which catches a red run on every merge after a withdrawal;
   - a paused rollout sets nothing, and the run fails with the pause's code, which catches automation that resumes a paused fleet;
   - a chart template change since the platform Deployment sets nothing and raises `cloud-release-platform-needed`, which catches a cell image on a platform without its chart;
   - a change only to `infra/cellctl/tests/**` and Markdown files passes the gate, which catches a test-only release that waits for a person;

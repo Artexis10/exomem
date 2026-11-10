@@ -63,7 +63,7 @@ Each run acts only on the newest published release. Steps:
 3. Read the rollout view. If its `cell_image` equals the digest, set nothing and succeed.
 4. If the rollout is paused, set nothing, and fail with the pause's error code (D8).
 5. Apply the platform gate (D2) and the barrier check (D3).
-6. Send `PUT cloud-release` with `{cellImage, release}`, where `release` is the verified tag. If Substrate answers `CELL_IMAGE_SEEN`, the digest was `cell_image` before. The run then sets nothing, logs the code and succeeds.
+6. Send `PUT cloud-release` with `{cellImage, release}`, where `release` is the verified tag. If Substrate answers `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER`, the release is not newer than the fleet. The run then sets nothing, logs the code and succeeds.
 7. Poll the rollout view until its `canary_on_target` is true, which means that the canary runs the target and is Ready. Fail on a pause or on the poll timeout.
 
 The workflow prints error codes and counts only. It prints no cell ID, no tenant ID and no secret, because the repository's Actions logs are public. `cellctl`'s private log and the D8 alerts name the cell.
@@ -75,7 +75,7 @@ The workflow prints error codes and counts only. It prints no cell ID, no tenant
 - One concurrency group, without cancel-in-progress, serializes runs. GitHub replaces a pending run with a newer one. Each run reads the newest release, so the collapse loses nothing.
 - The poll interval and the poll timeout are repository variables.
 
-**Image history (Substrate).** Substrate records each digest the first time it becomes `cell_image`, with its release tag and the time. The deploy principal may set only a digest that the history does not hold. Substrate refuses any other request with `CELL_IMAGE_SEEN` and writes nothing.
+**Image history (Substrate).** Substrate records each digest the first time it becomes `cell_image`, with its release tag and the time. The deploy principal may set only a digest that the history does not hold. Substrate refuses any other request with `CELL_IMAGE_SEEN` and writes nothing. Substrate also refuses a deploy-token release whose tag is older than the current `cell_image` tag, with `CELL_RELEASE_OLDER`. This covers a release that published but never became `cell_image`, for example while the platform gate held it.
 - A rerun, a bug or a changed workflow on `main` therefore cannot move the fleet backwards.
 - After a person withdraws release N by setting `cell_image` back to A with the admin token, later merges cannot set N again. The next new release moves the fleet forward.
 - The admin token may set any digest. A new digest from either token carries its release tag, so that every row that a token writes maps a digest to a release (D3).

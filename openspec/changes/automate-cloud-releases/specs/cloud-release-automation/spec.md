@@ -30,12 +30,17 @@ The `cloud-deploy` workflow SHALL run when the release workflow succeeds on a re
 
 ### Requirement: Substrate never sets a digest twice for the deploy principal
 
-Substrate SHALL record each digest the first time it becomes `cell_image`, with its release tag and the time. Before the deploy principal can use the history, a seed SHALL add every published release's cell image digest and tag, the live `cell_image` and `last_good_image`, and each cell's observed and desired images. A seeded digest that matches no published release SHALL carry no tag. The history therefore holds every digest that was ever `cell_image`. Substrate SHALL refuse a deploy-token request whose digest the history holds, with `CELL_IMAGE_SEEN`, and SHALL write nothing. The admin token MAY set any digest. A request that sets a digest new to the history SHALL carry its release tag. cellctl's database role SHALL have read access to the history.
+Substrate SHALL record each digest the first time it becomes `cell_image`, with its release tag and the time. Before the deploy principal can use the history, a seed SHALL add every published release's cell image digest and tag, the live `cell_image` and `last_good_image`, and each cell's observed and desired images. A seeded digest that matches no published release SHALL carry no tag. The history therefore holds every digest that was ever `cell_image`. Substrate SHALL refuse a deploy-token request whose digest the history holds, with `CELL_IMAGE_SEEN`, and SHALL write nothing. Substrate SHALL also refuse a deploy-token request whose release tag is older than the tag of the current `cell_image`, with `CELL_RELEASE_OLDER`, and SHALL write nothing. This covers a release that published but never became `cell_image`. The admin token MAY set any digest. A request that sets a digest new to the history SHALL carry its release tag. cellctl's database role SHALL have read access to the history.
 
 #### Scenario: A release from before the history
 
 - **WHEN** the deploy token sends the digest of a release that published before the history shipped
 - **THEN** Substrate refuses it with `CELL_IMAGE_SEEN`, and `cell_image` keeps its value
+
+#### Scenario: A skipped older release is sent
+
+- **WHEN** the deploy token sends the digest of a release that never became `cell_image` and whose tag is older than the current `cell_image` tag
+- **THEN** Substrate refuses it with `CELL_RELEASE_OLDER`, and `cell_image` keeps its value
 
 #### Scenario: An old run is rerun
 
