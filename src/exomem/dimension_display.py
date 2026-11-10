@@ -376,7 +376,7 @@ def group_hits(hits: Sequence[Any], request: GroupRequest) -> Grouped:
 
     A hit is in full in the first requested group it belongs to, where it carries that group's key
     as `dimension` and its marks as `display`. Each later group it belongs to lists it as a ref
-    that names the group showing it. Grouping only orders and marks: the limit has already cut the
+    that names the group showing it, with that later group's marks. Grouping only orders and marks: the limit has already cut the
     hits, so every hit stays, and one in no group keeps its rank after the groups.
     """
     members: dict[str, list[int]] = {group.key: [] for group in request.groups}
@@ -404,12 +404,16 @@ def group_hits(hits: Sequence[Any], request: GroupRequest) -> Grouped:
             edges=request.edges,
             named=named,
         )
-        listed: list[dict[str, str]] = []
+        listed: list[dict[str, Any]] = []
         for position in view.order:
             i = indices[position]
             hit = hits[i]
             if i in shown:
-                listed.append({"unit_ref": hit.unit_ref, "shown_in": shown[i]})
+                # The ref carries this group's marks, so each mark the group counts is in the reply.
+                ref: dict[str, Any] = {"unit_ref": hit.unit_ref, "shown_in": shown[i]}
+                if view.marks[position]:
+                    ref["display"] = dict(view.marks[position])
+                listed.append(ref)
                 continue
             shown[i] = group.key
             hit.dimension = group.key

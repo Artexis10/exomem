@@ -364,10 +364,29 @@ def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the
     assert next(h for h in reply["hits"] if h["unit_ref"] == analysis)["dimension"] == "provenance"
     provenance, attribution = reply["dimension_groups"]
     assert {"unit_ref": analysis} in provenance["units"]
-    assert attribution["units"] == [{"unit_ref": analysis, "shown_in": "provenance"}]
+    origin = {"by": "Research team", "from": [context_refs.vault_ref(f"{NOTES}/Survey.md")]}
+    assert attribution["units"] == [
+        {"unit_ref": analysis, "shown_in": "provenance", "display": {"origin": origin}}
+    ]
     assert reply["user_summary"] == "2 units in 'Provenance'. 1 unit in 'Attribution'."
     assert [group["units"] for group in reply["pack"]["groups"]][1] == [analysis]
     assert list(_packed(reply)).count(analysis) == 1
+
+
+def test_a_ref_in_a_later_group_carries_the_marks_that_group_counts(tmp_path: Path) -> None:
+    """Catches a later group that counts a mark on a unit it lists only as a ref, so the reply
+    says a question is open while no unit in the reply carries `open`."""
+    vault = _display_vault(tmp_path)
+
+    reply = _search(vault, {"unit.dimension": {"$in": ["kind", "uncertainty"]}})
+
+    _kind, uncertainty = reply["dimension_groups"]
+    support = _ref("Questions", "support")
+    assert {"unit_ref": support, "shown_in": "kind", "display": {"open": True}} in (
+        uncertainty["units"]
+    )
+    shown_open = [unit for unit in uncertainty["units"] if unit.get("display") == {"open": True}]
+    assert len(shown_open) == uncertainty["open"] == 1
 
 
 def test_a_cycle_of_precedes_edges_keeps_the_date_order_and_names_the_conflict(
