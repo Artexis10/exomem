@@ -2442,7 +2442,9 @@ def test_upkeep_line_renders_whole_or_not_at_all() -> None:
     (line,) = _upkeep_lines(block)
     assert line.startswith("- upkeep (Facts about an entity live on other pages): Orbit Pump — ")
     assert "inspect_memory review.item_context" in line
-    assert "maintain_memory" in line
+    # The packet's route names a REST command, which an MCP agent cannot call; item_context returns the route.
+    assert "act through the route it returns" in line
+    assert "maintain_memory" not in line
     assert "decide_review_item dismiss|snooze on review_item qo5tgbx.rbs7" in line
     assert "triage_memory" not in line
     assert line.endswith("[exomem://review/upkeep/0123456789abcdef01234567]")

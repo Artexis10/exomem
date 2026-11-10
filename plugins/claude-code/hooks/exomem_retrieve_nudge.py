@@ -1598,8 +1598,9 @@ def _upkeep_lines(packet: dict) -> list[str]:
 
     The item line names its label, subject title and closed-template reason,
     then says how to handle it: read `inspect_memory` `review.item_context`
-    first, then act through the item's own route or dispose of it through
-    `decide_review_item`, which takes the item's short id. The ref ends the
+    first, then act through the route that it returns or dispose of the item through
+    `decide_review_item`, which takes the item's short id. The packet's own
+    route names a REST command, so the line never names it. The ref ends the
     line like every other, collapsed like the prose, so no field of the item
     can start a line of its own. It is the context route's upkeep ref, which
     `review.item_context` accepts; a link item's own ref is a relation ref that
@@ -1618,12 +1619,10 @@ def _upkeep_lines(packet: dict) -> list[str]:
         subject = item.get("subject") if isinstance(item.get("subject"), dict) else {}
         title = str(subject.get("title") or "").strip()
         why = str(item.get("why") or "").strip()
-        route = item.get("route") if isinstance(item.get("route"), dict) else {}
-        tool = str(route.get("tool") or "its route")
         item_id = " ".join(str(item.get("id") or "").split())
         text = (
-            f"{title} — {why}. Review with inspect_memory review.item_context, then act via {tool} "
-            f"or decide_review_item dismiss|snooze{f' on review_item {item_id}' if item_id else ''}."
+            f"{title} — {why}. Review with inspect_memory review.item_context, then act through the "
+            f"route it returns or decide_review_item dismiss|snooze{f' on review_item {item_id}' if item_id else ''}."
         )
         label = str(item.get("label") or "upkeep")
         context = item.get("context_route") if isinstance(item.get("context_route"), dict) else {}

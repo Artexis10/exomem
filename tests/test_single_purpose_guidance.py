@@ -379,7 +379,8 @@ def test_the_hook_counts_every_capture_write_and_no_read_of_the_surface() -> Non
     surface = public_surface.public_surface()
     stamped = set(public_surface.write_selectors())
     door_operations = [op for door in surface.doors.values() for op in door.values()]
-    calls = [(name, {}, name) for name in surface.tools] + [
+    # A decision on a review item saves only when it accepts a relation, so that call carries the decision.
+    calls = [(name, {"decision": "accept"} if name == "decide_review_item" else {}, name) for name in surface.tools] + [
         (op.door, {"operation": op.name}, f"{op.door}:{op.name}") for op in door_operations
     ]
     for tool, arguments, selector in calls:

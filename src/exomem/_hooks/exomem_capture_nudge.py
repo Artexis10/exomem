@@ -547,7 +547,10 @@ def _successful_kb_write(tool: dict) -> bool:
         f"{name}:{operation}".lower().endswith(write) for write in _KB_WRITES if ":" in write
     ):
         return False
-    # A preview validates the call and writes nothing.
+    # A preview validates the call and writes nothing. A dismissal, snooze or stance records a
+    # decision on a review item; only `accept` saves a relation.
+    if name.endswith("decide_review_item") and tool_input.get("decision") != "accept":
+        return False
     return tool_input.get("preview") is not True
 
 

@@ -1040,6 +1040,6 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
                  add={"decision": "accept"})],
           destructive=False, example={"review_item": "r5t2k8w.2pxa", "decision": "accept", "relation": "refines"},
           claims=(("triage_memory", "decision"), ("connect_memory", "accept-relation")),
-          # An accepted relation is a saved write; the capture hook reads no argument, so a dismissal counts with it.
+          # An accepted relation is a saved write; the capture hook counts this call only for `decision` accept.
           captures=True),
 )}

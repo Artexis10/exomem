@@ -238,3 +238,7 @@ def test_standalone_hooks_keep_the_public_names_in_step_with_the_registry() -> N
     # A read door and a preparation that writes nothing never count as a saved write.
     assert capture._successful_kb_write({"name": "mcp__exomem__inspect_memory", "input": {"operation": "sources.compile"}}) is False
     assert capture._successful_kb_write({"name": "mcp__exomem__manage_memory", "input": {"operation": "files.create"}}) is True
+    # A dismissal records a decision on a review item; only an accepted relation is a saved write.
+    review = {"name": "mcp__exomem__decide_review_item", "input": {"review_item": "r5t2k8w.2pxa", "decision": "dismiss"}}
+    assert capture._successful_kb_write(review) is False
+    assert capture._successful_kb_write({**review, "input": {**review["input"], "decision": "accept"}}) is True
