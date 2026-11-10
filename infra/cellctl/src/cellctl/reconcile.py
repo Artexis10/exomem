@@ -1269,10 +1269,16 @@ async def _sync_rollout_annotations(
         elif not behind and observation.statefulset_candidate_since is not None:
             changes[CANDIDATE_SINCE_ANNOTATION] = None
         if recompute(row, observation):
-            parsed = cell_readiness.traffic_history(histories[row.cell_id]) if row.cell_id in histories else None
             window: Window | None = None
-            if parsed is not None:
-                window = compute_window(row.cell_id, TrafficHistory(*parsed), now, window_config)
+            try:
+                parsed = cell_readiness.traffic_history(histories[row.cell_id]) if row.cell_id in histories else None
+                if parsed is not None:
+                    window = compute_window(row.cell_id, TrafficHistory(*parsed), now, window_config)
+            except Exception as error:  # noqa: BLE001 - one cell's answer never stops the fleet pass
+                # The error type only: the message could echo the cell's answer.
+                logger.error("cellctl: event=upgrade_window_failed cell %s: %s", row.cell_id,
+                             type(error).__name__)
+            if window is not None:
                 memory.history_retry_at.pop(row.cell_id, None)
             else:
                 if row.cell_id in addresses:
@@ -1875,6 +1881,7 @@ async def reconcile_once(
     )
     # add-cloud-media-store D8: each node runs a bounded number of exports at
     # once, counted from the exports that hold a slot (packing) at the pass start.
+    canary_id = owner_cell(non_deleted_rows).cell_id if non_deleted_rows else None
     packing_cells = await db.read_packing_export_cells(connection)
     export_slots = ExportSlots(config.export_concurrency_per_node, [
         _export_node(row, observations[row.cell_id]) for row in rows if row.cell_id in packing_cells])
@@ -1897,6 +1904,7 @@ async def reconcile_once(
                 start_backup=row.cell_id in backup_candidates,
                 start_relocation=row.cell_id in relocation_candidates,
                 crossing=crossing.get(row.cell_id, False),
+                canary=row.cell_id == canary_id,
                 is_render_digest_candidate=row.cell_id == render_digest_candidate,
                 refusal_parked=row.cell_id in parked,
                 memory=memory,
@@ -2615,6 +2623,7 @@ async def _reconcile_row(
     backup_listing=None,
     export_slots: ExportSlots | None = None,
     crossing: bool = False,
+    canary: bool = False,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -2852,6 +2861,7 @@ async def _reconcile_row(
         start_relocation=start_relocation,
         storage_room=storage_room,
         crossing=crossing,
+        canary=canary,
     )
     local = cluster_config.storage.local
     guarded = local is not None and local.reservations and (

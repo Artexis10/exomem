@@ -181,6 +181,50 @@ async def test_a_restarted_cellctl_resumes_the_attempt_with_its_pinned_target(ce
         await fleet.close()
 
 
+async def test_an_attempt_without_a_pin_that_has_not_applied_ends_on_its_current_image(
+        cell_db: CellDatabase) -> None:
+    # Catches an attempt started by a cellctl before the pin taking a cell_image the
+    # canary never ran.
+    fleet = await Fleet.start(cell_db, TENANT)
+    try:
+        await _set_cell_image(cell_db, IMAGE_B)
+        now = await fleet.finish(OWNER, await fleet.to_target_applied(OWNER, NOON))
+        await fleet.run(now)  # the canary's hold end is recorded
+        _observe(fleet.cluster, OWNER)
+        await fleet.run(now + timedelta(seconds=5))  # the tenant's attempt toward IMAGE_B starts
+        assert _annotations(fleet.cluster, TENANT)["exomem.io/hold"] == "upgrade"
+        await _set_cell_image(cell_db, IMAGE_C)
+        _observe(fleet.cluster, TENANT, statefulset_upgrade_target=None)
+
+        await fleet.run(now + timedelta(seconds=10))
+
+        statefulset = _statefulset(fleet.cluster, TENANT)
+        assert "exomem.io/hold" not in statefulset["metadata"]["annotations"]
+        assert (statefulset["spec"]["replicas"], _image(fleet.cluster, TENANT)) == (1, IMAGE_A)
+    finally:
+        await fleet.close()
+
+
+async def test_an_attempt_without_a_pin_that_has_applied_is_pinned_to_the_applied_image(
+        cell_db: CellDatabase) -> None:
+    # Catches an attempt started by a cellctl before the pin switching to a newer
+    # cell_image after its target ran.
+    fleet = await Fleet.start(cell_db, TENANT)
+    try:
+        await _set_cell_image(cell_db, IMAGE_B)
+        now = await fleet.finish(OWNER, await fleet.to_target_applied(OWNER, NOON))
+        now = await fleet.to_target_applied(TENANT, now)
+        await _set_cell_image(cell_db, IMAGE_C)
+        _observe(fleet.cluster, TENANT, statefulset_upgrade_target=None, pod_ready=False, ready_pod_image=None)
+
+        await fleet.run(now)
+
+        assert _image(fleet.cluster, TENANT) == IMAGE_B
+        assert _annotations(fleet.cluster, TENANT)["exomem.io/upgrade-target"] == IMAGE_B
+    finally:
+        await fleet.close()
+
+
 async def test_a_pause_restarts_a_stopped_cell_whose_target_was_not_applied(cell_db: CellDatabase) -> None:
     # Catches a paused rollout that keeps applying targets. The canary's own failure
     # paused the rollout while the tenant's attempt had stopped it for its backup.
@@ -393,6 +437,22 @@ async def test_an_unreadable_history_keeps_the_cached_window(cell_db: CellDataba
         await fleet.close()
 
 
+async def test_one_cells_unreadable_history_fails_neither_the_pass_nor_another_cells_window(
+        cell_db: CellDatabase) -> None:
+    # Catches one cell's answer stopping every reconcile pass fleet-wide.
+    far_future = json.dumps({"retention_hours": 672, "first_hour": "9999-12-31T23:00:00-01:00",
+                             "requests": [1], "observed_seconds": [3600]}).encode()
+    fleet = await Fleet.start(cell_db, TENANT, TENANT_2, config=ReconcileConfig(upgrade_window=WINDOWS),
+                              histories={TENANT: _history(WINDOW_HOUR, NOON), TENANT_2: far_future})
+    try:
+        await fleet.run(NOON)
+
+        assert _annotations(fleet.cluster, TENANT)["exomem.io/upgrade-window"] == f"{WINDOW_HOUR} history"
+        assert _annotations(fleet.cluster, TENANT_2)["exomem.io/upgrade-window"].endswith(" default")
+    finally:
+        await fleet.close()
+
+
 async def test_releases_on_three_days_upgrade_every_cell_that_shares_a_window(cell_db: CellDatabase) -> None:
     # Catches a due order that starves the same cells each day. Each window has room
     # for one attempt; three tenants share it, and a new release lands every day.
@@ -490,6 +550,31 @@ async def test_a_crossing_attempt_that_misses_ready_holds_for_a_person(cell_db: 
         annotations = _annotations(fleet.cluster, OWNER)
         assert annotations["exomem.io/upgrade-target"] == IMAGE_C
         assert annotations["exomem.io/previous-image"] == IMAGE_A
+        assert "exomem.io/upgrade-phase" not in annotations
+    finally:
+        await fleet.close()
+
+
+async def test_a_held_tenant_resumes_toward_its_canaried_target_after_a_person_clears_the_pause(
+        cell_db: CellDatabase) -> None:
+    # Catches a tenant that runs a cell_image before the canary does.
+    fleet = await Fleet.start(cell_db, TENANT, config=ReconcileConfig(upgrade_barriers=ONE_WAY_CELL))
+    try:
+        await _history_table(fleet.admin, {IMAGE_A: "v1.4.0", IMAGE_B: "v1.6.0", IMAGE_C: "v1.7.0"})
+        await _set_cell_image(cell_db, IMAGE_B)
+        now = await fleet.finish(OWNER, await fleet.to_target_applied(OWNER, NOON))
+        now = await fleet.to_target_applied(TENANT, now)
+        miss = now + ReconcileConfig().upgrade_ready_deadline + timedelta(minutes=1)
+        await fleet.run(miss)
+        assert _annotations(fleet.cluster, TENANT)["exomem.io/upgrade-phase"] == "forward-only-held"
+
+        await _set_cell_image(cell_db, IMAGE_C)
+        await fleet.admin.execute("UPDATE exomem_cloud_rollout SET paused = false, error_code = NULL")
+        _observe(fleet.cluster, OWNER, TENANT)
+        await fleet.run(miss + timedelta(hours=1))
+
+        annotations = _annotations(fleet.cluster, TENANT)
+        assert annotations["exomem.io/upgrade-target"] == IMAGE_B
         assert "exomem.io/upgrade-phase" not in annotations
     finally:
         await fleet.close()

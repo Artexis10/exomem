@@ -15,6 +15,7 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parents[1]
 BARRIERS = ROOT / "infra/contracts/upgrade-barriers-v1.json"
@@ -24,13 +25,16 @@ pytestmark = pytest.mark.reads_repository_docs
 
 
 def _anchors(markdown: str) -> set[str]:
-    """GitHub's heading anchors: lower case, punctuation dropped, spaces as hyphens."""
+    """GitHub's heading anchors. markdown-it-py finds the headings, so a `#` line in a
+    fenced block is not one; the slug is GitHub's documented rule: the heading's text
+    in lower case, punctuation dropped, spaces as hyphens."""
 
+    tokens = MarkdownIt("commonmark").parse(markdown)
     anchors = set()
-    for line in markdown.splitlines():
-        match = re.match(r"#{1,6}\s+(.*)", line)
-        if match:
-            anchors.add(re.sub(r"[^\w\- ]", "", match[1].strip().lower()).replace(" ", "-"))
+    for opening, inline in zip(tokens, tokens[1:], strict=False):
+        if opening.type == "heading_open":
+            text = "".join(child.content for child in inline.children or ())
+            anchors.add(re.sub(r"[^\w\- ]", "", text.strip().lower()).replace(" ", "-"))
     return anchors
 
 
@@ -61,6 +65,14 @@ def test_an_entry_whose_runbook_section_does_not_exist_fails() -> None:
     # Catches a barrier with no step that a person can follow.
     document = copy.deepcopy(_document())
     document["barriers"][0]["runbook"] = "docs/runbooks/cloud-platform-deploy.md#a-section-nobody-wrote"
+
+    assert any("does not exist" in error for error in barrier_errors(document))
+
+
+def test_an_entry_that_names_a_comment_in_a_code_block_fails() -> None:
+    # Catches a `#` comment in a fenced block that reads as a section heading.
+    document = copy.deepcopy(_document())
+    document["barriers"][0]["runbook"] = "docs/runbooks/cloud-node-pool.md#terraformtfvars-foundation"
 
     assert any("does not exist" in error for error in barrier_errors(document))
 
