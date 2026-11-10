@@ -701,6 +701,38 @@ def test_the_part_sweep_deletes_a_stored_surplus_part_in_a_run_and_only_names_it
     assert not (served / part).exists()
 
 
+def test_a_store_that_refuses_its_writer_keeps_a_surplus_part_in_a_retire_and_a_preview(
+    served, writer, monkeypatch
+):
+    """A retire that raises after the parent page committed, so the job retries a write that
+    landed, or a reconcile preview that fails, because the store refused its writer."""
+    vault_module.batch_atomic_write(
+        [
+            planned(
+                served,
+                RAW_SOURCE,
+                "---\ntitle: Minutes\ntype: source\nextraction_parts: 2\n---\n# Minutes\n\n"
+                f"{preserve._EXTRACTED_HEADING}\n\nFirst part.\n",
+                create_only=True,
+            )
+        ],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    part = stored_part(served, 3)
+    projector.Projector(served, run=lambda work: work(writer)).run_pass()
+    start = revision(served)
+    diverged = OpError("COLLECTION_STORE_DIVERGED", "the store and its pages differ", "Reconcile.")
+    monkeypatch.setattr(availability, "_write_state", lambda _root: (True, diverged))
+
+    assert extraction_parts.retire(served, (served / part,)) == (part,)
+    listed = extraction_parts.sweep(served, dry_run=True)
+
+    assert (listed.removed, listed.unowned) == ([], [part])
+    assert read.page_exists(served, part)
+    assert revision(served) == start
+
+
 def test_init_overlay_refuses_in_store_mode_and_replaces_nothing(served):
     """A forced init whose overlay copies the scaffold's log over a page that the store holds."""
     before = tree(served)

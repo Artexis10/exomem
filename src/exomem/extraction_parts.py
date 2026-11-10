@@ -26,6 +26,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from . import media_engines, media_types, memory_refs, preserve, runtime_resources, temporal
 from .governance import raw_protection
@@ -40,6 +41,9 @@ from .vault import (
     with_newline,
     yaml_scalar,
 )
+
+if TYPE_CHECKING:
+    from .collection_store.writer import CollectionWriter
 
 FOLDER_SUFFIX = ".parts"
 _PART_PREFIX = "part-"
@@ -279,27 +283,38 @@ def kept_note(kept: tuple[str, ...]) -> str:
     )
 
 
-def _kept_by_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
-    """The store-owned part pages among ``rels`` that a store run from this thread keeps.
+def _kept_by_store(
+    vault_root: Path, rels: list[str]
+) -> tuple[tuple[str, ...], CollectionWriter | None]:
+    """The store-owned part pages among ``rels`` that a store run from this thread keeps, and the
+    writer that deletes the others there (None off the store thread, where a run hops first).
 
-    Every one when no store commit can run from here: off the store thread with no service in this
-    process to hop to (an offline sweep), or on it with no writer bound. Otherwise each part that
-    the store does not hold: a file that nothing has imported, which the projector leaves in place
+    Every part is kept when no store commit can run: off the store thread with no service in this
+    process to hop to (an offline sweep), or on it when the store refuses the writer (a takeover
+    still pending, a recorded divergence, no writer bound). Otherwise each part that the store
+    does not hold is kept: a file that nothing has imported, which the projector leaves in place
     because it never projected it. The importer adopts it, and a later sweep deletes it. A dry run
     asks this too, so it names what a real run would keep.
     """
+    from .cli_ops import OpError
     from .collection_store import runtime
     from .vault_store import availability, read
     from .vault_store import media as store_media
 
+    writer = None
     if store_media.off_store_thread(vault_root):
         if not runtime.served(vault_root):
-            return tuple(rels)
-    elif availability.page_writer(vault_root) is None:
-        return tuple(rels)
+            return tuple(rels), None
+    else:
+        try:
+            writer = availability.page_writer(vault_root)
+        except OpError:
+            return tuple(rels), None
+        if writer is None:
+            return tuple(rels), None
     with read.snapshot(vault_root) as view:
         held = view.held_pages(rels)
-    return tuple(rel for rel in rels if rel not in held)
+    return tuple(rel for rel in rels if rel not in held), writer
 
 
 def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
@@ -310,7 +325,7 @@ def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
     stops before the hop, keeps every part. The caller logs the kept parts.
     """
     from .cli_ops import OpError
-    from .vault_store import availability, batch, projector, write
+    from .vault_store import batch, projector, write
     from .vault_store import media as store_media
 
     if store_media.off_store_thread(vault_root):
@@ -320,9 +335,8 @@ def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
             )
         except (OpError, projector.StoreNotServed):
             return tuple(rels)
-    kept = _kept_by_store(vault_root, rels)
+    kept, writer = _kept_by_store(vault_root, rels)
     deleted = [rel for rel in rels if rel not in kept]
-    writer = availability.page_writer(vault_root)
     if not deleted or writer is None:  # with no writer, `_kept_by_store` kept every part
         return kept
     try:
@@ -346,8 +360,9 @@ def retire(vault_root: Path, pages: tuple[Path, ...]) -> tuple[str, ...]:
     Returns the part pages it kept, as vault-relative paths. A part page that the store owns (the
     folder of a raw-marked page is not a dot folder) is deleted from the store, and the projector
     removes its file. A store that refuses, or that holds no page for a part yet, keeps it, and
-    the caller logs the kept parts with `kept_note`. A raise would report a failed write for a parent that already committed, and the
-    job would retry it. A part page in a dot folder is on disk and is removed.
+    the caller logs the kept parts with `kept_note`. A raise would report a failed write for a
+    parent that already committed, and the job would retry it. A part page in a dot folder is on
+    disk and is removed.
     """
     if not pages:
         return ()
@@ -743,7 +758,7 @@ def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
         # A part that the store keeps stays, and both runs name it with the unowned.
         if dry_run:
             owned = _store_owned_part_rels(root, removable)
-            kept = _kept_by_store(root, owned) if owned else ()
+            kept = _kept_by_store(root, owned)[0] if owned else ()
         else:
             kept = retire(root, tuple(surplus))
         result.unowned += list(kept)
