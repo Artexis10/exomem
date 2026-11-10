@@ -27,8 +27,9 @@ discarded or restored), and a write that declares none SHALL carry no
 `user_summary`. A replacement leads with the new page and names the old one after a comma. A
 result whose status is `replayed` (the effect was already in place) SHALL read
 "Already" plus the lower-cased verb. A refusal or a validation result SHALL carry
-no `user_summary`. `response_detail="full"`
-SHALL add the complete leaf result under `diagnostics`;
+no `user_summary`. Over MCP, the reply SHALL name each page after the egress release: the primary `path` is replaced by the page's `title` and short `id`, several pages by `pages`, each with `title` and `id`, and `user_summary` names each page by its title. A page that cannot be read as a Markdown page keeps its path, and a tool whose subject is a file keeps `path`. The CLI and REST projections keep `path`, and the stored terminal is unchanged. A scenario below that reads a path describes the stored terminal.
+`response_detail="full"` SHALL add the complete leaf result under `diagnostics`, and keeps the
+page's path under `diagnostics.operational`;
 `response_detail="legacy"` SHALL return the pre-change raw leaf result during
 the compatibility window.
 
@@ -64,6 +65,14 @@ the compatibility window.
 - **AND** a batch that stores nothing reads "Already saved -> <path> (<store name>)" or "Nothing saved; 1 file could not be saved (<store name>)", never "Saved"
 - **AND** a single file whose bytes were already stored reads "Already saved -> <path> (<store name>)"
 - **AND** a repeat request with the same idempotency key returns the same text
+
+#### Scenario: An MCP create reply names the page by title
+- **WHEN** a caller creates a page over MCP
+- **THEN** the reply carries `title` and `id`, no `path`, and `user_summary` reads "Saved -> <title> (<store name>)"
+
+#### Scenario: Full detail keeps the path
+- **WHEN** the same MCP write is requested with `response_detail="full"`
+- **THEN** `diagnostics.operational.path` holds the vault path
 
 #### Scenario: Pending is not failed
 

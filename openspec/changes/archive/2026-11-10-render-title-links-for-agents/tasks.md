@@ -14,4 +14,4 @@
 - [x] 4.1 Test each render branch, the inverse map, the refused cut, and the public tool shape end to end.
 
 ## 5. Delivery
-- [ ] 5.1 Archive this change after the rebase onto the merged tool-surface change.
+- [x] 5.1 Archive this change after the rebase onto the merged tool-surface change.
