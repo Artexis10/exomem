@@ -31,7 +31,7 @@ type: research-note
 project: harbour-ferry
 status: active
 created: 2026-01-05
-updated: 2026-02-01
+updated: 2026-03-14
 sources: []
 tags: [ferry]
 ---
@@ -137,8 +137,8 @@ exomem_id: 9e4c2b18-0d3a-5b77-a1c6-7f8e2d4a6c02
 type: research-note
 project: tool-shelf
 status: active
-created: 2026-02-10
-updated: 2026-02-10
+created: 2026-04-07
+updated: 2026-04-07
 sources: []
 tags: [shelf]
 ---
@@ -327,16 +327,16 @@ def answer(text: str) -> checks.Evidence:
 
 
 def test_all_of_needs_one_spelling_from_each_group_whatever_the_case() -> None:
-    spec = {"groups": [["15", "fifteen"], ["Deposit"]]}
-    assert checks.answer_has_all_of(spec, answer("The DEPOSIT is fifteen pounds.")).verdict == checks.PASS
-    assert checks.answer_has_all_of(spec, answer("The deposit is twelve pounds.")).verdict == checks.FAIL
+    spec = {"groups": [["42", "forty-two"], ["Telescope"]]}
+    assert checks.answer_has_all_of(spec, answer("The TELESCOPE loan lasts forty-two nights.")).verdict == checks.PASS
+    assert checks.answer_has_all_of(spec, answer("The telescope loan lasts thirty nights.")).verdict == checks.FAIL
 
 
 def test_in_order_fails_a_missing_group_and_a_wrong_order_and_malformed_groups_are_unknown() -> None:
-    spec = {"groups": [["opened"], ["insurance"], ["donated", "hand tools"]]}
-    assert checks.answer_in_order(spec, answer("It opened, then insurance, then tools were donated.")).verdict == checks.PASS
-    assert checks.answer_in_order(spec, answer("Insurance came first, then it opened, then tools were donated.")).verdict == checks.FAIL
-    assert checks.answer_in_order(spec, answer("It opened and insurance followed.")).verdict == checks.FAIL
+    spec = {"groups": [["built"], ["repainted"], ["relit", "new lens"]]}
+    assert checks.answer_in_order(spec, answer("The lighthouse was built, then repainted, then relit.")).verdict == checks.PASS
+    assert checks.answer_in_order(spec, answer("It was repainted first, then built, then given a new lens.")).verdict == checks.FAIL
+    assert checks.answer_in_order(spec, answer("It was built and later repainted.")).verdict == checks.FAIL
     assert checks.answer_in_order({"groups": []}, answer("anything")).verdict == checks.UNKNOWN
 
 
