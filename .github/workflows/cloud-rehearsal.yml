@@ -15,9 +15,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook."
         type: choice
-        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import]
+        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, original-fixity]
         default: full
       large_import_files:
         description: "large-import only: files in both folders (default 70000). The byte total shrinks before the count does."
@@ -31,6 +31,14 @@ on:
         description: "large-import only: accept data too small to prove the volume claim; the verdict is then smoke_only, never pass."
         type: boolean
         default: false
+      original_fixity_originals:
+        description: "original-fixity only: stored originals to seed (default 1000)."
+        type: string
+        default: ""
+      original_fixity_mean_kib:
+        description: "original-fixity only: mean original size in KiB, exponentially distributed (default 512). Originals times mean stays within 2 GiB."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -105,8 +113,14 @@ jobs:
           COEXISTENCE: ${{ inputs.mode == 'full-coexistence' && '--local-storage-coexistence' || '' }}
           RESTORE_ABORT: ${{ inputs.mode == 'operator-restore-abort' && '--operator-restore-abort --steps 1,2 --harness-check' || '' }}
           OWNER_EXPORT: ${{ inputs.mode == 'owner-export' && '--owner-export --steps 1,2 --harness-check' || '' }}
+          ORIGINAL_FIXITY: ${{ inputs.mode == 'original-fixity' && '--original-fixity' || '' }}
+          ORIGINAL_FIXITY_ORIGINALS: ${{ inputs.mode == 'original-fixity' && inputs.original_fixity_originals || '' }}
+          ORIGINAL_FIXITY_MEAN_KIB: ${{ inputs.mode == 'original-fixity' && inputs.original_fixity_mean_kib || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} ${ORIGINAL_FIXITY} \
+            ${ORIGINAL_FIXITY_ORIGINALS:+--original-fixity-originals "$ORIGINAL_FIXITY_ORIGINALS"} \
+            ${ORIGINAL_FIXITY_MEAN_KIB:+--original-fixity-mean-kib "$ORIGINAL_FIXITY_MEAN_KIB"} \
+            --report "${RUNNER_TEMP}/cloud-rehearsal-report.json"
       - name: Summarize the report
         if: always()
         run: |

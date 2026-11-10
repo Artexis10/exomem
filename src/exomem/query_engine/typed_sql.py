@@ -31,7 +31,7 @@ class CompiledRows:
 
 def text_predicate(op: str, payload: str, value: str) -> bool:
     """Caller-registered exomem_typed_text UDF; Unicode compatibility is shared."""
-    if op not in {"contains", "icontains", "startswith"}:
+    if op not in ir.TEXT_OPS:
         raise ValueError("unsupported string predicate")
     actual = bytes.fromhex(payload).decode("utf-8")
     return match({"value": actual}, {"column": "value", "op": op, "value": value})
@@ -178,13 +178,13 @@ def _compile_legacy(query, projection, *, instant, after):
                 return f"{operand}{operator}{bind(value)}"
             return f"({tag}={bind(key_tag)} AND {operand}{operator}{bind(key)})"
 
-        if node.op in {"is_null", "is_missing", "is_not_null"}:
+        if node.op in ir.NULL_STATE_OPS:
             return f"({rank}={ {'is_null': 1, 'is_missing': 2, 'is_not_null': 0}[node.op]})"
-        if node.op in {"exists", "missing"}:
+        if node.op in ir.PRESENCE_OPS:
             nonempty = f"{payload}<>''" if tag is None else f"NOT ({tag} IN ({STRING_TAG},{LINK_TAG}) AND {payload}='')"
             exists = f"({present} AND {nonempty})"
             return exists if node.op == "exists" else f"(NOT {exists})"
-        if node.op in {"contains", "icontains", "startswith"}:
+        if node.op in ir.TEXT_OPS:
             residual = True
             encoded = f"hex(CAST({payload} AS BLOB))" if tag is None else payload
             return f"({present} AND exomem_typed_text({bind(node.op)},{encoded},{bind(node.value)}))"

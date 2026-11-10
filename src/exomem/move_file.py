@@ -65,6 +65,7 @@ from .vault import (
     walk_vault_md,
     write_log_entry,
 )
+from .vault_store import targets as store_targets
 
 log = logging.getLogger(__name__)
 
@@ -471,6 +472,15 @@ def _move_file_local(
     caller's own registry updates commit with the move or not at all.
     A caller's binding witness is checked before rename and batch publication.
     """
+    # The semantic preflight below judges a move against the pages on disk, and a store-mode vault
+    # holds a page there only once its projector writes it; the store move waits for that.
+    store_targets.refuse_unrouted(
+        vault_root,
+        "move_file",
+        "its semantic contract check reads pages from disk, where a store-mode vault holds a page "
+        "only after its projector writes it",
+        files=(old_path, new_path),
+    )
     stored_original = None
     try:
         old_abs, old_rel = resolve_under_vault(

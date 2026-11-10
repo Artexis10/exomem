@@ -419,6 +419,7 @@ def test_planning_inspection_uses_its_exact_typed_egress_envelope(tmp_path: Path
         "saved_views",
         "presentation",
         "lifecycle_guards",
+        "references",
     }
     assert set(result["contract"]) == {
         "collection_id",

@@ -145,7 +145,7 @@ def test_watcher_gate_decoupled_from_embeddings(vault, monkeypatch):
     started: list[str] = []
 
     class _FakeWatcher:
-        def __init__(self, root):
+        def __init__(self, root, importer=None):
             self._root = root
 
         def start(self):

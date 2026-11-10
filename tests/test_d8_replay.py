@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from test_recent_promotions import _as
+from test_relation_endpoints import _page_path
 from test_undeclared_referents import _committed, _served_with_graph
 
 from exomem import (
@@ -65,13 +66,13 @@ def _isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     due_state.reset_emission_state()
 
 
-def _remember(call, title: str, body: str) -> dict:
+def _remember(call, title: str, body: str, **extra) -> dict:
     """Commit one note through the validate-then-commit door, as a client does."""
     arguments = {"title": title, "note_type": "insight", "content": body}
     draft = call("remember", {**arguments, "validate_only": True})
     return _committed(call, "remember", {
         **arguments, "draft_id": draft["draft_id"], "draft_hash": draft["draft_hash"],
-        "draft_token": draft["draft_token"],
+        "draft_token": draft["draft_token"], **extra,
     }, draft["draft_hash"])
 
 
@@ -124,11 +125,11 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
     _as(monkeypatch, "seed")
     person = call("change_connections", {"operation": {
         "kind": "create-entity", "entity_type": "person", "name": PERSON, "summary": PERSON_SUMMARY,
-    }})
+    }, "response_detail": "full"})
     harbour = call("change_connections", {"operation": {
         "kind": "create-entity", "entity_type": "concept", "name": HARBOUR,
         "summary": "A synthetic harbour on the east coast.",
-    }})
+    }, "response_detail": "full"})
     _remember(call, "Winter berth", (
         f"## Observations\n\n- [finding] {PERSON} asked the harbour office at [[{HARBOUR}]] "
         "about a winter berth.\n"
@@ -149,7 +150,7 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
         "not seen again.\n"
         f"- [finding] The harbour held an [[{ONE_OFF_TWIN}]] on the day of the refit and has not "
         "repeated it.\n"
-    ))
+    ), response_detail="full")
     listed = {item["name"]: item for item in turn["undeclared_referents"]["names"]}
     assert set(listed) == {BOAT, INCIDENTAL_TWIN, ONE_OFF_TWIN}, (
         "the block lists the three unpaged names and neither existing entity", turn
@@ -168,11 +169,11 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
         route = listed[name]["route"]
         created[name] = call(route["tool"], {"operation": {
             **route["args"]["operation"], **plan,
-            "relations": [{"kind": "located_at", "target": harbour["path"].removesuffix(".md")}],
-        }})
+            "relations": [{"kind": "located_at", "target": _page_path(harbour).removesuffix(".md")}],
+        }, "response_detail": "full"})
         assert "error" not in created[name], created[name]
-    boat_path = created[BOAT]["path"]
-    _author_edge(call, person["path"], PERSON_SUMMARY, f"- owns [[{boat_path.removesuffix('.md')}]]")
+    boat_path = _page_path(created[BOAT])
+    _author_edge(call, _page_path(person), PERSON_SUMMARY, f"- owns [[{boat_path.removesuffix('.md')}]]")
 
     _publish(vault)
 
@@ -190,7 +191,7 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
         "kind": "context", "path": boat_path.removesuffix(".md"),
     }})
     turn_context = call("read_connections", {"operation": {
-        "kind": "context", "path": turn["path"].removesuffix(".md"),
+        "kind": "context", "path": _page_path(turn).removesuffix(".md"),
     }})
     notice = call("bootstrap", {"section": "epistemics"})["due_state"]
     promotions = review_state.ReviewStateStore(vault).load()["promotions"].values()

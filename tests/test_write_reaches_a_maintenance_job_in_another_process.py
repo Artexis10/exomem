@@ -99,7 +99,8 @@ def test_a_write_behind_a_drain_thread_commits_while_a_job_in_another_process_ho
     assert "MUTATION_BUSY" not in str(note), note
     assert [row for row in _journal(logs) if row["error_code"] == "MUTATION_BUSY"] == []
     assert _busy_total() == busy_before
-    assert "error" not in note and note.get("path"), note
+    assert "error" not in note and note.get("id"), note
+    assert note["title"] == "Agent write behind a drain thread", note
     assert note["elapsed"] < CAPTURE_WAIT_SECONDS, note["elapsed"]
     assert drained == ["held"]
     written = [

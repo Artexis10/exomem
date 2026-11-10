@@ -139,7 +139,7 @@ def list_directory(
         resolved_path = ""
     else:
         try:
-            resolution = resolve_under_vault(vault_root, path, must_exist=True, return_details=True)
+            resolution = _resolve_folder(vault_root, path, return_details=True)
         except VaultPathError as e:
             raise ListDirectoryError(code=e.code, reason=e.reason) from e
         assert isinstance(resolution, VaultPathResolution)
@@ -163,9 +163,7 @@ def list_directory(
                 code="NOT_FOUND", reason=f"path does not exist: {rel_path}"
             )
         try:
-            _target_abs, rel_path = resolve_under_vault(
-                vault_root, path, must_exist=True, must_be_dir=True
-            )
+            _target_abs, rel_path = _resolve_folder(vault_root, path, must_be_dir=True)
         except VaultPathError as e:
             raise ListDirectoryError(code=e.code, reason=e.reason) from e
 
@@ -247,11 +245,29 @@ def list_directory(
         for held_entry in held_entries
         # A page's entries were decided while it was chosen.
         if limit is not None
-        or listed(held_entry.relative_path, held_entry.identity.kind == "directory")
+        or listed(held_entry.relative_path, held_entry.kind == "directory")
     ]
     entries.sort(key=lambda e: entry_sort_key(e.type, e.path))
 
     return ListDirectoryResult(path=rel_path, entries=entries, truncated=truncated)
+
+
+def _resolve_folder(vault_root: Path, path: str, **options):
+    """``resolve_under_vault`` for a folder that must exist: the store's folders exist as well as
+    the disk's.
+    """
+    from .vault_store import read
+
+    try:
+        return resolve_under_vault(vault_root, path, must_exist=True, **options)
+    except VaultPathError as error:
+        if error.code != "NOT_FOUND":
+            raise
+        found = resolve_under_vault(vault_root, path, return_details=True)
+        assert isinstance(found, VaultPathResolution)
+        if not read.holds_folder(vault_root, found.resolved_relative):
+            raise
+        return resolve_under_vault(vault_root, path, **options)
 
 
 def _listable(parts: list[str], include_hidden: bool) -> bool:
@@ -280,7 +296,9 @@ def _withheld_target(
     walk stops at the first visible one.
     """
     if is_dir is None:
-        is_dir = (Path(vault_root) / rel_path).is_dir()
+        from .vault_store import read
+
+        is_dir = (Path(vault_root) / rel_path).is_dir() or read.holds_folder(vault_root, rel_path)
     if not is_dir:
         return not keep(rel_path)
     cached = collapsed.get(rel_path)
@@ -314,7 +332,7 @@ def _withheld_target(
 def _entry_for_held(
     entry: reserved_paths.GenericTreeEntry, rel_path: str
 ) -> DirectoryEntry:
-    is_dir = entry.identity.kind == "directory"
+    is_dir = entry.kind == "directory"
     updated: str | None = None
     fm_type: str | None = None
 

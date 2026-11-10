@@ -11,9 +11,15 @@ and expiry, never a bearer), purpose, the exact source receipt (path, SHA-256,
 size), the target's store and declaration lineage, and the declared mapping.
 Before each batch, and again inside the batch transaction, it re-resolves that
 principal's authority from a fresh snapshot; a loss rolls the batch back and
-pauses the job as ``partial``/``authority_lost``. Ambient service or owner
-authority never imports for a job, another principal never inherits a job, and
-expiry is renewed only by the bound principal's explicit continuation. A batch is
+pauses the job as ``partial``/``authority_lost``. The bound login stays valid
+past its first access token (openspec ``import-job-login-grant``): only the end
+of the login ends the job, and a session store that cannot be read pauses it as
+``store_unavailable``, never as a loss. The deadlines are a governance
+authorization session's expiry and, where the service cannot recheck a login
+without a live request, a one-hour window; each pauses the job as ``time_cap``.
+Ambient service or owner authority never imports for a job, another principal
+never inherits a job, and a deadline is renewed only by the bound principal's
+explicit continuation. A batch is
 one ordinary writer transaction (``bulk_upsert_records``) whose checkpoint,
 counters and rejections commit with its rows, so a crash or retry can neither skip
 nor repeat effects. A state change that commits no rows (start, pause, resume,
@@ -52,7 +58,7 @@ from .. import __version__, archive_members, auth_sessions, item_keys, records, 
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
-from ..query_engine import scalars
+from ..query_engine import reference_report, scalars
 from . import (
     connection,
     derived_rows,
@@ -79,6 +85,10 @@ MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
 PREVIEW_ROWS = 100
 JOB_WINDOW_SECONDS = 3600
+# A job paused because the session store was unreadable retries after this many seconds, doubling per
+# consecutive failure up to the cap: each retry can wait out the store's own timeout.
+UNREADABLE_RETRY_SECONDS = 30.0
+UNREADABLE_RETRY_MAX_SECONDS = 300.0
 MAX_REQUEST_BYTES = 16 << 10
 MAX_MAPPED_FIELDS = 64
 MAX_LISTED_MEMBERS = 256
@@ -96,9 +106,10 @@ _JOB_TOKEN = re.compile(r"import-job:([0-9a-f]{32})")
 _BOM = b"\xef\xbb\xbf"
 _START = {"row": 0, "byte": 0, "state": {}}
 _RESUMABLE = ("authority_lost", "time_cap")
+_SESSION_STORE = "IMPORT_SESSION_STORE_UNAVAILABLE"
 # Fixed writer/store protocol refusals a later tick outlives; other batch errors fail the job.
 _STORE_STATE = frozenset(
-    {"MUTATION_BUSY", takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST}
+    {"MUTATION_BUSY", takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
 )
 
 
@@ -202,12 +213,13 @@ def contract() -> dict[str, Any]:
         "states": {
             "running": (
                 "batches continue in the store writer; authority is current, or unverified "
-                "until this host re-proves the source bytes"
+                "until this host re-proves the source bytes or can read the session store"
             ),
             "partial": (
-                "paused: authority_lost or time_cap until continued, cancelled for good, or "
-                "store_unavailable until the store accepts writes again. Status checks a "
-                "running job afresh and reports the pause its next batch would record"
+                "paused: authority_lost (the login or access ended) or time_cap until continued, "
+                "cancelled for good, or store_unavailable until the store accepts writes or the "
+                "session store can be read again. Status checks a running job afresh and reports "
+                "the pause its next batch would record"
             ),
             "failed": "invalid_row under on_invalid stop, or batch_error; earlier batches stay",
             "complete": "the whole source was consumed",
@@ -217,8 +229,15 @@ def contract() -> dict[str, Any]:
             "depth": MAX_DEPTH,
             "batch_rows": MAX_BATCH_ROWS,
             "batch_bytes": MAX_BATCH_BYTES,
-            "window_seconds": JOB_WINDOW_SECONDS,
         },
+        "run_window": (
+            "a job runs until it finishes while the login that started it stays valid, and status shows "
+            "no expires_at for it. Two limits end a job early with time_cap, and status shows each as "
+            "expires_at: a job whose login the service cannot recheck without a live request (stdio, CLI, "
+            f"library or a Cloud cell) stops after {JOB_WINDOW_SECONDS} seconds, and a job bound to a "
+            "governance authorization session stops at that session's expiry, at most one hour. A "
+            "continuation resumes a job paused by time_cap"
+        ),
     }
 
 
@@ -301,6 +320,16 @@ def _ordered_location_keys(writer, manifest, request: _Request) -> list[str]:
 
 class _Lost(Exception):
     """Authority, source release or lineage no longer holds; the batch must not commit."""
+
+
+class _Unreadable(Exception):
+    """The session store could not be read, so the bound login is unverified; the batch must not commit.
+
+    It carries a store-state code: the job takes the host-local ``store_unavailable`` pause and
+    retries, since nothing shows that the login ended.
+    """
+
+    code = _SESSION_STORE
 
 
 # Request envelope
@@ -2145,6 +2174,49 @@ def _iso(timestamp: int) -> str:
     return dt.datetime.fromtimestamp(timestamp, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_WINDOW, _SESSION = "window", "authorization_session"
+
+
+def _message(state: str, reason: str | None, deadline: tuple[int, str] | None) -> str | None:
+    """What an agent repeats to the person: a running job without a deadline, and each pause the job's own limits cause."""
+    if state == "running" and deadline is None:
+        return "This import runs until it finishes, while the login that started it stays valid."
+    if reason == "authority_lost":
+        return (
+            "The login or access that started this import ended. A continuation from a current login "
+            "resumes it from the same row."
+        )
+    if reason == "store_unavailable":
+        return "The store could not be reached just now. The import resumes on its own once it can."
+    if reason == "time_cap":
+        what = (
+            "The authorization session that started this import expired."
+            if deadline is not None and deadline[1] == _SESSION
+            else "This import's one-hour run window ended."
+        )
+        return f"{what} A continuation resumes it from the same row."
+    return None
+
+
+def _deadline(job: _Job) -> tuple[int, str] | None:
+    """When this job's run must end and which limit says so, or None while only its login limits it.
+
+    A bound governance authorization session ends the job at its own expiry. The fixed window
+    applies only where the service cannot recheck the login without a live request.
+    """
+    ends = []
+    if job.binding["principal"]["session"] is not None:
+        ends.append((job.binding["principal"]["session"]["expires_at"], _SESSION))
+    if not auth_sessions.origin_revalidates_in_background(job.principal()):
+        ends.append((job.window_expires, _WINDOW))
+    return min(ends, default=None)
+
+
+def _deadline_passed(job: _Job) -> bool:
+    deadline = _deadline(job)
+    return deadline is not None and _now() >= deadline[0]
+
+
 def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     progress, checkpoint = job.progress, job.checkpoint
     if job.state == "running" and derived_rows.is_derived(writer.connection, job.collection_id):
@@ -2160,6 +2232,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     ]
     state, reason, error = job.state, job.reason, progress["error"]
     checked = {}
+    deadline = _deadline(job)
     blocked = writer.handle.import_blocked.get(job.id) if state == "running" else None
     if blocked is not None:
         # The store refuses writes, so this pause is host-local; a later tick resumes.
@@ -2170,7 +2243,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
             "row": checkpoint["row"],
             "byte": checkpoint["byte"],
         }
-    elif state == "running" and _now() >= job.window_expires:
+    elif state == "running" and _deadline_passed(job):
         state, reason = "partial", "time_cap"
     elif state == "running":
         checked["authority"] = _verdict(writer, job)
@@ -2183,7 +2256,15 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         position.update(member=checkpoint["member"], member_row=checkpoint["member_row"])
     if "members" in bound:
         exported["members"] = {"selected": len(bound["members"]["sha256"]), **progress["members"]}
+    message = _message(state, reason, deadline)
+    if deadline:
+        limit = {"expires_at": _iso(deadline[0])}
+    elif state == "running":
+        limit = {"runs_while": "login_active"}
+    else:
+        limit = {}
     return {
+        **({"message": message} if message is not None else {}),
         "mode": mode,
         **extra,
         **checked,
@@ -2207,12 +2288,33 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
             "total": bound["members"]["bytes"] if "members" in bound else bound["bytes"],
         },
         "batches": progress["batches"],
-        "window": {"started_at": _iso(job.window_started), "expires_at": _iso(job.window_expires)},
+        "window": {
+            "started_at": _iso(job.window_started),
+            **limit,
+        },
         "next_position": position,
         "last_receipt": progress["last_receipt"],
         "rejections": rejections,
         "error": error,
+        **_reference_report(writer, job, state),
     }
+
+
+def _reference_report(writer, job: _Job, state: str) -> dict:
+    """On completion, a non-derived job reports its declared references' resolution.
+
+    The check reads under the caller's own admission and never fails the status call.
+    """
+    if state != "complete":
+        return {}
+    try:
+        _, manifest, _ = writer._collection(job.collection_id)
+    except collections.CollectionError:
+        return {}  # the status call itself reports a collection the caller can no longer read
+    if manifest.derived or not collections.declared_references(manifest.schema):
+        return {}
+    report = reference_report.check_collection(writer.root, writer.handle.path, job.collection_id)
+    return {"reference_check": report, "warnings": reference_report.warnings(report)}
 
 
 @contextmanager
@@ -2229,19 +2331,23 @@ def _snapshot(writer):
 def _grant(writer, job: _Job, operation) -> None:
     """The bound principal's authority now, short of proving the source bytes; else _Lost.
 
-    The checks are a live (never extended) session, the collection's complete-state
-    mutation rule, the bound store and declaration (``_holds``) and release of the
-    exact bound source digest.
+    The checks are the bound login (``origin_login_state``: its access token's own
+    expiry does not count), a live (never extended) authorization session, the
+    collection's complete-state mutation rule, the bound store and declaration
+    (``_holds``) and release of the exact bound source digest. A session store that
+    cannot be read raises ``_Unreadable``, but only after every other check, so a
+    definite loss is never reported as an unreadable store.
     """
     bound = job.binding
-    if not auth_sessions.origin_session_active_sync(job.principal()):
+    login = auth_sessions.origin_login_state_sync(job.principal())
+    if login is auth_sessions.OriginLogin.NOT_VALID:
         raise _Lost
     issuer = bound["principal"]["issuer_family"]
     if issuer and issuer.startswith("cloud-cell:"):
         if not principal_module.cloud_owner_binding_matches(issuer.removeprefix("cloud-cell:")):
             raise _Lost
     session = bound["principal"]["session"]
-    if session is not None and _now() > session["expires_at"]:
+    if session is not None and _now() >= session["expires_at"]:
         raise _Lost
     if not _owns(operation.who, job):
         raise _Lost
@@ -2256,6 +2362,8 @@ def _grant(writer, job: _Job, operation) -> None:
     source = bound["source"]
     if not operation.allows_file(source["ref"], content_sha256=source["sha256"]):
         raise _Lost
+    if login is auth_sessions.OriginLogin.UNREADABLE:
+        raise _Unreadable
 
 
 def _authorize(writer, job: _Job, *, prove: bool) -> Source:
@@ -2301,6 +2409,8 @@ def _verdict(writer, job: _Job) -> str:
         proof.guard.recheck(writer.root)
     except (_Lost, vault.PathGuardError):
         return "lost"
+    except _Unreadable:
+        return "unverified"
     except Exception:  # noqa: BLE001 - an unreadable check is reported, not guessed
         log.warning("import job authority check failed", exc_info=True)
         return "unverified"
@@ -2804,10 +2914,21 @@ def _settle_alone(root: Path, writer, job: _Job, batch: Batch, guards, **settled
     return "paused" if batch.stop is not None else "batch"
 
 
+def _unblock(writer, job_id: str) -> None:
+    writer.handle.import_blocked.pop(job_id, None)
+    writer.handle.import_retry.pop(job_id, None)
+
+
+def _backing_off(writer, job_id: str) -> bool:
+    """Whether a job whose login could not be checked waits out its retry delay."""
+    retry = writer.handle.import_retry.get(job_id)
+    return retry is not None and time.monotonic() < retry[0]
+
+
 def _forget(writer, job_id: str) -> None:
     """Drop a job's host-local proof, open reader and store block once it stops running."""
     _proofs(writer).pop(job_id, None)
-    writer.handle.import_blocked.pop(job_id, None)
+    _unblock(writer, job_id)
     reader = writer.handle.import_readers.pop(job_id, None)
     if reader is not None:
         reader.close()
@@ -2892,15 +3013,16 @@ def _step(root: Path, writer, job_id: str) -> str:
     job = _load(writer.connection, job_id)
     if job is None or job.state != "running":
         return "idle"
-    if _now() >= job.window_expires:
+    if _deadline_passed(job):
         return _pause(root, writer, job, "time_cap")
     with principal_module.request_scope(job.principal()):
         outcome = _batch(root, writer, job)
     if outcome == "authority_lost":
-        return _pause(root, writer, job, "authority_lost")
+        # A batch that straddled its deadline lost its grant to the clock, not to a revocation.
+        return _pause(root, writer, job, "time_cap" if _deadline_passed(job) else "authority_lost")
     if outcome == "deferred":
         return outcome  # a derived collection's rebuild, or another job's open member, holds it
-    writer.handle.import_blocked.pop(job.id, None)
+    _unblock(writer, job.id)
     if outcome == "staged":
         return "batch"  # a derived batch commits its rows and progress outside the store
     settled = _load(writer.connection, job.id)
@@ -3174,6 +3296,13 @@ def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exceptio
     code = getattr(error, "code", None)
     if code in _STORE_STATE:
         writer.handle.import_blocked[job_id] = code
+        if code == _SESSION_STORE:
+            failures = writer.handle.import_retry.get(job_id, (0.0, 0))[1] + 1
+            delay = min(UNREADABLE_RETRY_SECONDS * 2 ** (failures - 1), UNREADABLE_RETRY_MAX_SECONDS)
+            writer.handle.import_retry[job_id] = (time.monotonic() + delay, failures)
+        else:
+            # The session store answered, so its backoff restarts from the first delay (design D2).
+            writer.handle.import_retry.pop(job_id, None)
         return
     if not isinstance(code, str) or not isinstance(
         error, (collections.CollectionError, connection.CollectionStoreError)
@@ -3218,16 +3347,29 @@ def run_jobs(
 def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) -> dict[str, int]:
     summary = {"batches": 0, "paused": 0, "deferred": 0, "errors": 0}
     running = [
-        row[0]
-        for row in writer.connection.execute(
-            "SELECT job_id FROM import_jobs WHERE state='running' ORDER BY created_at, job_id"
+        (created, job_id)
+        for created, job_id in writer.connection.execute(
+            "SELECT created_at, job_id FROM import_jobs WHERE state='running' ORDER BY created_at, job_id"
         )
     ]
-    for job_id in running:
-        # The deadline bounds further batches, not the first: a stall before it must not idle a tick.
-        while (max_batches is None or summary["batches"] < max_batches) and (
-            deadline is None or not summary["batches"] or time.monotonic() < deadline
-        ):
+    # Jobs take one batch each in turn, starting after the job that took the last batch, so a
+    # small job is not left waiting until an older long one completes.
+    last = writer.handle.import_last_turn
+    if last is not None:
+        running = [turn for turn in running if turn > last] + [
+            turn for turn in running if turn <= last
+        ]
+    while running:
+        for turn in list(running):
+            # The deadline bounds further batches, not the first: a stall before it must not idle a tick.
+            if not (max_batches is None or summary["batches"] < max_batches) or not (
+                deadline is None or not summary["batches"] or time.monotonic() < deadline
+            ):
+                return summary
+            job_id = turn[1]
+            if _backing_off(writer, job_id):
+                running.remove(turn)
+                continue
             job = _load(writer.connection, job_id)
             sequence = job.checkpoint["batch"] if job is not None else None
             try:
@@ -3239,12 +3381,15 @@ def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) 
                     _after_error(root, writer, job_id, sequence, error)
                 except Exception:  # noqa: BLE001 - the store refused even the settlement
                     log.warning("import job settlement deferred to a later tick", exc_info=True)
-                break
+                running.remove(turn)
+                continue
             if outcome != "batch":
                 summary["paused"] += outcome == "paused"
                 summary["deferred"] += outcome == "deferred"
-                break
+                running.remove(turn)
+                continue
             summary["batches"] += 1
+            writer.handle.import_last_turn = turn
     return summary
 
 
@@ -3297,6 +3442,21 @@ def _visible(writer, collection: str, job_id: str) -> _Job:
     return job
 
 
+def _require_members(manifest, request: _Request) -> None:
+    """Refuse a derived collection's import of anything but export members, in preview and start alike."""
+    if manifest.derived and request.members is None:
+        _refuse(
+            derived_rows.COLLECTION_DERIVED,
+            "a derived collection imports export members only, so its import log can rebuild its rows",
+            at="import_request.members",
+            expected="members: a glob or list of member paths of an export manifest",
+            repair=(
+                "add members to this request, as a glob or list of member paths of the export manifest; "
+                "if the source is not an export manifest yet, preserve the export with archive=members first"
+            ),
+        )
+
+
 def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     """Bind a new job, or return the live one an identical start already bound."""
     who = principal_module.effective_principal()
@@ -3310,14 +3470,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
     with writer.read_snapshot():
         row, manifest, _ = writer._collection(collection, facade_profile="records")
         request = _resolved(writer, row, manifest, request)
-        if manifest.derived and request.members is None:
-            _refuse(
-                derived_rows.COLLECTION_DERIVED,
-                "a derived collection imports export members only, so its import log can rebuild its rows",
-                at="import_request.members",
-                expected="members: a glob or list of member paths of an export manifest",
-                repair="preserve the export with archive=members and import from its manifest",
-            )
+        _require_members(manifest, request)
         if request.reimport is not None and request.members is None:
             _invalid("import_request.reimport", "reimport applies to an export's members", expected="members")
         plan = compile_mapping(request.mapping, manifest, request.format)
@@ -3442,9 +3595,7 @@ def _continue(root: Path, writer, collection: str, request: _Request) -> dict[st
     """
     with writer.read_snapshot():
         job = _visible(writer, collection, request.job_id)
-        lapsed = job.state == "running" and (
-            _now() >= job.window_expires or _verdict(writer, job) == "lost"
-        )
+        lapsed = job.state == "running" and (_deadline_passed(job) or _verdict(writer, job) == "lost")
     if job.state == "running" and not lapsed:
         return _status(writer, job, "start")
     if not (lapsed or (job.state == "partial" and job.reason in _RESUMABLE)):
@@ -3469,6 +3620,14 @@ def _continue(root: Path, writer, collection: str, request: _Request) -> dict[st
             "the job's exact source, collection lineage or authority does not currently hold",
             at="import_request.continuation",
             repair="restore access, or start a new import",
+            retryable=True,
+        )
+    except _Unreadable:
+        _refuse(
+            _SESSION_STORE,
+            "the session store could not be read, so the login behind this import is unverified",
+            at="import_request.continuation",
+            repair="send the continuation again shortly",
             retryable=True,
         )
     with writer._mutation():
@@ -3648,6 +3807,16 @@ def _sampled(sample: _Sample, reader, order: import_time.Fold | None) -> bool:
     return True
 
 
+def _window_limit(who: principal_module.RequestPrincipal) -> dict[str, Any]:
+    """The run limit a job this owner starts would carry, in status's shape (design D3).
+
+    Preview is owner-only, so no governance authorization session adds an expiry here.
+    """
+    if auth_sessions.origin_revalidates_in_background(who):
+        return {"runs_while": "login_active"}
+    return {"seconds": JOB_WINDOW_SECONDS}
+
+
 def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str, Any]:
     with writer.read_snapshot():
         row, manifest, declared = writer._collection(collection, facade_profile="records")
@@ -3655,6 +3824,7 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
         if not writer._operation.field_plan(manifest).owner:
             _source_not_found()
         request = _resolved(writer, row, manifest, request)
+        _require_members(manifest, request)
         source, sha256, size = resolve_source(root, writer._operation, request.source_ref)
         members = () if request.members is None else _export(root, source.ref, sha256, request.members)
         plan, findings, rows = None, [], None
@@ -3780,6 +3950,6 @@ def _preview(root: Path, writer, collection: str, request: _Request) -> dict[str
             "depth": MAX_DEPTH,
             "batch_rows": MAX_BATCH_ROWS,
             "batch_bytes": MAX_BATCH_BYTES,
-            "job_seconds": JOB_WINDOW_SECONDS,
+            "job_window": _window_limit(principal_module.effective_principal()),
         },
     }

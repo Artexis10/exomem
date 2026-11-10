@@ -255,21 +255,26 @@ def tolerated_refusals() -> frozenset[str]:
     return frozenset() if platform.TRANSFER_TOOLS_ENABLED else frozenset({GATEWAY_REQUIRED})
 
 
-def apply_step(reply: Mapping[str, Any], seconds: float, *, before: int | None) -> dict[str, Any]:
-    """One apply call as the page report keeps it: the reply's counts, the files this call filed, and whether it stopped.
+def file_step(reply: Mapping[str, Any], seconds: float, *, before: int | None) -> dict[str, Any]:
+    """One `file` call as the page report keeps it: the reply's counts, the files this call filed, and its state.
 
-    The reply's `applied` count is cumulative, so `before` is the count after the call before. A count that a
-    reply does not carry leaves what depends on it unknown (None), never 0.
+    The reply's `filed` count is cumulative over the whole stage, so `before` is the count after the call before.
+    A count that a reply does not carry leaves what depends on it unknown (None), never 0.
     """
     progress = reply.get("progress") or {}
-    applied = progress.get("applied")
-    return {"seconds": round(seconds, 2), "applied": applied, "remaining": progress.get("remaining"),
-            "failed": progress.get("failed"), "stopped": bool(reply.get("apply_stop")),
-            "files": applied - before if applied is not None and before is not None else None}
+    filed = progress.get("filed")
+    return {"seconds": round(seconds, 2), "filed": filed, "remaining": progress.get("remaining"),
+            "failed": progress.get("failed"), "filing": reply.get("filing"),
+            "files": filed - before if filed is not None and before is not None else None}
 
 
 def files_per_second(steps: Sequence[Mapping[str, Any]]) -> float | None:
-    """Files filed over the seconds of the apply calls that filed them; None when a call's files are unknown."""
+    """Files filed per second of round trip over these `file` calls; None when a call's rise is unknown.
+
+    The files are each call's rise in the stage's filed count. The seconds are each call's whole round trip,
+    so they include the steps that file nothing (`plan`, `finish`, the next page's `start`) and the transport.
+    `file_pages` passes the calls whose reply named one page.
+    """
     seconds = sum(step["seconds"] for step in steps)
     if not seconds or any(step["files"] is None for step in steps):
         return None
@@ -590,115 +595,74 @@ async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
     """The run as `read_import` status reports it, with what the compact `import_memory` replies leave out.
 
     The flow reads its control fields from the compact replies, as an agent does. The measurements also need
-    the inventory, the recorded stage and the finish count. A read changes nothing and keeps those replies
-    compact, where `response_detail: "full"` would wrap each reply in the terminal envelope and add a payload per call.
+    the inventory, the recorded stage and the finish count, which only the `full` view carries; the default view
+    is a bounded summary. A read changes nothing and keeps those replies compact, where `response_detail: "full"`
+    would wrap each reply in the terminal envelope and add a payload per call.
     """
-    body, _ = await agent.call("read_import", {"operation": {"kind": "status", "run_id": run_id}}, kind="status")
+    body, _ = await agent.call("read_import", {"operation": {"kind": "status", "run_id": run_id, "view": "full"}},
+                               kind="status")
     return body
 
 
-async def apply_calls(agent: Agent, plan: LargeImportPlan, run_id: str, plan_id: str, *, applied_before: int | None = 0,
-                      **first: Any) -> dict[str, Any]:
-    """Call apply until a reply carries no continuation, or stops for lack of space.
-
-    `applied_before` is the files already filed in the run, so the first call's own count is its difference.
-    """
-    fields: dict[str, Any] = {"run_id": run_id, "plan_id": plan_id, **first}
-    seconds, steps = 0.0, []
-    while True:
-        plan.require_time("the page was filed")
-        reply, took = await agent.import_op("apply", **fields)
-        seconds += took
-        steps.append(apply_step(reply, took, before=steps[-1]["applied"] if steps else applied_before))
-        token = reply.get("continuation")
-        if reply.get("apply_stop") or not token:
-            return {"reply": reply, "seconds": round(seconds, 2), "calls": len(steps), "stop": reply.get("apply_stop"),
-                    "steps": steps}
-        fields = {"run_id": run_id, "plan_id": plan_id, "continuation": token}
-
-
 async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dict[str, list[str]]:
-    """Page through the stage as the tool text says. Returns the problems found, by criterion."""
+    """File the stage with `file` calls, each repeated with the continuation of the reply before, as an agent does.
+
+    A cell with no Knowledge Base yet refuses `file`, so the first folder's first scan is a `start` that
+    bootstraps it; `file` then carries on that run. Returns the problems found, by criterion.
+    """
     stage_path = f"{fixture.STAGE_DIR}/{folder.import_id}"
-    pages: list[dict[str, Any]] = folder.report.setdefault("pages", [])
+    collection = CELL_COLLECTION[folder.name]
     problems: dict[str, list[str]] = {"manifest_proof": [], "no_space_failure": [], "filing": [], "compact_reply": []}
-    consumed = 0
-    fields: dict[str, Any] = {"path": stage_path, "collection": CELL_COLLECTION[folder.name],
-                              "initialize_kb": folder.name == "notes"}
+    if folder.name == "notes":
+        await agent.import_op("start", path=stage_path, collection=collection, initialize_kb=True)
+    pages: dict[str, dict[str, Any]] = {}
+    fields: dict[str, Any] = {"path": stage_path, "collection": collection}
+    filed_before: int | None = 0
     while True:
-        plan.require_time(f"page {len(pages) + 1} of the {folder.name} folder was filed")
-        reply, start_seconds = await agent.import_op("start", **fields)
-        run_id = reply["run_id"]
-        stored = await read_run(agent, run_id)
+        plan.require_time(f"the {folder.name} folder was filed")
+        reply, took = await agent.import_op("file", **fields)
+        page = pages.setdefault(reply["run_id"], {"page": len(pages) + 1, "run_id": reply["run_id"], "file_seconds": 0.0,
+                                                  "file_steps": []})
+        step = file_step(reply, took, before=filed_before)
+        page["file_steps"].append(step)
+        page["file_seconds"] = round(page["file_seconds"] + took, 2)
+        filed_before = step["filed"]
+        if reply["filing"] == "stopped":
+            needs = [item.get("need") for item in reply.get("person") or []]
+            problems["no_space_failure" if "free_space" in needs else "filing"].append(
+                f"page {page['page']}: filing stopped: {json.dumps(reply.get('stop'))[:400]}")
+            break
+        if reply["filing"] == "done":
+            break
+        if not reply.get("continuation"):
+            raise StepFailure(f"page {page['page']}: a working reply carried no continuation; keys {sorted(reply)}")
+        fields = {"path": stage_path, "collection": collection, "continuation": reply["continuation"]}
+    failed = (reply.get("progress") or {}).get("failed")
+    if failed:
+        problems["filing"].append(f"{failed} files failed to file")
+    consumed = 0
+    for page in pages.values():
+        stored = await read_run(agent, page["run_id"])
         rows = stored.get("inventory") or []
-        page: dict[str, Any] = {"page": len(pages) + 1, "run_id": run_id, "rows": len(rows),
-                                "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
-                                "hidden_files_skipped": stored.get("hidden_files_skipped"),
-                                "start_seconds": round(start_seconds, 2)}
-        pages.append(page)
+        recorded = stored.get("finish") or {}
+        page.update({"rows": len(rows), "row_bytes": sum(int(row.get("bytes") or 0) for row in rows),
+                     "hidden_files_skipped": stored.get("hidden_files_skipped"), "consumed": recorded.get("consumed"),
+                     "files_per_second": files_per_second(page["file_steps"])})
         if stored.get("stage") != {"stage": folder.import_id, "proof": folder.proof}:
             problems["manifest_proof"].append(f"page {page['page']} recorded the stage as {stored.get('stage')}, not its manifest proof")
-        next_after = reply.get("next_after")
-        if next_after != stored.get("next_after"):
-            problems["compact_reply"].append(
-                f"page {page['page']}: the compact start reply carried next_after {next_after!r}, the run holds {stored.get('next_after')!r}")
-        await agent.import_op("select", run_id=run_id, include=[stage_path])
-        planned, plan_seconds = await agent.import_op("plan", run_id=run_id)
-        while planned.get("continuation"):
-            more, took = await agent.import_op("plan", run_id=run_id, continuation=planned["continuation"])
-            planned, plan_seconds = more, plan_seconds + took
-        plan_id = (planned.get("plan") or {}).get("plan_id") or planned.get("plan_id")
-        if not plan_id:
-            raise StepFailure(f"page {page['page']}: plan returned no plan_id; keys {sorted(planned)}")
-        page["plan_seconds"] = round(plan_seconds, 2)
-        eligible = {row["path"] for row in rows if row.get("eligible")}
-        large = [entry for entry in folder.entries if entry.disposition == fixture.FILED_ARTIFACT
-                 and entry.size >= fixture.LARGE_MIN_BYTES and f"{stage_path}/{entry.path}" in eligible]
-        solo: dict[str, Any] = {"seconds": 0.0, "calls": 0, "steps": []}
-        if large and "large_binaries" not in folder.report:
-            # Applied alone first, so that their copy and hash time is measured on its own.
-            solo = await apply_calls(agent, plan, run_id, plan_id, only_paths=[f"{stage_path}/{e.path}" for e in large])
-            size = sum(entry.size for entry in large)
-            folder.report["large_binaries"] = {
-                "files": len(large), "bytes": size, "seconds": solo["seconds"], "calls": solo["calls"],
-                "mib_per_second": round(size / fixture.MIB / solo["seconds"], 2) if solo["seconds"] else None,
-                "what": "bytes of the large files over the seconds of the apply calls that handled only them, "
-                        "which hash, copy, write the Source and remove the staged copy",
-            }
-            if solo["stop"]:
-                problems["no_space_failure"].append(f"page {page['page']}: apply stopped for lack of space: {json.dumps(solo['stop'])[:400]}")
-                page["apply_stop"], page["apply_steps"] = solo["stop"], solo["steps"]
-                break
-        rest = await apply_calls(agent, plan, run_id, plan_id,
-                                 applied_before=solo["steps"][-1]["applied"] if solo["steps"] else 0)
-        steps = [*solo["steps"], *rest["steps"]]
-        page["apply_seconds"] = round(solo["seconds"] + rest["seconds"], 2)
-        page["apply_calls"] = solo["calls"] + rest["calls"]
-        page["apply_steps"] = steps
-        page["files_per_second"] = files_per_second(steps)
-        page["progress"] = rest["reply"].get("progress")
-        failed = (page["progress"] or {}).get("failed")
-        if failed:
-            problems["filing"].append(f"page {page['page']}: {failed} files failed to file")
-        if rest["stop"]:
-            problems["no_space_failure"].append(f"page {page['page']}: apply stopped for lack of space: {json.dumps(rest['stop'])[:400]}")
-            page["apply_stop"] = rest["stop"]
-            break
-        finished, finish_seconds = await agent.import_op("finish", run_id=run_id)
-        finish = finished.get("finish") or {}
-        recorded = (await read_run(agent, run_id)).get("finish") or {}
-        if finish.get("residual") != recorded.get("residual"):
-            problems["compact_reply"].append(
-                f"page {page['page']}: the compact finish reply carried residual {finish.get('residual')!r}, the run holds {recorded.get('residual')!r}")
-        folder.residual = finish.get("residual")
         consumed += int(recorded.get("consumed") or 0)
-        page.update({"finish_seconds": round(finish_seconds, 2), "consumed": recorded.get("consumed"),
-                     "residual_files": (finish.get("residual") or {}).get("files")})
+        # A done reply re-reads the newest page's residual from the stage; a newest page that closed has none to compare.
+        # Only `finish` removes empty folders, so only its residual counts them: that count is left out of the comparison.
+        held = {key: value for key, value in (recorded.get("residual") or {}).items() if key != "removed_empty_folders"}
+        if reply["filing"] == "done" and page["run_id"] == reply["run_id"] and recorded \
+                and (held or None) != (reply.get("filed") or {}).get("residual"):
+            problems["compact_reply"].append(
+                f"the compact done reply carried residual {reply['filed'].get('residual')!r}, the run holds {recorded.get('residual')!r}")
         print(f"[rehearsal] large-import {folder.name} page {page['page']}: {page['rows']} rows, "
-              f"apply {page['apply_seconds']}s ({page['files_per_second']} files/s), consumed {page['consumed']}", flush=True)
-        if not next_after:
-            break
-        fields = {"after": next_after}
+              f"{len(page['file_steps'])} file calls in {page['file_seconds']}s ({page['files_per_second']} files per call second), "
+              f"consumed {page['consumed']}", flush=True)
+    folder.report["pages"] = list(pages.values())
+    folder.residual = (reply.get("filed") or {}).get("residual")
     folder.consumed = consumed
     folder.report["residual_by_reason_files"] = fixture.residual_files_by_reason(folder.residual)
     folder.report["residual_files_left"] = int((folder.residual or {}).get("files", 0))
@@ -909,7 +873,7 @@ async def volume_state(ctx: Context) -> dict[str, Any]:
 
 
 def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -> dict[str, Any]:
-    """The phases' seconds and each folder's page 1 apply seconds, raw and divided by the host's calibration ratio.
+    """The phases' seconds and each folder's page 1 filing seconds, raw and divided by the host's calibration ratio.
 
     The ratio is the host's zlib calibration over the reference (`host_speed`), read from the report's
     `environment`. A `_per_calibration` value is what the same work would take on a host as fast as the
@@ -933,9 +897,9 @@ def calibrated_timings(out: Mapping[str, Any], environment: Mapping[str, Any]) -
                     "over the reference; the SHA-256 seconds and the workload's definition are in environment",
         },
         "phase_seconds_per_calibration": {label: scaled(seconds) for label, seconds in out["phases"].items()},
-        "page_1_apply": {name: {"apply_seconds": page.get("apply_seconds"),
-                                "apply_seconds_per_calibration": scaled(page.get("apply_seconds"))}
-                         for name, page in first_pages.items()},
+        "page_1_file": {name: {"file_seconds": page.get("file_seconds"),
+                               "file_seconds_per_calibration": scaled(page.get("file_seconds"))}
+                        for name, page in first_pages.items()},
     }
 
 
@@ -945,7 +909,6 @@ def measurements(out: dict, sampler: Sampler, environment: Mapping[str, Any]) ->
     every = summary["all"]
     # The index builds while files are filed and again after the discard restarts the cell, so both windows are given.
     drain = {label: peak for label, peak in summary["by_phase"].items() if label.endswith((".paging", ".index_drain"))}
-    large = [(name, folder["large_binaries"]) for name, folder in out["folders"].items() if "large_binaries" in folder]
     final = next((folder["read_import_index"] for folder in reversed(list(out["folders"].values()))
                   if "read_import_index" in folder), None)
     return {
@@ -972,7 +935,6 @@ def measurements(out: dict, sampler: Sampler, environment: Mapping[str, Any]) ->
             "source": "memory.current, memory.stat anon and memory.peak of the pod's cgroup",
         },
         "read_import_index": final,
-        "apply_throughput_large_binaries": dict(large) or {"measured": False, "why": "no page listed an eligible large file"},
         "phase_seconds": out["phases"],
         **calibrated_timings(out, environment),
     }

@@ -93,10 +93,18 @@ class Builder:
         return data
 
     @staticmethod
+    def operational(data: dict) -> dict:
+        """The vault paths of a write. A compact reply names pages by title and id; the commit asked
+        for `response_detail="full"`, which keeps the paths under `diagnostics.operational`."""
+        operational = (data.get("diagnostics") or {}).get("operational")
+        return operational if isinstance(operational, dict) else {}
+
+    @staticmethod
     def path_of(data: dict) -> str:
-        for key in ("path", "new_path", "page"):
-            if isinstance(data.get(key), str):
-                return data[key]
+        for layer in (data, Builder.operational(data)):
+            for key in ("path", "new_path", "page"):
+                if isinstance(layer.get(key), str):
+                    return layer[key]
         raise RuntimeError(f"no page path in the returned data {json.dumps(data)[:400]}")
 
     async def governed(self, tool: str, args: dict, step: str, *, review: str) -> dict:
@@ -106,7 +114,8 @@ class Builder:
         ``reviewed_none`` relation review, which is what the product asks an agent for.
         """
         draft = await self.call(tool, {**args, "validate_only": True}, f"{step}:validate")
-        commit = dict(args)
+        # Only the commit asks for full detail: it keeps the page paths, and the draft call stays as it was.
+        commit = {**args, "response_detail": "full"}
         for key in ("draft_id", "draft_hash", "draft_token", "relation_review_hash"):
             value = _find(draft, key)
             if value is not None:
@@ -155,6 +164,7 @@ class Builder:
                     "title": corr["title"],
                     "content": f"{corr['source_label']}. {corr['context']}\n\n{corr['claim']}\n",
                     "source_kind": "document",
+                    "response_detail": "full",
                 },
                 f"{cid}:correction-source",
             )
@@ -175,7 +185,7 @@ class Builder:
                 review="The supersession itself links the two pages; no other typed relation applies.",
             )
             # The result names both pages; the replacement is the one that is not the stale page.
-            corr_path = next(p for p in data["paths"] if p != stale_path)
+            corr_path = next(p for p in self.operational(data)["paths"] if p != stale_path)
             self.authored.append(corr_path)
         else:
             corr_path = await self.note(corr["title"], corr_body, domain, f"{cid}:correction")

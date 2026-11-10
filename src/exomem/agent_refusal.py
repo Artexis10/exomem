@@ -73,17 +73,18 @@ def ranked_with_link(options: Collection[Mapping[str, Any]], link: str) -> list[
     return [*keys[: MAX_CANDIDATES - 1], link]
 
 
-def _candidates(refusal: Mapping[str, Any]) -> list[str]:
+def _candidates(refusal: Mapping[str, Any]) -> list[Any]:
     """The values the agent can choose from, from the producer that knows them.
 
-    A producer that has `candidates` of its own names them first. `allowed` is the closed set of
-    values a refused argument accepts. A producer that only ranks `options` by `key` (the
-    generic-relation barrier) is read last.
+    A producer that has `candidates` of its own names them first; a candidate that is a mapping (a
+    page named by title and id) reaches the agent whole. `allowed` is the closed set of values a
+    refused argument accepts. A producer that only ranks `options` by `key` (the generic-relation
+    barrier) is read last.
     """
     for name in ("candidates", "allowed"):
         value = refusal.get(name)
         if isinstance(value, (list, tuple)) and value:
-            return [str(item) for item in value]
+            return [item if isinstance(item, Mapping) else str(item) for item in value]
     options = refusal.get("options")
     if isinstance(options, (list, tuple)):
         return [str(option["key"]) for option in options if isinstance(option, Mapping) and "key" in option]

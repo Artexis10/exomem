@@ -268,10 +268,16 @@ class WriterConnection:
         self._write_scope, self._owns_transaction = None, False
         # Host-local import job facts (``importer``), keyed by job id: this handle's
         # proofs of bound source bytes, the store refusal blocking a running job, and
-        # a streamed job's open reader. A new handle, as after a takeover, starts with none.
+        # a streamed job's open reader, and the (created_at, job_id) of the job that took the
+        # last batch, so the next tick starts after it. A new handle, as after a takeover,
+        # starts with none.
         self.import_proofs: dict[str, Any] = {}
         self.import_blocked: dict[str, str] = {}
+        # Per blocked job whose login could not be checked: when this host may retry (monotonic) and
+        # how many checks in a row failed.
+        self.import_retry: dict[str, tuple[float, int]] = {}
         self.import_readers: dict[str, Any] = {}
+        self.import_last_turn: tuple[str, str] | None = None
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
         self.derived: Any = None

@@ -233,6 +233,9 @@ def parse_declaration(data: object, *, builtin: bool) -> CollectionType:
         }
     except collections.CollectionError as error:
         raise CollectionTypeError("INVALID_DECLARATION", error.reason, "fields") from error
+    # A relation binds two collections that one owner keeps, so a shared type cannot declare one.
+    if any(_declares_references(spec) for spec in fields.values()):
+        raise CollectionTypeError("INVALID_DECLARATION", "a type cannot declare references", "fields")
     natural_key = tuple(data.get("natural_key") or ())
     if any(name not in fields for name in natural_key):
         raise CollectionTypeError(
@@ -267,6 +270,11 @@ def parse_declaration(data: object, *, builtin: bool) -> CollectionType:
         indexes=indexes,
         declaration=_frozen(data),
     )
+
+
+def _declares_references(spec: collections.FieldSpec) -> bool:
+    children = [*spec.properties.values(), *([spec.items] if spec.items is not None else [])]
+    return spec.references is not None or any(_declares_references(child) for child in children)
 
 
 def declaration_text(name: str) -> str:

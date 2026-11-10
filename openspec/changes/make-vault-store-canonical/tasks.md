@@ -6,6 +6,8 @@
 - [x] 1.4 Verify before activation: a fresh derivation equals the migrated rows on whole tables, and a full projection reproduces every file byte for byte.
 - [x] 1.5 Add rollback with its preconditions (drain projection, refuse on unexported held items, export audit and canonicity records) and a drill that rebuilds file mode from the projection and compares search and graph answers.
 - [x] 1.6 Scope the store: keep page, lexical and graph tables out of the collection store's in-vault replica; make store-mode knowledge writes refuse with the store's unavailability reason; build the replica from a staging database filled in one read transaction; refuse to start or activate store mode while multi-host writer-lease coordination is configured; amend to file mode the knowledge-stays-out, knowledge-writes-continue and whole-file replica clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine`, the Markdown-authority and replay requirements in `add-graph-traversal-queries`, and the replication assumption in `multi-host-writer-lease`.
+- [x] 1.7 Give a root that refuses with `VAULT_STORE_ELSEWHERE` an owner escape for the case where the root that holds the store is gone, holds a newer tenure or sits at a moved vault path: an owner-run release step on a file-mode root, or a stated procedure. Done when a refused root has a working remedy that does not need the other root.
+- [x] 1.8 Order the store-mode marker's decisions, for example with a decision counter in the marker value where the newest decision wins. Today neither store records which decision is newer: after a failed rollback hand-back, another root's takeover can republish `store` and refuse both roots; a crash between the clear publication and spending the pending key can let the rolled-back root clear a later root's marker once. Also re-check the marker inside the migrate route after it takes the lease, so two roots that migrate at once cannot both pass. Done when two-root tests of both sequences and the concurrent migrate converge on the newest decision.
 
 ## 2. Write path
 
@@ -13,17 +15,21 @@
 - [x] 2.2 Commit every file of a governed write with its lexical rows, graph rows, audit rows and projection intents in one `BEGIN IMMEDIATE`, through the collection store's existing writer lease and transaction owner; make preserved binary files durable before that commit. Give `unique_path` and `respell_new_path` a store form that lists folder contents from the store, not the disk; store mode needs this for any title-style name, with or without D12.
 - [x] 2.3 Re-resolve dependent pages whose links start resolving in the same transaction.
 - [ ] 2.4 Prove with hard-kill trials that no kill leaves repair state, and with a whole-table diff that rows equal file mode for the same bytes. A batch that writes `_Schema` derives its pages with the previous registry, because the derivation reads registries from disk while `_Schema` is store-owned; the background registry re-derivation job that the design names settles those rows, and no refusal is added.
+- [ ] 2.5 Give `move_file`, `recover_from_trash` and `delete_directory` a store form, replacing their named refusal (`VAULT_STORE_WRITER_UNROUTED`). Each runs a semantic preflight against a corpus that is built from the files, so each needs the store-aware corpus and guards of 3.1 first; the store transaction that they will commit is `vault_store.batch.Lifecycle` (page moves, deletes and `expect` guards beside the batch's own writes). Also route `relation_review` stale-slot cleanup, companion backfill and `clear_scene_frames` the same way. Give `delete_file`'s own refusals a store form too: a governed page, a binary, a stored original, extraction parts and an active catalog publication. Likewise `init_vault(force=True)` (its overlay copies the scaffold over stored pages), `extraction_parts.retire` (it keeps and names the part pages of a raw-marked page that the store holds, and needs a store delete to remove them) and `reclaim_legacy_shipped_schema(apply=True)` (it unlinks `_Schema` copies). The disk-first binary writers (archive pool, import placement) need no change.
 
 ## 3. Readers
 
 - [ ] 3.1 Point every reader of page bytes or derived rows at the store in store mode: lexical, graph, reference and semantic-unit readers, page reads, `find`'s parse cache (keyed by store revision), governance frontmatter reads and the registry overlay loaders.
 - [ ] 3.2 Remove freshness witnesses, mtime checks and sync-on-first-use repair from the store-mode read path.
+  - Left from 3.1: in store mode, `find`'s keyword mode answers the typed warming outcome once pages exist only in the store, because it reads the sidecar that is built from files; the managed browse and keyword readers and the semantic-unit and filter-eligibility catalogue readers read the same sidecar and are not yet probed.
+  - Left from 3.1: store-mode `find` costs about 7 to 14 ms per page, because each `FrontmatterCache.get` opens its own snapshot. Before the gate opens, search must use one snapshot per request and meet a stated latency budget.
+- [ ] 3.3 Before a reader serves from the store, key each cache that D2 keys on the store revision on the registry revision too, or bump the store revision at the end of a re-derivation pass: a pass changes derived rows without a page commit.
 
 ## 4. Projection and outside edits
 
 - [x] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status. Before replacing a file, compare it with the manifest and hold on a difference; never project a held path. Optional, for D12: project a store move as a rename, through the queue's move intent, when the file on disk matches the manifest.
-- [ ] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
-- [ ] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
+- [x] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
+- [x] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
 - [ ] 4.4 List held items in the review tool and resolve each with keep-mine or keep-store in the repair tool: keep-mine adopts the person's current file behind a store-revision check; keep-store saves the person's bytes to a dated folder outside the vault first; one audit row per resolution; ship before 4.2 and 4.3 import.
 
 ## 5. Stage 2: semantic units and canonicity
@@ -39,6 +45,8 @@
   - Known gap: a page that recall policy did not admit keeps a stamp without rows, so a later policy relaxation does not re-embed it until the page changes.
 - [ ] 6.2 Let a Cloud cell run without per-write projection and export Markdown on request.
 - [ ] 6.3 Run the acceptance set on native Windows/NTFS.
+- [ ] 6.4 Write the derived media rows that `media_processing.reconcile_media` writes from the store thread in store mode. The importer records each imported or renamed media binary as waiting for this writer and calls no media processing, which `VAULT_STORE_OFF_THREAD` refuses off the store thread. Done when an outside media file gains its derived rows from the store thread.
+- [ ] 6.5 Before store mode serves, route the media store's originals eviction and restore through `media_store.managed_event`. Otherwise the importer reads each eviction as an outside delete of a binary and each restore as an outside create.
 
 ## 7. Acceptance and switch
 

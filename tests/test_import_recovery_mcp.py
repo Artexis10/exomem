@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastmcp import Client
-from test_adoption_collection import TODAY, _import, _vault
+from test_adoption_collection import PHOTO, TODAY, _import, _vault
 from test_adoption_own_notes import JOURNAL_RULE, _notes
 
 from exomem import adoption_run, command_surface, server, writer_lease
@@ -140,6 +140,43 @@ def test_partial_chunk_completes_only_frozen_components_and_logs_once(tmp_path, 
         replayed = adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
         assert replayed["apply_result"] == recovered["apply_result"]
         assert {path: path.read_bytes() for path in snapshot} == snapshot
+
+
+def test_a_crash_while_a_repeat_files_its_own_source_recovers_that_source_under_the_same_identity(
+    tmp_path, monkeypatch,
+):
+    """The first photo changed after the plan, so its repeat files on its own; a crash must not strand that Source."""
+    root = _vault(tmp_path, {"Coll/a/IMG_1.png": PHOTO, "Coll/b/IMG_1 copy.png": PHOTO}, indexed=False)
+    run_id, planned = _import(root, path="Coll", include=["Coll"])
+    plan_id = planned["plan"]["plan_id"]
+    first, repeat = planned["plan"]["items"]
+    (root / first["original_path"]).write_bytes(PHOTO + b" edited")
+    sources = root / "Knowledge Base/Sources/Imported"
+
+    class Interrupted(BaseException):
+        pass
+
+    def interrupt_after_source(path):
+        if path.parent == sources and path.suffix == ".md":
+            raise Interrupted()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module, "_after_batch_destination_published", interrupt_after_source)
+        with writer_lease.active_mutation_claim_context(
+            claim_token="a" * 24, command_digest="a" * 64, identity_digest="1" * 64,
+        ):
+            with pytest.raises(Interrupted):
+                adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
+    with writer_lease.active_mutation_claim_context(
+        claim_token="b" * 24, command_digest="a" * 64, identity_digest="1" * 64, reconciling=True,
+    ):
+        recovered = adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
+
+    outcome = recovered["outcomes"][repeat["original_path"]]
+    assert outcome["status"] == "applied"
+    assert "stored_own_copy" in outcome
+    assert (root / outcome["artifact_path"]).read_bytes() == PHOTO
+    assert sorted((root / "Knowledge Base/Sources").rglob("*.png")) == [root / outcome["artifact_path"]]
 
 
 def test_interrupted_failed_subset_keeps_its_owed_note_after_another_invocation(tmp_path, monkeypatch):

@@ -110,7 +110,7 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
         "search_memory", {"query": "jitter", "mode": "keyword"}, run_middleware=True
     )).structured_content["result"]
     assert search["hits"]
-    path = search["hits"][0]["path"]
+    path = search["hits"][0]["id"]
     read = asyncio.run(mcp.call_tool(
         "read_memory", {"operation": {"kind": "page", "path": path}}, run_middleware=True
     )).structured_content

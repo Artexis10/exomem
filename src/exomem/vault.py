@@ -292,6 +292,16 @@ VAULT_SCAN_SKIP_DIRS = frozenset(
     }
 )
 VAULT_SCAN_SKIP_DIR_PREFIXES = (".exomem-batch-",)
+
+
+def is_scan_skipped_runtime_name(name: str) -> bool:
+    """Whether a scan skips this entry at any depth as runtime scratch, not content.
+
+    Batch workspaces, and the entries a held-filesystem capability probe briefly
+    creates (symlink aliases included) in a root it tests, which can lie inside the
+    Knowledge Base. `reserved_paths` refuses writes under the probe's names.
+    """
+    return name.startswith(VAULT_SCAN_SKIP_DIR_PREFIXES) or held_fs.is_probe_entry(name)
 _GRAPH_RESET_RUNTIME_DIR_NAME = re.compile(r"^\.graph-reset-[0-9a-f]{24}$", re.ASCII)
 _GRAPH_REBUILD_RUNTIME_FILE_NAME = re.compile(
     r"^\.graph-rebuild-[0-9a-f]{64}-[0-9a-f]{24}\.sqlite"
@@ -410,9 +420,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     ):
         return True
     for segment in segments:
-        if segment in VAULT_SCAN_SKIP_DIRS or segment.startswith(
-            VAULT_SCAN_SKIP_DIR_PREFIXES
-        ):
+        if segment in VAULT_SCAN_SKIP_DIRS or is_scan_skipped_runtime_name(segment):
             return True
     return False
 
@@ -500,10 +508,22 @@ def _is_vault(path: Path) -> bool:
     at all, so a vault has to stay a vault across the move in both directions --
     one that has migrated, and one that never will.
     """
-    return (
+    if (
         (path / kb_dirname() / "_Schema" / _SCHEMA_SENTINEL).exists()
         or (shipped_schema_target(path) / _SCHEMA_SENTINEL).exists()
-    )
+    ):
+        return True
+    # A store-mode vault keeps the legacy sentinel page in its store, and its file may be absent.
+    from . import state_migration
+    from .vault_store import read
+
+    try:
+        return read.page_exists(path, f"{kb_dirname()}/_Schema/{_SCHEMA_SENTINEL}")
+    except (ValueError, OSError, state_migration.StateMigrationManifestError):
+        # Callers probe every ancestor of a path. One that holds its own state root (the filesystem
+        # root, say) is refused placement, and a broken state root cannot prove a vault: both mean
+        # "not a vault", and file mode is as it was.
+        return False
 
 
 def kb_root(vault: Path) -> Path:
@@ -709,6 +729,16 @@ def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | s
     return stem or str(path)
 
 
+def title_key(title: str) -> str:
+    """The key a page is found under by its title: NFC, stripped, lower-cased.
+
+    One spelling for every producer and every lookup of the title map, so a title typed
+    decomposed (or padded) finds the page whose title is stored composed. It does not
+    case-fold: folding merges titles that differ (`ß` and `ss`).
+    """
+    return unicodedata.normalize("NFC", title).strip().lower()
+
+
 def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     """The wikilink resolver's lower-cased display title of a page's bytes, as a file read gives it.
 
@@ -722,7 +752,7 @@ def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
     # A text-mode read translates newlines before it parses; the bytes path parses the same text.
     fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
     title = resolve_display_title(fm, body, path)
-    return title.lower() if title else None
+    return title_key(title) if title else None
 
 
 def unique_path(directory: Path, stem: str, suffix: str = ".md", *, vault_root: Path | None = None) -> Path:
@@ -8188,6 +8218,7 @@ def find_inbound_wikilinks(
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
+    target_has_no_file: bool = False,
 ) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -8209,11 +8240,17 @@ def find_inbound_wikilinks(
     `visible` is a reader's view (see `egress.visible_page_filter`; `None`
     for the owner): uniqueness is then counted over the pages it admits, as
     in a vault without the others. Only a basename that is shared is decided.
+
+    `target_has_no_file` says the target is a page that the vault holds but has no file yet (a
+    store page that the projector has not written): the basename count includes it, so a bare
+    `[[foo]]` still resolves to it when no other file is named `foo`.
     """
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
-    return _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+    return _select_inbound_wikilinks(
+        snapshot, target_rel_path, visible, target_has_no_file=target_has_no_file
+    )
 
 
 def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
@@ -8359,6 +8396,8 @@ def _select_inbound_wikilinks(
     data: _InboundIndexData,
     target_rel_path: str,
     visible: Callable[[str], bool] | None,
+    *,
+    target_has_no_file: bool = False,
 ) -> list[InboundLink]:
     _target, target_full, target_stripped, target_basename = _inbound_target_forms(
         target_rel_path
@@ -8371,6 +8410,8 @@ def _select_inbound_wikilinks(
             for rel in data.stem_paths.get(target_basename, ())
             if visible(rel)
         )
+    if target_has_no_file:
+        stem_count += 1
     basename_unique = stem_count == 1
 
     candidates: list[_InboundEntry] = []
@@ -8513,7 +8554,7 @@ class WikilinkResolver:
         normalized = sorted(
             (
                 str(rel_path).replace("\\", "/").lstrip("/"),
-                str(title).strip().lower() if title and str(title).strip() else None,
+                title_key(str(title)) if title and str(title).strip() else None,
             )
             for rel_path, title in entries
         )
@@ -8523,14 +8564,33 @@ class WikilinkResolver:
         return resolver
 
     def _build(self) -> None:
-        vault_resolved = self.vault_root.resolve()
-        for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
-            request_budget.checkpoint()
-            try:
-                rel = md.resolve().relative_to(vault_resolved).as_posix()
-            except ValueError:
-                continue
-            self._add_entry(rel, self._read_title_lower(md))
+        from . import find_corpus
+        from .vault_store import ownership, read
+
+        root = self.vault_root
+        # A store-mode vault's corpus holds the store's pages and the files that it does not own.
+        corpus = find_corpus.corpus_paths(root, "vault", lambda: walk_vault_md(root))
+        # One snapshot reads each stored page's body once, as the walk of the disk reads each file.
+        with (
+            read.snapshot(root)
+            if isinstance(corpus, find_corpus.StoreCorpus)
+            else contextlib.nullcontext()
+        ) as view:
+            for md in sorted(corpus, key=lambda item: item.as_posix()):
+                request_budget.checkpoint()
+                try:
+                    # The path's own spelling: the walk yields no link, and a stored page's file may
+                    # be one, which `resolve()` would follow to another page.
+                    rel = relative_posix(md, root)
+                except ValueError:
+                    continue
+                if view is not None and ownership.classify(rel) is ownership.Ownership.PAGE:
+                    page = view.page(rel)
+                    if page is None:
+                        continue  # deleted since the corpus was listed
+                    self._add_entry(rel, title_key_from_bytes(page.body, rel))
+                else:
+                    self._add_entry(rel, self._read_title_lower(md))
 
     @classmethod
     def from_maps(
@@ -8640,6 +8700,23 @@ class WikilinkResolver:
             if candidate.title_key:
                 _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
+    def _current_title(self, vault_root: Path, rel_path: str) -> tuple[bool, str | None]:
+        """Whether the page exists now, and its title key: from the store when it serves the page,
+        else the file.
+        """
+        from .vault_store import read
+
+        try:
+            page = read.owned_page(vault_root, rel_path)
+        except FileNotFoundError:
+            return False, None
+        if page is not None:
+            return True, title_key_from_bytes(page.body, rel_path)
+        abs_path = vault_root / rel_path
+        if not abs_path.is_file():
+            return False, None
+        return True, self._read_title_lower(abs_path)
+
     @staticmethod
     def _read_title_lower(abs_path: Path) -> str | None:
         try:
@@ -8685,7 +8762,7 @@ class WikilinkResolver:
         deleted = _norm(deleted_rels)
         conflict = changed & deleted
         for rel_path in conflict:
-            if (vault_root / rel_path).is_file():
+            if self._current_title(vault_root, rel_path)[0]:
                 deleted.discard(rel_path)
             else:
                 changed.discard(rel_path)
@@ -8694,9 +8771,9 @@ class WikilinkResolver:
         for rel_path in deleted | changed:
             self._remove_entry(rel_path)
         for rel_path in sorted(changed):
-            abs_path = vault_root / rel_path
-            if abs_path.is_file():
-                self._add_entry(rel_path, self._read_title_lower(abs_path))
+            found, title = self._current_title(vault_root, rel_path)
+            if found:
+                self._add_entry(rel_path, title)
 
     def on_entries_changed(
         self,
@@ -8715,7 +8792,7 @@ class WikilinkResolver:
             return str(rel).replace("\\", "/").lstrip("/")
 
         changed = {
-            _path(rel): (str(title).strip().lower() if title and str(title).strip() else None)
+            _path(rel): (title_key(str(title)) if title and str(title).strip() else None)
             for rel, title in entries
         }
         deleted = {_path(rel) for rel in deleted_rels}
@@ -8731,7 +8808,7 @@ class WikilinkResolver:
         note's path) resolve before the file lands on disk.
         """
         no_ext = no_ext_path.removesuffix(".md").lstrip("/")
-        self._add_entry(no_ext + ".md", title.strip().lower() if title and title.strip() else None)
+        self._add_entry(no_ext + ".md", title_key(title) if title and title.strip() else None)
 
 
 def _strip_wikilink_brackets(s: str) -> str:
@@ -8921,7 +8998,7 @@ def _normalize_wikilink(
         if stem_matches:
             return _selected(stem_matches, "stem")
         title_matches = _matches(
-            resolver.titles.get(cleaned.lower(), ()), title_key=cleaned.lower()
+            resolver.titles.get(title_key(cleaned), ()), title_key=title_key(cleaned)
         )
         if title_matches:
             return _selected(title_matches, "title")

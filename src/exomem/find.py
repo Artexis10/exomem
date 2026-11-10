@@ -573,23 +573,23 @@ class FreshnessSnapshot:
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
-            live = freshness.triple(self._root, "kb")
+            # A store-mode vault's pages have no files to stat, so its key comes from the store.
+            stored = find_corpus.store_serves(self._root)
+            live = None if stored else freshness.triple(self._root, "kb")
             if live is not None:
                 self._kb = live
             else:
-                kb = self._root / kb_dirname()
-                self._kb = _walk_freshness_key(_walk_md(kb) if kb.is_dir() else ())
+                self._kb = _walk_freshness_key(_corpus_walk(self._root, "kb"))
         return self._kb
 
     def vault(self) -> tuple[int, int, str]:
         if self._vault is None:
-            live = freshness.triple(self._root, "vault")
+            stored = find_corpus.store_serves(self._root)
+            live = None if stored else freshness.triple(self._root, "vault")
             if live is not None:
                 self._vault = live
             else:
-                from .vault import walk_vault_md
-
-                self._vault = _walk_freshness_key(walk_vault_md(self._root))
+                self._vault = _walk_freshness_key(_corpus_walk(self._root, "vault"))
         return self._vault
 
     def for_scope(self, scope: str) -> tuple[int, int, str]:
@@ -1009,6 +1009,32 @@ def _vault_rel(vault_root: Path, path: Path) -> str | None:
     from . import pending_recall
 
     return pending_recall.vault_rel_path(vault_root, path)
+
+
+def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
+    """The candidate page paths of one scope: a walk of the disk, or the store's pages in a
+    store-mode vault.
+
+    The walk of the disk is looked up when it runs, so a test that replaces `_walk_md` or
+    `vault.walk_vault_md` still reaches it.
+    """
+
+    def disk() -> Iterable[Path]:
+        if scope == "kb":
+            kb = vault_root / kb_dirname()
+            return _walk_md(kb) if kb.is_dir() else ()
+        from .vault import walk_vault_md
+
+        return walk_vault_md(vault_root)
+
+    return find_corpus.corpus_paths(vault_root, scope, disk)
+
+
+def _kb_missing(vault_root: Path) -> bool:
+    """Whether the Knowledge Base folder is missing: a store-mode vault holds its pages in the
+    store, so it needs no folder.
+    """
+    return not (vault_root / kb_dirname()).is_dir() and not find_corpus.store_serves(vault_root)
 
 
 def _resolve_page(
@@ -2870,14 +2896,9 @@ def _eligible_unit_records(
 ) -> dict[str, tuple[ParsedPage, Any, int]]:
     """Return current unit identities satisfying one exact `(page, unit)` plan."""
     if allowed_parent_paths is not None:
-        walk = (vault_root / rel for rel in allowed_parent_paths)
-    elif scope == "kb":
-        root = vault_root / kb_dirname()
-        walk = _walk_md(root) if root.is_dir() else ()
+        walk: Iterable[Path] = (vault_root / rel for rel in allowed_parent_paths)
     else:
-        from .vault import walk_vault_md
-
-        walk = walk_vault_md(vault_root)
+        walk = _corpus_walk(vault_root, scope)
 
     from . import semantic_index
 
@@ -4415,13 +4436,7 @@ def _eligible_filter_paths(
     pending: Any | None = None,
 ) -> set[str]:
     """Resolve the one backend-independent eligible parent identity set."""
-    if scope == "kb":
-        root = vault_root / kb_dirname()
-        walk = _walk_md(root) if root.is_dir() else ()
-    else:
-        from .vault import walk_vault_md
-
-        walk = walk_vault_md(vault_root)
+    walk = _corpus_walk(vault_root, scope)
     if pending is not None and not pending.empty:
         walk = _merge_pending_walk(vault_root, walk, pending=pending, scope=scope)
 
@@ -5807,16 +5822,10 @@ def _find_keyword(
                 catalog = lexstore.get_store(vault_root).catalog_readiness(scope, freshness_key)
                 if not catalog.complete:
                     _raise_catalog_outcome(catalog)
-        if scope == "kb":
-            kb = vault_root / kb_dirname()
-            if not kb.is_dir():
-                log.error("KB directory missing: %s", kb)
-                return []
-            walk = _walk_md(kb)
-        else:
-            from .vault import walk_vault_md
-
-            walk = walk_vault_md(vault_root)
+        if scope == "kb" and _kb_missing(vault_root):
+            log.error("KB directory missing: %s", vault_root / kb_dirname())
+            return []
+        walk = _corpus_walk(vault_root, scope)
         _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
 
     if pending is not None and not pending.empty and not query_norm:
@@ -5966,13 +5975,24 @@ def _find_semantic(
 
         lexical_freshness = snapshot.for_scope(scope)
         lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
-        if mode != "vector" and not lexical_repair and lexstore.maintained_content_index_enabled():
-            catalog = lexstore.get_store(vault_root).catalog_readiness(
-                scope,
-                lexical_freshness,
-            )
-            if not catalog.complete:
-                _raise_catalog_outcome(catalog)
+        lexical_from_store = False
+        if mode != "vector" and lexstore.maintained_content_index_enabled():
+            if find_corpus.store_serves(vault_root):
+                # The catalogue is built from files, so it never covers the store corpus and an
+                # inline build would present the files as the whole store. Every lexical lane
+                # reads the store corpus instead, so the answer is whole: no notice, only an
+                # owner diagnostic.
+                lexical_from_store = True
+                lexical_repair = False
+                if timings is not None:
+                    timings.profile["lexical_lanes"] = {"corpus": "store", "catalogue": "bypassed"}
+            elif not lexical_repair:
+                catalog = lexstore.get_store(vault_root).catalog_readiness(
+                    scope,
+                    lexical_freshness,
+                )
+                if not catalog.complete:
+                    _raise_catalog_outcome(catalog)
 
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
@@ -6050,6 +6070,7 @@ def _find_semantic(
                 else snapshot.recall_paths(recall_scope or scope) & admitted_paths
             ),
             lexical_repair=lexical_repair,
+            from_store=lexical_from_store,
             eligible_paths=eligible_paths,
             filtered=filtered,
             admitted_paths=admitted_paths,
@@ -7120,11 +7141,9 @@ def _stem_word_coverage(
 def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
     """BM25-unavailable fallback: walk vault .md outside Knowledge Base/, keep
     files where >=1 query stem is present, ordered most-recent first."""
-    from .vault import walk_vault_md
-
     vault_resolved = vault_root.resolve()
     matches: list[tuple[str, str]] = []
-    for path in walk_vault_md(vault_root):
+    for path in _corpus_walk(vault_root, "vault"):
         try:
             rel = path.resolve().relative_to(vault_resolved).as_posix()
         except ValueError:
@@ -7219,6 +7238,7 @@ def _keyword_match_paths(
     k: int | None = None,
     pending: Any | None = None,
     allowed_paths: set[str] | None = None,
+    from_store: bool = False,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -7243,6 +7263,9 @@ def _keyword_match_paths(
     the truncation below do.
 
     Both backends bound the result identically, so parity holds at any `k`.
+
+    `from_store` is the caller's proof that the vault serves its reads from the store: the
+    catalogue is built from files and cannot answer, so the scan below reads the store corpus.
 
     `pending` supplies the exact committed generations the persistent catalogue
     has not published yet. Its identities shadow every catalogue row they own --
@@ -7294,7 +7317,7 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
-    if not repair and lexstore.maintained_content_index_enabled():
+    if not from_store and not repair and lexstore.maintained_content_index_enabled():
         catalog_result = lexstore.search_substring_result(
             vault_root,
             query_norm,
@@ -7306,18 +7329,22 @@ def _keyword_match_paths(
         if not catalog_result.readiness.complete:
             _raise_catalog_outcome(catalog_result.readiness)
         return _merged(list(catalog_result.value or []))
-    indexed = lexstore.search_substring(
-        vault_root,
-        query_norm,
-        scope=scope,
-        freshness=freshness,
-        repair=repair,
-        k=persistent_k,
-        allowed_paths=allowed_paths,
+    indexed = (
+        None
+        if from_store
+        else lexstore.search_substring(
+            vault_root,
+            query_norm,
+            scope=scope,
+            freshness=freshness,
+            repair=repair,
+            k=persistent_k,
+            allowed_paths=allowed_paths,
+        )
     )
     if indexed is not None:
         return _merged(indexed)
-    if lexstore.backend() != "python":
+    if not from_store and lexstore.backend() != "python":
         # The sidecar declined. `search_substring` documents exactly one meaning
         # for None -- "fall back" -- and its causes are a retired store, a
         # catalog that is not on disk, a sqlite error, or a sync that could not
@@ -7344,16 +7371,15 @@ def _keyword_match_paths(
             failed_out.append("keyword_lexical")
         _record_degradation("keyword_lexical")
     if allowed_paths is not None:
-        walk = (vault_root / rel for rel in allowed_paths if scope != "kb" or rel.startswith(kb_prefix()))
-    elif scope == "kb":
-        kb = vault_root / kb_dirname()
-        if not kb.is_dir():
-            return []
-        walk = _walk_md(kb)
+        walk: Iterable[Path] = (
+            vault_root / rel
+            for rel in allowed_paths
+            if scope != "kb" or rel.startswith(kb_prefix())
+        )
+    elif scope == "kb" and _kb_missing(vault_root):
+        return []
     else:
-        from .vault import walk_vault_md
-
-        walk = walk_vault_md(vault_root)
+        walk = _corpus_walk(vault_root, scope)
     matches: list[tuple[str, str]] = []  # (updated, rel_path)
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
@@ -7784,7 +7810,7 @@ def recall_resolver_snapshot(
     """
     from . import freshness as freshness_module
     from . import lexstore
-    from .vault import WikilinkResolver, walk_vault_md
+    from .vault import WikilinkResolver
 
     root = Path(vault_root)
     # Callers that already measured disk freshness (notably the graph rebuild)
@@ -7898,9 +7924,15 @@ def recall_resolver_snapshot(
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
+        # A store-mode vault builds from its pages: the catalogue is a derived copy of rows that the
+        # store holds.
+        entries = (
+            None
+            if find_corpus.store_serves(root)
+            else lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
+        )
         if entries is None:
-            if not allow_fallback:
+            if not allow_fallback and not find_corpus.store_serves(root):
                 lexstore.request_repair(
                     root, cause=lexstore.RepairCause.RESOLVER_ENTRIES_UNAVAILABLE
                 )
@@ -7909,7 +7941,7 @@ def recall_resolver_snapshot(
                     status="temporarily_unavailable",
                 )
             entries = []
-            for path in foreground_priority.yielding_in_bulk(walk_vault_md(root)):
+            for path in foreground_priority.yielding_in_bulk(_corpus_walk(root, "vault")):
                 if not recall_policy.is_recall_candidate(root, path):
                     continue
                 page = _CACHE.get(path, root)

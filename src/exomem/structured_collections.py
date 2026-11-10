@@ -133,6 +133,9 @@ _SAVED_VIEW_QUERY_KEYS = frozenset(
         "limit",
     }
 )
+# Version-1 query views: the query object is the same one the query engine's
+# route.run accepts, minus keys that are request- rather than view-scoped.
+_SAVED_VIEW_V1_MAX_BYTES = 16 * 1024
 _SAVED_VIEW_SHARED_SYSTEM_FIELDS = frozenset(
     {"collection_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -201,6 +204,17 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
                            "additionalProperties": {"$ref": "#/$defs/field"}},
             "depends_on": {"type": "array", "maxItems": _MAX_SCHEMA_FIELDS,
                            "items": {"type": "string"}},
+            "references": {
+                "type": "object",
+                "required": ["collection"],
+                "properties": {"collection": {"type": "string", "format": "uuid"}},
+                "additionalProperties": False,
+                "description": (
+                    "Declares that the field's values name rows of the collection with this exomem_id, "
+                    "matched on that collection's single natural-key field. Allowed on a string field, an "
+                    "array of strings, or a string property of the objects in an array."
+                ),
+            },
         },
         "additionalProperties": True,
     }
@@ -855,6 +869,16 @@ class CollectionDiagnostic:
     code: str
     reason: str
     location: str = ""
+    #: The reference a saved view names that the manifest does not declare (SAVED_VIEW_REFERENCE_UNDECLARED).
+    reference: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class FieldReference:
+    """A field's declaration that its values name rows of one other collection."""
+
+    #: The target's stable collection id, whichever spelling the manifest used.
+    collection: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -870,6 +894,40 @@ class FieldSpec:
     classification: str | None = None
     properties: Mapping[str, FieldSpec] = field(default_factory=lambda: MappingProxyType({}))
     depends_on: tuple[str, ...] = ()
+    references: FieldReference | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceDeclaration:
+    """One declared reference: where a row holds its values, which collection they name, and how many a row holds."""
+
+    #: The field, then for an object property the property: ``("site",)`` or ``("skills", "skill_id")``.
+    path: tuple[str, ...]
+    collection: str
+    many: bool
+
+    @property
+    def dotted(self) -> str:
+        return ".".join(self.path)
+
+    @property
+    def location(self) -> str:
+        """Where the manifest holds this declaration, for an error that names what to change."""
+        name, *member = self.path
+        return f"item_schema.fields.{name}" + (f".items.properties.{member[0]}" if member else "")
+
+    def values(self, row: Mapping[str, Any]) -> tuple[str, ...]:
+        """The distinct, non-empty text values one row's values hold here, in order of appearance.
+
+        A null, absent or empty value names no row, and a value repeated in one array counts once.
+        """
+        head = row.get(self.path[0])
+        if len(self.path) == 2:
+            found = [member.get(self.path[1]) for member in (head if isinstance(head, list) else [])
+                     if isinstance(member, Mapping)]
+        else:
+            found = head if isinstance(head, list) else [head]
+        return tuple(dict.fromkeys(value for value in found if type(value) is str and value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1536,6 +1594,16 @@ def parse_plan_ref(value: str) -> tuple[str, str] | None:
     return _parse_item_ref(PLAN_REF_PREFIX, value)
 
 
+def parse_row_ref(value: str) -> tuple[str, str, str] | None:
+    """The semantic profile, collection id and item key of a canonical record or plan row ref, else None."""
+    # These two owner profiles are fixed native identity protocols, not business vocabulary.
+    if (parsed := parse_record_ref(value)) is not None:
+        return "records", *parsed
+    if (parsed := parse_plan_ref(value)) is not None:
+        return "planning", *parsed
+    return None
+
+
 def plan_ref_target(collection_id: str, value: Any) -> str | None:
     """The plan id that a stored Planning reference names in this collection, or None."""
     parsed = parse_plan_ref(value) if type(value) is str else None
@@ -1972,6 +2040,13 @@ def _manifest_from_frontmatter(
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
     derived = _parse_derived(frontmatter.get("derived", False), view_mode)
+    if derived and (found := declared_references(schema)):
+        raise CollectionError(
+            "INVALID_FIELD_REFERENCE",
+            "a derived collection keeps its rows outside the store, so its fields cannot declare references",
+            {"field": f"{found[0].location}.references", "received": "derived: true",
+             "expected": "a collection whose rows live in the store", "example": "remove the references declaration"},
+        )
     return CollectionManifest(
         collection_id=collection_id,
         title=title,
@@ -2072,6 +2147,7 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
             manifest.semantic_profile,
         ),
         _saved_view_child_shapes(manifest.storage, manifest.child_tables),
+        frozenset(declaration.dotted for declaration in declared_references(manifest.schema)),
     )
     canonical = json.dumps(
         {
@@ -2118,7 +2194,8 @@ def _parse_saved_views(
             ):
                 raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
             normalized_view = _freeze_mapping(
-                _normalize_saved_view(definition, fields, child_shapes)
+                _normalize_saved_view(definition, fields, child_shapes,
+                                      frozenset(d.dotted for d in declared_references(schema)))
             )
             _validate_saved_view_literals(
                 normalized_view, schema, semantic_profile, planning_values
@@ -2126,7 +2203,8 @@ def _parse_saved_views(
             accepted[name] = definition
             normalized[name] = normalized_view
         except CollectionError as error:
-            diagnostics.append(CollectionDiagnostic(error.code, error.reason, location))
+            diagnostics.append(CollectionDiagnostic(
+                error.code, error.reason, location, error.details.get("reference", "")))
     return (
         _freeze_mapping(accepted, "views"),
         _freeze_mapping(normalized, "views"),
@@ -2242,10 +2320,101 @@ def _saved_view_selected_fields(
     )
 
 
+def _v1_view_field_names(query: Mapping) -> tuple[set[str], list[str]]:
+    """Every field name a version-1 view query uses: (names, related entries)."""
+
+    def leaves(node):
+        if isinstance(node, Mapping):
+            if type(node.get("field")) is str:
+                yield node["field"]
+            for key in ("all", "any", "not"):
+                yield from leaves(node.get(key))
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                yield from leaves(child)
+
+    names: set[str] = set()
+    for item in query.get("select") or ():
+        if type(item) is str:
+            names.add(item)
+    names.update(leaves(query.get("where")))
+    for key in ("order_by", "group_by"):
+        for item in query.get(key) or ():
+            if isinstance(item, Mapping) and type(item.get("field")) is str:
+                names.add(item["field"])
+    aggregates = query.get("aggregates")
+    if isinstance(aggregates, Mapping):
+        for spec in aggregates.values():
+            if not isinstance(spec, Mapping):
+                continue
+            if type(spec.get("field")) is str:
+                names.add(spec["field"])
+            names.update(leaves(spec.get("where")))
+    related = []
+    for entry in query.get("related") or ():
+        if type(entry) is str:
+            related.append(entry)
+        elif isinstance(entry, Mapping) and type(entry.get("field")) is str:
+            related.append(entry["field"])
+    return names, related
+
+
+def _normalize_saved_view_v1(
+    raw_query: Mapping,
+    fields: set[str],
+    reference_names: frozenset,
+) -> dict[str, Any]:
+    """Structural check of a version-1 query view: shape, grammar keys and reference heads.
+
+    Target-side fields are not checked — they belong to another collection's schema and
+    surface as SAVED_VIEW_STALE at run time.
+    """
+    from .query_engine import validation  # it imports this module, so it loads here, not at the top
+
+    try:
+        encoded = json.dumps(raw_query, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        raise CollectionError(
+            "INVALID_SAVED_VIEW", "saved view query is not JSON-encodable") from None
+    if len(encoded) > _SAVED_VIEW_V1_MAX_BYTES:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query exceeds 16 KiB")
+    if raw_query.get("version") != 1:
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query version must be 1")
+    if not _mapping_has_only_keys(raw_query, validation.VIEW_KEYS):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
+    page = raw_query.get("page")
+    if page is not None and (not isinstance(page, Mapping) or "after" in page):
+        raise CollectionError("INVALID_SAVED_VIEW", "saved view query must not pin a page cursor")
+    names, related = _v1_view_field_names(raw_query)
+    for name in sorted(names):
+        if name in fields:
+            continue
+        if "." in name:
+            head = name.split(".", 1)[0]
+            if head in reference_names:
+                continue
+            raise CollectionError(
+                "SAVED_VIEW_REFERENCE_UNDECLARED",
+                f"saved view field '{name}' uses undeclared reference '{head}'",
+                {"reference": head},
+            )
+        raise CollectionError(
+            "INVALID_SAVED_VIEW", f"saved view field '{name}' is not declared")
+    for entry in related:
+        if entry not in reference_names:
+            raise CollectionError(
+                "SAVED_VIEW_REFERENCE_UNDECLARED",
+                f"saved view related entry '{entry}' uses undeclared reference '{entry}'",
+                {"reference": entry},
+            )
+    return {"query": json.loads(encoded)}
+
+
 def _normalize_saved_view(
     value: object,
     fields: set[str],
     child_shapes: Mapping[str, frozenset[str]] = MappingProxyType({}),
+    reference_names: frozenset = frozenset(),
 ) -> dict[str, Any]:
     if (
         not isinstance(value, Mapping)
@@ -2256,6 +2425,12 @@ def _normalize_saved_view(
     raw_query = value.get("query", {})
     if not isinstance(raw_query, Mapping):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query is invalid")
+    if "version" in raw_query:
+        # A version-1 view is its engine query verbatim; sort/source_snapshot stay out.
+        if not _mapping_has_only_keys(value, {"query"}):
+            raise CollectionError(
+                "INVALID_SAVED_VIEW", "version-1 saved view takes only a query object")
+        return _normalize_saved_view_v1(raw_query, fields, reference_names)
     if not _mapping_has_only_keys(raw_query, _SAVED_VIEW_QUERY_KEYS):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
     expand_children = raw_query.get("expand_children")
@@ -2637,7 +2812,8 @@ def _parse_schema(version: int, value: object) -> ItemSchema:
             raise CollectionError(
                 "INVALID_ITEM_SCHEMA", "item schema contains an invalid field name"
             )
-        fields[name] = _parse_field_spec(raw_spec)
+        fields[name] = _parse_field_spec(raw_spec, 0, f"item_schema.fields.{name}")
+        _require_reference_positions(name, fields[name])
     def validate_dependencies(spec):
         if any(name not in fields for name in spec.depends_on):
             raise CollectionError("INVALID_ITEM_SCHEMA", "field dependencies must name declared fields")
@@ -2954,7 +3130,7 @@ def _parse_presentation_descriptors(
     return tuple(result)
 
 
-def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
+def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fields.*") -> FieldSpec:
     if depth > _MAX_SCHEMA_DEPTH:
         raise CollectionError("INVALID_ITEM_SCHEMA", "item schema nesting is too deep")
     raw = _mapping(value, "item_schema field")
@@ -2985,7 +3161,7 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
         raise CollectionError("INVALID_ITEM_SCHEMA", "enum fields require values")
     if kind != "enum" and enum:
         raise CollectionError("INVALID_ITEM_SCHEMA", "only enum fields may declare values")
-    items = _parse_field_spec(raw["items"], depth + 1) if "items" in raw else None
+    items = _parse_field_spec(raw["items"], depth + 1, f"{at}.items") if "items" in raw else None
     if kind == "array" and items is None:
         raise CollectionError("INVALID_ITEM_SCHEMA", "array field requires an items schema")
     units_raw = raw.get("units", [])
@@ -3012,8 +3188,91 @@ def _parse_field_spec(value: object, depth: int = 0) -> FieldSpec:
     if not isinstance(dependencies, list) or len(dependencies) > _MAX_SCHEMA_FIELDS or any(not isinstance(name, str) or not name for name in dependencies):
         raise CollectionError("INVALID_ITEM_SCHEMA", "depends_on must name declared fields")
     return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset, classification,
-                     MappingProxyType({name: _parse_field_spec(spec, depth + 1) for name, spec in properties.items()}),
-                     tuple(dependencies))
+                     MappingProxyType({name: _parse_field_spec(spec, depth + 1, f"{at}.properties.{name}")
+                                       for name, spec in properties.items()}),
+                     tuple(dependencies), references=_parse_field_reference(raw.get("references"), at))
+
+
+def _parse_field_reference(value: object, at: str) -> FieldReference | None:
+    """Read ``references: {collection: <id>}``; the target is named by its stable id, never by a path."""
+    if value is None:
+        return None
+    target = None
+    if isinstance(value, Mapping) and set(value) == {"collection"} and type(value["collection"]) is str:
+        target = memory_refs.parse_memory_ref(value["collection"]) or memory_refs.normalize_id(value["collection"])
+    if target is None:
+        raise CollectionError(
+            "INVALID_FIELD_REFERENCE",
+            "references must be a mapping with exactly one key, collection, holding the target collection's exomem_id",
+            {
+                "field": f"{at}.references",
+                "received": value,
+                "expected": "{collection: <exomem_id of the target collection>}",
+                "example": "references: {collection: 15dd81cd-9ae2-488c-bd9e-14771d86343e}",
+            },
+        )
+    return FieldReference(target)
+
+
+#: The natural-key field types whose values one text value can match, which fixes what a reference may target.
+# nosemgrep: ep-word-set -- the manifest schema's closed field types fix which natural keys one text value can match
+REFERENCE_KEY_TYPES = ("string", "date", "datetime")
+
+
+def _reference_slots(name: str, spec: FieldSpec) -> Iterable[tuple[tuple[str, ...], FieldSpec, bool]]:
+    """Where one top-level field may declare a reference: ``(path, the spec that carries it, many)``.
+
+    The slots are a closed set of shapes: a string, an array of strings (declared on the array),
+    and a string property of the objects in an array.
+    """
+    if spec.type == "string":
+        yield (name,), spec, False
+    elif spec.type == "array" and spec.items is not None:
+        if spec.items.type == "string":
+            yield (name,), spec, True
+        elif spec.items.type == "object":
+            for member, child in spec.items.properties.items():
+                if child.type == "string":
+                    yield (name, member), child, True
+
+
+def declared_references(schema: ItemSchema) -> tuple[ReferenceDeclaration, ...]:
+    """Every reference a schema declares, in field order."""
+    return tuple(
+        ReferenceDeclaration(path, carrier.references.collection, many)
+        for name, spec in schema.fields.items()
+        for path, carrier, many in _reference_slots(name, spec)
+        if carrier.references is not None
+    )
+
+
+def _require_reference_positions(name: str, spec: FieldSpec) -> None:
+    """Refuse a declaration that the reader would never look at, so it cannot be accepted and ignored."""
+    slots = {id(carrier): path for path, carrier, _ in _reference_slots(name, spec)}
+
+    def visit(node: FieldSpec, at: str) -> None:
+        if node.references is not None:
+            path = slots.get(id(node))
+            if path is None or any("." in part for part in path):
+                raise CollectionError(
+                    "INVALID_FIELD_REFERENCE",
+                    "references go on a string field, on an array of strings, or on a string property of the "
+                    "objects in an array, and no name along the way may contain a dot",
+                    {
+                        "field": f"{at}.references",
+                        "received": node.type if path is None else f"the name {'.'.join(path)!r}",
+                        "expected": "a top-level string field, a top-level array of strings (declared on the "
+                                    "array itself), or a string property of a top-level array of objects",
+                        "example": "site: {type: string, references: {collection: "
+                                   "15dd81cd-9ae2-488c-bd9e-14771d86343e}}",
+                    },
+                )
+        for member, child in node.properties.items():
+            visit(child, f"{at}.properties.{member}")
+        if node.items is not None:
+            visit(node.items, f"{at}.items")
+
+    visit(spec, f"item_schema.fields.{name}")
 
 
 def _parse_claims(value: object) -> Mapping[str, tuple[str, ...]] | None:

@@ -58,18 +58,22 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
 
     Raises SchemaParseError if anything looks wrong.
     """
-    from .vault import shipped_schema_root
+    from .vault import read_bytes_without_pinning, shipped_schema_root
 
     schema_dir = shipped_schema_root(vault_path) / "references"
     frontmatter_doc = schema_dir / "frontmatter.md"
     page_types_doc = schema_dir / "page-types.md"
 
+    texts = []
     for doc in (frontmatter_doc, page_types_doc):
-        if not doc.exists():
-            raise SchemaParseError(f"Schema doc missing: {doc}")
-
-    fm_text = frontmatter_doc.read_text(encoding="utf-8")
-    pt_text = page_types_doc.read_text(encoding="utf-8")
+        try:
+            # A store-mode vault keeps a legacy schema document in its store; the file is only a
+            # projection.
+            raw = read_bytes_without_pinning(doc, vault_path).decode("utf-8")
+            texts.append(raw.replace("\r\n", "\n").replace("\r", "\n"))  # as read_text read it
+        except FileNotFoundError:
+            raise SchemaParseError(f"Schema doc missing: {doc}") from None
+    fm_text, pt_text = texts
 
     source_section = _slice_section(fm_text, "### source", next_heading_prefix="###")
     if not source_section:

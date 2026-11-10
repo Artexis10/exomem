@@ -33,6 +33,7 @@ from . import (
     import_stage,
     markdown_regions,
     note_types,
+    originals,
     reserved_paths,
     source_taxonomy,
 )
@@ -96,6 +97,9 @@ class EarlierImport:
     # `imported_from` as written. Two originals whose names differ only in Unicode
     # normalisation share every normalised field; only this spelling tells them apart.
     spelled_from: str | None = None
+    # The file that the page's sidecar fields bind (an artifact Source), or None for a text
+    # Source, which fences its original instead.
+    bound_original: str | None = None
 
 
 def _collection_spelling(path: str | None, collection_path: str | None) -> str | None:
@@ -158,6 +162,7 @@ def earlier_import_of(
         captured=captured,
         aliases=tuple(planned.get("aliases") or ()),
         spelled_from=planned["original_path"],
+        bound_original=planned.get("artifact_path") or None,
     )
 
 
@@ -254,17 +259,23 @@ def mapping_fields(frontmatter: Mapping[str, Any], mapping: Mapping[str, str]) -
 def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
     """The earlier imports a Source page records: its first path, then each `also_imported_from` path.
 
-    A page that names no original and no mapping gives none.
+    A page that names no original and no mapping, or that cannot be read, gives none.
     """
     try:
-        frontmatter = _leading_frontmatter(root, page)
+        return page_import_entries(root, page)
     except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
         return []
+
+
+def page_import_entries(root: Path, page: Path) -> list[EarlierImport]:
+    """`read_import_entries`, except that a page it cannot read raises the refusal instead of giving none."""
+    frontmatter = _leading_frontmatter(root, page)
     if frontmatter is None:
         return []
     rel = page.relative_to(root).as_posix()
     captured = str(frontmatter.get("captured") or "")
     digest = _text_field(frontmatter.get("original_sha256"))
+    bound = originals.bound_path(frontmatter)
     entries: list[EarlierImport] = []
     spelled_from = frontmatter.get("imported_from")
     imported_from = _text_field(spelled_from)
@@ -282,6 +293,7 @@ def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
                     nfc(a) for a in aliases if isinstance(a, str) and a.strip()
                 ) if isinstance(aliases, list) else (),
                 spelled_from=spelled_from,
+                bound_original=bound,
             )
         )
     for mapped in recorded_mappings(frontmatter):
@@ -295,6 +307,7 @@ def read_import_entries(root: Path, page: Path) -> list[EarlierImport]:
                 captured=captured,
                 aliases=(),
                 spelled_from=mapped["imported_from"],
+                bound_original=bound,
             )
         )
     return entries
@@ -439,6 +452,19 @@ class Destinations:
         path = self.root / rel_path
         self._names(path.parent).add(path.name.casefold())
 
+    @classmethod
+    def frozen_by(cls, root: Path, items: list[dict]) -> Destinations:
+        """Destinations that already hold every path the plan items froze, so a new path never takes a later item's."""
+        destinations = cls(root)
+        for item in items:
+            frozen = [(item.get("note") or {}).get("target_path")]
+            if item["action"] == "copy-as-source":
+                frozen += [item["target_path"], item.get("artifact_path")]
+            for rel_path in frozen:
+                if rel_path:
+                    destinations.reserve(rel_path)
+        return destinations
+
     def taken(self, rel_path: str) -> bool:
         path = self.root / rel_path
         return path.name.casefold() in self._names(path.parent)
@@ -465,7 +491,7 @@ class Destinations:
             attempt += 1
 
 
-def _folder_for(root: Path, classification: Mapping[str, Any] | None,
+def folder_for(root: Path, classification: Mapping[str, Any] | None,
                 taxonomy: source_taxonomy.SourceTaxonomy | None) -> Path | str:
     """Where this item's Source lives, or a refusal code when the registry no longer agrees."""
     # A note rule alone leaves the Source copy unclassified: it files under Imported.
@@ -1026,7 +1052,7 @@ def plan_item(
                 item["previous_note"] = previous
                 owes_note = False
 
-    folder = _folder_for(root, classification, taxonomy)
+    folder = folder_for(root, classification, taxonomy)
     if isinstance(folder, str):
         return {"path": original_path, "code": folder,
                 "reason": "the Source taxonomy no longer accepts this rule's kind or domain"}
@@ -1057,15 +1083,7 @@ def plan_item(
         )
         item["existing_ref"] = item["target_ref"]
         return holds_source(item)
-    slug, slug_warning = slugify_with_truncation_check(item["title"])
-    suffix = None
-    if item["form"] == "artifact":
-        from .add import stored_artifact_suffix
-        from .preserve import _sanitize_filename
-
-        # A `.md` original is an artifact when its bytes are not UTF-8 text or exceed the inline bound.
-        suffix = stored_artifact_suffix(Path(_sanitize_filename(Path(original_path).name) or "").suffix)
-    page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
+    page, artifact, slug_warning = allocate_source(item, folder, destinations, date_iso=date_iso)
     reason = access.writable_reason(root, page)
     if reason is not None:
         return {"path": original_path, "code": "WRITE_REFUSED", "reason": reason}
@@ -1084,6 +1102,22 @@ def plan_item(
     if seen is not None:
         seen.setdefault((item["original_sha256"], protected, item["form"]), item)
     return item, text
+
+
+def allocate_source(
+    item: Mapping[str, Any], folder: Path, destinations: Destinations, *, date_iso: str
+) -> tuple[str, str | None, str | None]:
+    """A free Source page path in `folder`, the artifact path beside it for an artifact item, and the slug warning."""
+    slug, slug_warning = slugify_with_truncation_check(item["title"])
+    suffix = None
+    if item["form"] == "artifact":
+        from .add import stored_artifact_suffix
+        from .preserve import _sanitize_filename
+
+        # A `.md` original is an artifact when its bytes are not UTF-8 text or exceed the inline bound.
+        suffix = stored_artifact_suffix(Path(_sanitize_filename(Path(item["original_path"]).name) or "").suffix)
+    page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
+    return page, artifact, slug_warning
 
 
 def seen_in_plan(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, bool, str], Mapping[str, Any]]:

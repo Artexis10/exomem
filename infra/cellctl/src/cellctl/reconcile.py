@@ -55,6 +55,7 @@ from .errors import describe_error as _describe_error
 from .export_layout import (
     PACK,
     PAUSE,
+    STEPS,
     UPLOAD,
     VERIFY,
     legacy_job_name,
@@ -344,6 +345,11 @@ class LoopMemory:
     recall_read_at: datetime | None = None
     recall_verdicts: dict[str, bool] = field(default_factory=dict)
     recall_logged: tuple[list[str], list[str]] = field(default_factory=lambda: ([], []))
+    # The cell-originals-damaged alert, judged from the same readiness answers:
+    # each serving cell's last definite verdict (cell_readiness.originals_verdict)
+    # and the cells last logged. A restart forgets them, as above.
+    originals_verdicts: dict[str, bool] = field(default_factory=dict)
+    originals_logged: list[str] = field(default_factory=list)
     # D10: what each local cell's latest measured hourly backup found (a
     # GROWTH_ value). A restart forgets them, and the growth alert waits until
     # every serving local cell has been measured again.
@@ -2019,10 +2025,35 @@ async def _cell_health_alerts(
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.DISK_LOW_ALERT, firing, now)
 
-    await _recall_lag_alert(cluster, cluster_config, rows, observations, now, memory, after=thresholds.recall_lag_after)
+    await _readiness_alerts(cluster, cluster_config, rows, observations, now, memory, after=thresholds.recall_lag_after)
 
 
-async def _recall_lag_alert(
+def _readiness_verdicts(
+    previous: dict[str, bool],
+    serving: set[str],
+    addresses: dict[str, str],
+    answers: dict[str, bytes],
+    judge: Callable[[bytes], bool | None],
+    alert: str,
+) -> tuple[dict[str, bool], dict[str, bool | None]]:
+    """One alert's verdicts from this read: each serving cell keeps its last
+    definite verdict through an answer that cannot be judged, and a cell that
+    leaves service forgets it. Returns the kept verdicts and this read's."""
+
+    latest: dict[str, bool | None] = {}
+    for cell in addresses:
+        try:
+            latest[cell] = judge(answers[cell]) if cell in answers else None
+        except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
+            logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
+                         alert, cell, _describe_error(error))
+            latest[cell] = None
+    verdicts = {cell: verdict for cell, verdict in previous.items() if cell in serving}
+    verdicts.update((cell, verdict) for cell, verdict in latest.items() if verdict is not None)
+    return verdicts, latest
+
+
+async def _readiness_alerts(
     cluster: ClusterGateway,
     cluster_config: ClusterConfig,
     rows: list[CellRow],
@@ -2032,14 +2063,17 @@ async def _recall_lag_alert(
     *,
     after: timedelta,
 ) -> None:
-    """cell-recall-lagging: each serving cell's readiness answer, read from
-    its health-only port at most once a RECALL_LAG_INTERVAL, says whether its
-    recall serves a catalogue that has stayed unchanged and behind for
-    `after`. The age is the cell's own, so a cellctl restart restarts no
-    clock. An answer that cannot be judged (none, or a lag too young) keeps
-    the cell's last definite verdict: it says nothing new, and a stalled cell's
-    last verdict is the stall. A cell that leaves service forgets its verdict.
-    Nothing is read with no receiver to tell."""
+    """cell-recall-lagging and cell-originals-damaged, from each serving
+    cell's readiness answer, read from its health-only port at most once a
+    RECALL_LAG_INTERVAL.
+
+    The answer says whether the cell's recall serves a catalogue that has stayed
+    unchanged and behind for `after`. The age is the cell's own, so a cellctl
+    restart restarts no clock. It also counts the cell's missing or damaged
+    stored originals. An answer that cannot be judged (none, a lag too young,
+    or no fixity pass yet) keeps the cell's last definite verdict: it says
+    nothing new, and a stalled cell's last verdict is the stall. A cell that
+    leaves service forgets its verdicts. Nothing is read with no receiver to tell."""
 
     if cluster_config.alert_delivery_secret is None:
         return
@@ -2061,18 +2095,11 @@ async def _recall_lag_alert(
             except Exception as error:  # noqa: BLE001 - every cell then reads as unjudged
                 logger.error("cellctl: %s: no cell readiness could be read: %s", alerts.RECALL_LAG_ALERT,
                              _describe_error(error))
-        latest: dict[str, bool | None] = {}
-        for cell in addresses:
-            try:
-                latest[cell] = cell_readiness.recall_lag_verdict(answers[cell], after=after) if cell in answers else None
-            except Exception as error:  # noqa: BLE001 - an untrusted answer leaves its cell unjudged, never the pass down
-                logger.error("cellctl: %s: the readiness answer of cell %s could not be judged: %s",
-                             alerts.RECALL_LAG_ALERT, cell, _describe_error(error))
-                latest[cell] = None
-        verdicts = {cell: verdict for cell, verdict in memory.recall_verdicts.items() if cell in serving}
-        verdicts.update((cell, verdict) for cell, verdict in latest.items() if verdict is not None)
+        verdicts, latest = _readiness_verdicts(
+            memory.recall_verdicts, serving, addresses, answers,
+            lambda body: cell_readiness.recall_lag_verdict(body, after=after), alerts.RECALL_LAG_ALERT)
         memory.recall_verdicts = verdicts
-        lagging = alerts.recall_lagging_cells(rows, verdicts)
+        lagging = alerts.flagged_cells(rows, verdicts)
         unjudged = sorted(cell for cell in serving if latest.get(cell) is None)
         if (lagging, unjudged) != memory.recall_logged:
             memory.recall_logged = (lagging, unjudged)
@@ -2086,9 +2113,24 @@ async def _recall_lag_alert(
                 logger.info("cellctl: %s: %d serving cell(s) could not be read, or lag for less than %d seconds; "
                             "each keeps its last verdict: %s", alerts.RECALL_LAG_ALERT, len(unjudged), seconds,
                             ", ".join(unjudged))
-    firing = alerts.recall_lagging(rows, memory.recall_verdicts)
+        memory.originals_verdicts, _latest = _readiness_verdicts(
+            memory.originals_verdicts, serving, addresses, answers, cell_readiness.originals_verdict,
+            alerts.ORIGINALS_DAMAGED_ALERT)
+        damaged = alerts.flagged_cells(rows, memory.originals_verdicts)
+        if damaged != memory.originals_logged:
+            memory.originals_logged = damaged
+            if damaged:
+                logger.warning("cellctl: %s: %d serving cell(s) count a missing or damaged stored original: %s",
+                               alerts.ORIGINALS_DAMAGED_ALERT, len(damaged), ", ".join(damaged))
+            else:
+                logger.info("cellctl: %s: no judged serving cell counts a missing or damaged stored original",
+                            alerts.ORIGINALS_DAMAGED_ALERT)
+    firing = alerts.any_flagged(rows, memory.recall_verdicts)
     if firing is not None:
         await _deliver_alert(cluster, cluster_config, memory, alerts.RECALL_LAG_ALERT, firing, now)
+    firing = alerts.any_flagged(rows, memory.originals_verdicts)
+    if firing is not None:
+        await _deliver_alert(cluster, cluster_config, memory, alerts.ORIGINALS_DAMAGED_ALERT, firing, now)
 
 
 def _note_cell_health(
@@ -3076,7 +3118,7 @@ async def _remove_export(
     namespace = namespace_name(row.cell_id)
     try:
         # D8: an ended export leaves no step Job and no staging claim; a retry repeats each removal.
-        for name in (*(export_job_name(item.export_id, step) for step in (PAUSE, UPLOAD, PACK, VERIFY)),
+        for name in (*(export_job_name(item.export_id, step) for step in STEPS),
                      legacy_job_name(item.export_id)):
             cluster.delete_job(namespace, name)
         cluster.delete_export_staging(namespace, item.export_id)

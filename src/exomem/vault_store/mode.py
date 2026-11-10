@@ -76,9 +76,11 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     """``store_mode_active`` for a byte reader: it re-reads the records only when the manifest changes.
 
     Activation and rollback run offline, and each changes the manifest, so a reader may keep its answer
-    while the manifest's stat signature holds: one stat per read in place of a parse. A crash window is
-    never kept, and a manifest or store that cannot be read raises as ``state`` does. The write refusal
-    in ``availability`` does not use this: it asks ``store_mode_active`` every time.
+    while the manifest's stat signature holds: one stat per read in place of a parse. A crash window
+    is never kept, and a manifest or store that cannot be read raises as ``state`` does. A rollback
+    commits the store's file mode before it changes the manifest; ``read.snapshot`` meets that
+    window when it opens the store, and ``forget_read_mode`` drops the kept answer there. The write
+    refusal in ``availability`` does not use this: it asks ``store_mode_active`` every time.
     """
     key = (os.fspath(vault_root), state_paths._placement_environment())
     cached = _READ_MODES.get(key)
@@ -93,6 +95,11 @@ def store_mode_for_reads(vault_root: Path) -> bool:
             _READ_MODES.clear()
         _READ_MODES[key] = (manifest, signature, current == STORE_MODE)
     return current == STORE_MODE
+
+
+def forget_read_mode(vault_root: Path) -> None:
+    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
+    _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
 
 
 def _stored_mode(vault_root: Path) -> str | None:
@@ -127,29 +134,46 @@ STORE_FIGURES = (
     "held",
     "held_by_kind",
     "audit_rows",
+    "registry",
+    "registry_revision",
+    "registry_target_revision",
+    "registry_waiting_on_paths",
 )
 
 
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
-    A file-mode vault reports only the mode and the release gate. A crash window reports its own state. A
-    store-mode vault adds the figures that an operator checks before a rollback: stored pages and
-    binaries, queued projections, the age in seconds of the oldest queued projection that no hold
-    sits on (None when none waits, "unknown" when the clock says it is in the future), and held
-    items in total and by kind. A projection that the projector deferred, such as one on a linked
-    file, stays queued and keeps ageing. A store that cannot be read gives "unknown", for the mode
-    or for each figure, with the error's name in ``unreadable``: an unreadable store never reports
-    zeros. A damaged state manifest raises instead, so that the command refuses and names it.
+    A file-mode vault reports only the mode, the release gate and the vault-side marker. A crash
+    window reports its own state. A store-mode vault adds the figures that an operator checks before
+    a rollback: stored pages and binaries, queued projections, the age in seconds of the oldest
+    queued projection that no hold sits on (None when none waits, "unknown" when the clock says it
+    is in the future), and held items in total and by kind. A projection that the projector
+    deferred, such as one on a linked file, stays queued and keeps ageing. The registry figures say
+    whether the derived rows reflect the schema overlay (``current``), are being derived again
+    toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
+    ``registry_waiting_on_paths`` counts the overlay paths that the projector has not put on disk or
+    that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
+    ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
+    on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
+    root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and
+    ``vault_claim`` says whether this root ``holds`` the claim, is ``displaced`` from it or is
+    refused because another root holds it (``elsewhere``). A store that cannot be read gives
+    "unknown", for the mode or for each figure, with the error's name in ``unreadable``: an
+    unreadable store never reports zeros. A damaged state manifest raises instead, so that the
+    command refuses and names it.
     """
+    from . import marker
+
     report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
     # A damaged manifest raises here, so the command refuses and names it.
-    if not state_migration.vault_store_recorded(vault_root):
-        return {**report, "mode": FILE_MODE}
+    recorded = state_migration.vault_store_recorded(vault_root)
     try:
-        current = state(vault_root)
+        current = state(vault_root) if recorded else FILE_MODE
     except Exception as error:  # noqa: BLE001 - an unreadable store is unknown, never a mode
-        return {**report, "mode": UNKNOWN, "unreadable": _reason(error)}
+        unknown = {"mode": UNKNOWN, "unreadable": _reason(error)}
+        return {**report, **marker.report(vault_root), **unknown}
+    report.update(marker.report(vault_root, in_store_mode=current == STORE_MODE))
     if current != STORE_MODE:
         return {**report, "mode": current}
     try:
@@ -165,10 +189,14 @@ def _reason(error: Exception) -> str:
 
 
 def _store_figures(vault_root: Path) -> dict:
+    from . import rederive
+
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
     )
     with closing(reader):
+        registry = rederive.read(reader)
+        waiting = rederive.waiting_on(reader, vault_root)
         revision, release, changed_at = reader.execute(
             "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"
         ).fetchone()
@@ -199,4 +227,8 @@ def _store_figures(vault_root: Path) -> dict:
         "held": counts["store_held"],
         "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],
+        "registry": registry.state,
+        "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
+        "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,
+        "registry_waiting_on_paths": waiting,
     }

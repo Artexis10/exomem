@@ -64,6 +64,7 @@ from .substrate import PUBLIC_BASE_URL, Substrate
 
 if TYPE_CHECKING:
     from .large_import import LargeImportPlan
+    from .original_fixity import FixityPlan
     from .raw_import import RawImportPlan
 
 WARM_ITERATIONS = 20
@@ -145,6 +146,8 @@ class Context:
     large_import: LargeImportPlan | None = None
     # The raw-data import mode (raw_import.py): what to run after provisioning.
     raw_import: RawImportPlan | None = None
+    # The original-fixity mode (original_fixity.py): what to seed after provisioning.
+    original_fixity: FixityPlan | None = None
     a: Tenant = field(default_factory=lambda: Tenant("A", f"owner-{secrets.token_hex(3)}@rehearsal.test", paid=True))
     b: Tenant = field(default_factory=lambda: Tenant("B", f"friend-{secrets.token_hex(3)}@rehearsal.test", paid=False))
     browser: HeadlessBrowser = field(init=False)
@@ -314,6 +317,26 @@ class Context:
         )
         self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, f"CELLCTL_BACKUP_WINDOW={window}")
         self.kubectl("rollout", "status", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--timeout=180s")
+
+    async def backup(self, cell_id: str) -> str:
+        """Open the backup window until cellctl has taken a new snapshot of the cell and the cell serves again.
+
+        The window closes again afterwards, so no second backup lands mid-scenario. Returns the snapshot ID.
+        """
+
+        previous = (await self.cell(cell_id)).get("last_backup_snapshot")
+        hour = dt.datetime.now(dt.UTC).hour
+        self.set_backup_window(f"{hour}-{(hour + 2) % 24}")
+        try:
+            row = await self.wait_cell(
+                cell_id,
+                lambda row: bool(row.get("last_backup_snapshot")) and row["last_backup_snapshot"] != previous
+                and row.get("hold_kind") is None and row.get("ready") is True,
+                timeout=1200, interval=2, description="a new backup snapshot and the cell serving again")
+        finally:
+            hour = dt.datetime.now(dt.UTC).hour
+            self.set_backup_window(f"{(hour + 6) % 24}-{(hour + 7) % 24}")
+        return row["last_backup_snapshot"]
 
 
 def _is_ready_pod(pod: dict[str, Any] | None) -> bool:
@@ -982,6 +1005,54 @@ async def _step_10(ctx: Context, record: StepRecord) -> None:
         raise StepFailure("; ".join(problems))
 
 
+def restore_into_scratch(ctx: Context, cell_id: str, snapshot: str, scratch: str, *, label: str) -> None:
+    """Restore `snapshot` of the cell onto a new volume in namespace `scratch` and wait for the restore Job.
+
+    The scratch namespace holds the cell's documents with no replica, so nothing serves there until a caller
+    scales it. The per-cell credentials are read from the source cell's Secret, as an operator with cluster-admin.
+    `label` names the caller in the report's overlay.
+    """
+
+    secret = ctx.kube_json("get", "secret", "cell-credentials", "--namespace", namespace_name(cell_id))["data"]
+    decoded = {key: base64.b64decode(value).decode() for key, value in secret.items()}
+    # D9: a new cell's object-store key lives in the Secret the custodian minted, which the custodian
+    # writes only in cell namespaces; the operator copies it into the scratch namespace.
+    object_store_key = ctx.kube_json("get", "secret", OBJECT_STORE_KEY_SECRET, "--namespace", namespace_name(cell_id))
+    source_pod = ctx.runtime_pod(cell_id)
+    image = source_pod["spec"]["containers"][0]["image"]  # type: ignore[index]
+    scratch_bearer = secrets.token_urlsafe(32)
+    spec = CellManifestSpec(
+        cell_id=cell_id, image=image, replicas=0, read_only=False,
+        bearer_current=scratch_bearer, backup_password=decoded["backup-password"],
+        hold_kind="restore", hold_started_at=dt.datetime.now(dt.UTC).isoformat(),
+        job_egress_except=("10.42.0.0/16", "10.43.0.0/16"),
+    )
+    scratch_key = {"apiVersion": "v1", "kind": "Secret", "type": object_store_key.get("type", "Opaque"),
+                   "metadata": {"name": OBJECT_STORE_KEY_SECRET}, "data": object_store_key["data"]}
+    documents = render_cell_manifests(spec) + [scratch_key] + [
+        render_restore_job(spec, bucket_name=BACKUP_BUCKET, endpoint=ctx.stack.object_store.endpoint(from_host=False), snapshot_id=snapshot)
+    ]
+    for document in documents:
+        if document["kind"] == "Namespace":
+            document["metadata"]["name"] = scratch
+            document["metadata"].setdefault("labels", {})["exomem.io/scratch-of"] = cell_id
+            document["metadata"]["labels"].pop("exomem.io/cloud-cell", None)
+        else:
+            document["metadata"]["namespace"] = scratch
+    ctx.report.overlays.append(
+        f"{label} scratch restore: no operator export tool exists yet (task 3.6, deferred by ruling), so the "
+        f"rehearsal renders the cell with cellctl's render_cell_manifests and render_restore_job, moves every "
+        f"object into namespace {scratch} without the exomem.io/cloud-cell label, copies the cell's "
+        f"{OBJECT_STORE_KEY_SECRET} Secret there, mints a scratch bearer, "
+        "excepts only the cluster's pod and service ranges from Job egress, and applies it as cluster-admin"
+    )
+    payload = "\n---\n".join(json.dumps(doc) for doc in documents if doc["kind"] != "Job")
+    ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=payload)
+    job = next(doc for doc in documents if doc["kind"] == "Job")
+    ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=json.dumps(job))
+    ctx.kubectl("wait", "--namespace", scratch, "--for=condition=complete", f"job/{job['metadata']['name']}", "--timeout=600s")
+
+
 async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -> None:
     _require(ctx.b.cell_id and ctx.b.client)
     hour = dt.datetime.now(dt.UTC).hour
@@ -1003,47 +1074,10 @@ async def step_11_backup_and_scratch_restore(ctx: Context, record: StepRecord) -
     record.evidence["objects_under_prefix"] = len(objects)
 
     # Operator export runbook (D8): restore into a scratch namespace with the
-    # same Job, then serve it and check it. The per-cell credentials are
-    # read from the source cell's Secret, as an operator with cluster-admin.
-    secret = ctx.kube_json("get", "secret", "cell-credentials", "--namespace", namespace_name(ctx.b.cell_id))["data"]
-    decoded = {key: base64.b64decode(value).decode() for key, value in secret.items()}
-    # D9: a new cell's object-store key lives in the Secret the custodian minted, which the custodian
-    # writes only in cell namespaces; the operator copies it into the scratch namespace.
-    object_store_key = ctx.kube_json("get", "secret", OBJECT_STORE_KEY_SECRET, "--namespace", namespace_name(ctx.b.cell_id))
-    source_pod = ctx.runtime_pod(ctx.b.cell_id)
-    image = source_pod["spec"]["containers"][0]["image"]  # type: ignore[index]
-    scratch_bearer = secrets.token_urlsafe(32)
-    spec = CellManifestSpec(
-        cell_id=ctx.b.cell_id, image=image, replicas=0, read_only=False,
-        bearer_current=scratch_bearer, backup_password=decoded["backup-password"],
-        hold_kind="restore", hold_started_at=dt.datetime.now(dt.UTC).isoformat(),
-        job_egress_except=("10.42.0.0/16", "10.43.0.0/16"),
-    )
+    # same Job, then serve it and check it.
     scratch = f"exo-scratch-{ctx.b.cell_id[:8]}"
-    scratch_key = {"apiVersion": "v1", "kind": "Secret", "type": object_store_key.get("type", "Opaque"),
-                   "metadata": {"name": OBJECT_STORE_KEY_SECRET}, "data": object_store_key["data"]}
-    documents = render_cell_manifests(spec) + [scratch_key] + [
-        render_restore_job(spec, bucket_name=BACKUP_BUCKET, endpoint=ctx.stack.object_store.endpoint(from_host=False), snapshot_id=snapshot)
-    ]
-    for document in documents:
-        if document["kind"] == "Namespace":
-            document["metadata"]["name"] = scratch
-            document["metadata"].setdefault("labels", {})["exomem.io/scratch-of"] = ctx.b.cell_id
-            document["metadata"]["labels"].pop("exomem.io/cloud-cell", None)
-        else:
-            document["metadata"]["namespace"] = scratch
-    ctx.report.overlays.append(
-        f"step 11 scratch restore: no operator export tool exists yet (task 3.6, deferred by ruling), so the "
-        f"rehearsal renders the cell with cellctl's render_cell_manifests and render_restore_job, moves every "
-        f"object into namespace {scratch} without the exomem.io/cloud-cell label, copies the cell's "
-        f"{OBJECT_STORE_KEY_SECRET} Secret there, mints a scratch bearer, "
-        "excepts only the cluster's pod and service ranges from Job egress, and applies it as cluster-admin"
-    )
-    payload = "\n---\n".join(json.dumps(doc) for doc in documents if doc["kind"] != "Job")
-    ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=payload)
-    job = next(doc for doc in documents if doc["kind"] == "Job")
-    ctx.kubectl("apply", "--server-side", "--field-manager=rehearsal-operator", "--filename=-", input_text=json.dumps(job))
-    ctx.kubectl("wait", "--namespace", scratch, "--for=condition=complete", f"job/{job['metadata']['name']}", "--timeout=600s")
+    restore_into_scratch(ctx, ctx.b.cell_id, snapshot, scratch, label="step 11")
+    source_pod = ctx.runtime_pod(ctx.b.cell_id)
     ctx.kubectl("scale", "statefulset/cell", "--namespace", scratch, "--replicas=1")
     ctx.kubectl("wait", "--namespace", scratch, "--for=condition=Ready", "pod/cell-0", "--timeout=600s")
 
@@ -1250,6 +1284,13 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
                 if record.status != PASSED:
                     raise StepFailure("the raw-data import needs the provisioned cell, and step 2 did not pass")
                 await run_raw_import(ctx, ctx.raw_import)
+        if number == 2 and ctx.original_fixity is not None:
+            from .original_fixity import run_original_fixity
+
+            with stage(ctx.report, "original_fixity"):
+                if record.status != PASSED:
+                    raise StepFailure("the original-fixity mode needs the provisioned cell, and step 2 did not pass")
+                await run_original_fixity(ctx, ctx.original_fixity)
     if ctx.operator_restore_abort and "operator_restore_abort" not in ctx.report.stages:
         with stage(ctx.report, "operator_restore_abort"):
             raise StepFailure("the requested operator restore abort stage requires provisioning at step 2")
@@ -1262,6 +1303,9 @@ async def run_steps(ctx: Context, *, only: set[int] | None = None) -> None:
     if ctx.raw_import is not None and "raw_import" not in ctx.report.stages:
         with stage(ctx.report, "raw_import"):
             raise StepFailure("the requested raw-data import stage requires provisioning at step 2")
+    if ctx.original_fixity is not None and "original_fixity" not in ctx.report.stages:
+        with stage(ctx.report, "original_fixity"):
+            raise StepFailure("the requested original-fixity stage requires provisioning at step 2")
 
 
 async def close_clients(ctx: Context) -> None:

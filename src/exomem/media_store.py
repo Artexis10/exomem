@@ -455,6 +455,12 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
                 yield snapshot
         except (UnicodeError, ValueError):
             continue
+        except reserved_paths.ReservedPathLeafError as error:
+            # A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is
+            # not a binding to trust. These are the leaf boundary's structural refusal codes; any other one,
+            # such as a transient I/O refusal, reaches the caller, which must not miss a binding.
+            if error.code not in ("UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"):
+                raise
 
 
 def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:
@@ -718,12 +724,16 @@ def _offload_admission(
         return media_allowance.admission(usage, binary, reference, config.get("allowance_bytes")), reuse
 
 
-def upload_refusal(vault: Path, declared_bytes: int, filename: str, lane: str) -> str | None:
+def upload_refusal(
+    vault: Path, declared_bytes: int, filename: str | None, lane: str, *, most_bytes: int | None = None,
+) -> str | None:
     """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
 
     Only an upload that offload would store charges the allowance. Preserve keeps an Evidence note or dataset
     on the volume (design D1); the Source lane files every upload through `add` as an offloadable original,
-    whatever its name. An artifact too large to offload stays on the volume in either lane. The recorded
+    whatever its name, so an Evidence upload whose name is not known yet (`filename` None) is admitted. A size
+    known only as a range, at least `declared_bytes` and at most `most_bytes`, is refused only when every size
+    in it is. An artifact too large to offload stays on the volume in either lane. The recorded
     census decides first. Only a record that says the upload does not fit is confirmed by a census read now,
     and only the confirmed figure refuses. No record, an unknown figure, or a configuration, volume or ledger
     that cannot be read admits the upload: its original stays local with retryable offload demand, and offload
@@ -739,8 +749,11 @@ def upload_refusal(vault: Path, declared_bytes: int, filename: str, lane: str) -
             return None
         bounds = media_capacity.bounds_for(config, vault)
         # `evidence` is the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
-        stays = lane == "evidence" and (originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))
-        if stays or (bounds is not None and bounds.classify(declared_bytes) != media_capacity.OFFLOADABLE):
+        stays = lane == "evidence" and (
+            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))
+        largest = declared_bytes if most_bytes is None else most_bytes
+        # A larger size never classifies back to offloadable, so the largest possible size decides for the range.
+        if stays or (bounds is not None and bounds.classify(largest) != media_capacity.OFFLOADABLE):
             return None
         # The record, not a census read now, keeps a whole-vault walk under the consistency guard off each
         # upload: the per-item census cost that task 5.4.9 removed from offload.
@@ -756,7 +769,8 @@ def upload_refusal(vault: Path, declared_bytes: int, filename: str, lane: str) -
     if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
         return None
     # The owner's used total stays out: D10 withholds global usage from restricted principals.
-    return (f"the upload's {declared_bytes:,} bytes exceed what remains of the media allowance of "
+    size = f"{declared_bytes:,}" if most_bytes is None else f"{declared_bytes:,} or more"
+    return (f"the upload's {size} bytes exceed what remains of the media allowance of "
             f"{decision.allowance_bytes:,} bytes; delete stored media and empty Trash, or raise the allowance")
 
 

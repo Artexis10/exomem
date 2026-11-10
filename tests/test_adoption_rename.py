@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 import types
 import uuid
 from pathlib import Path
@@ -709,13 +710,18 @@ def test_a_rename_that_reports_an_error_after_it_took_place_still_files_the_memb
     run_id, plan_id = consume._plan(vault, f"_Imports/{import_id}")
     state = {"renamed": False, "refused": False}
     real_rename, real_sync = consume._held_fs_posix._rename_noreplace, consume._held_fs_posix._fsync
+    # The patches are process-wide. A background repair's capability probe also renames and syncs, and
+    # if it took the fault it would cache the root as unable to rename. So the fault follows only the
+    # member's own rename, on this thread.
+    applying_thread = threading.get_ident()
 
-    def rename_then_remember(*arguments, **keywords):
-        real_rename(*arguments, **keywords)
-        state["renamed"] = True
+    def rename_then_remember(source, *arguments, **keywords):
+        real_rename(source, *arguments, **keywords)
+        if source == "scan.bin":
+            state["renamed"] = True
 
     def refuse_to_sync_once_after_the_rename(descriptor):
-        if state["renamed"] and not state["refused"]:
+        if state["renamed"] and not state["refused"] and threading.get_ident() == applying_thread:
             state["refused"] = True
             raise OSError(5, "input/output error")
         real_sync(descriptor)
@@ -726,6 +732,7 @@ def test_a_rename_that_reports_an_error_after_it_took_place_still_files_the_memb
     reply = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=consume.TODAY)
 
     outcome = reply["outcomes"][_original(import_id)]
+    assert state["refused"], "the member's rename never met the injected sync failure"
     assert outcome["status"] == "applied" and (vault / outcome["artifact_path"]).stat().st_ino == inode
 
 

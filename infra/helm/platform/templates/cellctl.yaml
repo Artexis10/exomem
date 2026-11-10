@@ -616,7 +616,7 @@ spec:
         - port: 8769
           protocol: TCP
     {{- end }}
-    # Each cell's readiness for the cell-recall-lagging alert, from the cell's
+    # Each cell's readiness for the readiness alerts, from the cell's
     # health-only port alone. cellctl derives every cell bearer, so the cell
     # port, which carries MCP, stays the gateway's. Selected as the gateway
     # selects cells (cloud-gateway.yaml): runtime pods, never Job pods.

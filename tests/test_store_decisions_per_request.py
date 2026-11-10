@@ -26,6 +26,7 @@ from exomem import (
     commands,
     due_state,
     lexstore,
+    structured_collections,
     working_set_index,
     working_set_runtime,
     writer_lease,
@@ -134,7 +135,7 @@ def _mcp(root: Path, who: RequestPrincipal, name: str, **kwargs):
 
 
 def _hits(result) -> tuple[set[str], list[str]]:
-    """The paths of an ask_memory result, and the components its warming marker names."""
+    """The paths of an ask_memory result asked with `detail="full"`, and the components its warming marker names."""
     if isinstance(result, dict):
         return {hit["path"] for hit in result["hits"]}, (result.get("warming") or {}).get("components", [])
     return {hit["path"] for hit in result}, []
@@ -243,6 +244,32 @@ def test_a_read_that_reuses_the_due_state_memo_asks_the_store_once_for_its_pages
 
 
 @pytest.mark.timeout(180)
+@pytest.mark.parametrize("caller", ["owner", "owner_with_policy", "external"])
+def test_routing_a_write_to_a_records_collection_asks_the_store_once_for_the_collections(
+    service, store_requests: StoreRequests, caller: str  # noqa: F811
+) -> None:
+    """A semantic write routes its terms through every records collection the writer may see.
+
+    Each collection's manifest, its storage source and its items pass the release plane. Asked one at a
+    time, every store-owned page queued its own store request after every write.
+    """
+    root, who = service.root, _who(caller)
+    pages = _seed(root, caller)
+    # Current rows, as the claims projection holds them, so each one reaches its storage source check.
+    claims = {
+        page: {"manifest_hash": structured_collections.load_manifest(root, root / page).manifest_version.hash,
+               "items": []}
+        for page in pages
+    }
+
+    store_requests.kwargs.clear()
+    with request_scope(who):
+        due_state.routing_targets(root, payload={"claims": claims}, principal=who)
+
+    assert len(store_requests.kwargs) == 1, "routing asked the store about each collection on its own"
+
+
+@pytest.mark.timeout(180)
 def test_a_refused_store_request_withholds_the_store_pages_once_and_says_so(
     service, store_requests: StoreRequests  # noqa: F811
 ) -> None:
@@ -280,7 +307,7 @@ def test_an_mcp_call_asks_the_store_once_for_the_body_and_once_for_the_terminal_
     pages = _seed(root, caller)
 
     store_requests.kwargs.clear()
-    found, warming = _hits(_mcp(root, who, "ask_memory", query=QUERY, limit=20))
+    found, warming = _hits(_mcp(root, who, "ask_memory", query=QUERY, limit=20, detail="full"))
     asked = list(store_requests.kwargs)
     store_requests.kwargs.clear()
     activation = _mcp(root, who, "activate_context", turn=PHRASE)
@@ -308,12 +335,12 @@ def test_a_store_that_refuses_the_terminal_pass_withholds_the_store_pages_once_a
 
     store_requests.kwargs.clear()
     store_requests.refuse_nth = 2
-    found, warming = _hits(_mcp(root, OWNER, "ask_memory", query=QUERY, limit=20))
+    found, warming = _hits(_mcp(root, OWNER, "ask_memory", query=QUERY, limit=20, detail="full"))
     assert len(store_requests.kwargs) == 2, "pages kept asking the refusing store one by one"
     assert SHARED in found and not found & set(pages)
     assert "collection_store" in warming
 
     store_requests.refuse_nth = None
     store_requests.kwargs.clear()
-    found, warming = _hits(_mcp(root, OWNER, "ask_memory", query=QUERY, limit=20))
+    found, warming = _hits(_mcp(root, OWNER, "ask_memory", query=QUERY, limit=20, detail="full"))
     assert set(pages) <= found and "collection_store" not in warming, "a refusal outlived the call it refused"

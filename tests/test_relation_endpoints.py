@@ -183,10 +183,20 @@ def test_an_extension_that_declares_nothing_shows_the_endpoints_it_inherits(
     )
 
 
+def _page_path(reply: dict) -> str:
+    """The vault path of the page a full-detail write reply names (it leads with title and id)."""
+    return reply["diagnostics"]["operational"]["path"]
+
+
 def _capture_and_note(call, title: str, relation_row: str | None = None) -> dict:
     captured = call(
         "capture_source",
-        {"title": f"{title} source", "source_kind": "session", "content": f"{title} was discussed."},
+        {
+            "title": f"{title} source",
+            "source_kind": "session",
+            "content": f"{title} was discussed.",
+            "response_detail": "full",
+        },
     )
     return call(
         "create_note",
@@ -197,7 +207,7 @@ def _capture_and_note(call, title: str, relation_row: str | None = None) -> dict
                 f"## Observations\n\n- [fact] {title} was settled.\n"
                 + (f"\n## Relations\n\n- {relation_row}\n" if relation_row else "")
             ),
-            "sources": [f"{captured['path']}#Capture"],
+            "sources": [f"{_page_path(captured)}#Capture"],
             "response_detail": "full",
         },
     )
@@ -211,16 +221,16 @@ def test_an_owns_edge_from_a_note_is_written_and_the_receipt_flags_the_endpoint(
 
     # `owns` names an entity as owner; an insight note is not one.
     written = _capture_and_note(
-        call, "Crane ownership", f"owns [[{target['path'].removesuffix('.md')}]]"
+        call, "Crane ownership", f"owns [[{_page_path(target).removesuffix('.md')}]]"
     )
     assert written["diagnostics"]["operational"]["state"] == "committed", written
-    assert "owns [[" in (vault / written["path"]).read_text(encoding="utf-8")
+    assert "owns [[" in (vault / _page_path(written)).read_text(encoding="utf-8")
     flagged = {item["code"] for item in written["semantic_advisory"]["findings"]}
     assert "endpoint_mismatch" in flagged
 
     # A relation that declares no endpoints is never flagged for them.
     undeclared = _capture_and_note(
-        call, "Crane support", f"supports [[{target['path'].removesuffix('.md')}]]"
+        call, "Crane support", f"supports [[{_page_path(target).removesuffix('.md')}]]"
     )
     assert undeclared["diagnostics"]["operational"]["state"] == "committed", undeclared
     assert "endpoint_mismatch" not in {
@@ -251,7 +261,7 @@ def test_an_edge_is_judged_against_the_declared_type_and_its_descendants(
     concept = _entity(call, "concept", "Tidal Ledger")
 
     def affiliation(name: str, target: dict) -> dict:
-        relation = {"kind": "affiliated_with", "target": target["path"].removesuffix(".md")}
+        relation = {"kind": "affiliated_with", "target": _page_path(target).removesuffix(".md")}
         return _entity(call, "person", name, relations=[relation])
 
     # A club is an organization, so a person affiliated with one is within `affiliated_with`.

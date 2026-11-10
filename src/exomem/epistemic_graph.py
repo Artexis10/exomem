@@ -98,6 +98,8 @@ def _sqlite_connect_owned(
 SCHEMA_VERSION = 15
 _DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
+#: Page cache for a private whole-vault rebuild connection, in KiB (see `_connect_retained`).
+_REBUILD_CACHE_KIB = 64 * 1024
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
 REBUILD_STABILIZATION_ATTEMPTS = 2
@@ -1647,7 +1649,21 @@ def reset_republish_backoff() -> None:
 # --- Preserved-temporary reaping (contract R3) -----------------------------
 
 PRESERVED_TEMPORARY_LIMIT = 1
-_TEMPORARY_COMPANION_SUFFIXES = ("-journal", "-wal", "-shm")
+_ROLLBACK_JOURNAL_SUFFIX = "-journal"
+_TEMPORARY_COMPANION_SUFFIXES = (_ROLLBACK_JOURNAL_SUFFIX, "-wal", "-shm")
+
+
+def _interrupted_temporary_groups(groups: dict[str, list[Path]]) -> list[str]:
+    """Groups stopped inside their transaction, which preservation never keeps.
+
+    A private rebuild runs in rollback-journal mode, so a group that still has
+    its journal is a build SQLite rolls back on open, not a complete one.
+    """
+    return [
+        base
+        for base, paths in groups.items()
+        if any(path.name.endswith(_ROLLBACK_JOURNAL_SUFFIX) for path in paths)
+    ]
 
 
 def _temporary_base_name(name: str) -> str:
@@ -1753,7 +1769,8 @@ def _reap_preserved_temporaries(
     that file is collected on a later pass rather than failing the rebuild.
     """
     # Cheap pre-check without the claim: nothing to bound, nothing to lock.
-    if len(_unregistered_temporary_groups(live)) <= max(0, keep):
+    groups = _unregistered_temporary_groups(live)
+    if len(groups) <= max(0, keep) and not _interrupted_temporary_groups(groups):
         return []
     probe = live.with_name(f".graph-rebuild-reap-{secrets.token_hex(12)}.sqlite")
     try:
@@ -1773,7 +1790,9 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
     directory = live.parent
     # Re-scan under the claim: the pre-check ran without it.
     groups = _unregistered_temporary_groups(live)
-    if len(groups) <= max(0, keep):
+    interrupted = _interrupted_temporary_groups(groups)
+    complete = [base for base in groups if base not in interrupted]
+    if not interrupted and len(complete) <= max(0, keep):
         return []
 
     def _recency(base: str) -> float:
@@ -1785,10 +1804,16 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
                 continue
         return newest
 
-    ordered = sorted(groups, key=_recency, reverse=True)
+    ordered = sorted(complete, key=_recency, reverse=True)
     removed: list[Path] = []
-    for base in ordered[max(0, keep) :]:
-        for path in groups[base]:
+    for base in [*interrupted, *ordered[max(0, keep) :]]:
+        # The journal goes last, and stays if its file does: a file that lost
+        # its journal would look complete and be preserved on the next pass.
+        paths = sorted(groups[base], key=lambda p: p.name.endswith(_ROLLBACK_JOURNAL_SUFFIX))
+        kept_file = False
+        for path in paths:
+            if kept_file and path.name.endswith(_ROLLBACK_JOURNAL_SUFFIX):
+                continue
             try:
                 _remove_graph_rebuild_artifact(
                     vault_root,
@@ -1797,6 +1822,7 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
                 )
             except OSError:
                 # A reader still holds delete-sharing authority on Windows.
+                kept_file = True
                 continue
             removed.append(path)
     if removed:
@@ -2603,6 +2629,16 @@ class EpistemicGraphIndex:
             # Keeping private rebuilds in rollback-journal mode prevents
             # authoritative rows from remaining in a detached WAL companion.
             conn.execute("PRAGMA journal_mode=DELETE")
+            # A whole-vault pass inserts every row in a few transactions. With
+            # SQLite's defaults its temporary data goes to temp files and dirty
+            # pages spill from a 2 MiB cache: one pass over a synthetic
+            # 3,000-note vault (60 MB graph) passed 2.56 GB to write() by
+            # /proc/self/io wchar; with both settings, 180 MB. The cost is
+            # 64 MiB more peak memory per rebuild, one
+            # rebuild per vault at a time. With in-memory temp data the sorter
+            # never spills, so a whole-table sort added here would sit in RAM.
+            conn.execute(f"PRAGMA cache_size=-{_REBUILD_CACHE_KIB}")
+            conn.execute("PRAGMA temp_store=MEMORY")
         try:
             return self._initialize_graph_schema(conn)
         except BaseException:
@@ -13434,7 +13470,7 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     }
     if "/" not in cleaned:
         found.update(resolver.stems.get(cleaned, ()))
-        found.update(resolver.titles.get(cleaned.lower(), ()))
+        found.update(resolver.titles.get(vault_module.title_key(cleaned), ()))
     return {f"{candidate}.md" for candidate in found}
 
 

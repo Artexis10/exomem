@@ -1662,6 +1662,11 @@ def _status_main(argv: list[str]) -> int:
     if vault_root is not None:
         state_migration.require_vault_state_ready(vault_root)
     status = resource_status.collect(vault_root)
+    if vault_root is not None:
+        from .vault_store import mode as store_mode
+
+        # The records' own answer: it opens the store only when the manifest says store mode.
+        status["vault_store"] = store_mode.status(vault_root)
     if args.json:
         print(json.dumps(status))
     else:
@@ -1669,8 +1674,11 @@ def _status_main(argv: list[str]) -> int:
         print(f"  config: {status['config_path']}")
         print(f"  models: {status['models']}")
         print(f"  media: {status['media']}")
+        print(f"  originals: {status['originals']}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
+        if "vault_store" in status:
+            print(f"  vault_store: {status['vault_store']}")
     return 0
 
 
@@ -2607,7 +2615,24 @@ def _store_mode_main(argv: list[str]) -> int:
         "--export-held", action="store_true",
         help="keep each unimported edit in the export, then restore the store's version of its file",
     )
-    for command in (status, migrate, rollback):
+    release = subcommands.add_parser(
+        "release",
+        help="decide file mode over another state root's store claim, for a refused root whose "
+        "holder is gone; run apply with every service stopped and "
+        "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+    )
+    release_step = release.add_mutually_exclusive_group(required=True)
+    release_step.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="name the claim that a release would override; writes nothing",
+    )
+    release_step.add_argument("--apply", action="store_true", help="release the claim")
+    release.add_argument(
+        "--claim", help="the claim id that the refusal or --dry-run names (required with --apply)"
+    )
+    release.add_argument("--why", help="reason for the release (required with --apply)")
+    for command in (status, migrate, rollback, release):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -2624,6 +2649,12 @@ def _store_mode_main(argv: list[str]) -> int:
     if args.command == "rollback" and applying and args.export_to is None:
         print("store-mode rollback: --apply needs --export-to", file=sys.stderr)
         return 2
+    if args.command == "release" and applying and not (args.claim or "").strip():
+        print(
+            "store-mode release: --apply needs --claim, the id that a refusal or --dry-run names",
+            file=sys.stderr,
+        )
+        return 2
 
     from . import state_migration
     from .cli_ops import OpError
@@ -2631,6 +2662,7 @@ def _store_mode_main(argv: list[str]) -> int:
     from .governance.principal import library_scope
     from .vault_store import migrate as store_migrate
     from .vault_store import mode as store_mode
+    from .vault_store import release as store_release
     from .vault_store import rollback as store_rollback
 
     root = Path(args.vault)
@@ -2640,13 +2672,20 @@ def _store_mode_main(argv: list[str]) -> int:
                 result = store_mode.status(root)
             elif args.command == "migrate":
                 result = store_migrate.apply_route(root, why=args.why) if applying else store_migrate.dry_run(root)
+            elif args.command == "release":
+                result = (
+                    store_release.apply_route(root, claim=args.claim, why=args.why)
+                    if applying
+                    else store_release.dry_run(root)
+                )
             elif applying:
                 result = store_rollback.apply_route(
                     root, export_to=args.export_to, why=args.why, export_held=args.export_held
                 )
             else:
                 result = store_rollback.dry_run(root)
-        print(json.dumps(result, sort_keys=True))
+        # A release leads with its outcome sentence, so its keys keep their order; the rest sort.
+        print(json.dumps(result, sort_keys=args.command != "release"))
     except (
         CollectionStoreError,
         OpError,
@@ -2656,6 +2695,10 @@ def _store_mode_main(argv: list[str]) -> int:
     ) as error:
         code, message = getattr(error, "code", type(error).__name__), str(error)
         print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
+        # An OpError carries what the owner changes next; a refusal without it leaves a dead end.
+        remediation = getattr(error, "remediation", None)
+        if remediation:
+            print(remediation, file=sys.stderr)
         details = getattr(error, "details", None)
         if details:
             print(json.dumps(details, sort_keys=True, default=str), file=sys.stderr)
@@ -3214,9 +3257,14 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from . import init as init_module
+    from .cli_ops import OpError
 
     vault = Path(args.vault or os.environ.get("EXOMEM_VAULT_PATH") or ".")
-    report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
+    try:
+        report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
+    except OpError as error:
+        print(f"exomem reclaim-schema: {error.message}\n{error.remediation}", file=sys.stderr)
+        return 1
 
     if not report["removed"] and not report["declined"]:
         print(f"Nothing to reclaim: {vault} has no superseded schema copy.")
@@ -3318,12 +3366,16 @@ def _init_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from . import init as init_module
+    from .cli_ops import OpError
 
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH") or "."
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
         print(f"exomem init: {e}", file=sys.stderr)
+        return 1
+    except OpError as error:
+        print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
     print(f"Initialized {kb_dirname()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
