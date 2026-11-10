@@ -309,25 +309,25 @@ An activation inside an MCP request budget SHALL also carry its own, nearer dead
 - **WHEN** the request has less than the activation's seconds left
 - **THEN** the activation ends one second before the request's deadline, as the request's own budget would
 
-### Requirement: The activation log records the budget outcome
-
-Each row that the activation log appends SHALL carry `activation_result` and `budget`. `activation_result` SHALL hold the same content-free observation that the call ledger records for the call: whether it abstained, the closed reason, and whether a budget limited it. `budget` SHALL hold the seconds the activation had, the milliseconds left, and the names of the stages skipped or truncated, never a query or content. Each SHALL be null when the call had no budget or its packet cannot be observed, never a value that reads as "not limited". A served packet that a budget limited SHALL keep `outcome` of `served`.
-
-#### Scenario: A limited activation is visible in its row
-
-- **WHEN** an activation serves a partial packet because its deadline arrived
-- **THEN** its row has `outcome` of `served`, `activation_result.budget_limited` of true and the stage names in `budget.truncated`
-
-#### Scenario: A call without a budget has no budget block
-
-- **WHEN** an activation runs from the CLI with no request budget
-- **THEN** its row has `budget` of null and no value that reads as "not limited"
-
 #### Scenario: A reproduction exceeds the deadline
 
 - **WHEN** a bounded isolated activation reproduction returns after its absolute deadline
 - **THEN** its deadline observation is failed and the repair remains open
 - **AND** merely reporting the overrun or skipping later work does not satisfy the deadline requirement
+
+### Requirement: The activation log records the budget outcome
+
+Each row that the activation log appends SHALL carry `activation_result` and `budget`. `activation_result` SHALL hold the same content-free observation that the call ledger records for the call: whether it abstained, the closed reason, and whether a budget limited it; it SHALL be null when the packet cannot be observed. `budget` SHALL hold the seconds the activation had, the milliseconds left, and the names of the stages skipped or truncated, never a query or content; it SHALL be null when no budget was bound to the call. A served packet that a budget limited SHALL keep `outcome` of `served`.
+
+#### Scenario: A limited activation is visible in its row
+
+- **WHEN** an activation serves a partial packet because its deadline arrived
+- **THEN** its row has `outcome` of `served`, `activation_result.budget_limited` of true, and the stopped stages in `budget.skipped` or `budget.truncated`
+
+#### Scenario: A call without a bound budget has no budget block
+
+- **WHEN** an activation runs in process with no budget bound
+- **THEN** its row has `budget` of null, and `activation_result.budget_limited` of false
 
 ### Requirement: Deadline handling preserves canonical custody
 

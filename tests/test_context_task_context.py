@@ -751,6 +751,40 @@ def test_a_deadline_during_the_text_query_stops_it_short_of_the_deadline_and_ser
     assert not packet.get("abstained") and packet["map"]
 
 
+def test_a_deadline_spent_by_the_turn_slice_marks_task_context_partial_and_keeps_the_map(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the turn slice on, a starved slice compile once left task context "unavailable" with no reason given."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    for number in range(3):
+        _page(
+            vault,
+            f"alignment-visit-{number}",
+            body="Inspect the optical alignment before the workshop.\n",
+        )
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Inspect the optical alignment before the workshop"
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert unhurried["task_context"]["candidates"]
+
+    clock = _clock_at(monkeypatch)
+    compile_slice = commands._compile_guarded_activation
+
+    def starved_slice(*args, **kwargs):
+        compiled = compile_slice(*args, **kwargs)
+        clock[0] += 60.0  # the host was starved for the CPU while the turn slice compiled
+        return compiled
+
+    monkeypatch.setattr(commands, "_compile_guarded_activation", starved_slice)
+    packet, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert not packet.get("abstained") and packet["map"]
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert task["candidates"] == []
+
+
 def test_an_activation_stops_at_its_own_deadline_inside_a_longer_request_budget(
     vault: Path, monkeypatch: pytest.MonkeyPatch, activation_log: Path
 ) -> None:

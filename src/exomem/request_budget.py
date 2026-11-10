@@ -295,9 +295,9 @@ def can_afford(reserve: float) -> bool:
 
 
 @contextmanager
-def _running_until(parent: RequestBudget, deadline: float) -> Iterator[None]:
+def _running_until(parent: RequestBudget, deadline: float, now: float | None = None) -> Iterator[None]:
     """Run under a child budget that ends at `deadline`; the parent also learns what the child skipped or cut."""
-    now = time.monotonic()
+    now = time.monotonic() if now is None else now
     child = RequestBudget(seconds=max(0.0, deadline - now), entry=now)
     token = set_current(child)
     try:
@@ -338,10 +338,10 @@ def capped(seconds: float) -> Iterator[None]:
     if parent is None:
         yield
         return
-    deadline = min(
-        parent.deadline - ACTIVATION_STAGE_RESERVE_SECONDS, time.monotonic() + float(seconds)
-    )
-    with _running_until(parent, deadline):
+    # One clock read, so a child that gets its whole cap reports exactly `seconds`.
+    now = time.monotonic()
+    deadline = min(parent.deadline - ACTIVATION_STAGE_RESERVE_SECONDS, now + float(seconds))
+    with _running_until(parent, deadline, now):
         yield
 
 

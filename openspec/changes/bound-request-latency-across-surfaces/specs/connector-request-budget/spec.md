@@ -12,7 +12,7 @@ An activation that runs inside an MCP request budget SHALL run on its own budget
 #### Scenario: The request's budget names what the activation left out
 
 - **WHEN** the activation's budget skips or truncates `working_set.task_context_text`
-- **THEN** the request's budget lists that stage as truncated
+- **THEN** the request's budget lists that stage as skipped or truncated, as the activation's budget recorded it
 
 #### Scenario: Calls without a request budget are unchanged
 

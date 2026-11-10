@@ -415,7 +415,11 @@ def compile_context(
     if not turn.strip() and not conversation.focus:
         return block
     if working_set.budget_exhausted("working_set.task_context"):
-        return empty("unavailable", reset=bool(held))
+        # The map is already served and held methods were just revalidated: the block says the deadline cut
+        # discovery short, and keeps the revalidated methods instead of resetting them for a budget reason.
+        _add_missing(block, "budget")
+        block["state"] = "partial"
+        return block
     try:
         with find_types.timing_span(timings, "working_set.task_context"):
             discovered, missing = working_set.task_candidates(
