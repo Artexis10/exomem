@@ -1,0 +1,66 @@
+# Realm: the store itself. What does the memory know about its own contents?
+schema_version: 1
+phenomena:
+  # --- hygiene ---
+  - {id: hygiene.no-relevant-memory, stage: s1, probes: [stable, act], expect: [over_flags, invents_detail], says: "No stored memory bears on the task, and the result must be as good as with no memory.", from: [utility, frontiermemory]}
+  - {id: hygiene.duplicate, stage: s2, says: "The same note was written twice.", from: [membench]}
+  - {id: hygiene.near-duplicate, stage: s2, says: "Two notes say the same thing in different words.", from: [membench]}
+  - {id: hygiene.own-notes-conflict, stage: s2, expect: [flags_conflict], says: "Two of the store's own notes disagree."}
+  - {id: hygiene.summary-older-than-source, stage: s2, says: "A summary is older than the latest version of what it summarises."}
+  - {id: hygiene.history-overwritten, stage: s2, probes: [as_of, audit], says: "An update erased the earlier value, and the task asks for the history."}
+  - {id: hygiene.orphan, stage: s3, says: "A note cites a source that no longer exists.", from: [membench]}
+  - {id: hygiene.conflict-copy, stage: s3, says: "A file sync left two copies of one file."}
+  - {id: hygiene.scattered, stage: s3, says: "One fact is spread across many small notes."}
+  - {id: hygiene.edited-outside, stage: s3, says: "A file changed outside the product.", from: [esb]}
+  - {id: hygiene.empty-note, stage: s3, says: "A note has a title and no content."}
+  - {id: hygiene.misfiled, stage: s3, says: "A note sits in the wrong place."}
+  - {id: hygiene.evicted, stage: s3, probes: [state, stable], says: "A fact fell out of a bounded memory, and a later task asks for it.", from: [veracium]}
+  - {id: hygiene.long-run, stage: s4, says: "After a year of updates, the question asks how many current facts are still right.", from: [membench]}
+  # --- self ---
+  - {id: self.earlier-session, stage: s1, probes: [stable, act], says: "A task needs something that was agreed in an earlier session.", from: [longmemeval]}
+  - {id: self.invented-detail, stage: s1, probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "A task asks for a detail that was never stored."}
+  - {id: self.holds-anything, stage: s2, says: "The question asks whether the store holds anything on a subject."}
+  - {id: self.origin-forgotten, stage: s2, says: "The store recalls a fact and cannot say where it came from.", from: [continued-influence]}
+  - {id: self.note-or-present-file, stage: s2, truth: [state_fold, corpus_closure], probes: [act, state], expect: [uses_current, trusts_stale], says: "The store's own note and a newer file in the workspace disagree, and the newer file governs."}
+  - {id: self.when-learned, stage: s2, truth: [corpus_closure, interval_order], says: "The question asks when the store learned a fact.", from: [membench]}
+  - {id: self.what-changed, stage: s2, says: "The question asks what changed between two dates.", from: [membench]}
+  - {id: self.own-earlier-action, stage: s2, says: "The question asks what the agent itself did in an earlier session."}
+  - {id: self.which-agent-wrote, stage: s3, says: "The question asks which of several agents wrote a note."}
+  - {id: self.second-agent-continues, stage: s3, probes: [act], says: "A second agent continues the first agent's work from the memory alone.", from: [esb, frontiermemory]}
+  - {id: self.never-written, stage: s3, probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "Something happened in a session, and the agent never wrote it down."}
+  - {id: self.cannot-represent, stage: s4, truth: [judged], key: rubric-track, says: "The system says that it cannot represent something and does not fail silently."}
+  # --- procedure ---
+  - {id: procedure.step-order, stage: s2, says: "The steps of a procedure are given in order.", from: [membench]}
+  - {id: procedure.precondition, stage: s2, says: "A step needs something to be done first.", from: [membench]}
+  - {id: procedure.step-revised, stage: s2, says: "One step of a procedure is changed.", from: [membench]}
+  - {id: procedure.replaced, stage: s2, expect: [uses_current, trusts_stale], says: "A whole procedure is replaced by a new one."}
+  - {id: procedure.workaround-reused, stage: s2, says: "A workaround that was found once is used again.", from: [frontiermemory]}
+  - {id: procedure.failed-approach, stage: s2, expect: [uses_current, trusts_stale], says: "An approach that failed must not be tried again.", from: [frontiermemory]}
+  - {id: procedure.varies-by-scope, stage: s3, truth: [rule_closure, scope_lattice], expect: [keeps_scope], says: "The procedure differs between two environments."}
+  - {id: procedure.tool-use-learned, stage: s3, says: "The right way to call a tool was learned from an earlier error.", from: [frontiermemory]}
+  - {id: procedure.all-steps-done, stage: s3, truth: [rule_closure, corpus_closure], probes: [audit, state], says: "The question asks whether every required step has a record of being done."}
+  - {id: procedure.undo, stage: s3, says: "The task needs the recorded way to undo a change."}
+  - {id: procedure.approved-or-proposed, stage: s3, truth: [kind_tag, state_fold], expect: [keeps_kind], says: "An approved procedure is told apart from a proposed one."}
+  - {id: procedure.found-without-naming, stage: s3, probes: [act], says: "A stored method bears on the task, and the task does not name it.", from: [frontiermemory]}
+  # --- media ---
+  - {id: media.table, stage: s2, truth: [corpus_closure, quantity_calc], says: "A fact exists only in a table file.", from: [membench]}
+  - {id: media.image-text, stage: s4, says: "A fact exists only as text inside an image.", from: [membench]}
+  - {id: media.document-file, stage: s4, says: "A fact exists only inside a paged document file.", from: [membench]}
+  - {id: media.speech, stage: s4, says: "A fact exists only in a transcript of speech.", from: [membench]}
+  - {id: media.misread-digit, stage: s4, says: "The extracted text misreads one digit, and the image governs."}
+  - {id: media.unclear-word, stage: s4, truth: [corpus_closure, kind_tag], expect: [states_uncertainty], says: "A transcript marks a word as unclear."}
+  - {id: media.who-spoke, stage: s4, truth: [corpus_closure, holder_ledger], probes: [whose], expect: [keeps_attribution], says: "The question asks who said what in a recording."}
+  - {id: media.chart, stage: s4, truth: [corpus_closure, quantity_calc], says: "A value must be read from a chart."}
+  - {id: media.caption-or-content, stage: s4, probes: [weigh, state], expect: [flags_conflict], says: "A caption disagrees with what the picture shows."}
+  - {id: media.taken-or-shown, stage: s4, truth: [corpus_closure, interval_order], says: "The date a picture was taken differs from the date of what it shows."}
+  - {id: media.tied-to-file, stage: s4, probes: [trace], says: "A fact taken from a media file stays tied to that file."}
+  - {id: media.unreadable-here, stage: s4, probes: [abstain], expect: [abstains_when_unknown], says: "The profile cannot read a file's content, and the result reads unsupported and never zero.", from: [membench]}
+  # --- language ---
+  - {id: language.other-script-question, stage: s4, says: "A fact is stored in one script and asked for in another.", from: [membench]}
+  - {id: language.source-and-translation, stage: s4, says: "A source and its translation state one fact."}
+  - {id: language.translation-differs, stage: s4, truth: [identity_map, warrant_graph], probes: [weigh, state], expect: [flags_conflict, cites_source], says: "A translation says something that its source does not."}
+  - {id: language.mixed-note, stage: s4, says: "One note mixes two languages."}
+  - {id: language.transliterated-name, stage: s4, says: "A name is spelt in two ways after transliteration.", from: [membench]}
+  - {id: language.number-and-date-format, stage: s4, truth: [quantity_calc, interval_order], probes: [state], expect: [uses_current], says: "A decimal mark or a date order follows another locale."}
+  - {id: language.label-in-two-languages, stage: s4, says: "One kind of statement is labelled in two languages."}
+  - {id: language.unsupported, stage: s4, probes: [abstain], expect: [abstains_when_unknown], says: "The profile declares no support for a language, and the result reads unsupported and never zero.", from: [membench]}

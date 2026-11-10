@@ -1,0 +1,67 @@
+# Realm: the status of a statement. What kind of statement is it, and how sure is it?
+schema_version: 1
+phenomena:
+  # --- kind ---
+  - {id: kind.unverified-assumption, stage: s1, says: "An assumption is never verified, and later work must not treat it as established.", from: [f38]}
+  - {id: kind.hypothesis-or-result, stage: s1, says: "A hypothesis and the result that tested it are two different statements.", from: [esb]}
+  - {id: kind.proposal-not-adopted, stage: s1, says: "A proposal was discussed and never adopted."}
+  - {id: kind.plan-not-done, stage: s1, says: "A plan to do something is not a record that it was done."}
+  - {id: kind.target-not-status, stage: s1, says: "A target value is not the current value."}
+  - {id: kind.rejected-option, stage: s1, says: "An option was considered and rejected, and it must not be offered as the choice.", from: [membench]}
+  - {id: kind.estimate-then-measurement, stage: s2, truth: [kind_tag, state_fold], expect: [keeps_kind, uses_current], says: "An estimate is later joined by a measurement of the same quantity."}
+  - {id: kind.example-not-rule, stage: s2, says: "A document gives one example, and the example is not a general rule."}
+  - {id: kind.supposition, stage: s2, says: "A statement made under a supposition is not asserted."}
+  - {id: kind.question-not-claim, stage: s2, says: "A question presupposes something that nobody asserted."}
+  - {id: kind.draft-or-final, stage: s2, truth: [kind_tag, state_fold], expect: [keeps_kind, uses_current], says: "A draft states a value that the final version changed."}
+  - {id: kind.definition, stage: s2, says: "A statement defines a term and reports no fact about the world."}
+  - {id: kind.tentative-confirmed, stage: s2, truth: [kind_tag, state_fold], says: "A tentative statement is later confirmed.", from: [membench]}
+  - {id: kind.tentative-disproved, stage: s2, truth: [kind_tag, state_fold], expect: [keeps_kind, trusts_stale], says: "A tentative statement is later disproved.", from: [membench]}
+  - {id: kind.seen-or-concluded, stage: s2, says: "What an observer saw is told apart from what the observer concluded from it."}
+  - {id: kind.confirmed-fact, stage: s2, twin_of: kind.unverified-assumption, expect: [over_flags], says: "A statement was verified and recorded as a fact, and hedging it is the error."}
+  - {id: kind.sample-text, stage: s3, says: "Placeholder or sample text in a document is not data."}
+  - {id: kind.story-in-world, stage: s3, says: "A story told inside the world is not a report about the world."}
+  - {id: kind.not-literal, stage: s3, truth: [judged], key: rubric-track, says: "A remark is ironic or a joke and is not meant literally."}
+  # --- modality ---
+  - {id: modality.should-not-is, stage: s1, says: "A recommendation is not the current practice."}
+  - {id: modality.must-or-may, stage: s2, says: "A requirement and a permission are kept apart."}
+  - {id: modality.policy-or-practice, stage: s2, says: "The written rule and what people do in fact differ."}
+  - {id: modality.prohibition, stage: s2, says: "A rule forbids an action that the task would otherwise take."}
+  - {id: modality.one-time-permission, stage: s2, truth: [kind_tag, scope_lattice], expect: [keeps_kind, keeps_scope], says: "A permission is granted for one case against a standing prohibition."}
+  - {id: modality.possible-not-actual, stage: s2, says: "What could happen is not what did happen."}
+  - {id: modality.condition-unknown, stage: s2, says: "A rule says that one thing follows if another holds, and nobody recorded whether it holds."}
+  - {id: modality.condition-met, stage: s3, truth: [kind_tag, rule_closure], says: "The condition of a recorded rule is later met, so its consequence now holds."}
+  - {id: modality.would-have, stage: s3, says: "What would have happened is not what happened."}
+  - {id: modality.able-not-allowed, stage: s3, says: "A person can do something and is not authorised to do it."}
+  - {id: modality.lapsed-requirement, stage: s2, truth: [kind_tag, state_fold], expect: [uses_current, trusts_stale], says: "A requirement ended, and later work must not apply it."}
+  - {id: modality.advice-from-one-party, stage: s2, truth: [kind_tag, holder_ledger], expect: [keeps_kind, keeps_attribution], says: "Advice is one party's recommendation and not a rule."}
+  - {id: modality.rules-collide, stage: s3, truth: [judged], key: rubric-track, probes: [weigh], expect: [flags_conflict], says: "Two rules require things that cannot both be done."}
+  # --- uncertainty ---
+  - {id: uncertainty.open-question, stage: s1, says: "A question stays open, and the answer invents nothing.", from: [f38, esb]}
+  - {id: uncertainty.hedged-claim, stage: s1, says: "A claim is made with a hedge, and the hedge survives retelling."}
+  - {id: uncertainty.known-unknown, stage: s1, says: "The record states that something is not yet known.", from: [esb]}
+  - {id: uncertainty.insufficient-evidence, stage: s1, probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "The evidence supports no answer to the question.", from: [longmemeval, abstentionbench]}
+  - {id: uncertainty.range, stage: s2, truth: [kind_tag, quantity_calc], says: "A value is known only as a range."}
+  - {id: uncertainty.approximate, stage: s2, truth: [kind_tag, quantity_calc], says: "A value is given as approximate."}
+  - {id: uncertainty.question-answered, stage: s2, truth: [kind_tag, state_fold], expect: [uses_current], says: "A later record answers a question that was open."}
+  - {id: uncertainty.level-in-words, stage: s2, truth: [kind_tag, holder_ledger], expect: [states_uncertainty, keeps_attribution], says: "A holder says in words how sure they are, and the answer keeps that level.", from: [estimative-language]}
+  - {id: uncertainty.competing-explanations, stage: s2, probes: [weigh], says: "Several explanations stay live against the same evidence.", from: [competing-hypotheses]}
+  - {id: uncertainty.awaiting-check, stage: s2, says: "A claim awaits a named check that has not yet run."}
+  - {id: uncertainty.lost-hedge, stage: s2, says: "A later restatement dropped a hedge, and the original hedge governs."}
+  - {id: uncertainty.ambiguous-task, stage: s2, truth: [identity_map, corpus_closure], probes: [act], expect: [asks_when_ambiguous], says: "The task could mean either of two recorded things, and the right act is to ask.", from: [abstentionbench]}
+  - {id: uncertainty.part-known, stage: s2, says: "Part of the answer is recorded and part is not, and the answer separates them."}
+  - {id: uncertainty.within-error, stage: s3, truth: [quantity_calc], says: "Two measurements differ by less than their stated error, so they do not disagree."}
+  - {id: uncertainty.invented-precision, stage: s3, truth: [kind_tag, quantity_calc], says: "A rough figure reappears later with digits that nobody measured."}
+  - {id: uncertainty.no-possible-record, stage: s3, truth: [corpus_closure], probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "No record could hold the answer to the question.", from: [abstentionbench]}
+  # --- calibration ---
+  - {id: calibration.stated-probability, stage: s3, truth: [holder_ledger, kind_tag], probes: [whose, state], says: "A forecaster gives a probability, and the record keeps it with its holder and its basis."}
+  - {id: calibration.resolved-forecast, stage: s3, truth: [chance_model, state_fold], probes: [state, audit], expect: [uses_current], says: "A forecast comes due, and the outcome is recorded against it.", from: [esb]}
+  - {id: calibration.forecaster-record, stage: s3, truth: [chance_model, quantity_calc], probes: [state], says: "A forecaster's past hit rate follows from their resolved forecasts.", from: [proper-scoring]}
+  - {id: calibration.base-rate, stage: s3, truth: [chance_model, quantity_calc], says: "The base rate of an event follows from the world's own history."}
+  - {id: calibration.known-chance, stage: s3, says: "An outcome is drawn with a stated chance, so the best forecast is that chance.", from: [proper-scoring]}
+  - {id: calibration.overconfident-source, stage: s3, says: "A source says that it is certain, and its record shows frequent errors."}
+  - {id: calibration.update-on-evidence, stage: s3, says: "New evidence of recorded strength should move a probability by a computable amount."}
+  - {id: calibration.conjunction, stage: s3, says: "Two events together are not more likely than either one alone."}
+  - {id: calibration.past-due, stage: s3, truth: [corpus_closure, interval_order], probes: [audit, abstain], expect: [abstains_when_unknown], says: "A forecast is past its date, and nobody recorded the outcome."}
+  - {id: calibration.words-differ-by-holder, stage: s3, truth: [judged], key: rubric-track, says: "Two holders use the same word for different degrees of belief.", from: [estimative-language]}
+  - {id: calibration.interval-forecast, stage: s4, says: "A forecast gives an interval, and its coverage is scored."}
+  - {id: calibration.conditional-forecast, stage: s4, truth: [chance_model, rule_closure], says: "A forecast holds only if a stated condition is met."}

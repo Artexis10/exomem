@@ -1,0 +1,191 @@
+# Where the catalogue's phenomena and the generator's methods come from. A phenomenon names its
+# lineage keys in `from`. An entry with no `from` was defined in this project.
+#
+# `checked` says how the entry was read for this change: `fetched` on 2026-11-10 from the address
+# given, `in-repo` for code and specs in this repository, or `cited` for a published work that was
+# not fetched again. `adopt` and `leave` say what this benchmark takes and what it does not.
+schema_version: 1
+lineage:
+  recon:
+    work: "RECON: Benchmarking Agent Memory for Compositional Reasoning over Long Contexts (2026)"
+    address: https://arxiv.org/abs/2607.16716
+    checked: fetched
+    adopt: "A seeded production engine whose rules fire on recorded attributes; a provenance graph that the generation contract induces; invalidation that cuts edges and recomputes reach; counterfactuals by running the model again; a minimal proof trace per question; a check that each answer is unique; a filter that drops questions answerable without the corpus; a ceiling arm that reads the structured truth; models that write surface text only."
+    leave: "Its generator code, because the paper states no code licence and its cases are single long case files, not work sessions in which an agent builds its own memory. Its multiple-choice format."
+  stale:
+    work: "STALE: Can LLM Agents Know When Their Memories Are No Longer Valid? (2026)"
+    address: https://arxiv.org/abs/2605.06527
+    checked: fetched
+    adopt: "The definition of an implicit conflict by two conditions, incompatibility and no explicit negation; its two types, same attribute and propagated; its three probes, which are the probe forms state, premise and act here."
+    leave: "Scenarios that a model writes and a judge validates, because the truth is then not known by construction. Distractor sessions taken from another dataset. One conflict pair per case."
+  memconflict:
+    work: "MemConflict: Evaluating Long-Term Memory Systems Under Memory Conflicts (2026)"
+    address: https://arxiv.org/abs/2605.20926
+    checked: fetched
+    adopt: "Three conflict types by what is in doubt, validity in time, correctness and applicability; validity as fitness for the question asked; distance, distractors and implicit questions as difficulty dials; a retrieval view beside the answer view."
+    leave: "Its dialogue-only histories built from user profiles."
+  memoryagentbench:
+    work: "MemoryAgentBench: Evaluating Memory in LLM Agents via Incremental Multi-Turn Interactions (2025)"
+    address: https://arxiv.org/abs/2507.05257
+    checked: fetched
+    adopt: "Its four competencies as a coverage check on probe forms; conflict cases at one hop and at several hops."
+    leave: "Its datasets, which edit facts about the real world and so collide with what a model already believes. It stays an outside calibration run."
+  longmemeval:
+    work: "LongMemEval: Benchmarking Chat Assistants on Long-Term Interactive Memory (2024)"
+    address: https://arxiv.org/abs/2410.10813
+    checked: cited
+    adopt: "Its five abilities as a floor on coverage, and abstention as a scored outcome."
+    leave: "Replay of a fixed bank of 500 questions as the development loop. It stays the public number, run by the existing public-suite lane."
+  veracium:
+    work: "Ground Truth First: A Longitudinal Evaluation Instrument for Agent Memory (Veracium, 2026)"
+    address: https://arxiv.org/abs/2607.21962
+    checked: fetched
+    adopt: "Facts before text; volatility classes for how long a fact stays valid; sent against received channels; an open-book answerability check; a no-memory control and a full-history baseline; a second judge from another model family."
+    leave: "Its generator as a dependency. It emits a personal chat and email script with 15 question types, it needs a newer Python than this repository, and a memory product's own team maintains it. Its fidelity check finds a missing fact and not an added one."
+  frontiermemory:
+    work: "FrontierMemory 1.0 (Letta Research, 2026)"
+    address: https://www.letta.com
+    checked: cited
+    adopt: "Memory judged by success on later work, not by recall; separate scores for holding a fact and for using it."
+    leave: "Its 15 fixed tasks. It stays an outside canary."
+  membench:
+    work: "membench, the memory-proof benchmark in this repository"
+    address: benchmarks/membench
+    checked: in-repo
+    adopt: "Its record schema, bitemporal oracle, family classifications, wordbank, native renderers with parity reports, runner and scoring. The world emits membench records."
+    leave: "Scenario templates as the unit of authoring. Each template is an island with its own entities and hand-written status spans."
+  esb:
+    work: "The Epistemic State Bench in this repository"
+    address: benchmarks/epistemic
+    checked: in-repo
+    adopt: "Its families f01 to f31 as named phenomena; control twins; the amendment protocol for registering a family."
+    leave: "Hand-written scenario fixtures as the only source of cases."
+  f38:
+    work: "The epistemic task suite in this repository (family f38)"
+    address: openspec/changes/add-epistemic-task-bench
+    checked: in-repo
+    adopt: "Its project format, arms, lockstep runner, blind judge, case check, development gates and statistics. A generated project is a valid input to it."
+    leave: "Nothing. The hand-written projects stay the independent anchor."
+  utility:
+    work: "The downstream utility instrument in this repository (family f32)"
+    address: benchmarks/membench/utility
+    checked: in-repo
+    adopt: "Paired action episodes, harm accounting and the pinned low-cost actor."
+    leave: "Its single configuration world."
+  tms:
+    work: "Truth maintenance systems (Doyle, 1979; de Kleer, 1986)"
+    checked: cited
+    adopt: "Belief status as reach from intact justifications. The warrant graph is a justification-based truth maintenance system."
+    leave: "Assumption sets and labels, which the benchmark does not need."
+  agm:
+    work: "The AGM postulates of belief revision (Alchourrón, Gärdenfors and Makinson, 1985)"
+    checked: cited
+    adopt: "Success, consistency and minimal change as invariants that the oracle's tests assert."
+    leave: "Revision operators over full logical theories."
+  pollock:
+    work: "Defeasible reasoning: rebutting and undercutting defeaters (Pollock, 1987)"
+    checked: cited
+    adopt: "The two kinds of defeat as two edge types in the warrant graph."
+    leave: "Nothing."
+  dung:
+    work: "Abstract argumentation frameworks (Dung, 1995)"
+    checked: cited
+    adopt: "The grounded extension as the key for which arguments stand, in cases where it is unique."
+    leave: "Other semantics, which give several answers."
+  prov:
+    work: "W3C PROV data model (2013)"
+    address: https://www.w3.org/TR/prov-dm/
+    checked: cited
+    adopt: "Entity, activity and agent, and the derivation and attribution relations, as the neutral names of the evidence layer."
+    leave: "The full constraint set."
+  allen:
+    work: "Interval algebra (Allen, 1983)"
+    checked: cited
+    adopt: "The relations between two periods."
+    leave: "Constraint propagation over large networks."
+  test-of-time:
+    work: "Test of Time: A Benchmark for Evaluating LLMs on Temporal Reasoning (2024)"
+    checked: cited
+    adopt: "Synthetic temporal questions over invented entities, so that no outside knowledge answers them."
+    leave: "Its question bank."
+  proofwriter:
+    work: "RuleTaker and ProofWriter (2020, 2021), bAbI (2015), CLUTRR (2019) and PrOntoQA (2023)"
+    checked: cited
+    adopt: "Answers derived from a rule base over invented entities; open against closed world; proof depth as a dial."
+    leave: "Their toy language."
+  rippleedits:
+    work: "RippleEdits: Evaluating the Ripple Effects of Knowledge Editing (2023) and MQuAKE (2023)"
+    checked: cited
+    adopt: "The kinds of consequence after one edit, including what must stay unchanged."
+    leave: "Edits to a model's weights."
+  theory-of-mind:
+    work: "ToMi (2019), BigToM (2023), FANToM (2023), Hi-ToM (2023) and ExploreToM (2024)"
+    checked: cited
+    adopt: "A state tracker that records who witnessed what, from which each holder's belief follows; conversations with unequal information."
+    leave: "Short stories as the only carrier."
+  factbank:
+    work: "FactBank: a corpus annotated with event factuality (2009)"
+    checked: cited
+    adopt: "Factuality tied to a source, including a source inside a source."
+    leave: "Its annotation scheme."
+  knowledge-conflict:
+    work: "ConflictBank (2024), ClashEval (2024) and WikiContradict (2024)"
+    checked: cited
+    adopt: "Conflict kinds, and the finding that a model's prior pulls against the context, which is why the world is invented."
+    leave: "Real-world facts as cases."
+  defeasible-nli:
+    work: "Defeasible inference in natural language (2020) and BoardgameQA (2023)"
+    checked: cited
+    adopt: "An update that weakens or strengthens a conclusion; a stated preference among sources."
+    leave: "Crowd-written updates."
+  proper-scoring:
+    work: "The Brier score (1950), proper scoring rules (2007) and ForecastBench (2024)"
+    checked: cited
+    adopt: "A proper score against a recorded chance, so that the best forecast is known."
+    leave: "Forecasts about the real future."
+  estimative-language:
+    work: "Words of estimative probability (Kent, 1964) and the Admiralty source and information ratings"
+    checked: cited
+    adopt: "Belief in words with a holder; separate ratings for a source and for a claim."
+    leave: "Fixed numeric meanings for the words."
+  truth-discovery:
+    work: "Integrating conflicting data: the role of source dependence (2009)"
+    checked: cited
+    adopt: "Sources that copy one another count as one origin."
+    leave: "Statistical estimation of copying."
+  continued-influence:
+    work: "The continued influence effect (Johnson and Seifert, 1994) and source monitoring (Johnson, Hashtroudi and Lindsay, 1993)"
+    checked: cited
+    adopt: "Two named failures of memory: a withdrawn statement that still drives a conclusion, and a fact recalled without its origin."
+    leave: "Nothing."
+  causal:
+    work: "CLadder (2023) and Corr2Cause (2024)"
+    checked: cited
+    adopt: "Causal questions answered from a recorded structural model."
+    leave: "Their question banks."
+  abstentionbench:
+    work: "AbstentionBench (2025)"
+    checked: cited
+    adopt: "The kinds of case where the right answer is to decline or to ask."
+    leave: "Its question bank."
+  competing-hypotheses:
+    work: "Analysis of competing hypotheses (Heuer, 1999)"
+    checked: cited
+    adopt: "Several live explanations held against the same evidence."
+    leave: "The matrix procedure."
+  record-linkage:
+    work: "A theory for record linkage (Fellegi and Sunter, 1969)"
+    checked: cited
+    adopt: "Two records of one entity as a match to be found."
+    leave: "The probabilistic model."
+  polanyi:
+    work: "The Tacit Dimension (Polanyi, 1966)"
+    checked: cited
+    adopt: "The boundary of what can be written down, as a declared limit."
+    leave: "Nothing."
+  agent-evals:
+    work: "Demystifying evals for AI agents (Anthropic, 2026)"
+    address: https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents
+    checked: fetched
+    adopt: "Capability evals that start at a low pass rate and graduate to regression checks when they saturate; cases where a behaviour should occur and cases where it should not; a reference solution for each task; code graders where they fit and model graders for open text."
+    leave: "Nothing."

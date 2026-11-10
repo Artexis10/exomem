@@ -1,0 +1,54 @@
+# Realm: time and change. What holds, and when?
+schema_version: 1
+phenomena:
+  # --- currency ---
+  - {id: currency.reversal, stage: s1, says: "A later statement from the same authority reverses an earlier decision.", from: [f38, longmemeval]}
+  - {id: currency.value-update, stage: s1, says: "A count, a limit or a price takes a new value, with no word of reversal.", from: [longmemeval, veracium]}
+  - {id: currency.repeated-update, stage: s1, says: "A value changes three or more times, and only the last value is current."}
+  - {id: currency.revert, stage: s1, says: "A value changes and later returns to its first value, so the middle value is the trap."}
+  - {id: currency.partial-update, stage: s1, says: "One part of a compound fact changes and the rest stays.", from: [membench]}
+  - {id: currency.unmarked-update, stage: s1, implicit: [unmarked], says: "The new value appears with no word that marks it as a change.", from: [stale]}
+  - {id: currency.implied-update, stage: s2, implicit: [implied], says: "A later observation entails a new value of the same attribute and never states it.", from: [stale]}
+  - {id: currency.propagated-update, stage: s2, implicit: [propagated], truth: [state_fold, warrant_graph], says: "A change to another attribute makes this value outdated through a recorded dependency.", from: [stale]}
+  - {id: currency.expiry, stage: s2, says: "A fact has a stated end date and is no longer current after it.", from: [membench]}
+  - {id: currency.scheduled-change, stage: s2, says: "A change is announced for a future date, and the old value holds until then.", from: [membench]}
+  - {id: currency.cancelled-change, stage: s2, says: "An announced change is cancelled before it takes effect."}
+  - {id: currency.late-arrival, stage: s2, truth: [state_fold, interval_order], says: "A record of an earlier change arrives late, so the time it happened and the time it was learned differ.", from: [membench]}
+  - {id: currency.stale-copy, stage: s2, says: "An old copy of a document arrives after the update and must not win because it arrived last."}
+  - {id: currency.stale-summary, stage: s2, says: "A summary written before the change still states the old value."}
+  - {id: currency.old-value-asked, stage: s1, probes: [as_of], says: "The task asks for the earlier value, and the current value is the wrong answer."}
+  - {id: currency.conditional, stage: s2, truth: [state_fold, scope_lattice], says: "Which value is current depends on a condition that the question names.", from: [memconflict]}
+  - {id: currency.temporary-override, stage: s2, says: "A temporary exception replaces a value for a stated period, and then the standing value returns."}
+  - {id: currency.unchanged, stage: s1, twin_of: currency.value-update, probes: [stable], expect: [over_flags], says: "A fact is restated several times in new words and never changes."}
+  # --- order ---
+  - {id: order.sequence, stage: s2, says: "Events must be put in the order they happened, not the order they were recorded.", from: [recon]}
+  - {id: order.as-of, stage: s2, says: "The question asks what held at a named past date.", from: [membench, veracium]}
+  - {id: order.document-date-or-event-date, stage: s2, says: "A document carries its own date and describes an event of another date, and the question asks for one of the two.", from: [membench]}
+  - {id: order.same-day, stage: s2, says: "Two records share a day, and only their recorded instants can order them.", from: [membench]}
+  - {id: order.indeterminate, stage: s2, probes: [abstain], expect: [abstains_when_unknown], says: "The evidence does not fix the order of two events, and the answer says so.", from: [membench]}
+  - {id: order.overlap, stage: s2, says: "The question asks whether two periods overlapped.", from: [allen]}
+  - {id: order.duration, stage: s2, truth: [interval_order, quantity_calc], says: "The question asks how long a state lasted, from its start and end events.", from: [test-of-time]}
+  - {id: order.relative-date, stage: s2, says: "A date is given relative to another event, such as two weeks after an audit."}
+  - {id: order.vague-date, stage: s3, expect: [states_uncertainty], says: "A date is given vaguely, and the answer keeps the precision that was given."}
+  - {id: order.bounds-only, stage: s3, expect: [states_uncertainty], says: "Only an earliest and a latest possible date are known."}
+  - {id: order.deadline-passed, stage: s2, says: "A deadline has passed by the time of the probe, so a status changed because time moved."}
+  - {id: order.recurring, stage: s3, truth: [interval_order, rule_closure], says: "The next or the last occurrence of a recurring event follows from its stated rule."}
+  - {id: order.timezone, stage: s3, says: "Two timestamps in different time zones are compared."}
+  - {id: order.calendar-arithmetic, stage: s3, says: "A date is computed from offsets across a month end or a year end.", from: [test-of-time]}
+  - {id: order.cause-recorded-later, stage: s2, says: "An event recorded later happened before the event that it explains."}
+  - {id: order.anachronism, stage: s3, truth: [interval_order, corpus_closure], says: "A document refers to a thing that did not exist at its stated date, so the date is suspect."}
+  - {id: order.version-sequence, stage: s2, says: "Versions of a document are ordered by version number, not by file date."}
+  - {id: order.first-or-last, stage: s2, says: "The question asks who did something first, or which record is the latest, across many records."}
+  # --- persistence ---
+  - {id: persistence.permanent, stage: s1, probes: [stable], expect: [over_flags], says: "A fact that cannot change stays valid however old its record is.", from: [veracium]}
+  - {id: persistence.ephemeral, stage: s2, says: "A momentary state, such as where someone is today, must not be reported as current later.", from: [veracium]}
+  - {id: persistence.transient, stage: s2, says: "A short-lived state, such as a trip or an outage, ends with no record of its end.", from: [veracium]}
+  - {id: persistence.slow-drift, stage: s3, says: "A slowly changing value is probably different after a long gap, so the answer gives it as last known.", from: [veracium]}
+  - {id: persistence.habit-or-once, stage: s2, truth: [kind_tag, corpus_closure], expect: [keeps_kind], says: "One occurrence is not a habit, and several occurrences are."}
+  - {id: persistence.inertia, stage: s2, twin_of: persistence.ephemeral, expect: [over_flags], says: "A durable fact with no evidence of change is still taken to hold."}
+  - {id: persistence.last-known, stage: s2, says: "An old observation is given with its date and is not presented as the present state."}
+  - {id: persistence.review-due, stage: s2, says: "A fact carries a stated review date, and that date has passed."}
+  - {id: persistence.seasonal, stage: s3, says: "A value repeats by season, so last winter's value predicts this winter and not this summer."}
+  - {id: persistence.one-off-exception, stage: s2, says: "An exception for one day does not change the standing arrangement."}
+  - {id: persistence.lapsed-routine, stage: s3, implicit: [silent], truth: [corpus_closure], says: "A recurring activity stops without notice, and its absence over several cycles is the evidence."}
+  - {id: persistence.tied-to-version, stage: s2, truth: [state_fold, scope_lattice], says: "A fact about version 2 holds only while version 2 is in use."}

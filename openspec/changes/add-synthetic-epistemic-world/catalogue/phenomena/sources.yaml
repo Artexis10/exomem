@@ -1,0 +1,71 @@
+# Realm: sources and testimony. Where did it come from, and whose is it?
+schema_version: 1
+phenomena:
+  # --- provenance ---
+  - {id: provenance.primary-over-secondary, stage: s1, truth: [state_fold, warrant_graph], probes: [state, act, trace], expect: [uses_current, cites_source], says: "Two sources disagree, and one of them is the primary record.", from: [f38]}
+  - {id: provenance.origin-recall, stage: s1, says: "The question asks which document a stored fact came from.", from: [f38, prov]}
+  - {id: provenance.evidence-and-conclusion, stage: s1, says: "The raw record and the conclusion drawn from it stay two distinct things.", from: [esb]}
+  - {id: provenance.chain, stage: s2, says: "A claim reached the record through several hands, and the chain is rebuilt in order.", from: [recon, prov]}
+  - {id: provenance.transitive-citation, stage: s2, says: "One document cites a second, which cites a third, and the third is the support.", from: [membench]}
+  - {id: provenance.circular-reporting, stage: s2, probes: [trace, weigh], says: "Several reports trace back to one origin, so they count as one.", from: [truth-discovery]}
+  - {id: provenance.independent-corroboration, stage: s2, twin_of: provenance.circular-reporting, probes: [trace, weigh], says: "Two reports with separate origins corroborate each other.", from: [recon, truth-discovery]}
+  - {id: provenance.lost-origin, stage: s2, probes: [trace, abstain], expect: [abstains_when_unknown, invents_detail], says: "A claim has no origin that the corpus records, and the answer says so."}
+  - {id: provenance.derived-or-observed, stage: s2, truth: [warrant_graph, kind_tag], expect: [keeps_kind, cites_source], says: "A computed figure is told apart from a measured one."}
+  - {id: provenance.copy-drift, stage: s2, truth: [warrant_graph, corpus_closure], says: "A copy differs from its original, and the original governs."}
+  - {id: provenance.quote-chain, stage: s3, says: "A quotation changes as people pass it on, and the first recorded wording governs."}
+  - {id: provenance.custody-gap, stage: s3, expect: [states_uncertainty, cites_source], says: "Nobody recorded who held an artefact for a period, which weakens what the artefact shows."}
+  - {id: provenance.dropped-in-new-version, stage: s2, truth: [warrant_graph, state_fold], says: "A claim rests on one version of a document, and the next version drops it."}
+  - {id: provenance.summary-of-summary, stage: s2, expect: [keeps_scope, cites_source], says: "A third-hand summary lost a qualifier that the original carried."}
+  - {id: provenance.wrong-source-credited, stage: s2, says: "A later note credits a fact to the wrong document."}
+  - {id: provenance.own-inference, stage: s2, truth: [warrant_graph, holder_ledger], expect: [keeps_attribution, cites_source], says: "A conclusion that the agent drew earlier is marked as its own and not as a source's.", from: [continued-influence]}
+  - {id: provenance.pointer-only, stage: s3, says: "The record says where a fact can be found and does not hold the fact."}
+  - {id: provenance.claimed-origin-false, stage: s3, truth: [warrant_graph, corpus_closure], says: "An artefact claims an origin that the world's own records contradict."}
+  # --- attribution ---
+  - {id: attribution.unverified-claim, stage: s1, says: "A vendor or a colleague asserts something that nobody verified, and it stays that party's claim.", from: [f38]}
+  - {id: attribution.who-said, stage: s1, probes: [whose], says: "The question asks which person made a statement.", from: [factbank]}
+  - {id: attribution.who-decided, stage: s1, probes: [whose], says: "The person who made a decision is not the person who announced it."}
+  - {id: attribution.preference-holder, stage: s1, says: "An opinion is one named person's preference at one time.", from: [membench]}
+  - {id: attribution.restated-as-fact, stage: s1, says: "A later note restates one person's opinion as a plain fact, and it is still that person's opinion.", from: [membench]}
+  - {id: attribution.quote-not-endorsed, stage: s2, says: "A person quotes a view and does not hold it.", from: [factbank]}
+  - {id: attribution.nested-report, stage: s2, says: "One person reports that another said something, and neither the reporter nor the record asserts it.", from: [factbank]}
+  - {id: attribution.changed-mind, stage: s2, truth: [holder_ledger, state_fold], expect: [keeps_attribution, uses_current], says: "A person held a view and later changed it, and both views are theirs at their own times."}
+  - {id: attribution.group-or-member, stage: s2, says: "A team's position differs from one member's position."}
+  - {id: attribution.speaking-in-role, stage: s3, truth: [holder_ledger, identity_map], says: "A statement made in a role binds the role and not the person who held it."}
+  - {id: attribution.self-or-others, stage: s2, says: "What a person said about themselves differs from what others said about them.", from: [veracium]}
+  - {id: attribution.assistant-suggested, stage: s2, expect: [keeps_attribution, keeps_kind], says: "A suggestion that an assistant made earlier is not the user's decision."}
+  - {id: attribution.written-for-another, stage: s3, says: "One person signed a document that another person wrote."}
+  - {id: attribution.shared-claim, stage: s2, says: "Two people assert the same thing, and the answer names both."}
+  - {id: attribution.misquote, stage: s2, truth: [holder_ledger, corpus_closure], says: "A report says that a person said something, and the record of their words shows otherwise."}
+  - {id: attribution.unknown-holder, stage: s2, probes: [whose, abstain], expect: [abstains_when_unknown, invents_detail], says: "Nobody recorded who made a claim, and the answer keeps it unattributed."}
+  # --- reliability ---
+  - {id: reliability.authority-conflict, stage: s1, says: "A system of record outranks an informal note on the same fact.", from: [membench]}
+  - {id: reliability.stated-authority, stage: s1, says: "The world's own rule names which record governs a fact, and the answer follows that rule."}
+  - {id: reliability.authority-change, stage: s2, truth: [state_fold, interval_order], says: "The governing record changes on a date, and earlier facts keep the earlier authority."}
+  - {id: reliability.firsthand-over-hearsay, stage: s2, truth: [state_fold, holder_ledger], says: "An eyewitness outranks a person who only heard about the event."}
+  - {id: reliability.reliable-source-wrong, stage: s2, says: "A source that is normally right errs once and is corrected."}
+  - {id: reliability.recency-or-authority, stage: s2, says: "A newer note of low standing conflicts with an older record of high standing."}
+  - {id: reliability.dependent-sources, stage: s2, truth: [warrant_graph], probes: [weigh, trace], says: "Two sources share one upstream, so they are not independent.", from: [truth-discovery]}
+  - {id: reliability.track-record, stage: s3, truth: [chance_model, corpus_closure], expect: [states_uncertainty, cites_source], says: "A source with a history of corrections earns less trust on a new claim that nobody confirmed.", from: [membench]}
+  - {id: reliability.known-error-rate, stage: s3, truth: [chance_model], probes: [forecast], expect: [states_uncertainty], says: "A source with a recorded error rate makes a claim, and the warranted confidence follows that rate.", from: [proper-scoring]}
+  - {id: reliability.outside-expertise, stage: s3, truth: [state_fold, scope_lattice], says: "A source that is reliable in one field speaks outside that field."}
+  - {id: reliability.interested-party, stage: s3, truth: [holder_ledger], expect: [keeps_attribution, states_uncertainty], says: "A source gains from the claim that it makes."}
+  - {id: reliability.discounted-source-right, stage: s3, says: "A later record confirms a claim from a discounted source, and the claim then stands on the confirmation."}
+  - {id: reliability.source-and-claim-ratings, stage: s3, truth: [judged], key: rubric-track, says: "The standing of a source and the credibility of one claim are judged separately.", from: [estimative-language]}
+  - {id: reliability.anecdote-or-rate, stage: s3, truth: [quantity_calc], expect: [states_uncertainty], says: "One anecdote stands against a measured rate."}
+  - {id: reliability.instrument-accuracy, stage: s3, truth: [quantity_calc], expect: [states_uncertainty], says: "A measurement's stated accuracy limits what the measurement can settle."}
+  - {id: reliability.expert-before-change, stage: s3, truth: [state_fold, interval_order], says: "An expert's statement was made before a change that makes it outdated."}
+  # --- testimony ---
+  - {id: testimony.rumour, stage: s2, says: "An unsourced rumour stays a rumour in the answer."}
+  - {id: testimony.official-statement, stage: s2, says: "An official statement commits the organisation that issued it."}
+  - {id: testimony.self-report, stage: s2, says: "A person reports something about themselves."}
+  - {id: testimony.eyewitness, stage: s2, says: "A person observed something directly, at a recorded time and place."}
+  - {id: testimony.secondhand, stage: s2, says: "A report is one step removed from the person who observed the event."}
+  - {id: testimony.inside-a-question, stage: s2, implicit: [embedded], expect: [keeps_kind, invents_detail], says: "A fact appears only inside someone's question, and nobody affirmed it."}
+  - {id: testimony.denial, stage: s2, probes: [weigh, whose], expect: [flags_conflict, keeps_attribution], says: "A person denies a claim, and the record keeps both the claim and the denial."}
+  - {id: testimony.witnesses-differ, stage: s2, probes: [weigh, whose], expect: [flags_conflict, keeps_attribution], says: "Two eyewitnesses disagree on one detail and agree on the rest."}
+  - {id: testimony.recantation, stage: s2, truth: [holder_ledger, state_fold], expect: [uses_current, keeps_attribution], says: "A witness withdraws an earlier account."}
+  - {id: testimony.minutes-or-memory, stage: s2, probes: [weigh, state], expect: [flags_conflict, cites_source], says: "The minutes of a meeting and a participant's later recollection differ."}
+  - {id: testimony.not-for-attribution, stage: s3, truth: [holder_ledger, policy_view], expect: [leaks_withheld], says: "A statement was given on condition that the speaker is not named."}
+  - {id: testimony.no-objection, stage: s3, implicit: [silent], expect: [keeps_kind, invents_detail], says: "Nobody objected to a proposal, and that is not a record of agreement."}
+  - {id: testimony.expert-opinion, stage: s3, says: "An expert gives a judgement, marked as an opinion with its basis."}
+  - {id: testimony.through-interpreter, stage: s4, says: "A statement reached the record through an interpreter."}

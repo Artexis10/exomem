@@ -1,0 +1,52 @@
+# Realm: inference. What follows from what is recorded?
+schema_version: 1
+phenomena:
+  # --- inference ---
+  - {id: inference.two-facts, stage: s2, says: "A conclusion follows from two recorded facts.", from: [proofwriter]}
+  - {id: inference.multi-hop, stage: s2, says: "The answer needs facts from three or more records.", from: [recon, memoryagentbench]}
+  - {id: inference.default-rule, stage: s2, says: "A rule holds unless an exception is recorded.", from: [defeasible-nli]}
+  - {id: inference.exception-defeats-default, stage: s2, says: "A recorded exception defeats the default rule.", from: [defeasible-nli]}
+  - {id: inference.class-to-member, stage: s2, says: "A property of a class applies to a member of the class."}
+  - {id: inference.transitive, stage: s2, says: "A relation carries across a chain of records.", from: [proofwriter]}
+  - {id: inference.unstated-conclusion, stage: s2, says: "Several records imply a conclusion that no record states.", from: [membench]}
+  - {id: inference.constraints, stage: s2, says: "A choice must satisfy several recorded constraints.", from: [recon]}
+  - {id: inference.complete-list, stage: s3, truth: [rule_closure, corpus_closure], says: "A list is declared complete, so what is not on it is false.", from: [proofwriter]}
+  - {id: inference.incomplete-list, stage: s3, twin_of: inference.complete-list, truth: [rule_closure, corpus_closure], probes: [abstain], expect: [abstains_when_unknown], says: "A list is not declared complete, so what is not on it is unknown.", from: [proofwriter]}
+  - {id: inference.generalisation, stage: s3, truth: [kind_tag], expect: [keeps_kind, states_uncertainty], says: "A generalisation from cases is kept as a generalisation."}
+  - {id: inference.best-explanation, stage: s3, truth: [kind_tag], expect: [keeps_kind, states_uncertainty], says: "A best explanation is kept as an explanation and not as an observed fact."}
+  - {id: inference.by-analogy, stage: s3, truth: [kind_tag], expect: [keeps_kind, states_uncertainty], says: "A conclusion carried over from a similar case is kept as an analogy."}
+  - {id: inference.does-not-follow, stage: s3, probes: [audit, weigh], expect: [flags_conflict], says: "A recorded conclusion does not follow from its stated premises."}
+  - {id: inference.rule-used-backwards, stage: s3, says: "A rule is applied in the reverse direction, which the rule does not license."}
+  - {id: inference.elimination, stage: s3, says: "The records rule out every option except one.", from: [recon]}
+  - {id: inference.chain-length, stage: s3, says: "The same question is asked at increasing chain lengths.", from: [proofwriter, recon]}
+  - {id: inference.how-reached, stage: s3, truth: [kind_tag, warrant_graph], probes: [trace], expect: [keeps_kind, cites_source], says: "The answer says how a conclusion was reached, as its record states."}
+  # --- causation ---
+  - {id: causation.stated-cause, stage: s2, truth: [warrant_graph, kind_tag], probes: [state, trace], expect: [cites_source], says: "A record names the cause of an event."}
+  - {id: causation.confirmed-root-cause, stage: s2, truth: [state_fold, kind_tag], probes: [state, act], expect: [uses_current, keeps_kind], says: "A first explanation of a failure is replaced by the confirmed cause."}
+  - {id: causation.chain, stage: s2, truth: [warrant_graph], probes: [trace], expect: [keeps_order, cites_source], says: "One event caused a second, which caused a third.", from: [recon]}
+  - {id: causation.correlation-only, stage: s3, says: "Two things move together, and no record shows a cause.", from: [causal]}
+  - {id: causation.confounder, stage: s3, says: "A third factor drives both of two things that move together.", from: [causal]}
+  - {id: causation.several-causes, stage: s3, says: "Several causes each contributed to one event."}
+  - {id: causation.intervention, stage: s3, says: "A deliberate change is compared with what would have happened without it.", from: [causal]}
+  - {id: causation.counterfactual, stage: s3, probes: [what_if], says: "The question asks what would have followed if an event had happened earlier or not at all.", from: [recon, causal]}
+  - {id: causation.followed-not-caused, stage: s3, says: "One event followed another and was not caused by it."}
+  - {id: causation.reversed, stage: s3, says: "A note takes the effect for the cause."}
+  - {id: causation.prevented, stage: s3, probes: [what_if, state], says: "Something did not happen because of an action."}
+  - {id: causation.mechanism-unknown, stage: s3, truth: [causal_model, kind_tag], says: "An effect is established, and its mechanism is not."}
+  - {id: causation.necessary-or-sufficient, stage: s4, says: "A condition is needed for an effect and is not enough to produce it."}
+  - {id: causation.explaining-away, stage: s4, truth: [causal_model, chance_model], says: "One of two possible causes is confirmed, which makes the other less likely."}
+  # --- absence ---
+  - {id: absence.not-recorded, stage: s1, says: "Nothing in the corpus speaks to the question.", from: [membench, longmemeval]}
+  - {id: absence.recorded-as-false, stage: s1, probes: [state], expect: [uses_current], says: "The corpus records that something is not the case.", from: [membench]}
+  - {id: absence.false-premise, stage: s1, probes: [premise], expect: [resists_premise, invents_detail], says: "The task assumes an event that the corpus does not contain.", from: [stale, abstentionbench, veracium]}
+  - {id: absence.similar-entity, stage: s1, truth: [corpus_closure, identity_map], says: "The corpus holds the fact for a similar entity only.", from: [memconflict]}
+  - {id: absence.no-record-of-happening, stage: s2, truth: [corpus_closure, kind_tag], says: "A planned event has no record that it happened."}
+  - {id: absence.negative-finding, stage: s2, probes: [state], expect: [uses_current, keeps_kind], says: "A search was made and found nothing, and that is a result."}
+  - {id: absence.left-the-list, stage: s2, implicit: [silent], truth: [corpus_closure, state_fold], probes: [state, act], expect: [uses_current], says: "An item no longer appears on a list that used to include it."}
+  - {id: absence.no-reply, stage: s2, says: "A request was sent, and no reply is recorded."}
+  - {id: absence.not-yet, stage: s2, truth: [corpus_closure, interval_order], says: "The answer will exist only after a dated event that has not yet happened."}
+  - {id: absence.withheld, stage: s3, truth: [policy_view], probes: [state], expect: [reports_withheld, leaks_withheld], says: "A record exists, the asker may not see it, and the answer says that it is withheld.", from: [membench]}
+  - {id: absence.deleted-on-request, stage: s3, truth: [policy_view, corpus_closure], probes: [state, act], expect: [leaks_withheld], says: "A record was deleted on request, and the store must not restate it.", from: [membench, memoryagentbench]}
+  - {id: absence.asked-to-forget, stage: s3, truth: [policy_view, corpus_closure], probes: [state, act], expect: [leaks_withheld], says: "The user asked the store to forget something.", from: [memoryagentbench]}
+  - {id: absence.partial-list, stage: s3, says: "The corpus names some members of a set and does not say that the set is complete."}
+  - {id: absence.missing-report, stage: s3, implicit: [silent], probes: [audit, state], expect: [states_uncertainty], says: "A routine report is missing for one period, and the gap is informative."}

@@ -1,0 +1,120 @@
+# The closed attribute sets of the phenomenon catalogue.
+#
+# A phenomenon, a family and a behaviour are open words: adding one is a data change.
+# The sets in this file are closed: code implements each member, so adding one is a code
+# change and a change to this file. Code branches only on these values. It never branches
+# on a phenomenon id, a family key or a behaviour key.
+schema_version: 1
+
+# How the oracle knows the answer. Each mechanism is one pure function over the world.
+truth_mechanisms:
+  state_fold:
+    description: "Fold the dated statements about one attribute, in time order and under the precedence that the world's own records state."
+    derives: "The current value, the history, the value at a past date, and the stale values to reject."
+  interval_order:
+    description: "Compare event times and periods, each with the precision that was recorded."
+    derives: "Before, after, same or indeterminate; overlap; duration; a computed date."
+  warrant_graph:
+    description: "Follow support, derivation and defeat edges between statements. A conclusion stands while one intact support path reaches it."
+    derives: "What a claim rests on, which conclusions fall after a withdrawal, which survive on independent support, and how many independent origins a claim has."
+  holder_ledger:
+    description: "Record for each holder what that holder said, was told, saw and believes, and when."
+    derives: "Whose claim or belief a statement is, who knows what, and what one holder thinks another believes."
+  kind_tag:
+    description: "Each statement carries the kind, modality and hedge that the world gave it."
+    derives: "Whether an answer keeps a plan as a plan, a hypothesis as a hypothesis and a hedge as a hedge."
+  identity_map:
+    description: "Track each entity's names, aliases, merges, splits and role holders over time."
+    derives: "Which entity a name refers to at a date, and which records are about one thing."
+  scope_lattice:
+    description: "Attach each statement to the contexts where it holds. The most specific matching context decides."
+    derives: "Whether a rule applies to the case that the probe names."
+  quantity_calc:
+    description: "Compute over typed quantities with their units, precision and stated error."
+    derives: "A sum, difference, rate, count or comparison, with its unit and tolerance."
+  chance_model:
+    description: "The generator draws outcomes and source errors from probabilities that it records."
+    derives: "The best forecast for a chance event, a source's true error rate and the score of a stated probability."
+  causal_model:
+    description: "The generator produces events from a recorded structural model. The oracle runs that model again with one change."
+    derives: "The cause of an event, the effect of an intervention and a counterfactual outcome."
+  rule_closure:
+    description: "Apply the rules that the world's records state, to the facts that they state, until nothing new follows."
+    derives: "A conclusion that no record states, a default and its exceptions, and the steps of a procedure."
+  policy_view:
+    description: "Evaluate the world's audience and deletion rules for the asker."
+    derives: "What the asker may see, what must be withheld and what must not be restated."
+  corpus_closure:
+    description: "The oracle holds the complete list of artefacts, with their authors, dates and copies."
+    derives: "Whether something was never recorded, recorded as false, duplicated, orphaned or withheld."
+  judged:
+    description: "No function fixes one answer. The oracle supplies the facts that a predeclared rubric cites."
+    derives: "Rubric lines for a blind judge."
+  none:
+    description: "The phenomenon cannot be written into a corpus or checked."
+    derives: "Nothing. The entry states a limit of the benchmark."
+
+# Whether the key is computed. The three values are membench's family classifications.
+key_classes:
+  deterministic-oracle: "The oracle computes the key from the world."
+  rubric-track: "The oracle supplies facts, and a blind judge applies a predeclared rubric."
+  out-of-scope: "The benchmark declares the phenomenon outside what it can test."
+
+# What a probe asks the actor to do.
+probe_forms:
+  state: "Ask what holds now."
+  as_of: "Ask what held at a past date."
+  premise: "Give a task that presupposes a stale or false state. The actor must reject the premise."
+  act: "Give a work task that names neither state. Its correct result depends on the planted change."
+  trace: "Ask where a fact came from or what it rests on."
+  whose: "Ask who said, decided or believes something."
+  impact: "Ask which conclusions fall and which survive after a change."
+  what_if: "Ask what would have followed under one changed event."
+  abstain: "Ask a question whose warranted answer is that the corpus does not say."
+  weigh: "Ask for the state of a disagreement or the case on each side."
+  forecast: "Ask for a probability or a belief level. A proper scoring rule scores it."
+  audit: "Ask about the store itself, such as what changed or what is duplicated."
+  stable: "Ask for a fact that never changes. This is the recall control."
+
+# How openly a rendered artefact carries a statement. The statement's content is fixed
+# before rendering, so the level changes the text and never the key.
+implicitness_levels:
+  stated: "The text states the content and its status in plain words."
+  paraphrased: "The text states the content in words that the probe does not use."
+  unmarked: "The text gives the new content with no word that marks a change."
+  implied: "The text states an observation that entails the content through a registered bridge."
+  propagated: "The text changes another attribute, and a recorded dependency makes this content follow."
+  embedded: "The content arrives inside a side remark, a presupposition, a value in a file or metadata."
+  silent: "The absence of an expected artefact or list member carries the content."
+
+# The slice that builds a phenomenon.
+stages:
+  s1: "Slice 1. Generated dev projects for the epistemic task suite, and vault seeds with known marks."
+  s2: "Slice 2. Implied and propagated change, cascades, order, quantities and rules."
+  s3: "Slice 3. Holders' minds, chance, causes, adversaries and audience rules."
+  s4: "Slice 4. Media, other languages, large worlds and compound threads."
+  out: "Never built. The entry is out of scope."
+
+# How a probe's answer is scored.
+scorers:
+  judge_keyed: "A blind judge decides correctness from the task, the key and the answer."
+  field_exact: "A parser reads a structured answer field and compares it with the key."
+  set_match: "Precision and recall of a returned set against the key set."
+  rank_tau: "Kendall's tau of a returned order against the key order."
+  proper_score: "The Brier score of a stated probability against the recorded chance or outcome."
+  rubric_judge: "A blind judge applies the predeclared rubric lines."
+
+# Whether a behaviour is wanted or unwanted in an answer.
+behaviour_polarities:
+  wanted: "The answer should show the behaviour."
+  unwanted: "The answer should not show the behaviour."
+
+# Difficulty dials. A round declares each dial's value before it runs.
+dials:
+  implicitness: "The implicitness level of the artefacts that carry the planted change."
+  distance: "The number of sessions between the planted change and the probe."
+  distractors: "The number of similar, irrelevant statements about the same or a similar entity."
+  restatements: "The number of artefacts that repeat the old value after the change."
+  composition: "The number of phenomena that one thread combines."
+  history: "The number of sessions and pages in the world."
+  margin: "How far apart the standing of two conflicting sources is."
