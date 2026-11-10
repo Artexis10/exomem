@@ -43,13 +43,13 @@ A value that parses as a canonical `exomem://record/<cid>/<key>` or `exomem://pl
 
 ### D3. Phase 1 needs no new table
 
-Forward resolution is a lookup on the target's existing unique natural-key index, or on `(collection, item_key)` for a canonical ref. A filter through a single-valued reference first resolves the released target keys, then applies them to the source field. Declaring `references` marks the source field filterable, as named-validator references already are. If that exceeds the collection's index budget, the filter falls back to a bounded scan, as named-validator references do. Resolution happens at read time, so renaming a target rewrites nothing: the old values stop resolving and stay visible.
+Forward resolution is a lookup on the target's existing unique natural-key index, or on `(collection, item_key)` for a canonical ref. Phase 1 runs a filter, grouping or path through a reference on the base-row path in Python, not as SQL joins. It scans the admitted rows, resolves each chunk's distinct values with those lookups, and evaluates the filter with the typed SQL predicate's semantics, leaf for leaf. Every row visit and every lookup counts against the visit budget, and a filtered reduction never reads a rollup. Declaring `references` marks the source field filterable, as named-validator references already are. Pushing a path filter into SQL is a later optimisation behind the same results. Resolution happens at read time, so renaming a target rewrites nothing: the old values stop resolving and stay visible.
 
 Phase 2 adds `item_references(source collection, row, field path, ordinal, raw value)`, indexed on `(source collection, field path, value)`, for inverse expansion. It is maintained in the canonical item transaction, added by a new collection-store schema revision (never by editing a shipped one), kept out of the in-vault replica and rebuilt from items. Until it is built, inverse reads report warming, never an empty list. Materialising resolved targets was rejected. It would need a write cascade across collections, which the store does not have.
 
 ### D4. Every reference has a visible state
 
-Each reference that a query names reads `resolved` or `unresolved` on every returned row. References the query does not name are not resolved, so existing reads stay unchanged. A reference is `unresolved` in any of these cases:
+Each reference that a query names reads `resolved`, `unresolved` or `none` on every returned row. `none` means the source field holds no value, so the row names no target: it is neither resolved nor unresolved, and it adds nothing to `unresolved_rows` or `unresolved_values`. References the query does not name are not resolved, so existing reads stay unchanged. A reference is `unresolved` in any of these cases:
 
 - no released target row matches;
 - the target row is withheld;
@@ -60,7 +60,7 @@ A withheld target is indistinguishable from a missing one, the same rule as CQ4.
 
 A row query gains two things. `related` names declared references to expand into each row. A dotted path through a single-valued reference, such as `site.name`, works in select, filter and grouping, as the amended CQ4 states. Expansion is bounded per row and never multiplies base rows. One filter feeds both the row page and the totals, on the same snapshot. The cursor binds the release-qualified visible-state basis of the source and of each target collection, and refuses once any of them changed. A change to rows hidden from the caller never invalidates that caller's cursor.
 
-Totals need three things that do not exist today: reductions with a filter, a per-aggregate `where` so that one query can sum one field and count the rows matching a condition, and a result that carries rows and totals together. The amended query engine adds the per-aggregate `where`. `combined` forces the base-row path, never the rollup. It reports four values:
+Totals need three things that do not exist today: reductions with a filter, a per-aggregate `where` so that one query can sum one field and count the rows matching a condition, and a result that carries rows and totals together. The amended query engine adds the per-aggregate `where`. `combined` forces the base-row path, never the rollup. A grouped result reports `combined` for the whole result and for each group. A group's `combined` carries `count`, `unresolved_rows` and `unresolved_values`, but no `excluded_unresolved`: an excluded row belongs to no group, so only the whole result counts it. A time bucket on a path field is refused with `QUERY_UNSUPPORTED`, because a bucket reads the queried collection's own declared date or datetime field. The whole result reports four values:
 
 - `count`: the rows combined;
 - `unresolved_rows`: combined rows where a reference the query names did not resolve;
