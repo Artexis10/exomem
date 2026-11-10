@@ -55,6 +55,10 @@ _Item = TypeVar("_Item")
 #: What ``ImportReport.unjudged`` says of a file that changed between a read and its commit.
 CHANGED_WHILE_READ = "the file changed after it was read"
 
+#: What ``ImportReport.unjudged`` says of a missing binary when the media ledger cannot say whether
+#: the media store evicted it: the record stays until a later sweep can tell.
+MEDIA_LEDGER_UNREADABLE = "the media store ledger could not be read"
+
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
 APPLY_BATCH = 32
@@ -121,11 +125,11 @@ class ImportReport:
     media_derived: list[str] = field(default_factory=list)
     #: Media binaries whose reconciliation failed, each with its code; the next sweep tries again.
     media_failed: dict[str, str] = field(default_factory=dict)
-    #: Media binaries that a sweep's recovery pass reconciled because their rows were missing.
-    media_recovered: int = 0
+    #: Media binaries that a sweep's recovery pass attempted because their rows were missing.
+    media_attempted: int = 0
     #: Media binaries whose file the media store itself evicted or restored: no outside change.
     managed: list[str] = field(default_factory=list)
-    #: Media binaries that the media store is moving now, left for the next event or sweep.
+    #: Media binaries that a media store read holds open now, left for the watcher to look at again.
     deferred: list[str] = field(default_factory=list)
     #: Every path that was examined and carried no change, whatever its kind.
     unchanged: int = 0
@@ -251,7 +255,7 @@ class Importer:
             self._sweep_unowned(filesystem, report)
             self._refresh_noted(report)
             self._derive_media(report)
-            report.media_recovered = media.recover(self._root, self._run)
+            report.media_attempted = media.recover(self._root)
         return report
 
     def _take_refresh(self) -> dict[str, str | None]:
@@ -261,13 +265,14 @@ class Importer:
         return taken
 
     def _derive_media(self, report: ImportReport) -> None:
-        """Derive the media rows of each binary that this settle recorded, on the store thread.
+        """Derive the media rows of each binary that this settle recorded.
 
-        A renamed binary derives under its new path. A deleted one keeps its sidecar page, which
-        holds extracted text that a person may have edited; file mode keeps it too.
+        The sidecar page commits on the store thread. A renamed binary derives under its new path.
+        A deleted one keeps its sidecar page, which holds extracted text that a person may have
+        edited; file mode keeps it too.
         """
         report.media_derived, report.media_failed = media.derive(
-            self._root, self._run, (*report.imported, *report.moved)
+            self._root, (*report.imported, *report.moved)
         )
 
     # -- reading the disk -------------------------------------------------------------------------
@@ -330,12 +335,6 @@ class Importer:
             if ownership.classify(rel) is ownership.Ownership.NONE:
                 self._judge_unowned(filesystem, rel, report)
                 continue
-            managed = media.managed(self._root, rel)
-            if managed is not None:
-                # The media store's own eviction or restore changed this file, so it is no outside
-                # delete or create; a file in the middle of that move is read again later.
-                (report.managed if managed == media.SUPPRESS else report.deferred).append(rel)
-                continue
             disk = self._observe(filesystem, rel, report)
             if rel in report.unjudged:
                 continue
@@ -347,7 +346,9 @@ class Importer:
                 looks[rel] = _Look(rel, facts, disk, verdict)
         renames = _pair_renames(looks, moves)
         renamed = {path for rename in renames for path in (rename.src, rename.dst)}
-        singles = [rel for rel in looks if rel not in renamed]
+        singles = self._without_media_store_changes(
+            [rel for rel in looks if rel not in renamed], report
+        )
         # A rename that the store refused is two changes, each held to its own path's rule.
         for rename in self._apply_renames(filesystem, renames, report):
             singles.extend((rename.src, rename.dst))
@@ -358,6 +359,26 @@ class Importer:
                 if rel not in report.unjudged:
                     units.append((rel, disk))
             self._apply(filesystem, units, report)
+
+    def _without_media_store_changes(self, rels: list[str], report: ImportReport) -> list[str]:
+        """The paths that remain once the media store's own eviction and restore are set aside.
+
+        This runs after the renames pair by hash, so a person's rename of an original keeps its
+        record. A missing original that the media store holds as evicted keeps its record, as file
+        mode keeps it: a person's delete of a stored original reads the same way.
+        """
+        settled: list[str] = []
+        for rel in rels:
+            answer = media.managed(self._root, rel)
+            if answer is None:
+                settled.append(rel)
+            elif answer == media.SUPPRESS:
+                report.managed.append(rel)
+            elif answer == media.DEFER:
+                report.deferred.append(rel)
+            else:
+                report.unjudged[rel] = MEDIA_LEDGER_UNREADABLE
+        return settled
 
     def _bytes_to_keep(
         self, filesystem: held_fs.HeldFilesystem, look: _Look, report: ImportReport

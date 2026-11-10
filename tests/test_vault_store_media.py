@@ -11,6 +11,7 @@ read back from the store's rows, never from the importer's own report.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import types
@@ -24,17 +25,25 @@ from test_vault_store_importer import StoreThread, rows, sha, wait_for
 from test_vault_store_migration import build_indexes, migrate_apply
 from test_vault_store_projector import NOTES
 
-from exomem import extract, file_watcher, media_jobs, media_processing, media_store, media_worker
+from exomem import (
+    extract,
+    file_watcher,
+    media_jobs,
+    media_processing,
+    media_store,
+    media_worker,
+    reserved_paths,
+)
 from exomem.collection_store import runtime
 from exomem.governance.principal import library_scope
 from exomem.init import init_vault
 from exomem.vault_store import batch, importer, read
+from exomem.vault_store import media as store_media
 
-# The generated vault and the store thread are the importer suite's own fixtures.
+# The generated vault is the importer suite's fixture; the media store's key is the sibling's.
 coordinator_url = importer_suite.coordinator_url
 vault = importer_suite.vault
 stored = importer_suite.stored
-store_thread = importer_suite.store_thread
 selected_store = media_store_suite.selected_store
 
 pytestmark = pytest.mark.skipif(
@@ -45,6 +54,20 @@ PICTURE = f"{NOTES}/plain.png"
 PICTURE_BYTES = b"\x89PNG plain"
 CHANGED_BYTES = b"\x89PNG a person replaced the picture"
 MOVED = f"{NOTES}/moved.png"
+
+
+def serve_through(monkeypatch, thread):
+    """The service's one door to the store thread; a bare test has no running service for it."""
+    door = types.SimpleNamespace(call=lambda work, **_options: thread.run(lambda _writer: work()))
+    monkeypatch.setattr(runtime, "_server", lambda _root: door)
+
+
+@pytest.fixture
+def store_thread(stored, monkeypatch):
+    thread = StoreThread(stored)
+    serve_through(monkeypatch, thread)
+    yield thread
+    thread.close()
 
 
 def sidecar_of(rel):
@@ -171,7 +194,7 @@ def test_the_sweep_derives_the_rows_that_a_failed_derivation_left_missing(
     assert stored_sidecar(stored, PICTURE)
     assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", PICTURE) != []
     assert failed.media_failed == {PICTURE: "MEDIA_NOT_FOUND"} and failed.media_derived == []
-    assert swept.media_recovered >= 1
+    assert swept.media_attempted >= 1
 
 
 @pytest.fixture
@@ -186,8 +209,9 @@ def stored_original(vault, selected_store):
 
 
 @pytest.fixture
-def original_thread(vault, stored_original):
+def original_thread(vault, stored_original, monkeypatch):
     thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
     yield thread
     thread.close()
 
@@ -247,11 +271,6 @@ def test_a_media_result_that_lands_while_the_store_is_busy_commits_on_the_store_
             text="Words read from the picture.", media_type="image", engine="test"
         ),
     )
-    # The service's one door to the store thread; a bare test has no running service to supply it.
-    door = types.SimpleNamespace(
-        call=lambda work, **_options: store_thread.run(lambda _writer: work())
-    )
-    monkeypatch.setattr(runtime, "_server", lambda _root: door)
     threads = commit_threads(monkeypatch)
     worker = media_worker.MediaWorker(stored, execution_mode="process")
     worker._process(job)
@@ -297,3 +316,103 @@ def test_a_running_watcher_derives_the_rows_of_a_media_file_that_a_person_adds(
     assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", PICTURE) != []
     assert media_jobs.MediaJobStore(stored).get_by_binary(stored / PICTURE) is not None
     assert [record for record in caplog.records if record.exc_info or record.levelno >= 40] == []
+
+
+def test_a_hard_linked_or_symlinked_binary_is_judged_as_it_is_without_a_media_store(
+    vault, stored_original, original_thread
+):
+    """An importer that reads a binary that the media store cannot inspect as a file in flight: it
+    records no hard link, never says why it refused a symlink, and asks the watcher to look again,
+    for ever."""
+    settling = importer.Importer(vault, run=original_thread.run)
+    outside = vault / "outside.png"
+    outside.write_bytes(PICTURE_BYTES)
+    linked, symlinked = f"{NOTES}/linked.png", f"{NOTES}/symlinked.png"
+    os.link(outside, vault / linked)
+    os.symlink(outside, vault / symlinked)
+
+    report = settling.import_paths([linked, symlinked])
+
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", linked) != []
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", symlinked) == []
+    assert report.unjudged == {symlinked: "UNSAFE_PATH"}
+    assert report.deferred == [] and report.managed == []
+
+
+def test_a_media_ledger_that_cannot_be_read_keeps_the_record_of_a_missing_original(
+    vault, stored_original, original_thread
+):
+    """An importer that reads an eviction as a delete when the ledger that would say so is corrupt,
+    or that stops importing a changed original because of it."""
+    rel = stored_original
+    settling = importer.Importer(vault, run=original_thread.run)
+    settling.sweep()
+    before = media_state(vault, rel)
+    media_jobs.job_store_path(vault).write_bytes(b"this is not a database")
+    original = (vault / rel).read_bytes()
+    (vault / rel).unlink()
+
+    report = settling.import_paths([rel])
+
+    assert report.removed == [] and report.deferred == [] and rel in report.unjudged
+    assert media_state(vault, rel) == before
+
+    (vault / rel).write_bytes(original + b" and a person's edit")
+    report = settling.import_paths([rel])
+
+    assert report.imported == [rel] and report.unjudged == {}
+    assert media_state(vault, rel)["binary"] != before["binary"]
+
+
+def test_a_person_renaming_a_stored_original_moves_its_record_by_hash(
+    vault, stored_original, original_thread
+):
+    """An importer that sets a stored original aside as evicted before it pairs the rename: the old
+    record stays, the new path imports as a second binary, and nothing joins them."""
+    rel = stored_original
+    moved = f"{NOTES}/renamed-sample.txt"
+    settling = importer.Importer(vault, run=original_thread.run)
+    settling.sweep()
+    (vault / rel).rename(vault / moved)
+
+    report = settling.sweep()
+
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path IN (?, ?)", rel, moved) == [
+        (moved,)
+    ]
+    assert report.moved == {moved: rel} and report.managed == []
+
+
+def test_a_path_that_a_media_store_read_holds_open_is_left_for_the_watcher_to_look_at_again(
+    vault, stored_original, original_thread
+):
+    """An importer that settles a stored original while a read of it is in flight, or that forgets
+    the path so that the edit made meanwhile never imports."""
+    rel = stored_original
+    settling = importer.Importer(vault, run=original_thread.run)
+    settling.sweep()
+    before = media_state(vault, rel)
+    edited = (vault / rel).read_bytes() + b" and a person's edit"
+
+    # The read itself fails when it closes, because the file changed under it.
+    with pytest.raises(reserved_paths.ReservedPathLeafError), media_store.open_original(
+        vault, vault / rel
+    ):
+        (vault / rel).write_bytes(edited)
+        report = settling.import_paths([rel])
+
+        assert report.deferred == [rel] and report.imported == []
+        assert media_state(vault, rel) == before
+
+    assert settling.import_paths([rel]).imported == [rel]
+
+
+def test_a_commit_on_the_stores_own_thread_never_hops_to_its_own_queue(stored, monkeypatch):
+    """A commit that runs on the store's server thread after it dropped its writer binding (a create
+    that left the store pending does) would queue behind itself and wait for ever."""
+    assert store_media.off_store_thread(stored)
+
+    server = types.SimpleNamespace(thread=threading.current_thread())
+    monkeypatch.setitem(runtime._SERVERS, stored.resolve(), server)
+
+    assert not store_media.off_store_thread(stored)

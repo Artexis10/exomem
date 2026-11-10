@@ -1330,15 +1330,16 @@ class FileWatcher:
         owned_rel = self._import_target(path)
         if self._importer is None and path.suffix.lower() != ".md" and self._is_kb(path):
             from . import media_store
+            from .vault_store.media import DEFER, SUPPRESS
 
             disposition = media_store.managed_event(self._vault_root, path)
-            if disposition == "defer":
+            if disposition == DEFER:
                 with self._lock:
                     self._managed_media_events[path] = deleted
                     self._last_change = time.monotonic()
                 self._wake.set()
                 return
-            if disposition == "suppress":
+            if disposition == SUPPRESS:
                 return
         if notify_views:
             # A same-stat external save can match index suppression; edit-back still needs its hint.
@@ -1512,11 +1513,11 @@ class FileWatcher:
                 len(report.imported), len(report.moved), len(report.held), len(report.removed),
                 len(report.cleared), len(report.refreshed), len(report.unjudged),
             )
-        if report.media_derived or report.media_failed or report.media_recovered:
+        if report.media_derived or report.media_failed or report.media_attempted:
             log.info(
-                "file watcher: derived the media rows of %d imported file(s), recovered %d, "
+                "file watcher: derived the media rows of %d imported file(s), attempted %d more, "
                 "failed %d",
-                len(report.media_derived), report.media_recovered, len(report.media_failed),
+                len(report.media_derived), report.media_attempted, len(report.media_failed),
             )
         for rel in report.deferred:
             self._pend_import(rel)  # the media store is moving it; the next batch looks again

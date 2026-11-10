@@ -135,8 +135,10 @@ def _write_state(vault_root: Path):
             "mode collections-store-adopt-local.",
         )
     if bound_writer(root) is None:
-        # Waiting for the store thread from here, under the mutation boundary, would deadlock it; no
-        # caller may reach the store from another thread, so this is an invariant, not a retry.
+        # Waiting for the store thread from here, under the mutation boundary, would deadlock it, so
+        # a commit never waits for it: a write from another thread is refused, an invariant and
+        # not a retry. A background media writer reaches the store thread by hopping before its
+        # commit (``vault_store.media.on_store_thread``), which holds the writer binding then.
         return True, OpError(
             OFF_THREAD,
             "this write reached a store-mode vault outside the thread that serves its store",
