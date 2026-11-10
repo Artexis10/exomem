@@ -8460,7 +8460,7 @@ def read_memory_stored(
 @wraps(read_memory_stored)
 def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
     result = read_memory_stored(vault_root, *args, **kwargs)
-    if capabilities_module.current_tool_shape() == "public":
+    if capabilities_module.shows_links_by_title():
         result = _show_links_by_title(vault_root, result)
     return result
 

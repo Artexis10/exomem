@@ -42,6 +42,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import (
+    capabilities,
     corpus_aware,
     indexes,
     lifecycle_statuses,
@@ -295,6 +296,8 @@ def edit(
 
     if surgical:
         # old_string/new_string are not None here (validated above).
+        # One snapshot serves the preview count and the replace, built when first needed.
+        snapshot = functools.cache(lambda: find_module.writer_resolver_snapshot(vault_root))
         if validate_only:
             # Preview only — report the count (don't raise on 0 or >1; seeing
             # the count is the whole point) and write nothing.
@@ -302,7 +305,7 @@ def edit(
                 body,
                 old_string,  # type: ignore[arg-type]
                 vault_root,
-                functools.cache(lambda: find_module.writer_resolver_snapshot(vault_root)),
+                snapshot,
             )
             match_count = found.count
             matches = _match_contexts(found.shown or body, old_string)  # type: ignore[arg-type]
@@ -314,7 +317,6 @@ def edit(
                     match_count=match_count,
                     matches=matches,
                 )
-        resolver = find_module.writer_resolver_snapshot(vault_root)
         new_body_final, body_warnings = apply_surgical_replace(
             body,
             old_string,  # type: ignore[arg-type]
@@ -322,7 +324,7 @@ def edit(
             replace_all,
             vault_root,
             rel_path=rel_path,
-            resolver=resolver,
+            resolver=snapshot(),
         )
         body_changed = True
     elif heading_mode:
@@ -738,9 +740,11 @@ class OldStringMatch:
     """Where `old_string` is in a body: its occurrences, counted as the surgical replace will use them."""
 
     count: int
-    #: Stored ranges of the occurrences, when the stored bytes do not hold `old_string` but the
-    #: body shown with its links by title does. None when the stored bytes hold it.
+    #: Stored ranges of the occurrences, when the body shown with its links by title holds
+    #: `old_string`. None when the stored bytes are what was counted.
     ranges: tuple[tuple[int, int], ...] | None = None
+    #: Per occurrence in `ranges`: the `(shown, stored)` text of each link it holds, in order.
+    links: tuple[tuple[tuple[str, str], ...], ...] = ()
     #: An occurrence in the shown body starts or ends inside a link, so no stored bytes stand for it.
     cuts_link: bool = False
     #: The shown body that `ranges` came from, for the lines an occurrence spans.
@@ -753,45 +757,80 @@ def match_old_string(
     vault_root: Path,
     resolver: Callable[[], WikilinkResolver],
 ) -> OldStringMatch:
-    """Count `old_string` in the stored body; failing that, in the body shown with links by title.
+    """Count `old_string` as its caller reads the page.
 
-    A reader of a page sees `[[Title]]` where the file holds the page's path. A snippet copied from
-    that view matches nothing stored, so a count of none falls back to the shown form and maps each
-    occurrence back to the stored bytes it stands for. A snippet that the stored bytes hold applies
-    as it always did, so a caller that never saw the shown form (REST, CLI) sees no change.
-    `resolver` is called only when the fallback needs it.
+    An agent on the public tool shape reads `[[Title]]` where the file holds the page's path, and
+    cannot see the path's bytes. It is counted in the shown body, where the text outside a link is
+    the stored text, and each occurrence maps back to the stored bytes it stands for. Failing that, a
+    snippet in the stored form is counted in the stored bytes. Any other caller counts the stored
+    bytes only. `resolver` is called only when a link may be shown by title.
     """
-    count = body.count(old_string)
-    if count or "[[" not in body:
-        return OldStringMatch(count)
+    stored = OldStringMatch(body.count(old_string))
+    if not old_string or not capabilities.shows_links_by_title() or "[[" not in body:
+        return stored
     view = render_title_links(
         body, vault_root, resolver=resolver(), visible=writer_link_visibility(vault_root)
     )
     if not view.spans:
-        return OldStringMatch(0)
+        return stored
     ranges: list[tuple[int, int]] = []
-    cuts_link = False
+    links: list[tuple[tuple[str, str], ...]] = []
     at = view.text.find(old_string)
     while at != -1:
-        stored = view.stored_range(at, at + len(old_string))
-        if stored is None:
-            cuts_link = True
-        else:
-            ranges.append(stored)
-        at = view.text.find(old_string, at + len(old_string))
-    if cuts_link:
-        return OldStringMatch(0, cuts_link=True)
-    return OldStringMatch(len(ranges), tuple(ranges), shown=view.text)
+        end = at + len(old_string)
+        stored_range = view.stored_range(at, end)
+        if stored_range is None:
+            return OldStringMatch(0, cuts_link=True)
+        ranges.append(stored_range)
+        links.append(
+            tuple(
+                (view.text[shown_start:shown_end], body[stored_start:stored_end])
+                for stored_start, stored_end, shown_start, shown_end in view.links_in(at, end)
+            )
+        )
+        at = view.text.find(old_string, end)
+    if not ranges:
+        return stored
+    return OldStringMatch(len(ranges), tuple(ranges), tuple(links), shown=view.text)
+
+
+def _restore_repeated_links(new_string: str, links: tuple[tuple[str, str], ...]) -> str:
+    """`new_string` with each link of the matched text that it repeats unchanged put back as stored.
+
+    An untouched link keeps its stored bytes, so it is not resolved by title again.
+    """
+    pieces: list[str] = []
+    cursor = 0
+    for shown, stored in links:
+        at = new_string.find(shown, cursor)
+        if at == -1:
+            continue
+        pieces.append(new_string[cursor:at])
+        pieces.append(stored)
+        cursor = at + len(shown)
+    pieces.append(new_string[cursor:])
+    return "".join(pieces)
 
 
 def replace_old_string(
-    body: str, found: OldStringMatch, old_string: str, new_string: str, replace_all: bool
+    body: str,
+    found: OldStringMatch,
+    old_string: str,
+    new_string: str,
+    replace_all: bool,
+    normalized: Callable[[str], str] = lambda text: text,
 ) -> str:
-    """`body` with the first occurrence of `old_string`, or every one, replaced by `new_string`."""
+    """`body` with the first occurrence of `old_string`, or every one, replaced by `new_string`.
+
+    `normalized` turns the text that goes in into the stored form of its links.
+    """
     if found.ranges is None:
-        return body.replace(old_string, new_string, -1 if replace_all else 1)
-    for start, end in reversed(found.ranges if replace_all else found.ranges[:1]):
-        body = body[:start] + new_string + body[end:]
+        return body.replace(old_string, normalized(new_string), -1 if replace_all else 1)
+    chosen = range(len(found.ranges)) if replace_all else range(1)
+    for index in reversed(chosen):
+        start, end = found.ranges[index]
+        stored = _restore_repeated_links(new_string, found.links[index])
+        body = body[:start] + normalized(stored) + body[end:]
     return body
 
 
@@ -818,12 +857,10 @@ def apply_surgical_replace(
     """
     where = f" in {rel_path}" if rel_path else ""
     which = f" (edit #{pair_index})" if pair_index is not None else ""
-    found = match_old_string(
-        body,
-        old_string,
-        vault_root,
-        lambda: resolver if resolver is not None else find_module.shared_resolver(vault_root),
+    resolver_of = functools.cache(
+        lambda: resolver if resolver is not None else find_module.shared_resolver(vault_root)
     )
+    found = match_old_string(body, old_string, vault_root, resolver_of)
     count = found.count
     if count == 0:
         raise EditError(
@@ -852,12 +889,15 @@ def apply_surgical_replace(
         )
     # Normalize wikilinks only in the inserted snippet — the rest of the body
     # is left byte-for-byte untouched (no incidental legacy rewrites).
-    if resolver is None:
-        resolver = find_module.shared_resolver(vault_root)
-    new_string_norm, warnings = normalize_body_wikilinks(
-        new_string, vault_root, resolver=resolver
-    )
-    return replace_old_string(body, found, old_string, new_string_norm, replace_all), warnings
+    warnings: list[str] = []
+
+    @functools.cache
+    def normalized(text: str) -> str:
+        text, found_warnings = normalize_body_wikilinks(text, vault_root, resolver=resolver_of())
+        warnings.extend(found_warnings)
+        return text
+
+    return replace_old_string(body, found, old_string, new_string, replace_all, normalized), warnings
 
 
 def apply_section_edit(

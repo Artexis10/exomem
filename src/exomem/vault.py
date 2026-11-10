@@ -8507,13 +8507,13 @@ def _insert_into_bucket(mapping: dict[str, tuple[str, ...]], key: str, *values: 
 class WikilinkCandidate:
     """One indexed page's physical path and its own normalized title.
 
-    `display_title` keeps the title's own spelling for a reader that shows it; it plays no part
-    in resolution, so it stays out of equality and two builds of one page compare equal.
+    `display_title` keeps the title's own spelling, which an agent reads in a link, so two builds
+    that disagree on it are not the same candidate.
     """
 
     path: str
     title_key: str | None
-    display_title: str | None = field(default=None, compare=False)
+    display_title: str | None = None
 
 
 def _wikilink_path_key(path: str) -> str:
@@ -9182,7 +9182,9 @@ def normalize_body_wikilinks(
     # is consumed by a non-capturing branch), so we parse the full match
     # text to recover the alias.
     for m in reversed(matches):
-        full = m.group(0)  # '[[target]]' or '[[target|alias]]'
+        # '[[target]]' or '[[target|alias]]', read from the body: the matches come from text whose
+        # code spans are blanked, which would blank an alias that holds inline code.
+        full = body[m.start() : m.end()]
         inner = full[2:-2]
         alias: str | None = None
         if "|" in inner:
@@ -9207,7 +9209,8 @@ def normalize_body_wikilinks(
 
 #: A title that holds one of these cannot be written as a link: the link grammar reads `/` as a path,
 #: `#` as an anchor, `|` as an alias, the brackets as the link's own edge, and a line break ends it.
-_LINK_TITLE_REFUSED = frozenset("/#|[]\r\n")
+#: A backtick opens a code span, which blanks the link, or the links up to the next backtick, for a writer.
+_LINK_TITLE_REFUSED = frozenset("/#|[]`\r\n")
 
 
 @dataclass(frozen=True, slots=True)
@@ -9230,6 +9233,12 @@ class TitleLinkView:
         first = self._stored_offset(start)
         last = self._stored_offset(end)
         return None if first is None or last is None else (first, last)
+
+    def links_in(self, start: int, end: int) -> tuple[tuple[int, int, int, int], ...]:
+        """The rewritten links that lie wholly inside the shown range `[start, end)`."""
+        first = bisect.bisect_left(self.spans, start, key=operator.itemgetter(2))
+        last = bisect.bisect_right(self.spans, end, key=operator.itemgetter(3))
+        return self.spans[first:last]
 
     def _stored_offset(self, shown: int) -> int | None:
         index = bisect.bisect_right(self.spans, shown, key=operator.itemgetter(2)) - 1
@@ -9285,7 +9294,10 @@ def render_title_links(
             candidate = resolve(target)
             title = candidate.display_title if candidate is not None else None
             if candidate is not None and title and _LINK_TITLE_REFUSED.isdisjoint(title):
-                written_back = resolve(title)
+                link = f"[[{title}]]"
+                # A writer reads the link through the same masking, so it must come out whole.
+                whole = [found.group(0) for found in _rewritable_wikilinks(link)] == [link]
+                written_back = resolve(title) if whole else None
                 if written_back is not None and written_back.path == candidate.path:
                     shown_by_target[target] = title + split_wikilink_target(target)[1]
         return shown_by_target[target]
@@ -9295,12 +9307,14 @@ def render_title_links(
     cursor = 0
     shown_length = 0
     for match in _rewritable_wikilinks(body):
-        target, separator, alias = match.group(0)[2:-2].partition("|")
+        # Read from the body: the match comes from text with its code spans blanked.
+        original = body[match.start() : match.end()]
+        target, separator, alias = original[2:-2].partition("|")
         title = shown(target.strip())
         if title is None:
             continue
         replacement = f"[[{title}{separator}{alias}]]"
-        if replacement == match.group(0):
+        if replacement == original:
             continue
         pieces.append(body[cursor : match.start()])
         shown_length += match.start() - cursor

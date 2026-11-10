@@ -13,9 +13,15 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 
-from exomem import call_ledger, commands, edit, find, freshness, writer_lease
+from exomem import call_ledger, capabilities, commands, edit, find, freshness, writer_lease
 from exomem import server as server_module
-from exomem.vault import TitleLinkView, WikilinkResolver, render_title_links, walk_vault_md
+from exomem.vault import (
+    TitleLinkView,
+    WikilinkResolver,
+    normalize_body_wikilinks,
+    render_title_links,
+    walk_vault_md,
+)
 
 NOTES = "Knowledge Base/Notes/Insights"
 
@@ -26,6 +32,16 @@ def _page(vault: Path, stem: str, title: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f'---\ntitle: "{title}"\ntype: insight\n---\n\n# {title}\n', encoding="utf-8")
     return f"{NOTES}/{stem}"
+
+
+@pytest.fixture
+def public_shape():
+    """Serve the call as the public MCP tool shape does: the shape that shows links by title."""
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+    )
+    with capabilities.active_surface(descriptor):
+        yield
 
 
 def _view(vault: Path, body: str, visible=None) -> TitleLinkView:
@@ -77,6 +93,29 @@ def test_a_title_that_a_link_cannot_carry_keeps_the_stored_link(vault: Path) -> 
     assert _view(vault, body).text == body
 
 
+def test_a_title_with_a_backtick_keeps_the_stored_link_and_its_neighbours_come_back_whole(vault: Path) -> None:
+    # A write masks code spans: a lone backtick pairs with a later one and hides the links between.
+    ticked = _page(vault, "tick-slug", "A lone ` tick")
+    paired = _page(vault, "code-slug", "Never use `git stash`")
+    other = _page(vault, "open-slug", "Open Title")
+    body = f"See [[{ticked}]], [[{paired}]] and [[{other}]] and `code`.\n"
+
+    view = _view(vault, body)
+
+    assert view.text == f"See [[{ticked}]], [[{paired}]] and [[Open Title]] and `code`.\n"
+    assert normalize_body_wikilinks(view.text, vault, resolver=WikilinkResolver(vault))[0] == body
+
+
+def test_an_alias_with_inline_code_is_shown_and_taken_back_intact(vault: Path) -> None:
+    target = _page(vault, "alpha-slug", "Alpha Title")
+    body = f"Use [[{target}|the `x` flag]] here.\n"
+
+    view = _view(vault, body)
+
+    assert view.text == "Use [[Alpha Title|the `x` flag]] here.\n"
+    assert normalize_body_wikilinks(view.text, vault, resolver=WikilinkResolver(vault))[0] == body
+
+
 def test_a_withheld_target_keeps_the_stored_link_and_shows_no_title(vault: Path) -> None:
     withheld = _page(vault, "secret-slug", "Secret Title")
     shown = _page(vault, "open-slug", "Open Title")
@@ -123,6 +162,7 @@ def test_every_range_of_the_shown_body_maps_back_to_the_stored_bytes(vault: Path
                 assert body[stored[0] : stored[1]] == _unshown(view, body, start, end)
 
 
+@pytest.mark.usefixtures("public_shape")
 def test_an_edit_copied_from_the_shown_page_lands_on_the_stored_bytes(vault: Path) -> None:
     target = _page(vault, "alpha-slug", "Alpha Title")
     body = f"First line.\nSee [[{target}#Part|the part]] for the cap of 30 s.\nLast line.\n"
@@ -134,6 +174,7 @@ def test_an_edit_copied_from_the_shown_page_lands_on_the_stored_bytes(vault: Pat
     assert edited == f"First line.\nSee [[{target}]] for a cap of 10 s.\nLast line.\n"
 
 
+@pytest.mark.usefixtures("public_shape")
 def test_a_snippet_that_cuts_a_link_in_half_is_refused(vault: Path) -> None:
     target = _page(vault, "alpha-slug", "Alpha Title")
     body = f"See [[{target}]] now.\n"
@@ -145,6 +186,7 @@ def test_a_snippet_that_cuts_a_link_in_half_is_refused(vault: Path) -> None:
     assert "include each link it touches whole" in refused.value.reason
 
 
+@pytest.mark.usefixtures("public_shape")
 def test_shown_matches_count_and_replace_as_stored_ones_do(vault: Path) -> None:
     target = _page(vault, "alpha-slug", "Alpha Title")
     body = f"One [[{target}]].\nTwo [[{target}]].\n"
@@ -157,6 +199,7 @@ def test_shown_matches_count_and_replace_as_stored_ones_do(vault: Path) -> None:
     assert replaced == f"One [[{target}|it]].\nTwo [[{target}|it]].\n"
 
 
+@pytest.mark.usefixtures("public_shape")
 def test_a_snippet_in_the_stored_form_still_applies(vault: Path) -> None:
     target = _page(vault, "alpha-slug", "Alpha Title")
     body = f"See [[{target}]] now.\n"
@@ -164,6 +207,41 @@ def test_a_snippet_in_the_stored_form_still_applies(vault: Path) -> None:
     edited, _ = edit.apply_surgical_replace(body, f"[[{target}]] now", f"[[{target}]] later", False, vault)
 
     assert edited == f"See [[{target}]] later.\n"
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_snippet_is_counted_where_the_agent_sees_it_not_in_a_path_it_cannot_see(vault: Path) -> None:
+    target = _page(vault, "alpha-slug", "Alpha Title")
+    body = f"Release Notes go here. See [[{target}]].\n"
+
+    once, _ = edit.apply_surgical_replace(body, "Notes", "Changelog", False, vault)
+    every, _ = edit.apply_surgical_replace(body, "Notes", "Changelog", True, vault)
+
+    assert once == every == f"Release Changelog go here. See [[{target}]].\n"
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_link_the_edit_leaves_alone_keeps_its_stored_bytes(vault: Path) -> None:
+    # The snippet starts inside a code span, so on its own its backticks pair around the link:
+    # written back by title, the link would be skipped as code and stored as a raw title.
+    target = _page(vault, "alpha-slug", "Alpha Title")
+    body = f"Flags `a` then [[{target}]] and `b`.\n"
+
+    edited, _ = edit.apply_surgical_replace(
+        body, "a` then [[Alpha Title]] and `b", "z` then [[Alpha Title]] and `b", False, vault
+    )
+
+    assert edited == f"Flags `z` then [[{target}]] and `b`.\n"
+
+
+def test_a_caller_that_never_saw_the_shown_form_edits_the_stored_bytes(vault: Path) -> None:
+    target = _page(vault, "alpha-slug", "Alpha Title")
+    body = f"See [[{target}]] now.\n"
+
+    with pytest.raises(edit.EditError) as refused:
+        edit.apply_surgical_replace(body, "[[Alpha Title]] now", "[[Alpha Title]] later", False, vault)
+
+    assert refused.value.code == "STRING_NOT_FOUND"
 
 
 # ---- the public tool shape, end to end ----
@@ -265,7 +343,8 @@ def test_an_observation_written_with_a_title_link_stores_the_path_form(build, va
                 "content": f"# {title}\n\n## Observations\n\n- [finding] Original wording #reliability\n",
             })
         added = await _call(client, "add_observation", {
-            "note": "Jitter policy", "category": "finding", "text": "Bounded by [[Backoff ceiling]]",
+            "note": "Jitter policy", "category": "finding",
+            "text": "Bounded by [[Backoff ceiling]], see [[Not yet written]]",
         })
         edited = await _call(client, "edit_note", {
             "note": "Jitter policy", "why": "Link the ceiling", "action": "edit_observation",
@@ -279,6 +358,7 @@ def test_an_observation_written_with_a_title_link_stores_the_path_form(build, va
     added, edited, units = _session(build(), scenario)
 
     assert "error" not in added and "error" not in edited, (added, edited)
+    assert any("Not yet written" in warning for warning in added.get("warnings", [])), added
     stored = _stored(vault, "Jitter policy")
     assert "Still bounded by [[Knowledge Base/Notes/Insights/backoff-ceiling]]" in stored
     assert "[[Backoff ceiling]]" not in stored

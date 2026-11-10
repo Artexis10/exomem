@@ -287,6 +287,7 @@ def observe_memory(
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
     dropped_outcome: str | None = None
+    link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
         after_body = _remove_unit(
@@ -311,7 +312,7 @@ def observe_memory(
         if "[[" in normalized_content:
             # A link in a unit is stored as the vault stores one in a note body: `[[Title]]` becomes
             # the page's path form. A forward reference stays as written.
-            normalized_content, _ = vault.normalize_body_wikilinks(
+            normalized_content, link_warnings = vault.normalize_body_wikilinks(
                 normalized_content, vault_root, resolver=find.writer_resolver_snapshot(vault_root)
             )
         normalized_tags = _canonical_tags(tags or [])
@@ -573,6 +574,7 @@ def observe_memory(
             semantic=preflight.as_dict(),
             dropped_relations=dropped_relations,
             dropped_outcome=dropped_outcome,
+            warnings=link_warnings,
         )
 
     try:
@@ -636,6 +638,7 @@ def observe_memory(
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
+        warnings=link_warnings,
     )
 
 
@@ -1298,6 +1301,7 @@ def _result(
     dropped_relations: tuple[tuple[str, str], ...] = (),
     dropped_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "operation": operation,
@@ -1314,6 +1318,8 @@ def _result(
         value["outcome"] = dropped_outcome
     if timings is not None:
         value["timings"] = timings
+    if warnings:
+        value["warnings"] = warnings
     if unit is not None:
         value["unit_ref"] = unit.unit_ref
         value["unit_id"] = unit_id(unit)
