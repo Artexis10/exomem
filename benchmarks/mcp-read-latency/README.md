@@ -100,8 +100,9 @@ After the fixture loads and the arm goes quiet, the runner searches once, untime
 a search is served. The fixture writes leave the keyword catalogue behind the vault, and a managed
 worker starts its repair only when a read is refused as `RETRIEVAL_INDEX_WARMING`. Until then the
 worker is idle, so quiet alone does not mean a search is served. After each refused search the
-runner waits for quiet again. An arm whose search is still refused after 30 minutes is refused as
-`search-index-not-ready`. Any other error is refused as `search-probe-failed`.
+runner waits for quiet again. An arm whose search is still refused, or whose worker is still busy,
+after 10 minutes is refused as `search-index-not-ready`. Any other error is refused as
+`search-probe-failed`.
 
 ## Private mode
 
