@@ -1225,7 +1225,9 @@ def test_an_update_that_resends_a_relation_in_another_written_form_reports_nothi
             tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
             kind="belief", category="belief", content="Dana thinks the release mostly holds.",
-            relations=[{"kind": "assesses", "target": "[[Knowledge Base/Notes/Insights/observe.md]]"}],
+            relations=[
+                {"kind": "assesses", "target": "[[Knowledge Base/Notes/Insights/observe.md]]"},
+            ],
         )
 
     assert "outcome" not in result and "relations_dropped" not in result
