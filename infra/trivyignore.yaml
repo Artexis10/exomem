@@ -1,0 +1,8 @@
+# Secret findings the infra validation scan accepts. Each entry names one rule and one file.
+secrets:
+  - id: jwt-token
+    paths:
+      - infra/contracts/cell-deletion-grants-v1.json
+    statement: >-
+      The shared grant fixture holds JWTs signed by throwaway keys whose private halves were
+      discarded, so its tokens grant nothing. Any other secret rule still scans this file.

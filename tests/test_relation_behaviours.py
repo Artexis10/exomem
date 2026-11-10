@@ -115,6 +115,23 @@ def test_has_reads_a_behaviour_and_refuses_one_the_schema_does_not_declare(
         registry.has("answers", "settle")
 
 
+def test_a_reader_that_holds_a_label_or_a_stored_set_refuses_a_misspelt_behaviour(
+    tmp_path: Path,
+) -> None:
+    """Catches the reads that took a label or a census row's stored behaviours and so read false
+    for a mistyped name, where `has` raises."""
+    registry = _registry(tmp_path)
+
+    assert registry.has_label("answers", "settles") is True
+    assert registry.has_label("links_to", "settles") is False
+    stored = registry.behaviours_of("answers")
+    assert relation_registry.has_behaviour(stored, "settles") is True
+    with pytest.raises(ValueError, match="not a relation behaviour"):
+        registry.has_label("answers", "settle")
+    with pytest.raises(ValueError, match="not a relation behaviour"):
+        relation_registry.has_behaviour(stored, "settle")
+
+
 def test_the_pack_binds_seven_frontmatter_fields_and_each_bound_relation_accepts_the_origin() -> (
     None
 ):

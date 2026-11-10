@@ -79,11 +79,12 @@ when present and are omitted when absent, so an unjudged unit is distinguishable
 from a judged one.
 
 Both are answered from the maintained catalogue rather than by reading pages, so
-a due-date query costs an index read on a served cell. The one filter field with
-no index answer is `page.frontmatter:/<pointer>`, which is open-ended by
-construction; a served request naming it is refused with `UNSUPPORTED_FILTER_FIELD`
-rather than silently falling back to a corpus scan, while an offline CLI caller
-keeps the exact scan. A date bound is answered exactly when it names a whole
+a due-date query costs an index read on a served cell. One filter field has no
+index answer: `page.frontmatter:/<pointer>`, which is open-ended by construction.
+A served request naming it is refused with `UNSUPPORTED_FILTER_FIELD` rather than
+silently falling back to a corpus scan, while an offline CLI caller keeps the
+exact scan. `unit.dimension` (below) has no column either, and a served request
+answers it without a scan. A date bound is answered exactly when it names a whole
 day, so `updated_after`, `updated_before`, `recency_days` and a bare ISO date can
 all be negated with `$not`; a bound carrying a timestamp is refused under the same
 code when nothing else in the filter narrows it, because a day column cannot
@@ -142,6 +143,48 @@ plans fail before candidate retrieval and never silently widen.
 
 An empty query plus filters is a filter-only lookup. It uses the documented
 filtered-most-recent sort tuple; it does not fabricate a text score.
+
+`unit.dimension` filters units by epistemic dimension, with `$eq`, `$in` and
+`$ne`. It takes a dimension key or a label in any language, and a name that no
+registry entry holds is refused with the known keys. A unit belongs to a
+dimension when its kind is a member, when it carries a member key, or when it is
+an end of a typed edge whose family is a member. A unit's own `relations` row
+starts an edge at that unit, and a link with an anchor, such as `[[#before]]`,
+ends one at the unit the anchor names. An edge written in frontmatter, in a
+page's relations section or as a link with no anchor starts or ends at the whole
+page, and that end reaches every unit of the page. A vault adds a dimension in
+`_Schema/semantic-language-registry.yaml`, and the filter takes it with no code
+change. A vault may also remove a dimension it added: no page stores a dimension
+key, and a filter that still names it is refused with the keys that exist.
+
+```json
+{"filters": {"unit.dimension": {"$eq": "currency"}}, "result_level": "unit"}
+```
+
+A dimension with a family member reads the edge graph in one query for the
+units it tests. While the graph sidecar is missing or stale the request raises
+the typed warming outcome and never answers as if no edge existed. A caller sees
+an edge only when it may see both of its pages.
+
+A served request answers `unit.dimension` without reading pages. A dimension
+with no family member, whose member keys each have an index column, becomes the
+equivalent kind and key predicates, anywhere in the filter. Any other dimension
+is checked on the best units the search found, with one graph read for them,
+so the predicate must sit at the top level of the filter or under a top-level
+`$and`; under `$or` or `$not` it is refused with `UNSUPPORTED_FILTER_FIELD`.
+The limit applies before that check, so when it drops units the reply's
+`user_summary` says that the filter ran only on the best matches, how many of
+them it kept, and that more may exist. The offline CLI evaluates every dimension on every unit.
+
+The category report (`schema_memory` with `operation="infer"` and `subject="categories"`, which counts units by category) lists every
+dimension with its members and display behaviours, and with `unit_count` and
+`page_count` for the units it scanned. Its `edges` value says how the count was
+made: `not_needed` when no edge decides the dimension, `counted` when the graph
+answered, and `unavailable` when it could not, where both counts are `null`
+instead of a number that leaves out the edges. While the graph is missing or
+stale, the report schedules its rebuild, and the row's `repair` names the
+`maintain_memory` call that runs the rebuild now. A dimension a vault adds appears
+there with no code change.
 
 ## Explain ranking without inventing confidence
 

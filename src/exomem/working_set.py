@@ -3923,7 +3923,7 @@ def _carry_admission(
         targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
             .split("|", 1)[0].strip().casefold()
             for relation in hit.relations
-            if "names_subject" in names_subject.behaviours_of_label(str(relation.get("kind") or ""))}
+            if names_subject.has_label(str(relation.get("kind") or ""), "names_subject")}
         category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
         if category.status not in {"core", "extension", "alias", "unregistered"}:
             return False

@@ -1,10 +1,10 @@
 """The platform chart's Exomem Cloud entries, rendered and applied.
 
 `helm template` runs from a pinned Helm image against a copy of
-`infra/helm/platform` with its three subchart dependencies removed (the
-rehearsal renders only `templates/cellctl.yaml`, `cloud-gateway.yaml`,
-`cloud-storage-class.yaml`, `key-custodian.yaml` and `cell-deletion-policy.yaml`, none of which reads a
-subchart). Everything the
+`infra/helm/platform` with its subchart dependencies removed (the rehearsal
+renders only `templates/cellctl.yaml`, `cloud-gateway.yaml`,
+`cloud-storage-class.yaml`, `key-custodian.yaml` and
+`cell-deletion-policy.yaml`, none of which reads a subchart). Everything the
 chart renders is applied as rendered, except the overlays below. Each
 overlay is returned so the report lists it:
 
@@ -204,6 +204,8 @@ def custodian_documents(
     call, with the chart's default exceptions and its API-server egress aimed at this K3s.
     """
 
+    # The custodian mounts the chart's deletion policy ConfigMap and does not start without it.
+    templates = ("templates/key-custodian.yaml", "templates/cell-deletion-policy.yaml")
     custodian = render_chart(
         stack,
         {
@@ -212,14 +214,9 @@ def custodian_documents(
             "keyCustodian": {"enabled": True},
             "edge": {"apiServerCidrs": [f"{stack.k3s.ip}/32"]},
         },
-        show_only=("templates/key-custodian.yaml", "templates/cell-deletion-policy.yaml"),
+        show_only=templates,
     )
-    # The custodian mounts its namespace's copy of the deletion policy and does not start without it.
-    return [
-        doc for source, doc in custodian
-        if source == "templates/key-custodian.yaml"
-        or (source == "templates/cell-deletion-policy.yaml" and doc["metadata"]["namespace"] == CUSTODY_NAMESPACE)
-    ]
+    return [doc for source, doc in custodian if source in templates]
 
 
 def render_chart(

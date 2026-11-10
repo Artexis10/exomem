@@ -755,6 +755,10 @@ def _label_proposal(definition: LabelDefinition) -> dict[str, Any]:
         out["labels"] = dict(definition.labels)
     if definition.description:
         out["description"] = definition.description
+    if definition.members:
+        out["members"] = {name: list(values) for name, values in definition.members}
+    if definition.display:
+        out["display"] = list(definition.display)
     return out
 
 
@@ -767,10 +771,14 @@ def dropped_label_findings(
     A page that uses a saved verdict, level, modality or mode stops parsing once a save drops
     it. A save may still add an entry or change a label, so only a lost key is refused. A shipped
     key still resolves without its vault entry, so removing an entry that only labels a shipped
-    key is no loss. Validation and the save both read these findings.
+    key is no loss. No page stores a key of a registry that is not `on_pages`, such as a
+    dimension, so a vault may remove its own entry there; a filter that still names it is refused
+    with the keys that exist. Validation and the save both read these findings.
     """
     findings = []
     for labels in semantic_labels.REGISTRIES:
+        if not labels.on_pages:
+            continue
         section = labels.section
         dropped = sorted(
             set(current.label_entries.get(section, {}))
@@ -943,6 +951,11 @@ def _parse_registry_data(
     findings.extend(_replacement_cycle_findings(categories, "categories"))
     findings.extend(_replacement_cycle_findings(kinds, "kinds"))
     _core_category_shadow_findings(categories, findings)
+    _check_dimension_members(
+        label_entries.get(semantic_labels.DIMENSIONS.section, {}),
+        (*core.core_kinds, *kinds),
+        findings,
+    )
     sorted_findings = tuple(
         sorted(findings, key=lambda item: (item["path"], item["code"], item["detail"]))
     )
@@ -986,7 +999,7 @@ def _parse_label_entries(
         if not isinstance(value, dict):
             findings.append(_finding("invalid_definition", span, "must be an object"))
             continue
-        for unknown in sorted(set(value) - semantic_labels.ENTRY_FIELDS, key=str):
+        for unknown in sorted(set(value) - labels.entry_fields, key=str):
             findings.append(
                 _finding("unknown_field", f"{span}.{unknown}", "unknown definition field")
             )
@@ -1006,17 +1019,28 @@ def _parse_label_entries(
                 _finding("invalid_label", f"{span}.labels.{language}", problem)
                 for language, problem in problems
             )
+        members, display = (
+            _parse_members(labels, key, span, value, findings) if labels.has_members else ((), ())
+        )
         if core is not None:
             # Kept as written, so a save preserves the entry; `_effective_label` ignores it.
             raw_description = value.get("description")
             description = "" if raw_description is None else str(raw_description).strip()
-            if description:
+            fixed = [
+                name
+                for name, written in (
+                    ("description", description), ("members", members), ("display", display),
+                )
+                if written
+            ]
+            if fixed:
                 findings.append(
                     _finding(
                         f"core_{labels.noun}_shadowed",
-                        f"{span}.description",
-                        f"{key!r} is a shipped {labels.entry_words} with a fixed description, so "
-                        "this entry is ignored; remove its description to use its labels",
+                        f"{span}.{fixed[0]}",
+                        f"{key!r} is a shipped {labels.entry_words} with a fixed "
+                        f"{', '.join(fixed)}, so this entry is ignored; remove "
+                        f"{'it' if len(fixed) == 1 else 'them'} to use its labels",
                         severity="warning",
                     )
                 )
@@ -1028,11 +1052,118 @@ def _parse_label_entries(
                 )
                 continue
             description = description.strip()
+            if labels.has_members and not members:
+                findings.append(
+                    _finding(
+                        "missing_members",
+                        f"{span}.members",
+                        f"is required: name families, kinds or keys that make a unit belong to "
+                        f"the {labels.entry_words}",
+                    )
+                )
+                continue
         entries[key] = LabelDefinition(
-            key=key, labels=entry_labels, description=description, core=core is not None
+            key=key, labels=entry_labels, description=description, core=core is not None,
+            members=members, display=display,
         )
     _check_label_spellings(labels, shipped, entries, findings)
     return entries
+
+
+def _parse_members(
+    labels: LabelRegistry,
+    key: str,
+    span: str,
+    value: Mapping[Any, Any],
+    findings: list[RegistryFinding],
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[str, ...]]:
+    """The member lists and display behaviours one vault dimension wrote, with a finding for each
+    that is malformed or that the closed display set does not declare.
+
+    A name's existence as a family, kind or key is `_check_dimension_members`, which needs the
+    registries this document sits beside.
+    """
+    members: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    if "members" in value:
+        read = semantic_labels.read_members(value["members"])
+        if read is None:
+            findings.append(
+                _finding(
+                    "invalid_members",
+                    f"{span}.members",
+                    "must map `families`, `kinds` or `keys` to a list of keys",
+                )
+            )
+        else:
+            members = read[0]
+            findings.extend(
+                _finding("invalid_members", f"{span}.members.{name}", problem)
+                for name, problem in read[1]
+            )
+    display: tuple[str, ...] = ()
+    if "display" in value:
+        shown = semantic_labels.read_display(value["display"])
+        if shown is None:
+            findings.append(
+                _finding("invalid_display", f"{span}.display", "must be a list of display behaviours")
+            )
+        else:
+            display = shown[0]
+            findings.extend(
+                _finding(
+                    "undeclared_display_behaviour",
+                    f"{span}.display",
+                    f"{labels.entry_words} {key!r} names the display behaviour {behaviour!r}, "
+                    "which the registry does not declare; use "
+                    + ", ".join(sorted(semantic_labels.DISPLAY_BEHAVIOURS)),
+                )
+                for behaviour in shown[1]
+            )
+    return members, display
+
+
+def _check_dimension_members(
+    entries: Mapping[str, LabelDefinition],
+    kinds: Iterable[str],
+    findings: list[RegistryFinding],
+) -> None:
+    """Refuse a vault dimension member that names no family, kind or governed key, with a finding
+    that names the dimension and the member.
+
+    The families are the relation pack's: a vault extension inherits its parent's family, so no
+    vault adds one. The kinds are the shipped ones and the vault's own in this document.
+    """
+    from . import relation_registry, semantic_blocks
+
+    known = {
+        "families": (relation_registry.core_registry().core_families, "relation family"),
+        "kinds": (frozenset(kinds) | {semantic_labels.ALL_KINDS}, "unit kind"),
+        "keys": (frozenset(semantic_blocks.GOVERNED_UNIT_METADATA_KEYS), "governed unit-metadata key"),
+    }
+    for key, entry in sorted(entries.items()):
+        if entry.core:
+            continue
+        for list_name, values in entry.members:
+            exists, noun = known[list_name]
+            for value in values:
+                if value in exists:
+                    continue
+                findings.append(
+                    _finding(
+                        "unknown_dimension_member",
+                        f"dimensions.{key}.members.{list_name}",
+                        f"dimension {key!r} names the {noun} {value!r}, which does not exist; "
+                        + _member_remedy(list_name, exists),
+                    )
+                )
+
+
+def _member_remedy(list_name: str, exists: Iterable[str]) -> str:
+    """What to write instead: the families and keys that exist, which are few; the kinds by
+    where they live, because a vault may hold many."""
+    if list_name == "kinds":
+        return "name a shipped kind or a kind in this registry's `kinds` section"
+    return "use one of " + ", ".join(sorted(exists))
 
 
 def _effective_label(
@@ -1041,12 +1172,12 @@ def _effective_label(
     """The entry a vault entry gives: a new one as written, or a shipped one whose labels the
     vault's replace, language by language.
 
-    An entry that rewrites a shipped entry's description gives None: it is ignored, as a
-    category that shadows a shipped one is, and its warning says so.
+    An entry that rewrites a shipped entry's description, members or display gives None: it is
+    ignored, as a category that shadows a shipped one is, and its warning says so.
     """
     if shipped is None:
         return entry
-    if entry.description:
+    if entry.description or entry.members or entry.display:
         return None
     merged = {**dict(shipped.labels), **dict(entry.labels)}
     return LabelDefinition(
@@ -1054,6 +1185,8 @@ def _effective_label(
         labels=tuple(sorted(merged.items())),
         description=shipped.description,
         core=True,
+        members=shipped.members,
+        display=shipped.display,
     )
 
 
