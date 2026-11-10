@@ -4120,10 +4120,11 @@ def _build_identity_census(
                     for depth, name in enumerate(parts)
                 )
             ]
-            for start in range(0, len(members), 500):
+            for start in range(0, len(members), read.KEYS_PER_QUERY):
                 request_budget.checkpoint()
-                bodies = view.bodies(members[start : start + 500])
-                for rel in members[start : start + 500]:
+                chunk = members[start : start + read.KEYS_PER_QUERY]
+                bodies = view.bodies(chunk)
+                for rel in chunk:
                     path = root.joinpath(*rel.split("/"))
                     try:
                         source = bodies[rel].decode("utf-8")

@@ -111,10 +111,12 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     unimported: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     with read.snapshot(root) as view:
         sources = view.inbound_sources_many(targets)
-        found_in = {
-            source: matching(source, body.decode("utf-8", errors="replace"))
-            for source, body in view.bodies(set().union(*sources.values())).items()
-        }
+        # One chunk of linking pages' bodies at a time: a folder's linkers may be thousands.
+        linkers = sorted(set().union(*sources.values()))
+        found_in: dict[str, dict[str, list[vault.InboundLink]]] = {}
+        for start in range(0, len(linkers), read.KEYS_PER_QUERY):
+            for source, body in view.bodies(linkers[start : start + read.KEYS_PER_QUERY]).items():
+                found_in[source] = matching(source, body.decode("utf-8", errors="replace"))
         for rel in targets:
             for source in sorted(sources[rel] & found_in.keys()):
                 links[rel].extend(

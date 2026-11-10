@@ -152,8 +152,8 @@ class StoreSnapshot:
 
     def _each(self, rels: Iterable[str], columns: str) -> Iterator[tuple]:
         wanted = list(dict.fromkeys(rels))
-        for start in range(0, len(wanted), _KEYS_PER_QUERY):
-            chunk = wanted[start : start + _KEYS_PER_QUERY]
+        for start in range(0, len(wanted), KEYS_PER_QUERY):
+            chunk = wanted[start : start + KEYS_PER_QUERY]
             yield from self.connection.execute(
                 f"SELECT {columns} FROM store_pages WHERE path IN ({', '.join('?' * len(chunk))})",
                 chunk,
@@ -244,9 +244,9 @@ def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
     return inbound_sources_many(connection, (rel,))[rel]
 
 
-#: The most page keys that one graph query binds. SQLite allows 32766 parameters; a smaller chunk
-#: keeps each statement short to prepare.
-_KEYS_PER_QUERY = 500
+#: The most paths or page keys that one keyed store query binds. SQLite allows 32766 parameters;
+#: a smaller chunk keeps each statement short to prepare and each result small.
+KEYS_PER_QUERY = 500
 
 
 def inbound_sources_many(connection: Connection, rels: Iterable[str]) -> dict[str, frozenset[str]]:
@@ -257,10 +257,10 @@ def inbound_sources_many(connection: Connection, rels: Iterable[str]) -> dict[st
     """
     wanted = list(dict.fromkeys(rels))
     found: dict[str, set[str]] = {rel: set() for rel in wanted}
-    for start in range(0, len(wanted), _KEYS_PER_QUERY):
-        chunk = wanted[start : start + _KEYS_PER_QUERY]
+    for start in range(0, len(wanted), KEYS_PER_QUERY):
+        chunk = wanted[start : start + KEYS_PER_QUERY]
         rows = connection.execute(
-            "SELECT DISTINCT dst_page_key, source_path FROM graph_edges"
+            "SELECT dst_page_key, source_path FROM graph_edges"
             f" WHERE dst_page_key IN ({', '.join('?' * len(chunk))})",
             [f"file:{rel}" for rel in chunk],
         )
