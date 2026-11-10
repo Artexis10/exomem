@@ -34,7 +34,7 @@ The structured-filter field registry SHALL accept `unit.dimension` as a closed f
 #### Scenario: A served reader checks an edge dimension on its hits
 - **WHEN** a served request filters by a dimension that has a family member, at the top level of the filter
 - **THEN** the request returns only the ranked units that belong to the dimension, with one graph read for the hits and no corpus scan
-- **AND** when the check dropped units from a full ranking, the reply's leading outcome says how many of the best matches are in the dimension and that more may exist
+- **AND** when the check dropped units from a full ranking, the reply's leading outcome says that the dimension filter ran only on the best matches, how many of them it kept, and that more may exist, and names no count of the matches the server checked
 
 #### Scenario: A served reader refuses an edge dimension under a logical operator
 - **WHEN** a served request names a dimension that has a family member under `$or` or `$not`

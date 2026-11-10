@@ -6891,10 +6891,12 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
             continue
         envelope.pop(internal, None)
     if dimension_check:
-        # The limit applied before the dimension check, so the count says what was checked.
+        # The limit applied before the dimension check. `checked` is the pool the server fetched,
+        # which can exceed the caller's limit, so the sentence names only what the check kept.
+        kept = dimension_check["kept"]
         summary = (
-            f"{dimension_check['kept']} of the {dimension_check['checked']} best matches are in"
-            " the requested dimension, and more may exist."
+            "The dimension filter ran only on the best matches and kept "
+            f"{kept} {'match' if kept == 1 else 'matches'}; more may exist."
         )
     elif hits:
         summary = f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."

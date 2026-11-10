@@ -173,8 +173,8 @@ is checked on the best units the search found, with one graph read for them,
 so the predicate must sit at the top level of the filter or under a top-level
 `$and`; under `$or` or `$not` it is refused with `UNSUPPORTED_FILTER_FIELD`.
 The limit applies before that check, so when it drops units the reply's
-`user_summary` says how many of the best matches are in the dimension and that
-more may exist. The offline CLI evaluates every dimension on every unit.
+`user_summary` says that the filter ran only on the best matches, how many of
+them it kept, and that more may exist. The offline CLI evaluates every dimension on every unit.
 
 The category report (`schema_memory` with `operation="infer"` and `subject="categories"`, which counts units by category) lists every
 dimension with its members and display behaviours, and with `unit_count` and

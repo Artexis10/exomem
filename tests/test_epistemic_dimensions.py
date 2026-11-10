@@ -608,8 +608,9 @@ def test_a_served_search_says_when_its_dimension_check_left_fewer_hits_than_its_
 
     cut = ask(2)
     assert cut["hits"] == []
-    assert "0 of the 2 best matches are in the requested dimension" in cut["user_summary"]
-    assert "more may exist" in cut["user_summary"]
+    assert cut["user_summary"] == (
+        "The dimension filter ran only on the best matches and kept 0 matches; more may exist."
+    )
     assert "notice" in cut
     # A ranking shorter than the limit was checked whole, so nothing more can exist.
     whole = ask(10)
