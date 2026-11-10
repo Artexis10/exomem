@@ -145,7 +145,7 @@ class McpCell(Cell):
         try:
             for tool in await self._client.list_tools():
                 if tool.name == door:
-                    operations = (((tool.inputSchema or {}).get("properties") or {}).get("operation") or {}).get("enum") or ()
+                    operations = (((tool.input_schema or {}).get("properties") or {}).get("operation") or {}).get("enum") or ()
                     return bool(operations) and "imports.file" not in operations
         except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the operation
             return False

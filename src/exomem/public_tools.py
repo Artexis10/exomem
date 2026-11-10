@@ -17,7 +17,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from difflib import get_close_matches
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
@@ -158,12 +158,22 @@ def _bag(
     return bag
 
 
+def _leaf_call(
+    wire: dict[str, Any], name: str, ctx: Context, command: str, tool: str, leaf: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The leaf call of one translation: the wire bag `name` under the fields `leaf` sets.
+
+    `leaf` lists every field the translation owns, each None when this call leaves it out. The bag
+    may repeat none of them, so the set of owned fields has this one source.
+    """
+    return {**_bag(wire, name, ctx, command, frozenset(leaf), tool), **_given(leaf)}
+
+
 def _unlinked(wire: Mapping[str, Any]) -> dict[str, Any]:
     """The reviewed-none decision of one `unlinked_reason`; the server binds it to the committed bytes."""
     reason = wire.get("unlinked_reason")
-    if reason is None:
-        return {}
-    return {"relation_disposition": "reviewed_none", "relation_review_reason": reason}
+    return {"relation_disposition": None if reason is None else "reviewed_none",
+            "relation_review_reason": reason, "relation_review_hash": None}
 
 
 def _links(links: list[dict[str, Any]] | None) -> list[dict[str, str]] | None:
@@ -215,17 +225,13 @@ class SearchMemory(Wire):
     detail: Detail | None = _DETAIL
 
 
-_SEARCH_HANDLED = frozenset({"query", "types", "projects", "tags", "filters", "deep", "limit", "continuation", "detail"})
-
-
 def _search(wire: dict[str, Any], ctx: Context) -> Translated:
-    options = _bag(wire, "options", ctx, "ask_memory", _SEARCH_HANDLED, "search_memory")
-    leaf = _given({
+    leaf = {
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
         "continuation": wire.get("more"), "detail": wire.get("detail"), "projects": wire.get("projects"),
-    })
-    return "ask_memory", {**options, **leaf}
+    }
+    return "ask_memory", _leaf_call(wire, "options", ctx, "ask_memory", "search_memory", leaf)
 
 
 class ReadPage(Wire):
@@ -237,9 +243,18 @@ class ReadPage(Wire):
     )
 
 
+def _read_page_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
+    """The leaf fields of read_page, each None when the wire call leaves it out."""
+    return {
+        "path": wire.get("page"), "continuation": wire.get("more"),
+        "include_history": True if wire.get("part") == "history" else None,
+        "units": True if wire.get("part") == "units" else None,
+    }
+
+
 def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
     """The wire call of a read_memory call: the history and unit switches fold into `part`."""
-    handled = {"path", "continuation", "include_history", "units"}
+    handled = set(_read_page_leaf({}))
     wire = _given({"page": arguments.get("path"), "more": arguments.get("continuation")})
     if arguments.get("include_history"):
         wire["part"] = "history"
@@ -250,14 +265,7 @@ def _spell_read(arguments: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _read_page(wire: dict[str, Any], ctx: Context) -> Translated:
-    handled = frozenset({"path", "include_history", "continuation", "units"})
-    options = _bag(wire, "options", ctx, "read_memory", handled, "read_page")
-    leaf = _given({
-        "path": wire["page"], "continuation": wire.get("more"),
-        "include_history": True if wire.get("part") == "history" else None,
-        "units": True if wire.get("part") == "units" else None,
-    })
-    return "read_memory", {**options, **leaf}
+    return "read_memory", _leaf_call(wire, "options", ctx, "read_memory", "read_page", _read_page_leaf(wire))
 
 
 class ReadInstructions(Wire):
@@ -288,7 +296,7 @@ class VocabularyDecision(Wire):
 def _vocabulary(wire: Mapping[str, Any]) -> dict[str, Any]:
     """The leaf `vocabulary_decision`, which names `canonical` even when it is none."""
     decision = wire.get("vocabulary_decision")
-    return {} if decision is None else {"vocabulary_decision": {"canonical": None, **decision}}
+    return {"vocabulary_decision": None if decision is None else {"canonical": None, **decision}}
 
 
 class CreateNote(Wire):
@@ -307,22 +315,19 @@ class CreateNote(Wire):
     detail: Detail | None = _DETAIL
 
 
-_CREATE_HANDLED = frozenset({
-    "title", "content", "note_type", "project", "sources", "tags", "suggestions", "validate_only",
-    "response_detail", "relation_disposition", "relation_review_hash", "relation_review_reason",
-    "draft_id", "draft_hash", "draft_token", "vocabulary_decision", "slug", "projects",
-})
+#: Leaf fields a public note never sets: the server names the page from the title and holds no draft
+#: between calls. Listing them keeps `fields` from sending one.
+_NO_DRAFT_OR_SLUG = dict.fromkeys(("draft_id", "draft_hash", "draft_token", "slug"))
 
 
 def _create_note(wire: dict[str, Any], ctx: Context) -> Translated:
-    extra = _bag(wire, "fields", ctx, "remember", _CREATE_HANDLED, "create_note")
-    leaf = _given({
+    leaf = {
         "title": wire["title"], "content": wire["content"], "note_type": wire.get("type"),
         "project": wire.get("project"), "projects": wire.get("projects"), "sources": wire.get("sources"),
         "tags": wire.get("tags"), "suggestions": wire.get("suggest_links"), "validate_only": wire.get("preview"),
-        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire),
-    })
-    return "remember", {**extra, **leaf}
+        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire), **_NO_DRAFT_OR_SLUG,
+    }
+    return "remember", _leaf_call(wire, "fields", ctx, "remember", "create_note", leaf)
 
 
 class AddObservation(Wire):
@@ -377,13 +382,29 @@ def _decoded_object(item: Any) -> Any:
 EncodedTextEdit = Annotated[TextEdit, BeforeValidator(_decoded_object, json_schema_input_type=TextEdit)]
 
 
+#: The fields each action takes beyond the shared ones, so a field for another action is refused.
+_EDIT_ACTION_FIELDS: dict[str, frozenset[str]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
+    "replace_text": frozenset({"old_text", "new_text", "replace_all", "edits"}),
+    "replace_section": frozenset({"heading", "new_text", "position", "create_missing"}),
+    "replace_body": frozenset({"body", "tags"}),
+    "set_tags": frozenset({"tags"}),
+    "set_fields": frozenset({"fields"}),
+    "fill_row": frozenset({"row", "take", "overwrite"}),
+    "edit_observation": frozenset({"observation", "category", "text", "tags", "context", "links"}),
+    "remove_observation": frozenset({"observation"}),
+}
+_EDIT_SHARED = frozenset({"note", "why", "action", "unlinked_reason", "preview", "detail"})
+_EDIT_REQUIRED: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
+    "replace_text": (), "replace_section": ("heading", "new_text"), "replace_body": ("body",),
+    "set_tags": ("tags",), "set_fields": ("fields",), "fill_row": ("row", "take"),
+    "edit_observation": ("observation",), "remove_observation": ("observation",),
+}
+
+
 class EditNote(Wire):
     note: Page = Field(description="Page title, or the page id for replace_body.")
     why: str
-    action: Literal[
-        "replace_text", "replace_section", "replace_body", "set_tags", "set_fields", "fill_row",
-        "edit_observation", "remove_observation",
-    ]
+    action: Literal[*_EDIT_ACTION_FIELDS]
     old_text: str | None = Field(default=None, description="replace_text.")
     new_text: str | None = Field(default=None, description="replace_text, replace_section.")
     replace_all: bool | None = Field(default=None, description="replace_text: every match.")
@@ -407,25 +428,6 @@ class EditNote(Wire):
     detail: Detail | None = _DETAIL
 
 
-#: The fields each action takes beyond the shared ones, so a field for another action is refused.
-_EDIT_ACTION_FIELDS: dict[str, frozenset[str]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
-    "replace_text": frozenset({"old_text", "new_text", "replace_all", "edits"}),
-    "replace_section": frozenset({"heading", "new_text", "position", "create_missing"}),
-    "replace_body": frozenset({"body", "tags"}),
-    "set_tags": frozenset({"tags"}),
-    "set_fields": frozenset({"fields"}),
-    "fill_row": frozenset({"row", "take", "overwrite"}),
-    "edit_observation": frozenset({"observation", "category", "text", "tags", "context", "links"}),
-    "remove_observation": frozenset({"observation"}),
-}
-_EDIT_SHARED = frozenset({"note", "why", "action", "unlinked_reason", "preview", "detail"})
-_EDIT_REQUIRED: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
-    "replace_text": (), "replace_section": ("heading", "new_text"), "replace_body": ("body",),
-    "set_tags": ("tags",), "set_fields": ("fields",), "fill_row": ("row", "take"),
-    "edit_observation": ("observation",), "remove_observation": ("observation",),
-}
-
-
 def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
     action = wire["action"]
     sent = {key for key, value in wire.items() if value is not None} - _EDIT_SHARED
@@ -436,6 +438,8 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
     if missing:
         raise Refusal("MISSING_ARGUMENT", f"{action} needs {', '.join(missing)}.")
     detail = _given({"response_detail": wire.get("detail")})
+    # A page id names the version the agent read; the leaf compares it after the write is admitted.
+    guard = {"expected_hash": wire["note"]} if _is_id(wire["note"]) else {}
     if action in {"edit_observation", "remove_observation"}:
         if action == "remove_observation" and wire.get("preview"):
             raise Refusal("INVALID_ARGUMENT", "remove_observation has no preview.")
@@ -448,11 +452,9 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
                 "category": wire.get("category"), "content": wire.get("text"), "tags": wire.get("tags"),
                 "context": wire.get("context"), "relations": _links(wire.get("links")),
             }),
-            **_unlinked(wire), **detail,
+            **_given(_unlinked(wire)), **guard, **detail,
         }
         return "observe_memory", leaf
-    # A page id names the version the agent read; the leaf compares it after the write is admitted.
-    guard = {"expected_hash": wire["note"]} if _is_id(wire["note"]) else {}
     operation: dict[str, Any]
     if action == "replace_text":
         if wire.get("edits") is not None:
@@ -485,7 +487,7 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
         operation = {"kind": "fill_row", "row_key": wire["row"], "take": wire["take"],
                      **_given({"overwrite": wire.get("overwrite")})}
     operation.update(guard)
-    operation.update(_unlinked(wire))
+    operation.update(_given(_unlinked(wire)))
     if wire.get("preview"):
         operation["validate_only"] = True
     return "edit_memory", {"path": wire["note"], "why": wire["why"], "operation": operation, **detail}
@@ -559,18 +561,15 @@ class SupersedeNote(Wire):
     detail: Detail | None = _DETAIL
 
 
-_SUPERSEDE_HANDLED = _CREATE_HANDLED | {"old_path", "reason"}
-
-
 def _supersede_note(wire: dict[str, Any], ctx: Context) -> Translated:
-    extra = _bag(wire, "fields", ctx, "replace_memory", _SUPERSEDE_HANDLED, "supersede_note")
-    leaf = _given({
+    leaf = {
         "old_path": wire["note"], "title": wire["title"], "content": wire["content"],
         "reason": wire["why"], "note_type": wire.get("type"), "project": wire.get("project"),
-        "projects": wire.get("projects"), "sources": wire.get("sources"), "tags": wire.get("tags"), "validate_only": wire.get("preview"),
-        "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire),
-    })
-    return "replace_memory", {**extra, **leaf}
+        "projects": wire.get("projects"), "sources": wire.get("sources"), "tags": wire.get("tags"),
+        "validate_only": wire.get("preview"), "response_detail": wire.get("detail"),
+        **_unlinked(wire), **_vocabulary(wire), **_NO_DRAFT_OR_SLUG,
+    }
+    return "replace_memory", _leaf_call(wire, "fields", ctx, "replace_memory", "supersede_note", leaf)
 
 
 # --- Sources, evidence, episodes and transfers -----------------------------------------------
@@ -591,16 +590,13 @@ class SaveSource(Wire):
 
 
 def _save_source(wire: dict[str, Any], ctx: Context) -> Translated:
-    handled = frozenset({"title", "content", "url", "tags", "why_captured", "source_kind", "domain",
-                         "projects", "files", "response_detail"})
-    options = _bag(wire, "options", ctx, "capture_source", handled, "save_source")
-    leaf = _given({
+    leaf = {
         "title": wire["title"], "content": wire.get("content"), "url": wire.get("url"),
         "tags": wire.get("tags"), "why_captured": wire.get("why"), "source_kind": wire.get("source_kind"),
         "domain": wire.get("domain"), "files": wire.get("files"), "response_detail": wire.get("detail"),
         "projects": wire.get("projects"),
-    })
-    return "capture_source", {**options, **leaf}
+    }
+    return "capture_source", _leaf_call(wire, "options", ctx, "capture_source", "save_source", leaf)
 
 
 class SaveEvidence(Wire):
@@ -619,18 +615,14 @@ def _save_evidence(wire: dict[str, Any], ctx: Context) -> Translated:
     if text == files or (text and wire.get("name") is None):
         raise Refusal("INVALID_ARGUMENT", "save_evidence takes `text` with `name`, or `files`, and not both.")
     if files:
-        handled = frozenset({"scope", "category", "files", "response_detail"})
-        options = _bag(wire, "options", ctx, "preserve_artifacts", handled, "save_evidence")
         if wire.get("description") is not None:
             raise Refusal("INVALID_ARGUMENT", "description applies to `text` evidence only.")
-        return "preserve_artifacts", {**options, **_given({
-            "scope": wire["scope"], "category": wire["category"], "files": wire["files"],
-            "response_detail": wire.get("detail")})}
-    handled = frozenset({"scope", "category", "filename", "content", "description", "response_detail"})
-    options = _bag(wire, "options", ctx, "preserve_evidence", handled, "save_evidence")
-    return "preserve_evidence", {**options, **_given({
-        "scope": wire["scope"], "category": wire["category"], "filename": wire["name"],
-        "content": wire["text"], "description": wire.get("description"), "response_detail": wire.get("detail")})}
+        leaf = {"scope": wire["scope"], "category": wire["category"], "files": wire["files"],
+                "response_detail": wire.get("detail")}
+        return "preserve_artifacts", _leaf_call(wire, "options", ctx, "preserve_artifacts", "save_evidence", leaf)
+    leaf = {"scope": wire["scope"], "category": wire["category"], "filename": wire["name"],
+            "content": wire["text"], "description": wire.get("description"), "response_detail": wire.get("detail")}
+    return "preserve_evidence", _leaf_call(wire, "options", ctx, "preserve_evidence", "save_evidence", leaf)
 
 
 class SaveEpisode(Wire):
@@ -664,14 +656,22 @@ def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
         "response_detail": wire.get("detail")})}
 
 
+#: The most pages one download call takes; the leaf's own bound is this value.
+DOWNLOAD_BATCH_MAX = 8
+
+
 class DownloadFiles(Wire):
-    pages: list[str] = Field(min_length=1, max_length=8, description="Titles or ids of the pages.")
+    pages: list[str] = Field(min_length=1, max_length=DOWNLOAD_BATCH_MAX, description="Titles or ids of the pages.")
     detail: Detail | None = _DETAIL
 
 
+def _download_leaf(wire: Mapping[str, Any]) -> dict[str, Any]:
+    """The leaf fields of download_files, each None when the wire call leaves it out."""
+    return {"operation": "download", "artifacts": wire.get("pages"), "response_detail": wire.get("detail")}
+
+
 def _download_files(wire: dict[str, Any], ctx: Context) -> Translated:
-    return "transfer_artifact", {"operation": "download", "artifacts": wire["pages"],
-                                 **_given({"response_detail": wire.get("detail")})}
+    return "transfer_artifact", _given(_download_leaf(wire))
 
 
 def _spell_download(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -679,7 +679,8 @@ def _spell_download(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
 
     A call that names no page is a route in guidance, which leaves the pages to the tool schema.
     """
-    if set(arguments) - {"operation", "artifact", "artifacts", "response_detail"}:
+    # The leaf also takes one `artifact`, which this spelling folds into the list.
+    if set(arguments) - {*_download_leaf({}), "artifact"}:
         return None
     pages = arguments.get("artifacts") or ([arguments["artifact"]] if arguments.get("artifact") else None)
     return _given({"pages": pages, "detail": arguments.get("response_detail")})
@@ -699,9 +700,6 @@ class QueryRecords(Wire):
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: aggregate, date_from, date_to, view, output_format.")
 
 
-_QUERY_HANDLED = frozenset({"collection", "filters", "columns", "sort_by", "descending", "limit", "continuation", "action"})
-
-
 def _query_collection(command: str, tool: str, key: str | None):
     """`key` is the column that names a row: it and the row version make the row id the reply carries.
 
@@ -710,18 +708,18 @@ def _query_collection(command: str, tool: str, key: str | None):
     """
 
     def translate(wire: dict[str, Any], ctx: Context) -> Translated:
-        options = _bag(wire, "options", ctx, command, _QUERY_HANDLED, tool)
-        if wire.get("collection") is None:
-            return command, {"action": "inspect"}
+        collection = wire.get("collection")
         columns = wire.get("columns")
         if columns is not None and key is not None:
             columns = [*columns, *(name for name in (key, "item_version") if name not in columns)]
-        leaf = _given({
-            "collection": wire["collection"], "filters": wire.get("filters"), "columns": columns,
-            "sort_by": wire.get("sort_by"), "descending": wire.get("descending"), "limit": wire.get("limit"),
-            "continuation": wire.get("more"),
-        })
-        return command, {"action": "query", **options, **leaf}
+        leaf = {
+            "action": "inspect" if collection is None else "query", "collection": collection,
+            "filters": wire.get("filters"), "columns": columns, "sort_by": wire.get("sort_by"),
+            "descending": wire.get("descending"), "limit": wire.get("limit"), "continuation": wire.get("more"),
+        }
+        call = _leaf_call(wire, "options", ctx, command, tool, leaf)
+        # No collection lists them all; the other fields then have nothing to select.
+        return command, {"action": "inspect"} if collection is None else call
     return translate
 
 
@@ -741,12 +739,13 @@ class AddRecord(Wire):
     detail: Detail | None = _DETAIL
 
 
-_ADD_RECORD_HANDLED = frozenset({"action", "collection", "item", "why", "body", "hold", "held", "response_detail"})
-
-
 def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
-    options = _bag(wire, "options", ctx, "record_memory", _ADD_RECORD_HANDLED, "add_record")
-    return "record_memory", {"action": "append", **options, **_with_detail(wire)}
+    leaf = {
+        "action": "append", "collection": wire["collection"], "item": wire["item"], "why": wire["why"],
+        "body": wire.get("body"), "hold": wire.get("hold"), "held": wire.get("held"),
+        "response_detail": wire.get("detail"),
+    }
+    return "record_memory", _leaf_call(wire, "options", ctx, "record_memory", "add_record", leaf)
 
 
 class EditRecord(Wire):
@@ -842,10 +841,7 @@ REVIEW_QUEUES: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed queue
 }
 
 class ListReviewItems(Wire):
-    queue: Literal[
-        "due", "activation", "stale", "contradiction", "unprocessed_sources", "unlinked",
-        "relation_suggestions", "imports", "upkeep", "plan_progress", "vocabulary", "procedure_approvals",
-    ] | None = Field(default=None, description="One queue; due items by default.")
+    queue: Literal[*REVIEW_QUEUES] | None = Field(default=None, description="One queue; due items by default.")
     categories: list[str] | None = Field(default=None, description="Keep only these finding categories, or upkeep families.")
     limit: int | None = None
 
@@ -864,9 +860,15 @@ def _list_review_items(wire: dict[str, Any], ctx: Context) -> Translated:
                              **_given({"categories": wire.get("categories"), "limit": wire.get("limit")})}
 
 
+Decision = Literal["accept", "dismiss", "snooze", "reopen"]
+
+#: The decisions that triage one item; `accept` records a relation and takes the connection route.
+_TRIAGE_DECISIONS = tuple(decision for decision in get_args(Decision) if decision != "accept")
+
+
 class DecideReviewItem(Wire):
     review_item: str = Field(description="A list_review_items id, or an advisory ref.")
-    decision: Literal["accept", "dismiss", "snooze", "reopen"]
+    decision: Decision
     until: str | None = Field(default=None, description="snooze: YYYY-MM-DD.")
     why: str | None = None
     relation: str | None = Field(default=None, description="accept: the relation to record, when the suggestion offers several.")
@@ -877,7 +879,7 @@ class DecideReviewItem(Wire):
 
 def _spell_decision(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
     """The wire call of a decision on one review item; a family, envelope or vocabulary decision is a door operation."""
-    if arguments.get("item_id") is None or arguments.get("action") not in ("dismiss", "snooze", "reopen"):
+    if arguments.get("item_id") is None or arguments.get("action") not in _TRIAGE_DECISIONS:
         return None
     return {"review_item": arguments["item_id"], "decision": arguments["action"],
             **_given({"until": arguments.get("until"), "why": arguments.get("why"), "detail": arguments.get("response_detail")})}
@@ -942,9 +944,11 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           EditNote, "write", _edit_note,
           [Route("edit_memory", reverse=_spell_edit),
            Route("observe_memory", when={"operation": "update"}, add={"action": "edit_observation"},
-                 inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "content": "text", "reason": "why", **_NOTE_INVERSE}),
+                 inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "content": "text", "reason": "why", **_NOTE_INVERSE},
+                 derived=frozenset({"expected_hash"})),
            Route("observe_memory", when={"operation": "remove"}, add={"action": "remove_observation"},
-                 inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "reason": "why", **_NOTE_INVERSE})],
+                 inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "reason": "why", **_NOTE_INVERSE},
+                 derived=frozenset({"expected_hash"}))],
           destructive=True,
           example={"note": "Retry policy", "why": "Cap changed after the outage review", "action": "replace_text", "old_text": "cap at 30 s", "new_text": "cap at 10 s"},
           claims=(("observe_memory", "update"), ("observe_memory", "remove")),
@@ -1039,5 +1043,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
                  inverse={"item_id": "review_item", "requested_relation": "relation", "response_detail": "detail"},
                  add={"decision": "accept"})],
           destructive=False, example={"review_item": "r5t2k8w.2pxa", "decision": "accept", "relation": "refines"},
-          claims=(("triage_memory", "decision"), ("connect_memory", "accept-relation"))),
+          claims=(("triage_memory", "decision"), ("connect_memory", "accept-relation")),
+          # An accepted relation is a saved write; the capture hook reads no argument, so a dismissal counts with it.
+          captures=True),
 )}

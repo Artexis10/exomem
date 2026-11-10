@@ -25,7 +25,7 @@ class RecordingClient:
 
     async def list_tools(self):
         schema = {"properties": {"operation": {"type": "string", "enum": self._operations}}}
-        return [SimpleNamespace(name="manage_memory", inputSchema=schema)]
+        return [SimpleNamespace(name="manage_memory", input_schema=schema)]
 
 
 def _cell(operations: list[str]) -> tuple[McpCell, RecordingClient]:

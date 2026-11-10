@@ -121,6 +121,7 @@ from . import plan_progress as plan_progress_module
 from . import procedure_approval_operation as procedure_approval_operation_module
 from . import promotions as promotions_module
 from . import provenance as provenance_module
+from . import public_tools as public_tools_module
 from . import query_data as query_data_module
 from . import readiness as readiness_module
 from . import recall_timing as recall_timing_module
@@ -9436,7 +9437,7 @@ def op_preserve_artifacts(
 
 
 #: The most pages one download call takes; the public tool's schema states the same bound.
-_DOWNLOAD_BATCH_MAX = 8
+_DOWNLOAD_BATCH_MAX = public_tools_module.DOWNLOAD_BATCH_MAX
 
 
 def op_transfer_artifact(

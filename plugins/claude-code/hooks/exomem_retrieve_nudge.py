@@ -1597,12 +1597,13 @@ def _upkeep_lines(packet: dict) -> list[str]:
     one item a session start may carry.
 
     The item line names its label, subject title and closed-template reason,
-    then says how to handle it: read `review_item_context` first, then act
-    through the item's own route or dispose of it through `triage_memory`. The
-    ref ends the line like every other, collapsed like the prose, so no field
-    of the item can start a line of its own. It is the context route's upkeep
-    ref, which both tools the line names accept; a link item's own ref is a
-    relation ref that `review_item_context` rejects.
+    then says how to handle it: read `inspect_memory` `review.item_context`
+    first, then act through the item's own route or dispose of it through
+    `decide_review_item`, which takes the item's short id. The ref ends the
+    line like every other, collapsed like the prose, so no field of the item
+    can start a line of its own. It is the context route's upkeep ref, which
+    `review.item_context` accepts; a link item's own ref is a relation ref that
+    it rejects.
     """
     block = packet.get("upkeep")
     if not isinstance(block, dict):
@@ -1619,9 +1620,10 @@ def _upkeep_lines(packet: dict) -> list[str]:
         why = str(item.get("why") or "").strip()
         route = item.get("route") if isinstance(item.get("route"), dict) else {}
         tool = str(route.get("tool") or "its route")
+        item_id = " ".join(str(item.get("id") or "").split())
         text = (
-            f"{title} — {why}. Review with review_item_context, then act via {tool} "
-            "or triage_memory dismiss|snooze."
+            f"{title} — {why}. Review with inspect_memory review.item_context, then act via {tool} "
+            f"or decide_review_item dismiss|snooze{f' on review_item {item_id}' if item_id else ''}."
         )
         label = str(item.get("label") or "upkeep")
         context = item.get("context_route") if isinstance(item.get("context_route"), dict) else {}
@@ -1727,9 +1729,9 @@ def _relevant_due_lines(packet: dict) -> list[str]:
     return [
         f"- relevant due: {candidate}. Judge semantic relevance; raise at most one due item "
         "per maintained client conversation, remembering any mention through continuation, "
-        "compaction and OAuth renewal. Read review_item_context(ref, expected_fingerprint). "
+        "compaction and OAuth renewal. Read inspect_memory review.item_context(ref, expected_fingerprint). "
         "Use one applicable authored writer with its unit/parent guards to resolve, or one "
-        "triage_memory(ref, action=dismiss, expected_fingerprint, why) for presentation disposition."
+        "decide_review_item(review_item=id, decision=dismiss, why) for presentation disposition."
     ]
 
 

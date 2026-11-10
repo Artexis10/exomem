@@ -58,7 +58,7 @@ COOLDOWN_NS = 24 * 3600 * 1_000_000_000
 CLASSES: tuple[str, ...] = ("naming", "cue", "referent")
 RULE = (
     "Only if the user's own words should reach this page next time. "
-    "Decline with triage_memory."
+    "Decline with decide_review_item, decision dismiss."
 )
 #: Tests move the sensor's clock with this; production never sets it.
 _CLOCK_OFFSET_NS = 0

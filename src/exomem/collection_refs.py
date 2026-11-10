@@ -63,14 +63,18 @@ def row_id(profile: str, row: Mapping[str, Any]) -> str | None:
 def mark_rows(result: Any, *, profile: str) -> Any:
     """`result` with an `id` on each row that carries its key and version.
 
-    A collection may declare a field called `id`; its value stays, and the row's id is `row_id`.
+    A field the collection declares is stored data and stays. The id goes under `id`, or under
+    `row_id` where the collection declares an `id`, and a row that declares both has no short id.
     """
     rows = result.get("rows") if isinstance(result, Mapping) else None
     if not isinstance(rows, list):
         return result
     for row in rows:
-        if isinstance(row, dict) and (found := row_id(profile, row)) is not None:
-            row["row_id" if "id" in row else "id"] = found
+        if not isinstance(row, dict):
+            continue
+        slot = next((name for name in ("id", "row_id") if name not in row), None)
+        if slot is not None and (found := row_id(profile, row)) is not None:
+            row[slot] = found
     return result
 
 

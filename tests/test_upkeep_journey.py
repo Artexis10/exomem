@@ -175,8 +175,7 @@ def test_b_a_false_positive_is_held_until_the_evidence_changes(tmp_path: Path) -
     dismissed = _tool(
         vault,
         item["dispose"]["tool"],
-        **item["dispose"]["args"],
-        action="dismiss",
+        **{**item["dispose"]["args"], "action": "dismiss"},
         why="false_positive: the shared report covers unrelated runs",
     )
     assert dismissed["state"] == "dismissed"
@@ -215,8 +214,8 @@ def test_b_a_false_positive_is_held_until_the_evidence_changes(tmp_path: Path) -
 
 
 def test_the_hook_line_names_a_ref_its_own_advice_accepts(tmp_path: Path) -> None:
-    """The session-start line says "Review with review_item_context" and ends in
-    a ref: that ref must resolve there, and dispose of the item through triage."""
+    """The session-start line says "Review with inspect_memory review.item_context" and ends in
+    a ref: that ref must resolve there, and the item's id must dispose of the item."""
     import re
 
     from exomem._hooks import exomem_retrieve_nudge as hook
@@ -228,19 +227,20 @@ def test_the_hook_line_names_a_ref_its_own_advice_accepts(tmp_path: Path) -> Non
     item = _session(vault)
     assert item is not None and item["family"] == dreamer_families.LINK_FAMILY
     (line,) = hook._upkeep_lines({"upkeep": {"items": [item]}})
-    assert "review_item_context" in line
+    assert "review.item_context" in line and item["id"] in line
     rendered = re.search(r"\[([^\[\]]+)\]$", line).group(1)
     context = _tool(vault, "review_item_context", ref=rendered)
     assert context["mutated"] is False
     triaged = _tool(
         vault,
         "triage_memory",
-        ref=rendered,
-        action="dismiss",
-        why="false_positive: unrelated notes",
-        expected_fingerprint=item["fingerprint"],
+        **{
+            **item["dispose"]["args"],
+            "action": "dismiss",
+            "why": "false_positive: unrelated notes",
+        },
     )
-    assert triaged["family"] == dreamer_families.LINK_FAMILY, triaged
+    assert triaged["state"] == "dismissed" and triaged["ref"] == item["ref"], triaged
 
 
 def test_a_dismissed_pair_stays_held_when_the_row_cap_evicts_its_offered_direction(
@@ -474,11 +474,9 @@ def test_the_next_ordinary_session_receives_and_disposes_of_an_item_unasked(
         snoozed = _tool(
             vault,
             item["dispose"]["tool"],
-            **item["dispose"]["args"],
-            action="snooze",
+            **{**item["dispose"]["args"], "action": "snooze"},
             until=until,
             why="deferred: revisit after the next field report",
-            expected_fingerprint=item["fingerprint"],
         )
         assert snoozed["state"] == "snoozed", snoozed
 

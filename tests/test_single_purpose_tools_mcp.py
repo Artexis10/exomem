@@ -161,7 +161,7 @@ def test_the_surface_lists_the_public_tools_and_hides_every_other_name(build) ->
     assert PUBLIC <= set(tools)
     assert not (GROUPED | RETIRED) & set(tools)
     for name in ("inspect_memory", "manage_memory"):
-        assert "operation" in tools[name].inputSchema["required"]
+        assert "operation" in tools[name].input_schema["required"]
 
 
 def test_annotations_follow_the_effect_of_each_tool(build) -> None:
@@ -172,12 +172,12 @@ def test_annotations_follow_the_effect_of_each_tool(build) -> None:
 
     for name in ("query_records", "query_plan_items", "inspect_memory"):
         hints = annotations[name]
-        assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (True, False, True)
-        assert hints.openWorldHint is False
+        assert (hints.read_only_hint, hints.destructive_hint, hints.idempotent_hint) == (True, False, True)
+        assert hints.open_world_hint is False
     for name in ("edit_record", "edit_plan_item", "manage_memory"):
         hints = annotations[name]
-        assert (hints.readOnlyHint, hints.destructiveHint) == (False, True)
-        assert hints.openWorldHint is False
+        assert (hints.read_only_hint, hints.destructive_hint) == (False, True)
+        assert hints.open_world_hint is False
 
 
 @pytest.mark.parametrize("name", sorted(GROUPED | RETIRED))

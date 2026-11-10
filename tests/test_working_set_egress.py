@@ -4053,10 +4053,11 @@ def test_upkeep_refs_cross_the_guard(vault: Path) -> None:
             "tool": "review_item_context",
             "args": {"ref": "exomem://review/upkeep/0123456789abcdef01234567"},
         },
+        "id": "qo5tgbx.rbs7",
         "dispose": {
-            "tool": "triage_memory",
+            "tool": "decide_review_item",
             "actions": ["dismiss", "snooze"],
-            "args": {"ref": "exomem://review/upkeep/0123456789abcdef01234567"},
+            "args": {"review_item": "qo5tgbx.rbs7", "decision": "dismiss"},
         },
         "permission": "consideration does not authorize mutation",
     }

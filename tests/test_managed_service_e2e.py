@@ -14,7 +14,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from _public_call import public_call
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Managed service runtime is Linux-only"
@@ -195,10 +194,10 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
     async def scenario():
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, mode=mode, timeout=20) as client:
-                before = await client.call_tool(*public_call("counted", {"marker": "before"}))
-                escaped = await client.call_tool(*public_call("escaped_child"))
+                before = await client.call_tool("counted", {"marker": "before"})
+                escaped = await client.call_tool("escaped_child")
                 active = asyncio.create_task(
-                    client.call_tool(*public_call("counted", {"marker": "active", "delay": 0.7}))
+                    client.call_tool("counted", {"marker": "active", "delay": 0.7})
                 )
                 await eventually(
                     lambda: any(
@@ -210,11 +209,11 @@ def test_same_authenticated_context_survives_real_worker_handoff(tmp_path, mode)
                 async with asyncio.timeout(10):
                     while (await control(tmp_path, "status"))["phase"] != "upgrading":
                         await asyncio.sleep(0.01)
-                during = asyncio.create_task(client.call_tool(*public_call("counted", {"marker": "during"})))
+                during = asyncio.create_task(client.call_tool("counted", {"marker": "during"}))
                 active_result, during_result, result = await asyncio.gather(active, during, handoff)
                 assert result["ok"], result
                 assert result["handoff"]["standby"] == "ready", result
-                after = await client.call_tool(*public_call("counted", {"marker": "after"}))
+                after = await client.call_tool("counted", {"marker": "after"})
                 assert active_result.data["pid"] == before.data["pid"]
                 assert after.data["pid"] != before.data["pid"]
                 # Warm-up serves the old worker; cutover can queue the call for the new one.
@@ -242,18 +241,18 @@ def test_same_client_retries_a_failed_candidate_without_reauthorizing(tmp_path):
     async def scenario():
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, timeout=20) as client:
-                before = await client.call_tool(*public_call("counted", {"marker": "before-failure"}))
+                before = await client.call_tool("counted", {"marker": "before-failure"})
                 (tmp_path / "fail-start").touch()
                 result = await transition(tmp_path)
                 assert not result["ok"]
                 status = await control(tmp_path, "status")
                 assert status["phase"] == "ready"
                 assert status["pending"] is None
-                after_failure = await client.call_tool(*public_call("counted", {"marker": "after-failure"}))
+                after_failure = await client.call_tool("counted", {"marker": "after-failure"})
                 assert after_failure.data["pid"] == before.data["pid"]
                 (tmp_path / "fail-start").unlink()
                 assert (await transition(tmp_path))["ok"]
-                after = await client.call_tool(*public_call("counted", {"marker": "after-recovery"}))
+                after = await client.call_tool("counted", {"marker": "after-recovery"})
                 assert after.data["marker"] == "after-recovery"
 
     asyncio.run(scenario())
@@ -295,15 +294,15 @@ def test_a_crashed_worker_is_replaced_while_the_listener_stays_up(tmp_path):
     async def scenario():
         async with live_fixture(tmp_path) as (url, token, supervisor):
             async with Client(url, auth=token, timeout=30) as client:
-                before = await client.call_tool(*public_call("counted", {"marker": "before"}))
-                escaped = await client.call_tool(*public_call("escaped_child"))
+                before = await client.call_tool("counted", {"marker": "before"})
+                escaped = await client.call_tool("escaped_child")
                 # Only the worker dies, as in a native crash; the child it
                 # started in its own session outlives it.
                 os.kill(before.data["pid"], signal.SIGKILL)
                 async with asyncio.timeout(10):
                     while (await control(tmp_path, "status"))["phase"] != "restarting":
                         await asyncio.sleep(0.01)
-                during = await client.call_tool(*public_call("counted", {"marker": "during"}))
+                during = await client.call_tool("counted", {"marker": "during"})
                 assert supervisor.poll() is None
                 status = await control(tmp_path, "status")
                 assert status["phase"] == "ready"
@@ -354,7 +353,7 @@ def test_the_listener_answers_while_the_first_worker_warms(tmp_path):
                 while (await control(tmp_path, "status"))["phase"] != "ready":
                     await asyncio.sleep(0.05)
             async with Client(url, auth=token, timeout=20) as client:
-                served = await client.call_tool(*public_call("counted", {"marker": "after-warm"}))
+                served = await client.call_tool("counted", {"marker": "after-warm"})
             assert served.data["marker"] == "after-warm"
             assert supervisor.poll() is None
 
@@ -430,7 +429,7 @@ def test_systemd_reaps_old_invocation_before_restarting_supervisor(tmp_path):
             old_worker = old_status["worker_pid"]
             token = (tmp_path / "token").read_text()
             async with Client(f"http://127.0.0.1:{port}/mcp", auth=token, timeout=10) as client:
-                escaped = (await client.call_tool(*public_call("escaped_child"))).data["pid"]
+                escaped = (await client.call_tool("escaped_child")).data["pid"]
             old_supervisor = int(
                 subprocess.check_output(
                     ["systemctl", "--user", "show", unit, "--property=MainPID", "--value"],
@@ -572,7 +571,7 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
     async def scenario():
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
-                before = await client.call_tool(*public_call("counted", {"marker": "before"}))
+                before = await client.call_tool("counted", {"marker": "before"})
                 serving = before.data["pid"]
                 result = await transition(tmp_path)
                 assert result["ok"] is True, result
@@ -580,7 +579,7 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
                 assert handoff["standby"] == "ready", handoff
                 assert handoff["migration"] == {"state": "skipped", "reason": "declared_none"}
                 assert handoff["promotion"]["snapshot"] == "current"
-                after = await client.call_tool(*public_call("counted", {"marker": "after"}))
+                after = await client.call_tool("counted", {"marker": "after"})
                 assert after.data["pid"] != serving
 
             kinds = [entry["kind"] for entry in events(tmp_path)]
@@ -602,14 +601,14 @@ def test_a_declared_migration_still_runs_between_the_two_workers(tmp_path):
         (tmp_path / "declare-migration").write_text("1")
         async with live_fixture(tmp_path) as (url, token, _):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
-                await client.call_tool(*public_call("counted", {"marker": "before"}))
+                await client.call_tool("counted", {"marker": "before"})
                 result = await transition(tmp_path)
                 assert result["ok"] is True, result
                 assert result["handoff"]["migration"] == {
                     "state": "ran",
                     "reason": "descriptors_changed",
                 }
-                await client.call_tool(*public_call("counted", {"marker": "after"}))
+                await client.call_tool("counted", {"marker": "after"})
             kinds = [entry["kind"] for entry in events(tmp_path)]
             # The migrator owns state alone: it runs after the old worker has
             # stopped and before the standby is promoted.
@@ -628,9 +627,9 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(
         (tmp_path / "standby-stalls").write_text("1")
         async with live_fixture(tmp_path) as (url, token, manager):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
-                before = await client.call_tool(*public_call("counted", {"marker": "before"}))
+                before = await client.call_tool("counted", {"marker": "before"})
                 serving = before.data["pid"]
-                await client.call_tool(*public_call("escaped_child", {"orphan_after_standby": True}))
+                await client.call_tool("escaped_child", {"orphan_after_standby": True})
                 active = (await control(tmp_path, "status"))["active"]
                 handoff = asyncio.create_task(transition(tmp_path))
                 await eventually(lambda: (tmp_path / "orphan.pid").exists())
@@ -642,7 +641,7 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(
 
                 await eventually(adopted_by_manager)
                 while not handoff.done():
-                    during = await client.call_tool(*public_call("counted", {"marker": "during"}))
+                    during = await client.call_tool("counted", {"marker": "during"})
                     assert during.data["pid"] == serving
                     await asyncio.sleep(0.05)
                 result = await handoff
@@ -650,7 +649,7 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(
                 assert result["handoff"]["standby"] == "discarded"
                 assert result["handoff"]["waiting"] == "graph_snapshot"
                 assert "unavailable_ms" not in result["handoff"]
-                after = await client.call_tool(*public_call("counted", {"marker": "after"}))
+                after = await client.call_tool("counted", {"marker": "after"})
                 assert after.data["pid"] == serving
                 os.kill(orphan, 0)
                 status = await control(tmp_path, "status")
@@ -663,7 +662,7 @@ def test_a_stalled_standby_is_discarded_and_the_old_worker_keeps_serving(
                 assert result["handoff"]["standby"] == "ready"
                 with pytest.raises(ProcessLookupError):
                     os.kill(orphan, 0)
-                after_retry = await client.call_tool(*public_call("counted", {"marker": "after-retry"}))
+                after_retry = await client.call_tool("counted", {"marker": "after-retry"})
                 assert after_retry.data["pid"] != serving
 
     asyncio.run(scenario())
@@ -680,13 +679,13 @@ def test_a_standby_is_spawned_with_the_current_service_environment_file(
         env_file.write_text("EXOMEM_FIXTURE_MARK=before\n")
         async with live_fixture(tmp_path, env_file=env_file) as (url, token, _):
             async with Client(url, auth=token, mode="auto", timeout=20) as client:
-                await client.call_tool(*public_call("counted", {"marker": "before"}))
+                await client.call_tool("counted", {"marker": "before"})
                 # The operator edits the unit's environment file after the
                 # supervisor has already read it through systemd.
                 env_file.write_text("EXOMEM_FIXTURE_MARK=after\n")
                 result = await transition(tmp_path)
                 assert result["ok"] is True, result
-                await client.call_tool(*public_call("counted", {"marker": "after"}))
+                await client.call_tool("counted", {"marker": "after"})
             entries = events(tmp_path)
             supervisor = next(e for e in entries if e["kind"] == "supervisor-start")
             standby = next(e for e in entries if e["kind"] == "standby-start")

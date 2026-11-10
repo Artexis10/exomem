@@ -127,7 +127,7 @@ def test_a_model_is_guided_to_a_listed_tool_and_the_proposed_call_succeeds(
     # Nothing the model reads names a spelling it cannot call: not the tool schemas, the
     # bootstrap, or the disposition that asks it to file the note.
     for tool in tools:
-        assert not _mentions(f"{tool.description} {json.dumps(tool.inputSchema)}", hidden), tool.name
+        assert not _mentions(f"{tool.description} {json.dumps(tool.input_schema)}", hidden), tool.name
     assert not _mentions("\n".join(_texts(bootstrap)), hidden)
     assert not _mentions("\n".join(_texts(routing)), hidden)
 

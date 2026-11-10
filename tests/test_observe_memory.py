@@ -1151,3 +1151,25 @@ def test_a_blocked_edit_names_the_one_call_fix_and_no_other_route(tmp_path: Path
     assert "validate_only" not in message
     assert "operation=validate" not in message
     assert "fix: Fix:" not in message
+
+
+def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-id refusal names the unit's current id, so a released view must read every id as unknown."""
+    from types import SimpleNamespace
+
+    from exomem.governance import egress
+
+    unit = SimpleNamespace(unit_ref="exomem://unit/one", fingerprint="f1")
+    document = SimpleNamespace(units=[unit])
+    current = observe_memory.unit_id(unit)
+    assert observe_memory._bind_unit_id(tmp_path, document, current) == ("exomem://unit/one", "f1")
+    stale = current.partition(".")[0] + ".zzzz"
+    with pytest.raises(observe_memory.ObserveMemoryError, match="STALE_UNIT_REFERENCE"):
+        observe_memory._bind_unit_id(tmp_path, document, stale)
+
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: False)
+    for given in (current, stale):
+        with pytest.raises(observe_memory.ObserveMemoryError, match="UNIT_NOT_FOUND"):
+            observe_memory._bind_unit_id(tmp_path, document, given)

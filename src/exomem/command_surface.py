@@ -551,8 +551,8 @@ def resolve_invocation(
                         if rendering.name == public_name]
         if len(contributors) == 1:
             # One source owns the refusal format, but an invalid kind still owns no execution target.
-            contributors[0][0].argument_rules.refuse(f"{public_name} needs a valid operation.kind")
-        raise OpError("INVALID_OPERATION", f"{public_name} needs a valid operation.kind")
+            contributors[0][0].argument_rules.refuse(f"{subject or public_name} needs a valid operation.kind")
+        raise OpError("INVALID_OPERATION", f"{subject or public_name} needs a valid operation.kind")
     command, rendering = selected
     rules = command.argument_rules
     if rules is None:
@@ -587,7 +587,7 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
     """Validate business fields after the public discriminator selects its command."""
     rules = command.argument_rules
     if parsed is None:
-        rules.refuse(f"{rendering.name} takes an operation object and nothing else")
+        rules.refuse(f"{subject or rendering.name} takes an operation object and nothing else")
     kind, fields = parsed
     try:
         fields = rendering.leaf_fields(fields)
@@ -610,7 +610,7 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
             rules.refuse(f"{kind} is not a {rendering.effect} operation: send it to {sibling}")
         if hint := rendering.constraint_hint(kind):
             rules.refuse(hint)
-        rules.refuse(f"{rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
+        rules.refuse(f"{subject or rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
     fields = rendering.selected_arguments(variant, fields)
     fields.pop(rendering.selector, None)
     rules.validate(variant.action, fields)

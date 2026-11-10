@@ -182,7 +182,7 @@ def test_decided_rows_leave_room_for_a_fresh_pair(
     assert subjects & set(fresh), "the fresh pair was starved by decided rows"
     _quiet(vault, now=LATER)
     listed = upkeep.review(vault, state="open", limit=50)
-    assert any(item["dispose"]["args"].get("source_path") in fresh for item in listed["items"])
+    assert any(item["route"]["args"].get("path") in fresh for item in listed["items"])
 
 
 # ----------------------------------------------------------------------

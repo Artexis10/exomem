@@ -419,15 +419,21 @@ def _door_call(
         refusal.writes = writes
         raise refusal
     fields = body.get("arguments")
+    problem = None
     if isinstance(fields, str):
         try:
             fields = json.loads(fields)
         except ValueError:
-            fields = None
+            problem = "arguments is not valid JSON."
     if fields is None:
         fields = {}
-    if not isinstance(fields, dict):
-        refusal = OpError("INVALID_ARGUMENT", f"{door} {operation}: arguments must be an object.")
+    if problem is None and not isinstance(fields, dict):
+        problem = "arguments must be an object."
+    elif problem is None and "kind" in fields:
+        # `kind` is the operation's own discriminator; an argument of that name would pick another operation.
+        problem = "`kind` is not an argument; the operation name selects it."
+    if problem is not None:
+        refusal = OpError("INVALID_ARGUMENT", f"{door} {operation}: {problem}")
         refusal.writes = writes
         raise refusal
     tool_fields = {"response_detail": body["detail"]} if body.get("detail") is not None else {}
@@ -460,10 +466,12 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
             areas.setdefault(area, []).append(action)
         return {"tool": topic, "operations": areas,
                 "next": "read_instructions(topic='<area>.<action>') lists one operation's arguments."}
-    for door in DOORS.values():
-        ops = {op.name: op for op in surface.door_operations(door, commands)}
-        if topic in ops:
-            return _door_help(surface, ops[topic], commands)
+    served = [op for door in DOORS.values() for op in surface.door_operations(door, commands) if op.name == topic]
+    if len(served) == 1:
+        return _door_help(surface, served[0], commands)
+    if served:
+        # An operation that both doors carry reads on one and writes on the other: show each its own arguments.
+        return {"operation": topic, "tools": [_door_help(surface, op, commands) for op in served]}
     names = sorted({*listed, *(op.name for door in DOORS.values() for op in surface.door_operations(door, commands))})
     raise OpError("INVALID_OPERATION", f"{topic!r} is not a tool or an operation of this server.",
                   details={"candidates": get_close_matches(topic, names, n=5) or list(listed)[:5]})
@@ -488,9 +496,21 @@ def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any]) -> d
     if "description" in branch:
         result["note"] = branch["description"]
     if "anyOf" in branch:
-        result["alternatives"] = branch["anyOf"]
+        result["alternatives"] = [_without_kind(alternative) for alternative in branch["anyOf"]]
+        if not properties:
+            # Every field sits in an alternative, so the first one shows what a call looks like.
+            required = result["alternatives"][0].get("required", [])
+            result.setdefault("note", "Send the fields of one alternative as `arguments`.")
     result["example"] = {"operation": op.name, "arguments": {key: f"<{key}>" for key in required}}
     return result
+
+
+def _without_kind(alternative: Mapping[str, Any]) -> dict[str, Any]:
+    """An alternative as door `arguments` read it: the operation name carries `kind`, so it is no argument."""
+    properties = {key: value for key, value in alternative.get("properties", {}).items() if key != "kind"}
+    required = [key for key in alternative.get("required", []) if key != "kind"]
+    return {**{key: value for key, value in alternative.items() if key not in {"properties", "required"}},
+            "properties": properties, **({"required": required} if required else {})}
 
 
 # --- Published schemas ----------------------------------------------------------------------------

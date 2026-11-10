@@ -242,7 +242,7 @@ def observe_memory(
     )
     current_unit = None
     if unit is not None:
-        unit_ref, expected_fingerprint = _bind_unit_id(current.document, unit)
+        unit_ref, expected_fingerprint = _bind_unit_id(vault_root, current.document, unit)
     if unit_ref:
         resolution = current.document.resolve_unit(
             unit_ref,
@@ -624,10 +624,18 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     ]
 
 
-def _bind_unit_id(document: Any, unit: str) -> tuple[str, str]:
-    """The unit_ref and fingerprint of the one unit `unit` names, or a refusal that says why."""
+def _bind_unit_id(vault_root: Path, document: Any, unit: str) -> tuple[str, str]:
+    """The unit_ref and fingerprint of the one unit `unit` names, or a refusal that says why.
+
+    A principal that sees a released view is never given unit ids (`page_units`), so a unit reads
+    as unknown to it, and a stale-id refusal cannot name the current id of a unit the view withholds.
+    """
     head, _, version = str(unit).partition(".")
-    found = [u for u in document.units if u.unit_ref and page_ids.part_head(u.unit_ref) == head]
+    visible = egress.restricted_release_filter(vault_root) is None
+    found = [
+        u for u in document.units
+        if visible and u.unit_ref and page_ids.part_head(u.unit_ref) == head
+    ]
     if not found:
         raise ObserveMemoryError(
             "UNIT_NOT_FOUND",

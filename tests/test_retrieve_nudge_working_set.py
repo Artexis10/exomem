@@ -360,7 +360,8 @@ def test_relevant_due_rendering_keeps_both_guards_or_omits_the_entire_candidate(
     full = hook._format_working_set_block(packet, 4000)
     (line,) = [line for line in full.splitlines() if line.startswith("- relevant due:")]
     assert json.dumps(candidate, ensure_ascii=True, separators=(",", ":")) in line
-    assert "review_item_context" in line and "triage_memory" in line
+    assert "review.item_context" in line and "decide_review_item" in line
+    assert "triage_memory" not in line and "review_item_context" not in line
     assert "one due item" in line and "compaction" in line and "OAuth renewal" in line
 
     tight = hook._format_working_set_block(packet, len(full) - 1)
@@ -2410,7 +2411,12 @@ def _upkeep_item(title: str = "Orbit Pump") -> dict:
         "disposition": {"state": "open", "delivered_before": 0},
         "route": {"tool": "maintain_memory", "args": {"mode": "curation"}},
         "context_route": {"tool": "review_item_context", "args": {"ref": ref}},
-        "dispose": {"tool": "triage_memory", "actions": ["dismiss", "snooze"], "args": {"ref": ref}},
+        "id": "qo5tgbx.rbs7",
+        "dispose": {
+            "tool": "decide_review_item",
+            "actions": ["dismiss", "snooze"],
+            "args": {"review_item": "qo5tgbx.rbs7", "decision": "dismiss"},
+        },
         "permission": "consideration does not authorize mutation",
     }
 
@@ -2435,9 +2441,10 @@ def test_upkeep_line_renders_whole_or_not_at_all() -> None:
     block = hook._format_working_set_block(packet, 4000)
     (line,) = _upkeep_lines(block)
     assert line.startswith("- upkeep (Facts about an entity live on other pages): Orbit Pump — ")
-    assert "review_item_context" in line
+    assert "inspect_memory review.item_context" in line
     assert "maintain_memory" in line
-    assert "triage_memory dismiss|snooze" in line
+    assert "decide_review_item dismiss|snooze on review_item qo5tgbx.rbs7" in line
+    assert "triage_memory" not in line
     assert line.endswith("[exomem://review/upkeep/0123456789abcdef01234567]")
     # It is the packet's last line, so the ceiling cuts it first, and whole.
     assert block.splitlines()[-1] == line

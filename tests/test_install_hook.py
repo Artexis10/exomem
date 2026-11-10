@@ -349,6 +349,7 @@ def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkey
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("CODEX_HOME")  # the default home under HOME is what this test reads
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
     hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
 
@@ -2028,12 +2029,12 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
 
 
 def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-        **(extra_env or {}),
-    }  # redirect Path.home()
+    # Redirect Path.home(), and drop the variables that override it, so the state lands under `home`.
+    inherited = {
+        key: value for key, value in os.environ.items()
+        if key not in ("EXOMEM_HOOK_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+    }
+    env = {**inherited, "HOME": str(home), "USERPROFILE": str(home), **(extra_env or {})}
     return subprocess.run(
         [sys.executable, str(script)],
         input=json.dumps(event),
