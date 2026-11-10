@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import hashlib
 import importlib.resources
-import inspect
 import json
 import logging
 import math
@@ -88,11 +87,13 @@ def _compile_response_schema(schema):
     return Draft202012Validator(schema, registry=Registry())
 
 
+#: The canary protocol's closed tool tokens, not vault vocabulary: the listed tools a case may call.
+CASE_TOOLS = ("search_memory", "recall_context", "read_page", "query_records", "query_plan_items", "inspect_memory")
+
+
 def load_cases(raw: bytes):
     """Parse and validate a case file; the sole loader for every runner of this observer."""
     from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
-
-    operation_validators = {}
 
     class Reference(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
@@ -138,16 +139,7 @@ def load_cases(raw: bytes):
     class Case(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         id: str = Field(min_length=1)
-        # These are the canary protocol's closed tool tokens, not vault vocabulary.
-        tool: Literal[
-            "ask_memory",
-            "activate_context",
-            "read_memory",
-            "search_memory",
-            "recall_context",
-            "read_records",
-            "read_plans",
-        ]
+        tool: Literal[CASE_TOOLS]
         bar_id: str = Field(default="programme-public-warm", min_length=1)
         # A runner-owned label for reporting cases together; the observer never reads it.
         group: str | None = Field(default=None, min_length=1)
@@ -156,29 +148,28 @@ def load_cases(raw: bytes):
 
         @model_validator(mode="after")
         def read_only_operation(self):
-            # These tool tokens fix the observer's collection-read protocol.
-            if self.tool not in ("read_records", "read_plans"):
+            # These tool tokens fix the observer's collection-read protocol: two typed reads and the read door.
+            # nosemgrep: ep-word-membership -- closed tool names from the published tool surface.
+            if self.tool not in ("query_records", "query_plan_items", "inspect_memory"):
                 return self
-            from . import commands
-            from .operation_entries import split_operation
-            from .operation_schema import operation_schema
+            from . import commands, operation_entries
+            from .cli_ops import OpError
+            from .public_surface import public_surface
 
-            parsed = split_operation(self.arguments)
-            # Inspect and query are the observer protocol's closed collection operation tokens.
-            if parsed is None or parsed[0] not in ("inspect", "query"):
+            try:
+                command, leaf = public_surface().resolve(
+                    self.tool, self.arguments, commands.product_commands_for("mcp"),
+                    strict=True, passthrough=frozenset(),
+                )
+            except OpError as refusal:
+                # The refusal names what to change; the case's own arguments are already in pydantic's error.
+                raise ValueError(f"collection case is not a valid read: {refusal}") from None
+            # The door carries every read; a case may only inspect or query a Records or Planning
+            # collection, which are the observer protocol's closed collection operation tokens.
+            collections = (operation_entries.RECORDS.command, operation_entries.PLANS.command)
+            # nosemgrep: ep-word-membership -- closed collection action tokens of the operation entries.
+            if command.name not in collections or leaf.get("action") not in ("inspect", "query"):
                 raise ValueError("collection cases require inspect or query")
-            if self.tool not in operation_validators:
-                command, rendering = next(
-                    (command, rendering)
-                    for command in commands.product_commands_for("mcp")
-                    for rendering in command.renderings
-                    if rendering.name == self.tool
-                )
-                grouped = commands.bind_vault(command.leaf, None, command=command)
-                operation_validators[self.tool] = _compile_response_schema(
-                    operation_schema(rendering, inspect.signature(grouped).parameters)
-                )
-            operation_validators[self.tool].validate(self.arguments["operation"])
             return self
 
     def reject_nonfinite(value):

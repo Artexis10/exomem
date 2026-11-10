@@ -28,7 +28,7 @@ def configuration(tmp_path):
             [
                 {
                     "id": "case-01",
-                    "tool": "ask_memory",
+                    "tool": "search_memory",
                     "arguments": {},
                     "expected": {
                         "state_path": ["ok"],
@@ -209,6 +209,25 @@ def test_last_execution_with_missing_credential_remains_unconfigured(installed):
     installed.configuration["report_file"].write_text(json.dumps({"failure": "missing-token"}))
     installed.properties[(monitor.SERVICE, "Service")]["Result"] = "exit-code"
     assert monitor.status(unit_dir=installed.units, now=110)["state"] == "unconfigured"
+
+
+def test_an_installed_canary_whose_cases_name_retired_tools_fails_the_doctor_and_names_the_tools(
+    installed, monkeypatch
+):
+    """A case file written for retired tool names once read as an unconfigured warning, not a failure."""
+    installed.configuration["cases"].write_text(json.dumps([{
+        "id": "old", "tool": "ask_memory", "arguments": {"query": "x"},
+        "expected": {"outcome": "ok", "state_path": ["state"], "state": "ok"},
+    }]))
+    installed.configuration["report_file"].write_text(json.dumps({"failure": "invalid-cases"}))
+    installed.properties[(monitor.SERVICE, "Service")]["Result"] = "exit-code"
+    observed = monitor.status(unit_dir=installed.units, now=110)
+    assert observed["state"] == "invalid-cases"
+
+    monkeypatch.setattr(monitor, "status", lambda: observed)
+    check = doctor._check_recall_canary()
+    assert check.status == "fail"
+    assert "search_memory" in check.remediation
 
 
 def test_enable_checks_loaded_credential_and_keeps_target_failures_scheduled(

@@ -4,7 +4,7 @@
 
 ### Requirement: One shared canary measures live public calls and recall availability
 
-One packaged observer SHALL provide a read-only MCP canary mode for configured positive `ask_memory`, `activate_context`, `read_memory`, `search_memory`, `recall_context`, `read_records` and `read_plans` cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and select a configured latency bar per case, defaulting to the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
+One packaged observer SHALL provide a read-only MCP canary mode for configured positive `search_memory`, `recall_context`, `read_page`, `query_records`, `query_plan_items` and `inspect_memory` cases. It SHALL measure the caller round trip through the parsed terminal response, retain every attempted outcome, and select a configured latency bar per case, defaulting to the packaged warm programme bar. Warm public calls SHALL meet p95 below one second on the installed real-vault deployment. The report SHALL bind the deployment, contract, cases and measurement window. It SHALL identify warmth, contention and incomplete evidence. Natural write observations and isolated write acceptance SHALL remain separate from read-only production probes.
 
 The canary SHALL report availability separately from latency. A timeout, unavailable response, malformed terminal, missing expected reference or missing expected material SHALL fail a positive case. A fast refusal SHALL NOT pass availability. The runner SHALL emit content-free JSON, a failing exit status and a structured warning for failed evidence. A standard systemd user timer SHALL run availability checks through an independently selected installed observer. The existing script SHALL delegate its MCP mode to that observer. The canary SHALL NOT change admission, initiate repairs or add an application scheduler. Local failed-unit, journal and doctor status SHALL NOT claim delivered notifications. Unmeasured operations, missing authorization and unverified notification delivery SHALL remain visible as incomplete work.
 
@@ -114,7 +114,7 @@ Each case SHALL report its selected `bar_id`, observed terminal count, and descr
 
 #### Scenario: A bar names typed tools explicitly
 
-- **WHEN** one bar lists `search_memory`, `recall_context`, `read_records` and `read_plans` and a case for each selects it
+- **WHEN** one bar lists `search_memory`, `recall_context`, `query_records` and `query_plan_items` and a case for each selects it
 - **THEN** each case reports its own tool and a latency verdict from that bar
 - **AND** no case reports `unknown-operation` or `unavailable` for coverage
 
@@ -176,7 +176,7 @@ The existing internal late-projection path and its cold-index policy SHALL remai
 
 ### Requirement: Paired MCP reads have a configured reference and a pending bar
 
-The packaged latency contract SHALL declare the paired MCP read measurement as the reference `mcp-read-paired` and as one pending bar on the boundary `mcp-worker-socket-v1` that covers `read_records`, `read_plans`, `read_memory`, `search_memory` and `recall_context`. The reference SHALL carry the fixture profile digest (null until a profile fixes it), the repeat count, the minimum case count, the confidence, the multiplicity policy, the gating groups with their allowance in milliseconds, and the non-gating groups. An allowance SHALL be null until paired runs of identical code establish it. The number of gating groups SHALL come from this configuration, never from the groups that ran.
+The packaged latency contract SHALL declare the paired MCP read measurement as the reference `mcp-read-paired` and as one pending bar on the boundary `mcp-worker-socket-v1` that covers `query_records`, `query_plan_items`, `inspect_memory`, `read_page`, `search_memory` and `recall_context`. The reference SHALL carry the fixture profile digest (null until a profile fixes it), the repeat count, the minimum case count, the confidence, the multiplicity policy, the gating groups with their allowance in milliseconds, and the non-gating groups. An allowance SHALL be null until paired runs of identical code establish it. The number of gating groups SHALL come from this configuration, never from the groups that ran.
 
 The reference SHALL set a p95 target of 100 ms for records query and read and planning query and read. It SHALL set a p95 target of 300 ms for records list and 150 ms for planning list, because one list call authorizes and counts every collection, legacy tracker and misplaced declaration. Each target SHALL be the private-sandbox acceptance bar and SHALL NOT gate any shared runner. The pending bar SHALL NOT observe live traffic, and the earlier bars and references SHALL stay byte-identical under the new revision.
 

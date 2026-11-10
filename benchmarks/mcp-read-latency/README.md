@@ -15,7 +15,7 @@ worker (`python -m exomem.service_manager worker`). The arms never share state.
 1. Create matching notes for both arms so that their pages are byte-identical.
 2. Write the legacy trackers so that both arms hold the same tracker pages.
 3. Start each arm so that its managed worker becomes quiet.
-4. Load generated collections through each arm's change tools so that both hold the fixture.
+4. Load generated collections through each arm's write tools so that both hold the fixture.
 5. Wait for each worker to use under 20% of one CPU for 10 seconds; fixture preparation is quiet.
 6. Check state and derived readiness so that both arms meet the timing requirements.
 7. Pause both workers so that only the arm under measurement runs.
