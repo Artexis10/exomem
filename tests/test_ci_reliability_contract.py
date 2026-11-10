@@ -156,11 +156,11 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     )
     assert job["name"] == f"{tier} tests (py${{{{ matrix.python-version }}}}, {shard_label})"
     if job_id == "core-tests":
-        # A pull request's own test modules add one 3.13 job; a full run's 3.13 shard 1
-        # must stay a full shard, so the extra job never joins a full run.
+        # A pull request's own test modules add 3.13 jobs; a full run's 3.13 shards
+        # must stay full shards, so the extra jobs never join a full run.
         include = " ".join(str(matrix["include"]).split())
         assert "needs.scope.outputs.full != 'true'" in include
-        assert "needs.scope.outputs.changed_tests != ''" in include
+        assert "fromJSON(needs.scope.outputs.changed_tests_include)" in include
 
     command = _run_step(job)["run"]
     assert f"--splits={shards}" in command
@@ -700,6 +700,7 @@ def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
         env={
             **os.environ,
             "EVENT_NAME": event,
+            "CHANGED_TESTS_PYTHON": "3.13",
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
         },
@@ -764,28 +765,41 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
             "docs_only": "true",
             "pytest_args": "-m reads_repository_docs --splits=1 --group=1",
             "changed_tests": "",
+            "changed_tests_include": "[]",
         }
         assert "shard 1 each run all their marked tests" in summary
         assert "Docs-only change: the example check did not run" in summary
     else:
-        assert decision == {"docs_only": "false", "pytest_args": "", "changed_tests": ""}
+        assert decision == {
+            "docs_only": "false",
+            "pytest_args": "",
+            "changed_tests": "",
+            "changed_tests_include": "[]",
+        }
         assert not summary
 
 
-def test_change_scope_names_the_pull_requests_own_test_modules_for_python_3_13(tmp_path: Path) -> None:
-    """Catches a deleted module or a crafted file name reaching the 3.13 job's pytest command line."""
+def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups(tmp_path: Path) -> None:
+    """Catches a deleted or crafted module name reaching the 3.13 jobs, and one job too long for its timeout."""
     repository = tmp_path / "repository"
     repository.mkdir()
     _scope_fixture_git(repository, "init", "-b", "main")
-    for relative in ("tests/test_changed.py", "tests/test_deleted.py", "src/runtime.py"):
+    for relative in ("tests/test_changed.py", "tests/test_deleted.py", "tests/test_unchanged.py", "src/runtime.py"):
         (repository / relative).parent.mkdir(parents=True, exist_ok=True)
         (repository / relative).write_text("initial\n")
+    durations = {
+        "tests/test_changed.py::test_first": 700.0,
+        "tests/test_changed.py::test_second": 700.0,
+        "tests/test_unchanged.py::test_slow": 5000.0,
+    }
+    (repository / ".test_durations.json").write_text(json.dumps(durations))
     _scope_fixture_git(repository, "add", ".")
     _scope_fixture_git(repository, "commit", "-m", "initial")
     _scope_fixture_git(repository, "checkout", "-b", "topic")
     (repository / "tests/test_changed.py").write_text("changed\n")
     (repository / "tests/test_deleted.py").unlink()
-    for added in ("tests/store/test_added.py", "tests/helpers.py", "tests/test_$(touch pwned).py"):
+    # The newline would add a docs_only line to $GITHUB_OUTPUT if the name passed the format check.
+    for added in ("tests/store/test_added.py", "tests/helpers.py", "tests/test_crafted\ndocs_only=true\nx=.py"):
         (repository / added).parent.mkdir(parents=True, exist_ok=True)
         (repository / added).write_text("added\n")
     _scope_fixture_git(repository, "add", "-A")
@@ -795,8 +809,32 @@ def test_change_scope_names_the_pull_requests_own_test_modules_for_python_3_13(t
 
     decision, _ = _change_scope(repository, "pull_request")
 
+    assert decision["docs_only"] == "false"
     assert decision["changed_tests"] == "tests/store/test_added.py tests/test_changed.py"
-    assert not (repository / "pwned").exists()
+    # 1400 measured seconds need two groups; the unchanged module's time does not count.
+    assert json.loads(decision["changed_tests_include"]) == [
+        {"python-version": "3.13", "shard": 1, "splits": 2, "selection": "changed tests 1/2"},
+        {"python-version": "3.13", "shard": 2, "splits": 2, "selection": "changed tests 2/2"},
+    ]
+
+
+@pytest.mark.timeout(300)
+def test_changed_tests_selection_keeps_the_tier_and_ignore_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches the 3.13 jobs running a module that the core tier, the TUI job or a serial job owns."""
+    workflow = _workflow()
+    core_job = workflow["jobs"]["core-tests"]
+    run = _run_step(core_job)["run"]
+    tui_directory = workflow["env"]["EXOMEM_TUI_TEST_DIRECTORY"]
+    assert '--ignore="$EXOMEM_TUI_TEST_DIRECTORY"' in run
+    serial_module = core_job["env"]["EXOMEM_SERIAL_CORE_MODULE"]
+    harness_module = (ROOT / "tests" / "harness_modules.txt").read_text(encoding="utf-8").split()[0]
+    tui_module = next((ROOT / tui_directory).glob("test_*.py")).relative_to(ROOT).as_posix()
+    core_module = "tests/test_ci_reliability_contract.py"
+    monkeypatch.setenv("EXOMEM_CHANGED_TESTS", " ".join((core_module, harness_module, serial_module, tui_module)))
+
+    items = _collect_items("changed tests", "core", [f"--ignore={tui_directory}", f"--ignore={serial_module}"])
+
+    assert {item.split("::", 1)[0] for item in items} == {core_module}
 
 
 @pytest.mark.parametrize(
@@ -820,7 +858,12 @@ def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
 
     decision, summary = _change_scope(repository, event)
 
-    assert decision == {"docs_only": "false", "pytest_args": "", "changed_tests": ""}
+    assert decision == {
+        "docs_only": "false",
+        "pytest_args": "",
+        "changed_tests": "",
+        "changed_tests_include": "[]",
+    }
     assert not summary
 
 

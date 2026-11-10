@@ -49,8 +49,18 @@ def pytest_configure(config: pytest.Config) -> None:
 _COLLECT_PART = os.environ.get("EXOMEM_COLLECT_PART", "").strip()
 
 
+#: Set only by CI's changed-tests job (scripts/ci_change_scope.py): the repository-relative test
+#: modules a pull request adds or changes. Other modules are ignored; the tier and ignore rules
+#: still decide the named ones, which a module named on the command line would bypass.
+_CHANGED_TESTS = frozenset(REPO_ROOT / module for module in os.environ.get("EXOMEM_CHANGED_TESTS", "").split())
+
+
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    if not _COLLECT_PART or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+    if collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    if _CHANGED_TESTS and collection_path.resolve() not in _CHANGED_TESTS:
+        return True
+    if not _COLLECT_PART:
         return None
     part, parts = (int(value) for value in _COLLECT_PART.split("/"))
     if not 0 <= part < parts:
