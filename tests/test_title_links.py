@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 from fastmcp import Client
 
-from exomem import call_ledger, commands, edit, writer_lease
+from exomem import call_ledger, commands, edit, find, freshness, writer_lease
 from exomem import server as server_module
-from exomem.vault import TitleLinkView, WikilinkResolver, render_title_links
+from exomem.vault import TitleLinkView, WikilinkResolver, render_title_links, walk_vault_md
 
 NOTES = "Knowledge Base/Notes/Insights"
 
@@ -200,6 +200,15 @@ async def _call(client, name, arguments):
     }
 
 
+def _resident_resolver(vault: Path) -> None:
+    """Hold the shared resolver in memory and current, as the running server's watcher keeps it.
+
+    A read only borrows the resident resolver: it never builds or copies one.
+    """
+    freshness.seed(vault, "vault", [(str(p), freshness.stat_signature(p)) for p in walk_vault_md(vault)])
+    find.shared_resolver(vault)
+
+
 def _stored(vault: Path, title: str) -> str:
     for path in (vault / "Knowledge Base" / "Notes").rglob("*.md"):
         text = path.read_text(encoding="utf-8")
@@ -222,16 +231,20 @@ def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault) 
                 "- [finding] Untouched line #reliability\n"
             ),
         })
+        cold = await _call(client, "read_page", {"page": "Retry policy"})
+        _resident_resolver(vault)
         read = await _call(client, "read_page", {"page": "Retry policy"})
         span = "Cap retries at 30 s as in [[Backoff ceiling]]"
         edited = await _call(client, "edit_note", {
             "note": "Retry policy", "why": "Cap changed after review", "action": "replace_text",
             "old_text": span, "new_text": "Cap retries at 10 s as in [[Backoff ceiling]]",
         })
-        return read, span, edited
+        return cold, read, span, edited
 
-    read, span, edited = _session(build(), scenario)
+    cold, read, span, edited = _session(build(), scenario)
 
+    # With no resolver resident a read builds none: the links stay as stored.
+    assert "[[Knowledge Base/Notes/Insights/backoff-ceiling]]" in cold["body"], cold
     assert span in read["body"] and "Knowledge Base/" not in read["body"], read
     assert "error" not in edited, edited
     stored = _stored(vault, "Retry policy")
@@ -259,6 +272,7 @@ def test_an_observation_written_with_a_title_link_stores_the_path_form(build, va
             "observation": added.get("unit_id"), "category": "finding",
             "text": "Still bounded by [[Backoff ceiling]]",
         })
+        _resident_resolver(vault)
         units = await _call(client, "read_page", {"page": "Jitter policy", "part": "units"})
         return added, edited, units
 
