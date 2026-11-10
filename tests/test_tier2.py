@@ -29,8 +29,6 @@ from exomem import preserve as preserve_module
 from exomem import recover_from_trash as recover_module
 from exomem import set_frontmatter_field as set_fm_module
 from exomem import vault as vault_module
-from exomem.command_surface import listed_names
-from exomem.operation_entries import DEFAULT_TOOL_SHAPE
 
 TODAY = dt.date(2026, 5, 24)
 
@@ -1153,18 +1151,15 @@ def test_list_inbound_links_returns_empty_for_unreferenced(vault: Path) -> None:
 
 # ---------------- Tier 2 registration gating (EXOMEM_DISABLE_TIER2) ----------------
 
-# Post-consolidation Tier 2 surface: create_directory folded into create_file
-# Product surface: governance administration and file/data/media tier-2 behavior
-# are exposed through product commands while canonical leaves remain implementation
-# details.
-TIER2_TOOLS = {
-    name for command in commands.product_commands_for("mcp") if command.tier == 2
-    for name in listed_names(command, DEFAULT_TOOL_SHAPE)
+# The grouped commands that only the tier-2 switch registers. The typed tools and the two doors
+# list some of them as operations, so the switch is read on the commands a server registers.
+TIER2_COMMANDS = {
+    command.name for command in commands.product_commands_for("mcp") if command.tier == 2
 }
 
 
-def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
-    """Build the FastMCP server and return the set of registered tool names.
+def _server_view(monkeypatch: pytest.MonkeyPatch) -> tuple[set[str], set[str], set[str]]:
+    """Build the FastMCP server; return its listed tools, the door operations, and the registered tier-2 commands.
 
     build_server() calls load_dotenv(override=True); neutralize it so the repo
     `.env` can't clobber the test's EXOMEM_VAULT_PATH / EXOMEM_DISABLE_TIER2.
@@ -1175,48 +1170,45 @@ def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
 
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     mcp = server_module.build_server(require_auth=False)
-    tools = asyncio.run(mcp.list_tools(run_middleware=False))
-    return {t.name for t in tools}
+    listed = {tool.name: tool for tool in asyncio.run(mcp.list_tools(run_middleware=False))}
+    operations = {
+        operation for door in ("inspect_memory", "manage_memory")
+        for operation in listed[door].parameters["properties"]["operation"]["enum"]
+    }
+    registered = {name for name in TIER2_COMMANDS if asyncio.run(mcp.get_tool(name)) is not None}
+    return set(listed), operations, registered
+
+
+_TIER1_TOOLS = {
+    "search_memory", "read_page", "create_note", "save_source", "edit_note", "list_review_items",
+    "inspect_memory", "manage_memory",
+}
 
 
 def test_tier2_registered_by_default(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
-    names = _registered_tool_names(monkeypatch)
+    names, operations, registered = _server_view(monkeypatch)
     # Tier 1 read/write ops are always present...
-    assert {
-        "search_memory",
-        "read_memory",
-        "create_note",
-        "capture_source",
-        "edit_note",
-        "read_review",
-    } <= names
+    assert _TIER1_TOOLS <= names
     # ...and so are the Tier 2 escape hatches when the flag is unset.
-    assert TIER2_TOOLS <= names
+    assert TIER2_COMMANDS <= registered
+    assert {"dataset.query", "media.video"} <= operations
 
 
 def test_tier2_dropped_when_disabled(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
-    names = _registered_tool_names(monkeypatch)
-    # Tier 1 stays fully registered — only the escape hatches drop.
-    assert {
-        "search_memory",
-        "read_memory",
-        "create_note",
-        "capture_source",
-        "edit_note",
-        "read_review",
-        "read_connections",
-    } <= names
+    names, operations, registered = _server_view(monkeypatch)
+    # Tier 1 stays fully registered: only the escape hatches drop.
+    assert _TIER1_TOOLS <= names
     tier1_shared = {
-        name for command in commands.product_commands_for("mcp", expose_tier2=False)
-        for name in listed_names(command, DEFAULT_TOOL_SHAPE)
+        command.name for command in commands.product_commands_for("mcp", expose_tier2=False)
     }
-    assert names.isdisjoint(TIER2_TOOLS - tier1_shared)
+    assert registered.isdisjoint(TIER2_COMMANDS - tier1_shared)
+    assert not {"dataset.query", "media.video"} & operations
 
 
 def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:
@@ -1234,8 +1226,8 @@ def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:
     rel = "Knowledge Base/Notes/Insights/conf.md"
 
     refusal = asyncio.run(mcp.call_tool(
-        "edit_memory",
-        {"path": rel, "why": "x", "field": "confidence", "value": 0.99},
+        "edit_note",
+        {"note": rel, "why": "x", "action": "set_fields", "fields": {"confidence": 0.99}},
         run_middleware=True,
     ))
     assert refusal.structured_content["error"]["code"] == "EXCLUDED_FIELD"

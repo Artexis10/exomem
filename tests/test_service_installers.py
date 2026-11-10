@@ -111,8 +111,8 @@ def _fake_python(path: Path) -> None:
             print(selected)
             raise SystemExit(0)
 
-        if len(sys.argv) > 1 and sys.argv[1] == "-" and len(sys.argv) == 8:
-            _, _, env_path, systemd_path, process_path, xml_path, log_dir, legacy = sys.argv
+        if len(sys.argv) > 1 and sys.argv[1] == "-" and len(sys.argv) == 7:
+            _, _, env_path, systemd_path, process_path, xml_path, log_dir = sys.argv
             assert Path(systemd_path) != Path(os.environ["FAKE_SERVICE_ENV_FILE"])
             values = {}
             for raw in Path(env_path).read_text(encoding="utf-8").splitlines():
@@ -124,8 +124,6 @@ def _fake_python(path: Path) -> None:
             values.setdefault("EXOMEM_LOG_DIR", log_dir)
             values["EXOMEM_STATE_ROOT"] = os.environ["EXOMEM_MANAGED_STATE_ROOT_DEFAULT"]
             values.setdefault("PATH", os.environ["PATH"])
-            if legacy == "1":
-                values["EXOMEM_MCP_LEGACY_COMPAT"] = "1"
             Path(systemd_path).write_text(
                 "".join(f'{key}="{value}"\n' for key, value in values.items()),
                 encoding="utf-8",

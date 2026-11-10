@@ -246,10 +246,10 @@ def test_recent_context_still_leads_and_the_packet_still_fits_its_budget(
 # --------------------------------------------------------------------------- #
 
 
-def test_a_captured_session_entry_is_labelled_for_read_memory() -> None:
+def test_a_captured_session_entry_is_labelled_for_read_page() -> None:
     """A `Sources/Sessions` capture is raw material, so it stays a
-    `read_memory` target even though the header's default follow-up for
-    every other `recent_context` line is now `activate_context(anchor=...)`.
+    `read_page` target even though the header's default follow-up for
+    every other `recent_context` line is now `recall_context(anchor=...)`.
     """
     from exomem._hooks import exomem_retrieve_nudge as hook
 
@@ -280,14 +280,14 @@ def test_a_captured_session_entry_is_labelled_for_read_memory() -> None:
 
     assert "- session:" in block, block
     assert "- recent:" not in block, block
-    assert "read_memory" in hook._WORKING_SET_HEADER
+    assert "read_page" in hook._WORKING_SET_HEADER
     assert "recall_context" in hook._WORKING_SET_HEADER
 
 
 def test_the_named_pages_menu_now_offers_the_anchor_remedy() -> None:
     """`retrieval_named` pages are exactly what `_eligible_agent_page` now
     admits, so the hook's own closing line for that menu must offer the
-    remedy that actually works — `anchor=`, not `read_memory`, which is
+    remedy that actually works — `anchor=`, not `read_page`, which is
     what a page not eligible this way still needs."""
     from exomem._hooks import exomem_retrieve_nudge as hook
 
@@ -330,7 +330,7 @@ def test_the_named_pages_menu_now_offers_the_anchor_remedy() -> None:
 
     assert "anchor" in closing, closing
     assert "recall_context" in closing, closing
-    assert "read_memory" not in closing, closing
+    assert "read_page" not in closing, closing
 
 
 def test_the_deployed_hook_mirror_stays_byte_identical() -> None:
@@ -345,7 +345,7 @@ def test_the_deployed_hook_mirror_stays_byte_identical() -> None:
 # Follow-up round (batch review REQUEST_CHANGES, findings 5-10): a
 # non-canonical spelling must not reach the expensive path or the file it
 # names, a withheld page must refuse before the compile, the hook must route
-# a unit/state/session ref to `read_memory`, and a resolved packet must still
+# a unit/state/session ref to `read_page`, and a resolved packet must still
 # show its answer at a small hook ceiling.
 # --------------------------------------------------------------------------- #
 
@@ -523,13 +523,13 @@ def test_an_index_anchor_override_still_works_when_the_early_check_applies(
 def test_the_header_routes_by_kind() -> None:
     """P3 (finding 6): `unit`, `pointer`, `state` and `session` lines are not
     eligible `anchor` refs (a unit/state ref is not a page path at all, and a
-    session capture is raw material) and must be routed to `read_memory`;
+    session capture is raw material) and must be routed to `read_page`;
     every other kind keeps the `anchor=` default."""
     from exomem._hooks import exomem_retrieve_nudge as hook
 
     for kind in ("unit", "pointer", "state", "session"):
         assert f"`{kind}`" in hook._WORKING_SET_HEADER, hook._WORKING_SET_HEADER
-    assert "read_memory" in hook._WORKING_SET_HEADER
+    assert "read_page" in hook._WORKING_SET_HEADER
     assert "recall_context(anchor=...)" in hook._WORKING_SET_HEADER
 
 

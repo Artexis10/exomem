@@ -30,7 +30,7 @@ exomem review --state all --json
 exomem review --category relation_debt --json
 ```
 
-The MCP/REST product route is `review_memory(mode="attention")`. Every item
+The MCP/REST product route is `list_review_items(queue="due")`. Every item
 includes its current path, canonical target reference, reasons, stable
 `exomem://review/<id>` reference, signal fingerprint, and review state.
 
@@ -60,7 +60,7 @@ on every Records operation, and this family is its only consumer.
 What resolves a finding: the item leaves the open state, the binding is removed
 from the manifest, or the joined records are gone. Never time, and never the
 runtime — no command, sweep or write-path advisory edits either side. You move
-the item yourself with `plan_memory(action="triage")`.
+the item yourself with `edit_plan_item`.
 
 The fingerprint is the item reference plus the joined record keys, so a new
 event on a dismissed item resurfaces it under the ordinary material-change rule
@@ -80,8 +80,8 @@ exomem review dismiss exomem://review/0123456789abcdef01234567 --why "intentiona
 exomem review reopen exomem://review/0123456789abcdef01234567
 ```
 
-Agents call `triage_memory` with the same `dismiss`, `snooze`, or `reopen`
-action. Decisions live in `.review-state.json` under the external per-vault
+Agents call `decide_review_item` with the same `dismiss`, `snooze`, or `reopen`
+`decision`. Decisions live in `.review-state.json` under the external per-vault
 machine-local state root. The file is portable JSON and stores no note content.
 
 A decision binds to the exact signal fingerprint reviewed. Ranking changes and
@@ -103,10 +103,10 @@ relations. It does not mean Exomem should invent edges.
    claim/finding/evidence-level edges.
 5. Re-run review. The repaired note leaves the relation-debt queue.
 
-For batch repair, `review_memory(mode="relation-queue")` presents the same
+For batch repair, `list_review_items(queue="relation_suggestions")` presents the same
 deterministic suggestions as a fingerprint-guarded accept/reject queue
 (see the Review Studio's Relations worklist): accept via
-`connect_memory(operation="accept-relation")`, reject via `triage_memory`.
+`decide_review_item` with `decision="accept"`, reject via `decide_review_item`.
 Rejections are fingerprint-bound and resurface when the signal materially
 changes.
 
@@ -147,7 +147,7 @@ exomem review off near-duplicate --reason false_positive
 exomem review normal prediction_window
 ```
 
-Agents use the same `triage_memory` command with a family reference,
+Agents use the `review.set_family` operation of `manage_memory` with a family reference,
 `exomem://review/family/<family>`, and the `quiet`, `off`, or `normal` action.
 `quiet` and `off` require a reason code.
 
@@ -160,7 +160,7 @@ Agents use the same `triage_memory` command with a family reference,
 
 **A quiet family is silent, not clean.** The full audit still measures it, and a
 due-state block that omits a family is never evidence that family has nothing
-due. `review_memory(mode="dispositions")` lists every non-default family with
+due. `list_review_items(queue="dispositions")` lists every non-default family with
 its reason, `why`, timestamp, origin, and the number of items of that family
 you had already dismissed by hand before quieting it.
 
@@ -214,7 +214,7 @@ most one block rather than one per write — the counters are how that is
 checkable rather than merely claimed, and checking it is the point of writing
 them down.
 
-Successive single `record_memory` or `plan_memory` calls each carry a block, and
+Successive single `add_record` or `add_plan_item` calls each carry a block, and
 that is the accepted behaviour rather than a leak: the governor suppresses an
 identical total, and each of those writes genuinely changes the total. Turning
 that into one block per session would be a change to the governance rule, not to
@@ -235,7 +235,7 @@ of inheriting a `pass` from a block emitted before it started.
 
 Which is what it reports today. No product command commits more than one
 governed write through the write carrier: measured on `adoption_studio` apply,
-`maintain_memory(mode="fix")`, `preserve_artifacts` and `process_media`, each
+`maintenance.fix`, `save_evidence` and `media.process`, each
 of which writes eight to twelve pages and reaches the carrier zero times. The
 batch scope those leaves hold is therefore a guard for a route nothing takes
 yet, not a mechanism doing work today; where the carrier IS reached — a single

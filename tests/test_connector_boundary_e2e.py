@@ -5,7 +5,9 @@ import io
 import json
 import shutil
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
+from _public_call import public_call
 from starlette.testclient import TestClient
 from test_connector_boundary import ISSUER, PRIVATE, PUBLIC
 from test_connector_boundary import configured_boundary as configured_boundary
@@ -64,6 +66,7 @@ def test_oauth_owner_twins_keep_read_search_and_browse_independent_of_hidden_con
         app = server.build_server(require_auth=True).http_app(stateless_http=True, json_response=True)
         with TestClient(app) as client:
             def call(token, name, arguments):
+                name, arguments = public_call(name, arguments)
                 response = client.post("/mcp", headers={
                     "Authorization": f"Bearer {token}", "Accept": "application/json",
                     "mcp-protocol-version": "2025-06-18", "mcp-method": "tools/call", "mcp-name": name,
@@ -91,33 +94,41 @@ def test_oauth_owner_twins_keep_read_search_and_browse_independent_of_hidden_con
             assert "private.md" not in json.dumps(listing)
             # Exercise both cache orderings without multiplying the twin fixture.
             order = (limited, full) if index == 0 else (full, limited)
-            transfers = {token: call(token, "transfer_artifact", {"operation": "download"})["structuredContent"]
-                         for token in order}
-            broad_transfer, transfer = transfers[full], transfers[limited]
-            downloads = [client.get("/download", params={"path": path},
-                headers={"Authorization": f"Bearer {transfer['token']}"}) for path in artifacts]
+
+            def delivery(token, path):
+                """The `/download` grant a bearer gets for one original, or the refusal it gets instead."""
+                reply = call(token, "download_files", {"pages": [path]})
+                [row] = json.loads(reply["content"][0]["text"])["artifacts"]
+                if "error" in row:
+                    return None, row["error"]
+                return parse_qs(urlsplit(row["deliveries"]["https"]["url"]).query)["grant"][0], None
+
+            grants = {token: delivery(token, artifacts[0])[0] for token in order}
+            narrow_grant = grants[limited]
+            downloads = [client.get("/download", params={"grant": narrow_grant})]
             assert downloads[0].status_code == 200
             assert downloads[0].content == b"\x00allowed bytes"
-            assert downloads[1].status_code == 404
-            private_download = client.get("/download", params={"path": artifacts[1]},
-                headers={"Authorization": f"Bearer {broad_transfer['token']}"})
+            hidden_grant, hidden_refusal = delivery(limited, artifacts[1])
+            assert hidden_grant is None and "protected" not in json.dumps(hidden_refusal)
+            private_grant, _ = delivery(full, artifacts[1])
+            private_download = client.get("/download", params={"grant": private_grant})
             assert private_download.status_code == 200
             assert private_download.content == b"\x00protected bytes"
             private_path = root / artifacts[1]
             private_bytes = private_path.read_bytes()
             private_path.unlink()
             try:
-                missing = client.get("/download", params={"path": artifacts[1]},
-                    headers={"Authorization": f"Bearer {transfer['token']}"})
+                # A hidden original and a missing one refuse alike.
+                _, missing_refusal = delivery(limited, artifacts[1])
             finally:
                 private_path.write_bytes(private_bytes)
-            assert (downloads[1].status_code, downloads[1].content) == (missing.status_code, missing.content)
+            assert hidden_refusal == missing_refusal
             observations.append((visible, hidden, search, listing,
-                                 [(response.status_code, response.content) for response in downloads]))
+                                 [(response.status_code, response.content) for response in downloads], hidden_refusal))
             if index == 1:
+                unspent_grant = delivery(limited, artifacts[0])[0]
                 asyncio.run(authority.tombstone(narrow_record.session_id, reason="operator"))
-                revoked = client.get("/download", params={"path": artifacts[0]},
-                    headers={"Authorization": f"Bearer {transfer['token']}"})
-                assert revoked.status_code == 401
+                revoked = client.get("/download", params={"grant": unspent_grant})
+                assert revoked.status_code in {401, 404}
                 assert b"allowed bytes" not in revoked.content
     assert observations[0] == observations[1]

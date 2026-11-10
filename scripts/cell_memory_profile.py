@@ -16,8 +16,8 @@ because resident memory is a property of a process's whole history:
   ``EXOMEM_CLOUD_CELL=1`` with a locally generated bearer, its ASGI app and
   lifespan (``LocalRuntimeActivation``: drain, watcher, warm-up, reaper), and
   real MCP ``tools/call`` requests over ``/mcp``. Points: import, model load,
-  cell ready, first hybrid find (``ask_memory``), first governed write
-  (``remember``), and one reaper tick. The tick runs the reaper's own
+  cell ready, first hybrid find (``search_memory``), first governed write
+  (``create_note``), and one reaper tick. The tick runs the reaper's own
   ``_reap_once`` over ``default_slots()`` with its clock advanced past the idle
   threshold, instead of waiting fifteen minutes for the daemon.
 
@@ -111,7 +111,10 @@ CELL_POINTS = (
 #: reach the report.
 QUERY = "how do the topic notes relate to each other"
 WRITE_TITLE = "Memory profile probe"
-WRITE_BODY = "A probe note the memory profiler writes through the governed path."
+WRITE_BODY = (
+    "A probe note the memory profiler writes through the governed path.\n\n"
+    "## Observations\n\n- [probe] The memory profiler wrote this note #profile\n"
+)
 #: Threads a cell starts for one-off startup or request follow-up work. A point
 #: is sampled once none is alive (bounded by --settle-seconds), so it measures
 #: the state the work leaves rather than a race with it.
@@ -641,7 +644,7 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
 
     import httpx
 
-    from exomem import model_reaper, server
+    from exomem import model_reaper, operation_entries, server
 
     scratch = Path(args.scratch)
     vault = scratch / "vault"
@@ -657,9 +660,11 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
     app = mcp.http_app(stateless_http=True, json_response=True)
     request_id = 0
 
-    async def call(client: httpx.AsyncClient, name: str, arguments: dict) -> dict[str, Any]:
+    async def call(client: httpx.AsyncClient, command: str, arguments: dict) -> dict[str, Any]:
         nonlocal request_id
         request_id += 1
+        # The cell lists only the public tools; spell the grouped command as the tool that carries it.
+        name, arguments = operation_entries.spell_call(command, arguments, "public")
         payload = {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -692,7 +697,7 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
                 attempts, code, result = 0, None, {}
                 while time.monotonic() < deadline:
                     attempts += 1
-                    result = await call(client, "ask_memory", {"query": QUERY})
+                    result = await call(client, "search_memory", {"query": QUERY})
                     error = result.get("error")
                     code = (error or {}).get("code")
                     if code != "RETRIEVAL_INDEX_WARMING":
@@ -719,12 +724,12 @@ async def _cell_scenario(args: argparse.Namespace, points: list[dict], started: 
 
                 result = await call(
                     client,
-                    "remember",
+                    "create_note",
                     {
                         "content": WRITE_BODY,
                         "title": WRITE_TITLE,
-                        "status": "draft",
-                        "response_detail": "full",
+                        "unlinked_reason": "A probe note that links nothing.",
+                        "detail": "full",
                     },
                 )
                 operational = (result.get("diagnostics") or {}).get("operational") or {}

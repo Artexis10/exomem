@@ -105,7 +105,7 @@ Normalize observations without changing arguments, results or user turns:
   "plugin_enabled": true,
   "observations": [
     {"kind": "user", "text": "What retrieval approach did the sample project choose?"},
-    {"kind": "tool", "name": "bootstrap", "arguments": {}, "result": {}},
+    {"kind": "tool", "name": "read_instructions", "arguments": {}, "result": {}},
     {"kind": "assistant", "text": "actual answer"}
   ]
 }
@@ -120,13 +120,13 @@ the original names in the native export. Installation observations use
 successful native authentication.
 
 For a capture, include `readback` with its own `conversation_id`, `surface`,
-`identity`, timestamp, prompt and observations, including `read_memory(path=...)`
-bound to the write's returned path/reference. Its result and answer must contain
+`identity`, timestamp, prompt and observations, including a `read_page` call
+whose result is the page that the write returned. Its result and answer must contain
 the unique content marker. Give that readback its own native evidence too.
 Its observed user turn must exactly match the separate `prompt` field, without
 supplying the marker or answer. Grounding binds each citation to the page/hit
-containing the marker. `observe_memory` validation is not a capture: acceptance
-requires an add/update with `mutated: true`. Proactive capture requires the live
+containing the marker. An `add_observation` call with `preview: true` is not a capture: acceptance
+requires a saved write (`mutated: true` or a `user_summary`). Proactive capture requires the live
 `engagement.envelope.classes.proactive_capture.disposition` to be `silent`.
 
 Each native record has an `evidence` object:

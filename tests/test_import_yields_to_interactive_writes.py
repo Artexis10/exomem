@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from fastmcp import Client
 
 from exomem import adoption_run, metrics, server, writer_lease
@@ -113,12 +114,12 @@ def test_agent_and_cli_writes_commit_while_an_import_apply_runs(
 
     async def journey() -> tuple[list[dict], dict]:
         async with Client(server.build_server(require_auth=False)) as client:
-            started = asyncio.create_task(client.call_tool("import_memory", apply_args, raise_on_error=False))
+            started = asyncio.create_task(client.call_tool(*public_call("import_memory", apply_args), raise_on_error=False))
             assert await asyncio.to_thread(chunk_running.wait, 30), "the import never reached a chunk"
             gate.touch()
-            agent_write = asyncio.create_task(client.call_tool("create_note", {
+            agent_write = asyncio.create_task(client.call_tool(*public_call("create_note", {
                 "title": "Agent write beside the import", "content": NOTE.format(name="agent"),
-            }, raise_on_error=False))
+            }), raise_on_error=False))
             replies = [(await started).structured_content]
             note = (await agent_write).structured_content
             # The agent's next call comes a turn later, after the writes it waited for.
@@ -126,7 +127,7 @@ def test_agent_and_cli_writes_commit_while_an_import_apply_runs(
             while replies[-1].get("continuation"):
                 operation = {**apply_args["operation"], "continuation": replies[-1]["continuation"]}
                 result = await client.call_tool(
-                    "import_memory", {**apply_args, "operation": operation}, raise_on_error=False
+                    *public_call("import_memory", {**apply_args, "operation": operation}), raise_on_error=False
                 )
                 replies.append(result.structured_content)
             return replies, note

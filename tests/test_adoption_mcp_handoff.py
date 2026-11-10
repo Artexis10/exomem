@@ -43,7 +43,7 @@ def test_continue_adoption_soft_fails_with_no_runs(
     rendered = asyncio.run(prompt.render({}))
     text = rendered.messages[0].content.text
     assert "No open Exomem adoption run" in text
-    assert "import_memory" in text
+    assert "manage_memory(operation='imports.start'" in text
 
 
 def test_continue_adoption_infers_newest_open_run(
@@ -62,9 +62,8 @@ def test_continue_adoption_infers_newest_open_run(
     rendered = asyncio.run(prompt.render({}))
     text = rendered.messages[0].content.text
     assert run_id in text
-    assert "work-item" in text
-    assert "propose" in text
-    assert "import_memory" in text
+    assert "imports.work_item" in text
+    assert "imports.propose" in text
     assert "adoption_studio(" not in text
 
 

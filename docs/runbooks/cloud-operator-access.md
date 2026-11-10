@@ -469,12 +469,12 @@ fi
 
 Then, through the Cloud connector, in one session:
 
-1. Write a note containing the canary, for example with `remember`: "Canary
+1. Write a note containing the canary, for example with `create_note`: "Canary
    note: `<canary>` marks the content-free log check."
-2. Search for it: `ask_memory` with the canary itself.
-3. Recall it: `ask_memory` with a paraphrase ("the note that marks the log
-   check"), then `read_memory` on the note it cites.
-4. Review it: `review_memory` over the note.
+2. Search for it: `search_memory` with the canary itself.
+3. Recall it: `search_memory` with a paraphrase ("the note that marks the log
+   check"), then `read_page` on the note it cites.
+4. Review it: `list_review_items` over the note.
 
 Every step must find the note, or the canary never reached the code paths that
 matter. Then scan straight away, within the hour. A pod replaced in the

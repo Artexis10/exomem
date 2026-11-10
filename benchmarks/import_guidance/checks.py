@@ -118,11 +118,11 @@ def only_scripted_tools(
 
 
 def filed_before_shell_exit(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
-    """A landed window is filed (`import_memory` start or select) while the import command still runs."""
+    """A landed window is filed (`manage_memory` imports.start or imports.select) while the import command still runs."""
     filings = [
         c["t"]
         for c in evidence.calls
-        if c["tool"] == "import_memory" and c.get("kind") in ("start", "select")
+        if c["tool"] == "manage_memory" and c.get("kind") in ("imports.start", "imports.select")
     ]
     if not filings:
         return Outcome("filed_before_shell_exit", FAIL, "no window was filed")

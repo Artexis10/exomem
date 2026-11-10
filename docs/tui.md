@@ -135,7 +135,7 @@ provenance and the managed-service version when one is configured.
   refresh lexical search via mtime checks, but the semantic sidecar drifts
   until a server or `exomem index` pass. The Ask screen's refresh action
   (`u`) clears in-process caches.
-- Binary media import (`/upload`, `process_media`) is not in the TUI yet —
+- Binary media import (`/upload`, `media.process`) is not in the TUI yet —
   capture text, or use adoption for markdown folders.
 - Review depth: proposal-first flows (supersede, compile, accept relations)
   deliberately live in the browser Review Studio; the TUI links to it (the

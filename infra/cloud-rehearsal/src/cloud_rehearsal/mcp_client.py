@@ -297,11 +297,12 @@ class MeasuredSession:
         return ToolResult(structured=structured, is_error=bool(result.isError), seconds=elapsed)
 
     async def governed_write(self, arguments: dict[str, Any], *, timeout: float = 90.0) -> ToolResult:
-        """`remember`, honouring MUTATION_WARMING's own retry_after_ms."""
+        """`create_note` for a note that links nothing, honouring MUTATION_WARMING's own retry_after_ms."""
 
+        note = {"unlinked_reason": "A rehearsal note that links nothing.", **arguments}
         deadline = time.monotonic() + timeout
         while True:
-            result = await self.call("remember", arguments)
+            result = await self.call("create_note", note)
             if result.error_code != "MUTATION_WARMING" or time.monotonic() > deadline:
                 return result
             wait_ms = (result.structured.get("error") or {}).get("retry_after_ms", 500)

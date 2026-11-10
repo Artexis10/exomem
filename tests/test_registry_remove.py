@@ -277,9 +277,14 @@ def test_the_item_context_hands_over_the_registry_hash_and_the_call_that_reverts
     current = call("schema_memory", {"subject": "entity-types", "operation": "inspect"})
     assert context["revert_fingerprint"] == current["content_hash"]
     assert context["dependants"] == [{"key": "venue", "action": "removed"}]
-    arguments = {**context["revert"]["arguments"], "why": "the user undid it"}
-    assert context["revert"]["tool"] == "schema_memory"
-    assert "vocabulary_ref" not in arguments and "vocabulary_fingerprint" not in arguments
+    def with_why(route: dict) -> dict:
+        """The door call that the served revert route names, with the user's reason added."""
+        return {**route["arguments"], "arguments": {**route["arguments"]["arguments"], "why": "the user undid it"}}
+
+    assert context["revert"]["tool"] == "manage_memory"
+    arguments = with_why(context["revert"])
+    assert "vocabulary_ref" not in arguments["arguments"]
+    assert "vocabulary_fingerprint" not in arguments["arguments"]
 
     # A later save changes the hash, so the hash the user was shown no longer applies.
     _save(
@@ -287,12 +292,12 @@ def test_the_item_context_hands_over_the_registry_hash_and_the_call_that_reverts
         {"upsert": {"arena": {**_VENUE, "label": "Arena", "attributes": {"folder": "Arenas"}}}},
         "a later save",
     )
-    stale = call("schema_memory", arguments)
+    stale = call("manage_memory", arguments)
     assert stale["error"]["code"] == "STALE_REGISTRY"
     assert _entity_type_keys(call) == {"venue": "active", "arena": "active"}
 
-    fresh = call("review_item_context", {"ref": ref})["revert"]["arguments"]
-    done = call("schema_memory", {**fresh, "why": "the user undid it"})
+    fresh = call("review_item_context", {"ref": ref})["revert"]
+    done = call("manage_memory", with_why(fresh))
     assert "error" not in done, done
     assert _entity_type_keys(call) == {"arena": "active"}, "the later save stays"
     assert call("review_item_context", {"ref": ref})["revert_fingerprint"] is None, "settled"

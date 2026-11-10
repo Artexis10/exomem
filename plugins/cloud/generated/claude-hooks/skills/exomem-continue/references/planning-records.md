@@ -36,27 +36,25 @@ the operation's `kind` and its fields at the top level.
 
 For recall or correction of an observed event or state, inspect Records
 independently of ordinary Note recall. Raw Records items do not appear there.
-Call `read_records(operation={"kind": "inspect"})` to list admitted collections, then inspect
+Call `query_records()` to list admitted collections, then inspect
 one compatible collection using its returned `manifest_path` as `collection`.
 Run a bounded `query` for the requested identity or declared fields.
 An empty ordinary search does not establish that no matching Record exists.
 If inspection or query refuses, report that unavailable boundary rather than absence.
 For recall, return the matching rows. An authorized correction uses the guarded update below.
-For `update`, copy the returned internal UUID into `item_key`, the row's
-`item_version` into `expected_item_version`, and `snapshot` into
-`expected_container_hash`. Preserve provenance and verify the updated row.
+For `edit_record`, copy the row `id` that `query_records` returned into `record`.
+The server checks the row version and the collection state, and a stale id refuses with
+the current one. Preserve provenance and verify the updated row.
 Do not infer that a matching row exists or create another collection when
 the inventory, schema, or query does not establish one.
 
-For Planning recall or a change, call `read_plans(operation={"kind": "inspect"})` to list admitted
+For Planning recall or a change, call `query_plan_items()` to list admitted
 collections. Copy the chosen `manifest_path` into `collection`, then inspect
 that collection and run a bounded `query` for the requested items.
 For a change, identify exactly one item before choosing a write.
 If collection titles repeat, use their separate manifest paths. For recall,
-return the matching items. For an authorized change, use the returned
-`snapshot` as `expected_container_hash`, and that query row's `plan_id`
-and `item_version` as `plan_id` and `expected_item_version`. These are
-returned identities and versions, not filenames or values to invent.
+return the matching items. For an authorized change, pass that query row's `id` as `plan_item` to
+`edit_plan_item`. It is a returned identity and version, not a filename or a value to invent.
 
 The `area` and `parent` fields require `exomem://plan/<collection-uuid>/<plan-uuid>`
 references. Query the chosen collection for `collection_id` and `plan_id` before
@@ -88,24 +86,24 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|
-| `ask` | "what do I know," "find what I concluded," "show the context" | Reuse turn context; `search_memory(detail="compact", rerank=false)` for gaps, then `read_memory` or `search_memory(deep=true)` as needed |
+| `ask` | "what do I know," "find what I concluded," "show the context" | Reuse turn context; `search_memory(detail="compact", rerank=false)` for gaps, then `read_page` or `search_memory(deep=true)` as needed |
 | `create_note` | "remember this," "save this conclusion," "write this decision" | `create_note`; use `supersede_note` when it supersedes old knowledge |
-| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
-| `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `read_plans` or `change_plans` for intended future state in a configured Planning collection |
-| `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `read_records` or `change_records` for observed state in a configured Record collection |
-| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `read_review/triage_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
-| `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `read_review(operation={'kind': 'relation-queue'})` for the batched read; accept one reviewed candidate via `change_connections(operation={'kind': 'accept-relation'})` (requires the queue fingerprint, target `expected_hash`, and an audit reason; an item with `options` also needs one of them as `requested_relation`, see [governance](governance.md)); reject via `triage_memory` |
-| `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `read_connections/change_connections`; use `operation="context"` for bounded graph, provenance, evidence, and history |
-| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `check_memory(operation={'kind': 'audit'})` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`backfill-ids`/`reconcile` writes run as maintenance jobs that start from a preview's `plan_id` and a `why` |
-| `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `read_schema/change_schema`; infer before saving, and keep governance optional |
+| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | Pick the lane first, then the transport. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
+| `plan` | "save this feature idea," "file this bug for later," "what matters this week" | `query_plan_items` or `add_plan_item` for intended future state in a configured Planning collection |
+| `record` | "a dated measurement," "a completed session," "a transaction," "the current mileage" | `query_records` or `add_record` for observed state in a configured Record collection |
+| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `list_review_items` and `decide_review_item`; explicit dismiss/snooze/reopen via `decide_review_item` |
+| `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `list_review_items(queue='relation_suggestions')` for the batched read; accept one reviewed candidate via `decide_review_item(decision='accept')` (requires an audit reason; an item with `options` also needs one of them as `relation`, see [governance](governance.md)); reject via `decide_review_item` |
+| `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `inspect_memory` and `manage_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
+| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `inspect_memory(operation="imports.scan")` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `inspect_memory(operation="maintenance.audit")` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`backfill-ids`/`reconcile` writes run as maintenance jobs that start from a preview's `plan_id` and a `why` |
+| `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `inspect_memory` and `manage_memory`; infer before saving, and keep governance optional |
 
 Records routing is semantic: use it for durable observed events or current state
 without waiting for a magic verb. When exactly one compatible existing collection
 accepts a sufficiently identified observation, the active engagement policy may
 append or update it and the agent reports the mutation. Ask one focused question
 when collections compete or identity, date, provenance, or ownership is unclear.
-When no collection fits, use `read_records(operation={"kind": "describe"})` and propose a
+When no collection fits, use `inspect_memory(operation="records.describe")` and propose a
 concise collection; the agent must not silently create a long-lived schema.
 A refused Record write is held rather than lost: the response names the failing
 field and returns a `held` reference, so fix the named field and resume by that
@@ -116,7 +114,7 @@ A committed Note or Evidence write may return `records_routing` when its authore
 terms have one clear existing Records home. Read the observation before appending
 under the active capture disposition, and resume a returned held candidate when
 needed; the advisory never writes a record by itself. A strong
-`collection_candidate` is likewise a proposal: use `read_records(operation={"kind": "describe"})`
+`collection_candidate` is likewise a proposal: use `inspect_memory(operation="records.describe")`
 and `validate` to draft a concise schema, ask one question in the user's domain
 language, and create only after that inline confirmation. Backfill only exactly
 dated evidence units, citing each unit or artifact in `sources`; prose notes stay
@@ -150,7 +148,7 @@ title and tags only, compared in a folded form, so `failure`/`failures` and
 never count as shared vocabulary.
 
 A strong route of a failure-shaped note carries a `disposition`, set by the
-user's prominence: `file` (perform the ready `change_records` call without
+user's prominence: `file` (perform the ready `add_record` call without
 asking), `append_occurrence` (perform the ready update payload, which adds the
 note to the existing item it recurs), `ask` (put the one precomposed question
 once and act only on yes), or `hold` (leave it for review). Editing a note that
@@ -168,7 +166,7 @@ horizon, and other mutable state in frontmatter so ordinary updates do not cause
 renames. Treat every managed body block as derived: never edit it as data or read
 values back from it. A guarded item update can refresh one block. For an existing
 UUID-named collection, call
-`check_memory(operation={'kind': 'structured-files', 'collection': ...})` to preview every
+`inspect_memory(operation="maintenance.structured_files", arguments={'collection': ...})` to preview every
 rename, body change, collision, and inbound-link blocker; apply only with the
 returned `plan_id`, `source_snapshot`, and reason. Query a declared Records child
 table with `expand_child`; use `expand_children=true` only when the collection
@@ -180,26 +178,26 @@ Examples:
   `Saved -> <title>`.
 - "What did I conclude about onboarding?" -> reuse current context, search remaining gaps with `search_memory`, cite hits, and
   retry with adjacent terms before treating a miss as meaningful.
-- "Save this article" -> `capture_source` with provenance; ask about compiling
+- "Save this article" -> `save_source` with provenance; ask about compiling
   only if a conclusion is present.
 - "Here's the transcript/screenshot from that session" -> an attachment is raw
-  material, so `capture_source(files=[...])`, classified on both axes. Do not
+  material, so `save_source(files=[...])`, classified on both axes. Do not
   reach for an Evidence command because the file handle was convenient: the
   lane is what the artifact is *for*, and a Source can be promoted to Evidence
   later when it turns out to be proof, while the reverse is refused.
-- "Keep this receipt for the warranty case" -> `preserve_evidence`, `preserve_artifacts`, or `transfer_artifact`, not as a
+- "Keep this receipt for the warranty case" -> `save_evidence`, `save_evidence`, or `upload_files`, not as a
   general note.
 - "I completed a dated training session" -> resolve exactly one compatible
-  collection before `change_records(operation={"kind": "append", ...})`; keep the session as an
+  collection before `add_record(...)`; keep the session as an
   observed Record, not a compiled conclusion. If none fits, propose a collection
   rather than creating one silently.
-- "Show my last three months" -> `read_records(operation={"kind": "query", ...})` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
-- "The second one is done, the rest can wait" -> one landing, two consequences: `change_records(operation={"kind": "append", ...})` for the produced deliverable, then `change_plans(operation={"kind": "triage", ...})` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `browse_memory` when none is named, inspect that exact collection with `read_plans(operation={"kind": "inspect", "collection": ...})`, then resolve the item with `read_plans(operation={"kind": "query", ...})` filtered on the title or a natural-key field plus `lifecycle` and `status`.
-- "Save this feature idea" -> `change_plans(operation={"kind": "add", ...})`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
+- "Show my last three months" -> `query_records(...)` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
+- "The second one is done, the rest can wait" -> one landing, two consequences: `add_record(...)` for the produced deliverable, then `edit_plan_item(...)` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `inspect_memory` when none is named, inspect that exact collection with `query_plan_items(collection=...)`, then resolve the item with `query_plan_items(...)` filtered on the title or a natural-key field plus `lifecycle` and `status`.
+- "Save this feature idea" -> `add_plan_item(...)`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.
 - "Compile these three sources" -> ensure the three originals are already
   captured as Source/Evidence pages (capture any missing originals first), then
   draft a sourced note with
-  `create_note(suggestions=true, response_detail="full")` link suggestions, then
+  `create_note(suggest_links=true, detail="full")` link suggestions, then
   write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
   keep/edit/supersede/archive.
@@ -208,5 +206,5 @@ Examples:
 
 ## Tool parameter notes
 
-- `read_plans` and `change_plans`: `inspect`, `validate` and `query` are read-only (`read_plans`); `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes (`change_plans`). A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `check_memory(operation={'kind': 'structured-files'})` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
-- `read_records` and `change_records`: `item_key` is the item's internal UUID (required for update; on append identity derives from the collection's declared natural key). `expected_container_hash` guards append, update, revise and rebaseline; `expected_manifest_hash` guards revise and rebaseline; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.
+- `query_plan_items` and `add_plan_item`: `inspect`, `validate` and `query` are read-only (`query_plan_items`); `create`, `add`, `update`, `triage`, `revise`, `rebaseline` are guarded writes (`add_plan_item`). A plan's UUID is durable identity, not its filename. New collections can declare human filenames and managed presentation blocks; an existing UUID collection moves only through a read-only `inspect_memory(operation="maintenance.structured_files")` preview followed by exact-plan apply. Never infer completion or horizon changes from elapsed time.
+- `query_records` and `add_record`: `record` is the row id that `query_records` returned (required for `edit_record`; on `add_record` identity derives from the collection's declared natural key). The server binds the collection state itself; `acknowledged_gap_codes` are the exact inspect-reported codes for rebaseline. `delivery` is a receipt-gated artifact-delivery envelope for append only: field mappings are vault-schema-neutral and never set item values or create or loosen a collection. `expand_children` expands the one unambiguous child container; `expand_child` names an exact declared child. `held` resumes a held candidate on append/update (`item`/`changes` supply overrides, null removes a field) or names the one to remove on discard; a refused append/update is held unless `hold=false`.

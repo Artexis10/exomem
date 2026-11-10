@@ -48,7 +48,6 @@ import shutil
 import subprocess
 import sys
 import time
-import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta, timezone
@@ -543,26 +542,26 @@ async def compare_samples(journey: Journey, service: Session) -> None:
 
 async def discover_and_plan(journey: Journey, service: Session) -> None:
     """An installed client can discover and use each first-slice query lifecycle route."""
-    from exomem import tool_surface
+    from exomem import public_surface, public_tools, tool_surface
 
+    listed = {*public_tools.TOOLS, *public_surface.DOORS.values(), *public_surface.PASSTHROUGH_COMMANDS.values()}
     await samples_ready(journey, service)
     described = await service.records(action="describe")
-    expect(described.get("query", {}).get("grammar", {}).get("args", {}).get("name") == "collections"
+    # The grammar route is the listed schema operation, so a client reads it without a retired name.
+    grammar = described.get("query", {}).get("grammar", {})
+    expect(grammar.get("tool") in listed
+           and grammar.get("args", {}).get("arguments", {}).get("name") == "collections"
            and described.get("import", {}).get("zone_rules", {}).get("package") == "tzdata",
-           "store describe omitted query discovery or pinned import zone rules", described)
+           "store describe omitted query discovery or pinned import zone rules",
+           {"keys": sorted(described), "query": described.get("query", {}).get("grammar"),
+            "zone_rules": described.get("import", {}).get("zone_rules")})
     sizes = {}
     for name in ("collections", "import"):
         chapter = await service.call("schema_memory", subject="query-engine", operation="inspect", name=name)
         sizes[name] = len(json.dumps(chapter, ensure_ascii=False, separators=(",", ":")).encode())
         # The query-engine discovery contract fixes the chapter ceiling at 64 KiB.
-        from exomem.command_surface import find_rendering
-        from exomem.commands import PRODUCT_COMMANDS
-
-        route_tool = chapter["route"]["tool"]
-        # Over MCP the route names the listed Records rendering for the served shape.
-        found = find_rendering(route_tool, PRODUCT_COMMANDS)
-        routes_records = route_tool == "record_memory" or (found is not None and found[0].name == "record_memory")
-        expect(chapter["chapter"] == name and routes_records
+        # Over MCP the route names a listed tool that serves the Records route.
+        expect(chapter["chapter"] == name and chapter["route"]["tool"] in listed
                and sizes[name] <= 64 * 1024, "installed query grammar is absent or exceeds its byte bound", chapter)
     for mode in ("compose", "explain", "preview", "dry_run"):
         planned = await service.query({**SAMPLE_DAILY, "mode": mode, "execution_profile": "analytics"}, SAMPLES_ID)
@@ -610,7 +609,7 @@ async def protected_members(journey: Journey, owner: Session, recipient: Session
             try:
                 await recipient.call("read_memory", path=candidate)
             except Refused as refusal:
-                expect(refusal.message.removeprefix("Error calling tool 'read_memory': ") == "[withheld]",
+                expect(refusal.message.removeprefix(f"Error calling tool '{refusal.tool}': ") == "[withheld]",
                        "the member read disclosed a protected path or existence", refusal.message)
             else:
                 raise RuntimeError("the recipient read a protected member or manifest")
@@ -627,6 +626,7 @@ class Refused(RuntimeError):
 
     def __init__(self, tool: str, code: str, message: str, *, error: dict[str, Any] | None = None) -> None:
         super().__init__(f"{tool} refused {code}: {message}")
+        self.tool = tool  # the tool that was called, which the server's fault wrapper names
         self.code = code
         self.message = message
         self.error = error
@@ -686,11 +686,29 @@ def memory_window(service, baseline, *, scope, progress) -> dict[str, Any]:
     return {**result, "status": "observed", "additional_reported_mib": delta / memory_profile.MIB}
 
 
-class Session:
-    """One MCP session on a running service."""
+def public_call(tool: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """The call an agent sends for a grouped-command step; a call that names a listed tool goes as it is.
 
-    def __init__(self, client, timeout: float, *, process_observation=None) -> None:
-        self.client, self.timeout = client, timeout
+    The installed server lists the public tools only. The journey states each step as the command it proves,
+    and the product's own translation spells it as the public call.
+    """
+    from exomem import operation_entries, public_surface, public_tools
+
+    listed = {*public_tools.TOOLS, *public_surface.DOORS.values(), *public_surface.PASSTHROUGH_COMMANDS.values()}
+    if tool in listed:
+        # The reply size is `detail` on every public tool.
+        return tool, {("detail" if key == "response_detail" else key): value for key, value in arguments.items()}
+    return operation_entries.spell_call(tool, arguments, "public")
+
+
+class Session:
+    """One MCP session on a running service.
+
+    `public` is false for the earlier release's service, which lists the grouped commands.
+    """
+
+    def __init__(self, client, timeout: float, *, process_observation=None, public: bool = True) -> None:
+        self.client, self.timeout, self.public = client, timeout, public
         self.process_observation = process_observation
 
     def memory_snapshot(self, *, startup=False) -> dict[str, Any]:
@@ -713,14 +731,16 @@ class Session:
             return {"status": "unavailable", "reason": type(error).__name__}
 
     async def call(self, tool: str, **arguments: Any) -> Any:
+        called, sent = public_call(tool, arguments) if self.public else (tool, arguments)
         result = await asyncio.wait_for(
-            self.client.call_tool(tool, arguments, raise_on_error=False), timeout=self.timeout
+            self.client.call_tool(called, sent, raise_on_error=False), timeout=self.timeout
         )
         if getattr(result, "is_error", False):
             text = "".join(getattr(block, "text", "") for block in result.content)
             # This checks the product's fixed refusal-code format, never the meaning of user text.
             code = re.search(r"\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b", text)
-            raise Refused(tool, code.group(1) if code else "UNKNOWN", text)
+            # The server's fault wrapper names the tool that was called, so the refusal carries that name.
+            raise Refused(called, code.group(1) if code else "UNKNOWN", text)
         data = getattr(result, "structured_content", None)
         if data is None:
             data = loop._result_data(result)
@@ -783,7 +803,7 @@ class RestOwner(Session):
     """The authenticated owner REST facade on the recipient's running writer."""
 
     def __init__(self, base_url: str, journey: Journey) -> None:
-        super().__init__(None, journey.timeout)
+        super().__init__(None, journey.timeout, public=False)  # REST keeps the grouped command names
         self.base_url, self.token = base_url, journey.rest_key
 
     async def call(self, tool: str, **arguments: Any) -> Any:
@@ -901,7 +921,7 @@ class Journey:
                 raise RuntimeError(
                     f"service '{label}' did not start ({error})\n--- {log.name} tail ---\n{tail}"
                 ) from error
-            yield Session(client, self.timeout, process_observation=observation)
+            yield Session(client, self.timeout, process_observation=observation, public=python is None)
 
     def observed_server(self, label: str, *arguments: str, process_observation=None) -> list[str]:
         """Launch the same installed module with temporary failure-only observation."""
@@ -1051,8 +1071,9 @@ ENROLMENT_REQUIRED = "COLLECTION_STORE_ENROLLMENT_REQUIRED"
 SERVICE_ACTIVE = "COLLECTION_STORE_SERVICE_ACTIVE"
 #: What the owner's offline enrolment leaves in the vault: the replica and the routing marker.
 STORE_FILES = ("Knowledge Base/_Collections/collections.sqlite", "Knowledge Base/_Collections/mode.json")
+#: The Planning items by label. The server mints each item's id; `plan_ids` maps a label to it.
 PLAN_ITEMS = {
-    "b4596ce9-10fd-4856-a26e-89d8be72b0db": {
+    "delivery": {
         "title": "Reliable Planning delivery",
         "kind": "outcome",
         "status": "planned",
@@ -1060,7 +1081,7 @@ PLAN_ITEMS = {
         "commitment": "considering",
         "horizon": "year",
     },
-    "95a51c93-7873-4262-a9ba-bc3ae7ed362b": {
+    "edge-case": {
         "title": "Investigate planning query edge case",
         "tags": ["bug"],
     },
@@ -1093,18 +1114,20 @@ async def create_file_collections(journey: Journey, service: Session) -> None:
         manifest_text=planning["manifest_text"],
         why="file Planning collection B, created before the store",
     )
-    for plan_id, item in PLAN_ITEMS.items():
-        await service.mutate(
+    plan_ids = {}
+    for label, item in PLAN_ITEMS.items():
+        added = await service.mutate(
             "plan_memory",
             action="add",
             collection=planning["collection"],
-            plan_id=plan_id,
             item=item,
             why="file Planning item",
         )
+        plan_ids[label] = added["plan_id"]
     journey.file_collections = {
         "records": records["collection"],
         "planning": planning["collection"],
+        "plan_ids": plan_ids,
         "digests": {},
     }
     journey.file_collections["digests"] = file_digests(journey)
@@ -1140,7 +1163,7 @@ async def file_collections_unchanged(journey: Journey, service: Session, when: s
         lifecycle="all",
     )
     expect(
-        {row["plan_id"] for row in plan["rows"]} == set(PLAN_ITEMS),
+        {row["plan_id"] for row in plan["rows"]} == set(journey.file_collections["plan_ids"].values()),
         f"file Planning collection B answered wrongly {when}",
         plan,
     )
@@ -1149,13 +1172,13 @@ async def file_collections_unchanged(journey: Journey, service: Session, when: s
 async def preserve_export(journey: Journey, service: Session) -> None:
     """S1.0: the owner keeps the raw export as Evidence; its receipt must match the bytes."""
     receipt = await service.mutate(
-        "preserve_evidence",
+        "save_evidence",
         scope=EXPORT_SCOPE,
         category=EXPORT_CATEGORY,
-        filename=EXPORT_FILENAME,
-        content=journey.export.decode("utf-8"),
+        name=EXPORT_FILENAME,
+        text=journey.export.decode("utf-8"),
         description="invented workout-summary export",
-        raw_protection=True,
+        options={"raw_protection": True},
     )
     journey.source_receipt = receipt
     digest = hashlib.sha256(journey.export).hexdigest()
@@ -1543,7 +1566,7 @@ async def field_release_journey(journey: Journey) -> None:
                         await recipient.call("read_memory", path=path)
                     except Refused as refusal:
                         # The terminal RAW gate serves this fixed opaque token on MCP, including errors.
-                        message = refusal.message.removeprefix("Error calling tool 'read_memory': ")
+                        message = refusal.message.removeprefix(f"Error calling tool '{refusal.tool}': ")
                         expect(refusal.code == "UNKNOWN" and message == "[withheld]",
                                "the RAW read did not return its opaque refusal", refusal.message)
                         messages.append(refusal.message)
@@ -1693,9 +1716,9 @@ async def narrowing_rollback(journey: Journey) -> None:
             # Identical starts return the completed job; a distinct source gives rollback live work to stop.
             stoppable_export = journey.export + b"\n"
             receipt = await service.mutate(
-                "preserve_evidence", scope=EXPORT_SCOPE, category=EXPORT_CATEGORY,
-                filename="rollback-workouts.ndjson", content=stoppable_export.decode("utf-8"),
-                description="invented export for the interrupted rollback job", raw_protection=True,
+                "save_evidence", scope=EXPORT_SCOPE, category=EXPORT_CATEGORY,
+                name="rollback-workouts.ndjson", text=stoppable_export.decode("utf-8"),
+                description="invented export for the interrupted rollback job", options={"raw_protection": True},
             )
             expect(receipt.get("state") == "stored"
                    and receipt.get("hash") == hashlib.sha256(stoppable_export).hexdigest(),
@@ -1717,7 +1740,7 @@ async def narrowing_rollback(journey: Journey) -> None:
                                  item={"occurred_on": "2026-08-05", "title": "After rollback", "status": "completed"},
                                  why="prove file Records stays writable")
             await service.mutate("plan_memory", action="add", collection=journey.file_collections["planning"],
-                                 plan_id=str(uuid.uuid4()), item={"title": "After rollback", "tags": ["bug"]},
+                                 item={"title": "After rollback", "tags": ["bug"]},
                                  why="prove file Planning stays writable")
             await asyncio.sleep(1.2)  # Cross a normal background tick while the import remains disabled.
             after = snapshot_state(journey, "after-rollback")
@@ -1744,6 +1767,8 @@ NATIVE_RECORDS_KEY = "5a1f6c0e-3d2b-4b7a-9c18-2e4d7f6a8b90"
 STORAGE_IDENTITY = frozenset({
     "generated_at", "snapshot", "source_versions", "item_version", "rendered", "expected_container_hash",
     "projection",
+    # A row's `id` ends with its item version, so it differs between the two modes as `item_version` does.
+    "id",
 })
 #: Bound for the service's background view work (an item's view file, the start census adopting an edit).
 EDIT_BACK_WINDOW = 30.0
@@ -1893,9 +1918,10 @@ async def compatible_rollback(copied: Journey, settled: dict[str, Any]) -> dict[
                 changes={"title": title}, expected_container_hash=rows["snapshot"],
                 expected_item_version=row["item_version"], why="verify the compatible application write")
             plan = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
-            item = next(key for key, values in PLAN_ITEMS.items() if "priority" in values)
+            label = next(key for key, values in PLAN_ITEMS.items() if "priority" in values)
+            item = copied.file_collections["plan_ids"][label]
             row = next(row for row in plan["rows"] if row["plan_id"] == item)
-            priority = PLAN_ITEMS[item]["priority"]
+            priority = PLAN_ITEMS[label]["priority"]
             expect(row["priority"] != priority, "the rollback fixture has no distinct Planning update")
             await service.mutate_released(
                 "plan_memory", action="update", collection=planning, plan_id=item, changes={"priority": priority},
@@ -1972,9 +1998,8 @@ async def store_mode_writes(journey: Journey, service: Session, summary_before: 
                                      columns=["occurred_on", "title", "status"], limit=20)
         row = next(row for row in rows["rows"] if row["record_id"] == NATIVE_RECORDS_KEY)
         updated = await service.mutate(
-            "record_memory", action="update", collection=records, item_key=NATIVE_RECORDS_KEY,
-            changes={"title": "Native row corrected"}, expected_container_hash=rows["snapshot"],
-            expected_item_version=row["item_version"], why="Records correction written in store mode")
+            "record_memory", action="update", collection=records, item_id=row["id"],
+            changes={"title": "Native row corrected"}, why="Records correction written in store mode")
         expect(updated["operation"] == "update", "the store-mode update did not commit", updated)
         inspected = await service.records(action="inspect", collection=records)
         title = inspected["contract"]["title"]
@@ -2009,12 +2034,11 @@ async def store_mode_writes(journey: Journey, service: Session, summary_before: 
             expect(False, "history lacks the native entries or exact imported events", history)
 
     with journey.step("7. Planning in store mode: one update"):
-        item = "b4596ce9-10fd-4856-a26e-89d8be72b0db"
+        item = journey.file_collections["plan_ids"]["delivery"]
         plan = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")
         row = next(row for row in plan["rows"] if row["plan_id"] == item)
         updated = await service.mutate(
-            "plan_memory", action="update", collection=planning, plan_id=item, changes={"priority": "low"},
-            expected_container_hash=plan["snapshot"], expected_item_version=row["item_version"],
+            "plan_memory", action="update", collection=planning, item_id=row["id"], changes={"priority": "low"},
             why="Planning update written in store mode")
         expect(updated["operation"] == "update", "the store-mode Planning update did not commit", updated)
         after = await service.call("plan_memory", action="query", collection=planning, limit=20, lifecycle="all")

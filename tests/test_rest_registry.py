@@ -1049,7 +1049,8 @@ def test_review_memory_route_and_openapi_params(vault, monkeypatch: pytest.Monke
     triage_schema = doc["paths"]["/api/triage_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
-    assert {"ref", "action"} <= set(triage_schema.get("required", []))
+    # `item_id` replaces `ref`, so the leaf validates which one a call needs.
+    assert {"ref", "action", "item_id"} <= set(triage_schema["properties"])
 
 
 def test_review_memory_activation_route(vault, monkeypatch: pytest.MonkeyPatch) -> None:

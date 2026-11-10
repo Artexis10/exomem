@@ -443,21 +443,16 @@ def test_registry_mcp_rest_openapi_and_cli_share_closed_adoption_contract(
     registry_schema = next(item for item in command.params if item.name == "adoption").schema
     assert registry_schema is not None
     registry_schema = registry_schema["anyOf"][0]
-    tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
-    mcp_schema = tools["preserve_artifacts"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
-        "inputSchema"
-    ]["properties"]["adoption"]
     rest = TestClient(mcp.http_app())
     openapi_schema = rest.get("/api/openapi.json").json()["paths"][
         "/api/preserve_artifacts"
     ]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"][
         "adoption"
     ]
-    for projected in (mcp_schema, openapi_schema):
-        assert projected["type"] == registry_schema["type"] == "object"
-        assert projected["properties"] == registry_schema["properties"]
-        assert projected["required"] == registry_schema["required"]
-        assert projected["additionalProperties"] is False
+    assert openapi_schema["type"] == registry_schema["type"] == "object"
+    assert openapi_schema["properties"] == registry_schema["properties"]
+    assert openapi_schema["required"] == registry_schema["required"]
+    assert openapi_schema["additionalProperties"] is False
 
     arguments = {
         "scope": "synthetic-case",
@@ -470,15 +465,21 @@ def test_registry_mcp_rest_openapi_and_cli_share_closed_adoption_contract(
         ],
         "adoption": {**_adoption(), "unknown": True},
     }
+    # MCP carries the leaf's `adoption` envelope in `save_evidence.options`; the leaf closes it.
+    mcp_arguments = {
+        "scope": arguments["scope"],
+        "category": arguments["category"],
+        "files": arguments["files"],
+        "options": {"adoption": arguments["adoption"]},
+    }
     with principal.request_scope(principal.owner_principal(surface="mcp")):
-        mcp_result = asyncio.run(
-            mcp.call_tool("preserve_artifacts", arguments, run_middleware=False)
-        )
+        mcp_result = asyncio.run(mcp.call_tool("save_evidence", mcp_arguments))
     mcp_payload = (
         mcp_result.structured_content
         if isinstance(mcp_result.structured_content, dict)
         else json.loads(mcp_result.content[0].text)
     )
+    mcp_payload = mcp_payload.get("result", mcp_payload)
     rest_response = rest.post(
         "/api/preserve_artifacts",
         headers={"Authorization": "Bearer synthetic-key"},
@@ -535,18 +536,17 @@ def test_delivery_registry_mcp_and_openapi_close_nested_platform_proof(
         "content"
     ]["application/json"]["schema"]["properties"]["delivery"]
     tools = {item.name: item for item in asyncio.run(mcp.list_tools())}
-    # MCP lists Records writes as `change_records`; delivery belongs to its append variant.
-    variants = tools["change_records"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
+    # MCP lists the append as `add_record`; the leaf's `delivery` rides in its `options` bag.
+    options = tools["add_record"].to_mcp_tool().model_dump(mode="json", by_alias=True)[
         "inputSchema"
-    ]["properties"]["operation"]["oneOf"]
-    append = next(item for item in variants if item["properties"]["kind"].get("const") == "append")
-    mcp_delivery = append["properties"]["delivery"]
+    ]["properties"]["options"]
+    assert "delivery" in options["description"]
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "record_memory")
     registry_delivery = next(item for item in command.params if item.name == "delivery").schema
     assert registry_delivery is not None
     registry_delivery = registry_delivery["anyOf"][0]
 
-    for delivery in (registry_delivery, mcp_delivery, openapi_delivery):
+    for delivery in (registry_delivery, openapi_delivery):
         assert delivery["type"] == "object"
         assert delivery["additionalProperties"] is False
         proof = delivery["properties"]["platform_proof"]

@@ -199,11 +199,10 @@ def test_remember_declares_the_new_default_on_its_tool_surface() -> None:
     prose — the prose is free to be reworded, the schema contract is not.
     """
     schema = json.loads(_TOOL_SCHEMAS.read_text(encoding="utf-8"))
-    suggestions = schema["create_note"]["inputSchema"]["properties"]["suggestions"]
-    assert suggestions["default"] is False
-
-    # Loose prose check: the description must still name the way back on.
-    assert "suggestions=true" in suggestions["description"].lower()
+    suggestions = schema["create_note"]["inputSchema"]["properties"]["suggest_links"]
+    # The wire leaves the knob unset and the leaf reads that as off; a schema default of true would turn it on.
+    assert suggestions["type"] == "boolean" and suggestions.get("default") is not True
+    assert "link" in suggestions["description"].lower()
 
     # Python defaults must agree with the wire schema, and the shared leaf with
     # both, or the CLI and MCP surfaces would diverge.

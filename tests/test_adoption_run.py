@@ -214,11 +214,11 @@ def test_a_run_serves_its_pack_suggestions_in_the_spelling_of_the_surface_readin
     vault = _legacy_vault(tmp_path)
     grouped = set(operation_entries.OPERATIONS)
     run = adoption_run.start(vault, today=TODAY)
-    nested = capabilities.ActiveSurfaceDescriptor(
-        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
     )
 
-    with capabilities.active_surface(nested):
+    with capabilities.active_surface(public):
         served = adoption_run.status(vault, run_id=run["run_id"])
 
     assert {name for name in grouped if name in json.dumps(run["pack_suggestions"])}

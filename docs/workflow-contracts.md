@@ -17,7 +17,7 @@ being saved; preview and save it with a reason to make the choice durable.
 Planning always owns intended future state and Records always owns observed
 events. A companion contract only declares opaque artifact ownership; it does
 not call a tool, synchronize data, establish authority, or complete Planning.
-Use `review_memory(mode="plan-progress")` and `unreflected_outcomes` to review
+Use `list_review_items(queue="plan_progress")` and `unreflected_outcomes` to review
 the feedback loop, then make an explicit Planning transition when appropriate.
 
 Older vaults may report `WORKFLOW_CONTRACT_MIGRATION_REQUIRED`. Resolve the

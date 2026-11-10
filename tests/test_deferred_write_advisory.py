@@ -798,7 +798,7 @@ def test_advisory_result_pending_ready_failed_superseded_wire_shapes_are_closed(
     assert set(ready) == {"mode", "ref", "status", "advisories"}
     assert ready["status"] == "ready"
     for advisory in ready["advisories"]:
-        assert set(advisory) == {"warning", "ref", "fingerprint"}
+        assert set(advisory) == {"warning", "ref", "fingerprint", "id"}
         assert _REVIEW_REF_RE.match(advisory["ref"]), advisory["ref"]
         assert re.fullmatch(r"[0-9a-f]{24}", advisory["fingerprint"])
         assert isinstance(advisory["warning"], str) and advisory["warning"]
@@ -870,19 +870,17 @@ def test_write_advisory_result_mode_has_mcp_rest_cli_surface_parity(vault: Path)
             encoding="utf-8"
         )
     )
-    from jsonschema import ValidationError, validate
+    from jsonschema import validate
 
     from exomem.operation_entries import spell_call
 
     name, arguments = spell_call(
-        "review_memory", {"mode": "write-advisory-result", "ref": "advisory-ref"}, "nested"
+        "review_memory", {"mode": "write-advisory-result", "ref": "advisory-ref"}, "public"
     )
-    assert name == "read_review"
-    assert arguments == {"operation": {"kind": "write-advisory-result", "ref": "advisory-ref"}}
+    assert name == "inspect_memory"
+    assert arguments == {"operation": "review.advisory_result", "arguments": {"ref": "advisory-ref"}}
     schema = schemas[name]["inputSchema"]
     validate(arguments, schema)
-    with pytest.raises(ValidationError):
-        validate({"operation": {"kind": "write-advisory-result"}}, schema)
 
 
 # ---------------------------------------------------------------------------

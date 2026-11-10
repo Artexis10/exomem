@@ -11,7 +11,7 @@ to return.
 
 | Layer | What it is | Example |
 | --- | --- | --- |
-| Exomem product commands | Product MCP/REST/CLI commands that read and write the KB | `search_memory`, `read_memory`, `create_note`, `capture_source`, `review_memory` |
+| Exomem product commands | Product MCP/REST/CLI commands that read and write the KB | `search_memory`, `read_page`, `create_note`, `save_source`, `list_review_items` |
 | Context packs | Retrieval-time evidence bundles returned by `search_memory(deep=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
 | Knowledge packs | Product/domain guidance selected during setup | technical, creative, legal/warranty, personal records |
 | Workflow skills | Agent-visible workflows for common user intent | `exomem-continue`, `exomem-capture`, `exomem-review` |

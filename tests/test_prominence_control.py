@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 
 from exomem import commands, prominence, writer_lease
 from exomem.governance.principal import RequestPrincipal, request_scope
@@ -231,19 +232,19 @@ def test_mcp_setting_is_visible_to_a_new_client(vault, monkeypatch, level):
 
     async def scenario():
         async with Client(mcp) as first:
-            inspected = await first.call_tool("configure_memory", {"action": "inspect"})
+            inspected = await first.call_tool(*public_call("configure_memory", {"action": "inspect"}))
             before = inspected.data
             saved = await first.call_tool(
-                "configure_memory",
+                *public_call("configure_memory",
                 {
                     "action": "set",
                     "prominence": level,
                     "expected_revision": before["revision"],
-                },
+                }),
             )
             assert saved.data["engagement"]["level"] == level
         async with Client(mcp) as second:
-            result = await second.call_tool("bootstrap", {"profile": "compact"})
+            result = await second.call_tool(*public_call("bootstrap", {"profile": "compact"}))
             assert result.data["engagement"]["level"] == level
 
     asyncio.run(scenario())
@@ -505,26 +506,26 @@ def test_two_clients_of_one_identity_split_by_engagement_context(vault, monkeypa
 
     async def scenario():
         async with Client(mcp) as coding:
-            inspected = await coding.call_tool("configure_memory", {"action": "inspect"})
+            inspected = await coding.call_tool(*public_call("configure_memory", {"action": "inspect"}))
             saved = await coding.call_tool(
-                "configure_memory",
+                *public_call("configure_memory",
                 {
                     "action": "set",
                     "prominence": "balanced",
                     "expected_revision": inspected.data["revision"],
                     "context": "coding",
-                },
+                }),
             )
             assert saved.data["context"] == "coding"
             assert saved.data["contexts"] == {"coding": "balanced"}
         async with Client(mcp) as another_coding_client:
-            result = await another_coding_client.call_tool("bootstrap", {"profile": "compact"})
+            result = await another_coding_client.call_tool(*public_call("bootstrap", {"profile": "compact"}))
             assert result.data["engagement"]["level"] == "balanced"
             assert result.data["engagement"]["context"] == "coding"
             assert result.data["engagement"]["source"] == "preference:context"
         presenting["client_name"] = "claude.ai"
         async with Client(mcp) as conversational:
-            result = await conversational.call_tool("bootstrap", {"profile": "compact"})
+            result = await conversational.call_tool(*public_call("bootstrap", {"profile": "compact"}))
             assert result.data["engagement"]["context"] == "conversation"
             assert result.data["engagement"]["level"] == "maximal"
             assert result.data["engagement"]["source"] == "default"

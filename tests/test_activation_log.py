@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 
 from exomem import command_surface, commands, query_log, usage
 from exomem.governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
@@ -253,7 +254,7 @@ def test_mcp_activation_has_one_dispatch_and_one_leaf(vault, monkeypatch) -> Non
 
     async def invoke():
         async with Client(server.build_server(require_auth=False)) as client:
-            result = await client.call_tool("activate_context", {"turn": " "})
+            result = await client.call_tool(*public_call("activate_context", {"turn": " "}))
             assert result.data["abstained"] is True
 
     asyncio.run(invoke())

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from test_media_store import selected_store as _selected_store  # noqa: F401 - shared encrypted-store fixture
 
 from exomem import commands, media_engines, reserved_paths, server
@@ -34,10 +35,10 @@ def test_selected_cloud_cell_lists_video_and_status(vault, monkeypatch):
     mcp = server.build_server(require_auth=True)
     try:
         tools = asyncio.run(mcp.list_tools())
-        media = next(tool for tool in tools if tool.name == "read_media")
-        kinds = {branch["properties"]["kind"]["const"]
-                 for branch in media.parameters["properties"]["operation"]["oneOf"]}
-        assert kinds == {"video", "status"}
+        reads = next(tool for tool in tools if tool.name == "inspect_memory")
+        operations = set(reads.parameters["properties"]["operation"]["enum"])
+        assert {"media.video", "media.status"} <= operations
+        assert "media.image" not in operations
     finally:
         mcp._exomem_local_runtime_activation._shutdown.set()
 
@@ -441,7 +442,7 @@ time.sleep(30)
 
     async def call_and_cancel():
         call = asyncio.create_task(mcp.call_tool(
-            "read_media", {"operation": {"kind": "video", "path": path}}, run_middleware=True))
+            *public_call("read_media", {"operation": {"kind": "video", "path": path}}), run_middleware=True))
         try:
             until = time.monotonic() + 8
             while not (vault / "stalled").exists():
@@ -585,8 +586,8 @@ def test_registered_cloud_read_hydrates_retained_video_and_returns_native_jpegs(
     began = time.monotonic()
     try:
         result = asyncio.run(mcp.call_tool(
-            "read_media", {"operation": {"kind": "video", "path": captured.path, "max_frames": 2,
-                                           "max_side": "original"}},
+            *public_call("read_media", {"operation": {"kind": "video", "path": captured.path, "max_frames": 2,
+                                           "max_side": "original"}}),
             run_middleware=True,
         ))
     finally:

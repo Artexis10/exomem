@@ -204,9 +204,16 @@ def test_plan_memory_create_makes_a_summary_collection_whose_hierarchy_and_saved
     def summary_pages():
         return [path for path in files_under(root, ROADMAP_FOLDER) if path.startswith("Summary/")]
 
-    _until(lambda: len(summary_pages()) == 1 + len(inspected["saved_views"])
-           and not any(path.rsplit("/", 1)[-1].startswith(".") for path in summary_pages()), 30)
-    pages = summary_pages()
+    # Judge the listing that met the condition: a later publish may begin its aside file a moment after.
+    settled: list[str] = []
+
+    def only_the_pages():
+        settled[:] = summary_pages()
+        return len(settled) == 1 + len(inspected["saved_views"]) and not any(
+            path.rsplit("/", 1)[-1].startswith(".") for path in settled)
+
+    _until(only_the_pages, 30)
+    pages = settled
     assert len(pages) == 1 + len(inspected["saved_views"]) and len(pages) <= 16
     assert "Summary/_summary.md" in pages
     assert not (root / ROADMAP_FOLDER / "Items").exists()

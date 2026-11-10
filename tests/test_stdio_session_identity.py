@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _public_call import public_call
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
@@ -55,7 +56,7 @@ def test_every_call_on_one_stdio_connection_reports_one_session(
 ) -> None:
     async def three_calls(client: Client) -> None:
         for _ in range(3):
-            await client.call_tool("bootstrap", {}, raise_on_error=False)
+            await client.call_tool(*public_call("bootstrap", {}), raise_on_error=False)
 
     _in_connection(stdio_env, three_calls)
 
@@ -78,7 +79,7 @@ def test_a_notice_one_stdio_connection_created_is_told_to_the_next_connection_no
         }
         for _ in range(60):
             created = await client.call_tool(
-                "change_connections", {"operation": operation}, raise_on_error=False
+                *public_call("change_connections", {"operation": operation}), raise_on_error=False
             )
             outcome = (created.structured_content or {}).get("result") or {}
             if (outcome.get("error") or {}).get("code") != "MUTATION_WARMING":
@@ -89,7 +90,7 @@ def test_a_notice_one_stdio_connection_created_is_told_to_the_next_connection_no
 
     async def read(client: Client) -> dict[str, int]:
         result = await client.call_tool(
-            "bootstrap", {"section": "epistemics"}, raise_on_error=False
+            *public_call("bootstrap", {"section": "epistemics"}), raise_on_error=False
         )
         block = (result.structured_content or {}).get("due_state") or {}
         return dict(block.get("categories") or {})

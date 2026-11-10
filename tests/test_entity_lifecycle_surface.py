@@ -855,7 +855,7 @@ def test_every_carrier_file_states_the_cadence_bounds_on_its_own() -> None:
     ):
         block = _lifecycle_block(path)
         folded = block.casefold()
-        assert "'limit': 3" in block, path
+        assert "limit=3" in block, path
         assert "once per session" in folded, path
         assert "at most three candidates" in folded, path
         assert ("do not rescan" in folded) or ("do not repeat" in folded), path
@@ -879,7 +879,7 @@ def test_portable_skill_and_operation_reference_carry_the_same_lifecycle() -> No
         assert "resolve exact and alias" in prose
         assert "stop on ambiguity" in prose
         assert "hydrate" in prose
-        assert "save-entity-types" in combined
+        assert "schema.save_entity_types" in combined
         assert "person | organization | concept | library | decision" not in combined
 
 

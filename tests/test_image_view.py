@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from _public_call import public_call
 from test_upload_endpoint import _ASGIClient
 
 from exomem import commands, download_links, server, server_transfer
@@ -72,7 +73,7 @@ def _call(mcp, operation: dict):
     from exomem.governance.principal import owner_principal, request_scope
 
     with request_scope(owner_principal(surface="mcp")):
-        return asyncio.run(mcp.call_tool("read_media", {"operation": operation}, run_middleware=True))
+        return asyncio.run(mcp.call_tool(*public_call("read_media", {"operation": operation}), run_middleware=True))
 
 
 def test_agent_sees_a_preserved_photo_upright_and_downscaled(served, vault):
@@ -253,7 +254,7 @@ def test_a_raw_the_decoder_runs_out_of_memory_on_names_the_download(served, monk
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 
     assert "IMAGE_TOO_LARGE" in refused
-    assert "transfer_artifact operation=download" in refused
+    assert "download_files(pages=" in refused
 
 
 def test_a_damaged_camera_raw_is_named_undecodable(served):
@@ -272,7 +273,7 @@ def test_a_format_without_a_decoder_names_the_download_instead(served):
     refused = json.dumps(_call(mcp, {"kind": "image", "path": path}).structured_content)
 
     assert "IMAGE_FORMAT_UNSUPPORTED" in refused
-    assert "transfer_artifact operation=download" in refused
+    assert "download_files(pages=" in refused
 
 
 def test_download_link_is_short_and_serves_the_exact_original(served, vault):
@@ -365,7 +366,7 @@ def test_an_image_too_large_to_decode_names_the_download(served, monkeypatch):
 
     assert "IMAGE_TOO_LARGE" in refused
     assert (9000, 6000) not in decoded, "the canvas was decoded before the size check"
-    assert "transfer_artifact operation=download" in refused
+    assert "download_files(pages=" in refused
     # A PNG decodes at full size whatever is asked, so a smaller request would fail the same way.
     assert "smaller max_side" not in refused
 

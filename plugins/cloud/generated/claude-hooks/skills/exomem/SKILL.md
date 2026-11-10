@@ -2,15 +2,17 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 4975fe30d2c7a70041982ec461f08b2ac344890ced60dacd550d6721cb91fe74
+  skill_contract: 44ea482ab4e0c18622db26fd0a2039ed26c96ebdadad512ff94d91c6e02250cf
   version: "0.32.0"
 ---
 
 # Exomem
 
-MCP calls use the typed `operation` object shown by discovery. REST and CLI calls
-keep their grouped command selectors. Choose the published tool and one `operation.kind`;
-keep file attachments in the top-level `files` field.
+MCP calls use the typed tools shown by discovery; each takes its own fields.
+`inspect_memory` (reads) and `manage_memory` (writes) take `operation`, named
+`<area>.<action>`, and `arguments`. Call `read_instructions(topic=<tool or operation>)`
+for the arguments and one example. REST and CLI calls keep their grouped command
+selectors. Keep file attachments in the top-level `files` field.
 
 Exomem is the connector/MCP; the Knowledge Base is the governed layer inside a
 markdown vault (Obsidian optional). Keep temporary working context in the current
@@ -36,19 +38,19 @@ Use product tools so validation, indexes, logs, and provenance stay governed.
 
 Load only the tools needed for the current intent. With deferred discovery,
 Claude Code can use `ToolSearch("select:search_memory")` for a lookup, then discover
-`read_memory` after selecting a hit. Other harnesses use their own tool discovery
+`read_page` after selecting a hit. Other harnesses use their own tool discovery
 or directly call already exposed tools; `select:` is not a portable requirement.
 Do not preload the mutation/media catalogue for recall.
 
-Use `bootstrap(operation={"kind": "instructions", "profile": "session", "skill_contract": <metadata.skill_contract>})` once
+Use `read_instructions(profile="session", skill_contract=<metadata.skill_contract>)` once
 when this session lacks the current `engagement` (including `envelope`) or active
 capability information. Reuse it until policy, connection, adapter, or returned
-vault configuration/registry state changes. Inspect the exposed bootstrap schema: if it lacks
-`skill_contract`, request `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` directly. Otherwise request session;
+vault configuration/registry state changes. Inspect the exposed `read_instructions` schema: if it lacks
+`skill_contract`, request `read_instructions(profile='compact')` directly. Otherwise request session;
 if the server rejects the session profile or argument, request compact once.
 `session_profile_unavailable` marks compact fallback, not loaded session rules. The static skill
 cannot tell you a user's current overrides. Generic MCP clients without this skill
-obtain their portable operating contract from compact bootstrap. Use
+obtain their portable operating contract from compact `read_instructions`. Use
 `profile="diagnostics"` only when investigating compute, timing, reranking, or
 retrieval configuration.
 Never recommend an unavailable command: `available_product_tools` belongs to the
@@ -60,26 +62,26 @@ session unless it changes. For large reference manuals, read the relevant
 operation or page-type section, not the entire catalogue. Paths are relative to this skill package: use the
 harness's filesystem or bundled-resource reader. Do not bulk-load references.
 If a required reference cannot be read, obtain the portable contract through
-bootstrap; do not improvise a mutation whose rules remain unavailable.
+`read_instructions`; do not improvise a mutation whose rules remain unavailable.
 
 | Current intent | Tools to discover as needed | Required procedure |
 |---|---|---|
-| Ordinary recall | `recall_context` for a turn with no prior context, then `search_memory` and `read_memory`; `browse_memory` for structure | The short recall loop below suffices |
-| Filtered/unit/media recall, unresolved identities, or retrieval diagnostics | `search_memory`, `read_memory`, `read_connections/change_connections`, `read_memory`, `read_media` | [recall](references/recall.md) |
-| Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `create_note`, `prepare_note/change_observations`, `edit_note`, `supersede_note`, `capture_source`, `prepare_note`, `read_connections/change_connections` | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
-| Preserve or retrieve original files, process media | `capture_source`, `preserve_evidence`, `preserve_artifacts`, `transfer_artifact`, `read_media/change_media`, `read_media` | [operation routing and transport](references/operation-routing.md); [mutation results](references/mutation-results.md) before any mutation |
-| Save intent or observed events; interpret an ambiguous action | `read_plans`, `change_plans`, `read_records`, `change_records`, `browse_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
-| Record what a conversation worked on, decided and left open | `record_episode/read_episode` | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
+| Ordinary recall | `recall_context` for a turn with no prior context, then `search_memory` and `read_page`; `inspect_memory` for structure | The short recall loop below suffices |
+| Filtered/unit/media recall, unresolved identities, or retrieval diagnostics | `search_memory`, `read_page` (`part="units"` lists unit ids), `inspect_memory` (`connections.*`, `media.*`) | [recall](references/recall.md) |
+| Capture/compile/edit a conclusion or entity, connect or supersede knowledge | `create_note`, `add_observation`, `edit_note`, `supersede_note`, `save_source`, `inspect_memory` and `manage_memory` (`connections.*`) | [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
+| Preserve or retrieve original files, process media | `save_source`, `save_evidence`, `upload_files`, `download_files`, `inspect_memory` and `manage_memory` (`media.*`) | [operation routing and transport](references/operation-routing.md); [mutation results](references/mutation-results.md) before any mutation |
+| Save intent or observed events; interpret an ambiguous action | `query_plan_items`, `add_plan_item`, `edit_plan_item`, `query_records`, `add_record`, `edit_record`, `inspect_memory` | [Planning and Records](references/planning-records.md); [mutation results](references/mutation-results.md) before any mutation |
+| Record what a conversation worked on, decided and left open | `save_episode`, `inspect_memory` (`episodes.*`) | [engagement](references/engagement.md); [mutation results](references/mutation-results.md) before any mutation |
 | Learn from a context miss or source-backed feedback | Existing recall and governed write tools | [context learning](references/context-learning.md) |
-| Bring a folder, ZIP or notes export into the Knowledge Base | `read_import` and `import_memory`; on Cloud also `observe_transfer` and `transfer_memory` | [importing](references/importing.md); [operation details](references/operations.md); [mutation results](references/mutation-results.md) before any mutation |
-| Review, adopt, audit, restructure, or maintain a vault | `read_review/triage_memory`, `triage_memory`, `read_import` and `import_memory`, `check_memory/repair_memory` | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
-| Infer/change vocabulary or schema | `read_schema/change_schema` | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
-| Give maps topics, or file unfiled pages under topics | `read_review(operation={'kind': 'vocabulary'})` topic-carrier items, then `read_schema/change_schema` with `subject="topic-carriers"` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
-| Configured governance policy or a reserved withhold notice | `read_governance/change_governance`, `manage_authorization_session`, `grant_session_access/change_session_access` | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
+| Bring a folder, ZIP or notes export into the Knowledge Base | `inspect_memory` and `manage_memory` (`imports.*`); on Cloud also `observe_transfer` and `transfer_memory` | [importing](references/importing.md); [operation details](references/operations.md); [mutation results](references/mutation-results.md) before any mutation |
+| Review, adopt, audit, restructure, or maintain a vault | `list_review_items`, `decide_review_item`, `inspect_memory` and `manage_memory` (`review.*`, `imports.*`, `maintenance.*`) | [vault care](references/vault-care.md); [operation details](references/operations.md) for the selected operation; [mutation results](references/mutation-results.md) before any mutation |
+| Infer/change vocabulary or schema | `inspect_memory` and `manage_memory` (`schema.*`) | [vocabulary](references/vocabulary.md), [operation details](references/operations.md), [writing](references/writing.md); [mutation results](references/mutation-results.md) before any mutation |
+| Give maps topics, or file unfiled pages under topics | `list_review_items(queue="vocabulary")` topic-carrier items, then `manage_memory` (`schema.*`) with `subject="topic-carriers"` | [vocabulary](references/vocabulary.md), section "Topic carriers"; never edit pages one by one for this |
+| Configured governance policy or a reserved withhold notice | `inspect_memory` and `manage_memory` (`governance.*`, `session.*`, `access.*`) | [governance](references/governance.md); [mutation results](references/mutation-results.md) before any mutation |
 
-If the vocabulary reference is missing, inspect the exposed bootstrap schema.
-Use `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'vocabulary'})`, or
-`bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` when `section` is unavailable. Follow the returned
+If the vocabulary reference is missing, inspect the exposed `read_instructions` schema.
+Use `read_instructions(profile='compact', section='vocabulary')`, or
+`read_instructions(profile='full')` when `section` is unavailable. Follow the returned
 inspect routes and `save` contract. Reuse or alias before proposing justified
 new meaning; save with the current hash and `why`. Report saved versus queued
 and the returned restore route. Use only exposed operations.
@@ -94,18 +96,18 @@ The table above also works when the current package is the only installed skill.
 
 ## Portable operating rules
 
-Before the first operation, inspect the exposed bootstrap schema. If it lacks `skill_contract`, obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` directly. Otherwise obtain `bootstrap(operation={"kind": "instructions", "profile": "session", "skill_contract": <metadata.skill_contract>})` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact'})` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
+Before the first operation, inspect the exposed `read_instructions` schema. If it lacks `skill_contract`, obtain `read_instructions(profile='compact')` directly. Otherwise obtain `read_instructions(profile="session", skill_contract=<metadata.skill_contract>)` if current policy or capabilities are missing; honor `engagement.envelope` and `available_product_tools`. Reuse returned state until policy, connection, adapter, or returned vault configuration/registry state changes. If the server rejects the session profile or argument, obtain `read_instructions(profile='compact')` once. `session_profile_unavailable` marks a compact fallback; follow its returned rules. Use the harness's supported discovery mechanism and load only the tools needed now. If the applicable local procedure cannot be read, obtain the portable compact contract; do not improvise a write.
 
 Do not invoke tools absent from `available_product_tools`; use the live capability list even when a bundled workflow mentions a withheld operation.
 
-Use `bootstrap/change_settings` set/clear only for an explicit user request to change saved engagement.
+Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user request to change saved engagement.
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence are immutable, and content outside the managed Knowledge Base
 is read-only. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
-in the first write. Use `read_connections(operation={'kind': 'suggest-links'})` when useful
+in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
 Honor the live confirmation ceiling;
 a workflow or standing capture preference does not grant restructure authority.
@@ -182,7 +184,7 @@ Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a
 conversation's decision or stopping point, record one bounded recap with
-`record_episode/read_episode` only when requested or permitted by the live proactive-capture
+`save_episode` only when requested or permitted by the live proactive-capture
 disposition; it is what the next session on any client sees first.
 
 ## Recall loop
@@ -196,7 +198,7 @@ authorize sending context or saving it.
 Before a substantive turn with no prior context, call `recall_context` with the turn verbatim. Follow `next_action` when present.
 
 If activation returns a map, read it as an index of what exists. Pull by ref
-with `read_memory` or use `search_memory` before answering; cite the refs you use.
+with `read_page` or use `search_memory` before answering; cite the refs you use.
 A map whose entries are mostly unfiled lacks topic declarations: declare them on
 topic carriers, as the routing row above says.
 
@@ -235,12 +237,12 @@ before giving subject-specific advice. Do not use unrelated search hits to choos
 An optional `relevant_due_refs` candidate names due work on released current material.
 Judge semantic relevance; raise at most one due item per maintained client conversation.
 Remember any due mention through continuation, compaction, hooks, MCP, REST and OAuth renewal; receipt alone is not a mention.
-Read `read_review(operation={'kind': 'item-context', 'ref': ...})` before deciding.
-One applicable authored writer resolves with its own unit or parent guards; one `triage_memory` dismissal records presentation disposition.
+Read `inspect_memory(operation="review.item_context", arguments={"ref": ...})` before deciding.
+One applicable authored writer resolves with its own unit or parent guards; one `decide_review_item` dismissal records presentation disposition.
 The due fingerprint is not a unit fingerprint; preserve existing authority gates.
 See [engagement](references/engagement.md) for stale context and the exact operations.
 When knowledge about an identified subject is still missing, use
-`search_memory(detail="compact", rerank=false)`, then `read_memory` for
+`search_memory(detail="compact", rerank=false)`, then `read_page` for
 selected hits. Use `search_memory(deep=true)` for a bounded synthesis context, and
 request graph enrichment or full diagnostics only when needed. Keep retrieval
 quiet; cite useful hits. A miss means "not found in what I searched", never proof
@@ -266,7 +268,7 @@ Partition durable material into reusable objects, resolve a canonical home for e
 
 ## What Exomem does on its own
 
-Read the active **delegation envelope** at `the bootstrap response's `engagement.envelope``.
+Read the active **delegation envelope** in the `read_instructions` reply's `engagement.envelope`.
 Prominence sets participation; the envelope sets authority for each action class.
 
 Each class has a hard **ceiling** that no level, override or adaptation can raise.
@@ -320,12 +322,12 @@ either a refusal or a consent.
 
 When the user asks to stop hearing about a KIND of suggestion, that is a signal
 family rather than an envelope class: quiet the family through
-`triage_memory(operation={'kind': 'decision', 'ref': 'exomem://review/family/<family>', 'action': 'quiet', 'why': '<code>: ...'})` rather than lowering prominence, which silences everything.
-`read_review(operation={'kind': 'dispositions'})` lists the registered family vocabulary
+`manage_memory(operation="review.set_family", arguments={"ref": "exomem://review/family/<family>", "action": "quiet", "why": "<code>: ..."})` rather than lowering prominence, which silences everything.
+`inspect_memory(operation="review.dispositions")` lists the registered family vocabulary
 alongside the envelope block and what is currently quiet and why.
 
 Set or reset a served envelope class through the same triage surface:
-`triage_memory(operation={'kind': 'decision', 'ref': 'exomem://envelope/<action-class>', 'action': '<disposition>|reset'})`.
+`manage_memory(operation="review.set_envelope", arguments={"ref": "exomem://envelope/<action-class>", "action": "<disposition>|reset"})`.
 
 ## Semantic authoring contract
 
@@ -339,7 +341,7 @@ carry the same `title` and `id` with a canonical `exomem://memory/<uuid>` refere
 (`detail="full"` adds the vault path). Every tool that takes a
 page path also takes a title or that `id`. In normal user-facing prose, show the
 note title by default and do not expose the raw canonical ref by default. Add the
-current vault-relative path (`read_memory` returns it, and `response_detail="full"` shows
+current vault-relative path (`read_page` returns it, and `detail="full"` shows
 it under `diagnostics`) for clarity or disambiguation; if the title is missing or
 unusable, use the path or file name as the visible fallback.
 
@@ -351,7 +353,7 @@ target; use a plain title-first citation. Never invent, copy, or edit an
 `exomem_id` by hand.
 
 Legacy pages are not rewritten automatically. To add IDs, first run
-`check_memory(operation={'kind': 'backfill-ids'})` in its default dry-run mode, inspect the
+`inspect_memory(operation="maintenance.backfill_ids")` in its default dry-run mode, inspect the
 proposed files, and write only after explicit confirmation with `dry_run=false`. A remote
 write starts a maintenance job with the preview's `plan_id` and a `why` ([vault care](references/vault-care.md)).
 Duplicate or malformed IDs are audit findings; do not guess which duplicate a

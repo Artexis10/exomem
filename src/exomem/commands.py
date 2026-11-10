@@ -122,6 +122,7 @@ from . import plan_progress as plan_progress_module
 from . import procedure_approval_operation as procedure_approval_operation_module
 from . import promotions as promotions_module
 from . import provenance as provenance_module
+from . import public_tools as public_tools_module
 from . import query_data as query_data_module
 from . import readiness as readiness_module
 from . import recall_timing as recall_timing_module
@@ -139,6 +140,7 @@ from . import request_budget as request_budget_module
 from . import reserved_paths as reserved_paths_module
 from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
+from . import review_ids as review_ids_module
 from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
 from . import semantic_kinds as semantic_kinds_module
@@ -859,6 +861,7 @@ def op_bootstrap(
     workflow: str | None = None,
     skill_contract: str | None = None,
     section: str | None = None,
+    topic: str | None = None,
 ) -> dict:
     """Read Exomem's contract and live settings when missing or changed; reuse while current.
 
@@ -870,7 +873,17 @@ def op_bootstrap(
         workflow: Context label only.
         skill_contract: Session digest; missing/stale returns compact plus session_profile_unavailable.
         section: Compact block name; index lists available blocks.
+        topic: A listed tool, a door or one door operation; returns its arguments and an example
+            instead of the contract.
     """
+    if topic is not None:
+        if (profile, workflow, skill_contract, section) != ("compact", None, None, None):
+            raise ValueError("bootstrap: topic stands alone; it takes no profile, workflow, skill_contract or section")
+        from . import public_surface as public_surface_module
+
+        return public_surface_module.help_for(
+            topic, _active_bootstrap_descriptor().contributing_commands or PRODUCT_COMMANDS
+        )
     if profile not in ("compact", "full", "diagnostics", "session"):
         raise ValueError(
             "bootstrap: profile must be 'compact', 'full', 'diagnostics', or 'session', "
@@ -946,6 +959,10 @@ def op_bootstrap(
     )
     active_product_names = frozenset(active_descriptor.product_commands)
     tool_shape = active_descriptor.tool_shape
+    public = tool_shape == "public"
+    # The same advice spelled for the surface that reads it: the public tools name these arguments differently.
+    detail_full = "detail='full'" if public else "response_detail='full'"
+    suggest_links = "create_note(suggest_links=true)" if public else "create_note(suggestions=true)"
 
     def listed(command: str, effect: operation_entries.Effect | None = None) -> bool:
         """Whether the surface lists the command's required side in its active shape."""
@@ -1382,6 +1399,31 @@ def op_bootstrap(
     semantic_authoring_projection = semantic_authoring_module.bootstrap_projection(
         authoring_contract, profile=profile
     )
+    # The reviewed-write contracts as the public tools state them: they carry a preview and an
+    # unlinked reason, where the grouped writers carry drafts, hashes and tokens.
+    public_reviewed_creation = {
+        "preview": "call create_note with preview=true to read the semantic feedback without writing",
+        "commit": "after review, call create_note again without preview; the write validates the same bytes again",
+        "unlinked": (
+            "when no truthful link applies, send a bounded unlinked_reason; "
+            "never fabricate one or infer review from missing links"
+        ),
+        "generic": (
+            "a write that adds a generic relation is refused with GENERIC_RELATION_REFUSED, "
+            "a ranked list of up to eight specific relations and the exact routes: retry "
+            "with one, propose a new relation type, or as a last resort write a plain link"
+        ),
+        "adoption_handoff": (
+            f"{call_text('adopt_vault', {'mode': 'compile-selected'})} returns a proposal only; review "
+            "it, then call create_note() so normal semantic precommit still applies"
+        ),
+    }
+    public_reviewed_existing_edit = {
+        "rule": (
+            "if refused for relation review, send the edit again with unlinked_reason when no "
+            "truthful link applies; preview=true shows the review without writing"
+        ),
+    }
     if listed("record_memory"):
         contract_tool, contract_arguments = operation_entries.spell_call(
             "record_memory", {"action": "describe"}, tool_shape
@@ -1513,6 +1555,9 @@ def op_bootstrap(
             f"{tools_text('plan_memory', 'write')} before treating them as observed Records."
         ),
         "inventory": (
+            "Name a collection by its title and a plan item by the id that query_plan_items returns. "
+            "Send changes with edit_plan_item and why; a stale id is refused with the current one."
+            if public else
             f"{call_text('plan_memory', {'action': 'inspect'})} without collection lists manifest_path. "
             "Query by title or natural key plus lifecycle/status. For update/triage, "
             "use inspect/query snapshot as expected_container_hash and the chosen "
@@ -1818,8 +1863,8 @@ def op_bootstrap(
                     if profile == "compact" else
                     "after a write, read the returned warnings and follow up on "
                     "unresolved links or duplicate warnings; write_feedback needs "
-                    "response_detail='full', and suggestions additionally need "
-                    "create_note(suggestions=true)"
+                    f"{detail_full}, and suggestions additionally need "
+                    f"{suggest_links}"
                 ),
                 (
                     "Tell the user the reply's user_summary; follow next_action when present; "
@@ -1854,8 +1899,8 @@ def op_bootstrap(
                 ),
                 f"write with create_note, {tools_text('observe_memory', 'write')}, edit_note, supersede_note, capture_source, preserve_evidence, or {tools_text('connect_memory', 'write')}",
                 (
-                    "inspect write warnings; response_detail='full' reveals write_feedback; "
-                    "create_note(suggestions=true) also reveals suggestions"
+                    f"inspect write warnings; {detail_full} reveals write_feedback; "
+                    f"{suggest_links} also reveals suggestions"
                 ),
                 "apply any accepted links through edit_note",
                 mutation_terminal_module.NARRATION_RULE,
@@ -1884,8 +1929,8 @@ def op_bootstrap(
                 ),
             },
             "post_write": {
-                "remember_suggestions": "non-binding related pages: create_note(suggestions=true), response_detail='full'",
-                "write_feedback": "create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with response_detail='full'",
+                "remember_suggestions": f"non-binding related pages: {suggest_links}, {detail_full}",
+                "write_feedback": f"create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with {detail_full}",
                 "structure_suggestion": (
                     "A committed response may carry one advisory. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
@@ -1893,7 +1938,7 @@ def op_bootstrap(
                 ),
                 "structure_suggestion_handling": (
                     "note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
-                    + call_text("triage_memory", {"ref": "<ref>", "action": "dismiss", "expected_fingerprint": "<fingerprint>", "why": "intentional: <the one question>"})
+                    + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the one question>"})
                     + "; it stays quiet until the next size step. Several: propose a split with "
                     + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
                     + " and apply it only after the user confirms the previewed plan. A hub by design: add a hub or snapshot tag with a governed edit. source_classification_debt: say it in the user's words, agree a real kind, then "
@@ -1948,6 +1993,22 @@ def op_bootstrap(
                     "A dismissal is not completion: it lowers the visible count only."
                 ),
                 "relevant_due_handling": (
+                    f"Read {tools_text('review_item_context')} with ref; refresh on REVIEW_ITEM_CHANGED. "
+                    "Audit wider if needed. One writer that fits resolves the item and clears the "
+                    "finding with no extra triage. decide_review_item only dismisses advice. "
+                    "Keep write authority."
+                    if public and profile == "compact"
+                    else
+                    f"For relevant_due_refs, read {tools_text('review_item_context')} with ref; "
+                    "bounded context may need a wider audit. "
+                    f"{tools_text('review_memory', 'read')} takes no fingerprint. Refresh after REVIEW_ITEM_CHANGED. "
+                    f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, "
+                    "resolves the item and clears the finding without extra triage. "
+                    f"One {call_text('triage_memory', {'item_id': '<id>', 'action': 'dismiss', 'why': '<code>: ...'})} "
+                    "records presentation disposition, not authored resolution. "
+                    "Preserve existing mutation authority."
+                    if public
+                    else
                     f"Read {tools_text('review_item_context')} with ref and expected_fingerprint; refresh on REVIEW_ITEM_CHANGED. "
                     "Audit wider if needed. Resolve with unit fingerprint and parent hash, "
                     "not due fingerprint; no extra triage. triage_memory only dismisses advice. "
@@ -1959,7 +2020,7 @@ def op_bootstrap(
                     f"One applicable writer, such as {call_text('observe_memory', {'operation': 'update'})}, resolves with the real unit "
                     "fingerprint and parent hash. Its delta clears the finding without extra triage; "
                     "a due fingerprint is not a unit fingerprint. "
-                    f"One {call_text('triage_memory', {'ref': '<ref>', 'action': 'dismiss', 'expected_fingerprint': '<fingerprint>', 'why': '<code>: ...'})} "
+                    f"One {call_text('triage_memory', {'item_id': '<id>', 'action': 'dismiss', 'why': '<code>: ...'})} "
                     "records presentation disposition, not authored resolution. "
                     "Preserve existing mutation authority."
                 ),
@@ -2046,6 +2107,9 @@ def op_bootstrap(
                         "rich_form": authoring_contract.rich["heading_syntax"],
                         "mutation_rule": authoring_contract.routes["single_semantic_unit"],
                         "drift_guards": (
+                            "edit_note(edit_observation|remove_observation) takes the unit id that "
+                            "read_page(part='units') returned; a stale id is refused with the current one"
+                            if public else
                             "update/remove require the current parent content hash and unit fingerprint"
                         ),
                     }
@@ -2053,7 +2117,7 @@ def op_bootstrap(
                     else {}
                 ),
             },
-            "reviewed_creation": {
+            "reviewed_creation": public_reviewed_creation if public else {
                 "validate_only": (
                     "call the intended creation writer with validate_only=true and retain "
                     "its draft_id, draft_hash, draft_token, relation_review_hash, candidate, "
@@ -2081,6 +2145,8 @@ def op_bootstrap(
                 ),
             },
             "reviewed_existing_edit": (
+                public_reviewed_existing_edit
+                if public else
                 {
                     "rule": (
                         "if refused for relation review, re-send the edit with "
@@ -2180,17 +2246,19 @@ def op_bootstrap(
                 "custody": "original first; transcription beside, never instead",
                 "fallback": {
                     "tool": "transfer_artifact",
-                    "args": {"hold": True},
+                    "args": {"operation": "upload", "hold": True},
                     "when": "the client cannot supply file handles",
                 },
             },
             "original_recovery": {
                 "tool": "transfer_artifact",
                 "when": "recover a stored original through a desktop/personal endpoint",
-                # The tool description, its response and the skill carry these, so compact leaves them out.
+                # The tool description, its response and the skill carry the rest, so compact leaves them out.
+                "args": {"operation": "download", **(
+                    {"artifacts": ["<stored artifact or custody page>"]} if profile != "compact" else {}
+                )},
                 **(
                     {
-                        "args": {"operation": "download", "artifact": "<stored artifact or custody page>"},
                         "delivery": "native MCP blob where supported; otherwise the clickable HTTPS link",
                         "proof": "verify recovered SHA-256 and size; a prepared handoff proves no consumption",
                     }
@@ -2292,7 +2360,11 @@ def op_bootstrap(
             },
             {
                 "goal": "capture a durable conclusion",
-                "call": "create_note(note_type='research-note'|'insight'|..., title='...', content='...')",
+                "call": (
+                    "create_note(type='research-note'|'insight'|..., title='...', content='...')"
+                    if public else
+                    "create_note(note_type='research-note'|'insight'|..., title='...', content='...')"
+                ),
             },
             {
                 "goal": "preserve attached binary files when the client supplies file handles",
@@ -6975,9 +7047,9 @@ def op_activate_context(
 
     Reuse held context; conversation gives excerpts. Agent focus is not human intent.
     Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
-    Read map/task_context refs and method scope/exclusions with read_memory.
+    Read map/task_context refs and method scope/exclusions with a page read.
     Discard held methods on methods.reset. Follow next_action.
-    epistemic_status: counts/completeness; read_memory: provenance.
+    epistemic_status: counts/completeness; a page read: provenance.
 
     Args:
         turn: Human turn verbatim; never a summary. Empty abstains.
@@ -6985,15 +7057,11 @@ def op_activate_context(
         purpose: Visibility; never ranking.
         continuity: Prior token unchanged; drop on compaction/new session.
         anchor: Visible compiled ref for an established prior subject, ambiguity or correction.
-            Hidden and ineligible refs refuse alike.
-        include_timings: Stage timings.
         client: Lowercase client label; invalid labels ignored.
         session: Stable opaque conversation ID; max 256 chars.
         workspace: Thread project key; max 256 chars.
-        conversation: All optional: focus (one line/240 chars; current subjects and attachment names/objects),
-            refs (12 already-read pages), recent (six excerpts/2,400 chars total; user 600, assistant 300 each); never full history.
-        trigger: user_turn: initial recall. task_refresh: keep turn; task in focus;
-            intent_resolution qualifies human intent separately.
+        conversation: Relevant excerpts and refs; never full history.
+        trigger: user_turn: initial recall. task_refresh: keep turn; task in focus.
         initiator: Caller label; no authority. Invalid labels ignored.
     """
     # `RequestBudget` is bound in exactly one place, the MCP dispatch
@@ -8210,6 +8278,7 @@ def op_read_memory(
     continuation: _OptionalViewContinuation = None,
     follow_corrections: bool = True,
     offset: int | None = None,
+    units: bool = False,
 ) -> dict:
     """Read a page, exact unit, or exomem://map view.
 
@@ -8230,6 +8299,7 @@ def op_read_memory(
         continuation: Next-page token of a view.
         follow_corrections: False reads the historical Source; unit reads stay exact.
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
+        units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
     """
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
@@ -8368,6 +8438,8 @@ def op_read_memory(
     if (named_id := page_names_module.id_of_read(result)) is not None:
         # The id the page's own `title` or this one names for the next call, with the version read.
         result["id"] = named_id
+    if units:
+        result["units"] = observe_memory_module.page_units(vault_root, result)
     return result
 
 
@@ -8412,7 +8484,7 @@ def op_browse_memory(
             limit=min(max(page, 1), _BROWSE_LIST_MAX_LIMIT),
             cursor=cursor,
         )
-    raise ValueError("INVALID_MODE: browse_memory mode must be 'overview' or 'list'")
+    raise ValueError("INVALID_MODE: mode must be 'overview' or 'list'")
 
 
 def op_remember(
@@ -8670,6 +8742,7 @@ def op_observe_memory(
     until: str | None = None,
     id: str | None = None,
     unit_ref: str | None = None,
+    unit: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -8697,6 +8770,7 @@ def op_observe_memory(
         until: Rich ISO last valid date; '' clears.
         id: Parent-unique anchor; derived on add if omitted.
         unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
+        unit: Unit id from a read or a write reply, for update/remove. It stands for unit_ref and both guards.
         expected_fingerprint: Current fingerprint for update/remove and existing-unit preview.
         expected_hash: Current parent hash for update/remove.
         transition_token: From validate.
@@ -8763,6 +8837,7 @@ def op_observe_memory(
             until=until,
             id=id,
             unit_ref=unit_ref,
+            unit=unit,
             expected_fingerprint=expected_fingerprint,
             expected_hash=expected_hash,
             transition_token=transition_token,
@@ -9446,25 +9521,54 @@ def op_preserve_artifacts(
     return _carrying_batch_advisories(vault_root, result)
 
 
+#: The most pages one download call takes; the public tool's schema states the same bound.
+_DOWNLOAD_BATCH_MAX = public_tools_module.DOWNLOAD_BATCH_MAX
+
+
 def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
-    hold: bool = False,
+    hold: bool = False, artifacts: list[str] | None = None,
 ) -> dict:
     """Prepare an upload or download; a handoff does not prove custody.
 
     Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
-    Capture its handle. Download: supply artifact; use MCP or HTTPS delivery.
+    Capture its handle. Download: supply artifact or artifacts; use MCP or HTTPS delivery.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
+        artifacts: Download only: up to 8 pages, each by title, id or path, replacing `artifact`.
+            Each gets its own handoff or its own refusal in the reply.
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
     """
     from . import cloud_cell
+    from .cli_ops import OpError
 
+    if artifacts is not None:
+        if operation != "download" or artifact is not None or hold or expected_sha256 is not None:
+            raise ValueError("INVALID_MODE: artifacts needs download, with no artifact, hold or expected_sha256")
+        if not 1 <= len(artifacts) <= _DOWNLOAD_BATCH_MAX:
+            raise ValueError(f"INVALID_MODE: artifacts takes 1 to {_DOWNLOAD_BATCH_MAX} pages")
+        handoffs: list[dict] = []
+        for named in artifacts:
+            try:
+                reply = op_transfer_artifact(
+                    vault_root, operation="download",
+                    artifact=page_names_module.resolve_page(vault_root, named, field="artifacts"),
+                )
+                handoffs.append({"page": named, **reply})
+            except (ValueError, OpError) as error:
+                # One refused page leaves the others deliverable; the reply names which one failed.
+                handoffs.append({"page": named, "error": {"message": str(error)}})
+        return {
+            "handoff_status": "handoff_prepared" if any("error" not in h for h in handoffs) else "refused",
+            "committed": False,
+            "artifacts": handoffs,
+            "failed": sum("error" in h for h in handoffs),
+        }
     if cloud_cell.cloud_mode_enabled() and not hold:
         # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
         if operation != "download" or not artifact:
@@ -9492,7 +9596,7 @@ def op_transfer_artifact(
 
         return artifact_recovery.prepare(vault_root, artifact, expected_sha256=expected_sha256)
     if operation not in ("upload", "download"):
-        raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
+        raise ValueError("INVALID_MODE: operation must be 'upload' or 'download'")
     if lane not in upload_tokens.UPLOAD_LANES:
         raise ValueError(
             f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
@@ -9865,7 +9969,7 @@ def _selected_media_paths(
     if paths is None:
         return None
     if not isinstance(paths, list) or not 1 <= len(paths) <= 32:
-        raise OpError("INVALID_MEDIA_PATHS", "process_media paths must contain 1 to 32 paths")
+        raise OpError("INVALID_MEDIA_PATHS", "media paths must contain 1 to 32 paths")
     values = paths
 
     root = Path(vault_root).resolve()
@@ -9874,7 +9978,7 @@ def _selected_media_paths(
     seen: set[str] = set()
     for value in values:
         if not isinstance(value, str) or not value:
-            raise OpError("INVALID_MEDIA_PATHS", "process_media paths must contain only non-empty paths")
+            raise OpError("INVALID_MEDIA_PATHS", "media paths must contain only non-empty paths")
         binary = Path(value)
         if not binary.is_absolute():
             binary = root / binary
@@ -9889,7 +9993,7 @@ def _selected_media_paths(
             ) from error
         relative = canonical_vault_rel(root, relative)
         if relative in seen:
-            raise OpError("DUPLICATE_MEDIA_PATH", "process_media paths must be unique after normalization")
+            raise OpError("DUPLICATE_MEDIA_PATH", "media paths must be unique after normalization")
         seen.add(relative)
         selected.append((root / relative, relative))
     return selected
@@ -10033,6 +10137,7 @@ def _review_question_submission(path: Any, query: Any, family: Any) -> bool:
     return path is not None or bool(query) or family is not None
 
 
+@review_ids_module.marks_items
 def op_review_memory(
     vault_root: Path,
     mode: str = "attention",
@@ -10805,13 +10910,14 @@ def _effect_block(
 
 def op_triage_memory(
     vault_root: Path,
-    ref: str,
-    action: str,
+    ref: str | None = None,
+    action: str | None = None,
     until: str | None = None,
     why: str | None = None,
     expected_fingerprint: str | None = None,
     source_path: _OptionalRelationText = None,
     decision: _VocabularyDecisionArgument = None,
+    item_id: str | None = None,
 ) -> dict:
     """Save review decisions or attention settings; use returned refs and fingerprints.
 
@@ -10825,7 +10931,33 @@ def op_triage_memory(
         expected_fingerprint: Reviewed fingerprint; mismatch refuses.
         source_path: Source page; required for newly returned relation items.
         decision: Payload for decide-vocabulary.
+        item_id: The id a review reply gives one item, or a write advisory's review ref; replaces
+            `ref`, `expected_fingerprint` and `source_path`. A stale id refuses with the current one.
     """
+    if item_id is not None:
+        if ref is not None or expected_fingerprint is not None or source_path is not None:
+            raise ValueError(
+                "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
+            )
+        if corpus_aware_module.is_write_advisory_ref(item_id):
+            # A write advisory is on no queue: its ref is its handle, and the ledger names the
+            # fingerprint it last surfaced with.
+            ref = item_id
+            expected_fingerprint = review_state_module.last_surfaced_fingerprint(
+                vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
+            )
+            if expected_fingerprint is None:
+                from .cli_ops import OpError
+
+                raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
+        else:
+            bound = review_ids_module.bind(
+                lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+            )
+            ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+            source_path = bound.get("source_path")
+    if ref is None:
+        raise ValueError("INVALID_REVIEW_ACTION: a triage decision requires `ref` or `item_id`")
     normalized_action = str(action or "").strip().lower()
     vocabulary_ref = ref.startswith("exomem://review/vocabulary/")
     if normalized_action == "decide-vocabulary":
@@ -11091,6 +11223,7 @@ def op_connect_memory(
     entity_family: str | None = None,
     registry_scope: str | None = None,
     relations: list[dict] | None = None,
+    item_id: str | None = None,
 ) -> dict | list[dict]:
     """Find relations, graph context or entities.
 
@@ -11113,6 +11246,8 @@ def op_connect_memory(
             context and graph-context keep only its entity neighbours.
         registry_scope: create-entity instance selector; public or a canonical private Scope ID.
         relations: create-entity only. {kind, target} edges; a specific relation key.
+        item_id: accept-relation only. The id the relation queue gives one suggestion; replaces `ref`,
+            `expected_hash` and `expected_fingerprint`, and a stale id refuses with the current one.
     """
     if registry_scope is not None and operation not in {"create-entity", "resolve-relation"}:
         raise ValueError(
@@ -11211,6 +11346,16 @@ def op_connect_memory(
         result["context"] = {"path": path, "target": target}
         return result
     if operation == "accept-relation":
+        if item_id is not None:
+            if any(given is not None for given in (ref, expected_hash, expected_fingerprint)):
+                raise ValueError(
+                    "INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint"
+                )
+            bound = review_ids_module.bind(
+                lambda **kw: op_review_memory(vault_root, **kw), item=item_id, modes=review_ids_module.RELATION_QUEUE_MODES
+            )
+            ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+            path = path or bound.get("source_path")
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
 
@@ -11241,6 +11386,7 @@ def op_connect_memory(
             requested_relation=requested_relation,
             bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
             edit_memory=_accept_relations_edit,
+            bind_page_hash=item_id is not None,
         )
     if operation == "suggest-relations":
         # Relation proposals are owner work (see `op_suggest_relations`);
@@ -11632,12 +11778,12 @@ def op_observe_transfer(
        browser sign-in; takes a folder or ZIP.
        browser: without a shell, the Home link; desktop only, folders only, within one page
        session; phones cannot upload folders.
-       attachments: chat or phone attachments go through preserve_artifacts or
-       capture_source, within their per-call bounds.
+       attachments: chat or phone attachments go through save_evidence or
+       save_source, within their per-call bounds.
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
-    3. File it: import_memory `file` on the `next` path (`_Imports/<id>`), repeated with its
-       `continuation` until `filing` is not `working`. An older server refuses `file`: start on
+    3. File it: manage_memory `imports.file` on the `next` path (`_Imports/<id>`), repeated with its
+       `continuation` until `filing` is not `working`. An older server refuses it: `imports.start` on
        the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
        until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
@@ -11753,7 +11899,7 @@ def op_maintain_memory(
     MAINTENANCE_REQUIRES_CLI: run it on the host with the service stopped.
     collections-cutover only previews the move of every collection to SQLite-only storage;
     the owner applies its plan_id with `exomem collections cutover` on the host.
-    held-resolve settles one held item from read_review mode held: path, choice keep-mine or
+    held-resolve settles one held item that mode held of review_memory lists: path, choice keep-mine or
     keep-store, that item's item_version and why.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
@@ -13846,6 +13992,7 @@ def op_record_memory(
     on_reject: Literal["abort", "skip"] | None = None,
     import_request: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
+    item_id: str | None = None,
 ) -> dict[str, Any]:
     """Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.
 
@@ -13872,6 +14019,7 @@ def op_record_memory(
         source: bulk_upsert default preserved Source/Evidence path.
         on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
         query: v1 query object; grammar via describe.
+        item_id: Update only: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
     """
     return record_memory_module.record_memory(
         vault_root,
@@ -13913,6 +14061,7 @@ def op_record_memory(
         on_reject=on_reject,
         import_request=import_request,
         query=query,
+        item_id=item_id,
     )
 
 
@@ -14311,7 +14460,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "review": {
         "intent": "Review stale, contradictory, disconnected, or unprocessed knowledge before acting.",
         "route": {"tool": "review_memory", "args": {"mode": "attention"}},
-        "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
+        "audit_route": {"tool": "maintain_memory", "args": {"mode": "audit"}},
         "safety": "read-only by default; triage state changes are explicit through triage_memory",
         "advanced": [
             "review_item_context",

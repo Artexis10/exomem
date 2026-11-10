@@ -1,7 +1,7 @@
 """The Stop hook's episode ask, and coverage that only a record earns (task 4.1).
 
 Hooks trigger; agents author. Every K substantive turns (K by prominence) the
-Stop hook asks the agent for one `episode_memory` record under a key derived
+Stop hook asks the agent for one `save_episode` record under a key derived
 from the session it already holds, so the key survives compaction without the
 hook reading a transcript record. Only a SUCCESSFUL record resets the count:
 an unrelated committed note, a `Saved ->` marker or a failed record all leave
@@ -120,7 +120,7 @@ def _stops(monkeypatch, capsys, tmp_path, count: int, *, landed: bool = True) ->
     episode ask needs a landing; `landed=False` is the same turns with none."""
     if landed:
         transcript = _claude_turn(
-            tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__remember", {"text": "note"}, False), name="landed.jsonl"
+            tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__create_note", {"text": "note"}, False), name="landed.jsonl"
         )
     else:
         transcript = _transcript(tmp_path, SUBSTANTIVE)
@@ -138,7 +138,7 @@ def test_the_ask_comes_after_k_substantive_turns_with_the_session_key(
     assert _is_episode_ask(results[-1])
     key = episode_capture.hook_key("claude-code", SESSION)
     assert key in results[-1]["reason"]
-    assert "record_episode" in results[-1]["reason"]
+    assert "save_episode" in results[-1]["reason"]
     assert results[-1]["decision"] == "block"
 
 
@@ -168,10 +168,10 @@ def test_the_key_survives_a_simulated_compaction(
 @pytest.mark.parametrize(
     "tool, tool_input, text, failed",
     [
-        ("mcp__exomem__remember", {"title": "x"}, SUBSTANTIVE, False),
+        ("mcp__exomem__create_note", {"title": "x"}, SUBSTANTIVE, False),
         (None, None, "Saved -> Knowledge Base/Notes/x.md. " + "x" * 400, False),
-        ("mcp__exomem__episode_memory", {"action": "record"}, SUBSTANTIVE, True),
-        ("mcp__exomem__episode_memory", {"action": "inspect"}, SUBSTANTIVE, False),
+        ("mcp__exomem__save_episode", {}, SUBSTANTIVE, True),
+        ("mcp__exomem__inspect_memory", {"operation": "episodes.coverage"}, SUBSTANTIVE, False),
     ],
 )
 def test_only_a_successful_record_resets_coverage(
@@ -198,7 +198,7 @@ def test_a_record_refused_with_the_error_envelope_leaves_the_episode_pending(
     k, _cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     _stops(monkeypatch, capsys, tmp_path, k - 1)
     refusal = {"error": {"code": "EPISODE_INVALID", "message": "Subject is required. Nothing was saved."}}
-    record = {"action": "record", "subject": "Harbor Lamp purchase"}
+    record = {"subject": "Harbor Lamp purchase"}
     lines = [
         {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
         {
@@ -206,7 +206,7 @@ def test_a_record_refused_with_the_error_envelope_leaves_the_episode_pending(
             "message": {
                 "role": "assistant",
                 "content": [
-                    {"type": "tool_use", "id": "tool-1", "name": "mcp__exomem__episode_memory", "input": record},
+                    {"type": "tool_use", "id": "tool-1", "name": "mcp__exomem__save_episode", "input": record},
                     {"type": "text", "text": SUBSTANTIVE},
                 ],
             },
@@ -233,8 +233,8 @@ def test_a_successful_record_resets_coverage(
     recorded = _transcript(
         tmp_path,
         SUBSTANTIVE,
-        tool="mcp__exomem__episode_memory",
-        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        tool="mcp__exomem__save_episode",
+        tool_input={"subject": "Harbor Lamp purchase"},
         name="r.jsonl",
     )
     assert not _is_episode_ask(_stop(monkeypatch, capsys, recorded))
@@ -284,8 +284,8 @@ def test_a_record_made_in_answer_to_the_ask_is_counted(
     continuation = _transcript(
         tmp_path,
         "Recorded the recap.",
-        tool="mcp__exomem__episode_memory" if record else "mcp__exomem__remember",
-        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        tool="mcp__exomem__save_episode" if record else "mcp__exomem__create_note",
+        tool_input={"subject": "Harbor Lamp purchase"},
         name="continuation.jsonl",
     )
     assert _stop(monkeypatch, capsys, continuation, active=True) is None
@@ -606,7 +606,7 @@ def test_the_door_check_stays_within_its_bounded_timeout(
 def test_a_transcript_record_still_counts_without_consulting_the_door(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """A successful `episode_memory` tool call resets the counter before the
+    """A successful `save_episode` tool call resets the counter before the
     ask is ever about to fire, so the door check -- which only runs right
     before an otherwise-due ask -- is never reached for it."""
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "test-key")
@@ -621,8 +621,8 @@ def test_a_transcript_record_still_counts_without_consulting_the_door(
     recorded = _transcript(
         tmp_path,
         SUBSTANTIVE,
-        tool="mcp__exomem__episode_memory",
-        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        tool="mcp__exomem__save_episode",
+        tool_input={"subject": "Harbor Lamp purchase"},
         name="r2.jsonl",
     )
     assert not _is_episode_ask(_stop(monkeypatch, capsys, recorded))
@@ -674,8 +674,8 @@ def _recorded_transcript(tmp_path: Path, name: str) -> Path:
     return _transcript(
         tmp_path,
         SUBSTANTIVE,
-        tool="mcp__exomem__episode_memory",
-        tool_input={"action": "record", "subject": "Harbor Lamp purchase"},
+        tool="mcp__exomem__save_episode",
+        tool_input={"subject": "Harbor Lamp purchase"},
         name=name,
     )
 
@@ -886,8 +886,11 @@ def _prepared(tmp_path: Path, name: str = "prepare.jsonl") -> Path:
     return _transcript(
         tmp_path,
         SUBSTANTIVE,
-        tool="mcp__exomem__episode_memory",
-        tool_input={"action": "prepare", "episode": WORKFLOW_KEY, "candidate": "thesis"},
+        tool="mcp__exomem__manage_memory",
+        tool_input={
+            "operation": "episodes.prepare",
+            "arguments": {"episode": WORKFLOW_KEY, "candidate": "thesis"},
+        },
         name=name,
     )
 
@@ -895,7 +898,7 @@ def _prepared(tmp_path: Path, name: str = "prepare.jsonl") -> Path:
 def _noted(tmp_path: Path, *, saved: bool, name: str = "note.jsonl") -> Path:
     text = ("Saved -> Knowledge Base/Notes/x.md. " + "x" * 400) if saved else SUBSTANTIVE
     return _transcript(
-        tmp_path, text, tool="mcp__exomem__remember", tool_input={"title": "x"}, name=name
+        tmp_path, text, tool="mcp__exomem__create_note", tool_input={"title": "x"}, name=name
     )
 
 
@@ -1114,7 +1117,7 @@ def test_the_checkpoint_reads_the_real_ledger_through_the_rest_door(
 def test_the_stop_ask_names_the_active_episode_jobs() -> None:
     """The Stop hook keeps one short prompt while naming the typed read and write jobs."""
     ask = hook.COVERAGE_ASK
-    assert "read_episode" in ask and "record_episode" in ask
+    assert "inspect_memory" in ask and "manage_memory" in ask
     assert "sink" not in ask and "cluster" not in ask
 
 
@@ -1218,7 +1221,7 @@ class TestCaptureReminderLandingGate:
     def test_a_landing_that_also_wrote_to_the_kb_stays_silent(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:
-        turn = _claude_turn(tmp_path, "Pushed.", PUSH, ("mcp__exomem__remember", {"text": "decision"}, False))
+        turn = _claude_turn(tmp_path, "Pushed.", PUSH, ("mcp__exomem__create_note", {"text": "decision"}, False))
         assert _stop(monkeypatch, capsys, turn) is None
 
     @pytest.mark.parametrize("shape", ["exec-cell", "exec-command"])
@@ -1377,7 +1380,7 @@ def test_a_landing_on_the_asking_turn_does_not_count_twice(
     k, cooldown = hook._EPISODE_ASK_PRESETS["balanced"]
     clock = {"now": 1_000_000.0}
     monkeypatch.setattr(hook.time, "time", lambda: clock["now"])
-    landed = _claude_turn(tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__remember", {"text": "n"}, False))
+    landed = _claude_turn(tmp_path, SUBSTANTIVE, PUSH, ("mcp__exomem__create_note", {"text": "n"}, False))
     _stops(monkeypatch, capsys, tmp_path, k - 1, landed=False)
     assert _is_episode_ask(_stop(monkeypatch, capsys, landed))
     assert _stop(monkeypatch, capsys, landed, active=True) is None

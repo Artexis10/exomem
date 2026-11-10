@@ -10,9 +10,9 @@ from lme.native_agent import AgentLimits, NativeBroker, RunEnvelope, run_agent_p
 
 class Cell:
     schemas = {
-        "ask_memory": {"description": "Recall memories.", "inputSchema": {"type": "object"}},
-        "remember": {"description": "Write compiled memory.", "inputSchema": {"type": "object"}},
-        "capture_source": {"description": "Capture source text.", "inputSchema": {"type": "object"}},
+        "search_memory": {"description": "Recall memories.", "inputSchema": {"type": "object"}},
+        "create_note": {"description": "Write compiled memory.", "inputSchema": {"type": "object"}},
+        "save_source": {"description": "Capture source text.", "inputSchema": {"type": "object"}},
     }
 
     def __init__(self):
@@ -50,11 +50,10 @@ def broker(backend, *, limits=None):
     )
 
 
-@pytest.mark.parametrize("catalogue_name", ["ask_memory", "search_memory"])
-def test_fresh_answer_worker_obtains_evidence_through_public_tool(tmp_path, catalogue_name):
+def test_fresh_answer_worker_obtains_evidence_through_public_tool(tmp_path):
+    catalogue_name = "search_memory"
     backend = Backend([tool(catalogue_name, {"query": "current choice"}), {"role": "assistant", "content": "Cedar."}])
     b = broker(backend)
-    b.cell.schemas = {catalogue_name: Cell.schemas["ask_memory"]}
     result = asyncio.run(run_agent_phase(b, phase="answer", turn="What is the current choice?", out=tmp_path / "answer"))
     assert result["status"] == "completed"
     assert result["answer"] == "Cedar."
@@ -71,9 +70,9 @@ def test_fresh_answer_worker_obtains_evidence_through_public_tool(tmp_path, cata
 
 
 @pytest.mark.parametrize("name,args", [
-    ("capture_source", {"files": [{"download_url": "https://example.invalid/answers"}]}),
+    ("save_source", {"files": [{"download_url": "https://example.invalid/answers"}]}),
     ("read_file", {"path": "../evaluator.json"}),
-    ("discover_tools", {"names": ["transfer_artifact"]}),
+    ("discover_tools", {"names": ["upload_files"]}),
 ])
 def test_denied_routes_never_dispatch(name, args):
     b = broker(Backend([]))
@@ -82,45 +81,39 @@ def test_denied_routes_never_dispatch(name, args):
     assert b.cell.calls == []
 
 
-@pytest.mark.parametrize("name", ["remember", "create_note"])
-def test_answer_phase_cannot_mutate_memory(name):
+def test_answer_phase_cannot_mutate_memory():
     b = broker(Backend([]))
-    b.cell.schemas = {"create_note": Cell.schemas["remember"]}
-    result, _ = asyncio.run(b.tool(name, {"title": "Injected"}, phase="answer"))
+    result, _ = asyncio.run(b.tool("create_note", {"title": "Injected"}, phase="answer"))
     assert result["isError"] is True
     assert b.cell.calls == []
 
 
-def test_writer_aliases_preserve_dispatch_without_admitting_other_identities():
+def test_writer_phase_admits_only_the_named_public_tools():
     b = broker(Backend([]))
     b.cell.schemas = {
-        "remember": Cell.schemas["remember"],
-        "create_note": Cell.schemas["remember"],
-        "recall_context": Cell.schemas["ask_memory"],
-        "unknown_memory": Cell.schemas["ask_memory"],
+        "create_note": Cell.schemas["create_note"],
+        "recall_context": Cell.schemas["search_memory"],
+        "upload_files": Cell.schemas["search_memory"],
+        "unknown_memory": Cell.schemas["search_memory"],
     }
     assert set(b.available("writer")) == {"create_note", "discover_tools", "read_file"}
     arguments = {"title": "Durable conclusion"}
-    for name in ("remember", "create_note"):
-        result, _ = asyncio.run(b.tool(name, arguments, phase="writer"))
-        assert not result.get("isError")
-    assert b.cell.calls == [("remember", arguments), ("create_note", arguments)]
-    for name in ("activate_context", "recall_context", "unknown_memory"):
+    result, _ = asyncio.run(b.tool("create_note", arguments, phase="writer"))
+    assert not result.get("isError")
+    assert b.cell.calls == [("create_note", arguments)]
+    for name in ("recall_context", "upload_files", "unknown_memory", "remember"):
         result, _ = asyncio.run(b.tool(name, {}, phase="writer"))
         assert result["isError"] is True
-    assert len(b.cell.calls) == 2
+    assert len(b.cell.calls) == 1
 
 
-@pytest.mark.parametrize("catalogue_name", ["remember", "create_note"])
-def test_discovery_projects_aliases_only_within_the_available_catalogue(catalogue_name):
+def test_discovery_loads_only_names_in_the_available_catalogue():
     b = broker(Backend([]))
-    b.cell.schemas = {catalogue_name: Cell.schemas["remember"]}
-    arguments = {"names": ["remember", "create_note"]}
-    result, loaded = asyncio.run(b.tool("discover_tools", arguments, phase="writer"))
-    assert result == {"loaded": [catalogue_name]}
-    assert loaded == [catalogue_name]
-    assert arguments == {"names": ["remember", "create_note"]}
-    for name in ("activate_context", "recall_context", "unknown_memory"):
+    b.cell.schemas = {"create_note": Cell.schemas["create_note"]}
+    result, loaded = asyncio.run(b.tool("discover_tools", {"names": ["create_note"]}, phase="writer"))
+    assert result == {"loaded": ["create_note"]}
+    assert loaded == ["create_note"]
+    for name in ("recall_context", "unknown_memory", "remember"):
         result, loaded = asyncio.run(b.tool("discover_tools", {"names": [name]}, phase="writer"))
         assert result["isError"] is True
         assert loaded == []
@@ -196,8 +189,8 @@ def test_source_special_token_spelling_is_preserved_as_plain_data(tmp_path):
 
 
 def test_multi_tool_response_counts_each_operation_against_phase_budget(tmp_path):
-    message = tool("ask_memory", {"query": "first"})
-    message["tool_calls"].append(tool("ask_memory", {"query": "second"}, "call-2")["tool_calls"][0])
+    message = tool("search_memory", {"query": "first"})
+    message["tool_calls"].append(tool("search_memory", {"query": "second"}, "call-2")["tool_calls"][0])
     b = broker(Backend([message]), limits=replace(AgentLimits(), phase_tool_calls=1))
     result = asyncio.run(run_agent_phase(b, phase="answer", turn="Question", out=tmp_path / "run"))
     assert result["status"] == "incomplete"
@@ -206,23 +199,22 @@ def test_multi_tool_response_counts_each_operation_against_phase_budget(tmp_path
 
 
 def test_oversized_tool_result_stops_without_silent_truncation(tmp_path):
-    b = broker(Backend([tool("ask_memory", {"query": "choice"})]), limits=replace(AgentLimits(), max_tool_result_bytes=10))
+    b = broker(Backend([tool("search_memory", {"query": "choice"})]), limits=replace(AgentLimits(), max_tool_result_bytes=10))
     result = asyncio.run(run_agent_phase(b, phase="answer", turn="Question", out=tmp_path / "run"))
     assert result["status"] == "incomplete"
     assert "tool-result byte budget" in result["reason"]
 
 
-@pytest.mark.parametrize("catalogue_name", ["ask_memory", "search_memory"])
-def test_explicit_messages_and_initial_tools_bypass_lme_role_prompt(tmp_path, catalogue_name):
+def test_explicit_messages_and_initial_tools_bypass_lme_role_prompt(tmp_path):
+    catalogue_name = "search_memory"
     backend = Backend([{"role": "assistant", "content": "Done."}])
     b = broker(backend)
-    b.cell.schemas = {catalogue_name: Cell.schemas["ask_memory"]}
     explicit = [
         {"role": "system", "content": "TASK-ONLY-SENTINEL"},
         {"role": "user", "content": "Do the task."},
     ]
     result = asyncio.run(run_agent_phase(
-        b, phase="writer", out=tmp_path / "run", messages=explicit, initial_tools=["ask_memory"],
+        b, phase="writer", out=tmp_path / "run", messages=explicit, initial_tools=["search_memory"],
     ))
     assert result["status"] == "completed"
     assert [row["function"]["name"] for row in backend.requests[0]["tools"]] == [catalogue_name]
@@ -250,7 +242,7 @@ def test_messages_and_turn_are_mutually_exclusive(tmp_path):
 
 
 def test_omitted_messages_and_tools_retain_old_lme_default_behavior(tmp_path):
-    backend = Backend([tool("ask_memory", {"query": "current choice"}), {"role": "assistant", "content": "Cedar."}])
+    backend = Backend([tool("search_memory", {"query": "current choice"}), {"role": "assistant", "content": "Cedar."}])
     b = broker(backend)
     result = asyncio.run(run_agent_phase(b, phase="answer", turn="What is the current choice?", out=tmp_path / "run"))
     assert result["status"] == "completed"

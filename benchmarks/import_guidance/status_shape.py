@@ -1,6 +1,6 @@
 """Scripted replies in the shape the product returns, built in one place.
 
-`read_import` status is `import_windows.report` merged into `adoption_run.status`. The window listing, the counts and
+`inspect_memory` `imports.status` is `import_windows.report` merged into `adoption_run.status`. The window listing, the counts and
 `keep_source` come from the product's own `import_windows` code, so a scenario cannot show a window state that the tool
 never returns. The budget figures are `{"bytes": N}` or `{"unknown": why}`, as `import_windows._figure` writes them.
 
@@ -130,7 +130,7 @@ def _budget(spec: dict, windows: list) -> dict:
 
 
 def status_reply(spec: dict) -> dict:
-    """`read_import` status without a run ID. `spec`: `windows` (the `Window` fields) and `budget` (see `_budget`)."""
+    """`inspect_memory` `imports.status` without a run ID. `spec`: `windows` (the `Window` fields) and `budget` (see `_budget`)."""
     from exomem import import_windows as iw
 
     windows = _windows(spec.get("windows", []))

@@ -16,6 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 
 from exomem import commands, memory_refs, query_log, writer_lease
 from exomem.governance import egress, membership, policy, projection_timing, receipts
@@ -393,7 +394,7 @@ def test_mcp_refusals_of_withheld_and_missing_pages_take_the_same_time(
 
     async def refuse(client: Client, target: str) -> None:
         started = time.perf_counter()
-        result = await client.call_tool("read_memory", {"path": target}, raise_on_error=False)
+        result = await client.call_tool(*public_call("read_memory", {"path": target}), raise_on_error=False)
         elapsed[target].append(time.perf_counter() - started)
         answer = json.loads(result.content[0].text)
         assert answer["error"]["code"] == "NOT_FOUND"

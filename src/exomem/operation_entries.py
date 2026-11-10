@@ -10,7 +10,9 @@ vocabulary that a vault or customer defines. Vocabulary subjects and governance
 coverage come from their existing registries.
 
 `spell_call` and `unspell_call` preserve grouped execution identities while naming
-the tools and arguments that each serving surface publishes.
+the tools and arguments that each serving surface publishes. On the `public` shape the
+`public_surface` module answers them: typed tools and two doors, which route through the
+renderings these entries declare. A rendering is then an internal routing record, not a tool.
 """
 
 from __future__ import annotations
@@ -30,13 +32,13 @@ Effect = Literal["read", "write"]
 #: operation declares exactly one (a write that declares none gets no summary).
 OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored"]
 
-#: How the MCP surface publishes a command that has renderings. `nested` carries the
-#: operation in one `operation` object, and `grouped` lists only the grouped command.
-#: `grouped` remains an internal spelling for compatibility and historical measurements;
-#: the server no longer offers the retired grouped comparison catalogue.
-ToolShape = Literal["nested", "grouped"]
+#: How the MCP surface publishes a converted command. `public` lists the typed tools and
+#: the two doors of `public_surface`, and `grouped` names the grouped command itself.
+#: `grouped` is the spelling of a direct Python call and of every non-MCP adapter; the
+#: server never lists it.
+ToolShape = Literal["public", "grouped"]
 TOOL_SHAPES: tuple[str, ...] = get_args(ToolShape)
-DEFAULT_TOOL_SHAPE: ToolShape = "nested"
+DEFAULT_TOOL_SHAPE: ToolShape = "public"
 
 #: The argument path that names the operation in a nested call, as guidance and refusals say it.
 OPERATION_KIND = "operation.kind"
@@ -417,10 +419,11 @@ RECORDS = CommandOperations(
         _entry(
             "update", CHANGE_RECORDS,
             (
-                "collection", "item_key", "changes", "expected_container_hash",
+                "collection", "item_id", "item_key", "changes", "expected_container_hash",
                 "expected_item_version", "why", "refresh_presentation", "held", "hold",
             ),
-            ("collection", "item_key", "expected_container_hash", "expected_item_version", "why"),
+            # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
+            ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
@@ -465,6 +468,9 @@ _PLAN_QUERY_FIELDS = (
 _PLAN_GUARDED_FIELDS = (
     "collection", "plan_id", "expected_container_hash", "expected_item_version", "why",
 )
+# `item_id` stands for the plan id and both guards; the leaf asks for them when it is absent.
+_PLAN_ITEM_FIELDS = (*_PLAN_GUARDED_FIELDS, "item_id")
+_PLAN_ITEM_REQUIRED = ("collection", "why")
 
 PLANS = CommandOperations(
     command="plan_memory",
@@ -515,12 +521,12 @@ PLANS = CommandOperations(
         ),
         _entry(
             "update", CHANGE_PLANS,
-            (*_PLAN_GUARDED_FIELDS, "changes", "body"), _PLAN_GUARDED_FIELDS,
+            (*_PLAN_ITEM_FIELDS, "changes", "body"), _PLAN_ITEM_REQUIRED,
             effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
-            "triage", CHANGE_PLANS, (*_PLAN_GUARDED_FIELDS, "transition"),
-            (*_PLAN_GUARDED_FIELDS, "transition"), effect="write", destructive=True,
+            "triage", CHANGE_PLANS, (*_PLAN_ITEM_FIELDS, "transition"),
+            (*_PLAN_ITEM_REQUIRED, "transition"), effect="write", destructive=True,
             outcome_verb="updated",
         ),
         _entry(
@@ -628,7 +634,13 @@ _REMAINING = {
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("reprocess", "change_media", ("path", "paths", "language", "multilingual"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
-    "triage_memory": (None, (_row("decision", "triage_memory", verb="saved"),)),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+    "triage_memory": (None, (
+        _row("decision", "triage_memory", verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        # The family, envelope and vocabulary decisions name a kind of signal or a request, not one item, so no short id reaches them.
+        _row("family", "triage_memory", ("ref", "action", "until", "why"), ("ref", "action"), kind="set-family", verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("envelope", "triage_memory", ("ref", "action"), ("ref", "action"), kind="set-envelope", verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("vocabulary-decision", "triage_memory", ("ref", "action", "decision"), ("ref", "decision"), kind="decide-vocabulary", constraints=(_literal("action", "decide-vocabulary", implied=True),), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+    )),
     "review_item_context": (None, (_row("item-context", "read_review"),)),
     "review_memory": ("mode", (
         _row("attention", "read_review", ("categories", "limit", "state")),
@@ -660,13 +672,13 @@ _REMAINING = {
         _row("resolve-entity", "read_connections", ("name", "entity_type", "entity_family", "limit"), ("name",)),
         _row("resolve-relation", "read_connections", ("path", "target", "query", "requested_relation", "limit", "continuation")),
         _row("create-entity", "change_connections", ("entity_type", "entity_family", "registry_scope", "name", "slug", "summary", "why_in_kb", "tags", "connections", "affiliation", "relationship", "domain", "language", "repo", "license", "used_in", "decided", "project", "decision_status", "aliases", "identity_decision", "facets", "relations", "ref"), ("name",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb and the `ref` field changed.
-        _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint"), ("ref", "expected_hash", "expected_fingerprint", "why"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("accept-relation", "change_connections", ("path", "requested_relation", "ref", "expected_hash", "expected_fingerprint", "why", "vocabulary_ref", "vocabulary_fingerprint", "item_id"), ("why",), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "observe_memory": ("operation", (
         _row("validate", "prepare_note", None, ("path",), kind="observation"),
         _row("add", "change_observations", None, ("path", "content", "category"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("update", "change_observations", None, ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("remove", "change_observations", ("path", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path", "unit_ref", "expected_fingerprint", "expected_hash"), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("update", "change_observations", None, ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("remove", "change_observations", ("path", "unit", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
     "manage_memory_file": ("operation", (
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),
@@ -915,6 +927,18 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
     return result
 
 
+def converted_commands() -> tuple[str, ...]:
+    """Every grouped command that declares operations, from source-owned metadata alone.
+
+    The answer does not wait for the command registry, so a module that the registry imports
+    can already ask which tools carry a command.
+    """
+    return tuple(dict.fromkeys((
+        *(operations.command for operations in (RECORDS, PLANS)), *_REMAINING,
+        "schema_memory", "govern_memory", "maintain_memory",
+    )))
+
+
 #: Every converted command, populated once from source-owned metadata at registry construction.
 _OPERATION_TABLE = {operations.command: operations for operations in (RECORDS, PLANS)}
 OPERATIONS: Mapping[str, CommandOperations] = MappingProxyType(_OPERATION_TABLE)
@@ -1036,10 +1060,11 @@ def listed_tools(command: str, shape: str, effect: Effect | None = None) -> tupl
     `grouped` shape, is listed under its own name whatever the side asked for.
     """
     _require_shape(shape)
-    renderings = _renderings_of(command) if shape != "grouped" else ()
-    if not renderings:
-        return (command,)
-    return tuple(r.name for r in renderings if effect in (None, r.effect))
+    if shape == "public":
+        from .public_surface import public_surface
+
+        return public_surface().tools_for(command, effect)
+    return (command,)
 
 
 def spell_call(
@@ -1047,29 +1072,17 @@ def spell_call(
 ) -> tuple[str, dict[str, Any]]:
     """The tool and arguments that carry a grouped-command call on a surface of this shape.
 
-    The inverse of `unspell_call`: a call that `resolve_invocation` accepts resolves back
-    to `arguments`. A command without renderings, and the `grouped` shape, spell a call as
-    itself. Raises ValueError for an operation that no rendering carries, because guidance
-    that names a tool the surface cannot call must fail where it is written.
+    The inverse of `unspell_call`: a call that the surface accepts resolves back to
+    `arguments`. The `grouped` shape spells a call as itself. Raises ValueError for an
+    operation that no public tool carries, because guidance that names a tool the
+    surface cannot call must fail where it is written.
     """
     _require_shape(shape)
-    renderings = _renderings_of(command) if shape != "grouped" else ()
-    if not renderings:
-        return command, dict(arguments)
-    selector = renderings[0].selector
-    kind = arguments.get(selector) if selector else None
-    fields = {key: value for key, value in arguments.items() if key != selector}
-    for rendering in renderings:
-        variant = next((entry for entry in rendering.variants
-                        if (selector is None or entry.action == kind)
-                        and all(replace(item, implied=False).matches(fields)
-                                for item in entry.constraints)), None)
-        if variant is None:
-            continue
-        # The tool's own arguments sit beside `operation`, where the server reads them.
-        tool_arguments = rendering.take_tool_arguments(fields)
-        return rendering.name, {"operation": {"kind": variant.kind, **rendering.wire_fields(fields)}, **tool_arguments}
-    raise ValueError(f"no rendering of {command} carries {selector}={kind!r}")
+    if shape == "public":
+        from .public_surface import public_surface
+
+        return public_surface().spell(command, arguments)
+    return command, dict(arguments)
 
 
 def call_text(command: str, arguments: Mapping[str, Any], shape: str) -> str:
@@ -1096,21 +1109,24 @@ def tools_text(command: str, shape: str, effect: Effect | None = None) -> str:
 def route(command: str, shape: str, actions: Sequence[str]) -> dict[str, Any]:
     """The route a bootstrap advertises for some operations of a grouped command.
 
-    A command without renderings, and the `grouped` shape, name one tool. Otherwise each
-    listed tool names the operations it carries, and `selector` names the argument that
-    holds the operation. Raises ValueError for an operation that no rendering carries,
-    because a route to a call the surface cannot take must fail where it is written.
+    The `grouped` shape names one tool. The `public` shape names each tool that carries one
+    of the operations, and the door operations among them. Raises ValueError for an operation
+    that no public tool carries, because a route to a call the surface cannot take must fail
+    where it is written.
     """
     _require_shape(shape)
-    renderings = _renderings_of(command) if shape != "grouped" else ()
-    if not renderings:
+    if shape != "public":
         return {"tool": command, "actions": list(actions)}
-    by_tool = {r.name: list(dict.fromkeys(v.kind for action in actions for v in r.variants
-                                        if v.action == action)) for r in renderings}
-    missing = [a for a in actions if not any(v.action == a for r in renderings for v in r.variants)]
-    if missing:
-        raise ValueError(f"no rendering of {command} carries {', '.join(missing)}")
-    return {"tools": by_tool, "selector": OPERATION_KIND}
+    operations = OPERATIONS.get(command) or register_operations(command)
+    selector = None if operations is None else operations.selector
+    tools: dict[str, list[str]] = {}
+    for action in actions:
+        tool, spelled = spell_call(command, {selector: action} if selector else {}, shape)
+        operation = spelled.get("operation")
+        tools.setdefault(tool, [])
+        if isinstance(operation, str) and operation not in tools[tool]:
+            tools[tool].append(operation)
+    return {"tools": tools}
 
 
 def split_operation(body: Mapping[str, Any]) -> tuple[Any, dict[str, Any]] | None:
@@ -1130,38 +1146,23 @@ def unspell_call(
 ) -> tuple[str, dict[str, Any]] | None:
     """The grouped command and flat arguments that a tool call of this shape stands for.
 
-    None when `tool` is not a name this shape lists for a converted command, or when the
-    arguments do not select an operation that the tool carries. It checks which operation
-    the call names and nothing about the operation's own fields: the grouped command's
-    argument rules do that when the call runs. A tool's own arguments beside the operation
-    cross into the flat arguments as they do on the server.
+    None when `tool` is not a name this shape lists, or when the arguments do not select an
+    operation that the tool carries. It checks which operation the call names and nothing
+    about the operation's own fields: the grouped command's argument rules do that when the
+    call runs.
     """
     _require_shape(shape)
+    if shape == "public":
+        from .public_surface import public_surface
+
+        return public_surface().unspell(tool, arguments)
     for command, operations in OPERATIONS.items():
-        if shape == "grouped":
-            if tool != command:
-                continue
-            kind = arguments.get(operations.selector)
-            if not any(entry.matches(kind, arguments) for entry in operations.entries):
-                return None
-            return command, dict(arguments)
-        for rendering in _renderings_of(command):
-            if rendering.name != tool:
-                continue
-            body = dict(arguments)
-            tool_arguments = rendering.take_tool_arguments(body)
-            parsed = split_operation(body)
-            if parsed is None:
-                return None
-            kind, fields = parsed
-            try:
-                fields = rendering.leaf_fields(fields)
-            except ValueError:
-                continue
-            if rendering.variant_for(kind, fields) is None:
-                continue
-            variant = rendering.variant_for(kind, fields)
-            return command, {**rendering.selected_arguments(variant, fields), **tool_arguments}
+        if tool != command:
+            continue
+        kind = arguments.get(operations.selector)
+        if not any(entry.matches(kind, arguments) for entry in operations.entries):
+            return None
+        return command, dict(arguments)
     return None
 
 

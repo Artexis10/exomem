@@ -10,9 +10,17 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from _public_call import public_call
 from test_connector_boundary import configured_boundary as configured_boundary
 
-from exomem import capture_carrier, commands, envelope, prominence, working_set_runtime, writer_lease
+from exomem import (
+    capture_carrier,
+    commands,
+    envelope,
+    prominence,
+    working_set_runtime,
+    writer_lease,
+)
 from exomem.governance.principal import RequestPrincipal, request_scope
 
 TURN = "what do we know about the tidal ledger?"
@@ -222,6 +230,7 @@ def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
     )
 
     def call(client, name: str, arguments: dict) -> dict:
+        name, arguments = public_call(name, arguments)
         reply = client.post(
             "/mcp",
             headers={
@@ -245,7 +254,7 @@ def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
             packet = call(client, "recall_context", {"turn": TURN, **({"continuity": token} if token else {})})
             token = packet["continuity"]
             delivered.append("capture_policy" in packet)
-        before = call(client, "configure_memory", {})
+        before = call(client, "inspect_memory", {"operation": "settings.inspect", "arguments": {}})
         call(client, "configure_memory", {"action": "set", "prominence": "light", "expected_revision": before["revision"]})
         changed = call(client, "recall_context", {"turn": TURN, "continuity": token})
 

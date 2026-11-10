@@ -36,9 +36,9 @@ CODEX = FIXTURES / "codex_rollout_thread.jsonl"
 CURRENT = "And is that still on track for the autumn?"
 CODEX_CURRENT = "Then who signs it off?"
 
-MARLOW = "Knowledge Base/Entities/Projects/Marlow Quay Survey.md"
+MARLOW = "exomem://memory/6f1d2c3a-4b5e-4f60-8a71-92b3c4d5e6f7"
 OTTILIE = "Knowledge Base/Entities/People/Ottilie Marsh.md"
-HARBOR = "Knowledge Base/Notes/Insights/harbor-lantern-budget-hub.md"
+HARBOR = "exomem://memory/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 SENTINELS = (
     "PRIVATE-THINKING-SENTINEL",
     "TOOL-RESULT-SENTINEL",
@@ -146,6 +146,18 @@ def test_refs_come_from_call_arguments_only_newest_first() -> None:
     assert conversation["refs"] == [OTTILIE, MARLOW]
 
 
+def test_a_page_named_by_title_is_no_ref(tmp_path: Path) -> None:
+    call = {"type": "tool_use", "id": "t1", "name": "mcp__exomem__read_page", "input": {"page": "Marlow Quay Survey"}}
+    lines = [
+        json.dumps({"type": "user", "message": {"role": "user", "content": "What is on the survey?"}}),
+        json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [call]}}),
+    ]
+    path = tmp_path / "title.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    conversation = hook._conversation_from_transcript(str(path), "nothing new")
+    assert "refs" not in conversation
+
+
 def test_the_hook_never_sends_a_focus() -> None:
     assert "focus" not in hook._conversation_from_transcript(str(CLAUDE), CURRENT)
 
@@ -170,7 +182,7 @@ def test_the_conversation_is_bounded_before_it_is_sent(tmp_path: Path) -> None:
     for index in range(30):
         lines.append(
             json.dumps(
-                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{index}", "name": "mcp__exomem__read_memory", "input": {"path": f"page-{index}.md"}}]}}
+                {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{index}", "name": "mcp__exomem__read_page", "input": {"page": f"exomem://memory/page-{index}"}}]}}
             )
         )
     path = tmp_path / "long.jsonl"
@@ -180,7 +192,7 @@ def test_the_conversation_is_bounded_before_it_is_sent(tmp_path: Path) -> None:
     assert sum(len(entry["text"]) for entry in conversation["recent"]) <= 2400
     assert all(len(e["text"]) <= (600 if e["role"] == "user" else 300) for e in conversation["recent"])
     assert len(conversation["refs"]) <= 12
-    assert conversation["refs"][0] == "page-29.md"
+    assert conversation["refs"][0] == "exomem://memory/page-29"
 
 
 def test_only_the_final_64_kib_are_read_and_a_partial_first_line_is_discarded(tmp_path: Path) -> None:

@@ -9,13 +9,14 @@ the version you read. A vault path, a KB-relative path and an `exomem://` ref ke
 
 A title that several pages share refuses with `AMBIGUOUS_REFERENCE`: `message` says how many
 pages carry it, and `candidates` lists at most 5 rows of `title`, `type`, `date` and `id`,
-newest first. Retry with `path` set to the `id` of the page you mean. Copies of one page share an
-`id`; then each row also carries its `path`, and the retry is `<path>`: set `path` to the `path`
-of the copy you mean. An `id` in `expected_hash`
+newest first. Retry with the page argument set to the `id` of the page you mean. Copies of one page share an
+`id`; then each row also carries its `path`, and the retry is `<path>`: set the page argument to the `path`
+of the copy you mean. The `id` of a page, given as `note` to `edit_note` with `action="replace_body"`,
 guards the edit against the version that id names; if the page changed since, the refusal is
 `STALE_EDIT` and carries the current `id` in its retry. The `id` of a write reply names the
 version that write left, so it guards your next edit of that page, even when the reply is a
-replay. A source and a superseded page take no guarded edit, so their `id` names the version
+replay. Every other edit reads the page again under the writer lease, so it needs no id.
+A source and a superseded page take no guarded edit, so their `id` names the version
 current when the reply was made.
 
 ## Mutation results and safe retries
@@ -33,7 +34,7 @@ this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not b
 whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
 carry the codes and reasons. A result whose status is
 `replayed` reads `Already saved -> <title>`. Each sentence ends with the name of the store
-that took the write, such as `Saved -> <title> (personal Exomem)`; the bootstrap's `store`
+that took the write, such as `Saved -> <title> (personal Exomem)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
@@ -42,21 +43,22 @@ several), the hashes a guarded write takes, any
 `warnings`, and at most one `next_action` sentence (do it) and one `notice` sentence (tell the
 user). `notice` appears only when the change may be incomplete: for example a background
 update failed, or the call only checked a draft. Everything operational moves under
-`diagnostics.operational`, which only `response_detail="full"` returns: `path` or `paths`,
+`diagnostics.operational`, which only `detail="full"` returns: `path` or `paths`,
 `ok`, `status`, `mutated`, `request_id`, `receipt_id`, `idempotency_key`, `before_hash`,
 `warnings_count`, and every `derived_sync*`, `advisory_sync*`, `graph_sync*` and
 `vocabulary_sync` field. A null receipt means that the surface supplied no replay
 identity; it does not weaken the committed status.
 When the write warned, `warnings` carries the texts — at most 8 entries of at
 most 300 characters. `warnings_count` appears beside them only when the list is
-shorter than the count: the rest were trimmed, and `response_detail="full"` shows
+shorter than the count: the rest were trimmed, and `detail="full"` shows
 them all. An upload receipt reports its warnings as per-file rows under
 `files` instead, and a mutation recovered from a portable receipt reports the
 count alone because it retains no leaf content. A corpus write advisory includes
 its review ref and complete 24-character signal fingerprint in its warning text;
-triage binds to that exact fingerprint (dismiss requires a reason), and a stale
-fingerprint simply lets the advisory re-emit when the counterpart changes or the
-written page changes the detected signal class.
+`decide_review_item(review_item=<that ref>, decision="dismiss", why=...)` binds the
+fingerprint the server last showed (dismiss requires a reason), and the advisory
+re-emits when the counterpart changes or the written page changes the detected
+signal class.
 A compiled-note write may also carry `structure_suggestion`. Its `kind` is
 `note_cohesion` while the written page has reached a size step and nobody has
 answered that step. It holds `units`, `step_units` and `next_step_units`, the
@@ -65,26 +67,25 @@ more than one independent question? The runtime counts size and claims nothing
 about the page. The field reports nothing about any other page, and it never
 affects `status`, `mutated`, or replay. Nothing is reorganised by the runtime;
 answering is the agent's decision with the user (see `writing.md`).
-Use `response_detail="full"` when existing leaf diagnostics are needed under
-`diagnostics`. Use `response_detail="legacy"` only for temporary compatibility
-with the former raw result. Response detail is presentation-only: changing it
+Use `detail="full"` when existing leaf diagnostics are needed under
+`diagnostics`. Detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
 terminal.
 
 A selected media process/retry/reprocess request can finish without changing canonical
 bytes. The default reply carries no `state`, `status`, `terminal` or `mutated`; with
-`response_detail="full"` they sit under `diagnostics.operational` and read
+`detail="full"` they sit under `diagnostics.operational` and read
 `state: settled`, `status: settled`, `terminal: true` and `mutated: false`, beside the
 request identity and bounded `media_results`. This means the request has completed, not
 that a new content commit or extraction has completed. Inspect each item's state and error/remediation, and use the same
 identity for exact replay. A failed-subset retry is a new request containing
 only those failed paths.
 
-Committed observation responses carry `unit_ref` and `removed_unit_ref` when their
-producer supplies them. A committed page write carries `after_hash`, the exact hash of
-the committed bytes; the `before_hash` sits under `diagnostics.operational`. `after_hash`
-is a mutation identity, not a promise that nobody has edited the page since: pass it as
-the next `expected_hash` and honor any stale-write refusal. Portable receipt recovery may
+A committed observation write names the unit it wrote or removed. Pass that unit id as
+the `observation` of the next `edit_note` call for it. A committed page write carries the
+page `id`, which names the exact committed bytes; the `before_hash` sits under
+`diagnostics.operational`. The `id` is a mutation identity, not a promise that nobody has
+edited the page since: honor any stale-write refusal. Portable receipt recovery may
 omit it; it never invents a missing identity.
 Do not reread solely to confirm a successful commit. Use one bounded final
 verification of the whole requested outcome, and extra reads only when content,
@@ -146,7 +147,7 @@ a `null` clears an argument, and a value in angle brackets is for you to supply.
 tool, `arguments` is the whole call. `retry.after_s` is a wait in seconds. `retry` is absent
 when no repeat of the call can succeed.
 `candidates` lists at most five valid values or titles to choose from. With
-`response_detail="full"` a write also returns `diagnostics`: the complete envelope with
+`detail="full"` a write also returns `diagnostics`: the complete envelope with
 the umbrella code, the remediation text, request identity and wait times.
 
 ## Relation choices and unlinked names on a write
@@ -157,17 +158,17 @@ Name a specific relation on every edge. A write can answer in two ways.
   to every pair of pages, a note to a note as much as a note to an entity. The write
   commits nothing. The compact error lists up to five `candidates`: the specific relations
   that fit the two pages, best first, with the plain link relation last. Repeat the call
-  with one of them. With `response_detail="full"`, `diagnostics` holds the ranked
+  with one of them. With `detail="full"`, `diagnostics` holds the ranked
   `options` (up to eight, with `options_route` for the full list) and the `routes` for each
-  way out: `routes.specific`, `routes.propose` (the `propose-relation` and `save-relations`
-  calls, for when no option fits) and `routes.plain_link` (the last resort).
-  No other answer keeps the generic edge: neither `relation_disposition="generic"` nor a
-  `reason` on a `relations` item exists. An edge the page already carried is not judged
+  way out: `routes.specific`, `routes.propose` (the `schema.propose_relation` and `schema.save_relations`
+  operations, for when no option fits) and `routes.plain_link` (the last resort).
+  No other answer keeps the generic edge: no argument keeps one. An edge the page already carried is not judged
   again, so a page that holds an older generic edge stays editable.
 - **`undeclared_referents` lists links to nothing.** Each of its `names` is a link that
-  this write added and that has no page and no entity, with its `create-entity` route.
+  this write added and that has no page and no entity, with its `connections.create_entity` route.
   Follow the route when the name is a durable referent: stable, recurring and
-  useful beyond this source. Otherwise dismiss it the same way.
+  useful beyond this source. Otherwise dismiss it with
+  `decide_review_item(review_item=<its review ref>, decision="dismiss", why=...)`.
 
 ## Relation disposition on compiled writes
 
@@ -183,36 +184,34 @@ A page that shares its subject with an existing page is not unrelated, even when
 specific relation holds. Give it a plain link (`- links_to [[...]]`), which satisfies
 the rule; a later measurement or a sibling note on the same topic is the usual case.
 
-To commit an unrelated page, send `relation_disposition="reviewed_none"` and a
-`relation_review_reason` naming why nothing qualified with the creation itself;
-that one call commits and records the decision. Committing without them refuses
-with `RELATION_DISPOSITION_MISSING`, and its `retry` is the call that records the
-decision; fill in the reason placeholder. The umbrella code
+To commit an unrelated page, send `unlinked_reason` naming why nothing qualified
+with the creation itself; that one call commits and records the decision. Committing
+without it refuses with `RELATION_DISPOSITION_MISSING`, and its `retry` is the call that
+records the decision; fill in the reason placeholder. The umbrella code
 `SEMANTIC_CONTRACT_BLOCKED` and its `remediation` text sit under `diagnostics`. A
-`validate_only=true` call reports the
-obligation first: it returns `relation_review_hash` alongside the draft fields
-and lists the finding under `blocking_findings`. Committing that validated
-draft sends its `draft_id`, `draft_hash` and `draft_token` and the
-`relation_review_hash` too. Prefer adding the real relation over asserting none
-exists; the disposition is for material that genuinely stands alone.
+`preview=true` call reports the obligation first and lists the finding under
+`blocking_findings`. To commit a previewed draft, send the same call again without
+`preview`: the server binds the draft and the relation review itself. Prefer adding the
+real relation over asserting none exists; the reason is for material that genuinely
+stands alone.
 
 The decision binds the page, not its bytes. A later edit of a page that holds a
-`reviewed_none` decision commits without any review field, and records no new
+`unlinked_reason` decision commits without one, and records no new
 decision, while the page stays unconnected. An edit that removes a page's last
 qualifying relation is still refused.
 
 A refused Record append or update is held rather than lost. The error message names
 the failing fields (at most three, then "and N more") and says the candidate is kept as a
-held candidate. Its `retry` is the `change_records` call that resumes it with the `held` reference;
+held candidate. Its `retry` is the `add_record` call that resumes it with the `held` reference;
 in `item` (append) or `changes` (update) a `null` clears a field and a value in angle
-brackets is yours to supply. With `response_detail="full"`, `diagnostics.error.issues` lists
+brackets is yours to supply. With `detail="full"`, `diagnostics.error.issues` lists
 every failing field. Fix the named fields and resume, or `discard` the candidate. Never loop,
 and never preserve diagnostic breadcrumbs as Evidence.
 
 On MCP these expected refusals arrive as normal tool content with a top-level
 `error`; inspect it rather than treating it as a transport failure. A `receipt_id`
 is diagnostic and is not a transferable
-cross-session replay key. `bootstrap` probes this vault's local OS
+cross-session replay key. `read_instructions` probes this vault's local OS
 mutation boundary: `verified: true` binds the safe holder fields to the current
 lock generation, while `verified: false` means the external holder is real but
 cannot be safely attributed. Never infer vault content or identity from status.

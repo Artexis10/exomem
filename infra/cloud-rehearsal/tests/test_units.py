@@ -23,9 +23,9 @@ def test_cloud_discovery_checks_public_renderings_and_keeps_its_denials(monkeypa
 
     from cloud_rehearsal import scenarios
 
-    discovery = {"excluded": ["transfer_artifact"], "adoption": ["read_import", "import_memory"]}
+    discovery = {"excluded": ["upload_files"], "adoption": ["inspect_memory", "manage_memory"]}
     policy = json.dumps(discovery)
-    tools = ["read_media", "read_import", "import_memory"]
+    tools = ["search_memory", "inspect_memory", "manage_memory"]
     if surface == "excluded":
         tools.append(discovery["excluded"][0])
     elif surface == "missing-adoption":
@@ -134,7 +134,7 @@ def test_cited_recall_reports_wrapped_refusal_without_private_content() -> None:
         report=report.Report(run_id="recall-refusal"),
     )
     record = report.StepRecord(number=5, name="paraphrased_cited_recall")
-    with pytest.raises(report.StepFailure, match="^ask_memory failed: QUERY_TIMEOUT$"):
+    with pytest.raises(report.StepFailure, match="^search_memory failed: QUERY_TIMEOUT$"):
         asyncio.run(scenarios.step_5_cited_recall(ctx, record))
 
 

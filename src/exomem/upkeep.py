@@ -224,13 +224,17 @@ def serve(
     subject_entry = next((item for item in evidence if item.get("path") == subject), {})
     ref = str(row.get("ref") or upkeep_ref(str(row["id"])))
     route = _visible_route(row.get("route") or {}, keep)
-    dispose_args: dict[str, Any] = {"ref": ref}
+    from . import review_ids  # imported here: review_ids reaches the public tool table
+
+    fingerprint = str(row.get("fingerprint") or "")
+    item_id = review_ids.item_id({"ref": ref, "fingerprint": fingerprint})
     if kind == dreamer_families.LINK_KIND:
-        dispose_args["source_path"] = subject
+        route = _accept_route(route, item_id)
     return {
         "ref": ref,
+        "id": item_id,
         "family": str(row.get("family") or ""),
-        "fingerprint": str(row.get("fingerprint") or ""),
+        "fingerprint": fingerprint,
         "kind": kind,
         "label": LABELS.get(kind, "Upkeep"),
         "subject": {
@@ -257,13 +261,38 @@ def serve(
             "tool": "review_item_context",
             "args": {"ref": upkeep_ref(str(row["id"]))},
         },
-        "dispose": {
-            "tool": "triage_memory",
-            "actions": ["dismiss", "snooze"],
-            "args": dispose_args,
-        },
+        "dispose": _dispose(item_id),
         "permission": dreamer_families.PERMISSION,
     }
+
+
+def _dispose(item_id: str | None) -> dict[str, Any]:
+    """The decision route of one item, spelled for the serving surface; `actions` names each decision it takes.
+
+    The route carries the item's short id, which the decision binds to the queue's current ref and
+    fingerprint, so a call the public surface lists can be written for every kind of item.
+    """
+    from . import capabilities
+
+    route = capabilities.active_call_route("triage_memory", {"action": "dismiss", "item_id": item_id})
+    return {**route, "actions": ["dismiss", "snooze"]}
+
+
+def _accept_route(route: dict[str, Any], item_id: str | None) -> dict[str, Any]:
+    """The accept call of a link item, named by its id on a surface that lists decide_review_item.
+
+    The stored route names the relation ref, the page path and the fingerprint, which that tool
+    does not take. The id carries the ref and the fingerprint, and the decision binds them at the leaf.
+    """
+    from . import capabilities
+
+    if item_id is None or capabilities.current_tool_shape() == "grouped":
+        return route
+    chosen = {key: route["args"][key] for key in ("requested_relation",) if key in route["args"]}
+    spelled = capabilities.active_call_route(
+        "connect_memory", {"operation": "accept-relation", "item_id": item_id, **chosen}
+    )
+    return {**spelled, **({"choose": route["choose"]} if "choose" in route else {})}
 
 
 def _visible_route(route: dict[str, Any], keep) -> dict[str, Any]:

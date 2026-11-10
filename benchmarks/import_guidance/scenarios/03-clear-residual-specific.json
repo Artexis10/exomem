@@ -3,14 +3,14 @@
  "title": "Clear the residual, specific request",
  "prompt": "My import finished. I no longer need `Scans/receipt-2019.pdf` or `Misc/backup.dmg`, they are redundant. Clear those two.",
  "served_tools": [
-  "import_memory",
-  "read_import",
+  "manage_memory",
+  "inspect_memory",
   "observe_transfer",
   "transfer_memory"
  ],
  "builtin_tools": [],
  "replies": {
-  "read_import.status": {
+  "inspect_memory.imports.status": {
    "$status": {
     "windows": [
      {
@@ -42,7 +42,7 @@
     }
    }
   },
-  "import_memory.acknowledge": {
+  "manage_memory.imports.acknowledge": {
    "mode": "adoption",
    "mutated": true,
    "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
@@ -60,12 +60,12 @@
  "checks": [
   {
    "type": "called_with",
-   "tool": "import_memory",
-   "kind": "acknowledge",
+   "tool": "manage_memory",
+   "kind": "imports.acknowledge",
    "once": true,
    "where": {
-    "operation": {
-     "kind": "acknowledge",
+    "operation": "imports.acknowledge",
+    "arguments": {
      "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
      "paths": [
       "Scans/receipt-2019.pdf",

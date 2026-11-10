@@ -5279,7 +5279,7 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
-            audit_call = active_call_text("review_memory", {"mode": "audit", "categories": ["path_variants"]})
+            audit_call = active_call_text("maintain_memory", {"mode": "audit", "categories": ["path_variants"]})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
                 f"run {audit_call} to see the split"

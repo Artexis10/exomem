@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _public_call import public_call
 from test_collection_store_writer import store as store
 
 from exomem import commands, entity_types, graph_sync, registry_history
@@ -50,7 +51,7 @@ def _served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     def call(tool: str, arguments: dict) -> dict:
         content = asyncio.run(
-            mcp.call_tool(tool, arguments, run_middleware=True)
+            mcp.call_tool(*public_call(tool, arguments), run_middleware=True)
         ).structured_content
         # A tool whose output schema is not an object wraps its result.
         return content["result"] if set(content) == {"result"} else content
@@ -84,7 +85,7 @@ def test_a_reverted_promotion_leaves_its_page_as_debt(
     # The write says what it promoted, under which parent, and how to revert it.
     [receipt] = promoted["vocabulary_receipt"]
     assert "entity-types: registered venue (parent concept)" in receipt
-    assert 'operation="restore"' in receipt
+    assert "operation='schema.restore'" in receipt
 
     # Bootstrap lists it with a counted zero once the server's own graph
     # maintenance has converged on the new registry.
@@ -153,7 +154,7 @@ def test_a_first_use_registration_is_announced_and_marked_new(
     )
     [receipt] = captured["vocabulary_receipt"]
     assert "source-kinds: registered field-notebook on first use" in receipt
-    assert 'operation="restore"' in receipt
+    assert "operation='schema.restore'" in receipt
 
     # Another agent's next bootstrap marks it new.
     served = call("bootstrap", {"section": "vocabulary"})

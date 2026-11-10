@@ -20,23 +20,23 @@ and index updates are determined by the operation, not the caller.
 
 | Op | Intent | Writes to |
 |---|---|---|
-| **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
+| **read_instructions** | Return a portable, versioned operating contract for generic MCP clients. A skill-aware agent fetches session state when current policy or capabilities are absent, with compact fallback when its exposed schema or server cannot accept the skill contract; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<Kind>/[<Domain>/]` |
-| **record_episode/read_episode** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point (`action="record"`); reuse its `episode` key for later recaps, which rewrite the episode's one page in place and keep the previous text in the page's history. `action="inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
+| **save_episode** and **inspect_memory** | Record a bounded recap of a conversation — worked on, decided, left open, at most three verbatim user statements — once at a decision or stopping point; reuse its `episode` key for later recaps, which rewrite the episode's one page in place and keep the previous text in the page's history. `inspect_memory` with `operation="episodes.inspect"` reads the key's revision history. Where `candidates` reports `execution: enabled`, `prepare`, `disposition`, `resume` and the final `coverage` pass run its typed candidates ([engagement](engagement.md)) | `Sources/Episodes/` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see the media transport guidance below), not this tool | `Evidence/<scope>/` |
 | **edit** | In-place edit through one `edit_note` tool. New clients send required nested `operation` with one `kind`: `replace_body`, `replace_tags`, `replace_string`, `batch_replace`, `edit_section`, `patch_frontmatter`, or `fill_row`. See `operations.md` for fields. Bumps `updated:` | the page |
-| **prepare_note/change_observations** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
+| **add_observation** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove take the unit id. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **graph_context** | Return a bounded typed graph neighborhood for a page or query from the derived graph sidecar. Read-only | — |
 | **suggest_relations** | Propose typed graph relations for a page or draft; review-only, never writes | — |
-| **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (echo `content_hash` to `edit` via `expected_hash`). Read-only | — |
+| **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (a replace-body edit takes the page `id` instead). Read-only | — |
 | **audit** | Lint pass: orphans, broken links, supersession integrity, aged unprocessed sources | proposals only |
 | **overview** | Bounded structure report of the vault or a subtree — folder tree, counts, frontmatter coverage, junk candidates. Works outside the KB and pre-init (read-only) | — |
 | **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `Knowledge Base/_Adoption/` or `Sources/Imported/` only in explicit write modes |
-| **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
+| **inspect_memory** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
 | **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Remote tools preview with `dry_run=true`, then start the repair as a maintenance job with the `plan_id` and a `why`; the CLI is `exomem maintain --reconcile` | drifted indexes + embedding sidecar |
 | **provenance_report** | Scan note bodies for `<!-- key:value -->` provenance tags (filter by key/value/path). Read-only | — |
@@ -75,13 +75,13 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   what's relevant into the note/evidence *text* (that's the queryable part), and
   deliver the *original file* separately. Decide the lane before the transport:
   raw material takes
-  **`capture_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`**,
+  **`save_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "...", "mime_type": "...", "file_name": "..."}])`**,
   and proof-bearing material takes
-  **`preserve_artifacts(scope="...", category="...", files=[...])`** — the same
+  **`save_evidence(scope="...", category="...", files=[...])`** — the same
   handle shape either way. When the client supplies file handles, call whichever
   of those fits directly. Otherwise use the route for your client under
   "A shared file that is evidence" below. A personal server (never Exomem Cloud) also
-  offers a direct upload: **`transfer_artifact(operation="upload")`** without `hold` returns a
+  offers a direct upload: **`upload_files(lane="evidence")`** without `hold` returns a
   short-lived `{token, upload_url}`, and a multipart `POST` there with `scope` and `category`
   form fields stores the file straight in Evidence. If the file-owning client cannot reach
   `upload_url`, open the prefilled browser upload form or give its URL to the user for a
@@ -101,14 +101,14 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   never save only the transcription. Send bytes, never a path: no tool takes one.
   - **File handles (ChatGPT attachments):** pass them in `files`, and put your
     transcription in
-    **`preserve_artifacts(scope="...", category="...", files=[...], transcriptions=[{"file_id": "...", "text": "..."}])`**.
+    **`save_evidence(scope="...", category="...", files=[...], options={"transcriptions": [{"file_id": "...", "text": "..."}]})`**.
     It lands on the original's own page, bound to its SHA-256, size and type, and
     only when that original is stored.
   - **Local clients (Claude Code, Codex CLI, any client with a local token):**
     `exomem attach <file>` holds the bytes and prints a `file` handle; pass it in
     `files` like any other handle. The handle works once, for an hour, and only for
     the local token that sent it, so the MCP connection must use that same local
-    token. `--lane source` holds it for `capture_source`; `--scope S --category C`
+    token. `--lane source` holds it for `save_source`; `--scope S --category C`
     preserves straight to Evidence.
   - **Sandbox clients (claude.ai, Claude desktop chat, Cowork; no file handle, no
     local token):** only with the user's opt-in (code execution on, the Exomem host
@@ -116,8 +116,8 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     session's own upload handoff. It needs no user token and works on Exomem Cloud and
     on a personal server; a Cloud cell accepts no other upload.
     1. In the sandbox, compute the file's SHA-256, for example with `sha256sum <file>`.
-    2. Call `transfer_artifact(operation="upload", lane="source", hold=true, expected_sha256="<digest>")`.
-       On a personal server, `lane="evidence"` holds the file for `preserve_artifacts` instead.
+    2. Call `upload_files(lane="source", hold=true, expected_sha256="<digest>")`.
+       On a personal server, `lane="evidence"` holds the file for `save_evidence` instead.
     3. Save the returned JSON to a file in the sandbox, for example `handoff.json`. Its
        `token` is a secret: never print it or put it in a message. It works once and
        expires within fifteen minutes, so prepare the file and digest first.
@@ -139,11 +139,11 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
          ```
     5. Check the reply: `state` is `held`, `hash` equals the digest and `size` equals the
        file's size. Pass its `file` object unchanged to
-       `capture_source(title="...", source_kind="...", files=[<file>], expected_sha256="<digest>")`.
-       Only the receipt that `capture_source` returns proves custody; the upload reply
+       `save_source(title="...", source_kind="...", files=[<file>], options={"expected_sha256": "<digest>"})`.
+       Only the receipt that `save_source` returns proves custody; the upload reply
        proves only a temporary hold.
 
-    Classify a held Source when calling `capture_source`, using `source_kind` and
+    Classify a held Source when calling `save_source`, using `source_kind` and
     a clear `domain` when known. A personal server also accepts direct Source
     uploads with these form fields; follow "Delivering the bytes" in
     `operations.md`. Keep classification fields out of the held-upload request.
@@ -155,28 +155,28 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   - **No path for the bytes:** tell the user the original was not preserved and, on a
     personal server, offer the browser upload form. Custody is proven only by a returned
     `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
-- **Media processing is automatic and actionable — `read_media/change_media`.** Supported
+- **Media processing is automatic and actionable — `inspect_memory` and `manage_memory`.** Supported
   audio and video preserved through Exomem or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.
-  Call `change_media(operation={'kind': 'process', 'path': ...})` for immediate targeted
+  Call `manage_memory(operation="media.process", arguments={'path': ...})` for immediate targeted
   reconciliation, `operation="status"` for bounded per-artifact state and next
   actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
   These actions enqueue or inspect work; they do not wait for model completion or
   overwrite an existing valid transcript. Add `'language': <code>` or
   `'multilingual': true` to `process` to declare the language of a recording whose
   transcript is not complete; a completed one refuses it. Only an explicit
-  `change_media(operation={'kind': 'reprocess', 'path': ..., 'language': <code>})`
+  `manage_memory(operation="media.reprocess", arguments={'path': ..., 'language': <code>})`
   extracts again over a completed transcript. Use it when the text is in the wrong
   language or loops on one line. The `language` code or `multilingual` mode is optional
   and is kept for later runs; the previous extraction stays on a linked prior page.
 - **Recover a stored original.** Call
-  **`transfer_artifact(operation="download", artifact="<stored artifact or custody page>")`**.
-  Supply `expected_sha256` when a particular version is required. The response names
+  **`download_files(pages=["<title of the stored artifact or custody page>"])`**
+  (up to eight pages; each page reports its own result). The response names
   the original's SHA-256, size, filename, MIME source and available delivery paths.
   Give the person `deliveries.https.url` as a link: it is short, opens in a normal
   browser and needs no hidden header. Use `deliveries.native_resource.uri` with MCP
   `resources/read` only when the client can consume a blob. To look at an image
-  yourself, use `read_media` kind `image` instead of downloading it. Large originals use HTTPS before base64 encoding.
+  yourself, use `inspect_memory` kind `image` instead of downloading it. Large originals use HTTPS before base64 encoding.
   A prepared handoff proves no consumption: verify the recovered bytes before
   claiming success. Native attachment rendering in other clients remains unverified.
   Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
@@ -186,12 +186,12 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - **Media hits in `find` are first-class.** An extracted media sidecar carries
   `media_type` and `media_file` (a pointer to the original binary). Treat the
   *file* as the result and the matched transcript/OCR snippet as the "why"; offer
-  to recover the original with `transfer_artifact(operation="download", artifact=...)`. Images and video are also
+  to recover the original with `download_files(pages=[...])`. Images and video are also
   searchable by *visual content* (CLIP), not just text — a purely-visual hit
   carries a `clip_score`; a video visual hit also carries `clip_match_at` (e.g.
   `"14:32"`), the timestamp of the matching keyframe.
-- **Look at a stored image — `read_media`.** To *see* a photo, scan or screenshot,
-  call `read_media(operation={"kind": "image", "path": ...})` with the image or its
+- **Look at a stored image — `inspect_memory`.** To *see* a photo, scan or screenshot,
+  call `inspect_memory(operation="media.image", arguments={"path": ...})` with the image or its
   Source page, or `"paths": [...]` to compare several. Each comes back INLINE as an
   upright JPEG image block with its file name and EXIF capture time; the stored
   original is unchanged. `max_side` sets the long side in pixels, or `"original"`
@@ -202,14 +202,14 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   when one can be made;
   images past a call's size or time limit are listed in `not_shown` for another call. A camera
   raw file such as DNG, or an image too large to decode, cannot be shown: recover it
-  with `transfer_artifact` download instead. Personal servers show images; Exomem
+  with `download_files` instead. Personal servers show images; Exomem
   Cloud does not yet.
-- **View a video's frames on demand — `read_media`.** To *see* what a vault
+- **View a video's frames on demand — `inspect_memory`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
-  `read_media(operation={"kind": "video", "path": ..., "max_frames": 8})` — it returns
+  `inspect_memory(operation="media.video", arguments={"path": ..., "max_frames": 8})` — it returns
   sampled keyframes INLINE as JPEG image blocks (no download round-trip needed),
   preceded by per-frame timestamps. The comprehension companion to visual search:
-  `search_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
+  `search_memory` locates the moment (`clip_match_at`), `inspect_memory` shows it — an
   overview call first, then zoom with `start_sec`/`end_sec` around that timestamp.
   Read-only, with defaults from settings (8 frames, at most 16, long side 768 px).
   `max_side` sets the frame long side, or `"original"`, as for images; for detail,
@@ -251,14 +251,14 @@ reference for the canonical operation leaves that product commands route to.
 - "fill in the take for X," "set the take on that row" → **edit** (`row_key`+`take`)
 - "make these few edits to the page" (same page) → **edit** (`edits=[…]`)
 - "what do I have on X," "find my notes on Y," "have I covered Z" → **find**
-- "why was this note changed," "show the history of this page" → **get** (`include_history=true`)
+- "why was this note changed," "show the history of this page" → **get** (`read_page(part="history")`)
 - "what did I used to think about X," "show me the superseded version" → **find** (`prefer_active=false`)
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
-- "which relations recur," "review unknown relation labels" → **read_schema/change_schema** (`subject="relations"`; proposal-first)
+- "which relations recur," "review unknown relation labels" → **inspect_memory** and **manage_memory** (`subject="relations"`; proposal-first)
 - "use an epistemic / provenance / causal lens" → **graph_context** (`traversal_profile=...`)
-- "what should I compile next," "drain the source backlog" → **propose_compilation**
+- "what should I compile next," "drain the source backlog" → **inspect_memory**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
 - "what should Exomem do with this existing vault," "how can we migrate this safely" → **adopt**
@@ -275,24 +275,24 @@ reference for the canonical operation leaves that product commands route to.
 
 **Implicit (no explicit ask) — proactive engagement:**
 - topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **search_memory** first, fold the hits into the answer
-- a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**create_note**, then report the path
+- a decision is made or a problem just got solved -> stepping-stone: capture via **save_source**/**create_note**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
 - the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
 - the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
-**capture_source** and ask whether to compile only if there is a durable
+**save_source** and ask whether to compile only if there is a durable
 conclusion.
 
-## read_schema/change_schema operation matrix
+## inspect_memory and manage_memory operation matrix
 
 Read-only unless the operation says save. Saves need `why`, plus `expected_hash` when updating an existing registry or contract.
 
-For a registry change, inspect the live registry, then use `read_schema` with `operation.kind="preview"`, its `subject`, and `proposal={"upsert":{"<key>":{"description":"..."}}}`. The preview merges the delta with existing custom entries and checks collisions and the registry cap without saving. Use a keyed object for `upsert`. `validate-document` checks a complete registry document; it does not preview a delta against the live overlay. The grouped compatibility route remains `schema_memory(operation="propose", subject=..., proposal=...)`.
+For a registry change, inspect the live registry, then use `inspect_memory(operation="schema.preview")` with its `subject` and `proposal={"upsert":{"<key>":{"description":"..."}}}`. The preview merges the delta with existing custom entries and checks collisions and the registry cap without saving. Use a keyed object for `upsert`. `validate-document` checks a complete registry document; it does not preview a delta against the live overlay.
 
 - **relations**: `propose-relation` returns a reviewed delta without writing (`proposal` needs `requested_label` (the name portion), `parent` (one core relation key), `description`, `direction` (directed or symmetric); `namespace` supplies the prefix and defaults to `vault`; optional `aliases`, `inverse`, `origins`, `source_kinds`, `target_kinds`, `projects`, `page_types`, `endpoints` (`{subject: [...], object: [...]}` of `entity:<type>`, `entity:*` or `role:<note role>`; an extension takes its parent's endpoints and may only narrow them), `query`; pass the mapping directly, no `extensions` wrapper). `save-relations` commits the returned delta with `expected_hash` and `why`. `census` returns counts-only relation quality from the published graph (optional `detail`: `counts` or `keys`, `date_from`, `date_to`) and never writes.
 - **topic-carriers**: `inspect` (the carriers and the hand-written project-key topics; considerations come from vocabulary review), `propose`, `save` (with `why` and `expected_hash`), `history` and `restore`. An `upsert` entry carries `attributes` of `kind`, `match`, `topics`, `origin` and `rejected`; a save writes no page.
-- **entity-types**: `resolve-entity-type` reads matching definitions using `query` and optional `requested_type`; `save-entity-types` saves a reviewed proposal with `why` (and `expected_hash` when updating). The current registry is included in bootstrap.
+- **entity-types**: `resolve-entity-type` reads matching definitions using `query` and optional `requested_type`; `save-entity-types` saves a reviewed proposal with `why` (and `expected_hash` when updating). The current registry is included in `read_instructions`.
 - **workflow-contracts** (exactly one of): `inventory` (no workflow fields); `inspect` (name); `validate` (exactly one of name or proposal); `resolve` (`context` plus at most one of name or proposal; `context` keys are only project, domain, activity, omit for unknown or null for known absent; `@standalone` is a valid name); `preview` (proposal, optional name); `save` (proposal and why, optional name plus expected_hash for updates); `refresh` (name, expected_hash, why). The legacy `save` flag is ignored when false and refused when true for workflow contracts; workflow writes use `operation=save`.
 - **context-roles**, **activation-conventions**: `validate` returns a proposal's findings plus the current registry `content_hash`; `diff` compares a proposal against the effective registry; `save-roles` / `save-conventions` (matched to the subject) commit a reviewed proposal with `why` and `expected_hash` (`roles_hash` / `conventions_hash`), refusing a proposal with any finding; `history` lists kept versions (newest first: time, why, before and after hash); `restore` reinstates one `version` with `why` and `expected_hash`, validated like a save; `infer` is refused because the server does not propose conventions or roles. `proposal` here is a complete override document in the vault file's shape.
 - **contract**, **traversal-profiles**: infer, validate, diff (`compare_to` for a saved contract), `strict` for a failing CI outcome.

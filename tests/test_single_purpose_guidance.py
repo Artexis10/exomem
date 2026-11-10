@@ -1,12 +1,12 @@
 """Guidance names only the tools that the active surface lists.
 
-Hosts let a model call only the tools a server lists. The single-purpose-tools pilot lists
-`read_records`, `change_records`, `read_plans` and `change_plans` on MCP and hides the
-grouped `record_memory` and `plan_memory`, so nothing a server sends or ships to an MCP
-client may tell it to call a hidden name. REST and the CLI keep the grouped names.
+Hosts let a model call only the tools a server lists. The public surface lists typed tools
+and two doors on MCP and hides the grouped `record_memory` and `plan_memory`, so nothing a
+server sends or ships to an MCP client may tell it to call a hidden name. REST and the CLI
+keep the grouped names.
 
-The workflow test drives a real MCP server per shape: a model bootstraps, files a note that
-a Records collection wants, receives a proposed call, and makes it.
+The workflow test drives a real MCP server: a model bootstraps, files a note that a Records
+collection wants, receives a proposed call, and makes it.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ from exomem import (
     mutation_terminal,
     operation_entries,
     product_invoke,
+    public_surface,
     writer_lease,
 )
 from exomem import server as server_module
 from exomem._hooks import exomem_capture_nudge as capture_hook
-from exomem.vault import content_hash
 
-SHAPES = ("nested",)
+SHAPES = ("public", "grouped")
 GROUPED_NAMES = frozenset({"record_memory", "plan_memory"})
 RENDERED_NAMES = frozenset(
     spec.name for name, operations in operation_entries.OPERATIONS.items()
@@ -44,7 +44,7 @@ RENDERED_NAMES = frozenset(
 ALL_SPELLINGS = GROUPED_NAMES | RENDERED_NAMES
 
 # What a client of each shape is told to call for a filing, written from the design.
-FILING_TOOL = {"nested": "change_records", "grouped": "record_memory"}
+FILING_TOOL = {"public": "add_record", "grouped": "record_memory"}
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SCAFFOLD = REPOSITORY / "src" / "exomem" / "_scaffold"
@@ -72,12 +72,9 @@ def build(vault, monkeypatch, tmp_path):
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
     monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
-    monkeypatch.delenv("EXOMEM_MCP_TOOL_SHAPE", raising=False)
-    monkeypatch.delenv("EXOMEM_MCP_LEGACY_COMPAT", raising=False)
     call_ledger.reset_chain_cache()
 
-    def make(shape: str):
-        monkeypatch.setenv("EXOMEM_MCP_TOOL_SHAPE", shape)
+    def make():
         return server_module.build_server(require_auth=False)
 
     yield make
@@ -93,17 +90,15 @@ async def _call(client: Client, name: str, arguments: dict) -> dict:
 # --- the workflow, once per shape ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("shape", SHAPES)
 def test_a_model_is_guided_to_a_listed_tool_and_the_proposed_call_succeeds(
-    vault, build, monkeypatch, shape
+    vault, build, monkeypatch
 ) -> None:
     evidence = _incident_vault(vault, monkeypatch, "maximal")
-    mcp = build(shape)
+    mcp = build()
     note = {
         "content": "## Observations\n\n- [failure] The panel stopped responding after load #widget-app ^froze\n",
         "title": "Widget panel froze on load",
-        "slug": "widget-panel-froze",
-        "note_type": "failure",
+        "type": "failure",
         "projects": ["widget-app"],
         "tags": ["widget-app", "failure"],
         "sources": [evidence],
@@ -112,31 +107,23 @@ def test_a_model_is_guided_to_a_listed_tool_and_the_proposed_call_succeeds(
     async def scenario():
         async with Client(mcp) as client:
             tools = await client.list_tools()
-            bootstrap = await _call(client, "bootstrap", {"profile": "full"})
-            validation = await _call(client, "create_note", {**note, "validate_only": True})
+            bootstrap = await _call(client, "read_instructions", {"profile": "full"})
+            validation = await _call(client, "create_note", {**note, "preview": True})
             written = await _call(
                 client,
                 "create_note",
-                {
-                    **note,
-                    "draft_id": validation["draft_id"],
-                    "draft_hash": validation["draft_hash"],
-                    "draft_token": validation["draft_token"],
-                    "relation_disposition": "reviewed_none",
-                    "relation_review_hash": validation["draft_hash"],
-                    "relation_review_reason": "No honest relation exists for this fixture.",
-                },
+                {**note, "unlinked_reason": "No honest relation exists for this fixture."},
             )
             routing = written["records_routing"]
-            (call_tool,) = [key for key in routing if key in ALL_SPELLINGS]
+            (call_tool,) = [key for key in routing if key in {t.name for t in tools}]
             followed = await _call(client, call_tool, routing[call_tool])
-            return tools, bootstrap, routing, call_tool, followed
+            return tools, bootstrap, validation, routing, call_tool, followed
 
-    tools, bootstrap, routing, call_tool, followed = asyncio.run(scenario())
+    tools, bootstrap, validation, routing, call_tool, followed = asyncio.run(scenario())
 
     listed = {tool.name for tool in tools}
     hidden = ALL_SPELLINGS - listed
-    assert hidden, "the shape must hide some spelling, or this test proves nothing"
+    assert hidden, "the surface must hide some spelling, or this test proves nothing"
     # Nothing the model reads names a spelling it cannot call: not the tool schemas, the
     # bootstrap, or the disposition that asks it to file the note.
     for tool in tools:
@@ -144,26 +131,18 @@ def test_a_model_is_guided_to_a_listed_tool_and_the_proposed_call_succeeds(
     assert not _mentions("\n".join(_texts(bootstrap)), hidden)
     assert not _mentions("\n".join(_texts(routing)), hidden)
 
-    assert call_tool == FILING_TOOL[shape]
-    assert call_tool in listed
+    assert call_tool == FILING_TOOL["public"]
     assert call_tool in routing["instruction"]
     arguments = routing[call_tool]
-    if shape == "nested":
-        assert set(arguments) == {"operation"}
-        assert arguments["operation"]["kind"] == "append"
-        assert arguments["operation"]["collection"] == INCIDENTS
-    else:
-        assert arguments["action"] == "append"
-        assert arguments["collection"] == INCIDENTS
-    assert followed["operation"] == "append", followed
-    assert followed["item_key"]
+    assert arguments["collection"] == INCIDENTS
+    assert "error" not in followed, followed
+    assert (vault / Path(INCIDENTS).parent / "Entries").glob("*.md")
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-def test_contract_and_refusal_responses_name_only_listed_tools(vault, build, monkeypatch, shape) -> None:
+def test_contract_and_refusal_responses_name_only_listed_tools(vault, build, monkeypatch) -> None:
     """The describe contract, the query and import routes and a generic-write refusal carry call text."""
     _incident_vault(vault, monkeypatch, "maximal")
-    mcp = build(shape)
+    mcp = build()
     appended = {
         "action": "append",
         "collection": INCIDENTS,
@@ -177,7 +156,7 @@ def test_contract_and_refusal_responses_name_only_listed_tools(vault, build, mon
             listed = {tool.name for tool in await client.list_tools()}
 
             async def call(command: str, arguments: dict):
-                tool, spelled = operation_entries.spell_call(command, arguments, shape)
+                tool, spelled = operation_entries.spell_call(command, arguments, "public")
                 assert tool in listed
                 result = await client.call_tool(tool, spelled, raise_on_error=False)
                 responses.extend([result.structured_content, [part.text for part in result.content]])
@@ -187,15 +166,13 @@ def test_contract_and_refusal_responses_name_only_listed_tools(vault, build, mon
             await call("record_memory", {"action": "describe", "collection": INCIDENTS})
             await call("record_memory", appended)
             (item,) = (vault / Path(INCIDENTS).parent / "Entries").glob("*.md")
+            page = await _call(client, "read_page", {"page": str(item.relative_to(vault))})
             refusal = await client.call_tool(
                 "edit_note",
                 {
-                    "path": str(item.relative_to(vault)),
-                    "operation": {
-                        "kind": "replace_body",
-                        "new_body": "Changed outside the owning product.",
-                        "expected_hash": content_hash(item.read_text(encoding="utf-8")),
-                    },
+                    "note": page["id"],
+                    "action": "replace_body",
+                    "body": "Changed outside the owning product.",
                     "why": "exercise the generic-write refusal",
                 },
                 raise_on_error=False,
@@ -212,35 +189,26 @@ def test_contract_and_refusal_responses_name_only_listed_tools(vault, build, mon
     assert not _mentions(text, hidden)
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-def test_bootstrap_routes_name_the_tools_of_the_shape(vault, build, shape) -> None:
-    mcp = build(shape)
+def test_bootstrap_routes_name_the_public_tools(vault, build) -> None:
+    mcp = build()
 
     async def scenario():
         async with Client(mcp) as client:
-            return await _call(client, "bootstrap", {"profile": "full"})
+            listed = {tool.name for tool in await client.list_tools()}
+            return listed, await _call(client, "read_instructions", {"profile": "full"})
 
-    payload = asyncio.run(scenario())
+    listed, payload = asyncio.run(scenario())
 
     records = payload["records"]
     planning = payload["planning"]
-    if shape == "grouped":
-        assert records["route"]["tool"] == "record_memory"
-        assert planning["route"]["tool"] == "plan_memory"
-        assert records["contract_route"] == {"tool": "record_memory", "arguments": {"action": "describe"}}
-    else:
-        assert records["route"]["selector"] == planning["route"]["selector"] == "operation.kind"
-        assert records["route"]["tools"] == {
-            "read_records": ["describe", "validate", "inspect", "query"],
-            "change_records": ["create", "append", "update", "revise", "rebaseline"],
-        }
-        assert planning["route"]["tools"] == {
-            "read_plans": ["inspect", "query"],
-            "change_plans": ["create", "add", "update", "triage"],
-        }
-        described = records["contract_route"]
-        assert described["tool"] == "read_records"
-        assert described["arguments"] == {"operation": {"kind": "describe"}}
+    routed = {*records["route"]["tools"], *planning["route"]["tools"]}
+    assert routed <= listed
+    assert {"query_records", "add_record", "edit_record", "manage_memory"} <= set(records["route"]["tools"])
+    assert {"query_plan_items", "add_plan_item", "edit_plan_item", "manage_memory"} <= set(planning["route"]["tools"])
+    assert records["contract_route"] == {
+        "tool": "inspect_memory",
+        "arguments": {"operation": "records.describe"},
+    }
 
 
 # --- REST and the CLI keep the grouped names ----------------------------------------------
@@ -250,7 +218,6 @@ def test_rest_and_cli_bootstrap_still_name_the_grouped_commands(vault, monkeypat
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
-    monkeypatch.setenv("EXOMEM_MCP_TOOL_SHAPE", "nested")
     rest = TestClient(server_module.build_server(require_auth=False).http_app())
     served = rest.post(
         "/api/bootstrap", json={"profile": "full"}, headers={"Authorization": "Bearer sekret"}
@@ -268,8 +235,9 @@ def test_rest_and_cli_bootstrap_still_name_the_grouped_commands(vault, monkeypat
 
 
 def _surface(shape: str) -> capabilities.ActiveSurfaceDescriptor:
+    listed = public_surface.public_surface().listed_names(commands.product_commands_for("mcp"))
     return capabilities.ActiveSurfaceDescriptor(
-        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape=shape
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=listed, tool_shape=shape
     )
 
 
@@ -278,10 +246,7 @@ _ITEM = {"incident": "Widget panel froze", "observed_on": "2026-09-27"}
 
 def _spelled(shape: str, **changes: object) -> tuple[str, dict]:
     call = {"action": "append", "collection": INCIDENTS, "item": _ITEM, "why": "Recurring incident", **changes}
-    if shape == "nested":
-        kind = call.pop("action")
-        return "change_records", {"operation": {"kind": kind, **call}}
-    return FILING_TOOL[shape], call
+    return operation_entries.spell_call("record_memory", call, shape)
 
 
 def _routing(tool: str, call: object) -> dict:
@@ -340,7 +305,7 @@ def test_the_size_bound_admits_the_same_item_in_every_shape(shape) -> None:
         assert _terminal_routing(_routing(*over_the_bound)) is None
 
 
-@pytest.mark.parametrize("shape,other", [("nested", "grouped"), ("grouped", "nested")])
+@pytest.mark.parametrize("shape,other", [("public", "grouped"), ("grouped", "public")])
 def test_the_terminal_drops_a_call_spelled_for_another_shape(shape, other) -> None:
     tool, call = _spelled(other)
 
@@ -360,9 +325,9 @@ def _scaffold_texts() -> dict[str, str]:
 
 
 def test_the_shipped_skill_packs_and_hook_name_no_grouped_spelling() -> None:
-    """The skill ships static, so it names the default `nested` renderings; a pack is spelt when served."""
+    """The skill ships static, so it names the public tools; a pack is spelt when served."""
     named = {path: _mentions(text, GROUPED_NAMES) for path, text in _scaffold_texts().items()}
-    with capabilities.active_surface(_surface("nested")):
+    with capabilities.active_surface(_surface("public")):
         served = knowledge_packs.list_builtin_packs()
     named |= {
         f"pack {pack['id']}": _mentions("\n".join(_texts(pack)), GROUPED_NAMES) for pack in served
@@ -377,33 +342,31 @@ def test_the_shipped_skill_packs_and_hook_name_no_grouped_spelling() -> None:
     assert {path: names for path, names in named.items() if names} == {}
 
 
-def test_every_call_the_skill_shows_names_an_operation_that_tool_carries() -> None:
-    # One tool can render several grouped commands, so its kinds are the union over them,
-    # spelled as the wire spells them (`kind`, not the grouped action).
-    carried: dict[str, set[str]] = {}
-    for operations in operation_entries.OPERATIONS.values():
-        for entry in operations.entries:
-            carried.setdefault(entry.rendering, set()).add(entry.kind)
+def test_every_call_the_skill_shows_names_an_operation_that_door_carries() -> None:
+    carried = {
+        door: {op.name for op in public_surface.public_surface().door_operations(door, commands.PRODUCT_COMMANDS)}
+        for door in public_surface.DOORS.values()
+    }
     # The calls sit in prose with placeholders such as <ref>, which no Python parser
     # accepts, so a pattern over the fixed call form reads them, in either quote style.
-    call = re.compile(rf'''(?<!\w)({"|".join(carried)})\(operation=\{{["']kind["']: ["']([\w-]+)["']''')
+    call = re.compile(rf'''(?<!\w)({"|".join(carried)})\(operation=["']([\w.]+)["']''')
     shown = [
-        (path, tool, kind)
+        (path, door, operation)
         for path, text in _scaffold_texts().items()
-        for tool, kind in call.findall(text)
+        for door, operation in call.findall(text)
     ]
 
-    assert shown, "the skill shows at least one single-purpose call"
-    assert [(path, tool, kind) for path, tool, kind in shown if kind not in carried[tool]] == []
+    assert shown, "the skill shows at least one door call"
+    assert [(path, door, op) for path, door, op in shown if op not in carried[door]] == []
 
 
 # --- the capture-nudge hook ---------------------------------------------------------------
 
 
-def test_the_hook_stamps_exactly_the_write_selectors_of_the_entries() -> None:
-    assert capture_hook._COLLECTION_WRITES == operation_entries.write_selectors(), (
-        "restamp _COLLECTION_WRITES in exomem_capture_nudge.py from operation_entries.write_selectors():\n"
-        + "\n".join(f'    "{selector}",' for selector in operation_entries.write_selectors())
+def test_the_hook_stamps_exactly_the_write_selectors_of_the_surface() -> None:
+    assert capture_hook._KB_WRITES == public_surface.write_selectors(), (
+        "restamp _KB_WRITES in exomem_capture_nudge.py from public_surface.write_selectors():\n"
+        + "\n".join(f'    "{selector}",' for selector in public_surface.write_selectors())
     )
 
 
@@ -411,34 +374,30 @@ def _hook_sees_a_write(tool: str, arguments: dict) -> bool:
     return capture_hook._successful_kb_write({"name": f"mcp__exomem__{tool}", "input": arguments})
 
 
-def _grouped_arguments(operations, entry) -> dict:
-    """The grouped arguments that select one entry: its action and, where it has one, its mode."""
-    rendering = next(item for item in operations.renderings_with_entries() if item.name == entry.rendering)
-    return rendering.arguments_for(entry)
+def test_the_hook_counts_every_capture_write_and_no_read_of_the_surface() -> None:
+    """Each typed tool and door operation, called as a client would, counts exactly where it is stamped."""
+    surface = public_surface.public_surface()
+    stamped = set(public_surface.write_selectors())
+    door_operations = [op for door in surface.doors.values() for op in door.values()]
+    # A decision on a review item saves only when it accepts a relation, so that call carries the decision.
+    calls = [(name, {"decision": "accept"} if name == "decide_review_item" else {}, name) for name in surface.tools] + [
+        (op.door, {"operation": op.name}, f"{op.door}:{op.name}") for op in door_operations
+    ]
+    for tool, arguments, selector in calls:
+        assert _hook_sees_a_write(tool, arguments) is (selector in stamped), selector
 
-
-@pytest.mark.parametrize("shape", SHAPES)
-def test_the_hook_counts_every_write_and_no_read_of_each_shape(shape) -> None:
-    """Each operation of each tool, called as a client of this shape, is a write or a read as its entry says."""
-    for name, operations in operation_entries.OPERATIONS.items():
-        if name not in GROUPED_NAMES:
-            continue
-        for entry in operations.entries:
-            arguments = _grouped_arguments(operations, entry)
-            tool, spelled = operation_entries.spell_call(operations.command, arguments, shape)
-            # A grouped import is a read or a write by mode, which the hook cannot tell
-            # apart, so it leaves the grouped import to the other signals.
-            ambiguous = shape == "grouped" and entry.action == "import"
-            if ambiguous:
-                continue
-            assert _hook_sees_a_write(tool, spelled) is (entry.effect == "write"), (shape, tool, spelled)
+    reads = [op for op in door_operations if op.effect == "read"]
+    assert reads and not any(_hook_sees_a_write(op.door, {"operation": op.name}) for op in reads)
 
 
 def test_the_hook_ignores_a_failed_or_malformed_collection_write() -> None:
-    failed = {"name": "mcp__exomem__change_records", "input": {"operation": {"kind": "append"}}, "failed": True}
-    bare = {"name": "mcp__exomem__change_records", "input": {}}
-    other_server = {"name": "mcp__other__change_records", "input": {"operation": {"kind": "append"}}}
+    appended = {"collection": INCIDENTS, "item": _ITEM, "why": "Recurring incident"}
+    failed = {"name": "mcp__exomem__add_record", "input": appended, "failed": True}
+    previewed = {"name": "mcp__exomem__create_note", "input": {"title": "T", "content": "x", "preview": True}}
+    bare_door = {"name": "mcp__exomem__manage_memory", "input": {}}
+    other_server = {"name": "mcp__other__add_record", "input": appended}
 
     assert not capture_hook._successful_kb_write(failed)
-    assert not capture_hook._successful_kb_write(bare)
+    assert not capture_hook._successful_kb_write(previewed)
+    assert not capture_hook._successful_kb_write(bare_door)
     assert not capture_hook._successful_kb_write(other_server)

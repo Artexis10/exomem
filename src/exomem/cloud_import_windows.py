@@ -21,7 +21,7 @@ import httpx2
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from . import adoption_run, import_selection, import_stage, media_capacity
+from . import adoption_run, import_selection, import_stage, media_capacity, operation_entries
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import STORAGE_ALLOWANCE_EXCEEDED
@@ -113,7 +113,8 @@ class McpCell(Cell):
         if not self._entered:
             await self._client.__aenter__()
             self._entered = True
-        result = await self._client.call_tool("adoption_studio", arguments)
+        # The cell lists the public tools only, so the grouped call goes out as the door call that stands for it.
+        result = await self._client.call_tool(*operation_entries.spell_call("adoption_studio", arguments, "public"))
         if isinstance(result.structured_content, dict):
             return result.structured_content
         return json.loads(result.content[0].text)
@@ -136,20 +137,19 @@ class McpCell(Cell):
             return {"success": False, "error": {"code": _TOOL_ERROR, "message": str(error)}}
 
     async def _lacks_file(self) -> bool:
-        """Whether the cell's published schema lists the kinds of `import_memory`, and `file` is not one of them.
+        """Whether the cell's published write door lists its operations, and `imports.file` is not one of them.
 
-        A schema that cannot be read, or that lists no kinds, proves nothing, so the caller keeps the error as a stop.
+        A schema that cannot be read, or that lists no operations, proves nothing, so the caller keeps the error as a stop.
         """
-        kinds: set[str] = set()
+        door = operation_entries.spell_call("adoption_studio", {"action": "file"}, "public")[0]
         try:
             for tool in await self._client.list_tools():
-                operation = ((tool.inputSchema or {}).get("properties") or {}).get("operation") or {}
-                for variant in (operation.get("oneOf") or operation.get("anyOf") or ()) if tool.name == "import_memory" else ():
-                    kind = ((variant if isinstance(variant, dict) else {}).get("properties") or {}).get("kind") or {}
-                    kinds.update([kind["const"]] if "const" in kind else kind.get("enum") or ())
-        except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the action
+                if tool.name == door:
+                    operations = (((tool.input_schema or {}).get("properties") or {}).get("operation") or {}).get("enum") or ()
+                    return bool(operations) and "imports.file" not in operations
+        except Exception:  # noqa: BLE001 -- a listing or a schema that cannot be read says nothing about the operation
             return False
-        return bool(kinds) and "file" not in kinds
+        return False
 
 
 @dataclass(frozen=True)

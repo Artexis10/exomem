@@ -30,7 +30,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from . import access, bm25, find_results, query_data, reserved_paths, source_inspection, state_paths
+from . import (
+    access,
+    bm25,
+    capabilities,
+    find_results,
+    query_data,
+    reserved_paths,
+    source_inspection,
+    state_paths,
+)
 from .kbdir import kb_prefix
 
 if TYPE_CHECKING:
@@ -52,13 +61,15 @@ LANE = "dataset_values"
 #: one, and at most this long, so a sentence is not read as one code.
 COMPACT_MIN_CHARS = 6
 COMPACT_MAX_CHARS = 64
-#: What every value hit tells an agent to do next.
-NEXT_ACTION_LINE = (
-    "[A rendering of this dataset's values. query_dataset with path set to this hit's path reads its exact rows.]"
-)
 #: The suffixes a dataset card path can end in: the original's suffix, fixed by
 #: `query_data`, plus `.md`.
 _CARD_SUFFIXES = tuple(f"{suffix}.md" for suffix in query_data.ALLOWED_SUFFIXES)
+
+
+def next_action_line(reads_rows: str) -> str:
+    """What every value hit tells an agent to do next: `reads_rows` is the call that reads the rows."""
+    return f"[A rendering of this dataset's values. {reads_rows} reads its exact rows.]"
+
 
 # Why two indexes, and why values only. A field path is in every record of a dataset, so a
 # query of column names would match every dataset that has those columns and crowd the page
@@ -443,10 +454,12 @@ def _hit(vault_root: Path, card: Card, record_no: int, needles: _Needles) -> Hit
     focus = _best_field(record, needles)
     lines = record.lines()
     passage = [_window(lines, focus)]
+    # Spelled for the surface serving this search: the tool that reads the rows differs by surface.
+    reads_rows = capabilities.active_call_text("query_dataset", {"path": card.original})
     if rendering.truncated:
         # A rendering cut at its byte bound leaves later records unsearched; the hit says so.
-        passage.append(source_inspection.VALUE_TRUNCATION_LINE)
-    passage.append(NEXT_ACTION_LINE)
+        passage.append(source_inspection.value_truncation_line(reads_rows))
+    passage.append(next_action_line(reads_rows))
     page = card.page
     return Hit(
         path=card.original,
@@ -456,8 +469,8 @@ def _hit(vault_root: Path, card: Card, record_no: int, needles: _Needles) -> Hit
         updated=page.updated,
         excerpt=find_results.collapse("\n".join(lines[focus:]))[: find_results.EXCERPT_MAX_LEN],
         outside_kb=not card.original.startswith(kb_prefix()),
-        # No `matched_part`, offset or length: they would point `read_memory` into a rendering
-        # that no tool serves. The passage ends in the tool that does read the rows.
+        # No `matched_part`, offset or length: they would point a page read into a rendering
+        # that no tool serves. The passage ends in the call that does read the rows.
         passage={"text": "\n\n".join(passage)},
         status=page.status,
         snapshot_hash=card.card_hash,

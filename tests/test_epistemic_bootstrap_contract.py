@@ -307,8 +307,8 @@ def test_taught_metadata_keys_are_the_runtime_keys(vault: Path) -> None:
     schemas = json.loads(
         (Path(__file__).parent / "fixtures" / "mcp_tool_schemas.json").read_text(encoding="utf-8")
     )
-    operation = schemas["change_observations"]["inputSchema"]["properties"]["operation"]
-    arguments = sorted(set(operation["properties"]) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS))
+    properties = schemas["add_observation"]["inputSchema"]["properties"]
+    arguments = sorted(set(properties) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS))
     assert arguments
     for key in arguments:
         assert vocabulary[key], key

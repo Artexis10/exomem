@@ -49,10 +49,10 @@ def test_memory_arm_uses_real_shipped_tools_and_guidance(tmp_path):
     assert "SKILL.md" in guidance and len(guidance) > 1
 
     backend = ScriptedModel([
-        _call("bootstrap", {"profile": "compact"}, "call-1"),
+        _call("read_instructions", {"profile": "compact"}, "call-1"),
         _call("discover_tools", {"names": ["create_note"]}, "call-discover"),
         _call("create_note", {"content": "## Observations\n\n- [operating constraint] Project configuration requires bounded retries #reliability\n",
-                           "title": "Project configuration", "note_type": "insight"}, "call-2"),
+                           "title": "Project configuration", "type": "insight"}, "call-2"),
         _call("search_memory", {"query": "Project configuration bounded retries"}, "call-3"),
         {"role": "assistant", "content": "Captured."},
     ])

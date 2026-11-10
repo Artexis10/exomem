@@ -23,6 +23,7 @@ from exomem import (
     commands,
     context_views,
     lexstore,
+    review_ids,
     working_set,
     working_set_heat,
     working_set_resolve,
@@ -715,7 +716,7 @@ def test_due_advice_rides_on_a_resolved_lead(vault: Path) -> None:
     packet = _activate(vault, turn=SLED_TURN)
     assert [item["match"] for item in packet["turn_slice"]["items"] if item["ref"] == CARGO_SLED] == ["resolved"]
     assert packet["relevant_due_refs"] == [{
-        "ref": due[0]["ref"], "fingerprint": due[0]["fingerprint"],
+        "ref": due[0]["ref"], "fingerprint": due[0]["fingerprint"], "id": review_ids.item_id(due[0]),
         "category": due[0]["category"], "due_since": due[0]["due_since"], "anchor": CARGO_SLED,
     }]
     # The control: a turn that reaches nothing raises nothing.
@@ -748,7 +749,7 @@ def test_due_advice_on_a_page_the_resolved_anchor_links_names_that_anchor(vault:
     packet = _activate(vault, turn=SLED_TURN)
     assert [item["match"] for item in packet["turn_slice"]["items"] if item["ref"] == CARGO_SLED] == ["resolved"]
     assert packet["relevant_due_refs"] == [{
-        "ref": due[0]["ref"], "fingerprint": due[0]["fingerprint"],
+        "ref": due[0]["ref"], "fingerprint": due[0]["fingerprint"], "id": review_ids.item_id(due[0]),
         "category": due[0]["category"], "due_since": due[0]["due_since"], "anchor": CARGO_SLED,
     }]
     # The control: the same turn from a caller whose view withholds the note.

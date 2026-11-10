@@ -45,7 +45,7 @@ def _listed_tool(command: str, effect: Effect | None = None) -> str:
 def backfill_ids_route() -> tuple[str, str]:
     """The backfill preview call and its apply tool, spelled for the surface serving this call.
 
-    A typed surface lists `check_memory` and `repair_memory`, not `maintain_memory`, so
+    The public surface lists `inspect_memory` and `manage_memory`, not `maintain_memory`, so
     a fixed spelling would name a tool that the client cannot call.
     """
     return (
@@ -57,7 +57,7 @@ def backfill_ids_route() -> tuple[str, str]:
 def relation_review_stable_id_remediation() -> str:
     preview, apply = backfill_ids_route()
     return (
-        f"Preview {preview}; resolve identity issues before confirmation, then run "
+        f"Preview {preview}; resolve identity issues, then confirm: run "
         f"{apply} with dry_run=false, its plan_id and a why; re-read and validate."
     )
 

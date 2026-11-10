@@ -69,6 +69,10 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "EXOMEM_SERVICE_ENV",
         "EXOMEM_PROMINENCE",
         "XDG_CONFIG_HOME",
+        # The hook home follows these before HOME: a client session that sets one
+        # would send stamps and the log to the real client profile, not tmp_path.
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
         # Legacy aliases (still honored via _normalize_env_aliases).
         "KB_RETRIEVE_NUDGE_DISABLE",
         "KB_RETRIEVE_NUDGE_MIN_CHARS",
@@ -207,7 +211,7 @@ def test_stop_hook_feedback_text_is_suppressed() -> None:
 def test_stub_header_gives_diagnostic_verification_guidance() -> None:
     header = hook_mod._STUB_HEADER.lower()
     assert header.startswith("kb routing stubs"), "Keep the Track C payload marker stable"
-    assert "read_memory" in header
+    assert "read_page" in header
     assert "first relevant" in header
     assert "before investigating" in header
     assert "current repo" in header

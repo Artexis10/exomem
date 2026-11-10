@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from conversation_vault import seed
 from test_governance_egress import _external, write_rule, write_scope
 
@@ -63,7 +64,7 @@ def _call_through_the_server(vault: Path, monkeypatch: pytest.MonkeyPatch, argum
     monkeypatch.delenv("EXOMEM_DISABLE_CALL_LEDGER", raising=False)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     mcp = server_module.build_server(require_auth=False)
-    result = asyncio.run(mcp.call_tool("activate_context", arguments))
+    result = asyncio.run(mcp.call_tool(*public_call("activate_context", arguments)))
     if isinstance(result.structured_content, dict):
         payload = result.structured_content
         return payload.get("result", payload) if "abstained" not in payload else payload

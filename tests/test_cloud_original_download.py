@@ -185,17 +185,16 @@ def test_the_cloud_tool_returns_a_descriptor_and_a_command_but_no_link(cell):
                              "authorization": f"Bearer {TOKEN}", "mcp-protocol-version": "2025-11-25"},
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-        result = await _tool(client, "transfer_artifact", {"operation": "download", "artifact": path,
-                                                          "expected_sha256": hashlib.sha256(data).hexdigest()},
-                             _mcp_origin(key, LOGIN_A))
+        result = await _tool(client, "download_files", {"pages": [path]}, _mcp_origin(key, LOGIN_A))
         return names, result
 
     names, result = _run(app, scenario)
-    assert "transfer_artifact" in names
-    assert result["artifact"] == {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
+    assert "download_files" in names
+    (handed,) = result["artifacts"]
+    assert handed["artifact"] == {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data),
                                   "file_name": "sample.txt", "mime_type": "text/plain",
                                   "mime_type_source": "filename"}
-    assert result["next_step"] == "exomem cloud download -- " + shlex.quote(path)
+    assert handed["next_step"] == "exomem cloud download -- " + shlex.quote(path)
     assert "deliveries" not in result and "http" not in json.dumps(result)
 
 

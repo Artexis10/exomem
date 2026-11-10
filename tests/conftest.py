@@ -917,6 +917,22 @@ def _process_env_isolation():
 
 
 @pytest.fixture(autouse=True)
+def _hooks_resolve_a_scratch_client_home(tmp_path_factory, monkeypatch):
+    """No test writes a hook log, stamp or cooldown under a real client home.
+
+    The hooks resolve their state home from `EXOMEM_HOOK_HOME`, else `CLAUDE_CONFIG_DIR` or
+    `CODEX_HOME`, else the home directory. A developer's shell or an agent session often exports
+    one of them, and a test that runs a hook without setting its own home would then write there.
+    The shared override is cleared and both client homes point at a scratch directory; a test that
+    needs a specific home sets it after this runs, and still wins.
+    """
+    scratch = tmp_path_factory.getbasetemp() / f"client-home-{time.monotonic_ns()}"
+    monkeypatch.delenv("EXOMEM_HOOK_HOME", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(scratch / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(scratch / "codex"))
+
+
+@pytest.fixture(autouse=True)
 def _reset_corpus_context_cache():
     """Every test starts with a cold corpus-context cache.
 

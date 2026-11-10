@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from test_connector_boundary import configured_boundary as configured_boundary
 from test_connector_boundary import public_matter_writer as public_matter_writer
 
@@ -58,16 +59,16 @@ def test_restricted_mcp_edit_commits_stable_identity_and_prepared_state(
     authenticate("limited")
 
     async def invoke():
-        written = await mcp.call_tool("edit_memory", {
+        written = await mcp.call_tool(*public_call("edit_memory", {
             "path": PAGE, "why": "Record the completed round",
             "operation": {"kind": "replace_string", "old_string": "An earlier round.",
                           "new_string": "The completed round."},
-        }, run_middleware=True)
-        read = await mcp.call_tool("read_memory", {"path": PAGE, "include_history": True}, run_middleware=True)
+        }), run_middleware=True)
+        read = await mcp.call_tool(*public_call("read_memory", {"path": PAGE, "include_history": True}), run_middleware=True)
         unit = semantic_index.current_parent_index_state(vault, PAGE).document.units[0]
-        unit_read = await mcp.call_tool("read_memory", {
+        unit_read = await mcp.call_tool(*public_call("read_memory", {
             "path": PAGE, "unit_ref": unit.unit_ref, "include_history": True,
-        }, run_middleware=True)
+        }), run_middleware=True)
         return written, read, unit_read
 
     written_response, read_response, unit_response = asyncio.run(invoke())
@@ -138,11 +139,11 @@ def test_restricted_mcp_edit_matches_absent_and_withheld_entity_worlds(
         authenticate("limited")
 
         async def invoke(mcp=mcp):
-            return await mcp.call_tool("edit_memory", {
+            return await mcp.call_tool(*public_call("edit_memory", {
                 "path": PAGE, "why": "Record the new visitor",
                 "operation": {"kind": "replace_string", "old_string": "An earlier round.",
                               "new_string": "[[Hidden Visitor]] joined."},
-            }, run_middleware=True)
+            }), run_middleware=True)
 
         response = asyncio.run(invoke()).structured_content
         written = response.get("result", response)

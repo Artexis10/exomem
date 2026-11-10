@@ -488,7 +488,7 @@ def test_a_folder_resume_connects_mcp_only_when_it_calls_a_cell_tool(tmp_path, m
             exited.append(True)
 
         async def call_tool(self, name, arguments):
-            assert entered and name == "adoption_studio"
+            assert entered and name == "inspect_memory"
             return SimpleNamespace(structured_content={"resumed": True})
 
     def api_client(config, auth):

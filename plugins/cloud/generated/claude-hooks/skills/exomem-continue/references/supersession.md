@@ -9,7 +9,7 @@ The semantic writer keeps the prior interpretation in the same atomic transition
 
 Inspect the affected claims and evidence before choosing the writer.
 Keep the existing home when its subject and retrieval question still fit.
-Use `prepare_note/change_observations` for an exact unit on a registered compiled page, or the existing authorized edit owner elsewhere.
+Use `add_observation` for an exact unit on a registered compiled page, or the existing authorized edit owner elsewhere.
 Preserve a false historical proposition and author its verdict when its history matters.
 Add a distinct corrective unit and exact links when that makes the evidence clearer.
 Refutation and contradiction do not imply supersession or reduce a unit's rank.
@@ -17,7 +17,7 @@ Refutation and contradiction do not imply supersession or reduce a unit's rank.
 Use `supersede_note` when the agent judges that another page should become the current answer.
 Honor the active engagement policy for that operation.
 Do not create a replacement only to retain old wording: guarded edits already retain prior Markdown.
-Read those revisions with `read_memory(operation={'kind': 'page', 'include_history': true})`; the `revision_history` envelope remains separate from the page log.
+Read those revisions with `read_page(part="history")`; the `revision_history` envelope remains separate from the page log.
 
 ## How supersession works
 
@@ -123,4 +123,4 @@ source claim: every non-empty `sources` entry must resolve to authorized
 governed Source or Evidence material even when the old page carried an
 unresolved citation (`UNRESOLVED_SOURCE_CITATION`). Capture the original first
 or pass an honest empty list; a derivative is never promoted into the missing
-original. `validate_only` previews the draft without writing either page.
+original. `preview` previews the draft without writing either page.

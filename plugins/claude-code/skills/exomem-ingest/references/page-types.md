@@ -12,7 +12,7 @@ governed rich kind is the alternative when richer semantics are intended.
 Each `## Relations` line below shows one registered relation that often fits that
 page type; it is an example, not a default. State the meaning the note actually
 has with the registered relation that fits (resolve it with
-`read_connections(operation={'kind': 'resolve-relation'})`). When none fits, propose a
+`inspect_memory(operation="connections.resolve_relation")`). When none fits, propose a
 new relation type; a plain link is the last resort. A write that adds the generic
 relation is refused. Write no edge when no meaning is known.
 
@@ -20,7 +20,7 @@ relation is refused. Write no edge when no meaning is known.
 
 **Location:** `Sources/<Kind>/` — the directory is a *projection* of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Papers/`, `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`. The semantic metadata is authoritative; the folder is derived from it and is never deeper than `Sources/<Kind>/<Domain>/`.
 **Naming:** `YYYY-MM-DD-<slug>.md` (e.g., `2026-05-09-retrieval-patterns.md`)
-**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `browse_memory/change_files(operation='reclassify', …)` rewrites `source_type`/`domain`, moves the file to the location the corrected classification projects to, and rewrites every inbound reference, all with the body byte-identical and a stated reason recorded. Nothing reclassifies a source automatically.
+**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `inspect_memory/manage_memory(operation="files.reclassify", arguments={…})` rewrites `source_type`/`domain`, moves the file to the location the corrected classification projects to, and rewrites every inbound reference, all with the body byte-identical and a stated reason recorded. Nothing reclassifies a source automatically.
 **Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes). `domain` and `projects` are optional.
 
 **Content shape:**
@@ -386,8 +386,8 @@ the governed vocabulary you already have — `contradicts`, `evidenced_by`,
 - `verdict:` is exactly one verdict of the vault's registry, as its key or a
   label. The shipped verdicts are `confirmed`, `refuted`, `qualified`,
   `inconclusive`, and `abandoned` — the same five words as an experiment's
-  `outcome:`, one altitude down. `read_schema(operation={'kind': 'infer',
-  'subject': 'categories'})` lists the vault's own under `verdicts`. A verdict is a
+  `outcome:`, one altitude down. `inspect_memory(operation="schema.infer",
+  arguments={'subject': 'categories'})` lists the vault's own under `verdicts`. A verdict is a
   judgment in words, never a number: a claim carries no confidence score, so
   `verdict: 0.7` is rejected outright.
 
@@ -407,8 +407,8 @@ unit: the belief in prose, the unit rows `credence_holder` and `credence`, and a
 `assesses` relation to the claim. `credence` is a unit row, never a frontmatter
 field. It is a belief level or a probability from 0 to 1. A probability needs
 `credence_basis`, and you never invent a number. A belief records what its holder
-stated: never write one on a holder's behalf. `read_schema(operation={'kind':
-'infer', 'subject': 'categories'})` lists the accepted belief levels under
+stated: never write one on a holder's behalf. `inspect_memory(operation="schema.infer",
+arguments={'subject': 'categories'})` lists the accepted belief levels under
 `belief_levels`.
 
 A level, stated by the holder:
@@ -538,7 +538,7 @@ metrics, is a production-log.
 ## entity
 
 **Location:** `Entities/<registered-folder>/`, with the folder resolved from the
-active entity registry exposed by bootstrap.
+active entity registry exposed by `read_instructions`.
 **Naming:**
 
 - **People:** the working short used in daily reference — typically the first name
@@ -555,7 +555,7 @@ Vaults extend the five core kinds through the user-owned
 whole proposal before writing it; deprecated types stay recorded rather than
 being deleted. An unregistered-type finding supplies `proposal` and
 `expected_hash`; save those exact values with a `why` through
-`change_schema(operation={'kind': 'save-entity-types'})`. Its `proposed_entry` is only a
+`manage_memory(operation="schema.save_entity_types")`. Its `proposed_entry` is only a
 description, not a registry payload. For example:
 
 ```yaml

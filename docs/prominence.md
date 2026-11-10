@@ -82,7 +82,7 @@ Standalone hooks read that legacy configuration and environment; they do not
 inherit another authenticated identity's vault preference.
 
 The versioned hosted agent profiles retain their pinned command lists and do not
-yet expose `configure_memory`. Adding it there requires a new hosted profile.
+yet expose `manage_memory` with `settings.set`. Adding it there requires a new hosted profile.
 
 ## Which level you get by default, and why
 
@@ -121,14 +121,14 @@ setting one never clears the other. `bootstrap()` reports the effective level, t
 applied context and the source under `engagement` — `preference:context` when a
 context value won, `preference` when the identity-wide value did.
 
-Connected web clients save their choice through `configure_memory`, just like
+Connected web clients save their choice through `manage_memory` with `settings.set`, just like
 other agents. The optional custom-instruction blocks below help the assistant
 follow the policy, or provide instructions when that tool is unavailable; they
 do not persist a server preference.
 
 ### The nudge hooks read your own machine, not the server
 
-A level saved through `configure_memory` is stored on the **server**, per
+A level saved through `settings.set` is stored on the **server**, per
 identity. The capture and retrieve nudge hooks are standalone copies installed
 into a hook directory on your **client** machine, and they resolve from
 `EXOMEM_PROMINENCE` and that machine's exomem configuration file only. They
@@ -138,7 +138,7 @@ a service on another box has no credential to ask with.
 So on a client that runs them the two can disagree. Saving `off` through the
 agent makes every response say "never write on your own initiative" while the
 Stop hook on your laptop keeps injecting the capture reminder on its own timer.
-That is why `bootstrap()` and `configure_memory` serve a `hook_cadence` block to
+That is why `bootstrap()` and `settings.set` serve a `hook_cadence` block to
 every client in the **coding** context -- Claude Code, Codex, and any client
 Exomem does not recognise, since an unrecognised client is far more likely to be
 a hooked CLI than a web connector. Conversational clients get nothing, because
@@ -204,7 +204,7 @@ I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap
 Exomem prominence: MAXIMAL.
 - Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
 - Capture: save every stepping stone: decision, solved problem, diagnosed failure, reusable pattern, reusable fact about a recurring entity, or a method carried out with a reported useful result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet, else concise compiled observation; these, new Entity, own edge: `proactive_capture`; Records only for a compatible measurement; queued relation: `link_acceptance`; merge/structural change: confirmed `restructure_execution`. Fleeting preferences, one-offs, incidental associations, trivial metrics, and tentative claims stay quiet. When torn between saving and letting it pass, save. Never save transcripts.
-- Entities: once per chat, after primary work and before the final response, review_memory(mode="attention", categories=["entity_recurrence"], limit=3); skip if unavailable.
+- Entities: once per chat, after primary work and before the final response, list_review_items(queue="due", categories=["entity_recurrence"], limit=3); skip if unavailable.
 - Narration: cite recalls; after a write say "Saved -> <title>".
 - A committed final mutation result is authoritative; never invent a failure code from warnings.
 ```
@@ -217,7 +217,7 @@ I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap
 Exomem prominence: BALANCED.
 - Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.
 - Capture: save at a stepping stone: a durable conclusion, reusable fact about a recurring entity, or a method carried out with a reported result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet, else concise compiled observation; these, new Entity, own edge: `proactive_capture`; Records only for a compatible measurement; queued relation: `link_acceptance`; merge/structural change: confirmed `restructure_execution`. Fleeting preferences, one-offs, incidental associations, trivial metrics, and tentative claims stay quiet. Not mid-thought exploration, tangents, or open questions. Never save transcripts.
-- Entities: once per chat, after primary work and before the final response, review_memory(mode="attention", categories=["entity_recurrence"], limit=3); skip if unavailable.
+- Entities: once per chat, after primary work and before the final response, list_review_items(queue="due", categories=["entity_recurrence"], limit=3); skip if unavailable.
 - Narration: stay quiet; cite useful recalls and after a write say "Saved -> <title>".
 - A committed final mutation result is authoritative despite adjacent warnings.
 ```
@@ -276,11 +276,11 @@ each kind carries a disposition — `off`, `advisory`, `silent`, `confirm` or
 
 You do not have to memorise the table and you should not paste one: `bootstrap()`
 reports the live envelope under `engagement`, and
-`review_memory(mode="dispositions")` shows it beside whatever you have quieted.
+`list_review_items(queue="dispositions")` shows it beside whatever you have quieted.
 Append this to your custom instructions instead:
 
 ```
-Exomem serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity merge, deletion, removing an edge and reverting a promotion always need my confirmation, while a new entity, your own edge and my type or relation saves follow proactive capture, and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by review_memory(mode="dispositions"), and you pick the one my words mean.
+Exomem serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity merge, deletion, removing an edge and reverting a promotion always need my confirmation, while a new entity, your own edge and my type or relation saves follow proactive capture, and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by list_review_items(queue="dispositions"), and you pick the one my words mean.
 ```
 
 That block is deliberately not a table. The envelope moves when you change level

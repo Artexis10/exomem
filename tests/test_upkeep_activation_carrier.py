@@ -143,6 +143,7 @@ def test_first_activation_of_a_session_carries_one_item(
     assert item["permission"] == dreamer_families.PERMISSION
     assert set(item) >= {
         "ref",
+        "id",
         "family",
         "fingerprint",
         "kind",

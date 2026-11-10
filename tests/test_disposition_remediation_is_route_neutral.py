@@ -111,23 +111,23 @@ def test_creation_remediation_names_only_the_one_call_review_fields():
     assert "creation" in text
 
 
-def _nested() -> capabilities.ActiveSurfaceDescriptor:
+def _public() -> capabilities.ActiveSurfaceDescriptor:
     return capabilities.ActiveSurfaceDescriptor(
         surface="mcp",
         profile="product",
         tier2_enabled=True,
         product_commands=(),
-        tool_shape="nested",
+        tool_shape="public",
     )
 
 
 def test_the_validate_route_of_an_observe_write_is_spelled_for_the_serving_surface():
-    """A nested surface has no `observe_memory(operation=validate)`; use `prepare_note`."""
+    """The public surface has no `observe_memory(operation=validate)`; use `add_observation(preview=True)`."""
     assert semantic_contract.validate_form("observe") == "observe_memory(operation='validate')"
-    with capabilities.active_surface(_nested()):
-        nested = semantic_contract.validate_form("observe")
-    assert nested.startswith("prepare_note(")
-    assert "observe_memory" not in nested
+    with capabilities.active_surface(_public()):
+        public = semantic_contract.validate_form("observe")
+    assert public.startswith("add_observation(")
+    assert "observe_memory" not in public
     # An operation whose validate is the shared `validate_only` parameter keeps that spelling.
     assert semantic_contract.validate_form("edit") == semantic_contract.VALIDATE_FORM
 
@@ -136,10 +136,10 @@ def test_the_validate_route_of_an_observe_write_is_spelled_for_the_serving_surfa
 def test_a_relation_quality_advisory_names_a_relation_read_the_surface_serves(code):
     grouped = semantic_contract.relation_quality_advisory(code)["remediation"]
     assert "schema_memory(" in grouped
-    with capabilities.active_surface(_nested()):
-        nested = semantic_contract.relation_quality_advisory(code)["remediation"]
-    assert "read_schema(" in nested
-    assert "schema_memory" not in nested
+    with capabilities.active_surface(_public()):
+        public = semantic_contract.relation_quality_advisory(code)["remediation"]
+    assert "inspect_memory(" in public
+    assert "schema_memory" not in public
 
 
 def test_validate_only_lives_on_the_shared_semantic_base():

@@ -44,7 +44,7 @@
 The vault around it is yours: any top-level folders you keep (`Daily/`, `Projects/`,
 `Reference/`, a journal — whatever) sit *beside* `Knowledge Base/` and are **read-only
 input** to this skill. Don't infer a fixed vault shape from the tree above. On your
-first engagement in a vault, run `browse_memory` once to learn its real top-level layout
+first engagement in a vault, run `inspect_memory` once to learn its real top-level layout
 (see § Assessing or adopting a vault you didn't build), then treat everything outside
 `Knowledge Base/` as read-only. Only `Knowledge Base/` is governed and writeable.
 
@@ -58,18 +58,18 @@ small set (e.g. `personal`, `project-alpha`, `work`) and add their own.
 
 ### Assessing or adopting a vault you didn't build
 
-**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **read_import(operation={"kind": "scan-only"})** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
+**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **inspect_memory(operation="imports.scan")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
 
 For structural questions —
 "what does this vault look like," "how is this vault organized," "is there junk in
-here" — and simply to learn the layout before you write, run **browse_memory** first: one bounded,
+here" — and simply to learn the layout before you write, run **inspect_memory** first: one bounded,
 read-only report of folder structure, counts, frontmatter coverage, naming
 patterns, and junk candidates (zero-byte files, sync-conflict duplicates). It
 works on any folder under the vault root, including trees outside
 `Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
 all. The folders it reports *outside* `Knowledge Base/` are read-only input — link
-to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `browse_memory` on folders of interest,
-`search_memory scope="vault"` for content, targeted `read_memory` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
+to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `inspect_memory` on folders of interest,
+`search_memory scope="vault"` for content, targeted `read_page` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
 bulk-read a vault file-by-file to answer a structural question** — the report
 answers in one call what would otherwise cost hundreds of reads.
 
@@ -95,7 +95,7 @@ Both update on every confirmed write.
 
 ## Audit (lint) checks
 
-The audit operation, `read_review(operation={'kind': 'audit'})`, runs read-only checks and proposes fixes (never
+The audit operation, `inspect_memory(operation="maintenance.audit")`, runs read-only checks and proposes fixes (never
 auto-fixes); every audit presentation remains read-only. The default
 `detail="actionable"` puts current blockers first, then malformed semantic units
 and unregistered relation work, then ordinary findings. Grandfathered relation-
@@ -106,7 +106,7 @@ integer from 0 through 50 and controls samples in actionable output only. The
 checks cover:
 orphans, broken wikilinks, supersession integrity, stale frontmatter,
 `index.md`/`log.md` drift, aged unprocessed sources (oldest-first — pair with
-`propose_compilation`), status/location mismatch, unfinished experiments, stalled
+`inspect_memory`), status/location mismatch, unfinished experiments, stalled
 production lifecycles, **stale-review candidates** (active conclusions that are old
 AND rarely surfaced in `find` AND low inbound-link degree — surfaced for review
 only, never decayed or down-ranked; hubs/snapshots excluded as expected-to-drift),
@@ -116,10 +116,8 @@ Two categories report exact duplicates and run only when you ask for them:
 `duplicate_content` (identical bytes in two or more live Sources or Evidence
 pages) and `duplicate_source_url` (one URL captured with different text). Pass
 them in `categories`, for example
-`read_review(operation={'kind': 'audit', 'categories': ['duplicate_content']})`;
-`attention` takes the same `categories`. A default audit and the default
-attention surface skip them, so an old vault's first run cannot bury the daily
-queue. Each `duplicate_content` finding carries the exact `fold-duplicate` step
+`list_review_items(categories=['duplicate_content'])`. The default review
+skips them, so an old vault's first run cannot bury the daily queue. Each `duplicate_content` finding carries the exact `fold-duplicate` step
 for every copy, or says why it offers none. Propose those steps as one curation plan, then preview, confirm
 and apply it ([curation](#curation)); an undo is a compensation plan.
 
@@ -140,7 +138,7 @@ is in **`audit-checks.md`**.
   is a `## Belief` unit: see "Recording a degree of belief" in `page-types.md`.
   Use citation count and recency as the trust signal for the claim itself.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
-  mark it; if irrelevant, archive into an `_archive/` subfolder. (`read_review/triage_memory`'s
+  mark it; if irrelevant, archive into an `_archive/` subfolder. (`list_review_items` and `decide_review_item`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
   candidates* for you to judge — but never auto-decays, down-ranks, hides, or moves
   anything; review surfacing has no effect on `search_memory`/`find` ordering.
@@ -157,10 +155,10 @@ is in **`audit-checks.md`**.
 - Modify `Sources/` or `Evidence/` files after creation. Mistakes get superseded,
   not edited.
 
-## Maintenance modes (`check_memory/repair_memory`)
+## Maintenance modes (`inspect_memory` and `manage_memory`)
 
-Remote `repair_memory` publishes structured-file, tag-variant, curation and
-maintenance-job writes. `check_memory` publishes the admitted read-only
+Remote `manage_memory` publishes structured-file, tag-variant, curation and
+maintenance-job writes. `inspect_memory` publishes the admitted read-only
 maintenance variants, including curation work items, previews, status and
 maintenance jobs. A remote client runs the whole curation workflow: work item,
 proposal, preview, one exact-plan approval, apply, resume and compensation. Follow the
@@ -173,10 +171,10 @@ Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontma
 
 A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview and write alike, not as one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
 
-1. Preview with `check_memory`, `dry_run=true`. The owner gets a `run_id` and `preview: true` at once: a preview of a large vault outlasts one request, so it runs as a read-only job. When it is `completed`, its receipt's `result` carries the `plan_id`. A caller other than the owner, and the local CLI, get the report in one call.
-2. Start with `repair_memory`: the same mode and flags, `dry_run=false`, that `plan_id` and a one-line `why`. It returns a `run_id` at once. Without both it returns `MAINTENANCE_PLAN_REQUIRED` and starts nothing.
-3. Follow with `check_memory` and `operation.kind="maintenance-job"` plus the `run_id`, until the state is `completed`, `failed`, `cancelled` or `interrupted`. Without a `run_id` it lists recent jobs.
-4. Stop one early with `repair_memory` and `operation.kind="maintenance-job-cancel"` (`run_id`, `why`). The job stops at its next checkpoint.
+1. Preview with `inspect_memory`, `dry_run=true`. The owner gets a `run_id` and `preview: true` at once: a preview of a large vault outlasts one request, so it runs as a read-only job. When it is `completed`, its receipt's `result` carries the `plan_id`. A caller other than the owner, and the local CLI, get the report in one call.
+2. Start with `manage_memory`: the same mode and flags, `dry_run=false`, that `plan_id` and a one-line `why`. It returns a `run_id` at once. Without both it returns `MAINTENANCE_PLAN_REQUIRED` and starts nothing.
+3. Follow with `inspect_memory(operation="maintenance.job")` plus the `run_id`, until the state is `completed`, `failed`, `cancelled` or `interrupted`. Without a `run_id` it lists recent jobs.
+4. Stop one early with `manage_memory(operation="maintenance.cancel_job")` (`run_id`, `why`). The job stops at its next checkpoint.
 5. Read the receipt. A finished job's status holds the totals: pages `committed`, `skipped_changed` (the page changed after the preview) and `outcome_unknown`. The page list is long, so read it page by page: pass the receipt's `next_cursor` as `cursor` to the same call, and repeat with each returned `next_cursor` until it is `null`. Each entry names a path, its kind and, for `backfill-ids`, the minted ID. A preview's entries are kind `planned`: the items its `plan_id` covers (paths, components or identities). A `fix` entry's value says what the plan does to the page. A `backfill-ids` preview also lists kind `identity_issue` and `skipped` entries, each with its detail as the value.
 
 If the vault changed after the preview, the job returns `STALE_MAINTENANCE_PLAN`, writes nothing and gives a fresh `plan_id`: preview again. Another start while a job runs returns `MAINTENANCE_JOB_ACTIVE`, and its `retry` reads the running job by its `run_id`. `fix` and `backfill-ids` write in short chunks that let other writes through. `reconcile` holds writes only in short holds, one per phase that writes, and other writes go through between them. A `MUTATION_BUSY` refusal during one of its holds names the job's `run_id`. Applying `collections-store-export` is host work: run it with the service stopped.
@@ -216,8 +214,8 @@ Previews the return of a migrated vault's store collections to file-canonical fi
 
 ### collections-cutover
 
-Previews the move of every structured collection to SQLite-only storage. It is owner-only and writes nothing. For each collection it names the steps the apply takes: `migrate` for a collection still in files, `convert` for one with item files, `rewrite_strategy` for a summary collection, or none. It lists every blocker with its fix, and returns a `plan_id`. Applying that `plan_id` with a `why` is the owner's offline step, `exomem collections cutover --plan-id ID --why REASON --backup-to FILE`, with the service stopped. The apply takes and verifies a backup first, checks each collection's rows after its step, and resumes after a crash when run again with a new `--backup-to` file. The preview counts, for each collection, the items that carry a body: after the apply, that body is read with `read_memory` on the old item path or with a `query` that names the row.
+Previews the move of every structured collection to SQLite-only storage. It is owner-only and writes nothing. For each collection it names the steps the apply takes: `migrate` for a collection still in files, `convert` for one with item files, `rewrite_strategy` for a summary collection, or none. It lists every blocker with its fix, and returns a `plan_id`. Applying that `plan_id` with a `why` is the owner's offline step, `exomem collections cutover --plan-id ID --why REASON --backup-to FILE`, with the service stopped. The apply takes and verifies a backup first, checks each collection's rows after its step, and resumes after a crash when run again with a new `--backup-to` file. The preview counts, for each collection, the items that carry a body: after the apply, that body is read with `read_page` on the old item path or with a `query` that names the row.
 
 ### Sidecar collapse (`fix`)
 
-`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `read_review(operation={'kind': 'audit', 'categories': ['duplicated_sidecar']})`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.
+`fix` also collapses media sidecars that accumulated nested copies of themselves (audit category `duplicated_sidecar`, reportable alone via `inspect_memory(operation="maintenance.audit", arguments={'categories': ['duplicated_sidecar']})`). It keeps the longest surviving `## Extracted text` (for a sidecar whose top-level block was blanked by a re-render, the one buried in a nested copy) and refuses any rewrite that would leave less transcript than it found. Frontmatter is untouched, so a still-`pending` sidecar is re-extracted normally and the recovered text is only the fallback.

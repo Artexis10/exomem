@@ -1153,6 +1153,28 @@ def test_a_blocked_edit_names_the_one_call_fix_and_no_other_route(tmp_path: Path
     assert "fix: Fix:" not in message
 
 
+def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-id refusal names a unit's current id, so a released view reads each id as unknown."""
+    from types import SimpleNamespace
+
+    from exomem.governance import egress
+
+    unit = SimpleNamespace(unit_ref="exomem://unit/one", fingerprint="f1")
+    document = SimpleNamespace(units=[unit])
+    current = observe_memory.unit_id(unit)
+    assert observe_memory._bind_unit_id(tmp_path, document, current) == ("exomem://unit/one", "f1")
+    stale = current.partition(".")[0] + ".zzzz"
+    with pytest.raises(observe_memory.ObserveMemoryError, match="STALE_UNIT_REFERENCE"):
+        observe_memory._bind_unit_id(tmp_path, document, stale)
+
+    monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: False)
+    for given in (current, stale):
+        with pytest.raises(observe_memory.ObserveMemoryError, match="UNIT_NOT_FOUND"):
+            observe_memory._bind_unit_id(tmp_path, document, given)
+
+
 _BELIEF_PAGE_BODY = (
     "# Observe\n\n## Belief\n- id: b1\n- credence_holder: Dana\n- credence: likely\n"
     "- relations: assesses: [[Observe]]\n\nDana thinks the release holds.\n\n"
@@ -1194,6 +1216,29 @@ def test_a_prose_only_belief_update_names_the_assesses_relation_it_drops(tmp_pat
     assert "send them again in `relations`, with the unit's `kind`" in result["outcome"]
     warnings = [item["code"] for item in result["semantic"]["contract_result"]["warnings"]]
     assert "missing_rich_assessed_claim" in warnings
+
+
+def test_the_dropped_relation_outcome_names_a_route_the_public_tools_can_call(
+    tmp_path: Path,
+) -> None:
+    """Catches a hint that sends an agent to `relations` where the edit tool has no such field."""
+    page = _write_belief_page(tmp_path)
+    unit = _belief_unit(tmp_path)
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=False,
+        product_commands=("edit_note",), tool_shape="public",
+    )
+
+    with capabilities.active_surface(descriptor), request_scope(owner_principal(surface="cli")):
+        result = commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
+            expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
+            kind="belief", category="belief", content="Dana thinks the release mostly holds.",
+        )
+
+    route = "write them back on the unit's `relations:` line in the page body with edit_note"
+    assert route in result["outcome"]
+    assert "`relations`, with" not in result["outcome"]
 
 
 def test_a_belief_update_that_resends_its_relations_reports_nothing_dropped(tmp_path: Path) -> None:

@@ -79,7 +79,7 @@ def build_capabilities_markdown() -> str:
     from exomem.command_surface import listed_names
 
     for command in mcp_generated:
-        for name in listed_names(command, "nested"):
+        for name in listed_names(command, "grouped"):
             mcp_tools.setdefault(name, []).append(command)
 
     lines = [

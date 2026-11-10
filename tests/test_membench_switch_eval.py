@@ -145,7 +145,7 @@ for line in sys.stdin:
                   "serverInfo": {"name": "stand-in", "version": "0"}, "instructions": "stand-in"}
     elif method == "tools/list":
         result = {"tools": [{"name": "read_memory", "description": "d", "inputSchema": {"type": "object"}}]}
-    elif method == "tools/call" and message["params"]["name"] == "ask_memory":
+    elif method == "tools/call" and message["params"]["arguments"].get("query") == "readiness probe":
         if "--check-meta" in sys.argv:
             assert message["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
         probes += 1

@@ -328,7 +328,7 @@ The issue command runs in a subshell from the empty working directory, so a
 The probe loop sends one MCP read and one MCP write every 30 seconds for 50
 minutes, which covers the 45 minutes after a switch made within 5 minutes of
 its start. It writes one line per call, `TIME read|write RESPONSE`, and each
-write records a disposable episode in the copy. The `record_episode` tool
+write records a disposable episode in the copy. The `save_episode` tool
 ships in 0.149.0 and later, so rehearse from 0.149.0 or a newer release.
 Run the loop:
 
@@ -336,7 +336,7 @@ Run the loop:
 TOKEN=$(cat /tmp/xr/home/local-token); END=$(( $(date +%s) + 3000 )); : > /tmp/xr/calls.log
 while [ "$(date +%s)" -lt "$END" ]; do
   NOW=$(date -u +%H:%M:%S)
-  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"record_episode\",\"arguments\":{\"operation\":{\"kind\":\"record\",\"subject\":\"Rehearsal probe\",\"summary\":\"Disposable rehearsal write at $NOW UTC.\",\"worked_on\":[\"rehearsal probe\"]}}}"; do
+  for CALL in "read {\"name\":\"search_memory\",\"arguments\":{\"query\":\"rehearsal probe\"}}" "write {\"name\":\"save_episode\",\"arguments\":{\"subject\":\"Rehearsal probe\",\"summary\":\"Disposable rehearsal write at $NOW UTC.\",\"worked_on\":[\"rehearsal probe\"]}}"; do
     BODY=$(curl -s -m 120 -X POST "http://127.0.0.1:LOCAL_PORT/mcp" -H "authorization: Bearer $TOKEN" \
       -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":${CALL#* }}" | tr -d '\n')

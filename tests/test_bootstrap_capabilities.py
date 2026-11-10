@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import commands, workflow_skills
@@ -58,7 +59,7 @@ _ACTION_VOCABULARY_MAPS = {
 
 def _call_mcp(mcp, profile: str) -> dict:
     result = asyncio.run(
-        mcp.call_tool("bootstrap", _bootstrap_args(profile), run_middleware=True)
+        mcp.call_tool(*public_call("bootstrap", _bootstrap_args(profile)), run_middleware=True)
     )
     structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
@@ -209,7 +210,6 @@ def _configure_server(
     vault: Path,
     *,
     tier2_enabled: bool,
-    legacy: bool = False,
 ) -> None:
     monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
@@ -219,23 +219,15 @@ def _configure_server(
         monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     else:
         monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
-    if legacy:
-        monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
-    else:
-        monkeypatch.delenv("EXOMEM_MCP_LEGACY_COMPAT", raising=False)
 
 
 @pytest.mark.parametrize("tier2_enabled", [True, False])
-@pytest.mark.parametrize("legacy", [True, False])
 def test_all_mcp_bootstrap_profiles_match_live_tools(
     vault: Path,
     monkeypatch: pytest.MonkeyPatch,
     tier2_enabled: bool,
-    legacy: bool,
 ) -> None:
-    _configure_server(
-        monkeypatch, vault, tier2_enabled=tier2_enabled, legacy=legacy
-    )
+    _configure_server(monkeypatch, vault, tier2_enabled=tier2_enabled)
     mcp = server_module.build_server(require_auth=False)
     live_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
     # A command with renderings is listed by them; its grouped name is a hidden spelling.
@@ -253,7 +245,7 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
             expected_product_tuple=product_tuple,
             exported_names=live_names,
             expected_surface="mcp",
-            expected_profile="product-with-legacy-aliases" if legacy else "product",
+            expected_profile="product",
             tier2_enabled=tier2_enabled,
             aliases=aliases,
         )
@@ -262,8 +254,7 @@ def test_all_mcp_bootstrap_profiles_match_live_tools(
             product_names=set(commands.PRODUCT_PUBLIC_NAMES),
             known_names=KNOWN_CALLABLE_NAMES,
         )
-        if not legacy:
-            assert {"note", "find", "get", "transfer_token"}.isdisjoint(refs)
+        assert {"note", "find", "get", "transfer_token"}.isdisjoint(refs)
         if not tier2_enabled:
             # A shared name can remain through a tier-one contributor (media status).
             assert (TIER2_PRODUCT_TOOLS - live_names).isdisjoint(

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from record_fixtures import copy_dataset_fixture
 from starlette.testclient import TestClient
 
@@ -367,13 +368,16 @@ def _request(
     }
     if mcp_session_id is not None:
         headers["mcp-session-id"] = mcp_session_id
+    # The carrier is not a field of any tool: spell the call without it, then present it beside the call.
+    carrier = {key: value for key, value in arguments.items() if key == "authorization_session_credential"}
+    name, wire = public_call(tool_name, {key: value for key, value in arguments.items() if key not in carrier})
     return client.post(
         "/mcp",
         json={
             "jsonrpc": "2.0",
             "id": request_id,
             "method": "tools/call",
-            "params": {"name": tool_name, "arguments": arguments},
+            "params": {"name": name, "arguments": {**wire, **carrier}},
         },
         headers=headers,
     )
@@ -805,8 +809,8 @@ def test_stateless_mcp_grant_is_bound_across_serving_content_route_families(
         # are not a precondition for the later positive route assertions.
         (
             "read_media",
-            "read_media",
-            {"path": VIDEO_PATH, "max_frames": 1},
+            "inspect_memory",
+            {"operation": "media.video", "arguments": {"path": VIDEO_PATH, "max_frames": 1}},
             '"duration_sec":42.0',
         ),
         (

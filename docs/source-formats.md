@@ -13,7 +13,7 @@ snapshot into a mutable collection.
 
 | Format | Automatic discovery | Exact content |
 | --- | --- | --- |
-| CSV, TSV, JSON | Dataset source card with structural counts; bounded field names for JSON | `query_dataset` reads rows, filters, nested JSON fields and aggregates from the original |
+| CSV, TSV, JSON | Dataset source card with structural counts; bounded field names for JSON | `inspect_memory` reads rows, filters, nested JSON fields and aggregates from the original |
 | YAML/YML, JSONL/NDJSON, XML, TOML | Literal UTF-8 text preview | Original download; these formats do not gain structured query support |
 | Other permitted files | Original and source companion | Extraction depends on the installed media/document capability |
 

@@ -247,7 +247,12 @@ def _tool_input_schema(tool: Any) -> Mapping[str, Any]:
 
 
 def process_media_requests(tool: Any, paths: Sequence[str]) -> list[dict[str, Any]]:
-    """Select the registered batch surface when it is actually advertised."""
+    """Select the registered batch surface when it is actually advertised.
+
+    The public surface lists no media tool; its `manage_memory` door carries the batch call.
+    """
+    if tool is None:
+        return [{"operation": "process", "paths": list(paths)}]
     properties = _tool_input_schema(tool).get("properties")
     if isinstance(properties, Mapping) and isinstance(properties.get("operation"), Mapping):
         # Discovery can group media requests under the closed operation discriminator.
@@ -392,18 +397,19 @@ def workflow_plan(variant: str) -> list[dict[str, Any]]:
 
 
 def required_tools_missing(discovered: Iterable[str]) -> list[str]:
-    """Return required product calls missing from the registered MCP surface."""
-    from exomem.command_surface import resolve_command
-    from exomem.commands import PRODUCT_COMMANDS
+    """Return required product calls missing from the registered MCP surface.
+
+    A call is present when its grouped command is listed, or when every public tool that carries
+    it is: the product's own listing says which tools those are.
+    """
+    from exomem.operation_entries import listed_tools
 
     discovered = set(discovered)
-    available = {
-        command.name if (command := resolve_command(name, PRODUCT_COMMANDS)) else name
-        for name in discovered
-    }
-    available.update(command.name for command in PRODUCT_COMMANDS
-                     if command.renderings and all(rendering.name in discovered for rendering in command.renderings))
-    return sorted(name for name in REQUIRED_PUBLIC_TOOLS if name not in available)
+    return sorted(
+        name
+        for name in REQUIRED_PUBLIC_TOOLS
+        if name not in discovered and not all(tool in discovered for tool in listed_tools(name, "public"))
+    )
 
 
 def evaluate_useful_closure(
@@ -1156,6 +1162,39 @@ def is_mutation_ack(tool: str, arguments: Mapping[str, Any]) -> bool:
     return True
 
 
+# Fields the grouped leaf asks of its caller and the public surface binds to the committed bytes on
+# the server, so a public call never carries them (`public_tools._unlinked`).
+_SERVER_BOUND_FIELDS = (
+    "draft_id", "draft_hash", "draft_token", "transition_token", "relation_review_hash",
+)
+
+
+class PublicSurfaceClient:
+    """A client that calls the workflow's grouped commands as the public surface takes them.
+
+    The report, the ledger join and the mutation-ack rule speak in grouped commands: that is
+    the identity the server's ledger records for a public call. Only the wire spelling changes,
+    through the product's own `spell_call`, so the benchmark sends what an agent would send.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    async def call_tool_mcp(self, tool: str, arguments: Mapping[str, Any]) -> Any:
+        from exomem.operation_entries import spell_call
+
+        leaf_arguments = {k: v for k, v in arguments.items() if k not in _SERVER_BOUND_FIELDS}
+        return await self._client.call_tool_mcp(*spell_call(tool, leaf_arguments, "public"))
+
+
+def serves_public_surface(registered_tools: Iterable[str]) -> bool:
+    """Whether the server lists the public tools rather than the grouped commands."""
+    return "search_memory" in set(registered_tools)
+
+
 async def _call(client: Any, calls: list[dict[str, Any]], tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     # The raw MCP response is intentional: a public refusal is valid protocol
@@ -1390,6 +1429,8 @@ async def run_public_workflow(
         missing = required_tools_missing(registered_tools)
         if missing:
             raise RuntimeError(f"registered product MCP surface missing: {missing}")
+        if serves_public_surface(registered_tools):
+            client = PublicSurfaceClient(client)
         await _warm_public_recall(client, timeout=timeout)
         startup_readiness = await _warm_public_mutation(
             client, path=corpus["active_tracker"], timeout=timeout
@@ -1439,7 +1480,7 @@ async def run_public_workflow(
             hashes_match = len(evidence_paths) == len(artifacts)
             # The stable grouped execution route remains callable; its schema is advertised by the write job.
             process_requests = process_media_requests(
-                registered_tools.get("process_media") or registered_tools["change_media"], evidence_paths
+                registered_tools.get("process_media") or registered_tools.get("change_media"), evidence_paths
             )
             extraction_enqueue_started = time.perf_counter()
             process_payloads = [

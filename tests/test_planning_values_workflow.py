@@ -50,6 +50,15 @@ def _guards(call, title: str) -> dict:
     }
 
 
+def _item(call, title: str) -> dict:
+    """The collection and item id that a public edit takes; the server derives the guards."""
+    query = call(
+        "plan_memory", {"action": "query", "collection": PLANNING_PATH, "lifecycle": "all"}
+    )
+    row = next(row for row in query["rows"] if row["title"] == title)
+    return {"collection": PLANNING_PATH, "item_id": row["id"]}
+
+
 def _add(call, vault: Path, title: str, **fields) -> dict:
     item = {
         "title": title,
@@ -70,7 +79,7 @@ def _triage(call, title: str, status: str) -> dict:
         "plan_memory",
         {
             "action": "triage",
-            **_guards(call, title),
+            **_item(call, title),
             "transition": {"status": status},
             "why": status,
         },
@@ -82,7 +91,7 @@ def _archive(call, title: str) -> dict:
         "plan_memory",
         {
             "action": "update",
-            **_guards(call, title),
+            **_item(call, title),
             "changes": {"lifecycle": "archived"},
             "why": "close it out",
         },
@@ -182,7 +191,7 @@ def test_a_vault_status_is_used_classified_archived_and_reverted(
         "plan_memory",
         {
             "action": "update",
-            **_guards(call, "Batch 2"),
+            **_item(call, "Batch 2"),
             "changes": {"title": "Batch 2b"},
             "why": "clarify the title",
         },
@@ -224,7 +233,7 @@ def _restore_latest(call, why: str) -> dict:
 def _update(call, title: str, changes: dict) -> dict:
     return call(
         "plan_memory",
-        {"action": "update", **_guards(call, title), "changes": changes, "why": "edit"},
+        {"action": "update", **_item(call, title), "changes": changes, "why": "edit"},
     )
 
 

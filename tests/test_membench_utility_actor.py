@@ -30,9 +30,9 @@ def test_renderer_removes_only_proven_duplicate_text():
 
 class FakeCell:
     schemas = {
-        "bootstrap": {"description": "Bootstrap.", "inputSchema": {"type": "object"}},
-        "ask_memory": {"description": "Recall memories.", "inputSchema": {"type": "object"}},
-        "remember": {"description": "Write compiled memory.", "inputSchema": {"type": "object"}},
+        "read_instructions": {"description": "Instructions.", "inputSchema": {"type": "object"}},
+        "search_memory": {"description": "Recall memories.", "inputSchema": {"type": "object"}},
+        "create_note": {"description": "Write compiled memory.", "inputSchema": {"type": "object"}},
     }
 
     def __init__(self):
@@ -75,8 +75,8 @@ def _broker(arm, cell=None, backend=None):
 def test_control_arm_has_no_memory_tools_or_discovery():
     broker = _broker("control")
     available = broker.available("action")
-    assert "bootstrap" not in available
-    assert "ask_memory" not in available
+    assert "read_instructions" not in available
+    assert "search_memory" not in available
     assert "discover_tools" not in available
     assert "read_file" not in available
     assert "list_projects" in available
@@ -86,31 +86,28 @@ def test_control_arm_has_no_memory_tools_or_discovery():
 def test_memory_arm_has_world_and_shipped_memory_tools():
     broker = _broker("memory")
     available = broker.available("experience")
-    assert "bootstrap" in available
-    assert "ask_memory" in available
-    assert "remember" in available
+    assert "read_instructions" in available
+    assert "search_memory" in available
+    assert "create_note" in available
     assert "discover_tools" in available
     assert "read_file" in available
     assert "apply_config" in available
 
 
 @pytest.mark.parametrize("arm", ["control", "memory"])
-def test_preferred_memory_catalogue_keeps_compatibility_within_arm_admission(arm):
+def test_memory_catalogue_is_admitted_by_arm_and_only_by_name(arm):
     cell = FakeCell()
     cell.schemas = {
-        "create_note": FakeCell.schemas["remember"],
-        "recall_context": FakeCell.schemas["ask_memory"],
-        "unknown_memory": FakeCell.schemas["ask_memory"],
+        "create_note": FakeCell.schemas["create_note"],
+        "recall_context": FakeCell.schemas["search_memory"],
+        "unknown_memory": FakeCell.schemas["search_memory"],
     }
     broker = _broker(arm, cell=cell)
     arguments = {"title": "Durable conclusion"}
-    for name in ("remember", "create_note"):
-        result, _ = asyncio.run(broker.tool(name, arguments, phase="experience"))
-        assert bool(result.get("isError")) is (arm == "control")
-    assert cell.calls == ([] if arm == "control" else [
-        ("remember", arguments), ("create_note", arguments),
-    ])
-    discovery = {"names": ["remember", "create_note"]}
+    result, _ = asyncio.run(broker.tool("create_note", arguments, phase="experience"))
+    assert bool(result.get("isError")) is (arm == "control")
+    assert cell.calls == ([] if arm == "control" else [("create_note", arguments)])
+    discovery = {"names": ["create_note"]}
     result, loaded = asyncio.run(broker.tool("discover_tools", discovery, phase="experience"))
     if arm == "memory":
         assert result == {"loaded": ["create_note"]}
@@ -118,8 +115,7 @@ def test_preferred_memory_catalogue_keeps_compatibility_within_arm_admission(arm
     else:
         assert result["isError"] is True
         assert loaded == []
-    assert discovery == {"names": ["remember", "create_note"]}
-    for name in ("activate_context", "recall_context", "unknown_memory"):
+    for name in ("remember", "recall_context", "unknown_memory"):
         result, _ = asyncio.run(broker.tool(name, {}, phase="experience"))
         assert result["isError"] is True
 
@@ -179,11 +175,11 @@ def test_run_phase_dispatches_world_tool_calls_to_the_action_world(tmp_path):
 def test_run_phase_memory_tool_calls_reach_the_cell(tmp_path):
     episode = generate_episode(seed=1, variant="helpful_history")
     view = actor_view(episode, 0)
-    backend = FakeBackend([_tool_call("ask_memory", {"query": "steps"}), {"role": "assistant", "content": "Noted."}])
+    backend = FakeBackend([_tool_call("search_memory", {"query": "steps"}), {"role": "assistant", "content": "Noted."}])
     cell = FakeCell()
     world = ActionWorld(episode, arm="memory")
     broker = UtilityBroker(world=world, arm="memory", cell=cell, backend=backend,
                             envelope=RunEnvelope(AgentLimits()), guidance=GUIDANCE)
     result = asyncio.run(run_phase(broker, view=view, out=tmp_path / "run"))
     assert result["status"] == "completed"
-    assert cell.calls == [("ask_memory", {"query": "steps"})]
+    assert cell.calls == [("search_memory", {"query": "steps"})]

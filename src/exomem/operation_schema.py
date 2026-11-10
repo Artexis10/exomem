@@ -1,22 +1,19 @@
-"""Published MCP signatures for the renderings of a grouped command.
+"""The `operation` schema of one rendering of a grouped command: one branch per kind.
 
 A rendering never runs: middleware rewrites its call to the grouped command before
-dispatch (`command_surface.resolve_invocation`), so these signatures exist to tell a
-client what to send. Every field's type and description is read from the grouped
-command's own published signature, and every variant's fields from the operation
-entries, so neither is declared a second time.
+dispatch (`command_surface.resolve_invocation`). Every field's type and description is
+read from the grouped command's own published signature, and every variant's fields from
+the operation entries, so neither is declared a second time.
 """
 
 from __future__ import annotations
 
 import inspect
-import json
-import typing
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import Annotated, Any
+from typing import Any
 
-from pydantic import TypeAdapter, WithJsonSchema
+from pydantic import TypeAdapter
 
 from .edit_operations import inline_schema
 from .operation_entries import Rendering
@@ -155,117 +152,3 @@ def operation_schema(
         "oneOf": branches,
         "discriminator": {"propertyName": "kind"},
     }
-
-
-def rendering_handler(rendering: Rendering, grouped: Callable) -> Callable:
-    """A callable whose signature FastMCP publishes as this rendering's input schema.
-
-    `grouped` is the bound grouped command, whose published parameters supply each
-    field's type and description.
-    """
-    parameters = {
-        name: parameter.replace(kind=inspect.Parameter.KEYWORD_ONLY)
-        for name, parameter in inspect.signature(grouped).parameters.items()
-    }
-    carried = [parameters[name] for name in rendering.tool_arguments]
-    schema = operation_schema(rendering, parameters)
-    operation = inspect.Parameter(
-        "operation",
-        kind=inspect.Parameter.KEYWORD_ONLY,
-        annotation=Annotated[dict[str, Any], WithJsonSchema(schema)],
-    )
-
-    def handler(**_: object) -> typing.NoReturn:
-        # Middleware rewrites every rendering call to its grouped command, so a call that
-        # reaches this body skipped authorization's view of the real command: fail closed.
-        raise RuntimeError(f"{rendering.name} reached its handler without translation")
-
-    handler.__signature__ = inspect.Signature([operation, *carried])  # type: ignore[attr-defined]
-    handler.__annotations__ = {
-        parameter.name: parameter.annotation
-        for parameter in handler.__signature__.parameters.values()  # type: ignore[attr-defined]
-        if parameter.annotation is not inspect.Parameter.empty
-    }
-    handler.__name__ = handler.__qualname__ = rendering.name
-    handler.__doc__ = rendering.description
-    return handler
-
-
-def _share_operation_fields(operation: dict[str, Any]) -> None:
-    """Move repeated complete field schemas above the operation alternatives."""
-    # Closed generated operation objects use fixed JSON Schema oneOf/anyOf unions; property schemas stay opaque.
-    pending = [(operation, False)]
-    nodes = []
-    while pending:
-        node, closed = pending.pop()
-        if not isinstance(node, dict) or not isinstance(node.get("properties", {}), dict):
-            return
-        nodes.append(node)
-        closed = closed or (node.get("additionalProperties") is False and not node.get("patternProperties"))
-        children = []
-        for keyword in ("oneOf", "anyOf"):
-            if keyword in node:
-                alternatives = node[keyword]
-                if not isinstance(alternatives, list) or not alternatives:
-                    return
-                children.extend(alternatives)
-        if not children and not closed:
-            return
-        pending.extend((child, closed) for child in reversed(children))
-
-    occurrences = {}
-    try:
-        for node in nodes:
-            properties = node.get("properties", {})
-            for name, field in properties.items():
-                signature = json.dumps(field, sort_keys=True, separators=(",", ":"))
-                occurrences.setdefault(name, []).append((properties, field, signature))
-    except (TypeError, ValueError):
-        return
-    for name, fields in occurrences.items():
-        if len(fields) < 2 or len({signature for _, _, signature in fields}) != 1:
-            continue
-        shared = operation.setdefault("properties", {})
-        shared[name] = fields[0][1]
-        for properties, _, _ in fields:
-            if properties is not shared:
-                properties[name] = {}
-
-
-def shared_rendering_tool(contributors):
-    """Build one discovery schema from the commands that own its public variants."""
-    from fastmcp.tools import FunctionTool
-    from mcp.types import ToolAnnotations
-
-    from .command_surface import compact_input_schema
-
-    first, grouped = contributors[0]
-    tool = FunctionTool.from_function(rendering_handler(first, grouped), output_schema=None)
-    properties = {"operation": {"description": "One operation, selected by `kind`.",
-                                 "oneOf": [], "discriminator": {"propertyName": "kind"}}}
-    required = ["operation"]
-    for rendering, bound in contributors:
-        parameters = dict(inspect.signature(bound).parameters)
-        schema = operation_schema(rendering, parameters)
-        properties["operation"]["oneOf"].extend(schema["oneOf"])
-        for name in rendering.tool_arguments:
-            parameter = parameters[name]
-            properties[name] = _field_schema(parameter, required=False)
-    schema = {"type": "object", "properties": properties, "required": required,
-              "additionalProperties": False}
-    tool.parameters = compact_input_schema(schema)
-    _share_operation_fields(tool.parameters["properties"]["operation"])
-    tool.description = " ".join(dict.fromkeys(rendering.description for rendering, _ in contributors))
-    from . import semantic_authoring
-
-    for rendering, _ in contributors:
-        if rendering.command in semantic_authoring.AUTHORING_TOOLS:
-            guidance = semantic_authoring.render_tool_guidance(rendering.command)
-            # This is an exact API spelling substitution in code-owned guidance.
-            tool.description += " " + guidance.replace(rendering.command, rendering.name)
-    read_only = all(rendering.read_only for rendering, _ in contributors)
-    tool.annotations = ToolAnnotations(title=first.title, readOnlyHint=read_only,
-                                      destructiveHint=any(r.destructive for r, _ in contributors),
-                                      idempotentHint=all(r.idempotent for r, _ in contributors),
-                                      openWorldHint=False)
-    return tool

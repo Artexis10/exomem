@@ -358,7 +358,7 @@ def test_a_written_scenario_loads_by_folder_path_with_its_checks_set_and_judging
     assert {spec["type"] for spec in first.checks} == {"only_scripted_tools", "answer_has_all_of", "answer_in_order"}
     assert {spec["type"] for spec in scenarios["c2"].checks} == {"only_scripted_tools"}
     assert first.prompt == TURN_ONE and first.reference == "Reference of c1." and first.judge == "batch"
-    assert first.hooks == ("UserPromptSubmit",) and first.served_tools == ("bootstrap", "recall_context")
+    assert first.hooks == ("UserPromptSubmit",) and first.served_tools == ("read_instructions", "recall_context")
     assert first.record["ready_graph"] is True and list(first.criteria) == RUBRIC
     assert json.loads((tmp_path / "out" / "case-sets.json").read_text()) == {"c1": "N", "c2": "S"}
 

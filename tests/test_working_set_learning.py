@@ -257,7 +257,7 @@ def test_a_naming_miss_offers_one_bounded_advisory(learning_vault: Path) -> None
     # caller's content words here; the agent picks the name out of them.
     assert advisory["turn_terms"] == ["weiter", "mit", "dem", "schlitten"]
     assert [option["family"] for option in advisory["options"]] == ["name", "referential_cue"]
-    assert "triage_memory" in advisory["rule"]
+    assert "decide_review_item" in advisory["rule"]
 
 
 def test_the_advisory_carries_the_writers_guards(learning_vault: Path) -> None:

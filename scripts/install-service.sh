@@ -22,7 +22,6 @@ PORT="${EXOMEM_PORT:-8765}"
 SERVICE_ROOT=""
 PACKAGE_VERSION=""
 ENV_FILE=""
-LEGACY_MCP_COMPAT=0
 RESUME_STOPPED_TRANSITION=0
 REBIND_VAULT=0
 SEAMLESS=0
@@ -53,7 +52,6 @@ Options:
   --env-file PATH           Dotenv file (default: <repo>/.env)
   --bind-host HOST          Service bind host (default: 127.0.0.1)
   --port PORT               Service port (default: 8765)
-  --legacy-mcp-compat       Set EXOMEM_MCP_LEGACY_COMPAT=1 in the service
   --resume-stopped-transition
                             Continue a prior failed transition proven stopped
   --rebind-vault            Allow an existing service's vault path to change.
@@ -119,10 +117,6 @@ while [[ $# -gt 0 ]]; do
             PORT="$2"
             PORT_EXPLICIT=1
             shift 2
-            ;;
-        --legacy-mcp-compat)
-            LEGACY_MCP_COMPAT=1
-            shift
             ;;
         --seamless)
             SEAMLESS=1
@@ -225,7 +219,7 @@ if [[ "$SEAMLESS" == 1 ]]; then
 fi
 SERVICE_ENV_FILE="$CONFIG_ROOT/service.env"
 if [[ "$SEAMLESS" == 1 && "$EXISTING_SERVICE" == 1 ]]; then
-    [[ "$ENV_FILE_EXPLICIT" == 0 && "$LEGACY_MCP_COMPAT" == 0 && "$REBIND_VAULT" == 0 ]] \
+    [[ "$ENV_FILE_EXPLICIT" == 0 && "$REBIND_VAULT" == 0 ]] \
         || die "--seamless bootstrap preserves installed service.env; configuration changes require maintenance"
     [[ -f "$SERVICE_ENV_FILE" ]] || die "installed service.env is required for --seamless bootstrap"
     ENV_FILE="$SERVICE_ENV_FILE"
@@ -644,8 +638,7 @@ EXOMEM_PROFILE_EMBED_BACKEND="$EMBED_BACKEND" \
     "$SERVICE_ENV_STAGING_FILE" \
     "$PROCESS_ENV_FILE" \
     "$LAUNCHD_ENV_FILE" \
-    "$LOG_DIR" \
-    "$LEGACY_MCP_COMPAT" <<'PY'
+    "$LOG_DIR" <<'PY'
 from __future__ import annotations
 
 import os
@@ -657,7 +650,7 @@ from xml.sax.saxutils import escape
 
 from dotenv import dotenv_values
 
-env_path, systemd_path, process_path, xml_path, log_dir, legacy = sys.argv[1:]
+env_path, systemd_path, process_path, xml_path, log_dir = sys.argv[1:]
 # Passed through the environment rather than as an eighth positional: the
 # renderer invocations here are told apart by argv length, so a new positional
 # would silently alias this call onto a different renderer.
@@ -688,8 +681,6 @@ if embed_backend:
     values.setdefault("EXOMEM_EMBED_BACKEND", embed_backend)
 if os.environ.get("PATH"):
     values.setdefault("PATH", os.environ["PATH"])
-if legacy == "1":
-    values["EXOMEM_MCP_LEGACY_COMPAT"] = "1"
 
 def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'

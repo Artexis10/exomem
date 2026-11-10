@@ -85,34 +85,28 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     assert "search" not in tools
     assert "fetch" not in tools
 
-    for name in ("search_memory", "read_memory"):
+    for name in ("search_memory", "read_page"):
         annotations = tools[name]["annotations"]
         assert annotations["readOnlyHint"] is True
         assert annotations["destructiveHint"] is False
         assert annotations["openWorldHint"] is False
 
     ask_inputs = tools["search_memory"]["inputSchema"]["properties"]
-    read_operation = tools["read_memory"]["inputSchema"]["properties"]["operation"]
-    assert read_operation["discriminator"]["propertyName"] == "kind"
-    page = next(branch for branch in read_operation["oneOf"] if branch["properties"]["kind"]["const"] == "page")
-    read_inputs = {**page["properties"], **read_operation.get("properties", {})}
-    assert {"query", "detail", "deep", "include_timings", "explain"} <= set(
-        ask_inputs
-    )
+    read_schema = tools["read_page"]["inputSchema"]
+    assert {"query", "detail", "deep", "options"} <= set(ask_inputs)
     assert "pack" not in ask_inputs
-    assert {"path", "frontmatter_only", "include_raw", "links", "unit_ref"} <= set(
-        read_inputs
-    )
-    assert {"kind", "path"} <= set(page["required"])
+    assert {"page", "part", "more", "options"} <= set(read_schema["properties"])
+    assert read_schema["required"] == ["page"]
 
     mcp = _build_server(monkeypatch, vault)
-    search = asyncio.run(mcp.call_tool(
-        "search_memory", {"query": "jitter", "mode": "keyword"}, run_middleware=True
-    )).structured_content["result"]
+    found = asyncio.run(mcp.call_tool(
+        "search_memory", {"query": "jitter", "options": {"mode": "keyword"}}, run_middleware=True
+    )).structured_content
+    search = found.get("result", found)
     assert search["hits"]
     path = search["hits"][0]["id"]
     read = asyncio.run(mcp.call_tool(
-        "read_memory", {"operation": {"kind": "page", "path": path}}, run_middleware=True
+        "read_page", {"page": path}, run_middleware=True
     )).structured_content
     expected = commands.op_read_memory(vault, path=path)
     assert read == json.loads(json.dumps(expected, default=str))

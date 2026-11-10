@@ -316,18 +316,18 @@ def test_workflow_skill_docs_route_through_product_commands() -> None:
 def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() -> None:
     text = (workflow_skills.source_dir("exomem-curate") / "SKILL.md").read_text(encoding="utf-8")
 
-    for action in ("work-item", "preview"):
-        assert f"'kind': 'curation-{action}'" in text
-    for action in ("propose", "apply", "resume", "propose-compensation", "apply-compensation"):
-        assert f'curation_action="{action}"' in text
+    for action in ("work_item", "preview"):
+        assert f'inspect_memory(operation="curation.{action}"' in text
+    for action in ("propose", "apply", "resume", "propose_compensation", "apply_compensation"):
+        assert f'manage_memory(operation="curation.{action}"' in text
     # Remote clients run curation writes too, so the skill must name the remote route.
-    assert "repair_memory(operation=" in text
+    assert "`manage_memory(operation=" in text
     assert "`structural_suggestions`" in text
     assert "`restructure_execution`" in text
     assert "preview the immutable plan once" in text
     assert "one explicit confirmation for that exact plan fingerprint" in text
     assert "resume automatically one step per request" in text
-    assert 'propose-compensation"`) is `structural_suggestions`' in text
+    assert 'propose_compensation")` (CLI `curation_action="propose-compensation"`) is `structural_suggestions`' in text
     assert "does not need a fresh confirmation" in text
     assert "stop on `partial` or `blocked`" in text
     assert "standing approval" in text
@@ -350,29 +350,11 @@ def test_core_skill_routes_tool_loading_by_current_intent() -> None:
     )[0]
 
     for command in [
-        "bootstrap",
-        "search_memory",
-        "read_memory",
-        "browse_memory",
-        "create_note",
-        "edit_note",
-        "change_observations",
-        "supersede_note",
-        "capture_source",
-        "prepare_note",
-        "preserve_evidence",
-        "preserve_artifacts",
-        "transfer_artifact",
-        "read_records",
-        "change_records",
-        "read_review",
-        "read_connections",
-        "read_import",
-        "check_memory",
-        "read_schema",
-        "read_governance",
-        "change_media",
-        "read_media",
+        "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
+        "edit_note", "supersede_note", "save_source", "save_evidence", "save_episode", "upload_files",
+        "download_files", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
+        "edit_plan_item", "list_review_items", "decide_review_item", "inspect_memory", "manage_memory",
+        "observe_transfer", "transfer_memory",
     ]:
         assert command in loading_section
     # Discovery must not turn a lookup into a load of every mutation/media schema.
@@ -440,5 +422,6 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
 
     for path in operation_copies:
         text = " ".join(path.read_text(encoding="utf-8").split())
-        assert "`read_records` carries `describe`, `validate`, `inspect`, and `query`" in text
-        assert "`change_records` carries `create`, `append`, `update`, `revise`, and `rebaseline`" in text
+        assert "`query_records`, `add_record` and `edit_record` are the public product tools" in text
+        assert "`records.describe`, `records.validate`, `records.inspect`" in text
+        assert "`records.create`, `records.revise`, `records.rebaseline`" in text

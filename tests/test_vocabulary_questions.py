@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import (
@@ -782,14 +783,20 @@ def test_question_variant_reaches_same_leaf_over_mcp_rest_and_cli(
 
     direct = commands.op_review_memory(vault, **request)
     mcp = server_module.build_server(require_auth=False)
-    mcp_result = asyncio.run(mcp.call_tool("review_memory", request, run_middleware=True))
+    mcp_result = asyncio.run(mcp.call_tool(*public_call("review_memory", request), run_middleware=True))
     rest = TestClient(mcp.http_app()).post(
         "/api/review_memory",
         json=request,
         headers={"Authorization": "Bearer test-key"},
     )
 
-    assert mcp_result.structured_content == direct
+    # An agent reads the follow-up call in the spelling of the tool it has; REST and CLI keep the grouped one.
+    served = dict(mcp_result.structured_content)
+    assert served.pop("context_route") == {
+        "tool": "inspect_memory",
+        "args": {"operation": "review.item_context", "arguments": {"ref": direct["context_route"]["ref"]}},
+    }
+    assert served == {key: value for key, value in direct.items() if key != "context_route"}
     assert rest.status_code == 200, rest.text
     assert rest.json() == {"success": True, "data": direct}
     assert (

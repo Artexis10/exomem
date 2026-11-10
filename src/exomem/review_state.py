@@ -1452,6 +1452,19 @@ def _cached_stamps(
     return cached
 
 
+def last_surfaced_fingerprint(vault_root: Path, review_id: str) -> str | None:
+    """The fingerprint a signal last surfaced with, from the first-surfaced ledger; None if it never surfaced."""
+    ledger = ReviewStateStore(vault_root).load().get("surfaced") or {}
+    prefix = f"{review_id}:"
+    surfaced = [
+        (stamp, key[len(prefix):])
+        for key, row in ledger.items()
+        if key.startswith(prefix) and isinstance(row, dict)
+        and (stamp := _parse_stamp(row.get("first_surfaced_at"))) is not None
+    ]
+    return max(surfaced)[1] if surfaced else None
+
+
 def surfaced_family(
     payload: dict[str, Any] | None, review_id: str, signal_fingerprint: str
 ) -> str | None:

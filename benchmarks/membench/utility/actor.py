@@ -35,7 +35,7 @@ MEMORY_TOOLS = WRITER_TOOLS
 
 #: Memory-specific harness tools, kept out of the control arm entirely --
 #: their only purpose is loading/reading shipped memory guidance.
-_MEMORY_HARNESS_TOOLS = frozenset({"bootstrap", "ask_memory", "read_memory"})
+_MEMORY_HARNESS_TOOLS = frozenset({"read_instructions", "search_memory", "read_page"})
 
 PERSISTENCE_NOTICE = (
     "Ordinary workspace notes (read_note/write_note) persist across sessions "

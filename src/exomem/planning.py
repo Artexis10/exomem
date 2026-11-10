@@ -13,7 +13,15 @@ from typing import Any, Never
 
 import yaml
 
-from . import memory_refs, query_compat, record_formats, record_governance, records, state_paths
+from . import (
+    collection_refs,
+    memory_refs,
+    query_compat,
+    record_formats,
+    record_governance,
+    records,
+    state_paths,
+)
 from . import structured_collections as collections
 from .collection_store import ownership
 from .collection_store.preview import QUERY_RECEIPT_BOUNDARY
@@ -689,6 +697,8 @@ def query(
                 },
                 manifest,
             )
+            # The ids go on before the projection is sealed: a sealed payload that changes is refused.
+            projected = collection_refs.mark_rows(projected, profile="planning")
             if writer is not None:
                 projected = writer._operation.query_metadata_evidence(
                     projected, writer, manifest, result, contributors=hierarchy_contributors)

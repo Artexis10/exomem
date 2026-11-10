@@ -124,10 +124,10 @@ def load_scenario(path: Path, shapes: Mapping[str, Any] | None = None) -> Scenar
 
 
 def call_kind(tool: str, arguments: dict) -> str | None:
-    """The operation a call selects: `operation.kind`, else `action`, else the tool schema's default action."""
+    """The operation a call selects: a door's `operation`, else `action`, else the tool schema's default action."""
     operation = arguments.get("operation")
-    if isinstance(operation, dict) and isinstance(operation.get("kind"), str):
-        return operation["kind"]
+    if isinstance(operation, str):
+        return operation
     action = arguments.get("action")
     if action is None:
         schema = tool_specs().get(tool, {}).get("inputSchema", {})

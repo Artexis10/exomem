@@ -2,7 +2,7 @@
 
 The evaluator owns the cases, their seeds and their keys. A case file names a seed, one user turn and an engagement;
 `<case-dir>/answer-keys/<id>.marks.json` holds the reference, the set (`S` or `N`) and the closed answer checks.
-The scenario that comes out records the arm's real `bootstrap` and `recall_context` replies on the case seed
+The scenario that comes out records the arm's real `read_instructions` and `recall_context` replies on the case seed
 (`recording.py`), serves only those two replies to the actor, stages the arm's `UserPromptSubmit` hook and leaves the
 judging to one blind batch (`judge_batch.py`). The judged criteria are the evaluator's too: `<case-dir>/rubric.json`
 holds them, and the writer copies them into every scenario. Nothing is copied back into the repository: the writer
@@ -20,7 +20,7 @@ from . import checks, judge
 from .scripted_replies import REPLAY_SUITE
 from .session_close import RUBRIC_FILE, Case, load_cases
 
-SERVED_TOOLS = ("bootstrap", "recall_context")
+SERVED_TOOLS = ("read_instructions", "recall_context")
 HOOKS = ("UserPromptSubmit",)
 #: A seeded vault answers its first read before its index is ready; the recorder waits this long between reads.
 WARM_SECONDS = 5
@@ -97,9 +97,9 @@ def scenario_for(case: Case, marks: dict, rubric: list[dict]) -> dict:
             "ready_graph": True,
             "steps": [
                 {
-                    "as": "bootstrap",
-                    "tool": "bootstrap",
-                    "arguments": {"operation": {"kind": "instructions", "profile": "compact"}},
+                    "as": "instructions",
+                    "tool": "read_instructions",
+                    "arguments": {"profile": "compact"},
                 },
                 {
                     "as": "context",
@@ -109,7 +109,7 @@ def scenario_for(case: Case, marks: dict, rubric: list[dict]) -> dict:
                 },
             ],
         },
-        "replies": {"bootstrap": {"$shape": "bootstrap"}, "recall_context": {"$shape": "context"}},
+        "replies": {"read_instructions": {"$shape": "instructions"}, "recall_context": {"$shape": "context"}},
         "default_reply": {"error": "this tool is not served in the replay"},
         "judge_view": "answer",
         "judge": "batch",

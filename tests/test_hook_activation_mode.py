@@ -42,7 +42,7 @@ def test_mcp_turn_requests_native_activation_without_transport(monkeypatch, caps
     assert retrieve.main() == 0
     assert calls == []
     context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "bootstrap" in context and "recall_context" in context
+    assert "read_instructions" in context and "recall_context" in context
     assert "raw user turn" in context and "once" in context
     assert "already" in context and "duplicate" in context
     assert continuation.MEMORY_CITATION_GUIDANCE in context
@@ -307,8 +307,8 @@ def test_installed_capture_and_continuation_keep_same_session_in_separate_homes(
                     "payload": {
                         "type": "function_call",
                         "namespace": "mcp__exomem__",
-                        "name": "episode_memory",
-                        "arguments": json.dumps({"action": "record", "episode": "episode-s"}),
+                        "name": "save_episode",
+                        "arguments": json.dumps({"episode": "episode-s"}),
                         "call_id": "record-1",
                     },
                 },
@@ -343,8 +343,8 @@ def test_installed_capture_and_continuation_keep_same_session_in_separate_homes(
                             {
                                 "type": "tool_use",
                                 "id": "record-1",
-                                "name": "mcp__exomem__episode_memory",
-                                "input": {"action": "record", "episode": "episode-s"},
+                                "name": "mcp__exomem__save_episode",
+                                "input": {"episode": "episode-s"},
                             },
                             {"type": "text", "text": text},
                         ],
@@ -805,7 +805,7 @@ def test_fresh_mcp_codex_capture_checks_live_capabilities_without_restart_wait(
         check=True,
     )
     reason = json.loads(result.stdout)["reason"]
-    assert "bootstrap first" in reason and "cannot capture" in reason
+    assert "read_instructions first" in reason and "cannot capture" in reason
     assert "not connected" in reason
     assert marker.read_text() == "old-marker"
 
@@ -858,7 +858,7 @@ def test_all_mcp_capture_reasons_guard_live_capabilities(monkeypatch, capsys, re
     )
     assert capture.main() == 0
     output = json.loads(capsys.readouterr().out)["reason"]
-    assert "bootstrap first" in output and "not connected" in output
+    assert "read_instructions first" in output and "not connected" in output
     assert "cannot capture" in output
     assert reason in output
 
