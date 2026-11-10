@@ -799,7 +799,6 @@ def add(
             source_counts=post_counts,
         )
 
-        kb = kb_root(vault_root)
         # Refresh the Notes/Entities counts in the top index alongside the
         # Sources counts that compute_updates() already handled. `add` doesn't
         # change Notes/Entities counts, so no override needed.
@@ -813,21 +812,7 @@ def add(
             top_with_counts if top_with_counts is not None
             else update.top_index_content
         )
-    from .governance import connector_boundary
-
-    effect_admitted = connector_boundary.effect_admission(vault_root)
-    # Derived navigation and log outputs of this capture, bound to its page like every other writer's.
-    derived: list[tuple[str, PlannedWrite]] = [
-        (role, write) for role, write in (
-            ("index", PlannedWrite(
-                path=indexes.sources_index_path(vault_root), content=update.sources_index_content,
-                guard=update.sources_index_guard,
-            )),
-            ("index", PlannedWrite(path=kb / "index.md", content=top_index_final, guard=update.top_index_guard)),
-            ("operation-log", PlannedWrite(path=kb / "log.md", content=update.log_content, guard=update.log_guard)),
-        )
-        if effect_admitted(write.path)
-    ]
+    derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
     derived.extend(("index", write) for write in sub_writes)
     writes = [
         PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
@@ -1654,17 +1639,40 @@ def _activity_summary(
     return f"{base} — {escape_wikilinks_for_log(excerpt + tags_part)}"
 
 
+def _derived_index_writes(
+    vault_root: Path, update: indexes.IndexUpdate, *, top_index_content: str
+) -> list[tuple[str, PlannedWrite]]:
+    """The index and log outputs of a Source write, each with its role and the guard of the read it came from.
+
+    They are derived outputs bound to the Source page, so activated vocabulary classifies the page,
+    not the links these lists carry.
+    """
+    from .governance import connector_boundary
+
+    kb = kb_root(vault_root)
+    effect_admitted = connector_boundary.effect_admission(vault_root)
+    return [
+        (role, write) for role, write in (
+            ("index", PlannedWrite(
+                path=indexes.sources_index_path(vault_root), content=update.sources_index_content,
+                guard=update.sources_index_guard,
+            )),
+            ("index", PlannedWrite(path=kb / "index.md", content=top_index_content, guard=update.top_index_guard)),
+            ("operation-log", PlannedWrite(path=kb / "log.md", content=update.log_content, guard=update.log_guard)),
+        )
+        if effect_admitted(write.path)
+    ]
+
+
 def revision_activity_writes(
     vault_root: Path, *, path: str, title: str, source_type: str, now: dt.datetime
-) -> list[PlannedWrite]:
-    """The index and log writes that a revision of the Source at `path` makes.
+) -> list[tuple[str, PlannedWrite]]:
+    """The index and log writes that a revision of the Source at `path` makes, with their roles.
 
     They are the writes `add` makes for a new Source, so a revision shows up in
     the recent-activity lists and the log as a new page did. A revision adds no
     page, so the folder counts stay the ones on disk.
     """
-    from .governance import connector_boundary
-
     page = Path(path)
     folder = page.parent.name
     rel_no_ext = page.with_suffix("").as_posix()
@@ -1683,17 +1691,7 @@ def revision_activity_writes(
             title=title, source_type=source_type, url=None, tags=[], why_captured=None
         ),
     )
-    kb = kb_root(vault_root)
-    effect_admitted = connector_boundary.effect_admission(vault_root)
-    return [
-        write
-        for write in (
-            PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
-            PlannedWrite(path=kb / "index.md", content=update.top_index_content),
-            PlannedWrite(path=kb / "log.md", content=update.log_content),
-        )
-        if effect_admitted(write.path)
-    ]
+    return _derived_index_writes(vault_root, update, top_index_content=update.top_index_content)
 
 
 def _log_entry_body(
