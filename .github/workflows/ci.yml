@@ -742,7 +742,7 @@ jobs:
         env:
           UV_PYTHON: /usr/bin/python3
           UV_PYTHON_DOWNLOADS: never
-        run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py tests/test_recall_timing.py -q
+        run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py tests/test_recall_timing.py tests/test_frame_stack.py -q
       - name: Read the series from the reference case file
         id: series
         # The case file defines the series; the paired matrix keeps no second list.

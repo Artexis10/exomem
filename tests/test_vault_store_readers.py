@@ -7,19 +7,40 @@ through ``write.commit``, as the store thread commits them.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import ALPHA, BETA, migrate_apply, vault  # noqa: F401
+from test_vault_store_migration import (
+    ALPHA,
+    BETA,
+    build_indexes,
+    migrate_apply,
+    vault,  # noqa: F401
+)
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 
 from exomem import __main__ as cli
-from exomem import commands, get_page, lexstore, list_directory, project_keys, warmup
+from exomem import (
+    commands,
+    document_containers,
+    get_page,
+    lexstore,
+    list_directory,
+    project_keys,
+    reserved_paths,
+    warmup,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.collection_store import connection
+from exomem.find_types import Hit
+from exomem.governance import egress
+from exomem.governance.principal import RequestPrincipal, request_scope
 from exomem.vault_store import ownership, write
 from exomem.vocabulary import registry
 
@@ -151,6 +172,148 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
     assert scheduled == []
 
 
+def restrict_external(root, selector):
+    """An active policy: pages that `selector` (a scope selector line) names are withheld from the
+    external audience."""
+    governance = root / "Knowledge Base" / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir()
+    (governance / "scopes" / "secret.yaml").write_text(
+        f"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\nname: Secret\n{selector}\n"
+    )
+    (governance / "rules" / "secret-external.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 0\n'
+    )
+
+
+EXTERNAL = RequestPrincipal(audience_id="external", surface="mcp")
+
+
+UNIT = "\n- [constraint] The lantern stays lit until dawn. ^lit\n"
+
+
+def derived_row_answers(root):
+    """What each catalogue reader of find answers, as plain data: keyword, browse, a category
+    filter, the unit lane and the vault scope."""
+
+    def found(**keywords):
+        hits = find_module.find(
+            root, limit=50, graph=False, rerank=False, mode="keyword", **keywords
+        )
+        return [(getattr(hit, "path", None) or hit.parent_path) for hit in hits]
+
+    return {
+        "keyword": found(query="lantern"),
+        "keyword and type": found(query="lighthouse", types=["note"]),
+        "browse": found(query="", types=["note"]),
+        "category": found(query="", categories=["constraint"]),
+        "units": found(query="lantern dawn", result_level="unit"),
+        "mixed": found(query="lantern dawn", result_level="mixed"),
+        "vault scope": found(query="lantern", scope="vault"),
+    }
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("damage", DAMAGE)
+def test_each_catalogue_reader_answers_from_the_store_as_it_answers_in_file_mode(
+    vault, damage, monkeypatch  # noqa: F811
+):
+    """A reader that still takes the sidecar that files built, or the projected file, for the
+    store's rows: it refuses, answers empty or serves the poison, where file mode answers the same
+    bytes."""
+    for index in range(GENERATED):
+        rel, body = generated_page(index)
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_bytes(body + UNIT.encode() if index % 5 == 0 else body)
+    build_indexes(vault)
+    find_module.clear_cache()
+    in_file_mode = derived_row_answers(vault)
+    assert all(in_file_mode.values()), "each reader must have something to answer"
+    assert migrate_apply(vault) == 0
+
+    damage_every_owned_projection(vault, damage)
+    sidecar = lexstore.lexical_path(vault)
+    sidecar.unlink()
+    sidecar.write_bytes(SENTINEL)  # a read of the file-built catalogue fails
+    find_module.clear_cache()
+    scheduled = []
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: scheduled.append(1))
+
+    assert derived_row_answers(vault) == in_file_mode
+    assert scheduled == []
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("caller", ("the owner", "an external caller under an active policy"))
+@pytest.mark.parametrize("damage", ("poisoned", "deleted"))
+def test_a_store_mode_read_stats_no_stored_page_and_schedules_no_repair(
+    stored, writer, damage, caller, monkeypatch  # noqa: F811
+):
+    """A read path that still checks a stored page's file (a freshness witness, an mtime key, a
+    first-use sync, a governance decision) pays a stat for every page on every request, and keys
+    its answer on a file that the store does not hold."""
+    external = caller != "the owner"
+    if external:
+        restrict_external(stored, 'tags: ["secret"]')
+    for index in range(GENERATED):
+        write.commit(writer, put(*generated_page(index)))
+    # The migration above ran in this process; a served process starts after it, with no memo of
+    # notes that file-mode reads kept.
+    document_containers.clear_unclaimed_notes()
+    damage_every_owned_projection(stored, damage)
+    find_module.clear_cache()
+    repairs, stats = [], []
+
+    def watching(real):
+        def watched(path, *arguments, **keywords):
+            try:
+                rel = Path(path).relative_to(stored).as_posix()
+            except (TypeError, ValueError):
+                rel = None  # a descriptor, or a path outside the vault
+            if rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE:
+                stats.append(rel)
+            return real(path, *arguments, **keywords)
+
+        return watched
+
+    monkeypatch.setattr(os, "stat", watching(os.stat))
+    monkeypatch.setattr(os, "lstat", watching(os.lstat))
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *args, **kwargs: repairs.append(1))
+    monkeypatch.setattr(lexstore, "request_repair", lambda *args, **kwargs: repairs.append(1))
+
+    with request_scope(EXTERNAL) if external else contextlib.nullcontext():
+        derived_row_answers(stored)
+        commands.op_find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+        commands.op_ask_memory(stored, query="lighthouse", limit=15)
+
+    assert stats == []
+    assert repairs == []
+
+
+@pytest.mark.parametrize("catalogue_off", ("the python backend", "a SQLite build without FTS5"))
+def test_a_store_vault_reads_the_store_corpus_for_its_lexical_lanes_with_the_catalogue_off(
+    stored, writer, catalogue_off, monkeypatch  # noqa: F811
+):
+    """A routing that waits for the file catalogue to be usable: with the catalogue off, the lexical
+    lanes of a store-mode vault fall back to a build from files that never covers the store."""
+    for index in range(GENERATED):
+        write.commit(writer, put(*generated_page(index)))
+    if catalogue_off == "the python backend":
+        monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    else:
+        monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    find_module.clear_cache()
+
+    asked = commands.op_ask_memory(stored, query="lighthouse", limit=15, include_timings=True)
+
+    assert any(hit["path"].startswith("Knowledge Base/Notes/Gen/") for hit in asked["hits"])
+    assert asked["timings"]["profile"]["lexical_lanes"] == {
+        "corpus": "store",
+        "catalogue": "bypassed",
+    }
+
+
 def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolver(
     stored, writer  # noqa: F811
 ):
@@ -171,6 +334,175 @@ def test_a_commit_that_changes_no_file_reaches_the_corpus_page_cache_and_resolve
 
     assert find_module._CACHE.get(stored / NEW, stored).title == "Delta"
     assert find_module.shared_resolver(stored).title_key_for_path(NEW) == "delta"
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("caller", ("the owner", "an external caller under an active policy"))
+@pytest.mark.parametrize("tool", ("op_find", "op_ask_memory"))
+def test_a_recall_tool_call_reads_one_store_snapshot_however_many_pages_it_reads(
+    stored, writer, tool, caller, monkeypatch  # noqa: F811
+):
+    """A reader that opens a snapshot per page costs 7 to 14 ms a page and may mix revisions in
+    one answer; the call's reads, release decisions included, must not grow with its pages."""
+    external = caller != "the owner"
+    if external:
+        restrict_external(stored, 'tags: ["secret"]')
+    opened = []
+    real = connection.store_reader
+
+    def counting(*arguments, **keywords):
+        opened.append(1)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(connection, "store_reader", counting)
+
+    def snapshots_for_one_call(pages):
+        for index in range(pages):
+            rel, body = generated_page(index)
+            write.commit(writer, put(rel, body))
+        find_module.clear_cache()
+        opened.clear()
+        with request_scope(EXTERNAL) if external else contextlib.nullcontext():
+            answer = getattr(commands, tool)(
+                stored, query="lighthouse", limit=15, graph=False, rerank=False
+            )
+        assert answer
+        return len(opened)
+
+    few = snapshots_for_one_call(20)
+    many = snapshots_for_one_call(60)
+
+    assert (few, many) == (1, 1)
+
+
+def test_a_store_page_tagged_into_a_restricted_scope_is_withheld_whatever_its_projected_file_says(
+    stored, writer  # noqa: F811
+):
+    """A decision read from the projected file releases a page that the store already holds in a
+    restricted scope (the file still has the old tags, or none), and withholds an open page whose
+    file has not been written yet."""
+    restrict_external(stored, 'tags: ["secret"]')
+    restricted = "Knowledge Base/Notes/Gen/Restricted.md"
+    open_page = "Knowledge Base/Notes/Gen/Open.md"
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED,
+            "test",
+            puts=(
+                write.PagePut(
+                    restricted,
+                    b"---\ntitle: R\ntype: note\ntags: [secret]\n---\n# R\n\nHeld back.\n",
+                ),
+                write.PagePut(open_page, b"---\ntitle: O\ntype: note\n---\n# O\n\nOpen.\n"),
+            ),
+        ),
+    )
+    # The restricted page's file is a stale projection from before the retag; the open page has
+    # none.
+    (stored / restricted).parent.mkdir(parents=True, exist_ok=True)
+    (stored / restricted).write_bytes(b"---\ntitle: R\ntype: note\n---\n# R\n\nHeld back.\n")
+    hits = [
+        Hit(path=rel, type="note", scope="proj", title="t", updated="2026-01-01", excerpt="e",
+            bm25_rank=1, vector_score=0.5)
+        for rel in (restricted, open_page)
+    ]
+
+    released = egress.annotate_hits(
+        stored, hits, principal=RequestPrincipal(audience_id="external", surface="mcp"), limit=5
+    )
+
+    assert [hit.path for hit in released.hits] == [open_page]
+
+
+@pytest.mark.parametrize("link_into", ("the vault", "outside the vault"))
+def test_a_stored_page_in_a_paths_scope_is_withheld_whatever_its_projection_is_linked_to(
+    stored, writer, tmp_path_factory, link_into  # noqa: F811
+):
+    """Scope membership that names the projected file's link target decides the page under another
+    path: a link into the vault names the target's path, and a link out of it names an absolute path
+    that no `paths:` selector matches. Either way the page leaves its scope."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Notes/Secret/**"]')
+    secret = "Knowledge Base/Notes/Secret/S.md"
+    decoy = "Knowledge Base/Notes/Gen/Decoy.md"
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED,
+            "test",
+            puts=(
+                write.PagePut(
+                    secret, b"---\ntitle: S\ntype: note\n---\n# S\n\nThe zebracorn stays here.\n"
+                ),
+                write.PagePut(decoy, b"---\ntitle: D\ntype: note\n---\n# D\n\nA public decoy.\n"),
+            ),
+        ),
+    )
+    (stored / decoy).parent.mkdir(parents=True, exist_ok=True)
+    (stored / decoy).write_bytes(b"---\ntitle: D\ntype: note\n---\n# D\n\nA public decoy.\n")
+    target = stored / decoy
+    if link_into == "outside the vault":
+        target = tmp_path_factory.mktemp("outside") / "elsewhere.md"
+        target.write_bytes(b"---\ntitle: E\ntype: note\n---\n# E\n\nElsewhere.\n")
+    (stored / secret).parent.mkdir(parents=True, exist_ok=True)
+    (stored / secret).unlink(missing_ok=True)
+    (stored / secret).symlink_to(target)
+
+    with request_scope(EXTERNAL):
+        found = commands.op_find(stored, query="zebracorn", mode="keyword", limit=10)
+        asked = commands.op_ask_memory(stored, query="zebracorn", limit=10)
+        listed = commands.op_browse_memory(
+            stored, path="Knowledge Base/Notes", mode="list", recursive=True
+        )
+
+    assert "Decoy" in json.dumps(listed, default=str)  # the listing itself was served
+    for answer in (found, asked, listed):
+        assert "zebracorn" not in json.dumps(answer, default=str)
+        assert "Secret/S.md" not in json.dumps(answer, default=str)
+
+
+@pytest.mark.timeout(300)
+def test_a_stored_page_with_an_invalid_container_claim_is_refused_as_in_file_mode(
+    vault, monkeypatch  # noqa: F811
+):
+    """A claim check that probes the projected file before the identity inventory exists reads a
+    missing projection as a page with no claim, so a page that file mode refuses is released."""
+    claim = "Knowledge Base/Notes/Gen/Claim.md"
+    (vault / claim).parent.mkdir(parents=True, exist_ok=True)
+    (vault / claim).write_bytes(
+        b"---\ntitle: C\ntype: note\ncontainer_member: {version: 2}\n---\n# C\n\nA claim.\n"
+    )
+    build_indexes(vault)
+
+    def permitted():
+        reserved_paths._BASELINE_IDENTITY_CATALOGUES.clear()  # no inventory is built yet
+        document_containers.clear_unclaimed_notes()
+        return egress.content_permits(vault, claim, EXTERNAL)
+
+    in_file_mode = permitted()
+    assert in_file_mode is False
+    assert migrate_apply(vault) == 0
+    (vault / claim).unlink()
+
+    assert permitted() is in_file_mode
+
+
+def test_a_decision_receipt_hashes_the_stored_page_not_its_projected_file(
+    stored, writer  # noqa: F811
+):
+    """A receipt that hashes a lagging projection records bytes that no reader was served, and a
+    store-only page loses its hash."""
+    page = "Knowledge Base/Notes/Gen/Receipted.md"
+    body = b"---\ntitle: Re\ntype: note\n---\n# Re\n\nStored bytes.\n"
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", puts=(write.PagePut(page, body),)),
+    )
+
+    assert egress._receipt_bytes(stored, page) == body  # no projected file yet
+    (stored / page).parent.mkdir(parents=True, exist_ok=True)
+    (stored / page).write_bytes(b"stale projection")
+    assert egress._receipt_bytes(stored, page) == body
 
 
 def test_warm_and_status_leave_no_sidecar_and_status_reports_the_store(

@@ -35,7 +35,7 @@ from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Annotated, Any, Literal, NamedTuple, NotRequired, get_args
+from typing import Annotated, Any, Literal, NamedTuple, NotRequired, TypeVar, cast, get_args
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -2653,6 +2653,26 @@ _PRE_ADMISSION_SIGNALS = (
 )
 
 
+_Tool = TypeVar("_Tool", bound=Callable[..., Any])
+
+
+def _reads_one_store_snapshot(operation: _Tool) -> _Tool:
+    """Run a recall tool in one store snapshot: its search and its release decisions then read one
+    revision, and open one snapshot for the call instead of one per page. A vault that is not in
+    store mode binds nothing. The call starts on a fresh frame-stack chunk (see `frame_stack`)."""
+
+    @wraps(operation)
+    def run(vault_root: Path, *arguments: Any, **keywords: Any) -> Any:
+        from .frame_stack import call_on_fresh_frame_stack
+        from .vault_store import read as store_read
+
+        with store_read.request_snapshot(Path(vault_root)):
+            return call_on_fresh_frame_stack(lambda: operation(vault_root, *arguments, **keywords))
+
+    return cast(_Tool, run)
+
+
+@_reads_one_store_snapshot
 @companions.request_byte_proofs()
 def op_find(
     vault_root: Path,
@@ -6775,6 +6795,7 @@ def op_get_video_frames(
 # ----- product command wrappers: public surface over canonical leaves -----
 
 
+@_reads_one_store_snapshot
 def op_ask_memory(
     vault_root: Path,
     query: str = "",

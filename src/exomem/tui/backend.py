@@ -486,7 +486,11 @@ class ExomemBackend:
         kb = root / kb_dirname()
         if store_mode.store_mode_for_reads(root):
             # The corpus holds a stored page whether or not its file exists yet.
-            corpus = tuple(find_corpus.corpus_paths(root, "kb", lambda: find_corpus.walk_md(kb)))
+            corpus = tuple(
+                find_corpus.corpus_paths(
+                    root, "kb", lambda **walk: find_corpus.walk_md(kb, **walk)
+                )
+            )
 
             def files(folder: Path):
                 return (path for path in corpus if path.is_relative_to(folder))

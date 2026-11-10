@@ -7551,11 +7551,13 @@ def relative_posix(path: Path, anchor: Path) -> str:
     return path.relative_to(anchor).as_posix()
 
 
-def walk_vault_md(vault_root: Path):
+def walk_vault_md(vault_root: Path, *, skip: Callable[[Path], bool] | None = None):
     """Yield every .md path under vault_root, skipping config/cruft dirs.
 
     Walks the FULL vault, not just Knowledge Base/. Used by Tier 2 inbound-
-    wikilink scans and move/delete safety checks.
+    wikilink scans and move/delete safety checks. ``skip`` is asked about each
+    Markdown-named entry before the walk stats it, and an entry that it takes is
+    dropped unstatted.
     """
 
     from . import foreground_priority
@@ -7568,6 +7570,8 @@ def walk_vault_md(vault_root: Path):
             return
         for child in children:
             foreground_priority.check_cancelled()
+            if skip is not None and child.suffix.lower() == ".md" and skip(child):
+                continue
             kind = _walk_vault_md_entry(vault_root, child)
             if kind == "dir":
                 yield from walk(child)
@@ -8605,7 +8609,9 @@ class WikilinkResolver:
 
         root = self.vault_root
         # A store-mode vault's corpus holds the store's pages and the files that it does not own.
-        corpus = find_corpus.corpus_paths(root, "vault", lambda: walk_vault_md(root))
+        corpus = find_corpus.corpus_paths(
+            root, "vault", lambda **walk: walk_vault_md(root, **walk)
+        )
         # One snapshot reads each stored page's body once, as the walk of the disk reads each file.
         with (
             read.snapshot(root)

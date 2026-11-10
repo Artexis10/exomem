@@ -10,8 +10,10 @@ every other path.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
@@ -233,6 +235,49 @@ def walk_member(rel: str) -> bool:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _RequestScope:
+    """The snapshot that one request holds open, and the thread and vault it belongs to."""
+
+    root: Path
+    thread: int
+    view: StoreSnapshot
+
+
+#: The open request scope of this context. A connection cannot cross threads, so a worker thread
+#: that inherits the context still opens its own snapshot (see ``snapshot``).
+_REQUEST: ContextVar[_RequestScope | None] = ContextVar(
+    "vault_store_request_snapshot", default=None
+)
+
+
+@contextmanager
+def request_snapshot(vault_root: Path) -> Iterator[None]:
+    """Hold one snapshot of the store for a whole request: every ``snapshot`` call that the request
+    makes on this thread, for this vault, joins it.
+
+    A reader that opens its own snapshot per page pays a connection, a transaction and a mode query
+    for each page, and the pages of one request may then belong to different revisions. Here the
+    request reads one revision. A vault that is not in store mode binds nothing, so a file-mode
+    request pays one read of the mode records; the scope nests, and an inner one joins the outer.
+    """
+    root = Path(vault_root)
+    if _REQUEST.get() is None and mode.store_mode_for_reads(root):
+        with ExitStack() as scope:
+            try:
+                view = scope.enter_context(snapshot(root))
+            except connection.CollectionStoreError as error:
+                if error.code != NOT_ACTIVE:
+                    raise
+                # The records stopped saying store mode: the request reads files.
+            else:
+                token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view))
+                scope.callback(_REQUEST.reset, token)
+                yield
+                return
+    yield
+
+
 @contextmanager
 def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
     """Open one consistent view of a store-mode vault's store.
@@ -242,8 +287,15 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
     unknown state never reads as an empty store. That row is also the check on a reader's kept
     mode answer, at no cost beyond this query: when the row disagrees, the kept answer is dropped,
     so a read that runs again meets the mode the records now show.
+
+    Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned
+    and nothing is opened.
     """
     root = Path(vault_root)
+    scope = _REQUEST.get()
+    if scope is not None and scope.thread == threading.get_ident() and scope.root == root:
+        yield scope.view
+        return
     path = connection.store_path(root)
     with connection.store_reader(path, runtime.reader_pool(root, path)) as reader:
         reader.execute("BEGIN")

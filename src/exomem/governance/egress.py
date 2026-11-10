@@ -498,28 +498,44 @@ def _outcome_for_decision(
         if ref is not None:
             value["ref"] = ref
     else:
-        # Defence in depth: `rel_path` is expected to already be a decided,
-        # vault-relative candidate, but this hash is the last thing that
-        # touches the filesystem before the receipt is written. Confining it
-        # here too means an unconfined candidate that reaches this far still
-        # cannot make the receipt read (and hash the size of) an arbitrary
-        # server file — it just loses its content hash.
-        try:
-            target = Path(vault_root) / rel_path
-            resolved = target.resolve()
-            resolved.relative_to(Path(vault_root).resolve())
-        except (OSError, ValueError):
-            pass
-        else:
-            if resolved.is_file():
-                try:
-                    raw = resolved.read_bytes()
-                except OSError:
-                    pass
-                else:
-                    value["content_hash"] = hashlib.sha256(raw).hexdigest()
-                    value["size"] = len(raw)
+        raw = _receipt_bytes(vault_root, rel_path)
+        if raw is not None:
+            value["content_hash"] = hashlib.sha256(raw).hexdigest()
+            value["size"] = len(raw)
     _record_outcome(value)
+
+
+def _receipt_bytes(vault_root: Path, rel_path: str) -> bytes | None:
+    """The bytes that a decision receipt hashes, or None when there are none to read.
+
+    A page that the store serves is read from the store: its file is a projection that may lag.
+    """
+    from ..vault_store import read
+
+    try:
+        stored = read.owned_bytes(vault_root, rel_path)
+    except OSError:  # the store serves this path but holds no page for it
+        return None
+    if stored is not None:
+        return stored
+    # Defence in depth: `rel_path` is expected to already be a decided,
+    # vault-relative candidate, but this hash is the last thing that
+    # touches the filesystem before the receipt is written. Confining it
+    # here too means an unconfined candidate that reaches this far still
+    # cannot make the receipt read (and hash the size of) an arbitrary
+    # server file — it just loses its content hash.
+    try:
+        target = Path(vault_root) / rel_path
+        resolved = target.resolve()
+        resolved.relative_to(Path(vault_root).resolve())
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_file():
+        return None
+    try:
+        return resolved.read_bytes()
+    except OSError:
+        return None
 
 
 def emit_boundary_receipt(collector: DisclosureCollector) -> None:
@@ -1903,7 +1919,7 @@ def _mint_escalation_quietly(
             return None
         connection = store.open_authorization_session_connection(vault_root)
         if expected_content_hash is None:
-            fingerprint = hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+            fingerprint = hashlib.sha256(_page_bytes(vault_root, rel_path)).hexdigest()
         elif re.fullmatch(r"[0-9a-f]{64}", expected_content_hash):
             fingerprint = expected_content_hash
         else:
@@ -2237,6 +2253,18 @@ def container_parent_allows(
     return decision is not None and decision.level >= LEVEL_FULL
 
 
+def _page_bytes(vault_root: Path, rel_path: str) -> bytes:
+    """The bytes of the page at ``rel_path``: the store's page when the store serves it, else the
+    file's.
+
+    A page that the store serves but lacks raises ``FileNotFoundError``, as a missing file does.
+    """
+    from ..vault_store import read
+
+    stored = read.owned_bytes(vault_root, rel_path)
+    return (vault_root / rel_path).read_bytes() if stored is None else stored
+
+
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
 def _decide_path(
     vault_root: Path,
@@ -2295,7 +2323,7 @@ def _decide_path(
         return Decision(DISCLOSURE_MAX)
     full_path = vault_root / rel_path
     try:
-        st = full_path.stat()
+        st = find_corpus.page_stat(full_path, vault_root)
     except OSError:
         return None
 
@@ -2303,7 +2331,7 @@ def _decide_path(
     live_content_hash: str | None = artifact_copy.sha256 if artifact_copy is not None else None
     if _is_markdown_path(rel_path) and artifact_copy is None:
         try:
-            raw = full_path.read_bytes()
+            raw = _page_bytes(vault_root, rel_path)
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
@@ -2364,7 +2392,7 @@ def _decide_path(
             return None
     if live_content_hash is None and authorization_context is not None:
         try:
-            live_content_hash = hashlib.sha256(full_path.read_bytes()).hexdigest()
+            live_content_hash = hashlib.sha256(_page_bytes(vault_root, rel_path)).hexdigest()
         except OSError:
             return None
 
@@ -7211,7 +7239,7 @@ def _release_level_for_path_only_snapshot(
     if who.verified_authorization_session is not None:
         try:
             content_hash = (
-                hashlib.sha256((vault_root / rel_path).read_bytes()).hexdigest()
+                hashlib.sha256(_page_bytes(vault_root, rel_path)).hexdigest()
                 if content_fingerprint is _CURRENT_PATH_FINGERPRINT else content_fingerprint
             )
         except OSError:

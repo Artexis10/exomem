@@ -522,7 +522,7 @@ def _read_parent(page: ParsedPage, parent: str) -> ParsedPage:
         raise MembershipUnresolved(f"the parent page of {page.rel_path!r} has no vault root")
     path = page.vault_root / parent
     try:
-        stat = path.stat()
+        stat = find_corpus.page_stat(path, page.vault_root)
     except OSError as exc:
         raise MembershipUnresolved(f"cannot read the parent page of {page.rel_path!r}: {exc}") from exc
     key = (str(path), stat.st_mtime_ns, stat.st_size)
@@ -587,7 +587,7 @@ def evaluate(page: ParsedPage, policy: Policy) -> frozenset[str]:
     # took effect. Size is not a content hash, but it moves for exactly the
     # authoring edit — adding a tag — that mtime alone was missing.
     try:
-        stat = page.path.stat()
+        stat = find_corpus.page_stat(page.path, page.vault_root)
         mtime_ns, size = stat.st_mtime_ns, stat.st_size
     except OSError as exc:
         # FAIL CLOSED. The old fallback here was `page.mtime` with `size=-1`,
