@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import tracemalloc
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -10,6 +11,38 @@ import pytest
 
 # This marker identifies the exact pytest node that the child must measure.
 _CHILD_NODE = "EXOMEM_TEST_FRESH_INTERPRETER"
+# Settling keeps this many names alive, which covers one resize of any intern table a test sees.
+_SETTLE_LIMIT = 1 << 21
+# A chunk of short names allocates far less than this; the table's own growth allocates more.
+_RESIZE_BYTES = 1 << 20
+
+
+def settle_intern_table() -> None:
+    """Grow the interpreter's intern table once, just before a traced window.
+
+    A measured call's first imports intern new names. When those cross the table's load limit,
+    the table resizes, and its new keys block (several megabytes on CPython 3.13) lands in the
+    traced peak although the code under test allocated none of it. Interning throwaway names
+    until that resize happens here leaves the table about half full, so the window cannot meet it.
+    """
+    kept: list[str | None] = [None] * _SETTLE_LIMIT
+    tracemalloc.start()
+    try:
+        before = tracemalloc.get_traced_memory()[0]
+        for start in range(0, _SETTLE_LIMIT, 1024):
+            for index in range(start, start + 1024):
+                kept[index] = sys.intern(f"exomem-settle-{index}")
+            now = tracemalloc.get_traced_memory()[0]
+            if now - before > _RESIZE_BYTES:
+                break
+            before = now
+    finally:
+        tracemalloc.stop()
+    # The names stay interned while the module keeps them, so the grown table keeps its size.
+    _SETTLED.append(kept)
+
+
+_SETTLED: list[list[str | None]] = []
 
 
 def run_in_fresh_process(request, directory: Path) -> bool:
