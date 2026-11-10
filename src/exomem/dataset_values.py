@@ -54,7 +54,7 @@ COMPACT_MIN_CHARS = 6
 COMPACT_MAX_CHARS = 64
 #: What every value hit tells an agent to do next.
 NEXT_ACTION_LINE = (
-    "[A rendering of this dataset's values. query_dataset, with this hit's path as data_file, reads its exact rows.]"
+    "[A rendering of this dataset's values. query_dataset with path set to this hit's path reads its exact rows.]"
 )
 #: The suffixes a dataset card path can end in: the original's suffix, fixed by
 #: `query_data`, plus `.md`.
