@@ -6,12 +6,12 @@ The operator decided on 2026-11-10 that cells upgrade automatically, once a day,
 
 ## What Changes
 
-- **A release sets the cell image.** A new `cloud-deploy` workflow runs when a release succeeds. It verifies the cell image's attestation, then sets `cell_image` through Substrate's existing release route. It runs in a GitHub environment that only `main` can use, over HTTPS only, with no cluster access.
-- **The automation never clears a pause.** Substrate's deploy principal can set `cellImage` only. Clearing a rollout pause and setting a cell's own image need the admin token, which a person holds.
-- **Cells wait for their platform.** Cells move only when the deployed platform carries the release's chart and controller. Otherwise an alert says that a platform upgrade is needed. A GitHub Deployment records the deployed platform release.
-- **Upgrade barriers.** A contract file lists each release that is one-way or needs an operator step. Crossing one stops the automation and forbids an automatic rollback.
+- **A release sets the cell image.** A new `cloud-deploy` workflow runs when a release succeeds on its tag. It verifies the cell image's attestation, then sets `cell_image` through Substrate's existing release route. It runs in a GitHub environment that only `main` can use, over HTTPS only, with no cluster access.
+- **The automation never clears a pause and never moves backwards.** Substrate's deploy principal can set a new `cellImage` with its release tag. It can read a bounded rollout view with no tenant identifiers. Substrate keeps a history of every digest that was `cell_image`, and refuses the deploy principal any digest in it. Clearing a rollout pause, setting a cell's own image and setting an old digest need the admin token, which a person holds.
+- **Cells wait for their platform.** Cells move only when the deployed platform carries the release's chart and controller build inputs. Otherwise an alert says that a platform upgrade is needed. A GitHub Deployment records the deployed platform release, and each platform upgrade dispatches the workflow again.
+- **Upgrade barriers.** A contract file lists each release that is one-way or needs an operator step. Crossing one stops the automation. A cell whose previous image is older than a one-way barrier never restores to it automatically: it holds until a person acts.
 - **Each cell upgrades in its own quiet hour.** The cell counts its requests per UTC hour on its own volume. `cellctl` computes each cell's quietest hour over the last 14 days. Inside that hour, it rolls the cell after a few idle minutes, or at the hour's end. A cell with too little history uses a default hour, and its record says so.
-- **More attempts at once.** After the canary runs the target, `cellctl` allows a configured number of attempts per node.
+- **Pinned attempts, then more attempts at once.** Each attempt pins its target when it starts, and a pause ends every attempt that has not applied its target. After that ships, `cellctl` allows a configured number of attempts per node once the canary runs the target.
 - **The gateway holds requests during the switch.** Substrate's gateway retries a request whose connection the cell refused, until a budget runs out. It then answers `503` with `Retry-After`. The gateway also gains an upstream timeout.
 - **A faster restore point.** On local cells, the restore point becomes a volume snapshot, taken after the stop. The off-site backup runs from its clone after the target starts. Cells on Hetzner volumes keep the stopped backup, without its prune.
 - **One command upgrades the platform.** A person with presence runs one command. It reviews the release by machine, upgrades, and records the Deployment. The image-only deploy tier, which needs no presence for controller-only releases, is a later phase.
@@ -42,9 +42,9 @@ This delivery adds pointer text to the design of each change below. It ticks no 
 
 ## Impact
 
-- **Substrate (separate repository):** the deploy principal's narrower scope, the gateway hold and timeouts, and a receiver capability for the `cloud-deploy` job.
-- **Exomem cell:** hourly request counts on the cell's volume, and the readiness `traffic` block.
-- **cellctl:** a pure window module, the due set, per-node concurrency, the snapshot restore point and four rollout alerts.
+- **Substrate (separate repository):** the deploy principal's narrower scope, the image history, the bounded rollout view, the gateway hold and timeouts, and a receiver capability for the `cloud-deploy` job.
+- **Exomem cell:** hourly request counts on the cell's volume, a history path on the health port, and two readiness `traffic` fields.
+- **cellctl:** pinned attempts and the pause abort, a pure window module, the due set, the forward-only rule, per-node concurrency, the snapshot restore point and four rollout alerts.
 - **Chart:** the window, concurrency and gateway hold values, and their schema.
 - **Contracts:** `infra/contracts/upgrade-barriers-v1.json`, and four alert thresholds in the observability contract.
 - **CI:** the `cloud-deploy` workflow, and the `cloud-deploy` and `cloud-platform` GitHub environments.

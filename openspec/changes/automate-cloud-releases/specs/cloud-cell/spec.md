@@ -13,15 +13,18 @@ The platform release SHALL be the digest in the `cell_image` setting.
 - A new cell SHALL start on `desired_image` if set, otherwise on `cell_image` while the rollout is not paused, otherwise on `last_good_image`. While paused with no `last_good_image`, a new cell SHALL wait with `NO_GOOD_IMAGE`.
 - `last_good_image` SHALL be set whenever a cell becomes ready on `cell_image`, including at first provisioning.
 
-cellctl SHALL start the canary's attempt as soon as its target changes. The canary is the non-deleted cell with the lowest `rollout_priority`. While the canary's image differs from its target, no other attempt SHALL run. After that, cellctl SHALL start an attempt only for a cell in the due set, in `rollout_priority` order. At most the configured number of cells per node SHALL carry an upgrade or restore hold. Each attempt SHALL:
+cellctl SHALL start the canary's attempt as soon as its target changes. The canary is the non-deleted cell with the lowest `rollout_priority`. While the canary's image differs from its pinned target, no other attempt SHALL run. After that, cellctl SHALL start an attempt only for a cell in the due set, oldest candidate first by the time it became a candidate. Until per-node concurrency ships, one attempt SHALL run fleet-wide. After it ships, at most the configured number of cells per node SHALL carry an upgrade hold. A restore hold anywhere SHALL block every new attempt. Each attempt SHALL:
 
-1. stop the cell;
-2. take a restore point while the cell is stopped: a volume snapshot on a storage class with snapshot support, otherwise a backup without a prune, within a bounded deadline;
-3. start the target image;
-4. on a snapshot class, back up a clone of the snapshot off site, after the target has started;
-5. wait for readiness up to the configured upgrade readiness deadline (30 minutes by default).
+1. pin its target when it starts, and use that pinned target on every later pass, whatever `cell_image` becomes;
+2. stop the cell;
+3. take a restore point while the cell is stopped and its volume is flushed: a volume snapshot on a storage class with snapshot support, otherwise a backup without a prune, within a bounded deadline;
+4. start the pinned target;
+5. on a snapshot class, back up one clone of the snapshot off site, after the target has started, and keep the clone and the upgrade hold until that backup ends;
+6. wait for readiness up to the configured upgrade readiness deadline (30 minutes by default).
 
 cellctl MUST NOT take the restore point while the cell serves.
+
+When the rollout pauses, cellctl SHALL end every attempt that has not applied its pinned target, and SHALL restart that cell on its current image. While paused, cellctl SHALL apply no target to any cell. An attempt that applied its target before the pause SHALL finish its readiness wait and, on a miss, its restore or its forward-only hold. The first failure SHALL set the held cell, and a later concurrent failure SHALL NOT replace it.
 
 If the stopped backup misses its deadline, cellctl SHALL restart the cell on its current image, record `BACKUP_FAILED`, and retry later. It MUST NOT leave the cell stopped on an object-storage failure. A failed off-site backup of the clone SHALL NOT end the attempt.
 
@@ -32,9 +35,9 @@ If readiness does not arrive, cellctl SHALL:
 - start the previous image;
 - pause the rollout, recording the error and the held cell.
 
-For a target listed in `cellctl.forwardOnlyImages`, cellctl SHALL instead pause the rollout and keep the cell stopped under its upgrade hold, recording `UPGRADE_FORWARD_ONLY`. It SHALL neither restore the cell nor start the previous image.
+An attempt crosses a one-way barrier when a `one-way` `cell` entry of the barrier file lies between two releases. The first is the release of the image that the cell ran before the attempt. The second is the release of its pinned target. cellctl SHALL map each digest to its release through Substrate's image history. A digest with no history row SHALL count as older than every entry. When a crossing attempt misses readiness, cellctl SHALL instead pause the rollout and keep the cell stopped under its upgrade hold, recording `UPGRADE_FORWARD_ONLY`. It SHALL neither restore the cell nor start the previous image, and it SHALL NOT re-apply a target to the held cell. Only a person's clear of the pause SHALL end the hold, after which cellctl SHALL start one new attempt toward the current target.
 
-It MUST NOT roll back by image digest alone, and MUST NOT start either image on an unrestored volume. While paused, no cell SHALL change image.
+It MUST NOT roll back by image digest alone, and MUST NOT start either image on an unrestored volume. While paused, no cell SHALL start a new image.
 
 No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
@@ -84,14 +87,46 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 #### Scenario: Several due cells share a node
 
-- **WHEN** the canary runs the target, the per-node concurrency is 1, and three due cells share one node
+- **WHEN** per-node concurrency has shipped, the canary runs the target, the per-node concurrency is 1, and three due cells share one node
 - **THEN** one of them starts an attempt, and a due cell on another node also starts one
 
-#### Scenario: A forward-only target fails readiness
+#### Scenario: A cell crosses a one-way barrier on a later release
 
-- **WHEN** a target listed in `cellctl.forwardOnlyImages` misses the upgrade readiness deadline
+- **WHEN** a cell's previous image is older than a one-way `cell` entry, its pinned target is a later release past that entry, and the target misses the upgrade readiness deadline
 - **THEN** cellctl pauses the rollout and keeps the cell stopped under its upgrade hold, recording `UPGRADE_FORWARD_ONLY`
 - **AND** it neither restores the volume nor starts the previous image
+
+#### Scenario: A forward-only hold waits for a person
+
+- **WHEN** a cell is in the forward-only hold and further passes run
+- **THEN** cellctl applies no target to the cell, and the cell stays stopped
+- **AND** after a person clears the pause, cellctl starts one new attempt toward the current target
+
+#### Scenario: An attempt does not cross
+
+- **WHEN** a cell's previous image is already past every one-way `cell` entry, and its target misses readiness
+- **THEN** cellctl restores the restore point and starts the previous image, as for any failed attempt
+
+#### Scenario: cell_image changes during an attempt
+
+- **WHEN** `cell_image` changes while a cell's attempt waits for readiness on its pinned target
+- **THEN** the attempt keeps its pinned target, and the cell takes the new image only in a later attempt
+
+#### Scenario: The rollout pauses during concurrent attempts
+
+- **WHEN** one attempt pauses the rollout while another cell's attempt has stopped its cell but not applied its target
+- **THEN** cellctl restarts that cell on its current image and ends its attempt
+- **AND** the first failing cell stays the held cell
+
+#### Scenario: A cell missed its window
+
+- **WHEN** a due cell found no free slot in yesterday's window, and newer candidates share its window today
+- **THEN** cellctl starts the older candidate first
+
+#### Scenario: A write just before the stop
+
+- **WHEN** the cell acknowledges a write just before its stop, and the attempt then fails readiness
+- **THEN** the restored cell holds that write
 
 ### Requirement: Each cell is backed up consistently, encrypted with its own key
 
@@ -170,12 +205,12 @@ A restore into a new namespace SHALL produce a cell that answers recall, reports
 
 ### Requirement: A cloud cell counts its own hourly traffic
 
-A cloud cell SHALL count the requests to its MCP path per UTC hour, with the seconds it ran in each hour. It SHALL keep 28 days of these counts on its own volume. Probes SHALL never count. Its readiness `traffic` block SHALL report the retained hours, the requests in flight, and the age of the newest request. An hour that the cell did not run SHALL read as not observed, never as zero. A failure of the counts SHALL never stop the cell.
+A cloud cell SHALL count the requests to its MCP path per UTC hour, with the seconds it ran in each hour. It SHALL keep 28 days of these counts on its own volume, outside the vault, and SHALL report its retention. Probes SHALL never count. Its readiness `traffic` block SHALL report the requests in flight and the age of the newest request. The retained hours SHALL be served on their own health-port path, not in readiness. An hour that the cell did not run SHALL read as not observed, never as zero. A failure of the counts SHALL never stop the cell.
 
 #### Scenario: The cell restarts
 
 - **WHEN** a cell restarts on the same volume
-- **THEN** its readiness reports the counts of the hours before the restart, less at most the last minute
+- **THEN** its history path reports the counts of the hours before the restart, less at most the last minute
 
 #### Scenario: The cell was down for an hour
 
@@ -198,9 +233,14 @@ A cloud cell SHALL count the requests to its MCP path per UTC hour, with the sec
 - **THEN** readiness reports at least one request in flight
 - **AND** a cell that has received no request since it started reports the newest request's age as null, not zero
 
+#### Scenario: A probe reads readiness
+
+- **WHEN** the kubelet or cellctl reads the cell's readiness
+- **THEN** the answer carries no hourly history
+
 ### Requirement: Each cell upgrades in its own quiet window
 
-cellctl SHALL give each cell a one-hour UTC upgrade window: the hour with the lowest request rate over the configured lookback. Below the configured coverage, the window SHALL be the configured default hour. cellctl SHALL record the window and its source on the cell's StatefulSet, and SHALL recompute it once per UTC day. Apart from the canary, a cell SHALL be due only inside its window, after the configured idle minutes or in the window's last configured minutes. Render-digest re-applies SHALL obey the due set.
+cellctl SHALL give each cell a one-hour UTC upgrade window: the hour with the lowest request rate over the configured lookback. Below the configured coverage, the window SHALL be a default hour that a stable hash of the cell ID picks inside the configured default range. cellctl SHALL refuse to start when that range overlaps the nightly backup window. cellctl SHALL record the window and its source on the cell's StatefulSet, keep it across every apply, and recompute it once per UTC day. Apart from the canary, a cell SHALL be due only inside its window, after the configured idle minutes or in the window's last configured minutes. Render-digest re-applies SHALL obey the due set.
 
 #### Scenario: The window comes from history
 
@@ -210,7 +250,17 @@ cellctl SHALL give each cell a one-hour UTC upgrade window: the hour with the lo
 #### Scenario: A cell has too little history
 
 - **WHEN** a cell observed less than the minimum coverage of its lookback
-- **THEN** its window is the configured default hour, and its StatefulSet records the source `default`
+- **THEN** its window is an hour inside the configured default range, and its StatefulSet records the source `default`
+
+#### Scenario: Many new cells have no history
+
+- **WHEN** many cells have too little history
+- **THEN** their default hours spread across the default range, and none falls in the nightly backup window
+
+#### Scenario: A routine apply of the StatefulSet
+
+- **WHEN** cellctl applies a cell's StatefulSet for another reason
+- **THEN** the window annotations keep their values, and cellctl does not recompute the window
 
 #### Scenario: An idle cell in its window
 

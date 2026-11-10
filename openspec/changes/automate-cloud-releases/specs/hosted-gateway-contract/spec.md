@@ -2,7 +2,7 @@
 
 ### Requirement: The gateway holds a request while its cell restarts
 
-When the gateway cannot connect to a running cell and no byte reached it, it SHALL retry the same cell at a configured interval with jitter, until a configured budget runs out. It SHALL then answer `503 CELL_NOT_READY` with `Retry-After`. It SHALL hold only a request whose body fits a configured cap. It SHALL never retry after a connection opened. Held requests SHALL count against their own configured caps, not the in-flight caps. A budget of 0 SHALL turn the hold off.
+When the gateway cannot connect to a running cell and no byte reached it, it SHALL retry the same cell at a configured interval with jitter, until a configured budget runs out. It SHALL then answer `503 CELL_NOT_READY` with `Retry-After`. It SHALL hold only a request whose body fits the gateway's existing prepared-body cap, and SHALL buffer it through that same reader. It SHALL never retry after a connection opened. Held requests SHALL count against their own configured caps, not the in-flight caps, until the cell accepts the connection. A held request that the cell accepts SHALL then need a free in-flight slot. A budget of 0 SHALL turn the hold off.
 
 #### Scenario: The cell returns within the budget
 
@@ -30,6 +30,11 @@ When the gateway cannot connect to a running cell and no byte reached it, it SHA
 - **THEN** the tenant's next held request gets `503` with `Retry-After` at once
 - **AND** another tenant's requests keep their in-flight slots
 
+#### Scenario: The cell accepts while the in-flight slots are full
+
+- **WHEN** a held request's connection is accepted, and its tenant and client have no free in-flight slot
+- **THEN** the gateway answers as a full in-flight cap answers, and the hold slot is free again
+
 #### Scenario: The client leaves
 
 - **WHEN** the client disconnects during a hold
@@ -47,12 +52,17 @@ When the gateway cannot connect to a running cell and no byte reached it, it SHA
 
 ### Requirement: Every gateway call to a cell has a timeout
 
-Each connect attempt to a cell SHALL end after a configured connect timeout. When a cell has sent no response headers within a configured upstream timeout, the gateway SHALL answer `504 CELL_TIMEOUT` and free the request's slot.
+Each connect attempt to a cell SHALL end after a configured connect timeout. When a cell has sent no response headers within a configured upstream timeout, the gateway SHALL answer `504 CELL_TIMEOUT` and free the request's slot. When a streamed response sends no bytes for a configured idle time, the gateway SHALL close the stream and free the request's slot.
 
 #### Scenario: A cell hangs
 
 - **WHEN** a cell accepts a request and sends no response headers within the upstream timeout
 - **THEN** the gateway answers `504 CELL_TIMEOUT`, and the request's in-flight slot is free again
+
+#### Scenario: A cell hangs mid-stream
+
+- **WHEN** a cell sends response headers, and then sends no body bytes for the configured idle time
+- **THEN** the gateway closes the stream, and the request's in-flight slot is free again
 
 #### Scenario: A slow call stays within the timeout
 

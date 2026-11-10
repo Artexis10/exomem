@@ -292,12 +292,13 @@ The attempt's state lives in annotations on the StatefulSet: `exomem.io/hold=upg
 
 Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A CI job on release tags publishes the image by digest and records it in the release notes.
 
-*Amendment, 2026-11-10.* `automate-cloud-releases` changes this section in five places:
+*Amendment, 2026-11-10.* `automate-cloud-releases` changes this section in six places:
 
-- a workflow sets `cell_image` after each attested release (its D1);
-- after the canary, a cell starts an attempt only inside its own upgrade window, with a per-node limit (its D4);
+- a workflow sets `cell_image` after each attested release, and Substrate refuses it any digest that was `cell_image` before (its D1);
+- each attempt pins its target, and a pause ends every attempt that has not applied it (its D4);
+- after the canary, a cell starts an attempt only inside its own upgrade window, later with a per-node limit (its D4);
 - a local cell's restore point becomes a volume snapshot taken after the stop (its D6);
-- a target listed as forward-only pauses the rollout without a restore (its D3);
+- an attempt that crosses a one-way cell barrier holds without a restore (its D3);
 - a person still clears a pause; the automation never does.
 
 That change's design and its `cloud-cell` delta hold the new rules.
@@ -517,7 +518,7 @@ A single row: `id int primary key check (id = 1)`, `paused boolean not null defa
 - An upstream connect failure or a non-ready cell returns 503 `CELL_NOT_READY`.
 - A 401 from the cell returns 502 `CELL_AUTH_MISMATCH`, and is never passed to the client.
 
-*Amendment, 2026-11-10.* `automate-cloud-releases` D5 changes C3. The gateway buffers a request body up to a configured cap, and holds the request while its cell refuses connections. It answers `503 CELL_NOT_READY` only after the hold's budget runs out. A cell that sends no headers within the upstream timeout gets `504 CELL_TIMEOUT`. The chart test's pinned environment set grows by the hold and timeout values.
+*Amendment, 2026-11-10.* `automate-cloud-releases` D5 changes C3. The gateway buffers a request body through its existing 1 MiB prepared-body reader, and holds the request while its cell refuses connections. It answers `503 CELL_NOT_READY` only after the hold's budget runs out. A cell that sends no headers within the upstream timeout gets `504 CELL_TIMEOUT`. The chart test's pinned environment set grows by the hold and timeout values.
 
 ### C4 Cell bearer derivation
 

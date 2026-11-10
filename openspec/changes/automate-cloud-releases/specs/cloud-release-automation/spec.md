@@ -6,28 +6,46 @@ Moves each successful Exomem release into Cloud's `cell_image` without an operat
 
 ### Requirement: A release sets the cell image only after its attestation verifies
 
-The `cloud-deploy` workflow SHALL run when a release succeeds, when a platform Deployment succeeds, and on dispatch. It SHALL act only on the newest published release. It SHALL set `cell_image` through Substrate's release route only after the cell image's attestation verifies as this repository's release workflow on the release tag. It SHALL set no release that is not newer than the newest successful cell Deployment.
+The `cloud-deploy` workflow SHALL run when the release workflow succeeds on a release tag, and on a dispatch on `main`. It SHALL act only on the newest published release. It SHALL set `cell_image` through Substrate's release route only after the cell image's attestation verifies as this repository's release workflow on the release tag. It SHALL send the digest with its verified release tag.
 
 #### Scenario: An attested release passes every gate
 
 - **WHEN** a release succeeds, its cell image's attestation verifies, and neither the platform gate nor a barrier stops it
-- **THEN** the workflow sets `cell_image` to the release's cell image digest
-- **AND** it records a successful cell Deployment of the release
+- **THEN** the workflow sets `cell_image` to the release's cell image digest, with the release tag
 
 #### Scenario: The attestation does not verify
 
 - **WHEN** the release's cell image digest has no attestation from the release workflow on the release tag
 - **THEN** the workflow sets nothing and fails
 
+#### Scenario: A push to main publishes no release
+
+- **WHEN** the release workflow completes on `main` without a release tag
+- **THEN** the `cloud-deploy` workflow does not run
+
+#### Scenario: The newest release is already the cell image
+
+- **WHEN** the rollout view's `cell_image` equals the newest release's digest
+- **THEN** the workflow sets nothing and succeeds
+
+### Requirement: Substrate never sets a digest twice for the deploy principal
+
+Substrate SHALL record each digest the first time it becomes `cell_image`, with its release tag and the time. Substrate SHALL refuse a deploy-token request whose digest was ever `cell_image`, with `CELL_IMAGE_SEEN`, and SHALL write nothing. The admin token MAY set any digest. A request that sets a digest new to the history SHALL carry its release tag.
+
 #### Scenario: An old run is rerun
 
-- **WHEN** the workflow runs for a release that is not newer than the newest successful cell Deployment
-- **THEN** it sets nothing, and `cell_image` keeps its value
+- **WHEN** the workflow sends a digest that was `cell_image` before
+- **THEN** Substrate refuses it with `CELL_IMAGE_SEEN`, `cell_image` keeps its value, and the workflow succeeds without a change
 
-#### Scenario: No cell Deployment exists
+#### Scenario: A person withdrew a release
 
-- **WHEN** the workflow runs and no successful cell Deployment exists
-- **THEN** it sets nothing and fails, naming the missing record
+- **WHEN** a person set `cell_image` back to an earlier digest with the admin token, and a later merge runs the workflow for the withdrawn release
+- **THEN** Substrate refuses the withdrawn digest, and the fleet stays on the earlier digest
+
+#### Scenario: A newer release follows a withdrawal
+
+- **WHEN** a release newer than the withdrawn one publishes and passes every gate
+- **THEN** Substrate accepts its digest, and the fleet moves forward
 
 ### Requirement: The release automation holds no cluster access and only main can use its token
 
@@ -43,9 +61,28 @@ The `cloud-deploy` workflow SHALL run in the `cloud-deploy` GitHub environment, 
 - **WHEN** the workflow's job runs
 - **THEN** it holds no kubeconfig and no private-network key, and it calls only Substrate's HTTPS admin route
 
+### Requirement: The release automation reads only a bounded view and prints no tenant identifier
+
+Substrate SHALL serve a bounded rollout view. It SHALL return `cell_image` with its release tag, the pause state and its error code, and whether the canary runs its target and is Ready. It SHALL also return counts of cells on target, behind target and under a hold. The view SHALL return no cell ID and no tenant ID. The canary signal SHALL come from the canary row's own observed image and readiness. The deploy principal SHALL read only this view, not the full release view. The workflow SHALL print no cell ID, no tenant ID and no secret.
+
+#### Scenario: The workflow polls the rollout
+
+- **WHEN** the workflow polls after it sets `cell_image`
+- **THEN** it reads the rollout view, and the answer holds no cell ID and no tenant ID
+
+#### Scenario: Another cell becomes Ready before the canary
+
+- **WHEN** a new cell becomes Ready on the new `cell_image` while the canary is still behind
+- **THEN** the rollout view reports the canary as not on target, and the workflow keeps polling
+
+#### Scenario: The deploy principal reads the full view
+
+- **WHEN** a request with the deploy token reads the full release view
+- **THEN** Substrate refuses it
+
 ### Requirement: The release automation never clears a rollout pause
 
-Substrate's deploy principal SHALL be able to read the release view and to set `cellImage`, and nothing else. Clearing a rollout pause and setting one cell's image SHALL need the admin token. While the rollout is paused, the workflow SHALL set nothing, and SHALL fail with the pause's error code and held cell.
+Substrate's deploy principal SHALL be able to read the rollout view and to set `cellImage` with its release tag, and nothing else. Clearing a rollout pause and setting one cell's image SHALL need the admin token. While the rollout is paused, the workflow SHALL set nothing, and SHALL fail with the pause's error code alone.
 
 #### Scenario: The deploy principal tries to clear a pause
 
@@ -60,31 +97,36 @@ Substrate's deploy principal SHALL be able to read the release view and to set `
 #### Scenario: The workflow finds the rollout paused
 
 - **WHEN** the workflow reads a paused rollout before it sets the image
-- **THEN** it sets nothing, and fails with the pause's error code and held cell
+- **THEN** it sets nothing, and fails with the pause's error code, and its log names no cell
 
 #### Scenario: The rollout pauses while the workflow polls
 
-- **WHEN** the rollout pauses before `last_good_image` equals the target
+- **WHEN** the rollout pauses before the canary runs the target
 - **THEN** the workflow fails with the pause's error code, and the pause stays until a person clears it
 
 ### Requirement: Cells move only when the platform carries the release
 
-The workflow SHALL set `cell_image` only when the newest successful platform Deployment names a release whose `infra/helm/platform/**` and `infra/cellctl/**` equal the new release's. Otherwise, or with no platform Deployment, it SHALL set nothing and raise `cloud-release-platform-needed` through the alert receiver. A successful platform Deployment SHALL start the workflow again, and SHALL resolve the alert when the gate then passes.
+The workflow SHALL set `cell_image` only when the newest successful platform Deployment names a release whose chart and controller build inputs equal the new release's. The build inputs SHALL be the files under `infra/helm/platform/` and `infra/cellctl/`, except Markdown files and test directories. Otherwise, or with no platform Deployment, the workflow SHALL set nothing and raise `cloud-release-platform-needed` through the alert receiver. After a person upgrades the platform, the platform upgrade command or the runbook step SHALL dispatch the workflow on `main`. The workflow SHALL then resolve the alert when the gate passes.
 
-#### Scenario: The release changes no platform file
+#### Scenario: The release changes no platform build input
 
-- **WHEN** the new release and the platform Deployment's release hold the same chart and controller files
+- **WHEN** the new release and the platform Deployment's release hold the same chart and controller build inputs
 - **THEN** the workflow sets `cell_image`
 
 #### Scenario: The release changes the chart
 
-- **WHEN** the new release changes a file under `infra/helm/platform/` since the platform Deployment's release
+- **WHEN** the new release changes a template or value file under `infra/helm/platform/` since the platform Deployment's release
 - **THEN** the workflow sets nothing, raises `cloud-release-platform-needed`, and fails
+
+#### Scenario: The release changes only controller tests and docs
+
+- **WHEN** the new release changes only files under `infra/cellctl/tests/` and Markdown files since the platform Deployment's release
+- **THEN** the platform gate passes
 
 #### Scenario: A person upgrades the platform
 
-- **WHEN** a platform Deployment for the new release reaches the state `success`
-- **THEN** the workflow runs again, sets `cell_image`, and resolves `cloud-release-platform-needed`
+- **WHEN** a person records a successful platform Deployment for the new release and dispatches the workflow on `main`
+- **THEN** the workflow runs, sets `cell_image`, and resolves `cloud-release-platform-needed`
 
 #### Scenario: No platform Deployment exists
 
@@ -93,12 +135,17 @@ The workflow SHALL set `cell_image` only when the newest successful platform Dep
 
 ### Requirement: Upgrade barriers stop the automation
 
-The barrier file SHALL list each release that is one-way or needs an operator step, with its scope, kind and runbook section. A pull request that adds such a change SHALL add its entry. The workflow SHALL set nothing when a move crosses a `cell` entry that no platform Deployment lists as crossed. The platform upgrade command SHALL refuse to cross a `platform` entry without `--crossed`. Crossing a one-way entry SHALL never roll back automatically.
+The barrier file SHALL list each release that is one-way or needs an operator step, with its scope, kind and runbook section. A pull request that adds such a change SHALL add its entry. From phase 1, the workflow SHALL read the barrier file. It SHALL set nothing while an entry of either scope lies at or below the new release and no successful platform Deployment lists it in `barriers_crossed`. The platform upgrade command SHALL refuse to cross a `platform` entry without `--crossed`. Crossing a one-way entry SHALL never roll back automatically.
 
-#### Scenario: A release crosses a cell barrier
+#### Scenario: A release crosses an uncrossed barrier
 
-- **WHEN** a `cell` entry lies between the cell Deployment's release and the new release, and no platform Deployment lists it as crossed
-- **THEN** the workflow sets nothing, raises `cloud-release-barrier` with the entry's ID and runbook, and fails
+- **WHEN** an entry lies at or below the new release, and no successful platform Deployment lists it as crossed
+- **THEN** the workflow sets nothing, raises `cloud-release-barrier` with the entry's ID, and fails
+
+#### Scenario: A platform barrier outside the gated paths
+
+- **WHEN** an uncrossed `platform` entry lies at or below a release that changes no chart or controller build input
+- **THEN** the workflow sets nothing and raises `cloud-release-barrier`
 
 #### Scenario: A person crossed the barrier
 
@@ -115,14 +162,9 @@ The barrier file SHALL list each release that is one-way or needs an operator st
 - **WHEN** the platform upgrade command crosses a `platform` entry of kind `one-way`
 - **THEN** it upgrades without `--atomic`, so Helm cannot roll the controller back across it
 
-#### Scenario: A person crosses a one-way cell barrier
-
-- **WHEN** the platform upgrade command crosses a `cell` entry of kind `one-way`
-- **THEN** it adds the target digest to `cellctl.forwardOnlyImages`
-
 ### Requirement: A person upgrades the platform with one reviewed command
 
-The platform upgrade command SHALL run in an admin session with the operator's presence. Before any change, it SHALL render and schema-check the chart, diff it against the live release, run a server dry run, probe the control database's columns, diff the secret contracts, and check `platform` barriers. It SHALL upgrade with `--atomic` unless a crossed barrier is one-way. It SHALL record the platform Deployment of the upgrade's outcome.
+The platform upgrade command SHALL run in an admin session with the operator's presence. Before any change, it SHALL render and schema-check the chart, diff it against the live release, run a server dry run, probe the control database's columns, diff the secret contracts, and check `platform` barriers. It SHALL upgrade with `--atomic` unless a crossed barrier is one-way. It SHALL record the platform Deployment of the upgrade's outcome, and after a success it SHALL dispatch the `cloud-deploy` workflow on `main`.
 
 #### Scenario: The control database lacks a column
 
@@ -137,12 +179,12 @@ The platform upgrade command SHALL run in an admin session with the operator's p
 #### Scenario: A clean upgrade
 
 - **WHEN** every review step passes, and no crossed barrier is one-way
-- **THEN** the command upgrades with `--atomic`, and records a successful platform Deployment for the tag
+- **THEN** the command upgrades with `--atomic`, records a successful platform Deployment for the tag, and dispatches `cloud-deploy` on `main`
 
 #### Scenario: The upgrade fails
 
 - **WHEN** the upgrade does not become Ready within its timeout
-- **THEN** the command records a failed platform Deployment, and the newest successful platform Deployment keeps its release
+- **THEN** the command records a failed platform Deployment, dispatches nothing, and the newest successful platform Deployment keeps its release
 
 #### Scenario: The controller starts against an older schema
 
@@ -155,13 +197,13 @@ The platform upgrade command SHALL run in an admin session with the operator's p
 
 #### Scenario: The rollout pauses
 
-- **WHEN** an attempt pauses the rollout
+- **WHEN** an attempt pauses the rollout, with any error code including `UPGRADE_FORWARD_ONLY`
 - **THEN** `cloud-rollout-paused` fires, and it resolves only after a person clears the pause
 
 #### Scenario: A hold lasts too long
 
 - **WHEN** a cell's upgrade or restore hold is older than the configured held threshold
-- **THEN** `cloud-rollout-held` fires, and `cellctl`'s log names the cell
+- **THEN** `cloud-rollout-held` fires, and `cellctl`'s private log names the cell
 
 #### Scenario: A cell stays behind its target
 
