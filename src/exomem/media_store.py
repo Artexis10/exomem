@@ -408,6 +408,11 @@ def _reserve(store: MediaJobStore, token: str, needed: int, limits: media_capaci
         raise MediaStoreError(STORE_BUSY_CODE, "hydration capacity is in use")
 
 
+#: The two answers of ``managed_event``: look at the file again later, or leave its bytes alone.
+DEFER = "defer"
+SUPPRESS = "suppress"
+
+
 def managed_event(vault: Path, path: Path) -> str | None:
     """Tell the watcher to defer an in-flight event or suppress proven cache bytes."""
     if originals.binding_for(vault) is None:
@@ -423,12 +428,12 @@ def managed_event(vault: Path, path: Path) -> str | None:
                 rows = conn.execute("SELECT * FROM media_access WHERE binary_rel = ?", (store._relative(path),)).fetchall()
                 # A read-only reader can see a ledger from before the start column, which the next write adds.
                 if any(holder_alive(row["pid"], row["pid_start"] if "pid_start" in row.keys() else None) for row in rows):
-                    return "defer"
+                    return DEFER
         finally:
             conn.close()
     snapshot = original_state(vault, path)
     if snapshot.state == "evicted" or cache_matches(vault, path, snapshot=snapshot):
-        return "suppress"
+        return SUPPRESS
     return None
 
 
@@ -791,6 +796,7 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
         render_frontmatter_document,
         serialize_frontmatter,
     )
+    from .vault_store import read
 
     text, guard = read_guarded_text(vault, snapshot.sidecar_path)
     if content_hash(text) != snapshot.sidecar_hash:
@@ -806,7 +812,14 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     ),))
     # Keep protection through an uncertain writer or catalog result. Explicitly
     # confirm durable bytes even when a prior attempt already wrote this value.
-    with reserved_paths.open_generic_binary(vault, snapshot.sidecar_path.relative_to(vault).as_posix()) as source:
+    relative = snapshot.sidecar_path.relative_to(vault).as_posix()
+    # A store-mode vault's page is the store's, committed durably above, and its Markdown file may
+    # not be projected yet: the read-back is the store's page, with no file to sync.
+    if (stored := read.owned_bytes(vault, relative)) is not None:
+        if stored != rendered.encode("utf-8"):
+            raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
+        return
+    with reserved_paths.open_generic_binary(vault, relative) as source:
         if source.stream.read() != rendered.encode("utf-8"):
             raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "reference publication is uncertain")
         os.fsync(source.stream.fileno())

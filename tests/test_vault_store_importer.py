@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import itertools
-import logging
 import multiprocessing
 import os
 import queue
@@ -32,7 +31,7 @@ from test_vault_store_projector import NOTES, commit, put, rows
 
 from exomem import file_watcher, server_runtime
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection
+from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.vault_store import importer, ownership, projector, read, verify, write
 
@@ -810,6 +809,10 @@ class StoreThread:
         path = connection.store_path(self._root)
         with connection.open_writer(path, lease_check=lambda: True) as handle:
             writing = CollectionWriter(self._root, handle)
+            # The service's store thread runs every job with this binding, which is what lets a
+            # governed batch commit; any other thread's batch is refused.
+            preview._BOUND.set((self._root.resolve(), writing, False))
+            self.ident = threading.get_ident()
             self._ready.set()
             while (job := self._jobs.get()) is not None:
                 work, outcome_queue = job
@@ -984,60 +987,3 @@ def test_a_commit_of_bytes_read_before_a_newer_governed_write_is_skipped(
     assert rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
     assert imports(stored) == []
     assert settling.import_paths([ALPHA]).settled == 0
-
-
-def test_an_imported_media_binary_is_named_as_waiting_for_the_media_writer(stored, importing):
-    """An importer that says nothing of an imported media file, so that nobody can tell that its
-    preview and transcript are not coming, or that names a file that media processing ignores."""
-    picture, bundle, gone = (f"{NOTES}/{name}" for name in ("plain.png", "data.bin", "old.png"))
-    (stored / gone).write_bytes(b"\x89PNG old")
-    importing.import_paths([gone])
-    (stored / gone).unlink()
-    (stored / picture).write_bytes(b"\x89PNG plain")
-    (stored / bundle).write_bytes(b"\x00\x01 not media")
-
-    report = importing.import_paths([picture, bundle, gone])
-
-    assert sorted(report.imported) == sorted([picture, bundle]) and report.removed == [gone]
-    assert report.media_waiting == [picture], "a deleted file and a non-media file are not named"
-
-
-def test_a_running_watcher_imports_a_media_file_without_calling_media_processing(
-    stored, store_thread, caplog
-):
-    """A watcher that hands an imported media file to a media writer that store mode refuses off
-    the store thread, so that the log shows a traceback for every binary a person adds, or that
-    names the media state for a file that is not media."""
-    reports = []
-
-    class Recording(importer.Importer):
-        def import_paths(self, rels, moves=None):
-            report = super().import_paths(rels, moves)
-            reports.append(report)
-            return report
-
-    plain, picture = f"{NOTES}/data.bin", f"{NOTES}/plain.png"
-    caplog.set_level(logging.INFO, logger="exomem.file_watcher")
-    watching = file_watcher.FileWatcher(
-        stored, debounce_seconds=0.2, importer=Recording(stored, run=store_thread.run)
-    )
-    assert watching.start()
-    try:
-        assert watching.wait_until_seeded(120)
-        (stored / plain).write_bytes(b"\x00\x01 not media")
-        wait_for(lambda: any(plain in report.imported for report in reports), "the data file")
-        assert not any(importer.MEDIA_WAITS in record.getMessage() for record in caplog.records)
-        (stored / picture).write_bytes(b"\x89PNG plain")
-        wait_for(
-            lambda: any(picture in report.media_waiting for report in reports),
-            "the report that names the imported media file",
-        )
-        wait_for(
-            lambda: any(importer.MEDIA_WAITS in record.getMessage() for record in caplog.records),
-            "the watcher's log of the media state",
-        )
-    finally:
-        watching.stop()
-
-    assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", picture) != []
-    assert [record for record in caplog.records if record.exc_info or record.levelno >= 40] == []

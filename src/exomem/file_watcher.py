@@ -1332,13 +1332,13 @@ class FileWatcher:
             from . import media_store
 
             disposition = media_store.managed_event(self._vault_root, path)
-            if disposition == "defer":
+            if disposition == media_store.DEFER:
                 with self._lock:
                     self._managed_media_events[path] = deleted
                     self._last_change = time.monotonic()
                 self._wake.set()
                 return
-            if disposition == "suppress":
+            if disposition == media_store.SUPPRESS:
                 return
         if notify_views:
             # A same-stat external save can match index suppression; edit-back still needs its hint.
@@ -1501,7 +1501,6 @@ class FileWatcher:
 
     def _after_import(self, report: ImportReport) -> None:
         """Tell the caches that read a changed path that the store now holds new bytes there."""
-        from .vault_store.importer import MEDIA_WAITS
         from .vocabulary import invalidate as invalidate_vocabulary
 
         for rel in (*report.imported, *report.moved, *report.moved.values()):
@@ -1513,11 +1512,14 @@ class FileWatcher:
                 len(report.imported), len(report.moved), len(report.held), len(report.removed),
                 len(report.cleared), len(report.refreshed), len(report.unjudged),
             )
-        if report.media_waiting:
+        if report.media_derived or report.media_failed or report.media_attempted:
             log.info(
-                "file watcher: %d imported media file(s): %s",
-                len(report.media_waiting), MEDIA_WAITS,
+                "file watcher: derived the media rows of %d imported file(s), attempted %d more, "
+                "failed %d",
+                len(report.media_derived), report.media_attempted, len(report.media_failed),
             )
+        for rel in report.deferred:
+            self._pend_import(rel)  # the media store is moving it; the next batch looks again
 
     def _reconcile_access_policy(self, pending_epoch: int) -> None:
         """Reproject one observed `_access.yaml` edit before clearing its barrier."""
