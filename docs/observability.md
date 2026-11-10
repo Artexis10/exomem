@@ -428,10 +428,13 @@ does not name the thread that used it, and it can read slightly below
 `thread_cpu_us`. Wall time far above both clocks is a wait on a lock, I/O,
 SQLite or another process. Process CPU far above thread CPU means other threads
 ran meanwhile; it does not prove they blocked this one. On Linux these spans also
-carry `thread_waits`: how many times the executing thread gave up the CPU to wait.
-A thread waiting for the GIL gives it up about once per 5 ms switch interval, so a
-long wait with many waits is GIL contention, and a long wait with a few is one
-lock, I/O or SQLite wait.
+carry `thread_waits`: how many times the executing thread blocked. Compare it with
+the off-CPU time, which is wall time minus `thread_cpu_us`. A thread that waits for
+the GIL blocks once or twice per 5 ms switch interval. A count near the off-CPU
+milliseconds divided by 5, or above it, points to GIL contention. A count far below
+it means a few long waits: a lock, a SQLite busy wait (about 10 per second) or
+another process. Each disk read also counts once, so check I/O pressure before you
+blame the GIL for a high count.
 Nested stage measurements overlap; do not add them. These fields do not change
 public wall-time diagnostics. Outside MCP, recall does not sample this CPU clock.
 Missing CPU fields leave consumption unknown.

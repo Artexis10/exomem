@@ -77,10 +77,12 @@ THREAD_CPU_US = "thread_cpu_us"
 #: is a wait on a lock, I/O, SQLite or another process; process CPU far above
 #: thread CPU says other threads ran meanwhile, not that they blocked this one.
 PROCESS_CPU_US = "process_cpu_us"
-#: How many times the executing thread gave up the CPU to wait over the span (Linux voluntary
-#: context switches). A thread that waits for the GIL gives it up about once per switch interval
-#: (5 ms), so a long wait with many switches is GIL contention, and a long wait with a few is one
-#: lock, I/O or SQLite wait. Absent where the platform does not count them per thread.
+#: How many times the executing thread blocked over the span (Linux voluntary context
+#: switches). Read it against the off-CPU time, wall minus thread CPU: a thread waiting for
+#: the GIL blocks once or twice per 5 ms switch interval, so a count near off-CPU ms / 5 or
+#: above is GIL contention, and a count far below it is a few long waits (a lock, a SQLite
+#: busy wait). Each disk read also counts once, so check I/O pressure first. Absent where the
+#: platform does not count a thread's own waits.
 THREAD_WAITS = "thread_waits"
 CPU_FIELDS = frozenset({THREAD_CPU_US, PROCESS_CPU_US, THREAD_WAITS})
 # RUSAGE_THREAD is Linux only; elsewhere the thread's waits are not counted.
@@ -250,7 +252,10 @@ def _thread_waits() -> int | None:
 
 
 def cpu_started() -> tuple[int, int, int | None] | None:
-    """The thread and process CPU clocks and the thread's waits at a span's start; None outside an MCP call."""
+    """The thread and process CPU clocks and the thread's waits at a span's start.
+
+    None outside an MCP call.
+    """
     if MCP_CALL_TOKEN.get() is None:
         return None
     return time.thread_time_ns(), time.process_time_ns(), _thread_waits()

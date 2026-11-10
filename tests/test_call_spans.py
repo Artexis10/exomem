@@ -109,19 +109,14 @@ def test_span_counts_how_often_its_thread_waited_for_a_lock(token) -> None:
     """Wall far above CPU did not say whether the thread waited once or kept losing the GIL."""
     import threading
 
-    released = threading.Event()
     lock = threading.Lock()
     lock.acquire()
-
-    def release_later() -> None:
-        for _ in range(3):
-            released.wait(0.01)
-        lock.release()
-
-    threading.Thread(target=release_later).start()
+    releaser = threading.Timer(0.03, lock.release)
+    releaser.start()
     with call_spans.span("phase.locked"):
         lock.acquire()
     lock.release()
+    releaser.join()
 
     assert call_spans.pop_call_spans(token)[0]["fields"]["thread_waits"] >= 1
 

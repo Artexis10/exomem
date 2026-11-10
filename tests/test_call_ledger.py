@@ -1505,4 +1505,5 @@ def test_a_span_with_every_field_slot_used_keeps_both_cpu_readings(
     fields = spans["derived.full"]["fields"]
     measured = {"a", "b", "c", "d", "e"}
     # thread_waits is counted only where the platform counts a thread's own waits.
-    assert measured | {"thread_cpu_us", "process_cpu_us"} <= set(fields) <= measured | call_spans.CPU_FIELDS
+    cpu = {"thread_cpu_us", "process_cpu_us"}
+    assert measured | cpu <= set(fields) <= measured | call_spans.CPU_FIELDS
