@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
-from contextlib import closing, contextmanager
-from contextvars import ContextVar
+from contextlib import closing
 from pathlib import Path
 
 from .. import state_migration, state_paths
@@ -74,41 +72,6 @@ def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
     return (found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns, found.st_ctime_ns)
 
 
-#: The answer that one request pinned for its own vault: the vault's path as the request spelled it,
-#: and whether that vault is in store mode. A context variable, so a worker thread that copies the
-#: request's context asks nothing either.
-_PINNED: ContextVar[tuple[str, bool] | None] = ContextVar(
-    "vault_store_pinned_read_mode", default=None
-)
-
-
-def pinned_read_mode(vault_root: Path) -> bool | None:
-    """The store-mode answer that this request pinned for ``vault_root``, or None if it pinned none.
-
-    A path spelled in another way than the request's own finds no pin, and asks the records as an
-    unpinned read does.
-    """
-    pinned = _PINNED.get()
-    if pinned is not None and pinned[0] == os.fspath(vault_root):
-        return pinned[1]
-    return None
-
-
-@contextmanager
-def pin_read_mode(vault_root: Path, in_store_mode: bool) -> Iterator[None]:
-    """Answer ``store_mode_for_reads`` for ``vault_root`` from ``in_store_mode`` in this block.
-
-    A request reads many pages and each read asks for the mode: a stat of the manifest and the
-    placement lookup, once for every page. Activation and rollback run offline, so the answer that
-    the request found at its start holds for the request, as the snapshot it reads already does.
-    """
-    token = _PINNED.set((os.fspath(vault_root), in_store_mode))
-    try:
-        yield
-    finally:
-        _PINNED.reset(token)
-
-
 def store_mode_for_reads(vault_root: Path) -> bool:
     """``store_mode_active`` for a byte reader: it re-reads the records only when the manifest changes.
 
@@ -120,9 +83,6 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     window when it opens the store, and ``forget_read_mode`` drops the kept answer there. The write
     refusal in ``availability`` does not use this: it asks ``store_mode_active`` every time.
     """
-    pinned = pinned_read_mode(vault_root)
-    if pinned is not None:
-        return pinned
     key = (os.fspath(vault_root), state_paths._placement_environment())
     cached = _READ_MODES.get(key)
     if cached is not None and _manifest_signature(cached[0]) == cached[1]:

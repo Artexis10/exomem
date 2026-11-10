@@ -258,29 +258,24 @@ def request_snapshot(vault_root: Path) -> Iterator[None]:
 
     A reader that opens its own snapshot per page pays a connection, a transaction and a mode query
     for each page, and the pages of one request may then belong to different revisions. Here the
-    request reads one revision. The request also asks for the mode once and pins the answer, so a
-    file-mode request pays one read of the mode records for all its pages. The scope nests, and an
-    inner one joins the outer.
+    request reads one revision. A vault that is not in store mode binds nothing, so a file-mode
+    request pays one read of the mode records; the scope nests, and an inner one joins the outer.
     """
     root = Path(vault_root)
-    with ExitStack() as scope:
-        if mode.pinned_read_mode(root) is None:
-            in_store_mode: bool | None = mode.store_mode_for_reads(root)
-            if in_store_mode and _REQUEST.get() is None:
-                try:
-                    view = scope.enter_context(snapshot(root))
-                except connection.CollectionStoreError as error:
-                    if error.code != NOT_ACTIVE:
-                        raise
-                    # The records stopped saying store mode: the request reads files, and asks the
-                    # records for each page, as an unpinned read does.
-                    in_store_mode = None
-                else:
-                    token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view))
-                    scope.callback(_REQUEST.reset, token)
-            if in_store_mode is not None:
-                scope.enter_context(mode.pin_read_mode(root, in_store_mode))
-        yield
+    if _REQUEST.get() is None and mode.store_mode_for_reads(root):
+        with ExitStack() as scope:
+            try:
+                view = scope.enter_context(snapshot(root))
+            except connection.CollectionStoreError as error:
+                if error.code != NOT_ACTIVE:
+                    raise
+                # The records stopped saying store mode: the request reads files.
+            else:
+                token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view))
+                scope.callback(_REQUEST.reset, token)
+                yield
+                return
+    yield
 
 
 @contextmanager
@@ -329,16 +324,12 @@ def _as_path(value: Path | str) -> Path:
 def serves(vault_root: Path, rel: str) -> bool:
     """Whether the store, not the disk, answers for ``rel``: store mode is on and it owns the page.
 
-    The one place that decides it; each byte chokepoint asks here. A request that pinned file mode
-    owns no page, so it skips the path rule. Otherwise the path rule is pure and runs first, so a
-    path that the store never owns costs no read of the mode records. The mode answer is the
-    reader's: it holds until the manifest changes.
+    The one place that decides it; each byte chokepoint asks here. The path rule is pure and runs
+    first, so a path that the store never owns costs no read of the mode records. The mode answer
+    is the reader's: it holds until the manifest changes.
     """
-    pinned = mode.pinned_read_mode(vault_root)
-    if pinned is False:
-        return False
-    return ownership.classify(rel) is ownership.Ownership.PAGE and (
-        pinned or mode.store_mode_for_reads(vault_root)
+    return (
+        ownership.classify(rel) is ownership.Ownership.PAGE and mode.store_mode_for_reads(vault_root)
     )
 
 
