@@ -238,3 +238,45 @@ def test_a_ref_only_conversation_naming_only_a_withheld_page_equals_no_conversat
     only_withheld = _served(cvault, conversation={"refs": [HUB_PATH]})
     unknown = _served(cvault, conversation={"refs": ["Knowledge Base/Notes/never-existed.md"]})
     assert only_withheld == unknown
+
+
+def test_a_declared_purpose_resolves_a_conversation_ref_title_without_the_withheld_namesake(
+    cvault: Path,
+) -> None:
+    """Catches `conversation.refs` titles resolved before the declared purpose applies: a page that
+    the rule withholds only for `marketing` shares the hub's title, so the ref reads as ambiguous and
+    is dropped, where the vault without that page carries the hub on the conversation's evidence.
+    Whether the hub gains that evidence tells the caller that a withheld page bears the title."""
+    from test_governance_egress import _reset_caches
+
+    write_scope(cvault, paths="Knowledge Base/Notes/Patterns/*", name="Patterns")
+    write_rule(cvault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    conversation = {"refs": ["Tidewater Grant"]}
+
+    def activation(*, purpose: str | None) -> tuple[list, list]:
+        _reset_caches()
+        working_set_runtime.reset_caches_for_tests()
+        lexstore.ensure_fresh(cvault)
+        working_set_index.WorkingSetIndex(cvault).rebuild()
+        with request_scope(_external()):
+            packet = commands.op_activate_context(cvault, turn=TURN, purpose=purpose, conversation=conversation)
+        anchors = [(a["ref"], a["status"], sorted(a.get("evidence") or ())) for a in packet["anchors"]]
+        return anchors, sorted(unit["ref"] for unit in packet["units"])
+
+    without_namesake = activation(purpose="marketing")
+    namesake = cvault / "Knowledge Base" / "Notes" / "Patterns" / "tidewater-namesake.md"
+    namesake.parent.mkdir(parents=True, exist_ok=True)
+    namesake.write_text(
+        "---\ntype: insight\nstatus: active\nupdated: 2026-09-02\n---\n\n"
+        "# Tidewater Grant\n\nAn older draft about the tidal monitoring grant.\n",
+        encoding="utf-8",
+    )
+    with_namesake = activation(purpose="marketing")
+    undeclared = activation(purpose=None)
+
+    hub = next(anchor for anchor in without_namesake[0] if anchor[0] == HUB_PATH)
+    assert "conversation" in hub[2]
+    assert with_namesake == without_namesake
+    # Undeclared, the rule withholds nothing, so the namesake makes the ref ambiguous: the declared
+    # answer depends on the purpose, not on a title that never collided.
+    assert undeclared != with_namesake

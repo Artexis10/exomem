@@ -545,6 +545,37 @@ def test_a_declared_purpose_resolves_a_relation_of_title_without_the_withheld_na
     assert "refused" in undeclared[0]
 
 
+
+@pytest.mark.parametrize("spelling", ["memory-ref", "path"])
+def test_a_declared_purpose_seeds_the_graph_context_as_a_vault_without_the_withheld_page(
+    tmp_path: Path, spelling: str
+) -> None:
+    """Catches `graph_context` resolving its seed before the declared purpose applies: a memory ref
+    to a page that the rule withholds only for `marketing` resolves, and the reply is an empty
+    neighbourhood, where a vault that never had the page refuses the ref as unknown."""
+    from test_governance_egress import _external, _reset_caches
+
+    from exomem import commands, epistemic_graph
+    from exomem.governance import principal
+
+    identity = "0f5d6a1e-6c2b-4b8e-9d51-2f3c4a5b6c7d"
+    seed = f"exomem://memory/{identity}" if spelling == "memory-ref" else OLD_ROADMAP
+    replies = []
+    for withheld in (True, False):
+        vault = _release_twin(tmp_path, withheld=withheld, rule_extra=_MARKETING_ONLY)
+        if withheld:
+            _write(vault, OLD_ROADMAP, f"---\ntype: insight\nexomem_id: {identity}\n---\n# Old roadmap\n\n## Relations\n\n- supports [[{REVIEW[:-3]}]]\n")
+            epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+            _reset_caches()
+        with principal.request_scope(_external()):
+            try:
+                replies.append(commands.op_graph_context(vault, path=seed, purpose="marketing"))
+            except ValueError as refusal:
+                replies.append({"refused": str(refusal)})
+
+    assert replies[0] == replies[1]
+
+
 @pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
 def test_a_restricted_callers_relation_hits_never_name_the_withheld_page(
     tmp_path: Path, search: str

@@ -3852,7 +3852,9 @@ def op_graph_context(
         carry source path/anchor/hash provenance and relation metadata.
     """
     if path:
-        path = _resolve_memory_identifier(vault_root, path)
+        # A memory ref is resolved over the pages this caller may see for the purpose it declares.
+        with principal_module.declared_purpose_scope(purpose):
+            path = _resolve_memory_identifier(vault_root, path)
     context = epistemic_graph_module.graph_context(
         vault_root,
         path=path,
@@ -7175,13 +7177,15 @@ def op_activate_context(
                 with ownership.read_scope(vault_root, finalize=True):
                     bounded = working_set_conversation_module.bound(conversation)
                     if bounded.refs:
-                        bounded = replace(
-                            bounded,
-                            refs=tuple(
-                                page_names_module.resolve_hint(vault_root, ref)
-                                for ref in bounded.refs
-                            ),
-                        )
+                        # A title is resolved over the pages this caller may see for the purpose it declares.
+                        with principal_module.declared_purpose_scope(purpose):
+                            bounded = replace(
+                                bounded,
+                                refs=tuple(
+                                    page_names_module.resolve_hint(vault_root, ref)
+                                    for ref in bounded.refs
+                                ),
+                            )
                     # The dispatcher runs this as a foreground request, ahead of in-process
                     # bulk passes (`writer_lease._foreground_priority_request`).
                     with (
