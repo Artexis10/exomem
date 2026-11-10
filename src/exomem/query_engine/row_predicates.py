@@ -14,10 +14,19 @@ import datetime as dt
 
 from ..query_compat import match
 from . import ir
-from .scalars import MISSING, ScalarValueError, scalar_key
+from .scalars import LINK_TAG, MISSING, STRING_TAG, ScalarValueError, scalar_key
 
 #: A path value whose reference did not resolve: every leaf reads it as unknown.
 UNRESOLVED = object()
+
+
+def _empty_text(value: object, kind: str) -> bool:
+    """Whether ``value`` is an empty string the typed scalar domain stores as text, as the SQL path decides."""
+    try:
+        tag, key = scalar_key(value, kind)
+    except ScalarValueError:
+        return False
+    return tag in (STRING_TAG, LINK_TAG) and key == ""
 
 
 def _leaf(node: ir.Filter, value_of, *, instant: dt.datetime) -> bool | None:
@@ -25,15 +34,14 @@ def _leaf(node: ir.Filter, value_of, *, instant: dt.datetime) -> bool | None:
     if value is UNRESOLVED:
         return None
     present = value is not MISSING and value is not None
-    if node.op in {"is_null", "is_missing", "is_not_null"}:
+    if node.op in ir.NULL_STATE_OPS:
         return {"is_null": value is None, "is_missing": value is MISSING,
                 "is_not_null": present}[node.op]
-    if node.op in {"exists", "missing"}:
+    if node.op in ir.PRESENCE_OPS:
         # A present empty string on a string or link field does not exist, as in SQL.
-        exists = present and not (type(value) is str and value == ""
-                                  and node.field.value_type in {"string", "link", "enum"})
+        exists = present and not _empty_text(value, node.field.value_type)
         return exists if node.op == "exists" else not exists
-    if node.op in {"contains", "icontains", "startswith"}:
+    if node.op in ir.TEXT_OPS:
         return present and type(value) is str and match(
             {"value": value}, {"column": "value", "op": node.op, "value": node.value})
     if not present:

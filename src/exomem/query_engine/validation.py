@@ -14,6 +14,9 @@ from ..structured_collections import CollectionError, FieldSpec, validate_field_
 from .buckets import EXTREMES
 from .errors import QueryError
 from .ir import (
+    NULL_STATE_OPS,
+    PRESENCE_OPS,
+    TEXT_OPS,
     Aggregate,
     Field,
     Filter,
@@ -54,6 +57,8 @@ _KEYS = frozenset(
         "related",
     }
 )
+#: The keys a saved view's query keeps; ``source`` and ``mode`` belong to each request.
+VIEW_KEYS = _KEYS - {"source", "mode"}
 _OPS = frozenset(
     {
         "eq",
@@ -75,7 +80,7 @@ _OPS = frozenset(
         "between",
     }
 )
-_NULL_OPS = frozenset({"exists", "missing", "is_null", "is_missing", "is_not_null"})
+_NULL_OPS = NULL_STATE_OPS | PRESENCE_OPS
 #: The v1 grammar's closed choices and input bounds (design §8, §11). The
 #: query-engine discovery chapter reports these same objects.
 MODES = ("compose", "explain", "preview", "dry_run", "execute")
@@ -432,7 +437,7 @@ class _Binder:
             return Filter(op, field)
         if field.value_type not in _SCALARS:
             _fail("QUERY_UNSUPPORTED", f"{at}.op", "scalar comparison")
-        if op in {"contains", "icontains", "startswith"} and field.value_type != "string":
+        if op in TEXT_OPS and field.value_type != "string":
             _fail("QUERY_OPERATOR_UNKNOWN", f"{at}.op", "string field operation")
         if op in {"gt", "gte", "lt", "lte", "between"} and field.value_type == "boolean":
             _fail("QUERY_OPERATOR_UNKNOWN", f"{at}.op", "ordered field operation")

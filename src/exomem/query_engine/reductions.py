@@ -32,9 +32,9 @@ from dataclasses import asdict, dataclass
 from ..collection_store import query_freshness, rollups, typed_storage
 from . import cursors, ir
 from .buckets import EXTREMES, Accumulator, Basis, bucket_key, declared_kind, group_key
+from .reference_resolution import unresolved_values
 from .row_predicates import UNRESOLVED
 from .runtime import MAX_RESULT_BYTES, QueryError, wire_bytes
-from .scalars import parse_instant
 
 _UNSUPPORTED = frozenset({"percentile", "distinct_count"})
 _MAX_DECODE_BYTES = 256 * 1024
@@ -121,8 +121,6 @@ def _shape(query, manifest, targets=None) -> _Shape:
         target = targets.get(field.alias)
         return None if target is None else target.schema.fields.get(field.path)
 
-    paths = [_public(key.field) for key in aggregate.groups]
-    paths += [_public(value.field) for value in aggregate.values if value.field is not None]
     if any(spec(field) is None for field in
            (*[key.field for key in aggregate.groups],
             *[value.field for value in aggregate.values if value.field is not None])):
@@ -208,14 +206,6 @@ def _boundary(bucket: str, identity: str) -> str:
     return f"{bucket}|{hashlib.sha256(identity.encode()).hexdigest()[:40]}"
 
 
-def _unresolved_pairs(pairs: Counter) -> dict:
-    """The bounded, ordered list of distinct unresolved (reference, value) pairs of a group."""
-    entries = [{"reference": name, "value": value, "rows": rows}
-               for (name, value), rows in pairs.items()]
-    entries.sort(key=lambda item: (-item["rows"], item["reference"], item["value"]))
-    return {"values": entries[:20], "truncated": len(entries) > 20, "total": len(entries)}
-
-
 def _row(shape: _Shape, bucket, tagged, rows: int, accumulators, extra=None) -> dict:
     result = {} if shape.timed is None else {shape.timed.field.path: bucket}
     unresolved = []
@@ -227,8 +217,9 @@ def _row(shape: _Shape, bucket, tagged, rows: int, accumulators, extra=None) -> 
     for value in shape.values:
         if value.where is not None:
             held = extra["filtered"].get(value.name) if extra is not None else None
-            result[value.name] = (held if isinstance(held, int)
-                                  else None if held is None else held.result(value.op))
+            if held is None:
+                held = Accumulator()  # no row of the group passed the filter: a count of 0, any other value null
+            result[value.name] = held if isinstance(held, int) else held.result(value.op)
         elif value.op == "count" and value.field is None:
             result[value.name] = rows
         else:
@@ -237,7 +228,7 @@ def _row(shape: _Shape, bucket, tagged, rows: int, accumulators, extra=None) -> 
         result["unresolved"] = unresolved
     if extra is not None:
         result["combined"] = {"count": rows, "unresolved_rows": extra["unresolved_rows"],
-                              "unresolved_values": _unresolved_pairs(extra["pairs"])}
+                              "unresolved_values": unresolved_values(extra["pairs"])}
     return result
 
 
@@ -549,16 +540,7 @@ def reduce(session, query, *, as_of: str | None = None) -> dict:
         raise QueryError("QUERY_UNSUPPORTED", "compose reads no values")
     _refuse_request(query, limits)
     collection_id = query.source.ref
-    codec = payload = None
-    if query.page.after is not None:
-        codec = cursors._codec(session)
-        payload = codec.open(query.page.after)
-    try:
-        frozen = parse_instant(payload["as_of"] if payload else as_of or dt.datetime.now(dt.UTC).isoformat())
-        if payload is not None and as_of is not None and parse_instant(as_of).isoformat() != frozen.isoformat():
-            raise QueryError("QUERY_CURSOR_INVALID")
-    except ValueError as error:
-        raise QueryError("QUERY_VALUE_INVALID", "as_of is an RFC 3339 instant") from error
+    codec, payload, frozen = cursors.freeze(session, query, as_of)
     frozen = frozen.isoformat()
     # Admission proves uniform release, including a summary collection's complete owner release.
     with session._manifest(collection_id) as (manifest, _, _, uniform):

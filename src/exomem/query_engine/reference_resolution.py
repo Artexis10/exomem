@@ -12,6 +12,7 @@ cannot read the target collection gets the refusal for a collection that does no
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import closing
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from .errors import QueryError
 
 #: Key values matched by one SQL statement, which keeps each statement's parameters few.
 _CHUNK = 100
+#: Distinct unresolved values a report lists before it says how many more there are.
+MAX_UNRESOLVED_VALUES = 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,17 @@ class Target:
 
     row_id: int
     item_key: str
+
+
+def unresolved_values(pairs: Counter) -> dict:
+    """The bounded list of distinct unresolved ``(reference, value)`` pairs, most rows first.
+
+    ``pairs`` counts the rows holding each pair. The result also holds how many pairs there are.
+    """
+    entries = [{"reference": name, "value": value, "rows": rows} for (name, value), rows in pairs.items()]
+    entries.sort(key=lambda item: (-item["rows"], item["reference"], item["value"]))
+    return {"values": entries[:MAX_UNRESOLVED_VALUES],
+            "truncated": len(entries) > MAX_UNRESOLVED_VALUES, "total": len(entries)}
 
 
 def bind(session, source_collection_id: str, dotted_path: str) -> BoundReference:

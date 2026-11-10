@@ -348,8 +348,18 @@ def test_a_filtered_reduction_without_references_still_uses_the_base_path(world)
                          "aggregates": {"n": {"op": "count"}, "total": {"op": "sum", "field": "hours"}}})
     assert result["plan"]["strategy"] == "base" and result["plan"]["reason"] == "filtered"
     assert result["combined"]["count"] == 2 and result["groups"][0]["total"] == 4
-    assert [item["title"] for item in result["rows"]] == ["day one", "day three"] or \
-        sorted(item["title"] for item in result["rows"]) == ["day one", "day three"]
+    assert sorted(item["title"] for item in result["rows"]) == ["day one", "day three"]
+
+
+def test_a_counted_where_that_matches_no_row_in_a_group_reports_zero(world):
+    """A group with rows but none matching a count's own filter has a count of 0, never null."""
+    result = run(world, {"group_by": [{"field": "leave"}],
+                         "aggregates": {"long_days": {"op": "count",
+                                                      "where": {"field": "hours", "op": "gt", "value": 5}},
+                                        "total": {"op": "sum", "field": "hours"}}})
+    by_leave = {group["leave"]: group for group in result["groups"]}
+    assert by_leave[True]["long_days"] == 0 and by_leave[True]["total"] == 4
+    assert by_leave[False]["long_days"] == 1
 
 
 def test_an_unfiltered_reduction_is_unchanged(world):
@@ -377,6 +387,25 @@ def test_shared_field_aggregates_do_not_double_count(world):
                                         "mean": {"op": "avg", "field": "hours"}}})
     group = result["groups"][0]
     assert group["total"] == 4 and group["peak"] == 3 and group["mean"] == 2
+
+
+_FILTER = {"field": "hours", "op": "gt", "value": 1}
+
+
+@pytest.mark.parametrize("raw", [
+    {"related": ["site"], "execution_profile": "analytics"},
+    {"select": ["site.name"], "execution_profile": "analytics"},
+    {"where": _FILTER, "aggregates": {"p": {"op": "percentile", "field": "hours", "p": 0.5}}},
+    {"where": _FILTER, "aggregates": {"d": {"op": "distinct_count", "field": "hours"}}},
+    {"related": ["site"], "group_by": [{"field": "leave"}], "aggregates": {"n": {"op": "count"}},
+     "having": {"field": "n", "op": "gt", "value": 0}},
+])
+def test_compose_refuses_each_reference_shape_that_execute_refuses(world, raw):
+    """An agent that refines a query by composing must not get a clean answer for one that cannot run."""
+    executed = refused(world, raw)
+    composed = refused(world, {**raw, "mode": "compose"})
+    assert (composed.code, composed.message) == (executed.code, executed.message)
+    assert composed.code == "QUERY_UNSUPPORTED"
 
 
 def _planning_manifest() -> str:

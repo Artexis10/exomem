@@ -21,6 +21,7 @@ from .. import capabilities, item_keys
 from ..structured_collections import declared_references
 from . import (
     cursors,
+    ir,
     reductions,
     reference_resolution,
     reference_rows,
@@ -81,26 +82,7 @@ def _profile(raw) -> str:
 
 def _names_reference(query) -> bool:
     """Whether the query names a reference: a ``related`` entry or a dotted path through one."""
-    if query.related:
-        return True
-
-    def leaves(node):
-        if node is None:
-            return
-        for child in node.children:
-            yield from leaves(child)
-        if node.field is not None:
-            yield node.field
-
-    fields = [*query.select.fields, *(key.field for key in query.order_by.keys),
-              *leaves(query.where), *leaves(query.having)]
-    if query.aggregate is not None:
-        fields += [group.field for group in query.aggregate.groups]
-        for value in query.aggregate.values:
-            if value.field is not None:
-                fields.append(value.field)
-            fields += list(leaves(value.where))
-    return any(field.alias is not None for field in fields)
+    return bool(query.related) or any(field.alias is not None for field in ir.fields(query))
 
 
 def run(writer, selector: str, raw, *, facade_profile: str,
@@ -178,11 +160,12 @@ def run(writer, selector: str, raw, *, facade_profile: str,
             or any(value.where is not None for value in query.aggregate.values))
         if query.mode == "compose":
             # Compose reads no values, but refuses every shape and profile the other modes refuse.
-            if not named and not filtered_reduction:
-                if query.aggregate is None:
-                    typed_rows.check_shape(replace(query, mode="execute"), manifest, basis, item_key_withheld=withheld)
-                else:
-                    reductions.check_shape(query, manifest, limits)
+            if named or filtered_reduction:
+                reference_rows.check_shape(session, query, bound_refs, manifest=manifest)
+            elif query.aggregate is None:
+                typed_rows.check_shape(replace(query, mode="execute"), manifest, basis, item_key_withheld=withheld)
+            else:
+                reductions.check_shape(query, manifest, limits)
             return {**view_meta, "source": asdict(query.source), "query_version": query.version,
                     "schema_version": manifest.schema.version, "mode": "compose",
                     "kind": "rows" if query.aggregate is None else "groups",
@@ -285,7 +268,8 @@ def chapter(name: str | None) -> dict:
             "mode": {"compose": "validate and fingerprint; reads no values",
                      "explain": "release, access path, declared index or rollup, bounds",
                      "preview": "explain plus what the plan reads: visit_charge for rows (admission's charge "
-                                "against bounds.max_row_visits), admitted_rows or rollup_buckets for groups",
+                                "against bounds.max_row_visits, plus an estimated lookup per row for each reference "
+                                "named), admitted_rows or rollup_buckets for groups",
                      "dry_run": "admission and preparation without result rows",
                      "execute": "the default; one page of rows or groups"},
             "execution_profile": {name: {**bounds, **({"concurrent_per_store": runtime.MAX_ANALYTICS_SESSIONS}

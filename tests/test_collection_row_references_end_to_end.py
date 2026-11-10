@@ -25,9 +25,8 @@ from test_collection_row_references import (
 from test_collection_store_writer import store as store  # noqa: F401
 from test_governance_egress import _external, write_rule, write_scope
 
-from exomem import structured_collections as collections
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.query_engine import route
+from exomem.query_engine import route, runtime
 
 K1, K2, K3, K4 = (f"00000000-0000-4000-8000-0000000000c{i}" for i in (1, 2, 3, 4))
 
@@ -104,22 +103,6 @@ def test_missing_and_renamed_targets_report_exactly(world):
     assert result["groups"][0]["total_hours"] == 8
 
 
-def test_a_withheld_target_row_is_indistinguishable_from_a_missing_one(world):
-    """The output for a hidden site row equals the missing-site twin apart from the key."""
-    write_scope(world.root, paths="Unrelated/**")
-    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
-    scope.write_text(scope.read_text() + f'refs: ["{collections.record_ref(SITES, NORTH)}"]\n')
-    write_rule(world.root, ceiling=0)
-    query = {"version": 1, "related": ["site"], "order_by": [{"field": "title"}]}
-    withheld = answer(world, query, who=_external())
-    for item in withheld["rows"]:
-        state = item["references"]["site"]
-        assert state in {"unresolved", "resolved"}
-        if item["title"] == "monday":
-            assert state == "unresolved" and "row" not in item["related"]["site"]
-    assert withheld["combined"]["unresolved_values"]["total"] >= 1
-
-
 def test_withheld_target_fields_bound_like_missing_ones(store):
     """A hidden non-key field omits itself in related; a hidden key refuses the query."""
     hidden = collection_text(SITES, "Sites", "code",
@@ -134,15 +117,15 @@ def test_withheld_target_fields_bound_like_missing_ones(store):
     result = answer(store, {"version": 1, "related": ["site"]}, who=_external())
     target_row = result["rows"][0]["related"]["site"]["row"]
     assert "name" in target_row and "gate_code" not in target_row
-    with pytest.raises(Exception) as error:
+    with pytest.raises(runtime.QueryError) as error:
         answer(store, {"version": 1, "where": {"field": "site.gate_code", "op": "eq", "value": "1"}},
                who=_external())
-    assert getattr(error.value, "code", getattr(error.value, "error_code", None)) == "QUERY_FIELD_UNAVAILABLE"
+    assert error.value.code == "QUERY_FIELD_UNAVAILABLE"
     keyed = collection_text(SITES, "Sites", "code",
                             "    code: {type: string, required: true, classification: location}\n"
                             "    name: {type: string}\n"
                             "    gate_code: {type: string, classification: location}\n")
     revise(store, SITES, keyed)
-    with pytest.raises(Exception) as error:
+    with pytest.raises(runtime.QueryError) as error:
         answer(store, {"version": 1, "related": ["site"]}, who=_external())
-    assert getattr(error.value, "code", getattr(error.value, "error_code", None)) == "QUERY_FIELD_UNAVAILABLE"
+    assert error.value.code == "QUERY_FIELD_UNAVAILABLE"

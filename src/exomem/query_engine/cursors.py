@@ -10,14 +10,20 @@ from dataclasses import asdict, fields, is_dataclass, replace
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from ..collection_store import native_identity, query_freshness, typed_storage
+from ..collection_store import native_identity, query_freshness
 from ..collection_store.native_projections import NativeProjectionPlan
 from ..issued_cursor import issued_cursor
 from ..structured_collections import _MAX_ITEM_KEY_BYTES
 from . import ir, typed_sql
 from .runtime import _MAX_DECODE_BYTES, MAX_RESULT_BYTES, QueryError, wire_bytes
 from .scalars import parse_instant
-from .typed_rows import AdmittedQuery, execute_rows, indexed_relation, logical_item_key
+from .typed_rows import (
+    AdmittedQuery,
+    decode_item_key,
+    execute_rows,
+    indexed_relation,
+    logical_item_key,
+)
 
 _MAX_TOKEN_BYTES = 4096
 _TOKEN_KEYS = frozenset({"v", "query", "principal", "schema", "authorization", "visible", "lineage", "as_of", "boundary"})
@@ -82,6 +88,25 @@ def _codec(session):
         raise QueryError("QUERY_UNAVAILABLE") from error
 
 
+def freeze(session, query, as_of):
+    """The codec, opened payload and frozen instant of a reduction or reference query's page.
+
+    A continuation keeps its first page's ``as_of``; a request that names a different one is refused.
+    The codec and payload are None on a first page.
+    """
+    codec = payload = None
+    if query.page.after is not None:
+        codec = _codec(session)
+        payload = codec.open(query.page.after)
+    try:
+        frozen = parse_instant(payload["as_of"] if payload else as_of or dt.datetime.now(dt.UTC).isoformat())
+        if payload is not None and as_of is not None and parse_instant(as_of).isoformat() != frozen.isoformat():
+            raise QueryError("QUERY_CURSOR_INVALID")
+    except ValueError as error:
+        raise QueryError("QUERY_VALUE_INVALID", "as_of is an RFC 3339 instant") from error
+    return codec, payload, frozen
+
+
 def with_rows(session, collection_id: str, visible: str) -> str:
     """``visible`` also bound to a derived collection's row position, so a batch inside an open
     member stales a continuation; the store's own rows keep their basis unchanged."""
@@ -118,8 +143,7 @@ def visible_basis(session, collection_id: str, *, uniform: bool, layout, depende
                 session.check()
                 if key is None:
                     raise QueryError("QUERY_COST_LIMIT")
-                if layout is not None and layout.encoding == typed_storage.TYPED_V2 and type(key) is bytes:
-                    key = native_identity.decode(key, layout.identity)
+                key = decode_item_key(layout, key)
                 try:
                     values = session.selected_values(
                         row_id, layout, set(dependencies) - {"item_key"},

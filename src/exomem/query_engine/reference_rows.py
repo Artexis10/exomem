@@ -9,25 +9,28 @@ through ``BoundReference``), evaluates the filter in Python, and reports
 ``combined``: the rows combined, the combined rows with an unresolved
 reference, the rows the filter excluded only because a reference did not
 resolve, and a bounded list of the values that did not resolve.
+
+The scan reads a target row's fields only where the filter, an order key, a group key or an
+aggregate names a path field. A ``related`` expansion reads its target rows' fields when it
+renders a page row, so a scan over many rows reads no target field it does not use.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import functools
 from collections import Counter
 from dataclasses import asdict, dataclass
 
-from ..collection_store import native_identity, typed_storage
-from . import cursors, ir, reductions, row_predicates
+from ..collection_store import typed_storage
+from . import cursors, ir, reductions, row_predicates, typed_rows
 from .buckets import Accumulator
 from .errors import QueryError
+from .reference_resolution import unresolved_values
 from .row_predicates import UNRESOLVED
 from .runtime import MAX_RESULT_BYTES, wire_bytes
-from .scalars import MISSING, ScalarValueError, parse_instant, scalar_key
+from .scalars import MISSING, ScalarValueError, scalar_key
 
 _CHUNK = 256
-_UNRESOLVED_VALUES = 20
 _PAGE_RESERVE = cursors._MAX_TOKEN_BYTES + 8
 _ROW_BYTES = 64
 
@@ -44,84 +47,76 @@ class _Row:
     pairs: set  # (reference, value) that did not resolve on this row
 
 
+def _chains(query, bound: dict) -> list[tuple[str, list]]:
+    """Every reference chain the query names, hop by hop: related entries and path aliases."""
+    collection_id = query.source.ref
+    chains: dict[str, list] = {}
+    for entry in query.related:
+        chains.setdefault(entry.path, [bound[(collection_id, entry.path)]])
+    for field in ir.fields(query):
+        if field.alias is None:
+            continue
+        cid, hops = collection_id, []
+        segments = field.alias.split(".")
+        for index, segment in enumerate(segments):
+            hop = bound[(cid, segment)]
+            hops.append(hop)
+            cid = hop.collection_id
+            chains.setdefault(".".join(segments[: index + 1]), list(hops))
+    return list(chains.items())
+
+
+def _targets(chains) -> dict:
+    """The manifest each chain's last hop reads, as the caller may see it."""
+    return {name: hops[-1].manifest for name, hops in chains}
+
+
 class _Execution:
     """The shared scan: dependencies, named chains, resolution and per-row reference state."""
 
-    def __init__(self, session, query, bound: dict):
+    def __init__(self, session, query, bound: dict, *, admitted, basis, uniform):
         self.session = session
         self.query = query
         self.bound = bound
+        self.admitted, self.basis, self.uniform = admitted, basis, uniform
         self.collection_id = query.source.ref
-        self.chains: list[tuple[str, list]] = []
-        self.related: dict[str, int] = {}
-        self.fields = list(self._ir_fields())
-        self._plan_chains()
+        self.fields = list(ir.fields(query))
+        self.related: dict[str, int] = {entry.path: entry.limit for entry in query.related}
+        self.chains = _chains(query, bound)
         self.resolved: dict = {b: {} for _, hops in self.chains for b in hops}
-        self.reads: dict = {}  # (bound, Target) -> values read
+        self.reads: dict = {}  # (bound, Target) -> the path fields read, for the scan
+        self.shown: dict = {}  # (bound, Target) -> digest of every readable field, for a related target
+        self.expansions: dict = {}  # (bound, Target) -> every readable field, for a rendered page row
         self._needed = self._target_fields()
+        self._related_bounds = {hops[-1] for name, hops in self.chains if name in self.related}
         self.pairs: Counter = Counter()
         self.count = 0
         self.unresolved_rows = 0
         self.excluded_unresolved = 0
+        self.state_bytes = 0
+        self.codec = self.payload = self.frozen = None
+        self._binding = None
 
-    def _ir_fields(self):
-        def leaves(node):
-            if node is None:
-                return
-            for child in node.children:
-                yield from leaves(child)
-            if node.field is not None:
-                yield node.field
+    def freeze(self, as_of) -> None:
+        """Fix the page's instant and open its continuation, when it has one."""
+        self.codec, self.payload, self.frozen = cursors.freeze(self.session, self.query, as_of)
 
-        yield from self.query.select.fields
-        yield from leaves(self.query.where)
-        for key in self.query.order_by.keys:
-            yield key.field
-        if self.query.aggregate is not None:
-            for group in self.query.aggregate.groups:
-                yield group.field
-            for value in self.query.aggregate.values:
-                if value.field is not None:
-                    yield value.field
-                yield from leaves(value.where)
-        yield from leaves(self.query.having)
-
-    def _plan_chains(self) -> None:
-        """Every reference chain the query names, hop by hop: related entries and path aliases."""
-        chains: dict[str, list] = {}
-        order: list[str] = []
-        for entry in self.query.related:
-            self.related[entry.path] = entry.limit
-            if entry.path not in chains:
-                order.append(entry.path)
-                chains[entry.path] = [self.bound[(self.collection_id, entry.path)]]
-        for field in self.fields:
-            if field.alias is None:
-                continue
-            cid, hops = self.collection_id, []
-            for index, segment in enumerate(field.alias.split(".")):
-                hop = self.bound[(cid, segment)]
-                hops.append(hop)
-                cid = hop.collection_id
-                name = ".".join(field.alias.split(".")[: index + 1])
-                if name not in chains:
-                    order.append(name)
-                    chains[name] = list(hops)
-        self.chains = [(name, chains[name]) for name in order]
+    def retain(self, size: int) -> None:
+        """Count bytes this execution holds across rows against the session's bound."""
+        self.state_bytes += size
+        if self.state_bytes > self.session.limits.max_state_bytes:
+            raise QueryError("QUERY_COST_LIMIT")
 
     def _target_fields(self) -> dict:
-        """The fields each bound reference's resolved targets must be read for."""
+        """The fields the scan reads from each bound reference's resolved targets."""
         needed: dict = {}
         for name, hops in self.chains:
-            terminal = hops[-1]
             for field in self.fields:
                 if field.alias == name:
-                    needed.setdefault(terminal, set()).add(field.path)
-            if name in self.related:
-                needed.setdefault(hops[0], set()).update(hops[0].manifest.schema.fields)
+                    needed.setdefault(hops[-1], set()).add(field.path)
             if len(hops) == 2:
                 needed.setdefault(hops[0], set()).add(hops[1].declaration.path[0])
-        return needed
+        return {bound: sorted(names) for bound, names in needed.items()}
 
     def dependencies(self) -> tuple[str, ...]:
         """The source fields the scan decodes: every base field used plus each hop's source field."""
@@ -133,55 +128,51 @@ class _Execution:
     def names(self) -> list[str]:
         return [name for name, _ in self.chains]
 
-    def _item_key(self, layout, raw):
-        if layout is not None and layout.encoding == typed_storage.TYPED_V2 and type(raw) is bytes:
-            try:
-                return native_identity.decode(raw, layout.identity)
-            except (ValueError, UnicodeError) as error:
-                raise QueryError("QUERY_UNAVAILABLE") from error
-        if type(raw) is not str:
-            raise QueryError("QUERY_UNAVAILABLE")
-        return raw
+    def visit_charge(self) -> int:
+        """The preview's charge: the admitted rows, plus one lookup per row for each bound reference.
+
+        An estimate, since the values to look up are read only when the query runs: it is an upper
+        bound for a single-valued reference and a floor for a many-valued one.
+        """
+        bounds = {bound for _, hops in self.chains for bound in hops}
+        return self.admitted.visible_count * (1 + len(bounds))
+
+    def _read_target(self, bound, target) -> None:
+        """Read the scan's fields of one resolved target, once.
+
+        A related target also folds every field the caller may read into a digest, so a continuation
+        refuses once a value it would show changed; the values themselves are read again for a page row.
+        """
+        if target is None:
+            return
+        fields = self._needed.get(bound)
+        if fields and (bound, target) not in self.reads:
+            values = self.reads[bound, target] = bound.read(target, fields)
+            self.retain(wire_bytes(values) + _ROW_BYTES)
+        if bound in self._related_bounds and (bound, target) not in self.shown:
+            self.shown[bound, target] = cursors._hash(bound.read(target, sorted(bound.manifest.schema.fields)))
+            self.retain(_ROW_BYTES)
 
     def _resolve_chunk(self, rows: list[tuple]) -> None:
-        """Resolve one chunk's distinct values per hop, then read each new target's fields once."""
-        first = {hops[0] for _, hops in self.chains}
-        second = {hops[1] for _, hops in self.chains if len(hops) == 2}
-        for bound in first:
-            bound.resolve([value for *_, values in rows for value in bound.declaration.values(values)])
-        for bound in first:
-            fields = sorted(self._needed.get(bound, ()))
-            if not fields:
-                continue
+        """Resolve one chunk's distinct values hop by hop, then read each new target's path fields once."""
+        hops = {(chain[0], chain[1] if len(chain) == 2 else None) for _, chain in self.chains}
+        for first in {first for first, _ in hops}:
+            first.resolve([value for *_, values in rows for value in first.declaration.values(values)])
             for *_, values in rows:
-                for value in bound.declaration.values(values):
-                    target = bound._found.get(value)
-                    if target is not None and (bound, target) not in self.reads:
-                        self.reads[bound, target] = bound.read(target, fields)
-        for bound in second:
-            hop1 = next(hops[0] for _, hops in self.chains if len(hops) == 2 and hops[1] is bound)
+                for value in first.declaration.values(values):
+                    self._read_target(first, first._found.get(value))
+        for first, second in hops:
+            if second is None:
+                continue
             wanted = []
             for *_, values in rows:
-                for value in hop1.declaration.values(values):
-                    target = hop1._found.get(value)
-                    if target is None:
-                        continue
-                    wanted += list(bound.declaration.values(self.reads.get((hop1, target), {})))
-            bound.resolve(wanted)
-        for bound in second:
-            fields = sorted(self._needed.get(bound, ()))
-            if not fields:
-                continue
-            hop1 = next(hops[0] for _, hops in self.chains if len(hops) == 2 and hops[1] is bound)
-            for *_, values in rows:
-                for value in hop1.declaration.values(values):
-                    target = hop1._found.get(value)
-                    if target is None:
-                        continue
-                    for value2 in bound.declaration.values(self.reads.get((hop1, target), {})):
-                        target2 = bound._found.get(value2)
-                        if target2 is not None and (bound, target2) not in self.reads:
-                            self.reads[bound, target2] = bound.read(target2, fields)
+                for value in first.declaration.values(values):
+                    target = first._found.get(value)
+                    if target is not None:
+                        wanted += second.declaration.values(self.reads.get((first, target), {}))
+            second.resolve(wanted)
+            for value in wanted:
+                self._read_target(second, second._found.get(value))
 
     def _row_state(self, values: dict) -> tuple[dict, dict, set]:
         """The state, terminal target and unresolved (reference, value) pairs of one row's chains."""
@@ -233,70 +224,83 @@ class _Execution:
         chain = next(hops for name, hops in self.chains if name == field.alias)
         return self.reads.get((chain[-1], terminal), {}).get(field.path, MISSING)
 
-    def scan(self, admitted) -> list[_Row]:
-        """Scan the admitted rows and classify each against the filter and its reference chains.
-
-        Returns the combined rows; the counters hold the rest of ``combined``.
-        """
+    def chunks(self):
+        """The admitted rows in chunks of ``(row_id, item_key, values)``, each chunk's references resolved."""
+        admitted, session = self.admitted, self.session
         sql, decode = reductions._scan_sql(
-            self.session, self.collection_id, admitted.layout, admitted.membership_sql,
+            session, self.collection_id, admitted.layout, admitted.membership_sql,
             self.dependencies(), with_row_id=True)
-        project = self.session._project_values
-        instant = self._instant
-        combined, retained, visited = [], 0, 0
-        cursor = self.session.connection.execute(sql, (self.collection_id,))
+        project = session._project_values
+        visited = 0
+        cursor = session.connection.execute(sql, (self.collection_id,))
         try:
             buffer = []
             for raw in cursor:
                 visited += 1
                 if not visited % reductions._CHECK_EVERY:
-                    self.session.check()
+                    session.check()
                 try:
                     row_id, values = decode(raw)
                 except (typed_storage.TypedStorageError, ValueError, TypeError) as error:
                     raise QueryError("QUERY_UNAVAILABLE") from error
                 if project is not None:
                     values = project(values)
-                buffer.append((row_id, self._item_key(admitted.layout, raw[1]), values))
+                buffer.append((row_id, typed_rows.decode_item_key(admitted.layout, raw[1]), values))
                 if len(buffer) == _CHUNK:
-                    retained += self._classify(buffer, combined, instant)
-                    if retained > self.session.limits.max_state_bytes:
-                        raise QueryError("QUERY_COST_LIMIT")
+                    self._resolve_chunk(buffer)
+                    yield buffer
                     buffer = []
             if buffer:
-                retained += self._classify(buffer, combined, instant)
-                if retained > self.session.limits.max_state_bytes:
-                    raise QueryError("QUERY_COST_LIMIT")
+                self._resolve_chunk(buffer)
+                yield buffer
         finally:
             cursor.close()
+
+    def scan(self) -> list[_Row]:
+        """Scan the admitted rows and classify each against the filter and its reference chains.
+
+        Returns the combined rows; the counters hold the rest of ``combined``.
+        """
+        combined = []
+        for buffer in self.chunks():
+            for row_id, item_key, values in buffer:
+                row = _Row(row_id, item_key, values, *self._row_state(values))
+                if self.include(row):
+                    combined.append(row)
         self.session.check()
         return combined
 
-    def _classify(self, buffer: list[tuple], combined: list[_Row], instant) -> int:
-        self._resolve_chunk(buffer)
-        retained = 0
-        for row_id, item_key, values in buffer:
-            states, terminals, pairs = self._row_state(values)
-            row = _Row(row_id, item_key, values, states, terminals, pairs)
-            outcome = row_predicates.evaluate(
-                self.query.where, lambda field, row=row: self.value_of(row, field), instant=instant)
-            if outcome is False:
-                continue
-            if outcome is None:
-                self.excluded_unresolved += 1
-            else:
-                self.count += 1
-                if "unresolved" in states.values():
-                    self.unresolved_rows += 1
-                combined.append(row)
-                retained += wire_bytes(values) + _ROW_BYTES
-            self.pairs.update(pairs)
-        return retained
+    def include(self, row: _Row) -> bool:
+        """Whether the filter combines ``row``, counting the row into ``combined`` as it decides.
+
+        A row the filter leaves unknown only because a reference did not resolve is excluded and counted.
+        """
+        outcome = row_predicates.evaluate(
+            self.query.where, lambda field: self.value_of(row, field), instant=self.frozen)
+        if outcome is False:
+            return False
+        self.pairs.update(row.pairs)
+        if outcome is None:
+            self.excluded_unresolved += 1
+            return False
+        self.count += 1
+        if "unresolved" in row.states.values():
+            self.unresolved_rows += 1
+        self.retain(wire_bytes(row.values) + _ROW_BYTES)
+        return True
 
     def combined(self) -> dict:
         return {"count": self.count, "unresolved_rows": self.unresolved_rows,
                 "excluded_unresolved": self.excluded_unresolved,
-                "unresolved_values": _unresolved_values(self.pairs)}
+                "unresolved_values": unresolved_values(self.pairs)}
+
+    def _expanded(self, bound, target) -> dict:
+        """Every field of a resolved target that the caller may read, read when a page row needs it."""
+        values = self.expansions.get((bound, target))
+        if values is None:
+            values = self.expansions[bound, target] = bound.read(target, sorted(bound.manifest.schema.fields))
+            self.retain(wire_bytes(values) + _ROW_BYTES)
+        return values
 
     def related_out(self, row: _Row) -> dict:
         """The ``related`` object of one output row: state, rows and bounded many-valued items."""
@@ -308,7 +312,7 @@ class _Execution:
                 out = {"state": state}
                 if state == "resolved":
                     target = row.terminals[name]
-                    out["row"] = {**self.reads.get((bound, target), {}), "item_key": target.item_key}
+                    out["row"] = {**self._expanded(bound, target), "item_key": target.item_key}
                 result[name] = out
                 continue
             values = bound.declaration.values(row.values)
@@ -317,47 +321,74 @@ class _Execution:
                 target = bound._found.get(value)
                 item = {"value": value, "state": "resolved" if target is not None else "unresolved"}
                 if target is not None:
-                    item["row"] = {**self.reads.get((bound, target), {}), "item_key": target.item_key}
+                    item["row"] = {**self._expanded(bound, target), "item_key": target.item_key}
                 items.append(item)
             result[name] = {"state": state, "count": len(values), "items": items,
                             "truncated": len(items) < len(values)}
         return result
 
     def digest(self) -> str:
-        """The resolution digest a continuation binds: each distinct value's outcome and values read."""
+        """The resolution digest a continuation binds: each distinct value's outcome and the values it shows."""
         seen = []
         for name, hops in self.chains:
             for position, bound in enumerate(hops):
                 entries = []
                 for value, target in sorted(bound._found.items(), key=lambda item: item[0]):
                     entries.append([value, None if target is None else
-                                    [target.item_key, self.reads.get((bound, target), {})]])
+                                    [target.item_key, self.reads.get((bound, target), {}),
+                                     self.shown.get((bound, target))]])
                 seen.append([f"{name}#{position}", entries])
         return cursors._hash(seen)
 
-    def binding(self, session, query, admitted, basis, uniform, dependencies) -> dict:
-        targets = sorted({bound.collection_id: bound for _, hops in self.chains for bound in hops
-                          }.items())
-        schema = cursors._hash([
-            [basis.manifest_hash, basis.type_name, basis.type_version, basis.declaration_hash],
-            [[bound.collection_id, bound.manifest.manifest_version.hash] for _, bound in targets]])
-        visible = cursors._hash([
-            cursors.visible_basis(session, self.collection_id, uniform=uniform,
-                                  layout=admitted.layout, dependencies=set(dependencies)),
-            self.digest()])
-        return {**cursors.caller_binding(session, query), "schema": schema,
-                "visible": cursors.with_rows(session, self.collection_id, visible)}
+    def binding(self) -> dict:
+        """What a continuation binds: the query, the caller, each collection's schema and what the scan saw."""
+        if self._binding is None:
+            targets = sorted({bound.collection_id: bound for _, hops in self.chains for bound in hops}.items())
+            schema = cursors._hash([
+                [self.basis.manifest_hash, self.basis.type_name, self.basis.type_version,
+                 self.basis.declaration_hash],
+                [[bound.collection_id, bound.manifest.manifest_version.hash] for _, bound in targets]])
+            visible = cursors._hash([
+                cursors.visible_basis(self.session, self.collection_id, uniform=self.uniform,
+                                      layout=self.admitted.layout, dependencies=set(self.dependencies())),
+                self.digest()])
+            self._binding = {**cursors.caller_binding(self.session, self.query), "schema": schema,
+                             "visible": cursors.with_rows(self.session, self.collection_id, visible)}
+        return self._binding
 
-    _instant = None
+    def resume(self, rows: list[_Row]) -> list[_Row]:
+        """The rows past the continuation's boundary; a continuation that no longer fits is refused."""
+        if self.payload is None:
+            return rows
+        self.codec.verify(self.payload, self.binding())
+        position = next((n for n, row in enumerate(rows) if row.item_key == self.payload["boundary"]), None)
+        if position is None:
+            raise QueryError("QUERY_CURSOR_STALE")
+        return rows[position + 1:]
 
-
-def _unresolved_values(pairs: Counter) -> dict:
-    """The bounded, ordered list of distinct unresolved (reference, value) pairs."""
-    entries = [{"reference": name, "value": value, "rows": rows}
-               for (name, value), rows in pairs.items()]
-    entries.sort(key=lambda item: (-item["rows"], item["reference"], item["value"]))
-    return {"values": entries[:_UNRESOLVED_VALUES],
-            "truncated": len(entries) > _UNRESOLVED_VALUES, "total": len(entries)}
+    def page(self, rows: list[_Row], render) -> dict:
+        """One page of ``rows`` within the row limit and the result byte cap, with its continuation."""
+        out, size, reason = [], 0, None
+        for index, row in enumerate(rows):
+            if index >= self.query.page.limit:
+                reason = "limit"
+                break
+            rendered = render(row)
+            cost = wire_bytes(rendered) + 2 * bool(out)
+            if size + cost > MAX_RESULT_BYTES - _PAGE_RESERVE:
+                if not out:
+                    raise QueryError("QUERY_RESULT_TOO_LARGE")
+                reason = "bytes"
+                break
+            out.append(rendered)
+            size += cost
+        token = None
+        if reason is not None:
+            self.codec = self.codec or cursors._codec(self.session)
+            token = self.codec.mint(self.binding(), as_of=self.frozen.isoformat(),
+                                    boundary=rows[len(out) - 1].item_key)
+        return {"rows": out, "returned": len(out), "has_more": reason is not None, "next_cursor": token,
+                "truncated": reason is not None, "truncation_reason": reason}
 
 
 def _refuse(query, session) -> None:
@@ -377,17 +408,11 @@ def _refuse(query, session) -> None:
             raise QueryError("QUERY_UNSUPPORTED", "percentile and distinct count are not assembled from rollups")
 
 
-def _freeze(session, query, as_of):
-    codec = cursors._codec(session)
-    payload = codec.open(query.page.after) if query.page.after is not None else None
-    try:
-        frozen = parse_instant(
-            payload["as_of"] if payload else as_of or query.as_of or dt.datetime.now(dt.UTC).isoformat())
-        if payload is not None and as_of is not None and parse_instant(as_of).isoformat() != frozen.isoformat():
-            raise QueryError("QUERY_CURSOR_INVALID")
-    except ValueError as error:
-        raise QueryError("QUERY_VALUE_INVALID", "as_of is an RFC 3339 instant") from error
-    return codec, payload, frozen
+def check_shape(session, query, bound: dict, *, manifest) -> None:
+    """Every refusal ``run`` and ``reduce`` make from the request and the declarations; reads no values."""
+    _refuse(query, session)
+    if query.aggregate is not None:
+        reductions._shape(query, manifest, _targets(_chains(query, bound)))
 
 
 def _sort_key(execution, row: _Row, field: ir.Field):
@@ -453,15 +478,7 @@ def _output_row(execution, admitted, row: _Row, select: tuple[ir.Field, ...]) ->
     return out
 
 
-def _open_execution(session, query, bound, *, basis, uniform, as_of):
-    _refuse(query, session)
-    codec, payload, frozen = _freeze(session, query, as_of)
-    execution = _Execution(session, query, bound)
-    execution._instant = frozen
-    return execution, codec, payload, frozen
-
-
-def _explain_plan(session, query, execution, *, manifest, uniform, admitted, dependencies):
+def _explain_plan(session, query, execution, *, manifest, uniform, dependencies):
     result = {"source": asdict(query.source), "query_version": query.version,
               "schema_version": manifest.schema.version, "mode": query.mode,
               "execution_profile": session.limits.profile, "bounds": session.limits.bounds(),
@@ -472,69 +489,26 @@ def _explain_plan(session, query, execution, *, manifest, uniform, admitted, dep
     if query.mode == "explain":
         return result
     if query.mode == "preview":
-        return {**result, "visit_charge": admitted.visible_count}
-    return {**result, "admitted": True, "visit_charge": admitted.visible_count}
-
-
-def _boundary_resume(rows: list[_Row], boundary: str) -> list[_Row]:
-    position = next((n for n, row in enumerate(rows) if row.item_key == boundary), None)
-    if position is None:
-        raise QueryError("QUERY_CURSOR_STALE")
-    return rows[position + 1:]
+        return {**result, "visit_charge": execution.visit_charge()}
+    return {**result, "admitted": True, "visit_charge": execution.visit_charge()}
 
 
 def run(session, query, bound: dict, *, basis, uniform, manifest, as_of=None) -> dict:
     """Execute, explain, preview or dry-run a row query that names a reference."""
     _refuse(query, session)
-    collection_id = query.source.ref
-    admitted = session.admit(collection_id)
+    admitted = session.admit(query.source.ref)
+    execution = _Execution(session, query, bound, admitted=admitted, basis=basis, uniform=uniform)
     if query.mode in {"explain", "preview", "dry_run"}:
-        execution = _Execution(session, query, bound)
         return _explain_plan(session, query, execution, manifest=manifest,
-                             uniform=uniform, admitted=admitted,
-                             dependencies=execution.dependencies())
-    execution, codec, payload, frozen = _open_execution(session, query, bound,
-                                                      basis=basis, uniform=uniform, as_of=as_of)
-    dependencies = execution.dependencies()
-    rows = execution.scan(admitted)
+                             uniform=uniform, dependencies=execution.dependencies())
+    execution.freeze(as_of)
+    rows = execution.scan()
     _sort_rows(execution, rows, query.order_by.keys)
-    binding = None
-    if payload is not None:
-        binding = execution.binding(session, query, admitted, basis, uniform, dependencies)
-        codec.verify(payload, binding)
-        rows = _boundary_resume(rows, payload["boundary"])
-
-    def mint(boundary: str) -> str:
-        nonlocal binding
-        binding = binding or execution.binding(session, query, admitted, basis, uniform, dependencies)
-        return codec.mint(binding, as_of=frozen.isoformat(), boundary=boundary)
-
-    limit = query.page.limit
-    out, size, last, has_more, reason = [], 0, None, False, None
-    select = query.select.fields
-    for index, row in enumerate(rows):
-        if index >= limit:
-            has_more, reason = True, "limit"
-            break
-        rendered = _output_row(execution, admitted, row, select)
-        cost = wire_bytes(rendered) + 2 * bool(out)
-        if size + cost > MAX_RESULT_BYTES - _PAGE_RESERVE:
-            if not out:
-                raise QueryError("QUERY_RESULT_TOO_LARGE")
-            has_more, reason = True, "bytes"
-            break
-        out.append(rendered)
-        size += cost
-        last = row.item_key
-    else:
-        last = rows[-1].item_key if rows else None
-    token = mint(last) if has_more else None
-    result = {"rows": out, "returned": len(out), "has_more": has_more, "next_cursor": token,
-              "total": execution.count, "as_of": frozen.isoformat(),
+    rows = execution.resume(rows)
+    page = execution.page(rows, lambda row: _output_row(execution, admitted, row, query.select.fields))
+    result = {**page, "total": execution.count, "as_of": execution.frozen.isoformat(),
               "source": asdict(query.source), "query_version": query.version,
-              "schema_version": manifest.schema.version, "schema_fingerprint":
-                  (binding or execution.binding(session, query, admitted, basis, uniform, dependencies))["schema"],
-              "truncated": has_more, "truncation_reason": reason,
+              "schema_version": manifest.schema.version, "schema_fingerprint": execution.binding()["schema"],
               "mode": query.mode, "execution_profile": session.limits.profile,
               "combined": execution.combined()}
     session.check()
@@ -551,13 +525,11 @@ def reduce(session, query, bound: dict, *, basis, uniform, manifest, as_of=None)
     _refuse(query, session)
     collection_id = query.source.ref
     admitted = session.admit(collection_id)
-    execution, codec, payload, frozen = _open_execution(session, query, bound,
-                                                      basis=basis, uniform=uniform, as_of=as_of)
-    targets = {name: hops[-1].manifest for name, hops in execution.chains}
-    shape = reductions._shape(query, manifest, targets)
-    dependencies = execution.dependencies()
+    execution = _Execution(session, query, bound, admitted=admitted, basis=basis, uniform=uniform)
+    execution.freeze(as_of)
+    shape = reductions._shape(query, manifest, _targets(execution.chains))
     visit_reason = "filtered" if (query.where is not None
-                                or any(value.where is not None for value in shape.values)) else "references"
+                                  or any(value.where is not None for value in shape.values)) else "references"
     basis_out = None if shape.basis is None else {
         "field": shape.basis.field, "bucket": shape.timed.bucket, "offset": shape.basis.offset,
         "kind": shape.basis.kind, "from": shape.timed.window_from, "to": shape.timed.window_to}
@@ -565,66 +537,31 @@ def reduce(session, query, bound: dict, *, basis, uniform, manifest, as_of=None)
             "release": "uniform" if uniform else "admitted", "rollup": None, "basis": basis_out}
     if query.mode in {"explain", "preview", "dry_run"}:
         result = {"source": asdict(query.source), "query_version": query.version,
-                  "schema_version": manifest.schema.version, "mode": query.mode, "as_of": frozen.isoformat(),
+                  "schema_version": manifest.schema.version, "mode": query.mode,
+                  "as_of": execution.frozen.isoformat(),
                   "execution_profile": session.limits.profile, "bounds": session.limits.bounds(),
                   "plan": plan, "references": execution.names()}
         if query.mode == "explain":
             return result
         if query.mode == "preview":
-            return {**result, "visit_charge": admitted.visible_count}
-        return {**result, "admitted": True, "visit_charge": admitted.visible_count}
+            return {**result, "visit_charge": execution.visit_charge()}
+        return {**result, "admitted": True, "visit_charge": execution.visit_charge()}
 
-    wheres = {value.name: _aggregate_where(execution, value, frozen)
-              for value in shape.values if value.where is not None}
+    wheres = {value.name: _aggregate_where(execution, value) for value in shape.values if value.where is not None}
     combined_rows: list[_Row] = []
-    retained = [0]
 
-    def include(context) -> bool | None:
-        verdict = row_predicates.evaluate(
-            query.where, lambda field, ctx=context: execution.value_of(ctx, field), instant=frozen)
-        if verdict is None:
-            execution.excluded_unresolved += 1
-            execution.pairs.update(context.pairs)
-            return None
-        if verdict is False:
+    def include(row: _Row) -> bool:
+        if not execution.include(row):
             return False
-        execution.count += 1
-        execution.pairs.update(context.pairs)
-        if "unresolved" in context.states.values():
-            execution.unresolved_rows += 1
-        combined_rows.append(context)
+        combined_rows.append(row)
         return True
 
-    sql, decode = reductions._scan_sql(
-        session, collection_id, admitted.layout, admitted.membership_sql,
-        dependencies, with_row_id=True)
-    project = session._project_values
     injected = [(field, f"{field.alias}.{field.path}") for field in execution.fields
                 if field.alias is not None]
 
     def scanned():
-        visited = 0
-        cursor = session.connection.execute(sql, (collection_id,))
-        try:
-            buffer = []
-            for raw in cursor:
-                visited += 1
-                if not visited % reductions._CHECK_EVERY:
-                    session.check()
-                try:
-                    row_id, values = decode(raw)
-                except (typed_storage.TypedStorageError, ValueError, TypeError) as error:
-                    raise QueryError("QUERY_UNAVAILABLE") from error
-                if project is not None:
-                    values = project(values)
-                buffer.append((row_id, execution._item_key(admitted.layout, raw[1]), values))
-                if len(buffer) == _CHUNK:
-                    yield from _classified(execution, buffer, injected, retained)
-                    buffer = []
-            if buffer:
-                yield from _classified(execution, buffer, injected, retained)
-        finally:
-            cursor.close()
+        for buffer in execution.chunks():
+            yield from _classified(execution, buffer, injected)
 
     groups, flagged = reductions._group_rows(
         session.limits, shape, scanned(), None, include=include, wheres=wheres)
@@ -634,22 +571,12 @@ def reduce(session, query, bound: dict, *, basis, uniform, manifest, as_of=None)
                               {"filtered": {}, "unresolved_rows": 0, "pairs": Counter()}]
     ordered = sorted(groups.items(), key=lambda item: item[0])
     combined_rows.sort(key=lambda row: row.item_key)
-
-    binding = None
-    if payload is not None:
-        binding = execution.binding(session, query, admitted, basis, uniform, dependencies)
-        codec.verify(payload, binding)
-        combined_rows = _boundary_resume(combined_rows, payload["boundary"])
-
-    def mint(boundary: str) -> str:
-        nonlocal binding
-        binding = binding or execution.binding(session, query, admitted, basis, uniform, dependencies)
-        return codec.mint(binding, as_of=frozen.isoformat(), boundary=boundary)
+    combined_rows = execution.resume(combined_rows)
 
     group_rows = [reductions._row(shape, bucket, *state) for (bucket, _), state in ordered]
     envelope = {"source": asdict(query.source), "query_version": query.version,
                 "schema_version": manifest.schema.version, "mode": query.mode,
-                "as_of": frozen.isoformat(), "execution_profile": session.limits.profile,
+                "as_of": execution.frozen.isoformat(), "execution_profile": session.limits.profile,
                 "bounds": session.limits.bounds(), "plan": plan,
                 "flagged_rows": flagged, "flagged_scope": "collection",
                 "admitted_rows": admitted.visible_count,
@@ -659,55 +586,35 @@ def reduce(session, query, bound: dict, *, basis, uniform, manifest, as_of=None)
             > MAX_RESULT_BYTES - _PAGE_RESERVE:
         raise QueryError("QUERY_RESULT_TOO_LARGE",
                          "the groups alone exceed the result cap; coarsen group_by")
-    out, size, last, has_more, reason = [], 0, None, False, None
     item_key_withheld = session._field_plans[collection_id].item_key_withheld
-    for index, row in enumerate(combined_rows):
-        if index >= query.page.limit:
-            has_more, reason = True, "limit"
-            break
-        rendered = _combined_row(execution, admitted, row, item_key_withheld=item_key_withheld)
-        cost = wire_bytes(rendered) + 2 * bool(out)
-        if size + cost > MAX_RESULT_BYTES - _PAGE_RESERVE:
-            if not out:
-                raise QueryError("QUERY_RESULT_TOO_LARGE")
-            has_more, reason = True, "bytes"
-            break
-        out.append(rendered)
-        size += cost
-        last = row.item_key
-    token = mint(last) if has_more else None
-    result = {**envelope, "rows": out, "returned": len(out), "has_more": has_more,
-              "next_cursor": token, "truncated": has_more, "truncation_reason": reason}
+    page = execution.page(combined_rows, lambda row: _combined_row(
+        execution, admitted, row, item_key_withheld=item_key_withheld))
+    result = {**envelope, **page}
     session.check()
     if wire_bytes(result) > MAX_RESULT_BYTES:
         raise QueryError("QUERY_RESULT_TOO_LARGE")
     return result
 
 
-def _aggregate_where(execution, value, instant):
+def _aggregate_where(execution, value):
     """One aggregate's own filter over the row context, three-valued like the query's."""
 
-    def accept(context) -> bool | None:
+    def accept(row: _Row) -> bool | None:
         return row_predicates.evaluate(
-            value.where, lambda field, ctx=context: execution.value_of(ctx, field), instant=instant)
+            value.where, lambda field: execution.value_of(row, field), instant=execution.frozen)
 
     return accept
 
 
-def _classified(execution, buffer, injected, retained):
-    """Resolve one chunk and yield (item_key, values with path values injected, row context)."""
-    execution._resolve_chunk(buffer)
+def _classified(execution, buffer, injected):
+    """Yield (item_key, values with path values injected, row context) for one resolved chunk."""
     for row_id, item_key, values in buffer:
-        states, terminals, pairs = execution._row_state(values)
-        row = _Row(row_id, item_key, values, states, terminals, pairs)
+        row = _Row(row_id, item_key, values, *execution._row_state(values))
         merged = dict(values)
         for field, public in injected:
             value = execution.value_of(row, field)
             if value is not MISSING:
                 merged[public] = value
-        retained[0] += wire_bytes(values) + _ROW_BYTES
-        if retained[0] > execution.session.limits.max_state_bytes:
-            raise QueryError("QUERY_COST_LIMIT")
         yield item_key, merged, row
 
 
