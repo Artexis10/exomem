@@ -8,7 +8,7 @@ anywhere.
 
 For the assistant-side behavior after the connector is added, see
 [ai-assistant-guide.md](ai-assistant-guide.md). Remote clients cannot use local
-hooks, so they should rely on custom instructions plus `bootstrap()`.
+hooks, so they should rely on custom instructions plus `read_instructions()`.
 
 **What you need:** a machine that stays on (desktop, home server, or a cheap
 VPS) and about **15 minutes**.
@@ -247,7 +247,7 @@ Use Exomem as the memory for my work. Before you start a task, recall what Exome
 The agent then recalls what Exomem holds before a task and saves what it learns.
 The two texts together are longer than a 1,500-character field, so where the
 client caps a field, give each its own field. If you cannot paste the block, at
-minimum start new chats by asking the agent to call `bootstrap(profile="compact")`
+minimum start new chats by asking the agent to call `read_instructions(profile="compact")`
 once before using the KB.
 
 ### Act as the owner from your remote connectors (optional)
