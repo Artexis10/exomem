@@ -1041,6 +1041,8 @@ def _recover_in_store(
         collection_authority.refuse_view_paths(
             root, (restore_rel, *moves.values()), RecoverError
         )
+        # Before the preflight: the commit refuses such a path after the slots have committed.
+        store_targets.refuse_crossing("recover_from_trash", moves.values())
         if _restore_taken(root, trash_kind, restore_rel):
             raise _destination_exists(restore_rel)
 

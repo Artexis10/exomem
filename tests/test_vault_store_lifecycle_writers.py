@@ -437,6 +437,30 @@ def test_a_recovery_onto_a_page_that_now_exists_refuses_and_keeps_both(served):
     assert read.page_exists(served, trashed.trash_path)
 
 
+def test_a_recovery_to_a_path_the_store_does_not_own_refuses_in_validation_and_commits_nothing(
+    served,
+):
+    """A recovery that validates a destination outside the store, so a caller plans on a recovery
+    that its commit then refuses."""
+    store_gamma(served)
+    trashed = delete_file.delete_file(served, path=GAMMA, confirm=True)
+    start = revision(served)
+
+    for validate_only in (True, False):
+        with pytest.raises(OpError) as refused:
+            recover_from_trash.recover_from_trash(
+                served,
+                trash_path=trashed.trash_path,
+                restore_path="Inbox/Gamma.md",
+                validate_only=validate_only,
+            )
+        assert refused.value.code == availability.WRITER_UNROUTED, validate_only
+
+    assert revision(served) == start
+    assert read.page_exists(served, trashed.trash_path)
+    assert not (served / "Inbox/Gamma.md").exists()
+
+
 HARBOUR = "Knowledge Base/Projects/Harbour"
 #: The folder size of the folder-trash cases; the latency drill sets it to 200.
 FOLDER_PAGES = int(os.environ.get("EXOMEM_LIFECYCLE_DRILL_PAGES", "40"))

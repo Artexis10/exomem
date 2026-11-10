@@ -327,11 +327,27 @@ def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
         raise availability.unrouted(operation, why)
 
 
-def _relative(vault_root: Path, path: str) -> str:
+def relative(vault_root: Path, path: str) -> str:
     """The vault-relative form of a path, or ``VaultPathError`` when it does not resolve."""
     resolution = vault.resolve_under_vault(vault_root, path, return_details=True)
     assert isinstance(resolution, vault.VaultPathResolution)
     return resolution.relative
+
+
+#: Why a store-mode move refuses an end that the store does not own.
+_CROSSES = "a move between a path that the store holds and one it does not has no store form"
+
+
+def refuse_crossing(operation: str, rels: Iterable[str]) -> None:
+    """Refuse a store-mode move with an end at a vault-relative path that the store does not own.
+
+    The store form moves a stored page from one path that the store owns to another. The commit
+    refuses any other path, but only after the preflight has judged the move and, for a recovery,
+    after its relation-review slots have committed. So a writer refuses here first, and its
+    validation refuses what its commit would. It reads nothing: a path's owner is a rule on its name.
+    """
+    if any(ownership.classify(rel) is ownership.Ownership.NONE for rel in rels):
+        raise availability.unrouted(operation, _CROSSES)
 
 
 def owns_any(
@@ -346,9 +362,9 @@ def owns_any(
         return False
     try:
         return any(
-            ownership.classify(_relative(vault_root, path)) is not ownership.Ownership.NONE
+            ownership.classify(relative(vault_root, path)) is not ownership.Ownership.NONE
             for path in files
-        ) or any(ownership.owns_folder(_relative(vault_root, path)) for path in folders)
+        ) or any(ownership.owns_folder(relative(vault_root, path)) for path in folders)
     except vault.VaultPathError:
         return False
 

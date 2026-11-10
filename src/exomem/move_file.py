@@ -604,14 +604,11 @@ def _move_file_local(
     # move of a page is one store transaction, planned against one snapshot of the store.
     store_writer = None
     if store_targets.owns_any(vault_root, files=(old_path, new_path)):
-        if not (
-            store_targets.owns_any(vault_root, files=(old_path,))
-            and store_targets.owns_any(vault_root, files=(new_path,))
-        ):
-            raise store_availability.unrouted(
-                "move_file",
-                "a move between a path that the store holds and one it does not has no store form",
-            )
+        try:
+            ends = [store_targets.relative(vault_root, path) for path in (old_path, new_path)]
+        except VaultPathError as e:
+            raise MoveFileError(code=e.code, reason=e.reason) from e
+        store_targets.refuse_crossing("move_file", ends)
         store_writer = store_availability.page_writer(vault_root)
     # The read phase sees one revision; it ends before the commit, which rechecks what it read.
     reading = mutation_context.enter_context(ExitStack())
