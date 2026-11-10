@@ -98,7 +98,6 @@ class _Execution:
         self.expansions: dict = {}  # (bound, Target) -> every readable field, for a rendered page row
         self._needed = self._target_fields()
         self._related_bounds = {hops[-1] for name, hops in self.chains if name in self.related}
-        self.inverse_seen: dict[str, list] = {name: [] for name in self.inverses}
         self.pairs: Counter = Counter()
         self.count = 0
         self.unresolved_rows = 0
@@ -139,13 +138,21 @@ class _Execution:
         return [name for name, _ in self.chains] + [name for name in self.inverses]
 
     def visit_charge(self) -> int:
-        """The preview's charge: the admitted rows, plus one lookup per row for each bound reference.
+        """The preview's charge: the admitted rows, plus one lookup per row for each bound reference
+        and each inverse's bounded index rows.
 
-        An estimate, since the values to look up are read only when the query runs: a many-valued
-        reference may need more lookups per row than it charges.
+        An upper bound, since the values to look up are read only when the query runs: a
+        many-valued reference may need more lookups per row than it charges.
         """
         bounds = {bound for _, hops in self.chains for bound in hops}
-        return self.admitted.visible_count * (1 + len(bounds))
+        charge = self.admitted.visible_count * (1 + len(bounds))
+        for _, (_, bound) in self.inverses.items():
+            charge += self.session.connection.execute(
+                "SELECT count(*) FROM (SELECT 1 FROM item_references "
+                "WHERE collection_id=? AND field_path=? LIMIT ?)",
+                (bound.collection_id, bound.dotted,
+                 self.session.limits.max_row_visits + 1)).fetchone()[0]
+        return charge
 
     def _read_target(self, bound, target) -> None:
         """Read the scan's fields of one resolved target, once.
@@ -347,14 +354,12 @@ class _Execution:
             "SELECT natural_key FROM items WHERE row_id=?", (row.row_id,)).fetchone()
         candidates = bound.candidates(
             self.session.connection, natural[0] if natural is not None else None, row.item_key)
-        # One visit per candidate whatever its release decision, so the cost reveals nothing.
-        self.session.charge_visits(len(candidates))
+        # One visit per RELEASED candidate, as `admit` charges; withheld rows cost and show nothing.
         released = []
         for row_id, key in candidates:
-            free = bound.released(key)
-            self.inverse_seen[name].append([key, free])
-            if free:
+            if bound.released(key):
                 released.append((row_id, key))
+        self.session.charge_visits(len(released))
         released.sort(key=lambda item: item[1])
         items = [{"item_key": key, **bound.read(row_id)} for row_id, key in released[:limit]]
         return {"state": "ready", "count": len(released), "items": items,
@@ -371,9 +376,6 @@ class _Execution:
                                     [target.item_key, self.reads.get((bound, target), {}),
                                      self.shown.get((bound, target))]])
                 seen.append([f"{name}#{position}", entries])
-        for name, (_, bound) in self.inverses.items():
-            seen.append([name, bound.ready(self.session.connection),
-                         sorted(self.inverse_seen[name], key=lambda pair: pair[0])])
         return cursors._hash(seen)
 
     def schema_hash(self) -> str:
@@ -382,7 +384,9 @@ class _Execution:
         return cursors._hash([
             [self.basis.manifest_hash, self.basis.type_name, self.basis.type_version,
              self.basis.declaration_hash],
-            [[bound.collection_id, bound.manifest.manifest_version.hash] for _, bound in targets]])
+            [[bound.collection_id, bound.manifest.manifest_version.hash] for _, bound in targets],
+            [[bound.collection_id, bound.manifest.manifest_version.hash, bound.dotted]
+             for name, (_, bound) in sorted(self.inverses.items())]])
 
     def binding(self) -> dict:
         """What a continuation binds: the query, the caller, each collection's schema and what the scan saw."""
@@ -391,7 +395,9 @@ class _Execution:
             visible = cursors._hash([
                 cursors.visible_basis(self.session, self.collection_id, uniform=self.uniform,
                                       layout=self.admitted.layout, dependencies=set(self.dependencies())),
-                self.digest()])
+                self.digest(),
+                [[name, bound.ready(self.session.connection)]
+                 for name, (_, bound) in sorted(self.inverses.items())]])
             self._binding = {**cursors.caller_binding(self.session, self.query), "schema": schema,
                              "visible": cursors.with_rows(self.session, self.collection_id, visible)}
         return self._binding

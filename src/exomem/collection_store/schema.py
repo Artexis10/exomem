@@ -1134,25 +1134,23 @@ class SchemaVersionError(RuntimeError):
 
 
 def _migrate_to_17(conn: sqlite3.Connection) -> None:
-    """Index declared references for inverse expansion: raw values, match keys and warm state.
+    """Index declared references for inverse expansion: match keys and warm state.
 
-    ``item_references`` holds one row per distinct value of a declaration per source row; ``match``
-    is what a target row is found by (``ref:`` + item_key for a canonical row ref, else the
-    serialized natural key), or NULL when the value can name no row. ``item_reference_state``
-    tracks each declaration's backfill: absent or ``ready=0`` means warming. The migration seeds a
-    ``ready=0, built_through=0`` state row for every declaration of every current manifest; the
-    backfill builds the rows.
+    ``item_references`` holds one row per distinct ``match`` a source row's declared
+    values resolve to (``ref:`` + item_key for a canonical row ref, else the serialized
+    natural key); a value that names no row stores nothing. ``item_reference_state``
+    tracks each declaration's backfill: absent or ``ready=0`` means warming. The
+    migration seeds a ``ready=0, built_through=0`` state row for every declaration of
+    every current manifest; the backfill builds the rows.
     """
     conn.execute("""CREATE TABLE item_references(
       collection_id TEXT NOT NULL,
-      row_id INTEGER NOT NULL,
       field_path TEXT NOT NULL,
-      ordinal INTEGER NOT NULL,
-      value TEXT NOT NULL,
-      match TEXT,
-      PRIMARY KEY(row_id, field_path, ordinal)
-    ) STRICT""")
-    conn.execute("CREATE INDEX item_references_by_match ON item_references(collection_id, field_path, match)")
+      match TEXT NOT NULL,
+      row_id INTEGER NOT NULL,
+      PRIMARY KEY(collection_id, field_path, match, row_id)
+    ) WITHOUT ROWID, STRICT""")
+    conn.execute("CREATE INDEX item_references_by_row ON item_references(row_id)")
     conn.execute("""CREATE TABLE item_reference_state(
       collection_id TEXT NOT NULL,
       field_path TEXT NOT NULL,
@@ -1167,7 +1165,9 @@ def _migrate_to_17(conn: sqlite3.Connection) -> None:
     from .. import vault
 
     for collection_id, text, schema_json in conn.execute(
-            "SELECT collection_id, manifest_text, schema_json FROM collection_manifests").fetchall():
+            "SELECT m.collection_id, m.manifest_text, m.schema_json FROM collection_manifests m "
+            "JOIN collections c ON c.collection_id=m.collection_id "
+            "AND c.manifest_version=m.manifest_version").fetchall():
         data, _, _ = vault.parse_frontmatter(text, strict=True)
         if "schema_version" not in data:
             continue

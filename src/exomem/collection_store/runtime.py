@@ -1244,6 +1244,7 @@ class StoreServer:
         self._view_retry_at = 0.0
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
+        self._references_seeded = None  # the writer handle whose reference build states were last seeded
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
         self._requests = deque()
         self._closed = False
@@ -1767,6 +1768,16 @@ class StoreServer:
 
         if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
             return IMPORT_IDLE_SECONDS
+        if self._references_seeded is not self.runtime._handle:
+            # A restored or assembled store may hold declarations with no build state; once per
+            # writer handle, seed them so the reference index warms and builds like any other.
+            try:
+                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                    _mutate(self.root, writer.seed_references)
+                    self._references_seeded = writer.handle
+            except Exception:  # noqa: BLE001 - a store that cannot seed now is retried next tick
+                logger.warning("reference index seeding could not run; retrying later", exc_info=True)
+                return IMPORT_RETRY_SECONDS
         try:
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 due = index_migrations.backfill_due(reader)

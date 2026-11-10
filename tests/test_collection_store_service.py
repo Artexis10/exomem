@@ -25,6 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_collection_row_references import DIARY, SITE_FIELD, SITES, diary_text, sites_text
 from test_collection_store_importer import ndjson, write_source
 from test_collection_store_s1_gate import (
     A_PATH,
@@ -2381,3 +2382,33 @@ def test_an_unreadable_hint_never_admits_a_canonical_projection_as_an_ordinary_f
         else:
             target.unlink()
             outside.rename(target)
+
+
+def test_a_store_whose_reference_state_was_lost_rebuilds_it_on_the_next_tick(service, monkeypatch):
+    """Defect: a store whose declarations lost their build state never rebuilds its reference index."""
+    root = service.root
+    monkeypatch.setattr(capability, "RELEASED", ON)
+    call(root, "record_memory", action="create",
+         manifest_path=manifest_path().replace("Work", "Sites"), manifest_text=sites_text(), why="create")
+    call(root, "record_memory", action="create",
+         manifest_path=manifest_path().replace("Work", "Diary"), manifest_text=diary_text(SITE_FIELD),
+         why="create")
+    call(root, "record_memory", action="append", collection=SITES,
+         item={"code": "North-Field", "name": "North field"}, why="row")
+    call(root, "record_memory", action="append", collection=DIARY,
+         item={"title": "day one", "site": "North-Field"}, why="row")
+    service.stop()
+    with sqlite3.connect(connection.store_path(root)) as raw:
+        raw.execute("DELETE FROM item_reference_state")
+        raw.commit()
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        def rebuilt():
+            with closing(sqlite3.connect(connection.store_path(root))) as raw:
+                count, ready = raw.execute(
+                    "SELECT count(*), min(ready) FROM item_reference_state WHERE collection_id=?",
+                    (DIARY,)).fetchone()
+            return count >= 1 and ready == 1
+        _until(rebuilt)
+    finally:
+        restarted.stop()

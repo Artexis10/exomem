@@ -37,9 +37,9 @@ _TARGET_CACHE = 64
 
 
 def _target_schema(conn, target_id: str):
-    """(semantic_profile, schema) of the target, cached per collection and manifest version."""
+    """(semantic_profile, schema) of the target, cached per collection and manifest hash."""
     row = conn.execute(
-        "SELECT c.manifest_version, m.manifest_text, m.schema_json FROM collections c "
+        "SELECT m.manifest_hash, m.manifest_text, m.schema_json FROM collections c "
         "JOIN collection_manifests m ON m.collection_id=c.collection_id "
         "AND m.manifest_version=c.manifest_version WHERE c.collection_id=?",
         (target_id,),
@@ -88,31 +88,48 @@ def match(target, target_id: str, value: str) -> str | None:
 
 
 def maintain(conn, manifest, row_id: int, values: Mapping[str, Any]) -> None:
-    """Rewrite one source row's index entries inside the canonical item transaction.
+    """Rewrite one source row's index entries inside the canonical item transaction."""
+    maintain_many(conn, manifest, ((row_id, values),))
 
-    The row's entries are deleted unconditionally, so deletes and value rewrites stay in
-    step. New entries are written only when the declaration's state row is ready or
-    already past this row — an unbackfilled row is the backfill's job, not this one's.
+
+def maintain_many(conn, manifest, rows) -> None:
+    """Rewrite the index entries of every ``(row_id, values)`` pair, one pass per declaration.
+
+    The declarations and their state rows are read once per batch, so a collection
+    without references pays nothing. Each row's entries are deleted unconditionally, so
+    deletes and value rewrites stay in step. New entries are written only when the
+    declaration's state row is ready or already past the row — an unbackfilled row is
+    the backfill's job, not this one's.
     """
     declarations = collections.declared_references(manifest.schema)
     if not declarations or not _present(conn):
         return
+    rows = [(row_id, values) for row_id, values in rows]
+    if not rows:
+        return
     for declaration in declarations:
-        conn.execute(
-            "DELETE FROM item_references WHERE row_id=? AND field_path=?",
-            (row_id, declaration.dotted),
-        )
         state = _state(conn, manifest.collection_id, declaration.dotted)
-        if state is None or (not state[2] and state[1] < row_id):
-            continue
-        target_schema = _target_schema(conn, state[0])
-        for ordinal, value in enumerate(declaration.values(values)):
+        target_schema = _target_schema(conn, state[0]) if state is not None else None
+        for row_id, values in rows:
             conn.execute(
-                "INSERT INTO item_references(collection_id, row_id, field_path, ordinal,"
-                " value, match) VALUES(?,?,?,?,?,?)",
-                (manifest.collection_id, row_id, declaration.dotted, ordinal, value,
-                 match(target_schema, state[0], value) if target_schema is not None else None),
+                "DELETE FROM item_references WHERE row_id=? AND field_path=?",
+                (row_id, declaration.dotted),
             )
+            if state is None or (not state[2] and state[1] < row_id):
+                continue
+            if target_schema is None:
+                continue
+            matches = set()
+            for value in declaration.values(values):
+                found = match(target_schema, state[0], value)
+                if found is not None:
+                    matches.add(found)
+            for found in sorted(matches):
+                conn.execute(
+                    "INSERT INTO item_references(collection_id, field_path, match, row_id)"
+                    " VALUES(?,?,?,?)",
+                    (manifest.collection_id, declaration.dotted, found, row_id),
+                )
 
 
 def revise(conn, collection_id: str, *, dropped: tuple[str, ...],
@@ -190,19 +207,52 @@ def backfill(conn, manifest, *, limit: int = 128) -> bool:
         conn.execute(
             "DELETE FROM item_references WHERE row_id=? AND field_path=?",
             (row_id, declaration.dotted))
-        for ordinal, value in enumerate(declaration.values(values)):
-            conn.execute(
-                "INSERT INTO item_references(collection_id, row_id, field_path, ordinal,"
-                " value, match) VALUES(?,?,?,?,?,?)",
-                (manifest.collection_id, row_id, declaration.dotted, ordinal, value,
-                 match(target_schema, state[0], value) if target_schema is not None else None),
-            )
+        if target_schema is not None:
+            matches = set()
+            for value in declaration.values(values):
+                found = match(target_schema, state[0], value)
+                if found is not None:
+                    matches.add(found)
+            for found in sorted(matches):
+                conn.execute(
+                    "INSERT INTO item_references(collection_id, field_path, match, row_id)"
+                    " VALUES(?,?,?,?)",
+                    (manifest.collection_id, declaration.dotted, found, row_id),
+                )
     conn.execute(
         "UPDATE item_reference_state SET built_through=?, ready=? "
         "WHERE collection_id=? AND field_path=?",
         (batch[-1]["row_id"] if batch else state[1], 0 if more else 1,
          manifest.collection_id, declaration.dotted))
     return not more
+
+
+def seed_missing(conn) -> None:
+    """Seed a ``ready=0`` state row for every declaration of every current manifest that has none.
+
+    A store assembled without the canonical create path — a restore, an import — runs
+    this once per writer handle so its declarations always warm and build.
+    """
+    if not _present(conn):
+        return
+    for collection_id, text, schema_json in conn.execute(
+            "SELECT m.collection_id, m.manifest_text, m.schema_json FROM collection_manifests m "
+            "JOIN collections c ON c.collection_id=m.collection_id "
+            "AND c.manifest_version=m.manifest_version").fetchall():
+        data, _, _ = _vault().parse_frontmatter(text, strict=True)
+        if "schema_version" not in data:
+            continue
+        item_schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
+        for declaration in collections.declared_references(item_schema):
+            conn.execute(
+                "INSERT OR IGNORE INTO item_reference_state(collection_id, field_path, target_id,"
+                " built_through, ready) VALUES(?,?,?,0,0)",
+                (collection_id, declaration.dotted, declaration.collection))
+
+
+def _vault():
+    from .. import vault
+    return vault
 
 
 def due(conn) -> tuple[str, ...]:
@@ -217,13 +267,17 @@ def inbound(operation, conn, manifest) -> list[dict]:
     A source the caller cannot read, or whose declared member path is withheld, is
     omitted entirely — the list never names a hidden collection.
     """
+    if not _present(conn):
+        return {"declarations": [], "truncated": False, "total": 0}
     entries = []
+    # Every inverse query over this collection is refused when its natural key is withheld.
+    plan = operation.field_plan(manifest)
+    if plan.natural_key_withheld or not plan.manifest.schema.natural_key:
+        return {"declarations": [], "truncated": False, "total": 0}
     rows = conn.execute(
         "SELECT c.collection_id, c.manifest_path, m.manifest_text, m.schema_json FROM collections c "
         "JOIN collection_manifests m ON m.collection_id=c.collection_id "
-        "AND m.manifest_version=c.manifest_version WHERE c.collection_id != ?",
-        (manifest.collection_id,),
-    ).fetchall()
+        "AND m.manifest_version=c.manifest_version").fetchall()
     from .. import vault
 
     for source_id, path, text, schema_json in rows:
@@ -252,4 +306,7 @@ def inbound(operation, conn, manifest) -> list[dict]:
                 (source_id, declaration.dotted)).fetchone()
             entries.append({"collection": source_id, "field": declaration.dotted,
                             "state": "ready" if state is not None and state[0] else "warming"})
-    return sorted(entries, key=lambda entry: (entry["collection"], entry["field"]))
+    entries.sort(key=lambda entry: (entry["collection"], entry["field"]))
+    return {"declarations": entries[:64],
+            "truncated": len(entries) > 64,
+            "total": len(entries)}

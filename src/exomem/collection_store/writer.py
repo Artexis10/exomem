@@ -2092,6 +2092,12 @@ class CollectionWriter:
             self._precommit(manifest)
         return published, ready
 
+    def seed_references(self) -> None:
+        """Seed warming state rows for declarations a store gained outside the create path."""
+        with self._mutation():
+            reference_index.seed_missing(
+                index_migrations.AccountedWriter(self.connection, self._execute))
+
     def rebuild_references(self, collection) -> None:
         """Reset the collection's reference index to warming for test and repair rebuilds."""
         with self._mutation():
@@ -2761,6 +2767,8 @@ class CollectionWriter:
                 txn_id=txn["txn_id"], schema_version=manifest.schema.version, scope=scope)
         index_migrations.maintain_new_items(index_migrations.AccountedWriter(self.connection, self._execute),
             manifest.collection_id, [(row_ids[key], key, 1, values) for key, values, _, _, _, _ in plans])
+        reference_index.maintain_many(index_migrations.AccountedWriter(self.connection, self._execute),
+            manifest, [(row_ids[key], values) for key, values, _, _, _, _ in plans])
         # Immediate source FKs require every payload identity to exist before sources attach.
         self._execute(tables.INSERT_SOURCE, [{"row_id": row_ids[key], "row_version": 1,
             "ordinal": 0, "source_ref": source} for key, _, _, _, _, source in plans])

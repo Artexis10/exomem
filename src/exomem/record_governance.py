@@ -467,12 +467,16 @@ def inspection_references(value: Any) -> list[dict[str, Any]] | None:
     return out
 
 
-def inspection_inbound(value: Any) -> list[dict[str, Any]] | None:
-    """Bounded inbound-declaration entries: source id, declaration name and index state."""
-    if not isinstance(value, list) or len(value) > 64:
+def inspection_inbound(value: Any) -> dict[str, Any] | None:
+    """The bounded inbound report: up to 64 declarations, plus truncation and total."""
+    if not isinstance(value, Mapping) or set(value) != {"declarations", "truncated", "total"}:
+        return None
+    items, truncated, total = value["declarations"], value["truncated"], value["total"]
+    if (not isinstance(items, list) or len(items) > 64 or type(truncated) is not bool
+            or type(total) is not int or total < len(items) or truncated != (total > 64)):
         return None
     out: list[dict[str, Any]] = []
-    for item in value:
+    for item in items:
         if not isinstance(item, Mapping) or set(item) != {"collection", "field", "state"}:
             return None
         if type(item["collection"]) is not str or type(item["field"]) is not str:
@@ -481,7 +485,7 @@ def inspection_inbound(value: Any) -> list[dict[str, Any]] | None:
             return None
         out.append({"collection": item["collection"], "field": item["field"],
                     "state": item["state"]})
-    return out
+    return {"declarations": out, "truncated": truncated, "total": total}
 
 
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1806,7 +1810,7 @@ def inspect_collection(
                 "saved_views": saved_views,
                 # Store inspection lists declared-reference state; the file mode has no
                 # store database to report against, so it reports the empty list.
-                "references": [], "inbound": [],
+                "references": [], "inbound": {"declarations": [], "truncated": False, "total": 0},
                 "lifecycle_guards": guards,
                 "coverage": _collection_coverage(
                     root,

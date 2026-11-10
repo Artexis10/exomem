@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .. import held_fs, planning, record_formats, record_governance, records, vault
 from .. import structured_collections as collections
-from . import authority, chain, governance, legacy_originals, log_view, ownership, summary, tokens, types, views
+from . import authority, chain, governance, legacy_originals, log_view, ownership, reference_index, summary, tokens, types, views
 from .connection import CollectionStoreError
 from .connection import checked_sql as checked_sql
 from .legacy import LegacyAuditProof, LegacyAuditSpool
@@ -670,6 +670,7 @@ def assemble(conn, material, check):
         check()
         legacy_originals.put(conn, cid, kind, identity, path, raw,
                              (envelope["transition_id"], _event_hash(envelope)))
+    reference_index.seed_missing(conn)
     return LegacyImportResult(cid, len(material.items), len(material.envelopes) - 1, checkpoint,
                               envelope["transition_id"], _event_hash(envelope), material.digest(check))
 

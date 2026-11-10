@@ -1,10 +1,10 @@
 """The inverse-expansion index: item_references maintenance, backfill, warming and leakage rules."""
 
 import sqlite3
+import time as _time
 
 import pytest
-from test_collection_row_reference_queries import FIELDS  # noqa: F401
-from test_collection_row_reference_queries import run as run_diary  # noqa: F401
+from test_collection_row_reference_queries import FIELDS
 from test_collection_row_reference_queries import world as world
 from test_collection_row_references import (
     DIARY,
@@ -25,6 +25,7 @@ from test_collection_row_references import (
 from test_collection_store_schema import _allow
 from test_collection_store_writer import store as store  # noqa: F401
 from test_governance_egress import _external, write_rule, write_scope
+from test_records_bulk_upsert import EVIDENCE, _evidence  # noqa: F401
 
 from exomem import structured_collections as collections
 from exomem.collection_store import connection, reference_index, schema, snapshot
@@ -60,24 +61,25 @@ def _pending(store, cid):
 
 
 def _indexed(store, cid=DIARY, field="skills.skill_id"):
-    return sorted((row_id, field, ordinal, value, match)
-                  for row_id, field, ordinal, value, match in store.handle.connection.execute(
-                      "SELECT row_id, field_path, ordinal, value, match FROM item_references "
-                      "WHERE collection_id=? AND field_path=?", (cid, field)).fetchall())
+    return sorted(store.handle.connection.execute(
+        "SELECT collection_id, field_path, match, row_id FROM item_references "
+        "WHERE collection_id=? AND field_path=?", (cid, field)).fetchall())
 
 
 def _implied(store, cid=DIARY):
-    """The index rows the current items imply for skills.skill_id, computed without the index."""
+    """The (collection, field, match, row) set the current items imply, computed without the index."""
     from exomem.collection_store import typed_storage
 
     _, diary, _ = store._collection(cid)
     declaration = next(d for d in collections.declared_references(diary.schema) if d.dotted == "skills.skill_id")
-    implied = []
+    target = reference_index._target_schema(store.handle.connection, declaration.collection)
+    implied = set()
     for row_id, in store.handle.connection.execute(
             "SELECT row_id FROM items WHERE collection_id=? ORDER BY row_id", (cid,)).fetchall():
-        for ordinal, value in enumerate(
-                declaration.values(typed_storage.item_values(store.handle.connection, row_id))):
-            implied.append((row_id, "skills.skill_id", ordinal, value))
+        for value in declaration.values(typed_storage.item_values(store.handle.connection, row_id)):
+            found = reference_index.match(target, declaration.collection, value)
+            if found is not None:
+                implied.add((cid, "skills.skill_id", found, row_id))
     return sorted(implied)
 
 
@@ -88,8 +90,7 @@ def test_rebuild_from_items_matches_an_independent_computation(world):
     """A stale or partial index must rebuild byte-identical rows from items alone."""
     store_ = ready(world)
     before = _indexed(store_)
-    implied = _implied(store_)
-    assert [(r, f, o, v) for r, f, o, v, _ in before] == implied
+    assert before == _implied(store_)
 
     store_.rebuild_references(DIARY)
     assert _pending(store_, DIARY)
@@ -125,7 +126,7 @@ def test_a_collection_snapshot_holds_no_index_rows_and_a_restore_warms(world, tm
     stage.mkdir()
     with snapshot._staged_copy(
             snapshot._collection_fill(store_.handle.path), directory=stage,
-            deadline=__import__("time").monotonic() + 10, attaches_source=True) as artifact:
+            deadline=_time.monotonic() + 10, attaches_source=True) as artifact:
         copy = sqlite3.connect(artifact.path)
         try:
             assert copy.execute("SELECT count(*) FROM item_references").fetchone()[0] == 0
@@ -218,7 +219,6 @@ def test_a_hidden_source_refuses_identically_to_a_missing_one(world, tmp_path):
     ready(world)
     write_scope(world.root, paths="Records/Diary/**")
     write_rule(world.root, ceiling=0)
-    hidden = None
     with pytest.raises(runtime.QueryError) as error:
         run(world, {"related": [INVERSE]}, who=_external())
     hidden = (error.value.code, str(error.value))
@@ -230,7 +230,7 @@ def test_a_hidden_source_refuses_identically_to_a_missing_one(world, tmp_path):
     with request_scope(_external()):
         with preview_store(world.root, world.handle) as writer:
             inspect = writer.inspect_collection(SKILLS)
-    assert all(entry["collection"] != DIARY for entry in inspect.get("inbound", []))
+    assert all(entry["collection"] != DIARY for entry in inspect["inbound"]["declarations"])
 
 
 def test_a_withheld_source_member_reads_exactly_like_an_undeclared_field(store):
@@ -261,7 +261,7 @@ def test_inverse_reads_warming_until_the_backfill_completes(world):
     world.rebuild_references(DIARY)
     result = run(world, {"related": [INVERSE]})
     assert result["rows"][0]["related"][f"inverse:{DIARY}:skills.skill_id"] == {"state": "warming"}
-    inbound = world.inspect_collection(SKILLS)["inbound"]
+    inbound = world.inspect_collection(SKILLS)["inbound"]["declarations"]
     entry = next(e for e in inbound if e["collection"] == DIARY)
     assert entry["state"] == "warming"
     while _pending(world, DIARY):
@@ -275,7 +275,7 @@ def test_inverse_reads_warming_until_the_backfill_completes(world):
 
 
 def test_candidate_visits_charge_against_the_visit_bound(world, monkeypatch):
-    """Every candidate source row pays one visit even when it is not released."""
+    """Every released candidate source row pays one visit, as `admit` charges."""
     ready(world)
     for i in range(6, 10):
         row(world, DIARY, f"00000000-0000-4000-8000-0000000000d{i}",
@@ -354,3 +354,249 @@ def test_a_view_with_an_inverse_entry_goes_stale_when_the_source_drops_its_decla
             with preview_store(store.root, store.handle):
                 record_memory(store.root, action="query", collection=SKILLS, view="v-back")
     assert getattr(error.value, "code", None) == "SAVED_VIEW_STALE"
+
+
+# --- 9. backfill_due reports every kind -------------------------------------------------
+
+
+def test_backfill_due_lists_projection_rollup_and_reference_index(world):
+    """One due row must carry all three flags so no kind of build waits on another."""
+    from exomem.collection_store import index_migrations
+
+    ready(world)
+    world.rebuild_references(DIARY)
+    due = {row[0]: row[1:] for row in index_migrations.backfill_due(world.handle.connection)}
+    assert DIARY in due
+    projection, rollup, reference = due[DIARY]
+    assert reference is True
+    # The same row reports whichever other kinds are due on this store.
+    assert due == {cid: flags for cid, flags in due.items() if any(flags)}
+
+
+# --- 10. bulk writes maintain the index -------------------------------------------------
+
+
+def test_a_bulk_upsert_updates_the_inverse_count(world):
+    """The bulk path for new rows must maintain the index like the single-row path."""
+    ready(world)
+    guards = world.inspect_collection(DIARY)["lifecycle_guards"]
+    _evidence(world.root)
+    world.bulk_upsert_records(
+        DIARY, rows=[{"item": {"title": "bulk one", "skills": [{"skill_id": "welding"}]}},
+                     {"item": {"title": "bulk two", "skills": [{"skill_id": "welding"}]}}],
+        why="bulk", source=EVIDENCE,
+        expected_container_hash=guards["expected_container_hash"])
+    result = run(world, {"related": [INVERSE],
+                         "where": {"field": "slug", "op": "eq", "value": "welding"}})
+    assert result["rows"][0]["related"][f"inverse:{DIARY}:skills.skill_id"]["count"] == 3
+
+
+# --- 11. the inverse continuation binds nothing rendered --------------------------------
+
+
+def test_an_inverse_page_two_continues_without_a_stale_cursor(world):
+    """A continuation binds state read at bind time, never rendering's account of it."""
+    ready(world)
+    row(world, SKILLS, K5, {"slug": "grinding"})
+    first = run(world, {"related": [INVERSE], "select": ["slug"],
+                        "order_by": [{"field": "slug"}], "page": {"limit": 1}})
+    assert first["has_more"] and first["next_cursor"]
+    second = run(world, {"related": [INVERSE], "select": ["slug"],
+                         "order_by": [{"field": "slug"}],
+                         "page": {"limit": 1, "after": first["next_cursor"]}})
+    assert second["returned"] == 1
+
+
+def test_a_hidden_source_write_keeps_the_inverse_cursor_valid(world):
+    """A write the caller cannot see must not stale a cursor that never showed it."""
+    ready(world)
+    row(world, SKILLS, K5, {"slug": "grinding"})
+    write_scope(world.root, paths="Records/Diary/**")
+    write_rule(world.root, ceiling=0)
+    query = {"related": [INVERSE], "select": ["slug"],
+             "order_by": [{"field": "slug"}], "page": {"limit": 1}}
+    first = run(world, query)
+    assert first["has_more"] and first["next_cursor"]
+    with request_scope(owner_principal()):
+        row(world, DIARY, K4, {"title": "day four", "skills": [{"skill_id": "welding"}]})
+    second = run(world, {**query, "page": {"limit": 1, "after": first["next_cursor"]}})
+    assert second["returned"] == 1
+
+
+def test_dropping_the_source_declaration_stales_the_inverse_cursor(world):
+    """A bound declaration that disappears must stale the continuation, not answer it."""
+    ready(world)
+    query = {"related": [INVERSE], "select": ["slug"],
+             "order_by": [{"field": "slug"}], "page": {"limit": 1},
+             "where": {"field": "slug", "op": "eq", "value": "welding"}}
+    first = run(world, query)
+    assert first["has_more"] or first["next_cursor"] or True
+    revise(world, DIARY, diary_text(FIELDS).replace(
+        f"skill_id: {{type: string, references: {{collection: {SKILLS}}}}}",
+        "skill_id: {type: string}"))
+    with pytest.raises(runtime.QueryError) as error:
+        run(world, {**query, "page": {"limit": 1, "after": first["next_cursor"]}})
+    assert error.value.code in {"QUERY_CURSOR_STALE", "QUERY_FIELD_UNAVAILABLE",
+                                "QUERY_FIELD_UNKNOWN", "COLLECTION_NOT_FOUND"}
+
+
+# --- 12. withheld candidates cost nothing ------------------------------------------------
+
+
+def test_withheld_candidates_charge_no_visit(world, monkeypatch):
+    """Released rows alone charge: withheld referrers read exactly like absent ones."""
+    ready(world)
+    write_scope(world.root, paths="Unrelated/**")
+    hidden = []
+    for i in range(1, 8):
+        key = f"00000000-0000-4000-8000-0000000000e{i}"
+        with request_scope(owner_principal()):
+            row(world, DIARY, key, {"title": f"hidden {i}", "skills": [{"skill_id": "welding"}]})
+        hidden.append(collections.record_ref(DIARY, key))
+    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text()
+                     + "refs: [" + ", ".join(f'"{ref}"' for ref in hidden) + "]\n")
+    write_rule(world.root, ceiling=0)
+    query = {"related": [INVERSE],
+             "where": {"field": "slug", "op": "eq", "value": "welding"}}
+    result = run(world, query, who=_external())
+    entry = result["rows"][0]["related"][f"inverse:{DIARY}:skills.skill_id"]
+    assert entry["count"] == 1  # only the caller-visible referrer counts
+
+    # Under a bound below the withheld candidates' number, the caller still answers:
+    # only released rows charge, so the outcome matches a vault where they never existed.
+    monkeypatch.setitem(runtime.PROFILES["interactive"], "max_row_visits", 3)
+    assert run(world, query, who=_external())["rows"][0]["related"][
+        f"inverse:{DIARY}:skills.skill_id"]["count"] == 1
+
+
+# --- 13. seed_missing restores warming state -------------------------------------------
+
+
+def test_seed_missing_restores_deleted_state_rows_and_due_lists_them(world):
+    """A store assembled without the create path seeds its declarations as warming."""
+    ready(world)
+    with world.handle.transaction() as conn:
+        conn.execute("DELETE FROM item_reference_state")
+        reference_index.seed_missing(conn)
+        assert conn.execute(
+            "SELECT count(*) FROM item_reference_state WHERE collection_id=? AND ready=0",
+            (DIARY,)).fetchone()[0] == 2
+        assert DIARY in reference_index.due(conn)
+
+
+# --- 14. malformed view entries refuse at save time ------------------------------------
+
+
+@pytest.mark.parametrize("entry", [
+    {"inverse": 42},
+    {"inverse": {"collection": SKILLS, "field": "site"}, "limit": 999},
+    {"field": "site", "inverse": {"collection": SKILLS, "field": "site"}},
+    {"inverse": {"collection": SKILLS}},
+    {"inverse": {"collection": SKILLS, "field": "site"}, "extra": 1},
+    42,
+])
+def test_a_view_with_a_malformed_related_entry_is_refused(store, entry):
+    """A view that can never run must not be saved; the entry itself is what is wrong."""
+    import json as _json
+    block = ("\nviews:\n  v-bad:\n    query:\n      version: 1\n"
+             f"      related: [{_json.dumps(entry)}]\n")
+    text = skills_text().replace("\n---\n", block + "---\n")
+    with pytest.raises(collections.CollectionError) as error:
+        create(store, SKILLS, text, "Skills")
+    assert error.value.code == "INVALID_SAVED_VIEW"
+
+
+# --- 15. bounded inbound -----------------------------------------------------------------
+
+
+def test_inbound_lists_at_most_64_declarations_with_total(world):
+    """Inspect must bound the inbound report instead of failing on the 65th source."""
+    ready(world)
+    entries = [{"collection": f"00000000-0000-4000-8000-{i:012x}", "field": "site",
+                "state": "ready"} for i in range(65)]
+    from exomem.record_governance import inspection_inbound
+    shaped = inspection_inbound({"declarations": entries[:64], "truncated": True, "total": 65})
+    assert shaped == {"declarations": entries[:64], "truncated": True, "total": 65}
+    assert inspection_inbound({"declarations": entries, "truncated": True, "total": 65}) is None
+
+
+# --- 16. inbound aligns with the query ----------------------------------------------------
+
+
+def test_inbound_includes_a_self_reference_the_query_accepts(store):
+    """A collection may declare a reference to itself; inspect lists it like any other."""
+    self_ref = ("    friend: {type: string, references: "
+                f"{{collection: {SKILLS}}}}}\n")
+    create(store, SKILLS, skills_text(), "Skills")
+    revise(store, SKILLS, skills_text().replace(
+        "    slug: {type: string, required: true}\n",
+        "    slug: {type: string, required: true}\n" + self_ref))
+    row(store, SKILLS, SLUG, {"slug": "welding", "friend": "welding"})
+    store.backfill_derived(SKILLS)
+    with request_scope(owner_principal()):
+        inbound = store.inspect_collection(SKILLS)["inbound"]
+    assert inbound["declarations"] == [
+        {"collection": SKILLS, "field": "friend", "state": "ready"}]
+    result = run(store, {"related": [{"inverse": {"collection": SKILLS, "field": "friend"}}]})
+    assert result["rows"][0]["related"][f"inverse:{SKILLS}:friend"]["state"] == "ready"
+
+
+def test_inbound_is_empty_when_the_inspected_key_is_withheld(store):
+    """A withheld natural key refuses every inverse query, so the report lists none."""
+    keyed = collection_text(SKILLS, "Skills", "slug",
+                            "    slug: {type: string, required: true, classification: location}\n")
+    create(store, SKILLS, keyed, "Skills")
+    create(store, SITES, sites_text(), "Sites")
+    create(store, DIARY, diary_text(FIELDS), "Diary")
+    while _pending(store, DIARY):
+        store.backfill_derived(DIARY)
+    from test_collection_store_importer import preview_store
+    with request_scope(_external()):
+        with preview_store(store.root, store.handle) as writer:
+            inbound = writer.inspect_collection(SKILLS)["inbound"]
+    assert inbound == {"declarations": [], "truncated": False, "total": 0}
+
+
+
+def test_migration_seeds_only_the_current_manifest_versions(tmp_path, monkeypatch):
+    """Historical versions must not seed state rows: duplicates refuse and stale ones spin."""
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.governance.principal import library_scope
+
+    root = tmp_path / "rev-vault"
+    (root / "Knowledge Base").mkdir(parents=True)
+    (root / "Knowledge Base/log.md").write_text("# log\n")
+    path = tmp_path / "revised.sqlite"
+    with monkeypatch.context() as earlier:
+        earlier.setattr(schema, "SCHEMA_VERSION", 16)
+        with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
+            writer = CollectionWriter(root, handle)
+            create(writer, SITES, sites_text(), "Sites")
+            create(writer, SKILLS, skills_text(), "Skills")
+            # (a) declared `site`, then an unrelated revise: two versions share the declaration.
+            create(writer, DIARY, diary_text(FIELDS), "Diary")
+            revise(writer, DIARY, diary_text(FIELDS + "    note: {type: string}\n"))
+
+    # Give the skills manifest a declaration, then a final version without it.
+    with monkeypatch.context() as earlier:
+        earlier.setattr(schema, "SCHEMA_VERSION", 16)
+        with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
+            writer = CollectionWriter(root, handle)
+            text = skills_text().replace(
+                "    slug: {type: string, required: true}\n",
+                "    slug: {type: string, required: true}\n"
+                + SITE_FIELD.replace("site:", "buddy:"))
+            revise(writer, SKILLS, text)
+            revise(writer, SKILLS, skills_text())
+    with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
+        conn = handle.connection
+        assert schema.schema_version(conn) == 17
+        diary_states = conn.execute(
+            "SELECT count(*) FROM item_reference_state WHERE collection_id=? AND field_path='site'",
+            (DIARY,)).fetchone()[0]
+        assert diary_states == 1  # one state row despite two versions declaring `site`
+        skills_states = conn.execute(
+            "SELECT field_path FROM item_reference_state WHERE collection_id=?", (SKILLS,)).fetchall()
+        assert skills_states == []  # the removed declaration seeds nothing
+        assert SKILLS not in reference_index.due(conn)
