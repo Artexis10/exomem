@@ -4873,11 +4873,8 @@ def _dimension_source(
     is the request's content admission; the read adds the release plane to it, so an edge to a
     page the caller cannot see gives no membership. A missing or stale sidecar raises the typed
     warming outcome and schedules a rebuild, as the relation filter does; an empty set from a
-    current one is real.
-
-    A restricted caller re-derives the links that resolve differently for it, which needs a
-    resolver. Inside an admitted catalogue view only the request's own checkpoint opens one, so
-    the resolver comes from `snapshot`, as the graph lane's does.
+    current one is real. A restricted caller's re-derived links resolve with the request's
+    resolver (`_request_resolver`).
     """
     from . import epistemic_graph
 
