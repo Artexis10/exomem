@@ -7,7 +7,8 @@ ids. `import_judgments` reads the judgments back by id, against the runs and sce
 prompt no longer has the prepared sha256 (the answer was rerun, or its reference or criteria changed) is `unknown`, as
 `session_score.native_answers` does. When fewer than `AGREEMENT_FLOOR` of the doubled items get the same pass or fail
 twice, the result reads "incomplete: judge agreement X". Items and judgments have the shapes of `session-score`: the item is
-`{"id", "prompt", "answer_schema"}` and a judgment is `{"id", "structured_output"}`. No model starts here.
+`{"id", "prompt", "answer_schema"}` and a judgment is `{"id", "structured_output"}`. Only `judge_all` starts a model: it
+asks the judge about each item in a judge process of its own (`session_score.call_judge`).
 """
 
 from __future__ import annotations
@@ -16,11 +17,14 @@ import hashlib
 import json
 import math
 import random
+import tempfile
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import checks, judge, session_score
+from jsonschema import Draft202012Validator
+
+from . import checks, judge, runner, session_score
 from .report import read_rows
 from .scripted_replies import Scenario
 
@@ -28,6 +32,10 @@ REJUDGE_FRACTION = 0.2
 AGREEMENT_FLOOR = 0.9
 #: Fixed and written into the private map, so the same runs always double the same items.
 BATCH_SEED = 20261110
+VIEWS_FILE = "judge-views.jsonl"
+JUDGMENTS_FILE = "judgments.jsonl"
+#: A missing or malformed judgment is asked for once more; after that the item stays without a judgment (unknown).
+JUDGE_ATTEMPTS = 2
 
 
 def answers_of(stage_b: Sequence[Path], stage_c: Sequence[Path]) -> list[tuple[dict, str, str]]:
@@ -79,9 +87,85 @@ def prepare(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequenc
             mapping[item_id] = {"run": run, "criteria": list(criteria), "twin_of": twin_of, "prompt_sha256": prompt_sha256(prompt)}
     rng.shuffle(items)
     (out / "private").mkdir(parents=True, exist_ok=True)
-    (out / "judge-views.jsonl").write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
+    (out / VIEWS_FILE).write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
     (out / "private" / "judge-map.json").write_text(json.dumps({"seed": BATCH_SEED, "items": mapping}, indent=1) + "\n", encoding="utf-8")
     return len(items)
+
+
+def read_views(out: Path) -> list[dict]:
+    """The blind items that judge-prepare wrote under `out`."""
+    path = out / VIEWS_FILE
+    try:
+        items = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"cannot read {path}: {error}; run judge-prepare first") from error
+    if not items:
+        raise SystemExit(f"{path} holds no items")
+    return items
+
+
+def judged_ids(path: Path) -> set[str]:
+    """The ids that already have a line in a judgments file. The runner writes a line only for a valid answer, and a
+    second line for an id would read as a duplicate (unknown), so an id with a line is never asked again."""
+    found = set()
+    for line in path.read_text(encoding="utf-8").splitlines() if path.exists() else []:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            found.add(item["id"])
+    return found
+
+
+def ask(item: dict, *, model: str, executable: Path, scratch: Path) -> dict | None:
+    """The judge's answer to one item, from processes of its own, or None after `JUDGE_ATTEMPTS` invalid answers."""
+    for _attempt in range(JUDGE_ATTEMPTS):
+        stdout = session_score.call_judge(item["prompt"], item["answer_schema"], model=model, executable=executable, scratch=scratch)
+        answer = judge.structured_output(stdout or "")
+        if answer is not None and Draft202012Validator(item["answer_schema"]).is_valid(answer):
+            return answer
+    return None
+
+
+def judge_all(out: Path, *, model: str, executable: Path) -> tuple[int, int, list[str]]:
+    """Judge every item of `judge-views.jsonl` under `out` that has no line yet in `judgments.jsonl`, each in a judge
+    process of its own, so the two copies of a doubled item are judged apart. Reads the views only, never the private
+    map. Appends one line per valid answer as it comes, so an interrupted run loses nothing and a rerun asks only the
+    items still without a line. Returns the item count, the count judged now and the ids still without a judgment."""
+    items = read_views(out)
+    target = out / JUDGMENTS_FILE
+    todo = [item for item in items if item["id"] not in judged_ids(target)]
+    missing = []
+    with tempfile.TemporaryDirectory(prefix="ig-judge-") as scratch, target.open("a", encoding="utf-8") as sink:
+        if target.stat().st_size and not target.read_bytes().endswith(b"\n"):
+            sink.write("\n")  # A line cut off by an interrupted run must not swallow the next one.
+        for item in todo:
+            answer = ask(item, model=model, executable=executable, scratch=Path(scratch))
+            if answer is None:
+                missing.append(item["id"])
+                continue
+            sink.write(json.dumps({"id": item["id"], "structured_output": answer}) + "\n")
+            sink.flush()
+    return len(items), len(todo) - len(missing), missing
+
+
+def judge_plan(out: Path, *, model: str) -> list[str]:
+    """What `judge_all` would run, as lines to print; starts nothing."""
+    items = read_views(out)
+    todo = [item for item in items if item["id"] not in judged_ids(out / JUDGMENTS_FILE)]
+    lines = [
+        f"Would judge {len(todo)} of {len(items)} items in {out / VIEWS_FILE} with {model}, one judge process per item "
+        f"(at most {JUDGE_ATTEMPTS} when the answer does not match the schema), appending to {out / JUDGMENTS_FILE}."
+    ]
+    if todo:
+        first = todo[0]
+        argv = runner.judge_argv(
+            Path("claude"), f"<the prompt of item {first['id']}: {len(first['prompt'])} characters>", first["answer_schema"],
+            empty_mcp=Path("empty-mcp.json"), model=model,
+        )
+        lines.append("  each call, as for the first item: " + " ".join(argv[:2] + [repr(argv[2])] + argv[3:]))
+    return lines
 
 
 def item_verdict(entry: dict, judgments: dict) -> tuple[str, list[checks.Outcome]]:

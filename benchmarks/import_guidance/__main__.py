@@ -10,6 +10,8 @@ from pathlib import Path
 # The reused harnesses (`epistemic`, `membench`) are top-level packages under benchmarks/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from epistemic.journeys.f27_replay import discover_agent_envelope  # noqa: E402
+
 from import_guidance import (  # noqa: E402
     judge_batch,
     replay_cases,
@@ -99,6 +101,13 @@ def main(argv: list[str] | None = None) -> int:
     prepare.add_argument("--stage-c", type=Path, nargs="*", default=[], help="runs.jsonl files of the session-close suite")
     prepare.add_argument("--suite", required=True, help="the replay scenario folder that the runs used; it holds each case's turn, reference and criteria")
     prepare.add_argument("--out", type=Path, required=True, help="gets judge-views.jsonl, and private/judge-map.json for the owner of the key only")
+    judging_run = sub.add_parser(
+        "judge-run",
+        help="judge each blind item of judge-views.jsonl in a judge process of its own; a rerun asks only the items without a judgment",
+    )
+    judging_run.add_argument("--out", type=Path, required=True, help="the folder judge-prepare wrote; gets judgments.jsonl")
+    judging_run.add_argument("--judge-model", default="opus", help="the judge's model")
+    judging_run.add_argument("--dry-run", action="store_true", help="print what would run; start nothing")
     imported = sub.add_parser(
         "judge-import", help="read the native judgments of a batch by opaque id and report the judge agreement; starts no model"
     )
@@ -163,6 +172,17 @@ def main(argv: list[str] | None = None) -> int:
         count = judge_batch.prepare(args.stage_b, args.stage_c, runner.load_scenarios("all", args.suite), out=args.out)
         print(f"Prepared {count} blind items in {args.out / 'judge-views.jsonl'}. Keep private/judge-map.json from the judge.")
         return 0
+    if args.command == "judge-run":
+        if args.dry_run:
+            print("\n".join(judge_batch.judge_plan(args.out, model=args.judge_model)))
+            return 0
+        executable = discover_agent_envelope().executable
+        total, judged, missing = judge_batch.judge_all(args.out, model=args.judge_model, executable=executable)
+        print(f"Judged {judged} items now with {args.judge_model}; {total - len(missing)} of {total} items have a judgment in {args.out / judge_batch.JUDGMENTS_FILE}.")
+        if missing:
+            print(f"{len(missing)} items still have none: the judge gave no answer that matches the schema in {judge_batch.JUDGE_ATTEMPTS} attempts. "
+                  "Run judge-run again to ask only those; judge-import reads them as unknown.")
+        return 1 if missing else 0
     if args.command == "judge-import":
         scenarios = runner.load_scenarios("all", args.suite)
         summary = judge_batch.import_judgments(args.judgments, out=args.out, stage_b=args.stage_b, stage_c=args.stage_c, scenarios=scenarios)

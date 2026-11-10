@@ -94,15 +94,19 @@ def judge_prompt(transcript: str, criteria: tuple[dict, ...], *, answer_view: bo
     )
 
 
-def parse_answer(stdout: str, criteria: tuple[dict, ...]) -> dict | None:
-    """The structured answer, or None when the output is not the schema's object."""
+def structured_output(stdout: str) -> dict | None:
+    """The judge's structured output object, or None when its output holds none."""
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
         return None
     answer = payload.get("structured_output") if isinstance(payload, dict) else None
-    if not isinstance(answer, dict) or not all(
-        isinstance(answer.get(c["id"]), bool) for c in criteria
-    ):
+    return answer if isinstance(answer, dict) else None
+
+
+def parse_answer(stdout: str, criteria: tuple[dict, ...]) -> dict | None:
+    """The structured answer, or None when the output is not the schema's object."""
+    answer = structured_output(stdout)
+    if answer is None or not all(isinstance(answer.get(c["id"]), bool) for c in criteria):
         return None
     return answer

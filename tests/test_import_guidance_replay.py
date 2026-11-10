@@ -464,6 +464,59 @@ def test_an_answer_rerun_after_judge_prepare_does_not_inherit_the_judgment_of_th
     assert {row["verdict"] for row in rows.values()} == {checks.PASS}
 
 
+FAKE_JUDGE = """#!{python}
+import json, sys
+argv = sys.argv[1:]
+prompt, schema = argv[argv.index("-p") + 1], json.loads(argv[argv.index("--json-schema") + 1])
+with open({log!r}, "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"prompt": prompt, "schema": schema}}) + "\\n")
+if "Reference of c3." in prompt:
+    print("not an answer")
+else:
+    answer = {{key: True if spec["type"] == "boolean" else "fine" for key, spec in schema["properties"].items()}}
+    print(json.dumps({{"type": "result", "structured_output": answer}}))
+"""
+
+
+def test_the_judge_runner_asks_each_item_in_a_process_of_its_own_and_its_lines_import_as_judgments(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Catches a runner that judges the batch in one context (the second copy of a doubled item would see the first),
+    that sends an item another item's schema, that keeps a malformed answer, or whose dry run starts a judge. The model
+    is replaced at the process boundary by a script that answers from the schema it is given and fails case c3."""
+    from import_guidance.__main__ import main
+
+    scenarios = [invented_scenario(f"c{n}") for n in range(5)]
+    out = tmp_path / "batch"
+    runs = ten_stage_b_runs(tmp_path)
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    log = tmp_path / "calls.jsonl"
+    fake = tmp_path / "fake-claude"
+    fake.write_text(FAKE_JUDGE.format(python=sys.executable, log=str(log)), encoding="utf-8")
+    fake.chmod(0o755)
+
+    assert main(["judge-run", "--out", str(out), "--judge-model", "judge-m", "--dry-run"]) == 0
+    assert "Would judge 12 of 12 items" in capsys.readouterr().out
+    assert not log.exists() and not (out / "judgments.jsonl").exists()
+
+    total, judged, missing = judge_batch.judge_all(out, model="judge-m", executable=fake)
+    items = {item["id"]: item for item in map(json.loads, (out / "judge-views.jsonl").read_text().splitlines())}
+    failing = {item_id for item_id, item in items.items() if "Reference of c3." in item["prompt"]}
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == len(items) + len(failing)
+    assert all(any((call["prompt"], call["schema"]) == (item["prompt"], item["answer_schema"]) for item in items.values()) for call in calls)
+    assert (total, judged, set(missing)) == (12, 12 - len(failing), failing)
+    lines = [json.loads(line)["id"] for line in (out / "judgments.jsonl").read_text().splitlines()]
+    assert sorted(lines) == sorted(set(items) - failing)
+
+    judge_batch.import_judgments(out / "judgments.jsonl", out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
+    rows = json.loads((out / "judged.json").read_text())["rows"]
+    assert {(row["scenario"], row["verdict"]) for row in rows} == {("c0", "pass"), ("c1", "pass"), ("c2", "pass"), ("c3", "unknown"), ("c4", "pass")}
+    log.unlink()
+    judge_batch.judge_all(out, model="judge-m", executable=fake)
+    assert len(log.read_text().splitlines()) == 2 * len(failing)
+
+
 def test_a_judge_item_shows_no_arm_model_or_stage_and_both_stages_share_one_shuffled_file(tmp_path: Path) -> None:
     """Catches an item that lets the judge tell the arm, the model or the stage, which would bias every judged criterion."""
     stage_b = write_rows(tmp_path / "b.jsonl", [stage_b_row("c0", "arm-zeta", "Sails at 07:15.", model="model-quokka")])

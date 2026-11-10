@@ -214,29 +214,29 @@ def judge_row(case: Case, key: dict, row: dict, *, model: str, executable: Path 
 def run_judge(view: str, criteria: tuple[dict, ...], *, model: str, executable: Path | None, scratch: Path) -> list[checks.Outcome]:
     """The legacy Claude judge runs only when explicitly selected."""
     assert executable is not None
+    stdout = call_judge(judge_prompt(view, criteria), judge.answer_schema(criteria), model=model, executable=executable, scratch=scratch)
+    return checks.judged_outcomes(criteria, judge.parse_answer(stdout, criteria) if stdout is not None else None)
+
+
+def call_judge(prompt: str, schema: dict, *, model: str, executable: Path, scratch: Path) -> str | None:
+    """One judge process on one prompt, with no tools, no MCP server, no saved session and `schema` as its structured
+    output. Returns its stdout, or None when it could not start or timed out."""
     empty_mcp = scratch / "empty-mcp.json"
     empty_mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
     env, _removed = environment_floor(os.environ)
     env = {k: v for k, v in env.items() if not k.startswith("EXOMEM_")}
     try:
         done = subprocess.run(  # noqa: S603
-            runner.judge_argv(
-                executable,
-                judge_prompt(view, criteria),
-                judge.answer_schema(criteria),
-                empty_mcp=empty_mcp,
-                model=model,
-            ),
+            runner.judge_argv(executable, prompt, schema, empty_mcp=empty_mcp, model=model),
             cwd=str(scratch),
             env=env,
             capture_output=True,
             text=True,
             timeout=JUDGE_TIMEOUT_SECONDS,
         )
-        answer = judge.parse_answer(done.stdout, criteria)
     except (OSError, subprocess.TimeoutExpired):
-        answer = None
-    return checks.judged_outcomes(criteria, answer)
+        return None
+    return done.stdout
 
 
 def content_evidence(tool: str, data: object) -> tuple[bool, list[dict]]:
