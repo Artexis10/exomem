@@ -101,18 +101,18 @@ def test_an_outside_new_or_changed_media_file_gets_its_rows_from_the_store_threa
 
     report = settling.import_paths([PICTURE])
 
-    assert report.media_derived == [PICTURE] and report.media_failed == {}
     assert without_volatile(stored_sidecar(stored, PICTURE)) == without_volatile(file_mode_sidecar)
     assert media_jobs.MediaJobStore(stored).get_by_binary(stored / PICTURE) is not None
     assert threads and set(threads) == {store_thread.ident}
+    assert report.media_derived == [PICTURE] and report.media_failed == {}
 
     (stored / PICTURE).write_bytes(CHANGED_BYTES)
     report = settling.import_paths([PICTURE])
 
-    assert report.imported == [PICTURE] and report.media_derived == [PICTURE]
     assert sha(CHANGED_BYTES).encode() in stored_sidecar(stored, PICTURE)
     assert sha(PICTURE_BYTES).encode() not in stored_sidecar(stored, PICTURE)
     assert set(threads) == {store_thread.ident}
+    assert report.imported == [PICTURE] and report.media_derived == [PICTURE]
 
 
 def test_an_outside_rename_and_delete_settle_the_binary_record_and_keep_the_extracted_page(
@@ -127,20 +127,20 @@ def test_an_outside_rename_and_delete_settle_the_binary_record_and_keep_the_extr
     (stored / PICTURE).rename(stored / MOVED)
     report = settling.import_paths([PICTURE, MOVED], {MOVED: PICTURE})
 
-    assert report.moved == {MOVED: PICTURE} and report.media_derived == [MOVED]
     assert rows(stored, "SELECT path FROM store_binaries WHERE path IN (?, ?)", PICTURE, MOVED) == [
         (MOVED,)
     ]
     assert sha(PICTURE_BYTES).encode() in stored_sidecar(stored, MOVED)
+    assert report.moved == {MOVED: PICTURE} and report.media_derived == [MOVED]
     # The old page stays, as file mode keeps it: it may hold text that a person edited.
     assert stored_sidecar(stored, PICTURE)
 
     (stored / MOVED).unlink()
     report = settling.import_paths([MOVED])
 
-    assert report.removed == [MOVED] and report.media_derived == []
     assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", MOVED) == []
     assert stored_sidecar(stored, MOVED)
+    assert report.removed == [MOVED] and report.media_derived == []
 
 
 def test_the_sweep_derives_the_rows_that_a_failed_derivation_left_missing(
@@ -160,18 +160,18 @@ def test_the_sweep_derives_the_rows_that_a_failed_derivation_left_missing(
     monkeypatch.setattr(media_processing, "reconcile_media", unreliable)
     (stored / PICTURE).write_bytes(PICTURE_BYTES)
 
-    report = settling.import_paths([PICTURE])
+    failed = settling.import_paths([PICTURE])
 
-    assert report.media_failed == {PICTURE: "MEDIA_NOT_FOUND"} and report.media_derived == []
     assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", PICTURE) != []
     assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", sidecar_of(PICTURE)) == []
 
     fail[0] = False
     swept = settling.sweep()
 
-    assert swept.media_recovered >= 1
     assert stored_sidecar(stored, PICTURE)
     assert rows(stored, "SELECT path FROM store_binaries WHERE path = ?", PICTURE) != []
+    assert failed.media_failed == {PICTURE: "MEDIA_NOT_FOUND"} and failed.media_derived == []
+    assert swept.media_recovered >= 1
 
 
 @pytest.fixture
