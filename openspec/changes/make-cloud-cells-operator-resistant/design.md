@@ -339,6 +339,8 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
    `main` already accepts changes only through its required checks. Repository administration (rulesets, branch protection, environments, Actions secrets) is admin-tier, so the GitHub credentials that agents hold carry no administration permission.
 
    The identity has no exec, attach, port-forward, proxy or ephemeral containers. It cannot read Secrets, or change RBAC, admission policy, volumes or Secrets. A full chart upgrade installs RBAC and admission policy, so no scoped identity can run it; it is an admin action.
+
+   *Amendment, 2026-11-10.* `automate-cloud-releases` D7 keeps the full chart upgrade an admin action, run with one reviewed command under the operator's presence. Its later phase gives this deploy identity a CI path for image-only platform changes, after tasks 4.1 and 4.6.
 3. **Admin.** Every credential that can yield one of the following is admin-tier:
    - node root;
    - cluster administration;
