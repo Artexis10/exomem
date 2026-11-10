@@ -114,3 +114,8 @@ def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[st
 
 def load_recording(target: Path) -> dict:
     return json.loads(target.read_text(encoding="utf-8"))
+
+
+def served_sizes(target: Path) -> dict[str, int]:
+    """The characters of each recorded reply as the scripted server serves it: the reply as indented JSON."""
+    return {name: len(json.dumps(shape, indent=2)) for name, shape in load_recording(target).get("shapes", {}).items()}

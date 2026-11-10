@@ -124,7 +124,9 @@ def load_case(path: Path) -> Case:
     turns = base.get("turns")
     if not (isinstance(turns, list) and turns and all(isinstance(t, str) and t.strip() for t in turns)):
         problems.append("turns must be a non-empty list of strings")
-    seed = suite_dir() / "seeds" / str(base.get("seed"))
+    # The case folder's own `seeds/` comes first: a seed of that name there is the case's data, not a shipped seed.
+    candidates = (path.parent / "seeds" / str(base.get("seed")), suite_dir() / "seeds" / str(base.get("seed")))
+    seed = next((folder for folder in candidates if folder.is_dir()), candidates[-1])
     if not seed.is_dir():
         problems.append(f"seed {base.get('seed')!r} is not a folder under seeds/")
     if "answer_key" in raw or "answer_key" in base:
@@ -301,6 +303,26 @@ def write_order(changed: dict, recaps: dict, after: dict[str, dict]) -> str:
 # --------------------------------------------------------------------------
 
 
+def plugin_hooks(root: Path, events: tuple[str, ...] = HOOK_EVENTS) -> dict:
+    """The checkout's own declarations of `events` from its plugin's `hooks.json`, with the plugin root filled in:
+    the hook entries a user's Claude Code would run. Shared by the session-close and the replay runners."""
+    plugin = root / "plugins" / "claude-code"
+    declared = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    return json.loads(json.dumps({e: declared[e] for e in events}).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)))
+
+
+def hook_env(work: Path, engagement: str) -> dict[str, str]:
+    """The pins the hooks read: native MCP activation, the case's engagement, and state under `work`, so a hook
+    never reaches a real vault or service."""
+    return {
+        "EXOMEM_PROMINENCE": engagement,
+        "EXOMEM_HOOK_HOME": str(work / "hook-home"),
+        "EXOMEM_HOOK_CLIENT": "claude",
+        "EXOMEM_RETRIEVE_INJECT": "mcp",
+        "EXOMEM_CONFIG_PATH": str(work / "exomem-config.json"),
+    }
+
+
 def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict[str, Path]:
     """Stage the same real MCP server, with plugin guidance or an explicit request to disable hooks."""
     mcp = work / "mcp.json"
@@ -313,9 +335,7 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
         schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
         files["skill"] = work / "skill.md"
         files["skill"].write_text("\n\n".join((schema / name).read_text(encoding="utf-8") for name in SKILL_FILES), encoding="utf-8")
-        plugin = arm.root / "plugins" / "claude-code"
-        declared = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-        settings = {"hooks": json.loads(json.dumps({e: declared[e] for e in HOOK_EVENTS}).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)))}
+        settings = {"hooks": plugin_hooks(arm.root)}
     files["settings"].write_text(json.dumps(settings), encoding="utf-8")
     return files
 
@@ -351,13 +371,7 @@ def agent_env(work: Path, case: Case) -> dict[str, str]:
     keep their state under `work` and never reach a real vault or service."""
     floor, _removed = environment_floor(os.environ)
     floor = {k: v for k, v in floor.items() if not k.startswith("EXOMEM_")}
-    return floor | {
-        "EXOMEM_PROMINENCE": case.engagement,
-        "EXOMEM_HOOK_HOME": str(work / "hook-home"),
-        "EXOMEM_HOOK_CLIENT": "claude",
-        "EXOMEM_RETRIEVE_INJECT": "mcp",
-        "EXOMEM_CONFIG_PATH": str(work / "exomem-config.json"),
-    }
+    return floor | hook_env(work, case.engagement)
 
 
 def user_message(text: str) -> str:

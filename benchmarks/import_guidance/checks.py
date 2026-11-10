@@ -217,6 +217,48 @@ def answer_has_scripted_string(spec: dict, evidence: Evidence, **_: Any) -> Outc
     )
 
 
+def _value_groups(spec: dict) -> list[list[str]] | None:
+    """The spec's `groups`: a non-empty list of non-empty lists of strings, each list the spellings of one value."""
+    groups = spec.get("groups")
+    well_formed = (
+        isinstance(groups, list)
+        and groups
+        and all(isinstance(g, list) and g and all(isinstance(v, str) and v.strip() for v in g) for g in groups)
+    )
+    return groups if well_formed else None
+
+
+def answer_has_all_of(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
+    """Each group of `groups` has one spelling in the answer. The values are the scenario's closed list, matched as
+    case-folded substrings of the whole answer, so no pattern guesses at what the answer means."""
+    groups = _value_groups(spec)
+    if groups is None:
+        return Outcome("answer_has_all_of", UNKNOWN, "groups must be a non-empty list of non-empty string lists")
+    text = evidence.answer.casefold()
+    missing = [g for g in groups if not any(v.casefold() in text for v in g)]
+    return Outcome(
+        "answer_has_all_of",
+        FAIL if missing else PASS,
+        f"no spelling of {missing} in the answer" if missing else f"{len(groups)} value(s) present",
+    )
+
+
+def answer_in_order(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
+    """The groups of `groups` first appear in the answer in the listed order. A group's place is the earliest
+    place of any of its spellings; every group must appear, and the places must strictly increase."""
+    groups = _value_groups(spec)
+    if groups is None:
+        return Outcome("answer_in_order", UNKNOWN, "groups must be a non-empty list of non-empty string lists")
+    text = evidence.answer.casefold()
+    places = [[at for v in g if (at := text.find(v.casefold())) >= 0] for g in groups]
+    missing = [g for g, found in zip(groups, places, strict=True) if not found]
+    if missing:
+        return Outcome("answer_in_order", FAIL, f"no spelling of {missing} in the answer")
+    firsts = [min(found) for found in places]
+    ordered = all(a < b for a, b in zip(firsts, firsts[1:], strict=False))
+    return Outcome("answer_in_order", PASS if ordered else FAIL, f"first places in the answer: {firsts}")
+
+
 CHECKS = {
     f.__name__: f
     for f in (
@@ -228,6 +270,8 @@ CHECKS = {
         filed_before_shell_exit,
         answer_lacks_scripted_strings,
         answer_has_scripted_string,
+        answer_has_all_of,
+        answer_in_order,
     )
 }
 

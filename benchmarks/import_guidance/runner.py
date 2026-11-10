@@ -24,6 +24,7 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
     REPO_ROOT,
+    count_hook_activity,
     discover_agent_envelope,
     environment_floor,
     fault_reason,
@@ -31,10 +32,13 @@ from epistemic.journeys.f27_replay import (
 )
 from membench.trackc.witness_join import parse_stream_json_transcript
 
-from . import checks, judge, recording
+from exomem import prominence
+
+from . import checks, judge, recording, session_close
 from .recording import Arm
 from .scripted_replies import (
     DEFAULT_SUITE,
+    REPLAY_SUITE,
     SCENARIO_DIR,
     Scenario,
     load_scenario,
@@ -46,7 +50,10 @@ from .scripted_replies import (
 SKILL_FILES = {
     DEFAULT_SUITE: ("SKILL.md", "references/importing.md"),
     "write-narration": ("SKILL.md",),
+    # The replay suite shows the agent what a user with the plugin has, as the session-close suite does.
+    REPLAY_SUITE: session_close.SKILL_FILES,
 }
+JUDGE_MODES = ("run", "batch")
 SERVER_SCRIPT = Path(__file__).resolve().parent / "server.py"
 MAX_TURNS = 20
 RUN_TIMEOUT_SECONDS = 600.0
@@ -70,6 +77,8 @@ def load_scenarios(selector: str, suite: str = DEFAULT_SUITE) -> list[Scenario]:
 
 def skill_text(root: Path = REPO_ROOT, suite: str = DEFAULT_SUITE) -> str:
     """The skill as a user has it from one checkout: SKILL.md, then the suite's reference files."""
+    if suite not in SKILL_FILES:
+        raise SystemExit(f"suite {suite!r} has no skill files listed; the runner knows {sorted(SKILL_FILES)}")
     schema = root / "src" / "exomem" / "_scaffold" / "_Schema"
     return "\n\n".join((schema / name).read_text(encoding="utf-8") for name in SKILL_FILES[suite])
 
@@ -100,7 +109,7 @@ def mcp_config(
 
 
 def agent_argv(
-    executable: Path, scenario: Scenario, *, mcp: Path, skill: Path, model: str
+    executable: Path, scenario: Scenario, *, mcp: Path, skill: Path, model: str, settings: Path | None = None
 ) -> list[str]:
     allowed = [f"mcp__{checks.SERVER}__{name}" for name in scenario.served_tools] + list(
         scenario.builtin_tools
@@ -114,6 +123,7 @@ def agent_argv(
         str(mcp),
         "--setting-sources",
         "project",
+        *(["--settings", str(settings), "--include-hook-events"] if settings else []),
         "--output-format",
         "stream-json",
         "--verbose",
@@ -327,6 +337,13 @@ def run_once(
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "notes.md").write_text("A note in the folder to import.\n", encoding="utf-8")
     env = child_env(os.environ, bin_dir, shell_log)
+    settings = None
+    if scenario.hooks:
+        # The arm's own hooks, as a user's Claude Code runs them, with the same pins as the session-close suite.
+        settings = work / "settings.json"
+        settings.write_text(json.dumps({"hooks": session_close.plugin_hooks(root, scenario.hooks)}), encoding="utf-8")
+        (work / "hook-home").mkdir(exist_ok=True)
+        env |= session_close.hook_env(work, scenario.engagement or prominence.DEFAULT_PROMINENCE)
 
     row: dict = {
         "scenario": scenario.id,
@@ -340,7 +357,7 @@ def run_once(
     }
     try:
         proc = run(
-            agent_argv(executable, scenario, mcp=mcp, skill=skill, model=model),
+            agent_argv(executable, scenario, mcp=mcp, skill=skill, model=model, settings=settings),
             cwd,
             env,
             RUN_TIMEOUT_SECONDS,
@@ -368,7 +385,7 @@ def run_once(
         scenario.checks, evidence, scenario.served_tools, scenario.builtin_tools
     )
     answer = None
-    if row["error"] is None and scenario.criteria:
+    if row["error"] is None and scenario.criteria and scenario.judge == "run":
         answer_view = scenario.judge_view == "answer"
         rendered = (
             judge.render_answer_view(
@@ -408,6 +425,9 @@ def run_once(
     )
     if proc is not None:
         row["api_key_source"] = init_field(proc.stdout, "apiKeySource")
+        if scenario.hooks:
+            # Information only: how many hook responses the stream shows. A run without any is not an error here.
+            row["hook_invocations"] = count_hook_activity(proc.stdout)[0]
         # Every message the person could have read, not only the last: a leak in a message before the answer.
         said = judge.assistant_texts(proc.stdout.splitlines())
         row["said"] = said
@@ -566,6 +586,13 @@ def dry_run(scenario: Scenario, scratch: Path, arm: Arm | None = None) -> list[s
             criterion["expect"], bool
         ):
             problems.append(f"criterion {criterion.get('id')} needs id, text and a boolean expect")
+    if scenario.judge not in JUDGE_MODES:
+        problems.append(f"judge must be one of {JUDGE_MODES}, not {scenario.judge!r}")
+    if scenario.hooks:
+        try:
+            session_close.plugin_hooks(root, scenario.hooks)
+        except (OSError, KeyError, ValueError) as error:
+            problems.append(f"cannot stage the hooks {scenario.hooks} from {root}: {type(error).__name__}: {error}")
     for name, text in scenario.fake_commands.items():
         syntax = subprocess.run(["sh", "-n"], input=text, text=True, capture_output=True)  # noqa: S603,S607
         if syntax.returncode != 0:

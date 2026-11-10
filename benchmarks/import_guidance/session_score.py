@@ -475,6 +475,12 @@ def read_native(path: Path, mapping_path: Path) -> tuple[dict, dict]:
     return mapping if isinstance(mapping, dict) else {}, answers
 
 
+def valid_answer(item: object, criteria: tuple[dict, ...]) -> dict | None:
+    """The judge's structured answer in one judgments line, or None when it is missing or not the rubric's object."""
+    answer = judge.parse_answer(json.dumps(item), criteria)
+    return answer if Draft202012Validator(judge.answer_schema(criteria)).is_valid(answer) else None
+
+
 def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: dict) -> dict:
     answers = {}
     identity = list(run_identity(row))
@@ -486,8 +492,7 @@ def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: d
                    and item.get("run") in compatible and item.get("stage") == stage
                    and item.get("prompt_sha256") == hashlib.sha256(prompt.encode()).hexdigest()]
         item = judgments.get(matches[0]) if len(matches) == 1 else None
-        answer = judge.parse_answer(json.dumps(item), criteria)
-        answers[stage] = answer if Draft202012Validator(judge.answer_schema(criteria)).is_valid(answer) else None
+        answers[stage] = valid_answer(item, criteria)
     return answers
 
 

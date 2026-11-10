@@ -10,8 +10,18 @@ from pathlib import Path
 # The reused harnesses (`epistemic`, `membench`) are top-level packages under benchmarks/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from import_guidance import report, runner, session_close, session_score, store_report  # noqa: E402
-from import_guidance.recording import parse_arm  # noqa: E402
+from import_guidance import (  # noqa: E402
+    judge_batch,
+    replay_cases,
+    replay_report,
+    report,
+    runner,
+    session_close,
+    session_score,
+    session_table,
+    store_report,
+)
+from import_guidance.recording import parse_arm, served_sizes  # noqa: E402
 from import_guidance.scripted_replies import DEFAULT_SUITE  # noqa: E402
 
 
@@ -33,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
     )
-    run.add_argument("--case-dir", type=Path, help="session-close case inputs; seed identifiers still use shipped seeds")
+    run.add_argument("--case-dir", type=Path, help="session-close case inputs; a seed in <case-dir>/seeds wins over a shipped seed of the same name")
     run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill")
     run.add_argument("--credits-account", help="session-close only: select the maintained credits launcher account")
     run.add_argument("--credits-budget-usd", type=float, help="maximum requested for each capture or fresh process; requires account and reason")
@@ -41,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--suite",
         default=DEFAULT_SUITE,
-        help="a scenario folder: `import` (scenarios/) or a name under scenarios/, e.g. write-narration. "
+        help="a scenario folder: `import` (scenarios/), a name under scenarios/ such as write-narration, or the path "
+        "of a folder of scenario files (`write-scenarios` makes one). "
         "`session-close` runs real sessions in a seeded vault; it needs --product-root arms and no judge here",
     )
     run.add_argument(
@@ -63,6 +74,41 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="session-close only: after the close turn, send the arm's own episode ask (the Stop hook's text) as one more turn",
     )
+    write = sub.add_parser(
+        "write-scenarios",
+        help="write one context-replay scenario per case of a case folder; starts no model",
+    )
+    write.add_argument("--case-dir", type=Path, required=True, help="case files, with answer-keys/<id>.marks.json and seeds/")
+    write.add_argument("--out", type=Path, required=True, help="outside every repository; gets scenarios/ and case-sets.json")
+    prepare = sub.add_parser(
+        "judge-prepare",
+        help="export the blind judge items for stage-B answers and stage-C replies, shuffled together; starts no model",
+    )
+    prepare.add_argument("--stage-b", type=Path, nargs="*", default=[], help="runs.jsonl files of the replay suite")
+    prepare.add_argument("--stage-c", type=Path, nargs="*", default=[], help="runs.jsonl files of the session-close suite")
+    prepare.add_argument("--suite", required=True, help="the replay scenario folder that the runs used; it holds each case's turn, reference and criteria")
+    prepare.add_argument("--out", type=Path, required=True, help="gets judge-views.jsonl, and private/judge-map.json for the owner of the key only")
+    imported = sub.add_parser(
+        "judge-import", help="read the native judgments of a batch by opaque id and report the judge agreement; starts no model"
+    )
+    imported.add_argument("--judgments", type=Path, required=True, help="JSONL lines of {id, structured_output}")
+    imported.add_argument("--out", type=Path, required=True, help="the folder judge-prepare wrote; gets judged.json")
+    replay = sub.add_parser(
+        "replay-report", help="per set of cases, the paired pass difference and reply-length ratio of two arms on stage-B answers"
+    )
+    replay.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files of the replay suite")
+    replay.add_argument("--judged", type=Path, help="judged.json from judge-import; without it every judged criterion is unknown")
+    replay.add_argument("--case-sets", type=Path, required=True, help="case-sets.json from write-scenarios")
+    replay.add_argument("--criteria", nargs="+", help="the judged criteria that must hold; default is the replay rubric")
+    replay.add_argument("--baseline", required=True, help="the baseline arm's label")
+    replay.add_argument("--candidate", required=True, help="the candidate arm's label")
+    replay.add_argument("--out", type=Path, help="write the report here instead of printing it")
+    table = sub.add_parser("session-table", help="per pair, what each full session did, from session-close runs.jsonl")
+    table.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files of the session-close suite")
+    table.add_argument("--judged", type=Path, help="judged.json from judge-import, for the reply verdict column")
+    table.add_argument("--baseline", required=True, help="the baseline arm's label")
+    table.add_argument("--candidate", required=True, help="the candidate arm's label")
+    table.add_argument("--out", type=Path, help="write the table here instead of printing it")
     rep = sub.add_parser(
         "report", help="leak and pass rates per case, model and arm from runs.jsonl"
     )
@@ -93,6 +139,27 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("--out", type=Path, required=True, help="a folder for scores.jsonl and report.md")
     args = parser.parse_args(argv)
 
+    if args.command == "write-scenarios":
+        paths = replay_cases.write_scenarios(args.case_dir, args.out)
+        print(f"Wrote {len(paths)} scenarios to {args.out / 'scenarios'} and the case sets to {args.out / 'case-sets.json'}.")
+        return 0
+    if args.command == "judge-prepare":
+        count = judge_batch.prepare(args.stage_b, args.stage_c, runner.load_scenarios("all", args.suite), out=args.out)
+        print(f"Prepared {count} blind items in {args.out / 'judge-views.jsonl'}. Keep private/judge-map.json from the judge.")
+        return 0
+    if args.command == "judge-import":
+        print(judge_batch.agreement_line(judge_batch.import_judgments(args.judgments, out=args.out)))
+        return 0
+    if args.command in ("replay-report", "session-table"):
+        if args.command == "replay-report":
+            text = replay_report.build(args.runs, judged=args.judged, case_sets=args.case_sets, baseline=args.baseline, candidate=args.candidate, criteria=args.criteria or replay_report.DEFAULT_CRITERIA)
+        else:
+            text = session_table.build(args.runs, baseline=args.baseline, candidate=args.candidate, judged=args.judged)
+        if args.out:
+            args.out.write_text(text, encoding="utf-8")
+        else:
+            print(text)
+        return 0
     if args.command == "session-score":
         if args.prepare_judge or not (args.judgments or args.automatic_judge):
             count = session_score.prepare_native(args.runs, out=args.out, case_dir=args.case_dir)
@@ -153,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"{label}{scenario.id}: "
                         f"{'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}"
                     )
+                    if not problems and arm and scenario.record:
+                        sizes = served_sizes(Path(scratch) / f"{scenario.id}.{arm.label}.shapes.json")
+                        print("  recorded:", ", ".join(f"{name} {size} chars" for name, size in sizes.items()))
                     if not problems:
                         argv_preview = runner.agent_argv(
                             Path("claude"),
