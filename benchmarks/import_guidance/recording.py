@@ -4,11 +4,13 @@ An arm is a checkout. `record_worker.py` runs inside that checkout's environment
 calls (the product's terminal builder, its refusal envelope and its bootstrap) on a throwaway fixture vault, or on a
 seeded vault when the scenario names a seed folder, and the scripted server then serves what came back. A reply copied by hand into the scenario would be the same
 for both arms by construction. The recording is made once per arm and scenario and then reused, so the ids it
-holds stay fixed for every run of that arm and the answer checks can look for them.
+holds stay fixed for every run of that arm and the answer checks can look for them. It is reused only while the arm's
+checkout is in the state it was recorded from (`checkout_sha`); otherwise the runner stops and says to delete it.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -37,10 +39,20 @@ def parse_arm(text: str) -> Arm:
 
 
 def checkout_sha(root: Path) -> str:
-    done = subprocess.run(  # noqa: S603,S607
+    """The checkout's HEAD, with `-dirty-` and the first 12 hex digits of the sha256 of its diff against HEAD when a
+    tracked file differs from HEAD, or "unknown". Untracked files do not count: a run folder kept inside the checkout
+    would otherwise change the state between two recordings."""
+    head = subprocess.run(  # noqa: S603,S607
         ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
     )
-    return done.stdout.strip() if done.returncode == 0 and done.stdout.strip() else "unknown"
+    if head.returncode != 0 or not head.stdout.strip():
+        return "unknown"
+    diff = subprocess.run(  # noqa: S603,S607
+        ["git", "-C", str(root), "diff", "HEAD", "--binary", "--no-color", "--no-ext-diff", "--no-textconv"], capture_output=True
+    )
+    if diff.returncode != 0:
+        return "unknown"
+    return head.stdout.strip() + (f"-dirty-{hashlib.sha256(diff.stdout).hexdigest()[:12]}" if diff.stdout else "")
 
 
 def worker_env(arm: Arm, scratch: Path) -> dict[str, str]:
@@ -71,9 +83,17 @@ def seed_folder(scenario: Scenario) -> Path | None:
 def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[str]:
     """Write the arm's recording of one scenario to `target` unless it exists. Returns the problems found."""
     if target.exists():
-        if scenario.record.get("ready_graph") and "ready" not in load_recording(target):
+        kept = load_recording(target)
+        if scenario.record.get("ready_graph") and "ready" not in kept:
             # A recording made before the graph was built holds the graph warming, so it would measure nothing.
             return [f"{scenario.id}: {target} was recorded without building the graph; delete it to record again"]
+        now = checkout_sha(arm.root)
+        if kept.get("product_sha") != now:
+            # Its replies came from other code than the skill, tool text and hooks the agent would now be shown.
+            return [
+                f"{scenario.id}: {target} was recorded from {arm.label} at {kept.get('product_sha') or 'an unrecorded state'}, "
+                f"and the checkout is now at {now}; delete it to record again"
+            ]
         return []
     if not scenario.record.get("steps"):
         return [f"{scenario.id} has no record steps"]

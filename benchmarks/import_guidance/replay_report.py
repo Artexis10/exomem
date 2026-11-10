@@ -142,12 +142,17 @@ def build(
         measured = row["error"] is None and not used_outside_script(row)
         return math.log(len(row["final_text"])) if measured and row.get("final_text") else None
 
-    shas = {r["arm"]: r.get("product_sha") for r in rows}
+    def states(arm: str) -> str:
+        # Every product state the arm's runs came from: re-recording into the same run folder can mix two.
+        found = sorted({str(r.get("product_sha") or "unknown") for r in rows if r["arm"] == arm})
+        mixed = " (more than one product state: these runs did not all measure the same code)" if len(found) > 1 else ""
+        return (", ".join(f"`{sha}`" for sha in found) or "an unknown state (no run of this arm)") + mixed
+
     models = sorted({r["model"] for r in rows})
     sets = sorted(set(sets_of.values()))
     in_set = {name: sorted(case for case, s in sets_of.items() if s == name) for name in sets}
     out = [
-        f"Baseline `{baseline}` at `{shas.get(baseline)}`. Candidate `{candidate}` at `{shas.get(candidate)}`.",
+        f"Baseline `{baseline}` at {states(baseline)}. Candidate `{candidate}` at {states(candidate)}.",
         f"Stage-B runs read: {len(rows)}, of which {sum(r['error'] is not None for r in rows)} ended in an error (unknown). "
         "Counting criteria: "
         + (", ".join(criteria) if criteria is not None else f"every criterion of each judgment ({', '.join(asked) or 'no judge batch given'})")

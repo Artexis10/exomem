@@ -244,12 +244,39 @@ def test_a_recording_made_before_the_graph_was_built_is_not_reused_for_a_scenari
     graph: its replies carry no relation mark, whatever the arm."""
     ferry_seed(tmp_path)
     old = tmp_path / "shapes.json"
-    old.write_text(json.dumps({"shapes": {"context": {"map": {"membership_graph": "warming"}}}}), encoding="utf-8")
+    old.write_text(
+        json.dumps({"product_sha": recording.checkout_sha(ROOT), "shapes": {"context": {"map": {"membership_graph": "warming"}}}}), encoding="utf-8"
+    )
     asking = load_scenario(replay_scenario(tmp_path, seed="seed", ready_graph=True))
     problems = recording.record(asking, Arm("test", ROOT), old, tmp_path / "scratch")
     assert problems and "without building the graph" in problems[0]
     plain = load_scenario(replay_scenario(tmp_path, seed="seed"))
     assert recording.record(plain, Arm("test", ROOT), old, tmp_path / "scratch") == []
+
+
+
+def test_a_recording_from_another_commit_or_an_uncommitted_change_of_the_arm_is_refused_and_says_to_delete_it(tmp_path: Path) -> None:
+    """Catches a recording reused after the arm's code moved: the agent would read the new skill and tool text beside
+    the old code's replies, and the report would credit the arm's new state with them."""
+    arm_root = tmp_path / "arm"
+    arm_root.mkdir()
+    git = ["git", "-C", str(arm_root), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+    (arm_root / "reply.py").write_text("REPLY = 'first'\n", encoding="utf-8")
+    for command in (["init", "-q"], ["add", "reply.py"], ["commit", "-q", "--no-verify", "-m", "first"]):
+        subprocess.run([*git, *command], check=True)
+    ferry_seed(tmp_path)
+    scenario = load_scenario(replay_scenario(tmp_path, seed="seed"))
+    arm, target = Arm("cand", arm_root), tmp_path / "shapes.json"
+    target.write_text(json.dumps({"product_sha": recording.checkout_sha(arm_root), "shapes": {}}), encoding="utf-8")
+    assert recording.record(scenario, arm, target, tmp_path / "scratch") == []
+
+    (arm_root / "reply.py").write_text("REPLY = 'second'\n", encoding="utf-8")
+    uncommitted = recording.record(scenario, arm, target, tmp_path / "scratch")
+    subprocess.run([*git, "commit", "-q", "--no-verify", "-am", "second"], check=True)
+    committed = recording.record(scenario, arm, target, tmp_path / "scratch")
+    head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    assert len(uncommitted) == 1 and "-dirty-" in uncommitted[0] and uncommitted[0].endswith("delete it to record again")
+    assert len(committed) == 1 and f"the checkout is now at {head};" in committed[0]
 
 
 # Case folders, scenarios and the answer checks.
@@ -582,6 +609,19 @@ def test_a_model_with_an_extra_repeat_weighs_no_more_in_its_case_than_a_model_wi
     assert "| c0 | S | 2/3 | 1/3 | +0.00 |" in text
     length = text.split("## Reply length")[1].split("\n- Set S, all models: ")[1]
     assert length.startswith("mean log ratio +0.000 (candidate over baseline x1.00;")
+
+
+def test_the_report_names_every_product_state_of_an_arm_when_its_runs_came_from_more_than_one(tmp_path: Path) -> None:
+    """Catches a report that names one state per arm when a re-recording into the same run folder mixed two: the
+    difference would be read as one commit's."""
+    later = stage_b_row("c1", "cand", "Sails at 07:15.") | {"product_sha": "def"}
+    rows = [stage_b_row("c0", "base", "Sails at 07:15."), stage_b_row("c0", "cand", "Sails at 07:15."), stage_b_row("c1", "base", "Sails at 07:15."), later]
+    sets = tmp_path / "case-sets.json"
+    sets.write_text(json.dumps({"c0": "S", "c1": "S"}), encoding="utf-8")
+    text = replay_report.build([write_rows(tmp_path / "b.jsonl", rows)], judged=None, case_sets=sets, baseline="base", candidate="cand")
+    assert text.splitlines()[0] == (
+        "Baseline `base` at `abc`. Candidate `cand` at `abc`, `def` (more than one product state: these runs did not all measure the same code)."
+    )
 
 
 def test_a_run_that_used_a_tool_outside_the_script_is_counted_apart_and_is_neither_a_pass_nor_a_fail(tmp_path: Path) -> None:
