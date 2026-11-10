@@ -15,7 +15,7 @@ from exomem import state_migration
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = ROOT / "tests" / "fixtures"
-HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp", "textual")
+HEAVY_MODULES = ("torch", "sentence_transformers", "fastmcp", "mcp", "textual")
 
 
 def _run_cli_with_module_probe(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess[str], set[str]]:
@@ -106,3 +106,30 @@ def test_tui_non_tty_fails_fast_without_heavy_stacks(tmp_path: Path) -> None:
     assert result.returncode == 2, result.stderr
     assert "interactive terminal" in result.stderr
     _assert_no_heavy_modules(modules)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("search_memory", "--detail", "compact", "--limit", "3", "--mode", "hybrid", "--json", "--", "fixture note"),
+        ("recall_context", "--max-chars", "4000", "--json", "--", "fixture note"),
+    ],
+)
+def test_the_prompt_hooks_cli_calls_do_not_import_the_mcp_server_stack(tmp_path: Path, command: tuple[str, ...]) -> None:
+    """The prompt hook gives each CLI call 5 s; FastMCP and the MCP models cost about half a second of it."""
+    result, modules = _run_cli_with_module_probe(tmp_path, *command)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["success"] is True
+    _assert_no_heavy_modules(modules)
+
+
+def test_a_media_leafs_return_type_still_resolves_to_fastmcp_tool_result() -> None:
+    """The REST schema and tool publishing resolve this annotation; a broken lazy name would make them generic."""
+    import typing
+
+    from fastmcp.tools import ToolResult
+
+    from exomem import commands
+
+    assert typing.get_type_hints(commands.op_get_video_frames)["return"] is ToolResult

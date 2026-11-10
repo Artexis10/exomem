@@ -37,9 +37,6 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, NamedTuple, NotRequired, TypeVar, cast, get_args
 
-from fastmcp.tools import ToolResult
-from fastmcp.utilities.types import Image as FastMCPImage
-from mcp.types import TextContent
 from pydantic import ConfigDict, Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
@@ -82,8 +79,8 @@ from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
-from . import find as find_module
 from . import (
+    fastmcp_types,
     find_types,
     note_types,
     operation_entries,
@@ -96,6 +93,7 @@ from . import (
     vault,
     vocabulary_resolution,
 )
+from . import find as find_module
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
@@ -6723,7 +6721,7 @@ def op_get_video_frames(
     start_sec: float | None = None,
     end_sec: float | None = None,
     max_side: int | Literal["original"] | None = None,
-) -> ToolResult:
+) -> fastmcp_types.ToolResult:
     """View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.
 
     Use this to see what a video actually contains (slides, screen
@@ -6797,9 +6795,9 @@ def op_get_video_frames(
     if result.not_shown:
         # Left out at the call's byte limit, in time order: a window that starts at the first one shows them.
         meta["not_shown"] = list(result.not_shown)
-    return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
-        + [FastMCPImage(data=f.jpeg, format="jpeg").to_image_content() for f in result.frames],
+    return fastmcp_types.ToolResult(
+        content=[fastmcp_types.TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        + [fastmcp_types.Image(data=f.jpeg, format="jpeg").to_image_content() for f in result.frames],
         structured_content=meta,
     )
 
@@ -10128,7 +10126,7 @@ def op_read_media(
     end_sec: float | None = None,
     max_side: int | Literal["original"] | None = None,
     region: list[float] | None = None,
-) -> ToolResult:
+) -> fastmcp_types.ToolResult:
     """Show stored images or sampled video frames inline (MCP only).
 
     Args:
@@ -10167,7 +10165,7 @@ def _show_images(
     paths: list[str] | None,
     max_side: int | str | None,
     region: list[float] | None,
-) -> ToolResult:
+) -> fastmcp_types.ToolResult:
     from . import artifact_recovery, image_view
 
     if path is not None and paths is not None:
@@ -10210,9 +10208,9 @@ def _show_images(
         meta["region"] = list(region)
     if result.not_shown:
         meta["not_shown"] = result.not_shown
-    return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
-        + [FastMCPImage(data=item.jpeg, format="jpeg").to_image_content() for item in shown],
+    return fastmcp_types.ToolResult(
+        content=[fastmcp_types.TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        + [fastmcp_types.Image(data=item.jpeg, format="jpeg").to_image_content() for item in shown],
         structured_content=meta,
     )
 
