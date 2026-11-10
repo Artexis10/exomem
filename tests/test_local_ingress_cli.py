@@ -445,6 +445,42 @@ def test_attach_reconciles_a_timed_out_part_before_continuing(
     assert sum(transport.parts) == source.stat().st_size
 
 
+def test_attach_sends_smaller_parts_after_a_proxy_times_out_on_a_large_one(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A proxy that drops every part above its limit ends a run that retries at the full part size."""
+    import hashlib
+
+    from exomem import upload_sessions
+
+    monkeypatch.setattr(upload_sessions, "MAX_PATCH_BYTES", 1024)
+    app = _service_app(tmp_path, monkeypatch)
+    source = tmp_path / "recording.bin"
+    source.write_bytes(bytes(range(256)) * 5)
+    proxy_limit, attempts = 300, []
+
+    class SizeLimitedProxyTransport(_ServiceTransport):
+        def handle_request(self, request):
+            if request.method == "PATCH":
+                size = len(request.read())
+                attempts.append(size)
+                if size > proxy_limit:
+                    return httpx.Response(504, request=request)
+            return super().handle_request(request)
+
+    assert _attach_main(
+        [str(source), "--scope", "Device", "--category", "Uploads", "--resumable",
+         "--token-file", str(_token_file(tmp_path)), "--port", "8764"],
+        transport=SizeLimitedProxyTransport(app),
+    ) == 0, capsys.readouterr().err
+
+    assert attempts[1] < attempts[0]
+    assert max(attempts[1:]) <= proxy_limit
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["hash"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert (vault / receipt["path"]).read_bytes() == source.read_bytes()
+
+
 def test_attach_sends_a_file_the_listener_refuses_as_too_large_through_a_session(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
