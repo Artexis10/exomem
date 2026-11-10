@@ -395,8 +395,9 @@ def test_compose_refuses_every_shape_and_profile_that_execute_refuses(store):
     loop accepts a query it can never run."""
     store.create_collection(manifest_path(), manifest(fields=SUMMARY_FIELDS, natural_key="date"),
                             why="create", scaffold=False)
+    filtered = {"where": {"field": "steps", "op": "gt", "value": 1}}
     for raw in ({"version": 1, "select": ["date"], "execution_profile": "analytics"},
-                {**STEPS, "where": {"field": "steps", "op": "gt", "value": 1}}):
+                {**STEPS, **filtered, "aggregates": {"median": {"op": "percentile", "field": "steps", "p": 0.5}}}):
         composed = refusal(store, "record_memory", action="query", collection=SUMMARY_CID,
                            query={**raw, "mode": "compose"})
         assert composed["code"] == "QUERY_UNSUPPORTED"

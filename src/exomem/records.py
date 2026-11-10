@@ -2122,7 +2122,7 @@ def create_collection(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
         manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
-        _refuse_file_view_mode(manifest)
+        _refuse_store_only_features(manifest)
         manifest_guard = vault.PathGuard.capture(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
         )
@@ -2263,7 +2263,7 @@ def require_create_manifest(vault_root: Path, manifest: collections.CollectionMa
     """Every facade's rule for a NEW collection: the vault's storage, and one view per row in a file."""
     require_create_storage(vault_root, manifest)
     if manifest.storage.strategy != collections.SQLITE_STORAGE:
-        _refuse_file_view_mode(manifest)
+        _refuse_store_only_features(manifest)
 
 
 def require_file_create(vault_root: Path, manifest: collections.CollectionManifest) -> None:
@@ -2340,7 +2340,7 @@ def _validate_collection_create_for_profile(
             else "PLANNING_PROFILE_REQUIRED",
             f"{semantic_profile.title()} collection is required",
         )
-    (require or _refuse_file_view_mode)(manifest)
+    (require or _refuse_store_only_features)(manifest)
     _require_activity_log(root)
     if not all(
         record_governance.full_release_filter(root)(path)
@@ -2870,7 +2870,7 @@ def _validate_revision_manifest(
     if proposed.view_diagnostics:
         diagnostic = proposed.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
-    _refuse_file_view_mode(proposed)
+    _refuse_store_only_features(proposed)
     if proposed.semantic_profile != semantic_profile or (
         proposed.collection_id != current.collection_id
         or proposed.semantic_profile != current.semantic_profile
@@ -3208,6 +3208,7 @@ def _preflight_collection_create(
 def _normalized_manifest_contract(
     manifest: collections.CollectionManifest,
 ) -> dict[str, Any]:
+    references = {item.dotted: item.collection for item in collections.declared_references(manifest.schema)}
     return {
         "collection_id": manifest.collection_id,
         "title": manifest.title,
@@ -3221,6 +3222,7 @@ def _normalized_manifest_contract(
             "format_version": manifest.storage.format_version,
         },
         "natural_key": list(manifest.schema.natural_key),
+        **({"references": references} if references else {}),
         "fields": {
             name: {
                 "type": spec.type,
@@ -4499,8 +4501,16 @@ def _refuse_excluded_authored_names(names: object) -> None:
     raise collections.CollectionError(vault.EXCLUDED_FIELD_CODE, reason, details={"field": field})
 
 
-def _refuse_file_view_mode(manifest: collections.CollectionManifest) -> None:
-    """A file collection is one view per row; summary rows live only in a NEW store collection."""
+def _refuse_store_only_features(manifest: collections.CollectionManifest) -> None:
+    """A file collection is one view per row; summary rows and row references live only in a store collection."""
+    if found := collections.declared_references(manifest.schema):
+        raise collections.CollectionError(
+            "INVALID_FIELD_REFERENCE",
+            "a file collection has no row index to resolve a reference through; only a store collection can "
+            "declare references",
+            {"field": f"{found[0].location}.references", "received": manifest.storage.strategy,
+             "expected": "a collection whose rows live in the store", "example": "remove the references declaration"},
+        )
     if manifest.view_mode == "items":
         return
     from .collection_store import summary

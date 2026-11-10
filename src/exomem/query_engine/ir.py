@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+
+# The predicate operator groups every evaluator reads; the grammar fixes each group.
+# nosemgrep: ep-word-set -- closed query operators fixed by the query grammar
+TEXT_OPS = frozenset({"contains", "icontains", "startswith"})
+NULL_STATE_OPS = frozenset({"is_null", "is_missing", "is_not_null"})
+PRESENCE_OPS = frozenset({"exists", "missing"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +82,7 @@ class NamedAggregate:
     op: str
     field: Field | None = None
     p: float | None = None
+    where: Filter | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +159,12 @@ class Pattern:
 
 
 @dataclass(frozen=True, slots=True)
+class Related:
+    path: str
+    limit: int = 10
+
+
+@dataclass(frozen=True, slots=True)
 class Query:
     source: Source
     select: Project
@@ -166,3 +180,29 @@ class Query:
     mode: str = "execute"
     execution_profile: str = "interactive"
     version: int = 1
+    related: tuple[Related, ...] = ()
+
+
+def fields(query: Query) -> Iterator[Field]:
+    """Every field a query names: its select, filter, order, group keys, aggregates and having."""
+
+    def leaves(node: Filter | None) -> Iterator[Field]:
+        if node is None:
+            return
+        for child in node.children:
+            yield from leaves(child)
+        if node.field is not None:
+            yield node.field
+
+    yield from query.select.fields
+    yield from leaves(query.where)
+    for key in query.order_by.keys:
+        yield key.field
+    if query.aggregate is not None:
+        for group in query.aggregate.groups:
+            yield group.field
+        for value in query.aggregate.values:
+            if value.field is not None:
+                yield value.field
+            yield from leaves(value.where)
+    yield from leaves(query.having)

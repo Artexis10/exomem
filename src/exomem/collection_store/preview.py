@@ -516,6 +516,14 @@ def _mutate(vault_root, method, *args, **kwargs):
         return method(*args, **kwargs)
 
 
+def _validate_create(writer, profile, args):
+    """Refuse a new manifest for what the store's create refuses; the file-mode preflight still builds the result."""
+    if "manifest_path" in args and "manifest_text" in args:
+        writer._require_operation_context()
+        writer._facade_profile = profile
+        writer.validate_create(args["manifest_path"], args["manifest_text"], scaffold=args.get("scaffold", True))
+
+
 def dispatch(
     vault_root: Path, profile: str, action: str, values: Mapping[str, Any]
 ) -> tuple[bool, Any]:
@@ -555,6 +563,12 @@ def dispatch(
             if created is not None:
                 return True, created
         if selector is None or selected_writer(vault_root, selector, prove=prove) is None:
+            if action == "validate" and args.get("collection") is None:
+                from .runtime import summary_create
+
+                # Only a create the store takes (the test served_create uses) is refused for what the store refuses.
+                if summary_create(vault_root, args):
+                    _validate_create(writer, profile, args)
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
@@ -564,6 +578,7 @@ def dispatch(
     writer._facade_profile = profile
     if action == "validate":
         if args.get("collection") is None:
+            _validate_create(writer, profile, args)
             return False, None
         return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
     # Records inspection is generic in file mode; only its mutations require
@@ -572,6 +587,35 @@ def dispatch(
         return True, writer.inspect_collection(args["collection"], facade_profile=profile)
     if action == "inspect":
         return True, writer.inspect_collection(args["collection"])
+    if action == "query" and "view" in args:
+        # A version-1 saved view runs on the query engine, on any facade profile.
+        from .. import structured_collections as _collections
+        from ..query_engine import route
+
+        with writer.read_collection(args["collection"], facade_profile=profile) as _manifest:
+            view = _collections.resolve_saved_view(_manifest, args["view"])
+        definition = view.definition
+        raw_view_query = definition.get("query") if isinstance(definition, Mapping) else None
+        if isinstance(raw_view_query, Mapping) and "version" in raw_view_query:
+            extras = set(args) - {"collection", "view", "query"}
+            paging = args.get("query")
+            if extras or (paging is not None and (
+                    not isinstance(paging, Mapping)
+                    or set(paging) - {"version", "page"}
+                    or (paging.get("page") is not None and (
+                        not isinstance(paging["page"], Mapping)
+                        or set(paging["page"]) - {"limit", "after"})))):
+                from ..structured_collections import CollectionError
+                raise CollectionError(
+                    "QUERY_ARGUMENT_CONFLICT",
+                    "a version-1 saved view accepts only query={version, page} alongside view")
+            merged = dict(raw_view_query)
+            if paging is not None:
+                merged["page"] = {**(merged.get("page") or {}), **(paging.get("page") or {})}
+            merged["version"] = 1
+            return True, route.run(writer, args["collection"], merged,
+                                   facade_profile=profile, view=view.name,
+                                   view_identity=view.identity)
     if action == "query" and "query" in args:
         from ..query_engine import route
 
