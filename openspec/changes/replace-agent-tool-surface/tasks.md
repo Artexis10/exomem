@@ -29,5 +29,5 @@
 - [x] 6.2 Set the byte budget from `measure-tool-schema-bytes.py`, and update the ChatGPT connector contract.
 
 ## 7. Delivery
-- [ ] 7.1 Run the proof, the full corpus, the privacy gate and `openspec validate --all --strict`.
+- [x] 7.1 Run the proof, the full corpus, the privacy gate and `openspec validate --all --strict`.
 - [ ] 7.2 After release, refresh the ChatGPT draft and rescan the directory listing.
