@@ -402,13 +402,17 @@ class ClusterClient:
             safe = {}
             if isinstance(detail, dict):
                 # The closed diagnostic wire fields carry code identifiers, never free-form error text.
-                for key in ("type", "function", "code", "limit", "cause"):
+                for key in ("type", "function", "code", "limit", "cause", "missing"):
                     value = detail.get(key)
                     if isinstance(value, str) and len(value) <= 80 and value.isascii() and value.isidentifier():
                         safe[key] = value
                 errno = detail.get("errno")
                 if type(errno) is int and errno > 0:
                     safe["errno"] = errno
+                # The HTTP status that refused a part upload, or that came without an ETag.
+                status = detail.get("status")
+                if type(status) is int and 100 <= status <= 599:
+                    safe["status"] = status
             # The controller removes terminal Jobs; retain the private-safe reason before it does.
             logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None

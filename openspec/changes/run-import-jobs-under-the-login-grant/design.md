@@ -13,7 +13,7 @@ Every per-session revocation also revokes the family: `revoke_bearer` and `tombs
 
 `JOB_WINDOW_SECONDS = 3600` is a separate clock. `_step` pauses a job with `time_cap` once `window_expires` passes, and only an explicit continuation renews it.
 
-Cloud cells carry the gateway's family in the origin binding, but `cloud_origin.matches` is false outside a request. Stdio, CLI and library owners carry no origin session.
+Cloud cells do bind an origin session, but its issuer family is the gateway's, and `cloud_origin.matches` is false outside a request. The service cannot revalidate such an origin from a background tick. Stdio, CLI and library owners carry no origin session at all. Neither kind has a login the service can recheck on its own.
 
 ## Goals / Non-Goals
 
@@ -27,7 +27,7 @@ Cloud cells carry the gateway's family in the origin binding, but `cloud_origin.
 
 - No automatic resume of a job whose authority really ended. That still needs an explicit continuation from the same principal.
 - No change to source release, target authority, cancel or status authorization, host takeover, or the lifetime of any token or session.
-- No change for Cloud cells, or for stdio, CLI and library owners.
+- No change for Cloud cells, or for stdio, CLI and library owners: their jobs keep the one-hour window.
 
 ## Decisions
 
@@ -58,13 +58,20 @@ The revalidation returns one of three results:
 
 Today `SessionStoreUnavailable` reads as lost authority. Once the hourly expiry is gone, that would become the main false `authority_lost`.
 
+Which errors are which:
+
+- **unreadable:** `SessionStoreUnavailable` (a storage read failure, a cipher failure, or a record that does not match its storage key) and `OSError`. Both say that the service could not read the answer, so nothing is known about the login.
+- **not valid:** every other outcome, including a missing record, a failed check, and a misconfiguration such as no session authority for the bound issuer (`RuntimeError`, `ValueError`). The service then has nothing that could vouch for the login, and retrying would not change that.
+
+An unreadable answer never lets a batch commit. The job pauses as `store_unavailable`, and the host retries on a bounded backoff: 30 seconds after the first failure, doubling on each consecutive failure, capped at 5 minutes. A skipped tick makes no store lookup, so a store that stays down is read about once per 5 minutes per job, not once per tick. A readable answer clears the backoff. The backoff applies only to this cause, so the other host-local pauses retry as before. A record that stays unreadable keeps the job paused until it is readable or the owner cancels it.
+
 ### D3. Which clock still applies
 
 | The job's origin | Deadline | Pause at the deadline |
 |---|---|---|
 | Origin session that stays valid (expiring access session with a live family, or a session without an expiry) | none | none |
 | Also bound to a governance authorization session | that session's `expires_at`, at most one hour | `time_cap` |
-| No origin session (stdio, CLI, library, Cloud cell) | the one-hour window, as today | `time_cap` |
+| An origin the service cannot revalidate without a live request (a Cloud cell's gateway origin; stdio, CLI and library owners, which have no origin session) | the one-hour window, as today | `time_cap` |
 
 - These are the only deadlines.
 - The login never extends a governance authorization session.
