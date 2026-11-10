@@ -451,7 +451,7 @@ A cell with local storage backs up each hour. Another cell backs up once a day, 
 7. After a stop at step 6, fix forward as "If the upgrade fails" step 8 says. Then repeat this section.
 8. For any other cause that you found, fix it so that the cell can back up.
 9. After three windows with no backup and no log line, find why cellctl skips the cell, such as a park.
-10. While a listed cell lacks a backup after the rollout end, keep the copy. After the next window, repeat step 3.
+10. Keep the copy while a listed cell has no backup after the rollout end. Repeat step 3 after its next window.
 11. When each listed cell has a backup after the rollout end, delete the temporary copy of the key columns.
 
     ```bash
