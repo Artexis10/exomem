@@ -370,8 +370,8 @@ def _page_version(page: str) -> tuple[tuple[int, int], tuple[int, int, int], os.
 def _remembered_unclaimed(root: Path, path: str) -> bool:
     # Only a file-mode read fills this memo: a stored page's read carries no generation, so
     # `_remember_unclaimed` never keeps it. Migration to the store runs offline, so a process that
-    # serves a store-mode vault starts empty and never stats a stored page's file here. A caller
-    # that migrates in its own process drops the memo, as a restart does.
+    # serves a store-mode vault starts empty and never stats a stored page's file here. No product
+    # path clears it on a migration; a long-lived reader open across one keeps stale answers.
     key = (root, path)
     with _UNCLAIMED_LOCK:
         entry = _UNCLAIMED.get(key)
