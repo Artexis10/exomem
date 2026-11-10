@@ -1046,7 +1046,7 @@ def _recover_in_store(
             raise _destination_exists(restore_rel)
 
         refusal = (
-            store_targets.folder_form_gap(root, trash_rel, stored)
+            store_targets.folder_form_gap(root, trash_rel, stored, error_class=RecoverError)
             if trash_kind == "directory"
             else store_targets.page_only_form_gap(
                 root, trash_rel, stored.get(trash_rel), destination=restore_rel

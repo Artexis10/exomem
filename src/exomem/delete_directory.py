@@ -758,7 +758,9 @@ def _delete_in_store(
             )
         with store_read.snapshot(root) as view:
             stored = view.bodies(pages)
-        refusal = store_targets.folder_form_gap(root, rel_path, stored)
+        refusal = store_targets.folder_form_gap(
+            root, rel_path, stored, error_class=DeleteDirectoryError
+        )
         if refusal is not None:
             raise store_availability.unrouted("delete_directory", refusal)
         from .collection_store import authority as collection_authority

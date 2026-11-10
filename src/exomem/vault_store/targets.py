@@ -189,6 +189,7 @@ _NOT_A_PAGE = "only a Markdown page is held by the store, and a file's bytes sta
 _GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
 _CARRIES_MORE = "its stored original or its part pages move with it, and they have no store form"
 _FILES_ON_DISK = "the folder holds files whose bytes stay on disk, and they have no store form"
+_LINKED = "the folder holds a symbolic link, which a folder write does not follow; remove it"
 _NOT_HELD = (
     "the folder holds a Markdown file that the store holds no page for, and moving the folder "
     "would leave it behind; retry once the store has imported or removed it"
@@ -246,7 +247,11 @@ def page_only_form_gap(
 
 
 def folder_form_gap(
-    vault_root: Path, folder: str, pages: Mapping[str, bytes]
+    vault_root: Path,
+    folder: str,
+    pages: Mapping[str, bytes],
+    *,
+    error_class: Callable[..., Exception],
 ) -> str | None:
     """Why a store-mode vault cannot move this folder of pages yet, or None when it has a store form.
 
@@ -258,6 +263,8 @@ def folder_form_gap(
     for. Such a file is a note that nothing has imported yet, or a page's old file that the
     projector has not removed yet. It refuses, because the move would leave it behind while the
     call reports the folder moved. A wrong refusal lasts until the importer or the projector runs.
+    A symbolic link below the folder raises ``error_class`` with RESERVED_PATH, as file mode's
+    folder read refuses one: neither form follows a link out of the folder or leaves it behind.
     """
     from .. import extraction_parts
     from ..governance import lifecycle
@@ -269,12 +276,23 @@ def folder_form_gap(
         if view.holds_binaries_under(f"{folder}/"):
             return _FILES_ON_DISK
     notes: set[str] = set()
-    for current, _folders, names in os.walk(root / folder):
-        base = Path(current).relative_to(root).as_posix()
-        for name in names:
-            if ownership.classify(f"{base}/{name}") is not ownership.Ownership.PAGE:
+    pending = [folder]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(root / current))
+        except OSError:
+            continue  # as `os.walk` does: a folder that cannot be listed names nothing
+        for entry in entries:
+            rel = f"{current}/{entry.name}"
+            if entry.is_symlink():
+                raise error_class(code="RESERVED_PATH", reason=_LINKED)
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(rel)
+            elif ownership.classify(rel) is not ownership.Ownership.PAGE:
                 return _FILES_ON_DISK
-            notes.add(f"{base}/{name}")
+            else:
+                notes.add(rel)
     if not notes <= pages.keys():
         return _NOT_HELD
     # A raw-marked page's parts are pages in a sibling folder, which is then one of these folders.
