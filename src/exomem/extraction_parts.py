@@ -284,14 +284,20 @@ def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
 
     A part that the store does not hold yet is a file that nothing has imported: its delete queues
     the file's removal. The commit runs on the store thread, as a media sidecar commit does. A store
-    that refuses the commit keeps every part, and the caller logs them.
+    that refuses the commit, or that no service in this process serves (an offline sweep), keeps
+    every part, and the caller logs them.
     """
     from .cli_ops import OpError
-    from .vault_store import availability, batch, write
+    from .vault_store import availability, batch, projector, write
     from .vault_store import media as store_media
 
     if store_media.off_store_thread(vault_root):
-        return store_media.on_store_thread(vault_root, lambda: _retire_in_store(vault_root, rels))
+        try:
+            return store_media.on_store_thread(
+                vault_root, lambda: _retire_in_store(vault_root, rels)
+            )
+        except (OpError, projector.StoreNotServed):
+            return tuple(rels)
     try:
         writer = availability.page_writer(vault_root)
         if writer is None:

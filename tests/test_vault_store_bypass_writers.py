@@ -47,7 +47,7 @@ from exomem import (
 from exomem import init as init_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection
+from exomem.collection_store import connection, preview
 from exomem.governance import catalog_publication, membership, policy
 from exomem.governance.principal import (
     library_scope,
@@ -652,6 +652,19 @@ def test_retiring_a_stored_part_off_the_store_thread_commits_on_the_store_thread
     assert not read.page_exists(stored, part_rel(3))
 
 
+def test_retiring_a_stored_part_where_no_service_serves_the_store_keeps_it(stored, writer):
+    """An offline sweep whose retire raises after the parent committed, because no service in the
+    process serves the store: the job would fail and retry a write that already landed."""
+    token = preview._BOUND.set((stored.resolve(), writer, False))
+    try:
+        part = stored_part(stored, 3)
+    finally:
+        preview._BOUND.reset(token)
+
+    assert extraction_parts.retire(stored, (stored / part,)) == (part,)
+    assert read.page_exists(stored, part)
+
+
 def test_the_part_sweep_deletes_a_stored_surplus_part_in_a_run_and_only_names_it_in_a_preview(
     served, writer
 ):
@@ -676,8 +689,8 @@ def test_the_part_sweep_deletes_a_stored_surplus_part_in_a_run_and_only_names_it
     assert (served / part).is_file()
     before = tree(served)
 
-    preview = extraction_parts.sweep(served, dry_run=True)
-    assert (preview.removed, preview.unowned) == ([part], [])
+    listed = extraction_parts.sweep(served, dry_run=True)
+    assert (listed.removed, listed.unowned) == ([part], [])
     assert read.page_exists(served, part)
 
     swept = extraction_parts.sweep(served, dry_run=False)
