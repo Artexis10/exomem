@@ -351,14 +351,16 @@ ROADMAP = f"{NOTES}/Roadmap.md"
 REVIEW = f"{NOTES}/Review.md"
 BUDGET = f"{NOTES}/Budget.md"
 OLD_BUDGET = f"{NOTES}/Old budget.md"
+MEMO = f"{NOTES}/Memo.md"
+FINDINGS = f"{NOTES}/Findings.md"
 OLD_ROADMAP = f"{PATTERNS}/Old roadmap.md"
 
 
 def _release_twin(tmp_path: Path, *, withheld: bool) -> Path:
     """A vault whose egress rule withholds `Notes/Patterns/**` from an external caller, with the
     withheld page or as if it never had it. The roadmap supersedes the withheld page, and the
-    withheld page supports the review. A visible supersession between two budget pages gives
-    both vaults the same non-empty answer."""
+    withheld page supports the review. A visible supersession between two budget pages, and a
+    visible support between two others, give both vaults the same non-empty answers."""
     from conftest import initialize_vault_state_offline
     from test_governance_egress import _reset_caches, write_rule, write_scope
 
@@ -383,6 +385,12 @@ def _release_twin(tmp_path: Path, *, withheld: bool) -> Path:
         page.format(title="Budget", body=f"## Relations\n\n- supersedes [[{OLD_BUDGET[:-3]}]]"),
     )
     _write(vault, OLD_BUDGET, page.format(title="Old budget", body="The budget is fixed."))
+    _write(
+        vault,
+        MEMO,
+        page.format(title="Memo", body=f"## Relations\n\n- supports [[{FINDINGS[:-3]}]]"),
+    )
+    _write(vault, FINDINGS, page.format(title="Findings", body="Hiring is on budget."))
     if withheld:
         _write(
             vault,
@@ -431,25 +439,27 @@ def _hit_paths(reply: dict | list) -> set[str]:
     return {hit["path"] for hit in (reply["hits"] if isinstance(reply, dict) else reply)}
 
 
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
 @pytest.mark.parametrize("ask", [False, True], ids=["op_find", "op_ask_memory"])
 @pytest.mark.parametrize("search", list(_PAGE_LEVEL_SEARCHES))
 def test_a_restricted_caller_gets_the_reply_of_a_vault_that_never_had_the_withheld_page(
-    tmp_path: Path, search: str, ask: bool
+    tmp_path: Path, request: pytest.FixtureRequest, search: str, ask: bool, served: bool
 ) -> None:
     """Catches a relation filter that resolves its participants over the request's content
     admission alone: the roadmap, or the review, is returned only when the withheld page it
-    shares an edge with exists, so the caller learns that the page exists."""
-    replies = [
-        _search_as(
-            "external",
-            _release_twin(tmp_path, withheld=withheld),
-            _RELATION_SEARCHES[search],
-            ask=ask,
+    shares an edge with exists, so the caller learns that the page exists. The served reader
+    resolves links through the request's own checkpoint, so it is checked as well."""
+    replies = []
+    for withheld in (True, False):
+        vault = _release_twin(tmp_path, withheld=withheld)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        replies.append(
+            _search_as("external", vault, _RELATION_SEARCHES[search], ask=ask)
         )
-        for withheld in (True, False)
-    ]
 
     assert replies[0] == replies[1]
+    assert _hit_paths(replies[0])
 
 
 @pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
@@ -499,9 +509,11 @@ def test_a_restricted_caller_still_filters_by_the_edges_between_visible_pages(
     tmp_path: Path,
 ) -> None:
     """Catches a fix that withholds every edge from a restricted caller: the budget pair still
-    answers `supersedes`, as it does in a vault without the withheld page."""
+    answers `supersedes` and the memo pair `supports`, as in a vault without the withheld page."""
     vault = _release_twin(tmp_path, withheld=True)
 
-    reply = _search_as("external", vault, {"relations": ["supersedes"]})
+    supersedes = _search_as("external", vault, {"relations": ["supersedes"]})
+    supports = _search_as("external", vault, {"relations": ["supports"]})
 
-    assert _hit_paths(reply) == {BUDGET, OLD_BUDGET}
+    assert _hit_paths(supersedes) == {BUDGET, OLD_BUDGET}
+    assert _hit_paths(supports) == {MEMO, FINDINGS}
