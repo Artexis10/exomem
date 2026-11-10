@@ -3789,7 +3789,7 @@ def _find_semantic_units(
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
     # A store-mode request has no catalogue to seed from: the oracle below reads the store's corpus.
-    # nosemgrep: ep-word-membership -- find's own closed search modes, which its argument check fixes.
+    # nosemgrep: ep-word-membership -- find's closed search modes, fixed by its argument check.
     if mode in {"keyword", "hybrid", "vector"} and not lexstore.catalogue_retired():
         if dnf_clauses is not None:
             # Exact eligibility is normal-table metadata only. Hybrid/vector
