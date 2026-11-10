@@ -18,7 +18,7 @@ import tracemalloc
 from pathlib import Path
 
 import pytest
-from memory_measurement import run_in_fresh_process
+from memory_measurement import run_in_fresh_process, settle_intern_table
 from s1_export_fixture import daily_csv, daily_summaries, iter_exercises, local_day
 from test_authorization_session_authority import NOW
 from test_collection_store_governance import session
@@ -296,6 +296,7 @@ def test_a_governed_session_previews_and_starts_without_loading_the_source(
     session(store, monkeypatch, paths="Unrelated/**")
     who = _session_at(store, NOW, 600)
     who = replace(who, client_binding=bound.client_binding, origin_session=bound.origin_session)
+    settle_intern_table()
     tracemalloc.start()
     try:
         assert refused(call, store, who, mode="preview", source_ref=SOURCE, format="ndjson",
