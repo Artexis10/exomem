@@ -137,8 +137,8 @@ Do this once, with the operator's approval and a prod grant. The private key goe
    Expect `1`. This proves the endpoint, not the key: with no valid key, the set is empty and still valid.
 
 Expected result: the next cell that Substrate deletes appears in the deletion set, with its `iat` and `purge_after`.
-If it does not, read Substrate's production log for `exomem_cloud_grant_key_invalid`.
-Unset, a deletion still succeeds and stores no grant.
+If it does not, read Substrate's production log. `exomem_cloud_grant_key_invalid` means that the key does not parse.
+`exomem_cloud_deletion_grant_unsigned` means that the key is unset. Either way, a deletion still succeeds and stores no grant.
 
 ### Turn on the purge
 
@@ -291,8 +291,9 @@ before Substrate signs with it, and remove the old key only when no relayed gran
 3. Add that public half as the second entry of `cellDeletion.grantPublicKeys`.
 4. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
 5. Count the grant keys as step 5 of "Triage an anomaly" says. Expect 2 in each namespace.
-6. Remove Substrate's current key: `vercel env rm EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY production --yes`
-7. Pipe the `_NEXT` key into the same variable, as step 2 of "Create the grant signing key" does.
+6. Replace Substrate's key in place, so that the variable is never unset:
+   `bwsx-run SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY_NEXT -- sh -c 'printf "%s\n" "$SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY_NEXT"' | vercel env update EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY --environment production`
+7. List the variable. Expect one Production entry, of type sensitive: `vercel env ls production`
 8. Redeploy Substrate as step 4 of "Create the grant signing key" says. Write down the switch time as Unix seconds.
 9. Count the relayed grants that Substrate signed before the switch:
    `kubectl -n exomem-cloud get configmap exomem-cell-deletions -o jsonpath='{.data.grants\.json}' | jq '[.[] | split(".")[1] | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson | select(.iat < <switch time>)] | length'`
@@ -300,6 +301,6 @@ before Substrate signs with it, and remove the old key only when no relayed gran
 11. Remove the old key from `cellDeletion.grantPublicKeys`, and run the Helm upgrade again.
 12. Copy the `_NEXT` key over the base BWS name, so that "Turn on the purge" step 3 prints the live key:
    `bwsx-run SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY_NEXT -- sh -c 'printf "%s\n" "$SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY_NEXT"' | bwsx-secret set --project prod SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY --format opaque`
-13. Delete the `_NEXT` entry in BWS.
+13. If step 12 ended without an error, delete the `_NEXT` entry in BWS. Step 12 reads the value back.
 
 Expected result: a repeat of step 5 shows 1 key in each namespace, and the watcher raises no anomaly.

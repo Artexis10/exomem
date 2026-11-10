@@ -436,20 +436,22 @@ A cell with local storage backs up each hour. Another cell backs up once a day, 
    ```
 
    The query leaves out a cell created after the copy, because the copy does not hold it.
-4. After 26 hours, read the recent cellctl log for each cell that still has no such backup.
+4. After 26 hours, read the cellctl log since the rollout end for each cell that still has no such backup.
 
    ```bash
    kubectl --namespace exomem-cloud logs deployment/cellctl --since-time=<rollout end> | grep -F '<cell id>'
    ```
 
-   If the cellctl pod restarted since the rollout end, run the command again with `--previous`.
+5. If the cellctl pod restarted since the rollout end, run the command of step 4 again with `--previous`.
+
    A cell with nightly backups logs a failure only inside its backup window. Finding no line is not a cause.
 
    cellctl unwraps the backup key before it makes the backup Job. A failed unwrap makes no Job, only this log line.
-5. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Stop here.
-6. For any other cause that you found, record it for that cell and continue.
-   If you found no cause, keep the copy and wait for the next backup window.
-7. Delete the temporary copy of the key columns.
+6. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Stop here.
+7. After a stop at step 6, fix forward from the copy.
+8. For any other cause that you found, record it for that cell.
+9. If a cell has no backup and no found cause, keep the copy. After its next backup window, repeat step 3.
+10. When each cell has a backup or a recorded cause, delete the temporary copy of the key columns.
 
    ```bash
    rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
