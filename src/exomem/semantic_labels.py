@@ -81,7 +81,8 @@ MEMBER_LISTS = ("families", "kinds", "keys")
 ALL_KINDS = "*"
 # The closed display-behaviour set. Each names something compiled context is to do within one
 # dimension's group, changing only the order and annotation of the context. The schema accepts
-# only these names; no reader applies one yet. Adding one is a schema change, as for a kind trait.
+# only these names, and `dimension_display` implements each one. Adding one is a schema change, as
+# for a kind trait, and needs its implementation there.
 # nosemgrep: ep-word-set -- the closed set this schema declares for a vault to choose from, not text
 DISPLAY_BEHAVIOURS = frozenset(("lead_with_current", "show_origin", "flag_open", "order_in_time"))
 # The shape a key has: lower-case letters, digits and underscores.

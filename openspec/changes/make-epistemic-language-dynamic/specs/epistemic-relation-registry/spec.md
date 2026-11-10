@@ -50,7 +50,7 @@ The core registry SHALL include `precedes` and `follows` as one inverse pair in 
 - **THEN** compiled context presents A before B
 
 ### Requirement: Epistemic dimensions are registry data
-The system SHALL keep epistemic dimensions in a vocabulary registry with shipped defaults and vault additions. A dimension entry SHALL carry a key, labels per language, a description, its members and its display behaviours. Members SHALL be relation families, unit kinds and governed metadata keys, and one member MAY belong to several dimensions. A unit SHALL belong to a dimension when its kind is a member, when it carries a member key, or when it is an endpoint of an edge whose family is a member. Retrieval SHALL filter by any dimension, the context compiler SHALL group by any dimension, and reviews and reports SHALL queue by any dimension. A display behaviour SHALL apply only within its own dimension's group, and a unit that belongs to several requested dimensions SHALL appear in full in the first requested dimension and as a ref in the others. Display behaviours SHALL come from a closed set that the registry schema declares: `lead_with_current`, `show_origin`, `flag_open` and `order_in_time`. A display behaviour SHALL change only the order and annotation of compiled context. It SHALL NOT hide a unit, change a unit's standing or change what a word means. Code SHALL NOT hold a dimension list or branch on a dimension key.
+The system SHALL keep epistemic dimensions in a vocabulary registry with shipped defaults and vault additions. A dimension entry SHALL carry a key, labels per language, a description, its members and its display behaviours. Members SHALL be relation families, unit kinds and governed metadata keys, and one member MAY belong to several dimensions. A unit SHALL belong to a dimension when its kind is a member, when it carries a member key, or when it is an endpoint of an edge whose family is a member. Retrieval SHALL filter by any dimension, the context compiler SHALL group by any dimension, and reviews and reports SHALL queue by any dimension. A display behaviour SHALL apply only within its own dimension's group, and a unit that belongs to several requested dimensions SHALL appear in full in the first requested dimension and as a ref in the others. Display behaviours SHALL come from a closed set that the registry schema declares: `lead_with_current`, `show_origin`, `flag_open` and `order_in_time`. A display behaviour SHALL change only the order and annotation of compiled context. It SHALL NOT hide a unit, change a unit's standing or change what a word means. Code SHALL NOT hold a dimension list or branch on a dimension key. A retrieval request SHALL ask for dimension groups through its filter alone: when the filter names `unit.dimension` at the top level, alone or under a top-level `$and`, `$eq` SHALL return one group and `$in` SHALL return one group for each named dimension, in the order given. `$ne` SHALL ask for no group. The request's limit SHALL count distinct units. Display marks SHALL come only from edges in the caller's view, so a page withheld from the caller SHALL NOT change a mark. When the edge state is unknown, no unit SHALL be marked open, edges SHALL NOT reorder a group, and the result SHALL say that the edge state is unknown. A per-dimension report row SHALL count each mark that the dimension's display behaviours produce, and SHALL give no count when the edge state is unknown.
 
 #### Scenario: A vault adds a dimension
 - **WHEN** a reviewed registry save adds dimension `regulation` with kinds `constraint` and `requirement` as members
@@ -64,6 +64,16 @@ The system SHALL keep epistemic dimensions in a vocabulary registry with shipped
 - **WHEN** dimension `currency` names `lead_with_current`, and one decision supersedes another
 - **THEN** compiled context places the current decision first
 - **AND** the earlier decision stays in the context, marked as replaced, or as a ref when the budget is short
+
+#### Scenario: An open question stays open until a visible answer settles it
+- **WHEN** dimension `uncertainty` names `flag_open`, and an open question has no verdict
+- **THEN** compiled context marks the question as open
+- **AND** when another page that the caller may see links to the question with `answers`, the question is no longer marked as open
+
+#### Scenario: A unit in two requested dimensions appears in full once
+- **WHEN** a request filters by `unit.dimension` with `$in` `provenance` and `attribution`, and one unit belongs to both
+- **THEN** the `provenance` group carries the unit in full
+- **AND** the `attribution` group carries the unit as a ref that names the `provenance` group
 
 #### Scenario: An undeclared display behaviour is refused
 - **WHEN** a registry save gives a dimension the display behaviour `hide_refuted`

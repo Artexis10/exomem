@@ -118,16 +118,20 @@ A dimension entry has a key, labels, a description, its members and its display 
 
 **Every dimension gets the generic operations:** retrieval filters by it, the context compiler groups by it, and reviews and reports queue by it. No code names a particular dimension.
 
+Two surfaces group by dimension now: unit search results and the context pack. A search asks for groups through its filter alone. When the filter names `unit.dimension` at the top level, alone or under a top-level `$and`, `$eq` returns one group and `$in` returns one group for each named dimension, in the order given. `$ne` asks for no group, and the limit counts distinct units. The automatic working set (`recall_context`) and the retrieve-nudge hook do not group or mark yet. They wait for the real-model check (task 5.4). The per-dimension report row counts each mark that the dimension's display behaviours produce.
+
 **A dimension may also name display behaviours** from a closed set:
 
-- `lead_with_current`: put current members before replaced ones, and mark the replaced ones;
-- `show_origin`: show beside each member where it came from and whose it is;
+- `lead_with_current`: put current members before replaced ones, and mark the replaced ones. A member is replaced when its page's lifecycle class is history, or when an inbound edge whose relation carries `replaces` ends at it or at its page; that edge's source is its successor;
+- `show_origin`: show beside each member where it came from and whose it is. `by` is its `asserted_by` or `credence_holder`, and `from` names up to three targets of its outbound edges, and of its page's, whose relation carries `sources`;
 - `flag_open`: mark members whose kind has the `closable` trait and that have no verdict or answer yet. An answer is an inbound edge whose relation carries `settles`;
 - `order_in_time`: present members in time order, read from edges with `earlier_than_target` or `later_than_target` and from `occurred_at`. It is the only rule that orders events.
 
 A display behaviour applies only within its own dimension's group. When a request groups by several dimensions, a unit that belongs to more than one appears in full in the first requested dimension and as a ref in the others, so orders cannot conflict.
 
-Display behaviours change only order and annotation in compiled context. They never hide a unit, change its standing or change what a word means. When the budget is short, a replaced unit becomes a ref, as context activation already allows. A dimension change takes effect only after a reviewed registry save, as every registry change does.
+Display behaviours change only order and annotation in compiled context. They never hide a unit, change its standing or change what a word means. When the pack's budget is short, a replaced group member stays in its group as a ref. The automatic working set is a different reader: it drops a superseded unit when its successor is already in the packet, and this change does not alter that. A dimension change takes effect only after a reviewed registry save, as every registry change does.
+
+Every mark comes from the edges that the request read for its group membership, in the caller's view, so a page withheld from the caller changes no mark: `open` means that nothing the caller can see settles the unit. When that edge read is partial or unavailable, no unit is marked `open`, no edge reorders a group, and the result says that the edge state is unknown.
 
 The shipped dimensions:
 
@@ -209,7 +213,8 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | Vault verdicts, vault kinds and kind labels in the vault-neutral parse | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column; `observe_memory` unit refs and the `unit` its result returns | These read the parse that uses the shipped registry, as vault kinds and categories already are there. A vault verdict shows in `metadata.verdict` and in the selected unit view, not in `unit.verdict` of the neutral parse. A unit under a vault kind's heading or a vault label is missing to `observe_memory`: it refuses the ref with `UNIT_NOT_FOUND` and says to edit the page body. Task 6.3 makes these readers read the page's registry. A vault-registry change does not rebuild the derived stores, as for relations. |
 | A `Relations` heading that names a kind | semantic_blocks relation section; semantic_language_registry `_check_kind_labels` | A vault kind's heading alias of `Relations` turns every page's `## Relations` section into a unit of that kind, and a label on a shipped kind can now do the same. The registry check does not refuse that spelling yet. |
 | Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
-| Retry advice while the graph is stale | find `_resolve_relation_filter`, `_dimension_source` (warming site `relation_graph_rebuilding`) | On the scan path, a `unit.dimension` filter that needs edges, or a `relations=` filter, raises the warming outcome while the graph rebuilds, and its remediation says to retry. After a direct file edit, only a reconcile (`maintain_memory` with mode `reconcile`) ends that state, so a retry can return the same outcome. The remediation belongs to the shared warming outcome, so this slice does not change it. |
+| Retry advice while the graph is stale | find `_resolve_relation_filter`, `_dimension_edges` (warming site `relation_graph_rebuilding`) | On the scan path, a `unit.dimension` filter that needs edges, or a `relations=` filter, raises the warming outcome while the graph rebuilds, and its remediation says to retry. After a direct file edit, only a reconcile (`maintain_memory` with mode `reconcile`) ends that state, so a retry can return the same outcome. The remediation belongs to the shared warming outcome, so this slice does not change it. |
+| Two rules for an answered question | audit `_bears_on_unit` (question aging); dimension_display `flag_open` | The audit's question-aging check treats a question as answered by its own outbound `bears_on` relation. `flag_open` treats a unit as settled by an inbound edge whose relation carries `settles`. The two rules can disagree about one question. Folding them changes audit findings and needs its own evidence, so this change does not alter the audit. |
 
 Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, projection_runtime 1837 (a core-or-extension test), and K24. Bootstrap now teaches its kinds and relations from each shipped entry's `teach` line, and the `relation_vocabulary` plain-link sentence reads its key from the registry.
 

@@ -179,12 +179,59 @@ The limit applies before that check, so when it drops units the reply's
 `user_summary` says that the filter ran only on the best matches, how many of
 them it kept, and that more may exist. The offline CLI evaluates every dimension on every unit.
 
+### Dimension groups
+
+A unit search asks for dimension groups through the same filter, with no other
+argument. When `unit.dimension` sits at the top level, alone or under a top-level
+`$and`, `$eq` returns one group and `$in` returns one group for each named
+dimension, in the order given. `$ne` asks for no group. The limit counts
+distinct units. Each unit hit in a group carries `dimension`, the key of its
+group, and `display` when the unit has a mark. The reply's `dimension_groups`
+lists each group with its `dimension`, `label`, `count`, mark counts and `units`
+in display order. A unit that belongs to two requested dimensions is in full in
+the first group, and a later group lists only its ref, with `shown_in` naming
+the first group. A deep search's pack carries the same `display` on its units
+and a `groups` list with each group's unit refs. The reply's `user_summary`
+names each group by its label and gives its counts, for example
+"4 units in 'Uncertainty'; 1 is open."
+
+The display behaviours that a dimension names set its group's order and marks.
+Each one reads only relation behaviours, kind traits and governed keys, so a
+vault dimension that names one needs no code change:
+
+- `flag_open` marks a unit `open` when its kind has the `closable` kind trait,
+  it has no `verdict`, and no edge whose relation has the `settles` behaviour
+  ends at the unit or at its page.
+- `lead_with_current` puts current units first and marks each replaced unit
+  `replaced`, with `by` naming its successor when one is known. A unit is
+  replaced when its page's lifecycle class is history, or when an edge whose
+  relation has the `replaces` behaviour ends at the unit or at its page.
+- `show_origin` gives each unit an `origin`. `by` is its `asserted_by` or
+  `credence_holder`. `from` lists up to three targets of the edges that start at
+  the unit or at its page and whose relation has the `sources` behaviour, and
+  `more` counts the rest.
+- `order_in_time` sorts the group by `occurred_at`, earliest first, with undated
+  units after the dated ones. Each edge between two members whose relation has
+  the `earlier_than_target` or `later_than_target` behaviour then orders its two
+  ends. When those edges form a cycle, its units keep the date order, and the
+  group lists them in `order_conflict`.
+
+A display behaviour changes only order and marks. It never removes a unit or
+changes the unit's fields. Marks read only the edges that the caller may see, so
+`open` means that nothing the caller can see settles the unit. When the edges
+are unknown, no unit is marked `open`, no edge orders the group, the group
+carries `edges: "unknown"`, and the summary says that its links could not be
+read. The automatic working set (`recall_context`) does not group or mark units
+yet.
+
 The category report (`schema_memory` with `operation="infer"` and `subject="categories"`, which counts units by category) lists every
 dimension with its members and display behaviours, and with `unit_count` and
 `page_count` for the units it scanned. Its `edges` value says how the count was
 made: `not_needed` when no edge decides the dimension, `counted` when the graph
-answered, and `unavailable` when it could not, where both counts are `null`
-instead of a number that leaves out the edges. While the graph is missing or
+answered, and `unavailable` when it could not. In an `unavailable` row, a count
+that edges decide is `null` instead of a number that leaves out the edges. A row
+also counts each mark that its dimension's display behaviours produce: `open`
+where it names `flag_open`, and `replaced` where it names `lead_with_current`. While the graph is missing or
 stale, the report schedules its rebuild, and the row's `repair` names the
 `maintain_memory` call that runs the rebuild now. A dimension a vault adds appears
 there with no code change.
