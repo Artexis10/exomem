@@ -53,7 +53,7 @@ The grant is an Ed25519 JWT with exactly these claims:
 - `purge_after`: an integer time, `iat` plus G.
 
 **Rules.**
-- G lives once, in Substrate's configuration. Its value is 7 days.
+- G lives once, in Substrate's code, as the constant `CELL_DELETION_GRACE_SECONDS`. Its value is 7 days. A change to G is a Substrate release.
 - The grant carries no `exp`. A deletion is final, so a grant stays true, and a replayed grant finds nothing left to purge. A grant therefore stays valid until the deletion has finished, through a hold or an executor outage.
 - An executor refuses a grant whose `purge_after` is less than `iat` plus one day, so a bad configuration cannot remove the grace.
 - An executor takes the cell ID only from the verified claims.
@@ -259,7 +259,7 @@ Expected result: the operator receives each alert of the rehearsal cell, and bot
 
 ## Open values
 
-- **Deletion grace G.** 7 days, the value that the current procedure uses. It lives in Substrate's configuration.
+- **Deletion grace G.** 7 days, the value that the current procedure uses. It lives in Substrate's code, as the constant `CELL_DELETION_GRACE_SECONDS`.
 - **Media grace N.** 14 days, decided on 2026-11-09.
 - **Backup retention R.** The production value lives in the deployment's private variables. The default is 30 days.
 - **Skew margin.** Proposed one hour. The watcher's pinned set holds it. It covers clock skew between an executor and the provider, and the requests in flight when a cell stops.

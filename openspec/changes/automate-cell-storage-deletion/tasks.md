@@ -11,7 +11,7 @@
 
 ## 2. Substrate (D1, D4)
 
-- [ ] 2.1 Substrate (separate repository): add the deletion grant and the watcher's endpoint.
+- [x] 2.1 Substrate (separate repository): add the deletion grant and the watcher's endpoint.
   - Add the `deletion_grant` column, readable and not writable by `cellctl`'s role.
   - Sign the grant, with no `exp`, when Substrate sets a cell's desired state to deleted.
   - Refuse any change to a deleted cell's desired state in the database.
