@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 from kubernetes.client.rest import ApiException
 
-from cellctl.export_layout import PACK, PAUSE, job_name, legacy_job_name
+from cellctl.export_layout import PACK, PAUSE, UPLOAD, job_name, legacy_job_name
 from cellctl.k8s_client import CELL_LABEL, ClusterClient
 from cellctl.manifests import (
     HOLD_ANNOTATION,
@@ -146,6 +146,22 @@ def _client(*, hold_started_at: str | None, jobs: dict, pods: list) -> ClusterCl
     client._apps = _Apps(hold_started_at)
     client._batch = _Batch(jobs)
     return client
+
+
+def test_a_refused_part_uploads_status_survives_its_job(caplog):
+    """Defect: the log kept the refusal's class but dropped its HTTP status, so a refused signature read
+    the same as a storage outage once the Job was gone."""
+    export_id = "00000000-0000-4000-8000-000000000001"
+    name = job_name(export_id, UPLOAD)
+    report = {"error": "EXPORT_UPLOAD_FAILED", "diagnostic": {"type": "ExportRefused", "function": "_put",
+              "status": 200, "missing": "ETag"}}
+    pod = _job_pod(name, snapshot_id=json.dumps(report))
+    pod.status.phase = "Failed"
+    pod.status.container_statuses[0].state.terminated.exit_code = 1
+    client = _client(hold_started_at=None, jobs={name: _job(failed=True)}, pods=[pod])
+
+    assert client.observe_export_job(NAMESPACE, export_id, step=UPLOAD).failed
+    assert '"status": 200' in caplog.text and '"missing": "ETag"' in caplog.text
 
 
 def test_a_failed_exports_reason_survives_its_job_without_logging_private_text(caplog):

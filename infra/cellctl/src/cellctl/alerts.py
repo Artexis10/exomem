@@ -62,6 +62,9 @@ DISK_LOW_ALERT = "cell-disk-low"
 # A serving cell whose recall serves a catalogue that has not advanced, read
 # from the cell's own readiness answer.
 RECALL_LAG_ALERT = "cell-recall-lagging"
+# verify-stored-originals D9: a serving cell whose readiness answer counts a missing or
+# damaged stored original. The answer carries the count only; the owner's surfaces name the files.
+ORIGINALS_DAMAGED_ALERT = "cell-originals-damaged"
 # contain-cloud-controller-compromise D9: a deleted cell's object-store key and backup files are
 # removed by the operator, never by cellctl. The alert name carries the cell
 # id because the receiver's transition has no other field for it; the alert never resolves
@@ -180,20 +183,22 @@ def disk_low(rows: Iterable[CellRow], free_bytes: Mapping[str, int], *, floor: i
     return None if unmeasured else False
 
 
-def recall_lagging_cells(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> list[str]:
-    """Serving cells whose last definite verdict (cell_readiness.recall_lag_verdict)
-    showed recall lagging past the threshold. `verdicts` lives in cellctl's memory."""
+def flagged_cells(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> list[str]:
+    """Serving cells whose last definite verdict from their readiness answer is
+    True: recall lagging past the threshold (cell_readiness.recall_lag_verdict),
+    or a missing or damaged original (cell_readiness.originals_verdict).
+    `verdicts` lives in cellctl's memory."""
 
     return sorted(row.cell_id for row in rows if row.desired_state in SERVING_STATES and verdicts.get(row.cell_id))
 
 
-def recall_lagging(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> bool | None:
-    """Whether any serving cell's recall has lagged past the threshold, from
-    each serving cell's last definite verdict. Unknown (None), never
-    "resolved", while a serving cell has no verdict yet: after a cellctl
-    restart, a cell may report a young lag for an old stall until its age
-    reaches the threshold or it reads ready. False only when every serving
-    cell's last definite verdict is strictly ready."""
+def any_flagged(rows: Iterable[CellRow], verdicts: Mapping[str, bool]) -> bool | None:
+    """Whether any serving cell's last definite readiness verdict is True.
+    Unknown (None), never "resolved", while a serving cell has no verdict yet:
+    after a cellctl restart, a cell may report a young lag for an old stall
+    until its age reaches the threshold or it reads ready, and a cell counts no
+    originals before its first fixity pass. False only when every serving
+    cell's last definite verdict is False."""
 
     serving = [verdicts.get(row.cell_id) for row in rows if row.desired_state in SERVING_STATES]
     if True in serving:

@@ -5399,6 +5399,16 @@ def derive_catalogue_rows(vault_root: Path, conn: sqlite3.Connection) -> None:
     store._insert_members(conn, members, signatures)
 
 
+def corpus_paths(vault_root: Path) -> list[Path]:
+    """The Markdown files that file mode's lexical corpus holds, by the walk a cold rebuild makes.
+
+    Store mode's importer asks which unowned files should have rows. It reuses this walk so that the
+    corpus rule (both walks and the recall policy) lives in ``_walk_entries`` alone.
+    """
+    members, _signatures = LexicalStore(vault_root)._walk_entries()
+    return list(members)
+
+
 class LexicalStore:
     """Mechanism for ONE vault's lexical sidecar: schema, sync, dual-write,
     and the two search primitives. Policy (backend env, probe) lives in the

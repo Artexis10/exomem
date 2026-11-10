@@ -20,7 +20,6 @@ from cloud_rehearsal.large_import_fixture import (
     HIDDEN_FOLDER,
     LEFT_BEHIND,
     MIB,
-    OVER_CEILING,
     Entry,
     SizingError,
 )
@@ -47,19 +46,14 @@ def test_layout_keeps_the_file_count_and_gives_each_kind_its_disposition():
 
     assert len(specs) == 120
     by_path = {spec.path: spec for spec in specs}
-    over = [spec for spec in specs if spec.disposition == OVER_CEILING]
-    assert len(over) == 1 and over[0].size > CEILING
+    over = [spec for spec in specs if spec.size > CEILING]
+    assert len(over) == 1 and over[0].disposition == FILED_ARTIFACT
     large = [spec for spec in specs if spec.path.startswith("archive/backup-")]
     assert large and all(spec.disposition == FILED_ARTIFACT and LARGE_MIN <= spec.size <= CEILING for spec in large)
     assert all(spec.disposition == FILED_TEXT for spec in specs if spec.path.endswith(".md") and not spec.hidden)
     assert all(by_path[path].disposition == HIDDEN_FOLDER for path in by_path if path.startswith(".git/"))
     loose = [spec for spec in specs if spec.hidden == "file"]
     assert loose and all(spec.disposition == HIDDEN_FILE for spec in loose)
-
-
-def test_a_file_exactly_at_the_ceiling_is_filed_and_one_byte_over_is_not():
-    assert fixture.disposition_of("binary", CEILING, ceiling=CEILING, hidden=None, include_hidden=True) == FILED_ARTIFACT
-    assert fixture.disposition_of("binary", CEILING + 1, ceiling=CEILING, hidden=None, include_hidden=True) == OVER_CEILING
 
 
 def test_hidden_files_are_left_behind_unless_the_client_is_told_to_send_them():
@@ -173,7 +167,7 @@ KEY = [
     _entry("n/a.md", FILED_TEXT, b"note"),
     _entry("att/b.dat", FILED_ARTIFACT, b"bin1"),
     _entry("att/c.dat", FILED_ARTIFACT, b"bin2"),
-    _entry("big.dat", OVER_CEILING, b"huge"),
+    _entry("big.dat", FILED_ARTIFACT, b"huge"),
     _entry(".git/HEAD", HIDDEN_FOLDER, b"ref"),
     _entry(".DS_Store", HIDDEN_FILE, b"ds"),
     _entry("left/.x", LEFT_BEHIND, b"x"),
@@ -197,22 +191,22 @@ def test_every_filed_file_needs_a_source_with_its_hash_and_nothing_else_does():
     assert len(wrong) == 1 and "n/a.md" in wrong[0]
 
 
-def test_what_stays_staged_is_exactly_the_over_ceiling_file_and_the_hidden_files():
+def test_what_stays_staged_is_exactly_the_hidden_files():
     leftover = fixture.expected_leftover(KEY)
-    assert set(leftover) == {"big.dat", ".git/HEAD", ".DS_Store"}
+    assert set(leftover) == {".git/HEAD", ".DS_Store"}
     assert fixture.check_stage(KEY, leftover) == []
 
     unconsumed = {**leftover, "att/b.dat": (4, hashlib.sha256(b"bin1").hexdigest())}
     unconsumed_text = {**leftover, "n/a.md": (4, hashlib.sha256(b"note").hexdigest())}
-    altered = {**leftover, "big.dat": (4, "0" * 64)}
+    altered = {**leftover, ".DS_Store": (2, "0" * 64)}
     assert "att/b.dat" in fixture.check_stage(KEY, unconsumed)[0]
     assert "n/a.md" in fixture.check_stage(KEY, unconsumed_text)[0]
-    assert "big.dat" in fixture.check_stage(KEY, altered)[0]
+    assert ".DS_Store" in fixture.check_stage(KEY, altered)[0]
 
 
 def test_files_the_client_leaves_behind_are_never_expected_in_the_stage():
     assert "left/.x" not in fixture.expected_stage(KEY)
-    assert fixture.expected_by_reason(KEY) == {"over_ceiling": 1, "ineligible": 1, "outside_run": 1}
+    assert fixture.expected_by_reason(KEY) == {"ineligible": 1, "outside_run": 1}
 
 
 def _members(entries=KEY, *, drop=(), change=(), add=(), twice=()):
@@ -238,19 +232,19 @@ def _page(**reasons):
 
 
 def test_the_last_page_residual_must_equal_the_key_by_reason_and_leave_nothing_unfiled():
-    assert fixture.check_residual(KEY, _page(ineligible=1, over_ceiling=1, outside_run=1)) == []
+    assert fixture.check_residual(KEY, _page(ineligible=1, outside_run=1)) == []
 
-    unconsumed = _page(ineligible=1, over_ceiling=1, kept=1, outside_run=1)
-    unconsumed_text = _page(ineligible=1, over_ceiling=1, text=1, outside_run=1)
-    miscounted = _page(ineligible=1, outside_run=1)
-    extra = _page(ineligible=1, over_ceiling=1, outside_run=4)
+    unconsumed = _page(ineligible=1, kept=1, outside_run=1)
+    unconsumed_text = _page(ineligible=1, text=1, outside_run=1)
+    miscounted = _page(ineligible=1)
+    extra = _page(ineligible=1, outside_run=4)
     assert any("kept" in problem for problem in fixture.check_residual(KEY, unconsumed))
     assert any("text" in problem for problem in fixture.check_residual(KEY, unconsumed_text))
-    assert any("over_ceiling" in problem for problem in fixture.check_residual(KEY, miscounted))
+    assert any("outside_run" in problem for problem in fixture.check_residual(KEY, miscounted))
     assert any("left in the stage" in problem for problem in fixture.check_residual(KEY, extra))
 
 
 def test_consumed_must_equal_the_files_the_key_says_were_filed():
-    assert fixture.count_consumable(KEY) == 3
-    assert fixture.check_consumed(KEY, 3) == []
-    assert "consumed 2" in fixture.check_consumed(KEY, 2)[0]
+    assert fixture.count_consumable(KEY) == 4
+    assert fixture.check_consumed(KEY, 4) == []
+    assert "consumed 3" in fixture.check_consumed(KEY, 3)[0]

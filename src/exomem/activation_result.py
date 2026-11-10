@@ -43,6 +43,23 @@ def validate_stored_result(row: Mapping[str, object]) -> dict[str, object] | Non
     return observation
 
 
+def of_packet(packet: object) -> dict[str, object] | None:
+    """The content-free observation of a final activation packet, or None when it is not observable."""
+    if not isinstance(packet, Mapping):
+        return None
+    abstention = packet.get("abstention")
+    budget = packet.get("request_budget")
+    limited = (
+        False if "request_budget" not in packet
+        else budget.get("applied") if isinstance(budget, Mapping) else None
+    )
+    return project_block({
+        "abstained": packet.get("abstained"),
+        "reason": abstention.get("reason") if isinstance(abstention, Mapping) else None,
+        "budget_limited": limited,
+    })
+
+
 @dataclass
 class Observation:
     """One request's shared cell; never retains the packet or its material."""
@@ -55,14 +72,4 @@ class Observation:
             return
         flag = packet.get("abstained")
         self.abstained = flag if type(flag) is bool else None
-        abstention = packet.get("abstention")
-        budget = packet.get("request_budget")
-        limited = (
-            False if "request_budget" not in packet
-            else budget.get("applied") if isinstance(budget, Mapping) else None
-        )
-        self.result = project_block({
-            "abstained": self.abstained,
-            "reason": abstention.get("reason") if isinstance(abstention, Mapping) else None,
-            "budget_limited": limited,
-        })
+        self.result = of_packet(packet)

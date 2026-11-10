@@ -12,7 +12,7 @@ Before each batch and at commit, an import job SHALL revalidate its bound origin
 
 An access session's own expiry SHALL NOT end the job. In its place, an expiring access session SHALL require its refresh-token family to be active for the same client. A session without an expiry SHALL be revalidated without a family check. A job whose origin stays valid SHALL NOT pause at a fixed window.
 
-A job SHALL pause with `authority_lost` when the revalidation answers that the origin is not valid, or when its source release or target authority ends. Logout, revocation, refresh-token reuse, a generation change, a disallowed identity and a client mismatch each make the origin not valid. If the session store cannot be read, the job SHALL take the host-local `store_unavailable` pause and retry on a later tick. Only an explicit continuation from the same principal SHALL resume a job paused with `authority_lost`.
+A job SHALL pause with `authority_lost` when the revalidation answers that the origin is not valid, or when its source release or target authority ends. Logout, revocation, refresh-token reuse, a generation change, a disallowed identity and a client mismatch each make the origin not valid. If the session store cannot be read, the job SHALL take the host-local `store_unavailable` pause without committing a batch, and retry on a later tick on a bounded backoff. Only an explicit continuation from the same principal SHALL resume a job paused with `authority_lost`.
 
 #### Scenario: A long import outlives its first access token
 
@@ -32,7 +32,7 @@ A job SHALL pause with `authority_lost` when the revalidation answers that the o
 #### Scenario: An unreadable session store is not a revocation
 
 - **WHEN** the session store cannot be read during a batch's revalidation
-- **THEN** the job pauses as `store_unavailable` without advancing the checkpoint, and a later tick continues it once the store answers
+- **THEN** the job pauses as `store_unavailable` without advancing the checkpoint, retries on a bounded backoff, and a later tick continues it once the store answers
 
 #### Scenario: Another principal cannot continue the job
 
@@ -41,7 +41,7 @@ A job SHALL pause with `authority_lost` when the revalidation answers that the o
 
 ### Requirement: Status shows only the deadlines a job keeps
 
-A job bound to a governance authorization session SHALL keep that session's expiry as its deadline, and the login SHALL NOT extend it. A job without an origin session SHALL keep the fixed one-hour window as its deadline. When a deadline passes, the job SHALL pause with `time_cap`, and its status SHALL have shown that deadline. Status for a job without a deadline SHALL state that it runs while the login that started it stays valid, and SHALL NOT show a deadline. Status, receipts and diagnostics SHALL NOT show session, family or client identifiers.
+A job bound to a governance authorization session SHALL keep that session's expiry as its deadline, and the login SHALL NOT extend it. A job whose origin the service cannot revalidate without a live request, being a Cloud cell's gateway origin or a stdio, CLI or library owner with no origin session, SHALL keep the fixed one-hour window as its deadline. When a deadline passes, the job SHALL pause with `time_cap`, and its status SHALL have shown that deadline. Status for a job without a deadline SHALL state that it runs while the login that started it stays valid, and SHALL NOT show a deadline. Status, receipts and diagnostics SHALL NOT show session, family or client identifiers.
 
 #### Scenario: A running job without a deadline says so
 
@@ -53,7 +53,7 @@ A job bound to a governance authorization session SHALL keep that session's expi
 - **WHEN** a job bound to a governance authorization session reaches that session's expiry, and the owner's login is still valid
 - **THEN** the job pauses with `time_cap` at that moment, and the status read just before showed that expiry as its deadline
 
-#### Scenario: A job without an origin session keeps the window
+#### Scenario: A job whose origin the service cannot revalidate keeps the window
 
-- **WHEN** a stdio owner's import runs for one hour
+- **WHEN** a stdio owner's or a Cloud cell's import runs for one hour
 - **THEN** it pauses with `time_cap`, its status showed the window's end, and a continuation resumes it from the same row

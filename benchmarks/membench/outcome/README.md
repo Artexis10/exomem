@@ -115,6 +115,37 @@ product name), because the blind judge reads the answer text.
 A held-out epistemic run refuses today: f38 is not registered in the preregistration, so no gate
 can pass it.
 
+## Incident regressions
+
+`python -m membench.outcome.incidents` replays product incidents on real models. Each file under
+`incidents/cases/` holds one incident's cases: a seeded note, one user turn, and the checks that
+pass it. The checks are `seed_corrected` (the seeded note's body changed, or the product reports it
+superseded), `called_any` (an Exomem tool was called) and `judge` (a blind model's schema fields
+match). An arm is a checkout: its `src` serves Exomem, its `plugins/claude-code` supplies the skill
+and hooks, and its own docs and code supply the guidance text. Each session gets a fresh vault under
+a neutral unit id, and the arms run interleaved. A unit passes, fails or is unknown: a harness fault,
+a seeding error or a judge error is unknown, never a failure.
+
+1. Add a case file when an agent misbehaves with Exomem in real use. A case is never removed or held out.
+2. Rerun the cases when guidance text, a prompt, the model or the code that reads the answer changes.
+3. Compare the base checkout with the change, with three repeats. The run root must be new and outside every repository:
+
+```
+PYTHONPATH=benchmarks:src python -m membench.outcome.incidents --arm base=../exomem-base --arm changed=. --repeats 3 --run-root /var/tmp/exomem-outcome-evals/runs/incidents-<id>
+```
+
+The run prints each case's passed, failed and unknown counts per arm. The run root holds
+`manifest.json` (each arm's commit and dirty state, the CLI version, the models), `results.jsonl`
+(one record per unit, and the only place that maps a unit to its arm) and `units/<id>/` (the stream
+and the judge's verdict). The actor model defaults to the one that the other suites use; pass
+`--model` (a full model id) when the incident happened on another. A session costs about $0.2 to $1 of notional
+subscription usage.
+
+Reading the result: three repeats cannot prove a difference. When the changed arm passes fewer runs
+than the base arm, treat the case as suspect and rerun it with more repeats before you merge. Any
+other difference is "no change" at this size. When a count has unknown units, run again in a new run
+root before you read it.
+
 ## Where data and evidence live
 
 Everything sits under the run root: `EXOMEM_OUTCOME_ROOT`, default `/var/tmp/exomem-outcome-evals`.

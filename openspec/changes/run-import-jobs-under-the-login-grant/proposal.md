@@ -17,8 +17,8 @@ An access token is short-lived on purpose, so that a leaked token stops working 
 - A job whose origin is still valid does not pause at the fixed one-hour window. It runs until its source is exhausted, the owner cancels it, or its authority ends.
 - Authority ends when the session or its family is revoked or logged out, the generation changes, the identity is disallowed, the source release is revoked, or the target authority is lost. Each of these pauses the job with `authority_lost`, as today.
 - A job started with a governance authorization session keeps that session's expiry, at most one hour, as its deadline. Status shows the deadline, and the job pauses with `time_cap` when it passes. The login never extends it.
-- A job with no origin session keeps the fixed one-hour window and pauses with `time_cap` when the window ends. This covers stdio, CLI and library owners and Cloud cells. Its status keeps today's deadline.
-- If the session store cannot be read, the job takes the existing host-local `store_unavailable` pause and a later tick retries. Only a definite "not valid" answer pauses it with `authority_lost`.
+- A job whose origin the service cannot revalidate without a live request keeps the fixed one-hour window and pauses with `time_cap` when the window ends. This covers stdio, CLI and library owners, which carry no origin session, and Cloud cells, which bind an origin session that only the gateway can vouch for during a request. Its status keeps today's deadline.
+- If the session store cannot be read, the job takes the existing host-local `store_unavailable` pause and a later tick retries, on a bounded backoff. Only a definite "not valid" answer pauses it with `authority_lost`.
 - Continuation, cancel and status keep their current authorization, and a different principal still cannot inherit a job.
 
 ## Capabilities
@@ -41,10 +41,10 @@ The canonical `release-gate` requirement for durable import jobs ("Each authorit
 `src/exomem/collection_store/importer.py`:
 
 - `_grant` revalidates the bound origin with the access-lifetime exception.
-- `_step` applies the window only to jobs without an origin session.
+- `_step` applies the window only to jobs whose origin the service cannot revalidate without a live request.
 - The `lapsed` check in `_continue` changes the same way.
 - The `time_cap` branch of `_status` and the status window fields change accordingly.
-- `contract()` `limits.window_seconds` and preview `limits.job_seconds` are reworded.
+- `contract()` `limits.window_seconds` and preview `limits.job_seconds` are replaced by a `run_window` statement and a `job_window` limit that say which clock applies.
 - The module docstring is updated.
 
 `src/exomem/auth_sessions.py`:
@@ -59,6 +59,6 @@ Tests:
 - A client mismatch refuses.
 - A session without an expiry runs through.
 - A job with a governance authorization session pauses with `time_cap` at that session's expiry, and status showed it.
-- A stdio owner's job keeps the one-hour window.
-- An unreadable session store pauses with `store_unavailable` and a later tick resumes.
+- A stdio owner's job and a Cloud cell's job keep the one-hour window.
+- An unreadable session store pauses with `store_unavailable`, a later tick resumes, and the retry backoff is bounded.
 - Another principal's continuation still refuses.

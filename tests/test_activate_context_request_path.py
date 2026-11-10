@@ -11,6 +11,7 @@ span.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -620,7 +621,9 @@ class _CountdownBudget(request_budget.RequestBudget):
 
 
 @pytest.fixture
-def countdown_budget():
+def countdown_budget(monkeypatch: pytest.MonkeyPatch):
+    # The countdown stands for the budget the activation reads; the leaf's own child budget would hide its count.
+    monkeypatch.setattr(request_budget, "capped", contextlib.nullcontext)
     tokens = []
 
     def _bind(healthy_calls: int) -> _CountdownBudget:
@@ -637,12 +640,12 @@ def countdown_budget():
 
 # Stage-boundary call order for a normal, resolving TURN against
 # `activation_vault`: freshness(1) readiness(2) lexical(3) release(4)
-# semantic(5) resolve(6) roles(7) current_state(8), then one call per
-# selected role lane (8+N), then packet-build, then guard. Confirmed against
+# heat(5) semantic(6) resolve(7) roles(8) current_state(9), then one call per
+# selected role lane (9+N), then packet-build, then guard. Confirmed against
 # `activation_vault` + TURN by inspecting `packet["timings"]["stages"]`
 # insertion order and `packet["roles"]`: six lanes run in the order
 # identity, constraints, resources, current_state, active_plans, location.
-_CALLS_THROUGH_RESOLVE = 6
+_CALLS_THROUGH_RESOLVE = 7
 
 
 def test_budget_exhausted_after_freshness_skips_readiness_onward(
@@ -731,6 +734,7 @@ def test_budget_exhausted_after_resolve_skips_roles_onward(
         "working_set.readiness",
         "working_set.lexical",
         "working_set.release",
+        "working_set.heat",
         "working_set.semantic",
         "working_set.resolve",
     } <= set(stages)

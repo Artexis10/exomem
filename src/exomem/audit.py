@@ -190,6 +190,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "artifact_role_promotion",
     "transient_state_review",
     "collection_view_corrections",
+    "original_fixity",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -831,6 +832,12 @@ def audit(
             findings.extend(correction_findings)
             if correction_coverage is not None:
                 metadata.setdefault("coverage", {})["collection_view_corrections"] = correction_coverage
+    with stage('original_fixity') as run:
+        if run:
+            fixity_findings, fixity_coverage = _check_original_fixity(vault_root)
+            findings.extend(fixity_findings)
+            if fixity_coverage is not None:
+                metadata.setdefault("coverage", {})["original_fixity"] = fixity_coverage
     semantic_categories = selected & _SEMANTIC_AUDIT_CATEGORIES
     with stage(semantic_categories) as run:
         if run:
@@ -888,6 +895,17 @@ def _check_collection_view_corrections(vault_root: Path) -> tuple[list[AuditFind
     from .collection_store import edit_back
 
     return edit_back.attention_findings(vault_root)
+
+
+@call_spans.timed("audit.original_fixity")
+def _check_original_fixity(vault_root: Path) -> tuple[list[AuditFinding], str | None]:
+    """Restored, missing and damaged stored originals (OpenSpec verify-stored-originals).
+
+    Read from the fixity table, which a background pass fills; this reads no original.
+    """
+    from . import original_fixity
+
+    return original_fixity.attention_findings(vault_root)
 
 
 @call_spans.timed("audit.bridge_review")

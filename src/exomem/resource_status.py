@@ -205,7 +205,14 @@ def runtime_info() -> dict[str, Any]:
 
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
-    from . import dreamer, media_brakes, media_engines, media_jobs, runtime_resources
+    from . import (
+        dreamer,
+        media_brakes,
+        media_engines,
+        media_jobs,
+        original_fixity,
+        runtime_resources,
+    )
 
     policy = mode.resolved()
     return {
@@ -225,6 +232,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "asr": asr_runtime_status(),
         "cuda": cuda_accounting_if_initialized(),
         "dreamer": dreamer.status(),
+        "originals": original_fixity.status(vault_root),
     }
 
 

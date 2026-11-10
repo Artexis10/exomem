@@ -29,7 +29,7 @@ import re
 import shlex
 import time
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
@@ -66,6 +66,7 @@ from . import contradiction_stance as contradiction_stance_module
 from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
+from . import dataset_values as dataset_values_module
 from . import deferred_write_advisory as deferred_write_advisory_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
@@ -3030,6 +3031,40 @@ def op_find(
             catalog_proof_out=catalog_proof,
             admit_path=admit_path,
         )
+        # Values of small datasets are a separate lane that `find` does not run. It answers an
+        # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
+        if (
+            query.strip()
+            and mode != "vector"
+            and result_level in ("auto", "page")
+            and not any(
+                (types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds,
+                 source_kinds, domains, relations, relation_of, filters)
+            )
+            and all(isinstance(hit, find_module.Hit) for hit in hits)
+        ):
+            if retrieval_trace is not None:
+                # A value hit has no ranking evidence, which `explain` requires of every hit.
+                retrieval_trace.lane_profiles[dataset_values_module.LANE] = {
+                    "status": "disabled",
+                    "reason": "explain_does_not_trace_dataset_values",
+                }
+            else:
+                with find_module._span(timings, "dataset_values"):
+                    value_lane = dataset_values_module.search(
+                        vault_root, query=query, scope=scope, admit_path=admit_path, limit=retrieval_limit
+                    )
+                if value_lane.hits:
+                    # Room for every value hit, so one that egress drops displaces no page hit.
+                    hits = dataset_values_module.fuse(
+                        hits,
+                        value_lane.hits,
+                        limit=retrieval_limit + len(value_lane.hits),
+                        rrf_k=find_module._active_ranking().rrf_k,
+                    )
+                if not restricted:  # indexing activity is not for a caller held to content floors
+                    degraded.extend(value_lane.warming)
+                failed.extend(value_lane.failed)
         # Recheck the selected snapshots before assembly. RAW-admitted searches
         # bypass both shared caches; ordinary policy retains its final gate.
         with find_module._span(timings, "release_gate"):
@@ -6998,6 +7033,7 @@ def op_activate_context(
     intent_resolution = {"status": "unavailable"} if trigger == "task_refresh" else None
     # Finalization and logging share the leaf's budget, including error paths.
     bound_token = None
+    activation_scope = ExitStack()
     try:
         from .collection_store import ownership
 
@@ -7027,6 +7063,17 @@ def op_activate_context(
                             bound_token = request_budget_module.set_current(
                                 request_budget_module.RequestBudget(
                                     seconds=request_budget_module.ACTIVATION_DOOR_BUDGET_SECONDS
+                                )
+                            )
+                        elif (
+                            request_budget_module.current() is not None
+                            # The anchors rollback keeps its abstention for an exhausted budget; only maps serves what it found.
+                            and working_set_runtime_module.activation_packet_mode() == "maps"
+                        ):
+                            # A request that carries a deadline gives the activation its own, nearer one.
+                            activation_scope.enter_context(
+                                request_budget_module.capped(
+                                    request_budget_module.activation_budget_seconds()
                                 )
                             )
                         # Owed before the body runs, so its characters come out of the map's budget
@@ -7118,6 +7165,8 @@ def op_activate_context(
                        for name, stage in observation_timings.stages.items() if "ms" in stage],
             )
         finally:
+            # After the row, so it reads the leaf's budget; before the caller, so the request's budget names what the leaf left out.
+            activation_scope.close()
             if bound_token is not None:
                 request_budget_module.reset_current(bound_token)
 

@@ -101,8 +101,8 @@ API_REQUEST_TIMEOUT = (5, 30)
 # never a clean one.
 METRICS_TIMEOUT = 3.0
 METRICS_MAX_BYTES = 256 * 1024
-# The cell-recall-lagging alert reads each cell's readiness answer, a few KB of
-# fixed fields, the same way.
+# The cell-recall-lagging and cell-originals-damaged alerts read each cell's
+# readiness answer, a few KB of fixed fields, the same way.
 READINESS_TIMEOUT = 3.0
 READINESS_MAX_BYTES = 64 * 1024
 
@@ -335,7 +335,7 @@ class ClusterClient:
         return scraped
 
     def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
-        """The cell-recall-lagging alert's input: each cell's readiness answer,
+        """The readiness alerts' input: each cell's readiness answer,
         read from its health-only port on its ready pod's own IP (`addresses`:
         cell id -> pod IP). cellctl derives every cell bearer, so it reads no
         other port of a cell, and the network policies admit it to no other.
@@ -402,13 +402,17 @@ class ClusterClient:
             safe = {}
             if isinstance(detail, dict):
                 # The closed diagnostic wire fields carry code identifiers, never free-form error text.
-                for key in ("type", "function", "code", "limit", "cause"):
+                for key in ("type", "function", "code", "limit", "cause", "missing"):
                     value = detail.get(key)
                     if isinstance(value, str) and len(value) <= 80 and value.isascii() and value.isidentifier():
                         safe[key] = value
                 errno = detail.get("errno")
                 if type(errno) is int and errno > 0:
                     safe["errno"] = errno
+                # The HTTP status that refused a part upload, or that came without an ETag.
+                status = detail.get("status")
+                if type(status) is int and 100 <= status <= 599:
+                    safe["status"] = status
             # The controller removes terminal Jobs; retain the private-safe reason before it does.
             logger.warning("cellctl: export %s failed: %s", export_id, json.dumps(safe, sort_keys=True))
         finished_at = _parse_timestamp(job.status.completion_time) if succeeded else None

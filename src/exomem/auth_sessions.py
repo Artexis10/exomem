@@ -23,6 +23,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -1211,15 +1212,10 @@ class SessionAuthority:
             return None
         return await self._validate_record_authoritatively(record)
 
-    async def validate_binding(
+    async def _bound_record(
         self, *, session_id: str, generation: str, client_id: str,
     ) -> SessionRecord | None:
-        """Recheck a server-authenticated delegation without retaining its bearer.
-
-        Callers authenticate the delegation before supplying this binding.
-        Current authoritative state prevents a revoked login outliving its
-        download; a store failure costs only that delegated request.
-        """
+        """The stored session a delegation binds, if it names that generation and client."""
         raw = await self._storage.get(session_id, collection=self.sessions_collection)
         if raw is None:
             return None
@@ -1231,9 +1227,42 @@ class SessionAuthority:
             raise SessionStoreUnavailable("session record does not match its authoritative storage key")
         if record.generation != generation or record.client_id != client_id:
             return None
-        return await self._validate_record_authoritatively(record)
+        return record
 
-    async def _validate_record_authoritatively(self, record: SessionRecord) -> SessionRecord | None:
+    async def validate_binding(
+        self, *, session_id: str, generation: str, client_id: str,
+    ) -> SessionRecord | None:
+        """Recheck a server-authenticated delegation without retaining its bearer.
+
+        Callers authenticate the delegation before supplying this binding.
+        Current authoritative state prevents a revoked login outliving its
+        download; a store failure costs only that delegated request.
+        """
+        record = await self._bound_record(
+            session_id=session_id, generation=generation, client_id=client_id,
+        )
+        return None if record is None else await self._validate_record_authoritatively(record)
+
+    async def revalidate_login(
+        self, *, session_id: str, generation: str, client_id: str,
+    ) -> SessionRecord | None:
+        """Recheck a bound login for background work that outlives the request that began it.
+
+        Every check of ``validate_binding`` applies except an access session's own
+        expiry, which a refresh family stands in for: the family must still be active
+        for the same client. A session without an expiry has no family and is
+        rechecked as ``validate_binding`` does.
+        """
+        record = await self._bound_record(
+            session_id=session_id, generation=generation, client_id=client_id,
+        )
+        if record is None:
+            return None
+        return await self._validate_record_authoritatively(record, outlive_access_token=True)
+
+    async def _validate_record_authoritatively(
+        self, record: SessionRecord, *, outlive_access_token: bool = False,
+    ) -> SessionRecord | None:
         if record.status != "active":
             logger.info(
                 "event=session_rejected reason=status status=%s", record.status
@@ -1249,7 +1278,9 @@ class SessionAuthority:
             logger.info("event=session_rejected reason=generation_mismatch")
             return None
         if record.schema_version == _ACCESS_SCHEMA_VERSION:
-            if record.expires_at is None or float(self.clock()) >= record.expires_at:
+            if not outlive_access_token and (
+                record.expires_at is None or float(self.clock()) >= record.expires_at
+            ):
                 logger.info(
                     "event=session_rejected reason=expired age_seconds=%s",
                     None
@@ -1269,6 +1300,10 @@ class SessionAuthority:
                     "event=session_rejected reason=refresh_family_inactive status=%s",
                     family.status,
                 )
+                return None
+            # With the token's own expiry set aside, the family is all that vouches for it.
+            if outlive_access_token and family.client_id != record.client_id:
+                logger.info("event=session_rejected reason=refresh_family_client_mismatch")
                 return None
         return record
 
@@ -1477,6 +1512,22 @@ def _request_verifier(origin: Any) -> tuple[SessionAuthority, str] | None:
     return verifier, token.token
 
 
+def _configured_authority(client: Any, origin: Any) -> SessionAuthority | None:
+    """The authority this deployment configures for a delegated origin, or None when it has none for it."""
+    from . import local_ingress, server_auth
+
+    if client.issuer == local_ingress.LOCAL_ISSUER:
+        authority = server_auth.build_local_session_authority()
+    else:
+        base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+        if not base_url or client.issuer != base_url:
+            return None
+        authority = server_auth.build_session_authority(base_url=base_url)
+    if client.issuer != authority.issuer or origin.audience != authority.audience:
+        return None
+    return authority
+
+
 async def origin_session_active(who: Any) -> bool:
     """Revalidate origin facts through the authority that verified them.
 
@@ -1498,8 +1549,6 @@ async def origin_session_active(who: Any) -> bool:
         from . import cloud_origin
 
         return cloud_origin.matches(who)
-    from . import local_ingress, server_auth
-
     try:
         verified = _request_verifier(origin)
         if verified is not None:
@@ -1511,14 +1560,8 @@ async def origin_session_active(who: Any) -> bool:
                 and (record.session_id, record.generation, record.audience, record.client_id)
                 == (origin.session_id, origin.generation, origin.audience, client.client_id)
             )
-        if client.issuer == local_ingress.LOCAL_ISSUER:
-            authority = server_auth.build_local_session_authority()
-        else:
-            base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
-            if not base_url or client.issuer != base_url:
-                return False
-            authority = server_auth.build_session_authority(base_url=base_url)
-        if client.issuer != authority.issuer or origin.audience != authority.audience:
+        authority = _configured_authority(client, origin)
+        if authority is None:
             return False
         return await authority.validate_binding(
             session_id=origin.session_id, generation=origin.generation, client_id=client.client_id,
@@ -1527,15 +1570,73 @@ async def origin_session_active(who: Any) -> bool:
         return False
 
 
-def origin_session_active_sync(who: Any) -> bool:
-    """Revalidate a delegated origin from a synchronous caller, retaining request evidence."""
+class OriginLogin(Enum):
+    """What a background recheck finds of the login that began delegated work."""
+
+    VALID = "valid"
+    NOT_VALID = "not_valid"
+    # The session store could not be read: nothing is known about the login, so the caller retries.
+    UNREADABLE = "unreadable"
+
+
+def origin_revalidates_in_background(who: Any) -> bool:
+    """Whether the service can recheck this principal's origin with no live request.
+
+    A Cloud cell's gateway proves the login on each request, and a principal with
+    no origin (stdio, CLI, library) has none to recheck.
+    """
+    from . import cloud_cell
+
+    return who.origin_session is not None and not cloud_cell.is_cloud_issuer_family(who.issuer_family)
+
+
+async def origin_login_state(who: Any) -> OriginLogin:
+    """Recheck the login behind a delegated origin for work that outlives its access token.
+
+    The origin session's own access-token expiry does not end it; its refresh family
+    must be active instead (``SessionAuthority.revalidate_login``). A Cloud cell's
+    origin is rechecked as ``origin_session_active`` does.
+
+    A store or cipher read failure, or an unusable state directory, is ``UNREADABLE``.
+    Any other failure, such as no authority configured for the issuer, is ``NOT_VALID``:
+    the service then has nothing that could vouch for the login.
+    """
+    origin = who.origin_session
+    if origin is None:
+        return OriginLogin.VALID
+    client = who.client_binding
+    if client is None:
+        return OriginLogin.NOT_VALID
+    from . import cloud_cell
+
+    if cloud_cell.is_cloud_issuer_family(who.issuer_family):
+        from . import cloud_origin
+
+        return OriginLogin.VALID if cloud_origin.matches(who) else OriginLogin.NOT_VALID
+    try:
+        verified = _request_verifier(origin)
+        authority = verified[0] if verified is not None else _configured_authority(client, origin)
+        if authority is None or client.issuer != authority.issuer or origin.audience != authority.audience:
+            return OriginLogin.NOT_VALID
+        record = await authority.revalidate_login(
+            session_id=origin.session_id, generation=origin.generation, client_id=client.client_id,
+        )
+    except (SessionStoreUnavailable, OSError):
+        return OriginLogin.UNREADABLE
+    except (RuntimeError, ValueError):
+        return OriginLogin.NOT_VALID
+    return OriginLogin.VALID if record is not None else OriginLogin.NOT_VALID
+
+
+def origin_login_state_sync(who: Any) -> OriginLogin:
+    """``origin_login_state`` for a synchronous caller, retaining request evidence."""
     if who.origin_session is None:
-        return True
+        return OriginLogin.VALID
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(origin_session_active(who))
+        return asyncio.run(origin_login_state(who))
     # Synchronous job ticks may run on an ASGI loop; retain its verified request context.
     context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(context.run, lambda: asyncio.run(origin_session_active(who))).result()
+        return pool.submit(context.run, lambda: asyncio.run(origin_login_state(who))).result()

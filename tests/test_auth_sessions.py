@@ -5,6 +5,7 @@ import base64
 import multiprocessing
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -566,6 +567,27 @@ async def test_offline_access_expiry_revocation_and_generation_fail_closed() -> 
     )
     await authority.replace_generation()
     assert await authority.validate_refresh(another_refresh, client_id="chatgpt") is None
+
+
+@pytest.mark.anyio
+async def test_a_login_revalidated_past_its_token_needs_a_refresh_family_of_its_own_client() -> None:
+    """With the token's expiry set aside, a family issued to another client must not vouch for a login."""
+    raw = AtomicMemoryStore()
+    authority = _authority(raw)
+    _, record, _ = await authority.issue_offline(
+        client_id="chatgpt", scopes=("offline_access",), identity=_identity()
+    )
+    binding = {"session_id": record.session_id, "generation": record.generation, "client_id": "chatgpt"}
+    assert await authority.revalidate_login(**binding) == record
+
+    family = await authority._load_family(record.family_id)
+    await authority._storage.put(
+        family.family_id,
+        replace(family, client_id="another-client").to_dict(),
+        collection=authority.refresh_families_collection,
+    )
+
+    assert await authority.revalidate_login(**binding) is None
 
 
 @pytest.mark.anyio

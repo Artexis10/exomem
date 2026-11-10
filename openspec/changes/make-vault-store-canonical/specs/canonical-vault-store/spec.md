@@ -53,7 +53,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **THEN** status reports the number of queued files and the age of the oldest one
 
 ### Requirement: Outside edits return through a base-revision check
-In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
+In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete of a page SHALL become a held deletion, never a silent delete of canonical content. A binary file is canonical on disk and the store records only its hash and size, so an outside change, delete or rename of a binary SHALL import as an audited record change; Exomem SHALL hold a binary only when an Exomem delete of it is queued and the file differs.
 
 #### Scenario: A clean outside edit imports
 - **WHEN** a person edits a projected page in Obsidian and no Exomem write to that page is pending
@@ -68,6 +68,15 @@ In store mode, a file the store owns whose hash differs from the projection mani
 #### Scenario: An outside delete is held
 - **WHEN** a projected page disappears from disk without an Exomem delete
 - **THEN** the store keeps the page and records a held deletion for review
+
+#### Scenario: A held deletion clears when the page returns
+- **WHEN** a person restores the file of a held deletion with the bytes that Exomem last projected
+- **THEN** the held deletion is removed and nothing is imported
+
+#### Scenario: An outside delete of a binary imports
+- **WHEN** a binary file disappears from disk without an Exomem delete
+- **THEN** the store removes the binary's record in an audited import, and holds nothing
+- **AND** a binary renamed outside Exomem keeps its record under the new path, paired by its hash
 
 ### Requirement: A held item is resolved by an explicit choice
 In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL need the same write authority as a governed write of the bytes it commits, and SHALL refuse with `WRITE_REFUSED`, before it saves or commits anything, when the caller lacks it. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that in one order. The owner with unrestricted access sees every held item. Any other caller is judged on the stored page's bytes, not on the person's file or the path alone. When the store holds no page, the person's file is judged the same way. When neither exists, and for a binary, the path alone decides. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.
@@ -180,6 +189,54 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 #### Scenario: The in-vault replica carries collections only
 - **WHEN** the collection store publishes its in-vault replica in a store-mode vault
 - **THEN** the replica holds the collection tables and no page, lexical or graph table
+
+### Requirement: A change to the schema overlay settles the registry state in the background
+In store mode, a commit that changes a source of the schema overlay (a page under `_Schema/` or the access policy file) SHALL record its revision and return without deriving every page again. A background job SHALL then derive the stored pages again, one bounded transaction per batch, and SHALL record the overlay revision that the derived rows reflect. Status SHALL report `rebuilding` with the target revision while the rows reflect an older overlay, `current` when they reflect the latest, and `unknown` when no record says or the record of the last overlay change cannot be read, and SHALL count the overlay paths that wait for the projector or a hold. A tick with no batch to run SHALL NOT take the vault's mutation boundary. A batch and its cursor SHALL commit together, so a kill leaves the rows behind the store and never ahead of it, and the next start SHALL resume at the cursor. The job SHALL run on the store thread's scheduler and SHALL add no thread.
+
+#### Scenario: A policy change returns before its rows and the job then settles them
+- **WHEN** a commit changes the access policy of a store-mode vault
+- **THEN** the commit returns while status reports `rebuilding` with that commit's revision as the target
+- **AND** when the job finishes status reports `current`, and every derived table equals a fresh derivation from the stored bytes with the new policy
+
+#### Scenario: A kill inside a batch leaves the rows behind the store
+- **WHEN** the process is killed inside a batch of the job
+- **THEN** no derived row is ahead of the recorded overlay revision
+- **AND** the next start resumes the job and ends with the rows of a fresh derivation
+
+#### Scenario: A write does not wait for the job
+- **WHEN** a governed write commits between two batches of the job
+- **THEN** the write commits at once, and the job derives that page with the policy that the vault holds when it finishes
+
+### Requirement: A store-mode vault says so beside the vault
+Activation SHALL record a store-mode marker in the collection store's `store_meta` in the transaction that records store mode, and rollback SHALL remove it in the transaction that records file mode. A root SHALL decide the marker while it holds the store and, after a rollback, until the publication that copies the clear replica; a deciding root SHALL force the hand-back to copy the replica under the vault when the replica disagrees with its mode, because store mode changes no collection head. A takeover by any other root SHALL carry the replica's marker, or its absence, into the new tenure's store and SHALL NOT decide it. `exomem store-mode migrate` SHALL refuse with the same code when the replica says that another state root holds the store. A file-mode service on another state root SHALL read the marker from the replica, whatever store schema wrote it, when it starts and SHALL refuse with a named code, the reason and the remediation when the replica says store. An absent or unreadable replica SHALL NOT block a file-mode start, and a vault that never migrated SHALL start as before. A state root whose own store says file, whose rollback is not yet published and which holds the replica's tenure SHALL start. `exomem store-mode status` and the doctor SHALL show the marker.
+
+#### Scenario: Another state root refuses a store-mode vault
+- **WHEN** a vault is migrated into store mode and a file-mode service starts on another state root over the same vault
+- **THEN** the service refuses to start with `VAULT_STORE_ELSEWHERE` and names the rollback
+
+#### Scenario: Rollback releases the vault
+- **WHEN** the vault is rolled back to file mode
+- **THEN** the replica no longer says store and the file-mode service on the other state root starts
+
+#### Scenario: A replica that cannot be read does not block a file-mode vault
+- **WHEN** the replica is absent or unreadable
+- **THEN** a file-mode service starts, and status names the unreadable replica
+
+#### Scenario: Another root's takeover keeps the marker
+- **WHEN** a root without a `store_mode` row takes the lease from a replica that says store, whether it adopts the replica or continues from its head
+- **THEN** the replica that it publishes still says store
+
+#### Scenario: A rollback is not undone by an adopting root
+- **WHEN** a root that adopted a replica saying store takes the lease again after the owner rolled back
+- **THEN** the replica that it publishes does not say store
+
+#### Scenario: A published rollback decides nothing
+- **WHEN** a root rolled back and published the clear replica, another root then migrated, and the first root takes the lease again
+- **THEN** the replica that it publishes still says store, and the first root refuses to start
+
+#### Scenario: A second root does not migrate a vault that another root holds
+- **WHEN** the replica says store and a root that does not hold the store runs `exomem store-mode migrate --apply`
+- **THEN** the command refuses with `VAULT_STORE_ELSEWHERE` and the vault stays in file mode on that root
 
 ### Requirement: Freshness requirements follow store ownership
 For files the store owns, the requirements that keep derived sidecars in step with Markdown on disk SHALL NOT apply in store mode; a change on disk to such a file SHALL follow the outside-edit requirement of this capability, and caches SHALL key on store revision. For vault content outside the store, those requirements SHALL keep applying in store mode as they do in file mode.

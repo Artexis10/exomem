@@ -202,7 +202,7 @@ def corpus_member(rel: str, scope: str) -> bool:
     The Knowledge Base corpus is ``find_corpus.walk_md`` over that folder; the vault corpus is
     ``vault.walk_vault_md``. The two differ in their anchor and in the folders they skip.
     """
-    return find_corpus.kb_walk_member(rel) if scope == "kb" else _walk_member(rel)
+    return find_corpus.kb_walk_member(rel) if scope == "kb" else walk_member(rel)
 
 
 def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
@@ -219,17 +219,17 @@ def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
     return frozenset(row[0] for row in rows)
 
 
-def _walk_member(rel: str) -> bool:
-    """Whether ``vault.walk_vault_md`` would reach this stored page, judged by path alone.
+def walk_member(rel: str) -> bool:
+    """Whether ``vault.walk_vault_md`` would reach the file at this path, judged by path alone.
 
     The walk's own entry rule (``vault._walk_vault_md_entry``) also lstat's the file for a symlink,
     a hard link and a regular file, and a stored page may have no file yet, so it cannot judge a
     page. That is the gap: this keeps the rule's path tests (the reserved registry, the excluded
-    scan folders, the Markdown suffix), and ``ownership.classify`` already keeps out a conflict copy.
+    scan folders, the Markdown suffix, the conflict copy). The importer asks it about files that
+    the store does not own, so it cannot leave the conflict copy to ``ownership.classify``.
     """
-    # A file extension is a closed set that the format fixes; it names the format, not the meaning.
     return (
-        rel.lower().endswith(".md")
+        find_corpus.walk_name_admits(rel.rpartition("/")[2], directory=False)
         and not reserved_paths.classify_logical(rel).blocked
         and not vault.in_excluded_scan_dir(rel)
     )
