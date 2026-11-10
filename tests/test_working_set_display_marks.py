@@ -48,8 +48,10 @@ HUB_PAGE = (
     "## Claim\n- id: exports\n- asserted_by: Research team\n"
     + "".join(f"- relations: derived_from: [[{source}]]\n" for source in SOURCES)
     + "\nOrchard launch exports come first on the roadmap.\n\n"
-    "## Timeline event\n- id: retro\n- occurred_at: 2026-03-01\n\nThe kickoff retrospective is held.\n\n"
-    "## Timeline event\n- id: kickoff\n- occurred_at: 2026-01-10\n\nThe kickoff meeting opens the work.\n"
+    "## Timeline event\n- id: retro\n- occurred_at: 2026-03-01\n\n"
+    "The kickoff retrospective is held.\n\n"
+    "## Timeline event\n- id: kickoff\n- occurred_at: 2026-01-10\n\n"
+    "The kickoff meeting opens the work.\n"
 )
 ANSWER_PAGE = (
     "---\ntype: insight\n---\n# Orchard answers\n\n"
@@ -83,7 +85,9 @@ def _vault(
     vault.mkdir(parents=True)
     initialize_vault_state_offline(vault, source="display marks fixture")
     pages = {HUB: hub_page, **{
-        f"{NOTES}/{source}.md": f"---\ntype: insight\n---\n# {source}\n\n## Claim\n\n{source} were read in May.\n"
+        f"{NOTES}/{source}.md": (
+            f"---\ntype: insight\n---\n# {source}\n\n## Claim\n\n{source} were read in May.\n"
+        )
         for source in SOURCES
     }}
     if answer is not None:
@@ -269,13 +273,12 @@ def test_dated_events_are_served_earliest_first_and_other_units_keep_their_place
     after = [unit["text"] for unit in _recall(vault)["units"]]
 
     events = ("The kickoff meeting opens the work.", "The kickoff retrospective is held.")
+    assert [text for text in before if text in events] == list(reversed(events))
+    assert sorted(after) == sorted(before)
     assert [text for text in after if text in events] == list(events)
-    assert sorted(before.index(text) for text in events) == sorted(after.index(text) for text in events)
-    assert [text for text in after if text not in events] == [
-        text for text in before if text not in events
-    ]
-    assert {after.index(text) for text in after if text not in events} == {
-        before.index(text) for text in before if text not in events
+    # Every other unit keeps its place, so the events fill the places they held.
+    assert {i: text for i, text in enumerate(after) if text not in events} == {
+        i: text for i, text in enumerate(before) if text not in events
     }
 
 
@@ -284,7 +287,8 @@ def test_a_sourced_claim_names_its_holder_and_at_most_three_sources(tmp_path: Pa
     that lists every source and crowds the packet."""
     packet = _recall(_vault(tmp_path))
 
-    origin = _units(packet)["Orchard launch exports come first on the roadmap."]["display"]["origin"]
+    claim = _units(packet)["Orchard launch exports come first on the roadmap."]
+    origin = claim["display"]["origin"]
     source_refs = {
         f"exomem://vault/{NOTES.replace(' ', '%20')}/{source.replace(' ', '%20')}.md"
         for source in SOURCES
