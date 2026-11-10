@@ -18,12 +18,13 @@ it (`session_seed.py`, the same code a session-close run seeds with), and the re
 `"ready_graph": true` in the plan builds the relation graph of a seeded vault first, as a live vault has it from its
 writes (`session_seed.py` says how, and writes no page): the arm's own reconcile runs before the server is built, and the
 arm's own `recall_context` is read, with a bound, until its map reports the graph available. The recording then
-holds `ready` with the graph state that was seen. The two-read `warm` check below still runs after it.
+holds `ready` with the graph state that was seen. The `warm` poll below still runs after it.
 
-A read step may carry `"warm": {"seconds": N, "ignore": [field, ...]}`. On a seeded vault the first read starts a
-background index pass and comes back cold (an empty slice, no leads), so the worker discards that read, waits N
-seconds, reads twice N seconds apart, and records the second reply only if it equals the first apart from the fields in
-`ignore` (ids that change on every call). A reply that is still changing fails the recording instead of being served.
+A read step may carry `"warm": {"seconds": N, "ignore": [field, ...], "within": W}`. On a seeded vault the first read
+starts a background index pass and comes back cold (an empty slice, no leads), so the worker discards that read, then
+reads every N seconds until two successive replies agree apart from the fields in `ignore` (ids that change on every
+call), and records the later one. When no two successive replies agree within W seconds (`WARM_WITHIN_SECONDS` by
+default), the recording fails instead of serving a reply that is still changing.
 
 `"mode": "cloud"` in the plan makes the product report Exomem Cloud (`EXOMEM_CLOUD_CELL=1`), for this process only. The
 product refuses to build a Cloud server without a cell id and a bearer, so the worker invents throwaway ones; it makes
@@ -47,6 +48,8 @@ from pathlib import Path
 from typing import Any
 
 SETTLE_SECONDS = 120.0
+#: How long a `warm` read is polled for two successive replies that agree, unless the step names its own `within`.
+WARM_WITHIN_SECONDS = 60.0
 #: A page that links an existing fixture note needs no relation review.
 SETTLE_LINK = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout"
 SETTLE_PAGE = (
@@ -71,18 +74,25 @@ OFFLINE_ENV = {
 def warmed_reply(call, tool: str, arguments: dict, warm: dict) -> dict:
     """The reply of a read that the vault's background index pass has stopped changing; see the module docstring."""
     seconds, ignore = float(warm["seconds"]), set(warm.get("ignore", ()))
+    within = float(warm.get("within", WARM_WITHIN_SECONDS))
     call(tool, arguments)
 
     def settled(reply: dict) -> dict:
         return {key: value for key, value in reply.items() if key not in ignore}
 
+    deadline = time.monotonic() + within
     time.sleep(seconds)
-    first = call(tool, arguments)
-    time.sleep(seconds)
-    second = call(tool, arguments)
-    if settled(first) != settled(second):
-        raise SystemExit(f"{tool} still changed between two reads {seconds:g}s apart: the index is not warm")
-    return second
+    previous = call(tool, arguments)
+    while True:
+        time.sleep(seconds)
+        reply = call(tool, arguments)
+        if settled(previous) == settled(reply):
+            return reply
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                f"{tool} still changed between two reads {seconds:g}s apart: the index is not warm (polled for {within:g}s)"
+            )
+        previous = reply
 
 
 def resolve_refs(value: Any, replies: dict[str, Any], product: dict[str, str]) -> Any:

@@ -3,6 +3,7 @@ the blind judge batch. Seeds, cases and keys here are tiny invented fixtures."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import subprocess
 import sys
@@ -237,6 +238,20 @@ def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes
         session_seed.wait_for_graph(stays_warming, seconds=0.05, interval=0.02)
     steps = iter([{"map": {"membership_graph": "warming"}}, {"map": {"membership_graph": "available"}}])
     assert session_seed.wait_for_graph(lambda tool, arguments: next(steps), seconds=5, interval=0.01) == "available"
+
+
+def test_the_warm_read_records_once_two_successive_replies_agree_and_fails_by_name_when_none_do_within_the_bound() -> None:
+    """Catches a warm step that records a reply the index pass is still changing, or that gives up on a vault whose
+    index settles after the second read and so fails a recording that a short wait would have made."""
+    from import_guidance.record_worker import warmed_reply
+
+    settling = iter([{"slice": []}, {"slice": ["a"]}, {"slice": ["a", "b"], "id": 1}, {"slice": ["a", "b"], "id": 2}])
+    reply = warmed_reply(lambda tool, arguments: next(settling), "recall_context", {}, {"seconds": 0.001, "ignore": ["id"]})
+    assert reply == {"slice": ["a", "b"], "id": 2}
+
+    counter = itertools.count()
+    with pytest.raises(SystemExit, match=r"recall_context still changed between two reads 0.001s apart: the index is not warm \(polled for 0.05s\)"):
+        warmed_reply(lambda tool, arguments: {"slice": [next(counter)]}, "recall_context", {}, {"seconds": 0.001, "within": 0.05})
 
 
 def test_a_recording_made_before_the_graph_was_built_is_not_reused_for_a_scenario_that_asks_for_it(tmp_path: Path) -> None:
