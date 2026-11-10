@@ -294,6 +294,29 @@ def test_a_recording_from_another_commit_or_an_uncommitted_change_of_the_arm_is_
     assert len(committed) == 1 and f"the checkout is now at {head};" in committed[0]
 
 
+
+def test_a_new_untracked_product_file_changes_the_arm_state_and_a_run_folder_does_not(tmp_path: Path) -> None:
+    """Catches a recording reused after a dev-round repair added an uncommitted scaffold file: the seeded vault holds
+    the new file, but the recorded replies came from the vault without it."""
+    arm_root = tmp_path / "arm"
+    (arm_root / "src").mkdir(parents=True)
+    git = ["git", "-C", str(arm_root), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+    (arm_root / "src" / "reply.py").write_text("REPLY = 'first'\n", encoding="utf-8")
+    for command in (["init", "-q"], ["add", "src/reply.py"], ["commit", "-q", "--no-verify", "-m", "first"]):
+        subprocess.run([*git, *command], check=True)
+    clean = recording.checkout_sha(arm_root)
+
+    (arm_root / "runs").mkdir()
+    (arm_root / "runs" / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    assert recording.checkout_sha(arm_root) == clean
+
+    (arm_root / "src" / "new-registry.yaml").write_text("kinds: {}\n", encoding="utf-8")
+    added = recording.checkout_sha(arm_root)
+    assert "-dirty-" in added
+    (arm_root / "src" / "new-registry.yaml").write_text("kinds: {claim: {}}\n", encoding="utf-8")
+    assert recording.checkout_sha(arm_root) not in (clean, added)
+
+
 # Case folders, scenarios and the answer checks.
 
 TURN_ONE = "When does the first ferry sail on weekdays?"
@@ -504,6 +527,20 @@ def test_an_answer_rerun_after_judge_prepare_does_not_inherit_the_judgment_of_th
     rerun = rows.pop(("c2", "cand"))
     assert rerun["verdict"] == checks.UNKNOWN and "changed after judge-prepare" in rerun["criteria"][0]["detail"]
     assert {row["verdict"] for row in rows.values()} == {checks.PASS}
+
+
+
+def test_a_judge_import_given_none_of_the_prepared_runs_is_refused_and_names_the_run_files(tmp_path: Path) -> None:
+    """Catches an import that forgot --stage-b: every judgment would read unknown with a reason that asks to judge
+    again, and the report would show a batch that was judged in full as unjudged."""
+    scenarios = [invented_scenario(f"c{n}") for n in range(5)]
+    out = tmp_path / "batch"
+    runs = ten_stage_b_runs(tmp_path)
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    judgments = judge_batch_as(out, lambda run: True)
+    with pytest.raises(SystemExit, match="--stage-b and --stage-c"):
+        judge_batch.import_judgments(judgments, out=out, stage_b=[], stage_c=[], scenarios=scenarios)
+    assert not (out / "judged.json").exists()
 
 
 FAKE_JUDGE = """#!{python}
