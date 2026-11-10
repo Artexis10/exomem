@@ -87,3 +87,31 @@ Recall SHALL accept a `filters` JSON object over explicit page and unit namespac
 #### Scenario: Page-only OR branch matches a page without units
 - **WHEN** a page with no units satisfies the page side of an OR expression whose other side is a unit predicate
 - **THEN** the page result may match through the page branch without fabricating a child unit
+
+### Requirement: Invalid Filters Fail Closed And Identically
+The filter compiler SHALL validate namespace, RFC 6901 pointer, reserved field, operator, value arity, and resolved value type before candidate generation. Errors SHALL identify the JSON path, stable code, expected shape/type, and remediation. Missing frontmatter values SHALL differ from explicit null and SHALL be testable through `$exists`. Reserved page/unit fields SHALL reuse existing shortcut canonicalization/case semantics; arbitrary frontmatter strings SHALL compare exactly after YAML parsing. Access scope and excluded-subtree policy SHALL apply before caller filters and MUST NOT be weakened by them. Every retrieval backend and facade SHALL consume the same normalized typed filter AST; an unsupported backend capability MUST fail or use a proven equivalent post-filter before ranking and MUST NOT silently broaden results. The one exception is a `unit.dimension` condition that a served reader's index cannot answer: the reader SHALL check it on the ranked hits after the limit, the result SHALL say that the check ran only on the best matches and that more may exist, and no unit outside the dimension SHALL be returned. Task 5.5 of `make-epistemic-language-dynamic` removes this exception by answering `unit.dimension` from the index.
+
+#### Scenario: Misspelled field does not look like an empty result
+- **WHEN** a caller uses the unknown closed unit field `unit.categry`
+- **THEN** recall returns an invalid-filter-field error pointing to that path rather than zero hits
+
+#### Scenario: Missing and null remain distinct
+- **WHEN** one page omits `owner` and another declares `owner: null`
+- **THEN** `$exists:false` matches only the missing field while `$eq:null` matches only the explicit null
+
+#### Scenario: Backend parity is enforced
+- **WHEN** the same structured filter runs through lexical, vector, hybrid, graph-enriched, SQLite, and any optional search backend
+- **THEN** every lane starts from the same eligible identity set and no backend returns a filtered-out candidate
+- **AND** when a served reader checks a `unit.dimension` condition on its ranked hits, every lane starts from the eligible set without that condition, the check applies to every lane's hits alike, and the result says that it ran only on the best matches
+
+#### Scenario: Heterogeneous scalar and array fields stay backend-identical
+- **WHEN** equivalent `$eq`, `$in`, `$contains`, and `$all` predicates run over a field that is scalar, array, null, missing, or a mapping on different pages
+- **THEN** every backend applies the same exact-type, terminal-array, and nonmatch rules
+
+#### Scenario: Numeric mapping key is not mistaken for array traversal
+- **WHEN** the same RFC 6901 pointer segment `0` follows a mapping in one candidate and an array in another
+- **THEN** every backend resolves the mapping key and treats continued array traversal as a nonmatch
+
+#### Scenario: Filter cannot bypass excluded scope
+- **WHEN** an expression names metadata present only in an excluded subtree
+- **THEN** no excluded identity becomes eligible or visible through hits, counts, explanations, or errors
