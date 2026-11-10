@@ -217,8 +217,12 @@ def answer_has_scripted_string(spec: dict, evidence: Evidence, **_: Any) -> Outc
     )
 
 
-def _value_groups(spec: dict) -> list[list[str]] | None:
-    """The spec's `groups`: a non-empty list of non-empty lists of strings, each list the spellings of one value."""
+GROUPS_SHAPE = "groups must be a non-empty list of non-empty string lists"
+
+
+def value_groups(spec: dict) -> list[list[str]] | None:
+    """The spec's `groups`: a non-empty list of non-empty lists of strings, each list the spellings of one value. None
+    when they are malformed; the scenario writer calls this too, so a malformed key stops before any run."""
     groups = spec.get("groups")
     well_formed = (
         isinstance(groups, list)
@@ -231,9 +235,9 @@ def _value_groups(spec: dict) -> list[list[str]] | None:
 def answer_has_all_of(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
     """Each group of `groups` has one spelling in the answer. The values are the scenario's closed list, matched as
     case-folded substrings of the whole answer, so no pattern guesses at what the answer means."""
-    groups = _value_groups(spec)
+    groups = value_groups(spec)
     if groups is None:
-        return Outcome("answer_has_all_of", UNKNOWN, "groups must be a non-empty list of non-empty string lists")
+        return Outcome("answer_has_all_of", UNKNOWN, GROUPS_SHAPE)
     text = evidence.answer.casefold()
     missing = [g for g in groups if not any(v.casefold() in text for v in g)]
     return Outcome(
@@ -246,9 +250,9 @@ def answer_has_all_of(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
 def answer_in_order(spec: dict, evidence: Evidence, **_: Any) -> Outcome:
     """The groups of `groups` first appear in the answer in the listed order. A group's place is the earliest
     place of any of its spellings; every group must appear, and the places must strictly increase."""
-    groups = _value_groups(spec)
+    groups = value_groups(spec)
     if groups is None:
-        return Outcome("answer_in_order", UNKNOWN, "groups must be a non-empty list of non-empty string lists")
+        return Outcome("answer_in_order", UNKNOWN, GROUPS_SHAPE)
     text = evidence.answer.casefold()
     places = [[at for v in g if (at := text.find(v.casefold())) >= 0] for g in groups]
     missing = [g for g, found in zip(groups, places, strict=True) if not found]

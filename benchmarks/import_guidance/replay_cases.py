@@ -48,6 +48,13 @@ def read_marks(case: Case) -> dict:
     deterministic = marks.get("deterministic")
     if deterministic is not None and not (isinstance(deterministic, dict) and set(deterministic) <= set(CHECK_TYPES)):
         problems.append(f"deterministic must be null or an object with keys from {sorted(CHECK_TYPES)}")
+    elif deterministic:
+        # The run-time check's own reading of the groups, so a key that it would score as unknown stops here.
+        problems.extend(
+            f"deterministic.{name}: {checks.GROUPS_SHAPE}"
+            for name, groups in deterministic.items()
+            if checks.value_groups({"groups": groups}) is None
+        )
     if problems:
         raise SystemExit(f"{path}: " + "; ".join(problems))
     return marks

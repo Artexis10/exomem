@@ -333,11 +333,16 @@ def test_the_scenario_writer_refuses_a_case_folder_without_a_usable_rubric_and_n
     assert not (tmp_path / "out" / "scenarios").exists()
 
 
-def test_a_marks_key_with_an_unknown_check_type_is_refused_by_name(tmp_path: Path) -> None:
-    """Catches a typo in a key that would write a scenario with no check, so a wrong answer could pass."""
+def test_a_marks_key_with_an_unknown_check_type_or_malformed_groups_is_refused_by_name(tmp_path: Path) -> None:
+    """Catches a typo in a key that would write a scenario with no check, so a wrong answer could pass, and groups that
+    the run-time check would score as unknown on every paid run."""
     folder = case_folder(tmp_path, {"c1": {"deterministic": {"allof": [["x"]]}}})
     with pytest.raises(SystemExit, match="allof|deterministic"):
         replay_cases.write_scenarios(folder, tmp_path / "out")
+    malformed = case_folder(tmp_path / "second", {"c1": {"deterministic": {"in_order": [["built"], []]}}})
+    with pytest.raises(SystemExit, match=r"c1\.marks\.json: deterministic\.in_order: groups must be"):
+        replay_cases.write_scenarios(malformed, tmp_path / "out")
+    assert not (tmp_path / "out" / "scenarios").exists()
 
 
 def answer(text: str) -> checks.Evidence:
