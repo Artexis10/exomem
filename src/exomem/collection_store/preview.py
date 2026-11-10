@@ -516,6 +516,14 @@ def _mutate(vault_root, method, *args, **kwargs):
         return method(*args, **kwargs)
 
 
+def _validate_create(writer, profile, args):
+    """Refuse a new manifest for what the store's create refuses; the file-mode preflight still builds the result."""
+    if "manifest_path" in args and "manifest_text" in args:
+        writer._require_operation_context()
+        writer._facade_profile = profile
+        writer.validate_create(args["manifest_path"], args["manifest_text"], scaffold=args.get("scaffold", True))
+
+
 def dispatch(
     vault_root: Path, profile: str, action: str, values: Mapping[str, Any]
 ) -> tuple[bool, Any]:
@@ -555,6 +563,12 @@ def dispatch(
             if created is not None:
                 return True, created
         if selector is None or selected_writer(vault_root, selector, prove=prove) is None:
+            if action == "validate" and args.get("collection") is None:
+                from .runtime import summary_create
+
+                # Only a create the store takes (the test served_create uses) is refused for what the store refuses.
+                if summary_create(vault_root, args):
+                    _validate_create(writer, profile, args)
             return False, None
         if action == "create":
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "store creation requires admission")
@@ -564,10 +578,7 @@ def dispatch(
     writer._facade_profile = profile
     if action == "validate":
         if args.get("collection") is None:
-            # The file-mode preflight still builds the result; the store adds the refusals a create would make.
-            if "manifest_path" in args and "manifest_text" in args:
-                writer.validate_create(args["manifest_path"], args["manifest_text"],
-                                       scaffold=args.get("scaffold", True))
+            _validate_create(writer, profile, args)
             return False, None
         return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
     # Records inspection is generic in file mode; only its mutations require

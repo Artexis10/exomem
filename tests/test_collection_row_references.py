@@ -136,16 +136,25 @@ def test_a_target_that_does_not_exist_is_refused_with_the_generic_target_error(s
     assert error.details["field"] == "item_schema.fields.site.references.collection"
 
 
-def test_validate_of_a_new_manifest_refuses_a_missing_target_as_create_does(store):
-    """A preflight that passes what create refuses sends an agent into a create that then fails."""
-    fields = SITE_FIELD.replace(SITES, GONE)
+COMPOUND_KEY_SITES = collection_text(
+    SITES, "Sites", "code, region", "    code: {type: string, required: true}\n"
+    "    region: {type: string, required: true}\n")
+
+
+@pytest.mark.parametrize(("target", "fields", "code"), [
+    pytest.param(sites_text(), SITE_FIELD.replace(SITES, GONE), "INVALID_REFERENCE_TARGET", id="missing-target"),
+    pytest.param(COMPOUND_KEY_SITES, SITE_FIELD, "UNSUPPORTED_REFERENCE_TARGET", id="compound-key-target"),
+])
+def test_validate_of_a_new_manifest_refuses_a_target_as_create_does(store, target, fields, code):
+    """A reference needs a target already in the store, so the preflight must refuse in a store that has one."""
+    create(store, SITES, target, "Sites")
     validate = next(command for command in commands.COMMANDS if command.name == "record_memory")
     with request_scope(owner_principal()), preview_store(store.root, store.handle), \
             pytest.raises(OpError) as validated:
         invoke_command(validate, store.root, action="validate", manifest_path=path("Diary"),
                        manifest_text=diary_text(fields))
     created = refused(store, fields, "create")
-    assert validated.value.code == created.code == "INVALID_REFERENCE_TARGET"
+    assert validated.value.code == created.code == code
     assert validated.value.details["field"] == created.details["field"]
 
 
