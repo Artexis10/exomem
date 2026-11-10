@@ -47,6 +47,7 @@ import shutil
 import sys
 import tarfile
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -64,6 +65,7 @@ RESERVE_BYTES_ENV = "EXOMEM_IMPORT_RESERVE_BYTES"
 #: What may follow the end-of-archive block when a caller stops reading there: tar pads to a whole record.
 END_WINDOW_BYTES = 2 * tarfile.RECORDSIZE
 
+_FSYNC_WORKERS = 16
 _NAME_MAX_BYTES = 255
 _PATH_MAX_BYTES = 4096
 _CHUNK = 1024 * 1024
@@ -130,8 +132,10 @@ class ReadPolicy:
     stop_after_end: bool = False
     #: Refuse two names that differ only in letter case: a vault may sit on a case-insensitive volume.
     portable_paths: bool = False
-    #: The most one pax or GNU long-name header may hold; `tarfile` reads it whole into memory.
+    #: The most bytes `tarfile` may read to parse one header and the pax, long-name and sparse headers chained to it.
     max_header_bytes: int | None = None
+    #: Flush with `os.sync`, as the Cloud job does. False flushes only the files and directories this unpack wrote.
+    host_wide_sync: bool = True
 
 
 def free_bytes(path: Path) -> int:
@@ -140,17 +144,41 @@ def free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
-def flush_to_disk(root: Path) -> None:
-    """Put every file under `root` on disk: `os.sync` where the platform has it, else an fsync of each file."""
+def _fsync_file(path: str) -> None:
+    with open(path, "rb+") as staged:
+        os.fsync(staged.fileno())
+
+
+def _fsync_directory(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def flush_to_disk(root: Path, *, host_wide: bool = True) -> None:
+    """Put every file under `root` on disk.
+
+    `host_wide` uses `os.sync` where the platform has it. Otherwise, or when it is False, each file is fsynced and,
+    where a directory can be opened, each directory too, so that a request flushes what it wrote and not the whole host.
+    """
 
     sync = getattr(os, "sync", None)
-    if sync is not None:
+    if host_wide and sync is not None:
         sync()
         return
+    files: list[str] = []
+    directories: list[str] = []
     for directory, _, names in os.walk(root):
-        for name in names:
-            with open(Path(directory, name), "rb+") as staged:
-                os.fsync(staged.fileno())
+        directories.append(directory)
+        files.extend(os.path.join(directory, name) for name in names)
+    # One fsync after another costs a journal commit each (about 5 ms per file measured on a local volume,
+    # so 65,536 entries would pass the request budget); concurrent ones share a commit.
+    with ThreadPoolExecutor(max_workers=_FSYNC_WORKERS) as pool:
+        list(pool.map(_fsync_file, files))
+        if hasattr(os, "O_DIRECTORY"):  # Windows cannot open a directory; the name is the portable test for POSIX
+            list(pool.map(_fsync_directory, directories))
 
 
 def unpack_stream(
@@ -217,7 +245,7 @@ def unpack_stream(
         if staging is not None:
             # The caller commits with a rename and then deletes the
             # ciphertext, so the files must be on disk before success.
-            flush_to_disk(staging)
+            flush_to_disk(staging, host_wide=policy.host_wide_sync)
         return result
     except BaseException as error:
         if isinstance(error, ArchiveRefused):
@@ -250,7 +278,10 @@ def _unpack_into(
     total = files = members = 0
     expected_offset = 0
     try:
+        # In stream mode `open` reads the first member's headers, so a refusal can arise here too.
         archive = tarfile.open(fileobj=stream, mode=policy.mode, tarinfo=header)
+    except ArchiveRefused:
+        raise
     except Exception:  # noqa: BLE001 -- any parser failure is an unreadable archive
         raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", 0) from None
     with archive:
@@ -352,14 +383,16 @@ def _read_trailer(stream: BinaryIO, end_offset: int | None, members: int) -> Non
 
 
 class _HeaderReads:
-    """The stream as a header sees it: no single read may ask for more than `limit` bytes."""
+    """The stream as one header and its chained headers see it: all their reads together may ask for `limit` bytes."""
 
     def __init__(self, stream: BinaryIO, limit: int) -> None:
         self._stream = stream
-        self._limit = limit
+        self._left = limit
 
     def read(self, size: int) -> bytes:
-        if size > self._limit:
+        # `tarfile` reads a pax or long-name header whole and a sparse map block by block, as the archive declares.
+        self._left -= max(size, 0)
+        if self._left < 0:
             raise ArchiveRefused(ARCHIVE_TOO_LARGE, "header")
         return self._stream.read(size)
 
@@ -382,9 +415,12 @@ def _end_tracking_header(max_header_bytes: int | None = None) -> type[tarfile.Ta
             # None for both, so this is the only place they differ.
             stream = source.fileobj
             position = stream.tell()
-            if max_header_bytes is not None:
-                # `tarfile` reads a pax or long-name header whole, as one read of the size the header declares.
+            # `tarfile` parses the headers chained to this one by calling back into itself, through this method
+            # before Python 3.14 and past it from then on, so the first call alone owns the count.
+            counted = False
+            if max_header_bytes is not None and not isinstance(stream, _HeaderReads):
                 source.fileobj = _HeaderReads(stream, max_header_bytes)
+                counted = True
             try:
                 return super().fromtarfile(source)
             except tarfile.EOFHeaderError:
@@ -392,7 +428,8 @@ def _end_tracking_header(max_header_bytes: int | None = None) -> type[tarfile.Ta
                 cls.end_offset = position
                 raise
             finally:
-                source.fileobj = stream
+                if counted:
+                    source.fileobj = stream
 
     return _Header
 

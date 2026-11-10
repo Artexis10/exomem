@@ -206,6 +206,41 @@ def _with_comment(size: int) -> tarfile.TarInfo:
     return info
 
 
+def _pax_record(key: str, value: str) -> bytes:
+    """One `length key=value` record of a pax header, whose length counts its own digits."""
+    body = f" {key}={value}\n".encode()
+    length = len(body) + len(str(len(body)))
+    length = len(body) + len(str(length))
+    return b"%d" % length + body
+
+
+def _entry(name: str, kind: bytes, data: bytes, pax: dict[str, str] | None = None) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type, info.size, info.pax_headers = kind, len(data), pax or {}
+    return info
+
+
+def _sparse_map_archive(pairs: int) -> bytes:
+    """A gzip tar whose one entry is a GNU sparse 1.0 file: `tarfile` reads its map, which lists `pairs` pairs, from the data."""
+    body = b"%d\n" % pairs + b"0\n" * (2 * pairs)
+    sparse = {"GNU.sparse.major": "1", "GNU.sparse.minor": "0", "GNU.sparse.name": "sparse.bin", "GNU.sparse.realsize": "1"}
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT) as archive:
+        archive.addfile(_entry("sparse.bin", tarfile.REGTYPE, body, sparse), io.BytesIO(body))
+    return buffer.getvalue()
+
+
+def _chained_pax_archive(headers: int, size: int) -> bytes:
+    """A gzip tar whose one file follows `headers` extended headers in a row, each a record of `size` bytes."""
+    record = _pax_record("comment", "x" * size)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.USTAR_FORMAT) as archive:
+        for n in range(headers):
+            archive.addfile(_entry(f"header{n}", tarfile.XHDTYPE, record), io.BytesIO(record))
+        archive.addfile(_entry("ok.pdf", tarfile.REGTYPE, PDF), io.BytesIO(PDF))
+    return buffer.getvalue()
+
+
 #: Sixteen components of 255 bytes: each is a legal name and the whole is under 4,096 bytes, but no stage path can hold it.
 _LONG = "/".join("a" * 255 for _ in range(16))
 
@@ -389,6 +424,50 @@ def test_a_gzip_stream_that_runs_on_after_the_end_block_is_not_read_to_its_end(a
     done = _journey_to_done(agent, padded)[-1]
 
     assert done["filing"] == "done" and done["progress"]["filed"] == 1
+
+
+@pytest.mark.parametrize("archive", [
+    pytest.param(lambda: _sparse_map_archive(300_000), id="a sparse map of 1.2 MB"),
+    pytest.param(lambda: _chained_pax_archive(headers=3, size=400_000), id="three extended headers of 400 KB each"),
+])
+def test_headers_that_are_each_under_the_limit_but_pass_it_together_are_refused(agent, archive):
+    """Catches a header chain read whole: `tarfile` reads a sparse map and each chained header without a total bound."""
+    body = archive()
+
+    async def journey():
+        async with agent.mcp() as client:
+            step = await agent.ask(client, body)
+            assert (await agent.send(step, body)).status_code == 201
+            return await agent.file(client, upload=step["token"])
+
+    refused = asyncio.run(journey())["refused"]
+
+    assert "ARCHIVE_TOO_LARGE" in refused and "headers hold more than" in refused
+    assert agent.imports() == []
+
+
+def test_a_gzip_tar_split_into_members_imports_every_file(agent, duplicate_index):
+    """Catches a gzip file of several members read as a truncated tar, as bgzip and `cat a.gz b.gz` write it."""
+    tar = _tar({"a.pdf": PDF + b"a", "docs/b.pdf": PDF + b"b", "docs/c.pdf": PDF + b"c"}, mode="w")
+    middle = len(tar.rstrip(b"\0")) // 2  # inside the files, not in the padding that follows them
+    archive = gzip.compress(tar[:middle]) + gzip.compress(tar[middle:]) + bytes(100)  # zeros after the last member
+
+    done = _journey_to_done(agent, archive)[-1]
+
+    assert done["filing"] == "done" and done["progress"]["filed"] == 3
+
+
+@pytest.mark.parametrize("pack", [_tar, _zip], ids=["tar", "zip"])
+def test_the_import_flushes_what_it_wrote_and_not_the_whole_host(agent, duplicate_index, monkeypatch, pack):
+    """Catches a global `os.sync` on the route: it waits for every dirty page of the host inside one request."""
+    def whole_host():
+        raise AssertionError("the import called os.sync")
+
+    monkeypatch.setattr(os, "sync", whole_host)
+
+    done = _journey_to_done(agent, pack({f"doc{n}.pdf": PDF + bytes([n]) for n in range(3)}))[-1]
+
+    assert done["filing"] == "done" and done["progress"]["filed"] == 3
 
 
 def test_the_import_lane_is_refused_on_exomem_cloud(agent):

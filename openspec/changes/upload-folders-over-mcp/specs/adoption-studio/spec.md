@@ -6,7 +6,7 @@ The action `file`, public as `import_memory` with operation kind `file` and as `
 
 The stage's `<id>` SHALL derive from the upload, so that a call repeated with the same `upload` finds its stage, unpacks nothing again and starts no second run. A call with the stage's `path` SHALL carry on the same run. A call that repeats the `upload` after filing removed the stage SHALL answer as a call with the `path` alone does. A stage SHALL appear under its final name only when it is whole, and no refusal SHALL leave a stage, a hidden unpack folder or a file outside `_Imports` behind. The held archive SHALL be redeemed once and released when the stage is on disk.
 
-The unpack SHALL choose the format from the archive's first bytes, never from its name, and SHALL read a zip only when the file starts with the zip's first entry. It SHALL refuse, with a coded refusal that names the member where one is at fault, a link, a hardlink, a device, a sparse entry, an absolute path, a `..` path, a path that resolves outside the stage, two paths that differ only in letter case, a name that is too long, holds control characters or that the volume cannot store, and a zip entry that is not stored or deflated. It SHALL refuse a compression other than gzip. It SHALL refuse an archive of more than 65,536 entries, a pax or long-name header of more than 1 MiB, and one whose members unpack to more bytes than `EXOMEM_IMPORT_MAX_EXPANDED_BYTES` allows, counting the bytes it writes, and SHALL NOT inflate more than that and the headers' share. It SHALL stop reading a tar one record after its end-of-archive block. A refusal for a reason that the same bytes would meet again SHALL release the hold. When the volume cannot hold the archive within the import reserve, the call SHALL answer `filing` `stopped` with the code `INSUFFICIENT_SPACE` and a `free_space` need for the person, and SHALL keep the hold; the need SHALL say that the archive is still held only when it is, and otherwise tell the agent to send it again. A stage that no record vouches for SHALL carry a `discard` need that says its staged copies are kept. A call whose upload no session hold matches SHALL be refused with `IMPORT_UPLOAD_UNAVAILABLE`, which says to call `upload_files` again.
+The unpack SHALL choose the format from the archive's first bytes, never from its name, and SHALL read a zip only when the file starts with the zip's first entry. It SHALL refuse, with a coded refusal that names the member where one is at fault, a link, a hardlink, a device, a sparse entry, an absolute path, a `..` path, a path that resolves outside the stage, two paths that differ only in letter case, a name that is too long, holds control characters or that the volume cannot store, and a zip entry that is not stored or deflated. It SHALL refuse a compression other than gzip, and SHALL read a gzip file of several members as one stream under the same limit. It SHALL refuse an archive of more than 65,536 entries, an entry whose pax, long-name and sparse headers together hold more than 1 MiB, and one whose members unpack to more bytes than `EXOMEM_IMPORT_MAX_EXPANDED_BYTES` allows, counting the bytes it writes, and SHALL NOT inflate more than that and the headers' share. It SHALL stop reading a tar one record after its end-of-archive block. A refusal for a reason that the same bytes would meet again SHALL release the hold. When the volume cannot hold the archive within the import reserve, the call SHALL answer `filing` `stopped` with the code `INSUFFICIENT_SPACE` and a `free_space` need for the person, and SHALL keep the hold; the need SHALL say that the archive is still held only when it is, and otherwise tell the agent to send it again. A stage that no record vouches for SHALL carry a `discard` need that says its staged copies are kept. A call whose upload no session hold matches SHALL be refused with `IMPORT_UPLOAD_UNAVAILABLE`, which says to call `upload_files` again.
 
 #### Scenario: An agent imports a folder it packed as a tar
 
@@ -37,6 +37,16 @@ The unpack SHALL choose the format from the archive's first bytes, never from it
 
 - **WHEN** the archive is a bzip2 or xz tar, or a zip with a member that is neither stored nor deflated
 - **THEN** it is refused before it is decompressed, and nothing is left under `_Imports`
+
+#### Scenario: A chain of headers is bounded as a whole
+
+- **WHEN** an entry's headers are each under 1 MiB but their total is not, whether as a sparse map or as a run of extended headers
+- **THEN** the unpack is refused before it holds them, and nothing is left under `_Imports`
+
+#### Scenario: A gzip file of several members is one archive
+
+- **WHEN** a gzip tar is written as several gzip members, one after another
+- **THEN** every file of the tar is staged
 
 #### Scenario: Padding after the end block is never read
 

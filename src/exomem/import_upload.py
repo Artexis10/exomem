@@ -65,8 +65,9 @@ _ZIP_MAGIC = b"PK\x03\x04"
 _GZIP_MAGIC = b"\x1f\x8b"
 #: The ZIP methods whose decompressors stop at the size a read asks for; `zipfile`'s bzip2 and lzma ones do not.
 _ZIP_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
-#: One pax or long-name header may hold this much; `tarfile` reads it whole into memory.
+#: One entry's pax, long-name and sparse headers may add up to this much; `tarfile` reads them into memory.
 _HEADER_LIMIT = 1024**2
+_GZIP_WBITS = zlib.MAX_WBITS | 16  # zlib's switch for the gzip wrapper
 #: The bytes a member's headers and padding may add to what it holds, for the limit on a gzip stream's output.
 _MEMBER_OVERHEAD = 4096
 _CHUNK = 1024**2
@@ -212,24 +213,31 @@ def _unpack(archive: Path, staging: Path, members: list[dict]) -> None:
 
 
 class _Inflated:
-    """The bytes of one gzip stream, inflated up to `limit`; past it `overrun` is set and the read fails.
+    """The bytes of a gzip file, inflated up to `limit` in all; past it `overrun` is set and the read fails.
 
     A tar reader that opens gzip itself has no bound on its output, so a few kilobytes of compressed zeros
     would be inflated for as long as the stream goes on. Each read here inflates at most the size it asks for.
+    A gzip file may hold several members one after another (bgzip, `cat a.gz b.gz`); the tar goes on in the next.
     """
 
     def __init__(self, raw: BinaryIO, limit: int) -> None:
         self._raw = raw
         self._limit = limit
-        self._inflater = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+        self._inflater = zlib.decompressobj(wbits=_GZIP_WBITS)
         self._produced = 0
         self.overrun = False
 
     def read(self, size: int = -1) -> bytes:
         size = size if size > 0 else _CHUNK
-        while not self._inflater.eof:
-            # An empty `data` still lets the inflater hand out the output it held back at the previous limit.
-            data = self._inflater.unconsumed_tail or self._raw.read(_CHUNK)
+        while True:
+            if self._inflater.eof:
+                data = self._inflater.unused_data or self._raw.read(_CHUNK)
+                if not data.startswith(_GZIP_MAGIC):
+                    return b""  # the file ends; bytes that start no other member are ignored, as `gunzip` ignores them
+                self._inflater = zlib.decompressobj(wbits=_GZIP_WBITS)
+            else:
+                # An empty `data` still lets the inflater hand out the output it held back at the previous limit.
+                data = self._inflater.unconsumed_tail or self._raw.read(_CHUNK)
             out = self._inflater.decompress(data, size)
             self._produced += len(out)
             if self._produced > self._limit:
@@ -238,8 +246,7 @@ class _Inflated:
             if out:
                 return out
             if not data:
-                break  # the file ends inside the gzip stream, so the tar reader sees a short archive
-        return b""
+                return b""  # the file ends inside the gzip stream, so the tar reader sees a short archive
 
 
 def _unpack_tar(
@@ -253,7 +260,7 @@ def _unpack_tar(
         inflated = source = _Inflated(
             stream, cap + archive_members.MAX_ENTRIES * _MEMBER_OVERHEAD + cloud_import.END_WINDOW_BYTES)
     policy = cloud_import.ReadPolicy(
-        mode="r|", stop_after_end=True, portable_paths=True, max_header_bytes=_HEADER_LIMIT)
+        mode="r|", stop_after_end=True, portable_paths=True, max_header_bytes=_HEADER_LIMIT, host_wide_sync=False)
     try:
         cloud_import.unpack_stream(
             source, staging, max_bytes=cap, max_members=archive_members.MAX_ENTRIES,  # type: ignore[arg-type]
@@ -312,7 +319,7 @@ def _unpack_zip(
         refused.member = refused.member or current
         raise
     # The held bytes go once the stage exists, so the stage must be on disk first, as `unpack_stream` leaves a tar's.
-    cloud_import.flush_to_disk(staging)
+    cloud_import.flush_to_disk(staging, host_wide=False)
 
 
 def _named(member: str | None) -> str:
@@ -329,7 +336,7 @@ def _from_tar(refused: cloud_import.ArchiveRefused, cap: int) -> ImportUploadErr
         if refused.reason == "members":
             return ImportUploadError(refused.code, f"the archive holds more than {archive_members.MAX_ENTRIES:,} entries; nothing was unpacked")
         if refused.reason == "header":
-            return ImportUploadError(refused.code, f"an entry's header holds more than {_HEADER_LIMIT:,} bytes; nothing was unpacked")
+            return ImportUploadError(refused.code, f"an entry's headers hold more than {_HEADER_LIMIT:,} bytes in all; nothing was unpacked")
         where = f" at {_named(refused.member)}" if refused.member else ""
         return ImportUploadError(
             refused.code, f"the archive expands past {cap:,} bytes{where} (setting {MAX_EXPANDED_ENV}); nothing was unpacked")

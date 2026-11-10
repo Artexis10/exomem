@@ -37,8 +37,8 @@ One lock covers every unpack of a vault, so a retry that overlaps a slow first c
 | Limit | Reason |
 | --- | --- |
 | The format is read from the first bytes: `PK\x03\x04` is a zip, the gzip magic is a gzip tar, anything else is read as a plain tar | A zip's end record may sit in the last 64 KiB of any file, so a tar that holds a zip would otherwise read as that zip and lose the rest. The file's name is the sender's word and decides nothing. A zip whose first entry does not start the file is refused. |
-| Only plain tar, gzip tar and deflated or stored zip members | Python's bzip2 and xz decompressors have no output bound, so a few hundred bytes made the server allocate its whole allowance. Gzip is inflated by a reader that stops at the byte limit and the tar reader stops one record after its end block, so padding after the archive costs nothing. |
-| One pax or long-name header holds at most 1 MiB | `tarfile` reads such a header whole into memory. |
+| Only plain tar, gzip tar and deflated or stored zip members | Python's bzip2 and xz decompressors have no output bound, so a few hundred bytes made the server allocate its whole allowance. Gzip is inflated by a reader that stops at the byte limit, counted over all the members of a gzip file (bgzip and `cat a.gz b.gz` write several), and the tar reader stops one record after its end block, so padding after the archive costs nothing. |
+| The pax, long-name and sparse headers of one entry hold at most 1 MiB together, counted over every byte `tarfile` reads while it parses them | `tarfile` reads a pax or long-name header whole, a sparse map block by block and follows a chain of such headers without a total bound, so a few kilobytes of compressed archive made it hold hundreds of megabytes. One counter covers a chain of any kind. |
 | Links, hardlinks, devices and sparse entries refused | A link written into the stage could point outside it, and a device is not a file. The set is fixed by the archive formats. |
 | Absolute and `..` paths, and any path that resolves outside the stage, refused | They write outside `_Imports`. |
 | 65,536 entries | The cap that the archive preserver already holds, so one archive cannot make the inventory unbounded. |
@@ -51,5 +51,6 @@ A refusal names the member, JSON-escaped and cut to 120 characters, because the 
 ### D4. Known limits
 
 - A tar's total is counted from the member headers the unpacker has already accepted, which equal the bytes written because it copies exactly the declared size or fails. Bytes after the end-of-archive block and one record of padding are not read, so a gzip stream that follows the block with zeros costs nothing. Whatever lies beyond that window is ignored.
+- The unpack flushes the files it wrote and their directories with `fsync`, from 16 threads, and never calls the host-wide `os.sync` that the Cloud import uses. One `fsync` after another cost about 5 ms each on a local volume, so 10,000 small files took 31 s; sixteen at a time took 4 s, because concurrent ones share a journal commit.
 - The hold is released when the stage is on disk, so a crash between the rename and the release leaves a claimed hold. The sweep removes a claimed hold two hours after the upload's modification time; the next call finds the stage and unpacks nothing.
 - A stage without a record that vouches for it, because the vault's state placement is not settled, keeps its files after filing. The reply then lists a `discard` need that says so, because only the person may delete them.
