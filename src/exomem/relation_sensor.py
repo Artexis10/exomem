@@ -11,6 +11,9 @@ come from the graph's own recorded anchors, never from a word match.
 
 Each source page is one replaceable scope (owner `relation-sensor`), one owned
 request per link, keyed by source path, target path and occurrence anchor.
+Submission writes the page's `relation_sensed` rows in the same transaction as
+the scope replacement, so a row is pending from the moment it is requested and
+keeps its verdict after the job retires.
 """
 
 from __future__ import annotations
@@ -19,17 +22,17 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import unicodedata
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
-from dataclasses import dataclass
 
 from . import (
     epistemic_graph as epistemic_graph_module,
-    relation_options,
     relation_queue,
     relation_registry,
     semantic_contract as semantic_contract_module,
@@ -47,12 +50,13 @@ OWNER = "relation-sensor"
 PAGES_PER_TICK = 8
 LINKS_PER_PAGE = 8
 MENU_LIMIT = 12
+#: How many pending or superseded rows one tick re-projects.
+INGEST_BATCH = 256
 
 _EXCERPT_CHARS = 900
 _LINK_CHARS = 300
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")
-_HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$")
 _SPACE = re.compile(r"\s+")
 
 #: The canonical Relations section heading, the same literal the governed
@@ -84,19 +88,28 @@ def _structural_frontmatter(metadata: str | None) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _file_nodes(conn) -> dict[str, _GraphPage]:
-    out: dict[str, _GraphPage] = {}
-    for path, title, page_type, metadata, source_hash in conn.execute(
-        "SELECT path, title, page_type, metadata, source_hash FROM graph_nodes WHERE kind='file'"
-    ):
-        out[str(path)] = _GraphPage(
-            str(path),
-            str(title or Path(str(path)).stem),
-            str(page_type) if page_type else None,
-            _structural_frontmatter(str(metadata)),
-            str(source_hash or ""),
-        )
-    return out
+def _page_from_row(row: tuple | None) -> _GraphPage | None:
+    if row is None:
+        return None
+    path, title, page_type, metadata, source_hash = row
+    return _GraphPage(
+        str(path),
+        str(title or Path(str(path)).stem),
+        str(page_type) if page_type else None,
+        _structural_frontmatter(str(metadata)),
+        str(source_hash or ""),
+    )
+
+
+def _file_node(conn: sqlite3.Connection, rel_path: str) -> _GraphPage | None:
+    """One file node by path — the only page lookup the producer makes."""
+    return _page_from_row(
+        conn.execute(
+            "SELECT path, title, page_type, metadata, source_hash FROM graph_nodes "
+            "WHERE kind='file' AND path=?",
+            (rel_path,),
+        ).fetchone()
+    )
 
 
 def _kind(fit: relation_queue.RelationFit, page: _GraphPage) -> Any:
@@ -121,7 +134,13 @@ def _plain(text: str) -> str:
 
 
 def _body_lines(vault_root: Path, rel_path: str) -> list[str]:
-    """The page's body lines from its raw bytes (frontmatter split, no parse)."""
+    """The page's body lines from its raw bytes (frontmatter split, no parse).
+
+    OPEN CONTRACT QUESTION: the published graph does not carry the page body
+    (file-node text is the title). Reading the file is the current behaviour
+    pending a published body source with the same line numbering the graph's
+    anchors use.
+    """
     try:
         raw = (Path(vault_root) / rel_path).read_text(encoding="utf-8")
     except OSError:
@@ -130,7 +149,7 @@ def _body_lines(vault_root: Path, rel_path: str) -> list[str]:
     return unicodedata.normalize("NFC", str(body)).splitlines()
 
 
-def _relation_lines(conn, rel_path: str) -> set[int]:
+def _relation_lines(conn: sqlite3.Connection, rel_path: str) -> set[int]:
     """Line numbers carrying authored relation statements, from graph anchors."""
     lines: set[int] = set()
     for (anchor,) in conn.execute(
@@ -147,7 +166,7 @@ def _relation_lines(conn, rel_path: str) -> set[int]:
     return lines
 
 
-def _section_lines(conn, rel_path: str) -> set[int]:
+def _section_lines(conn: sqlite3.Connection, rel_path: str) -> set[int]:
     """Line range of the canonical Relations section, from the graph's blocks."""
     out: set[int] = set()
     for title, start, end in conn.execute(
@@ -164,7 +183,8 @@ def _section_lines(conn, rel_path: str) -> set[int]:
     return out
 
 
-def excerpt(vault_root: Path, conn, page: _GraphPage, lines: list[str] | None = None) -> str:
+def excerpt(vault_root: Path, conn: sqlite3.Connection, page: _GraphPage,
+            lines: list[str] | None = None) -> str:
     """`page-excerpt-v1`: title, then body minus relation statements, links
     rendered as display text, whitespace-collapsed, cut at 900 chars."""
     if lines is None:
@@ -193,16 +213,19 @@ def menu_for(
     registry: relation_registry.RelationRegistry,
     source: _GraphPage,
     target: _GraphPage,
+    candidate: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """The `relation-menu-v1` entries: exactly the queue's options for the pair."""
-    return relation_options.ranked_options(
-        registry,
-        _kind(fit, source),
-        _kind(fit, target),
-        fit._types(),
-        accepts=lambda key: relation_queue._usable_relation(registry, key, source, target)
-        is not None,
-        limit=MENU_LIMIT,
+    """The `relation-menu-v1` entries, from the same call the queue makes.
+
+    The candidate is judged as the generic relation — the menu a `retype` or
+    generic item offers and a wikilink item's proposal menu.
+    """
+    return fit.options(
+        dict(candidate),
+        registry=registry,
+        source_page=source,
+        target_page=target,
+        relation=relation_registry.generic_relation_key(),
     )
 
 
@@ -212,15 +235,22 @@ class _Link:
     target: str        # target page rel path
     anchor: str        # occurrence anchor (wikilink occurrence / bullet line)
     line: int | None   # body line carrying the link (for link-sentence)
+    relation: str      # authored relation key (retype) or plain link (wikilink)
     bullet: str | None = None  # exact bullet line for retype evidence
 
 
+def request_key(source: str, target: str, anchor: str) -> str:
+    return hashlib.sha256(
+        json.dumps([source, target, anchor], ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()[:32]
+
+
 def plain_links(
-    conn,
+    conn: sqlite3.Connection,
     registry: relation_registry.RelationRegistry,
     source: _GraphPage,
 ) -> list[_Link]:
-    """A page's plain-link cohort from published rows, queue order, queue bound."""
+    """A page's plain-link cohort from published rows, queue order."""
     links: list[_Link] = []
     seen_targets: set[str] = set()
     rows = conn.execute(
@@ -232,7 +262,7 @@ def plain_links(
         (source.rel_path,),
     ).fetchall()
     specific: set[str] = set()
-    bullets: list[tuple[int, str, str, str]] = []  # line, kind-key, target, raw
+    bullets: list[tuple[int, str, str, str]] = []  # line, canonical, target, raw
     for dst_page_key, raw_relation, anchor, metadata in conn.execute(
         "SELECT dst_page_key, raw_relation, source_anchor, metadata FROM graph_edges "
         "WHERE origin='markdown_relation' AND src_key=('file:' || ?)",
@@ -267,13 +297,15 @@ def plain_links(
                 target,
                 f"occurrence-{internal.get('occurrence', -1)}",
                 int(internal["line"]) if internal.get("line") is not None else None,
+                registry.link_key,
             )
         )
-    for number, _canonical, target, raw_line in sorted(bullets):
+    for number, canonical, target, raw_line in sorted(bullets):
         if target in seen_targets:
             continue
         seen_targets.add(target)
-        links.append(_Link("retype", target, f"line-{number}", None, bullet=raw_line))
+        links.append(_Link("retype", target, f"line-{number}", None, canonical,
+                           bullet=raw_line))
     return [link for link in links if link.target not in specific]
 
 
@@ -291,35 +323,34 @@ def _slot(unit_ref: str, path: str, slot: str, extractor: str, text: str,
 
 def build_requests(
     vault_root: Path,
-    conn,
+    conn: sqlite3.Connection,
     fit: relation_queue.RelationFit,
     source: _GraphPage,
     links: Sequence[_Link],
-) -> list[tuple[str, sensing.SenseRequest]]:
-    """`(request_key, request)` per link. Raises nothing; skips unknown targets."""
+) -> list[tuple[str, sensing.SenseRequest, dict[str, Any]]]:
+    """`(request_key, request, row)` per link. `row` is the relation_sensed row."""
     registry = fit.registry(source)
-    pages = _file_nodes(conn)
     body = _body_lines(vault_root, source.rel_path)
     source_text = excerpt(vault_root, conn, source, lines=body)
-    out: list[tuple[str, sensing.SenseRequest]] = []
+    out: list[tuple[str, sensing.SenseRequest, dict[str, Any]]] = []
     for link in links[:LINKS_PER_PAGE]:
-        target = pages.get(link.target)
+        target = _file_node(conn, link.target)
         if target is None:
             continue
-        target_body = _body_lines(vault_root, target.rel_path)
-        target_text = excerpt(vault_root, conn, target, lines=target_body)
+        target_text = excerpt(vault_root, conn, target)
         link_text = link_line(body, link.line) if link.kind == "wikilink" else ""
-        menu = menu_for(fit, registry, source, target)
+        candidate = {
+            "from": source.rel_path,
+            "to": link.target,
+            "relation_type": link.relation,
+            "method": link.kind,
+        }
+        menu = menu_for(fit, registry, source, target, candidate)
         menu_text = sensing_llm.menu_slot_text(
             {"key": o["key"], "label": o["label"], "definition": o["description"]}
             for o in menu
         )
-        request_key = hashlib.sha256(
-            json.dumps(
-                [source.rel_path, link.target, link.anchor],
-                ensure_ascii=False, separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()[:32]
+        key = request_key(source.rel_path, link.target, link.anchor)
         inputs = (
             _slot(source.rel_path, source.rel_path, "source", "page-excerpt-v1", source_text),
             _slot(target.rel_path, target.rel_path, "target", "page-excerpt-v1", target_text),
@@ -329,20 +360,33 @@ def build_requests(
         )
         texts = (source_text, target_text, link_text, menu_text)
         try:
-            request = sensing.SenseRequest(
-                sensing.RELATION_TYPE, 2, inputs, texts
-            )
+            request = sensing.SenseRequest(sensing.RELATION_TYPE, 2, inputs, texts)
         except ValueError:
             log.debug("relation sensor: malformed request skipped", exc_info=True)
             continue
-        out.append((request_key, request))
+        row = {
+            "request_key": key,
+            "source_path": source.rel_path,
+            "target_path": link.target,
+            "anchor": link.anchor,
+            "kind": link.kind,
+            "menu_digest": sensing.text_sha256(menu_text),
+            "input_key": request.input_key,
+        }
+        out.append((key, request, row))
     return out
 
 
 def page_scope(
-    vault_root: Path, conn, fit: relation_queue.RelationFit, source: _GraphPage
+    vault_root: Path, conn: sqlite3.Connection, fit: relation_queue.RelationFit,
+    source: _GraphPage,
 ) -> sensed_model.Submission:
-    """Submit one replaceable scope of relation.type requests for a page."""
+    """Submit one replaceable scope of relation.type requests for a page.
+
+    The page's `relation_sensed` rows are replaced in the same transaction as
+    its jobs: every request lands as a pending row, so a verdict survives the
+    job's retirement.
+    """
     registry = fit.registry(source)
     links = plain_links(conn, registry, source)
     requests = build_requests(vault_root, conn, fit, source, links)
@@ -354,8 +398,9 @@ def page_scope(
         token,
         (
             sensed_model.OwnedRequest(request_key=key, request=request, order_key=key)
-            for key, request in requests
+            for key, request, _row in requests
         ),
+        relation_rows=(row for _key, _request, row in requests),
     )
 
 
@@ -366,147 +411,142 @@ def page_scope(
 
 def produce(
     vault_root: Path,
-    conn,
-    seen: Mapping[str, str],
-) -> dict[str, int]:
-    """One bounded pass: changed pages first, then the persisted cursor.
+    graph: sqlite3.Connection,
+    *,
+    cursor: str,
+    changed: Sequence[str],
+) -> dict[str, Any]:
+    """One bounded pass: this tick's changed pages first, then the cursor.
 
-    `conn` is a graph read snapshot; `seen` is the dreamer's path -> signature
-    map. Costs at most PAGES_PER_TICK pages and LINKS_PER_PAGE links per page.
+    `graph` is a graph read snapshot. Submissions go through the producer
+    connection, so this must run OUTSIDE the projection's write transaction;
+    the caller applies `processed`/`removed`/`cursor` to the tables inside it.
     """
-    store_conn = sensed_model.open_readonly(vault_root)
-    if store_conn is None:
-        return {"submitted": 0, "pages": 0}
-    try:
-        if sensed_model._get_meta(store_conn, "seeding") is not None:
-            return {"submitted": 0, "pages": 0}
-        cursor = sensed_model._get_meta(store_conn, "relation_cursor") or ""
-        hashes = sensed_model._get_meta(store_conn, "relation_seen_hashes") or {}
-    finally:
-        store_conn.close()
-
-    pages = _file_nodes(conn)
-    changed = [
-        path
-        for path, page in pages.items()
-        if seen.get(path) is not None and page.source_hash != hashes.get(path)
-    ]
-    ordered_paths = sorted(pages)
-    behind = [p for p in ordered_paths if p > str(cursor)]
-    front = [p for p in ordered_paths if p <= str(cursor)]
-    order = sorted(changed) + behind + front
     chosen: list[str] = []
-    seen_order = set(changed)
-    for path in order:
-        if len(chosen) >= PAGES_PER_TICK:
-            break
-        chosen.append(path)
-        seen_order.add(path)
+    remaining = PAGES_PER_TICK
+    chosen.extend(str(path) for path in changed[:remaining])
+    remaining -= len(chosen)
+    if remaining > 0:
+        rows = graph.execute(
+            "SELECT path FROM graph_nodes WHERE kind='file' AND path > ? "
+            "ORDER BY path LIMIT ?",
+            (cursor, remaining),
+        ).fetchall()
+        wrapped = len(rows) < remaining
+        for (path,) in rows:
+            chosen.append(str(path))
+        remaining -= len(rows)
+        if wrapped and remaining > 0:
+            rows = graph.execute(
+                "SELECT path FROM graph_nodes WHERE kind='file' AND path <= ? "
+                "ORDER BY path LIMIT ?",
+                (cursor, remaining),
+            ).fetchall()
+            for (path,) in rows:
+                if str(path) not in set(chosen):
+                    chosen.append(str(path))
+    chosen = chosen[:PAGES_PER_TICK]
     if not chosen:
-        return {"submitted": 0, "pages": 0}
+        return {"submitted": 0, "pages": [], "cursor": cursor}
 
     fit = relation_queue.RelationFit(Path(vault_root))
     submitted = 0
-    new_hashes = dict(hashes)
+    processed: list[tuple[str, str]] = []
     for path in chosen:
-        page = pages[path]
-        result = page_scope(vault_root, conn, fit, page)
+        page = _file_node(graph, path)
+        if page is None:
+            continue
+        result = page_scope(vault_root, graph, fit, page)
         if isinstance(result, sensed_model.Submission) and result.state in (
             "submitted", "partial"
         ):
             submitted += result.count
-            new_hashes[path] = page.source_hash
+            processed.append((path, page.source_hash))
         elif isinstance(result, sensed_model.Submission) and result.state == "seeding":
             break
 
-    # A drained pass wraps the cursor so the next pass starts at the first path.
+    # The cursor advances past the deepest path this pass reached; a pass that
+    # covered the whole table wraps so the next pass starts at the first path.
     last = chosen[-1]
-    wrapped = len(chosen) >= len(ordered_paths) or last == ordered_paths[-1]
-    conn2 = sensed_model._producer_connection(vault_root)
-    try:
-        conn2.execute("BEGIN IMMEDIATE")
-        sensed_model._set_meta(conn2, "relation_cursor", "" if wrapped else last)
-        sensed_model._set_meta(conn2, "relation_seen_hashes", new_hashes)
-        conn2.execute("COMMIT")
-    except Exception:  # noqa: BLE001 - cursor loss re-reads, never corrupts
-        conn2.execute("ROLLBACK")
-        log.debug("relation sensor: cursor not persisted", exc_info=True)
-    finally:
-        conn2.close()
-    return {"submitted": submitted, "pages": len(chosen)}
+    tail = graph.execute(
+        "SELECT 1 FROM graph_nodes WHERE kind='file' AND path > ? LIMIT 1", (last,)
+    ).fetchone()
+    return {
+        "submitted": submitted,
+        "pages": processed,
+        "cursor": "" if tail is None else last,
+    }
 
 
-def ingest(conn, ledger) -> int:
-    """Project current readings into `relation_sensed`; drop stale rows.
+def ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> int:
+    """Fill pending or superseded `relation_sensed` verdicts, incrementally.
 
-    `conn` is the projection write connection, `ledger` a ledger read. A row
-    stands only while its request is still queued and its reading answers the
-    active instrument set for `relation.type`.
+    Rows are written at submission as pending (verdict NULL). One tick fills at
+    most INGEST_BATCH of them from the ledger, and clears verdicts whose
+    instrument left the active set. Rows are never wiped wholesale.
     """
     from . import sensing_ledger
 
-    active = sensed_model._question_active(sensing.RELATION_TYPE)
+    active = sensing_llm.active_instruments()
     entry = sensing.QUESTIONS[sensing.RELATION_TYPE]
-    rows = 0
-    conn.execute("DELETE FROM relation_sensed")
-    if ledger is None:
-        return rows
-    for job in sensed_model.iter_jobs(conn, question_type=sensing.RELATION_TYPE):
-        request = job.request
-        stored = sensing_ledger.by_input_key(
-            ledger, sensing.RELATION_TYPE, request.input_key
-        )
-        for instrument_id in active:
-            reading = next(
-                (r for r in stored if r.reading_id == request.reading_id(instrument_id)),
-                None,
+    rows = conn.execute(
+        "SELECT request_key, input_key, instrument_id FROM relation_sensed "
+        "WHERE verdict IS NULL OR instrument_id NOT IN (%s) LIMIT ?"
+        % (",".join("?" for _ in active) or "''"),
+        (*active, INGEST_BATCH),
+    ).fetchall()
+    filled = 0
+    for request_key, input_key, old_instrument in rows:
+        verdict = reading = instrument = None
+        if ledger is not None and active:
+            stored = sensing_ledger.by_input_key(
+                ledger, sensing.RELATION_TYPE, str(input_key)
             )
-            if reading is None:
-                continue
-            verdict = sensing.rederive(
-                reading.vectors,
-                reading.verdict,
-                entry.label_map_version,
-                columns=reading.columns,
-                vector_names=entry.vector_names,
-            )
-            if verdict is None:
-                continue
-            slots = {item.slot: item for item in request.inputs}
-            source = slots.get("source")
-            target = slots.get("target")
-            link = slots.get("link")
-            menu = slots.get("menu")
-            anchor = link.anchor if link is not None else None
-            kind = "retype" if str(anchor or "").startswith("line-") else "wikilink"
+            for instrument_id in active:
+                reading = next(
+                    (r for r in stored if r.instrument_id == instrument_id),
+                    None,
+                )
+                if reading is not None:
+                    break
+            if reading is not None:
+                verdict = sensing.rederive(
+                    reading.vectors,
+                    reading.verdict,
+                    entry.label_map_version,
+                    columns=reading.columns,
+                    vector_names=entry.vector_names,
+                )
+                instrument = str(reading.instrument_id)
+        if verdict is not None:
             conn.execute(
-                "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    job.request_key,
-                    source.path if source is not None else "",
-                    target.path if target is not None else "",
-                    anchor,
-                    kind,
-                    reading.reading_id,
-                    instrument_id,
-                    verdict.label,
-                    verdict.p,
-                    menu.text_sha256 if menu is not None else "",
-                    request.input_key,
-                ),
+                "UPDATE relation_sensed SET verdict=?, p=?, reading_id=?, instrument_id=? "
+                "WHERE request_key=?",
+                (verdict.label, verdict.p, reading.reading_id, instrument, request_key),
             )
-            rows += 1
-            break
-    return rows
+        elif old_instrument is not None:
+            conn.execute(
+                "UPDATE relation_sensed SET verdict=NULL, p=NULL, reading_id=NULL, "
+                "instrument_id=NULL WHERE request_key=?",
+                (request_key,),
+            )
+        else:
+            continue
+        filled += 1
+    return filled
 
 
 # ----------------------------------------------------------------------
-# queue reads: sensed verdicts by request key
+# queue reads: sensed verdicts by request key, indexed by source path
 # ----------------------------------------------------------------------
 
 
-def sensed_rows(vault_root: Path) -> dict[str, dict[str, Any]]:
-    """`request_key -> row` of current relation verdicts, or {} when absent."""
+def sensed_rows_for(
+    vault_root: Path, sources: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """`request_key -> row` of current relation verdicts for the given sources."""
+    if not sources:
+        return {}
     conn = sensed_model.open_readonly(vault_root)
     if conn is None:
         return {}
@@ -515,9 +555,11 @@ def sensed_rows(vault_root: Path) -> dict[str, dict[str, Any]]:
             rows = conn.execute(
                 "SELECT request_key, source_path, target_path, anchor, kind, "
                 "reading_id, instrument_id, verdict, p, menu_digest "
-                "FROM relation_sensed"
+                "FROM relation_sensed WHERE source_path IN (%s)"
+                % ",".join("?" for _ in sources),
+                tuple(str(s) for s in sources),
             ).fetchall()
-        except Exception:  # noqa: BLE001 - an older projection has no table
+        except sqlite3.Error:
             return {}
     finally:
         conn.close()
@@ -534,6 +576,44 @@ def sensed_rows(vault_root: Path) -> dict[str, dict[str, Any]]:
             "menu_digest": digest,
         }
         for key, src, tgt, anchor, kind, rid, iid, verdict, p, digest in rows
+    }
+
+
+def sensed_for_candidate(
+    vault_root: Path, source: str, target: str, kind: str | None = None
+) -> dict[str, Any] | None:
+    """One source+target's current verdict row, without reading the table."""
+    conn = sensed_model.open_readonly(vault_root)
+    if conn is None:
+        return None
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT request_key, source_path, target_path, anchor, kind, "
+                "reading_id, instrument_id, verdict, p, menu_digest "
+                "FROM relation_sensed WHERE source_path=? AND target_path=?",
+                (str(source), str(target)),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+    finally:
+        conn.close()
+    if kind is not None:
+        rows = [row for row in rows if str(row[4]) == kind]
+    if len(rows) != 1:
+        return None
+    key, src, tgt, anchor, k, rid, iid, verdict, p, digest = rows[0]
+    return {
+        "request_key": key,
+        "source_path": src,
+        "target_path": tgt,
+        "anchor": anchor,
+        "kind": k,
+        "reading_id": rid,
+        "instrument_id": iid,
+        "verdict": verdict,
+        "p": p,
+        "menu_digest": digest,
     }
 
 
@@ -561,24 +641,18 @@ def proposal(row: Mapping[str, Any], options: Sequence[Mapping[str, Any]]) -> di
     }
 
 
-def request_key(source: str, target: str, anchor: str) -> str:
-    return hashlib.sha256(
-        json.dumps([source, target, anchor], ensure_ascii=False, separators=(",", ":")).encode()
-    ).hexdigest()[:32]
-
-
 def retype_candidates(
-    vault_root: Path,
-    conn,
+    conn: sqlite3.Connection,
     source_path: str,
     registry: relation_registry.RelationRegistry,
+    rows: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     """Authored plain-link/generic bullets with a current relation verdict.
 
     New candidates, method `retype`, only while their reading is a relation
-    verdict; evidence names the exact bullet line.
+    verdict; evidence names the exact bullet line. `rows` is the caller's
+    `sensed_rows_for` result for this source.
     """
-    rows = sensed_rows(vault_root)
     if not rows:
         return []
     out: list[dict[str, Any]] = []
@@ -597,7 +671,7 @@ def retype_candidates(
         target = str(dst_page_key or "").removeprefix("file:")
         key = request_key(source_path, target, anchor_text)
         row = rows.get(key)
-        if row is None:
+        if row is None or str(row.get("verdict") or "") in ("none", "abstain"):
             continue
         raw_line = ""
         try:
@@ -610,7 +684,7 @@ def retype_candidates(
             "relation_type": canonical,
             "method": "retype",
             "evidence": {"line": raw_line, "anchor": anchor_text},
-            "_sensed_row": row,
+            "_sensed": row,
         }
         out.append(candidate)
     return out

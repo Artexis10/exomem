@@ -9571,17 +9571,25 @@ class EpistemicGraphIndex:
             ).fetchall()
             # relation.type's authored plain-link/generic bullets, from the same
             # rows the graph already published. Only candidates with a current
-            # relation verdict survive the read below.
+            # relation verdict survive the read below; without readings the
+            # query never runs (the projection read is not a graph query).
+            from . import relation_sensor
+
+            sensed_by_key = relation_sensor.sensed_rows_for(self.vault_root, selected)
             retype_edge_rows: dict[str, list[tuple[str, str, str, str]]] = {
                 rel: [] for rel in selected
             }
             try:
-                for row in conn.execute(
-                    "SELECT source_path, dst_page_key, raw_relation, source_anchor, metadata "
-                    "FROM graph_edges WHERE origin='markdown_relation' "
-                    f"AND source_path IN ({placeholders})",
-                    tuple(selected),
-                ).fetchall():
+                for row in (
+                    conn.execute(
+                        "SELECT source_path, dst_page_key, raw_relation, source_anchor, metadata "
+                        "FROM graph_edges WHERE origin='markdown_relation' "
+                        f"AND source_path IN ({placeholders})",
+                        tuple(selected),
+                    ).fetchall()
+                    if sensed_by_key
+                    else []
+                ):
                     source, dst, raw_relation, anchor, metadata = row
                     canonical = _core_relation(
                         selected_registries[str(source)], str(raw_relation or "")
@@ -9669,9 +9677,6 @@ class EpistemicGraphIndex:
         }
         # relation.type readings: relation verdicts only. Empty when sensing is
         # off, unadmitted or unprojected, and the queue is byte-identical.
-        from . import relation_sensor
-
-        sensed_by_key = relation_sensor.sensed_rows(self.vault_root)
         for source, rows in retype_edge_rows.items():
             for dst, canonical, anchor, metadata in rows:
                 target_rel = _page_rel(str(dst or "").removeprefix("file:"))

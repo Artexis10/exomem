@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -158,7 +159,7 @@ class SensorModelPin:
     runtime_version: str
     #: The digest of the pinned tokenizer's letter-token map; the pin's evidence
     #: and admission run fix it beside the model.
-    label_token_map: str | None = None
+    label_token_map: str
 
     @property
     def pin_id(self) -> str:
@@ -257,8 +258,17 @@ REFUSAL_REASONS = frozenset(
         "precision-below-bar",
         "wilson-below-bar",
         "yield-below-bar",
+        "runtime-unavailable",
+        "label-token-map-mismatch",
     }
 )
+
+#: Runtime adapters keyed by `SensorModelPin.runtime`: the one seam through
+#: which a pinned model's LetterRuntime is constructed. Empty in this build —
+#: no runtime ships yet, so an admitted pin still refuses with
+#: `runtime-unavailable`. The sensor worker child calls `admit` with this
+#: table; private experiments inject an adapter here, never through a pin.
+RUNTIME_ADAPTERS: dict[str, Callable[[SensorModelPin], LetterRuntime]] = {}
 
 
 def ignored_environment(env: Mapping[str, str]) -> list[str]:
@@ -302,12 +312,18 @@ def admission_identity() -> dict[str, Any]:
     }
 
 
-def admit(*, env: Mapping[str, str] | None = None) -> SensorModelPin:
-    """The admitted pin for `relation.type`, or `Refused` with a named reason.
+def admit(
+    *,
+    env: Mapping[str, str] | None = None,
+    runtimes: Mapping[str, Callable[[SensorModelPin], LetterRuntime]] | None = None,
+) -> SensorModelInstrument:
+    """The admitted instrument for `relation.type`, or `Refused` with a named reason.
 
     Only the sensor worker child calls this. An empty registry refuses before
     any evidence is read; a pin is refused when its recorded evidence is absent
-    or below the bar for the active label map.
+    or below the bar for the active label map, when no runtime adapter serves
+    its runtime, or when the runtime's letter-token map digest differs from
+    the pin's.
     """
     entry = sensing.QUESTIONS[sensing.RELATION_TYPE]
     mapping = sensing.label_map(entry.label_map_version)
@@ -319,6 +335,7 @@ def admit(*, env: Mapping[str, str] | None = None) -> SensorModelPin:
             "the sensor-model pin registry is empty"
             + (f"; ignored environment: {', '.join(ignored)}" if ignored else ""),
         )
+    loaders = RUNTIME_ADAPTERS if runtimes is None else runtimes
     for pin in SENSOR_MODEL_PINS:
         reason = evidence_check(
             pin,
@@ -326,9 +343,18 @@ def admit(*, env: Mapping[str, str] | None = None) -> SensorModelPin:
             label_map_version=entry.label_map_version,
             propose_min=propose_min,
         )
-        if reason is None:
-            return pin
-        last = (reason, pin)
+        if reason is not None:
+            last = (reason, pin)
+            continue
+        loader = loaders.get(pin.runtime)
+        if loader is None:
+            last = ("runtime-unavailable", pin)
+            continue
+        instrument = SensorModelInstrument.from_runtime(pin, loader(pin))
+        if instrument.identity.label_token_map != pin.label_token_map:
+            last = ("label-token-map-mismatch", pin)
+            continue
+        return instrument
     reason, pin = last
     raise Refused(reason, f"pin {pin.pin_id[:16]} fails admission")
 
@@ -358,7 +384,7 @@ def active_instruments() -> dict[str, sensing.InstrumentIdentity]:
 def instrument_identity(pin: SensorModelPin, runtime: LetterRuntime, letters: Sequence[str]) -> sensing.InstrumentIdentity:
     """The instrument identity for an admitted pin: binds template and letter-token map."""
     entry = sensing.QUESTIONS[sensing.RELATION_TYPE]
-    label_token_map = pin.label_token_map or _label_token_map_digest(runtime, letters)
+    label_token_map = _label_token_map_digest(runtime, letters)
     return sensing.InstrumentIdentity(
         model=pin.model,
         revision=pin.revision,
@@ -421,7 +447,7 @@ class SensorModelInstrument:
                 raise ValueError("letter token outside the logit row; no reading is recorded")
             picked = [logits[token] for token in letter_ids]
             peak = max(picked)
-            exps = [pow(2.718281828459045, value - peak) for value in picked]
+            exps = [math.exp(value - peak) for value in picked]
             total = sum(exps)
             if not (total == total) or total <= 0.0:
                 raise ValueError("non-finite logits; no reading is recorded")

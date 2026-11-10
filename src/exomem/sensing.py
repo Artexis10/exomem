@@ -759,19 +759,20 @@ def rederive(
     """Validate the stored output at the consumer boundary, then apply the active map."""
     mapping = label_map(version)
     # A variable-column map declares `columns = None`: the stored reading's own
-    # columns validate the width and the trailing none column.
+    # columns validate the width and the trailing none column. A consumer that
+    # supplies none cannot validate or re-derive such a reading.
     fixed_columns = getattr(mapping, "columns", None)
+    if fixed_columns is None and not columns:
+        return None
     if columns is not None and fixed_columns is not None and tuple(columns) != fixed_columns:
         return None
-    if columns is not None and fixed_columns is None and (
-        not columns or str(columns[-1]) != "none"
-    ):
+    if columns is not None and fixed_columns is None and str(columns[-1]) != "none":
         return None
     if reading_vectors is None:
         return stored if stored.label == "abstain" else None
     if set(reading_vectors) != set(vector_names):
         return None
-    width = len(columns) if fixed_columns is None and columns is not None else len(fixed_columns)
+    width = len(columns) if fixed_columns is None else len(fixed_columns)
     try:
         if any(
             len(vector) != width or any(not _finite(float(v)) for v in vector)
@@ -792,10 +793,19 @@ def make_request_reading(
     vectors: Mapping[str, Sequence[float]] | None,
     abstain_reason: str | None,
     sensed_at: str,
-    columns: Sequence[str] | None = None,
 ) -> Reading | None:
     entry = question(request.question_type)
     mapping = label_map(entry.label_map_version)
+    columns: Sequence[str] | None = None
+    if mapping.columns is None:
+        # The columns live in the request's menu slot, not the instrument's
+        # result: the same request bytes that were judged.
+        from . import sensing_llm
+
+        try:
+            _entries, columns = sensing_llm.menu_columns(request)
+        except (ValueError, TypeError, KeyError):
+            return None
     rounded = (
         None
         if vectors is None
@@ -816,8 +826,6 @@ def make_request_reading(
     )
     if verdict is None:
         return None
-    # A fixed-column map stores its declared columns; a variable-column one
-    # stores the per-reading columns the instrument reported.
     stored_columns = mapping.columns if mapping.columns is not None else tuple(columns or ())
     return Reading(
         request.reading_id(instrument.instrument_id),

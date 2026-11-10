@@ -98,6 +98,7 @@
   - The ledger registered as a portable-derived external-state family for hosted export and restore (R3).
   - Update `tests/test_dreamer_hosted_boundary.py` and `tests/test_frozen_verifier_hosted_boundary.py` to the new contract.
 - [ ] 9.4 Slice 4: `recap.covered_by` (entailed, partial, absent); supersession direction, relation typing and `term.same_meaning`; convergence across independent origins and emerging connections to recent work.
+  - Note (2026-11-10): relation typing is re-laned to `add-relation-sensor` as the `relation.type` question, with the shared sensor model that task 9.1 reuses. This task keeps the other questions.
   - Note (2026-11-03): the `recap.covered_by` question was built and calibrated on real recaps. It did not beat the base rate (absent precision 0.59 to 0.63 against a base rate of 0.58), so it is not delivered. Compile coverage uses citation instead (`add-session-close-compilation`), and a successor change carries the question.
 
 ## 10. Verification and closure

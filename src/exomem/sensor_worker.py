@@ -735,11 +735,9 @@ def run_child(
                     results = selected_instrument.judge([job.texts for job in batch])
                 readings = []
                 for job, result in zip(batch, results, strict=True):
-                    columns = None
                     if isinstance(result, Mapping):
                         vectors = result.get("vectors")
                         reason = result.get("abstain_reason")
-                        columns = result.get("columns")
                     else:
                         ab, ba, reason = result
                         vectors = None if reason is not None else {"ab": ab, "ba": ba}
@@ -749,7 +747,6 @@ def run_child(
                         vectors=vectors,
                         abstain_reason=reason,
                         sensed_at=_utc_now(),
-                        columns=columns,
                     )
                     if reading is not None:
                         readings.append(reading)

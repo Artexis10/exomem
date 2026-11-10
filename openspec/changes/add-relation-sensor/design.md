@@ -62,7 +62,7 @@ Its input is version 2, with four named slots in this order:
 | `link` | `link-sentence-v1` | The line that carries the link, cut at 300 characters, or empty for a bare bullet |
 | `menu` | `relation-menu-v1` | The ordered options: each canonical key with its registry label and definition |
 
-The menu is the ordered pair's admissible relations, ranked by `relation_options.ranked_options` with the vault's own usage, at most 12, then a final "none of these". It is built by the same function the relation queue uses, so a proposal never names a relation that the accept would refuse. The `menu` slot hashes exactly these entries. An edit to an unrelated registry entry changes no reading identity; an edit to a listed definition does.
+The menu is the ordered pair's admissible relations exactly as the relation review queue offers them (`RelationFit.options`, ranked by `relation_options.ranked_options`, at most 12), then a final "none of these". The producer calls that same function, so a proposal never names a relation that the accept would refuse. The `menu` slot hashes exactly these entries. An edit to an unrelated registry entry changes no reading identity; an edit to a listed definition does.
 
 The output vector is `answer`. Its columns are the menu's keys in letter order, then `none`.
 

@@ -253,6 +253,7 @@ class RelationFit:
         *,
         registry: relation_registry.RelationRegistry | None = None,
         source_page: Any | None = None,
+        target_page: Any | None = None,
         relation: str | None = None,
     ) -> list[dict[str, Any]]:
         """The ranked specific relations when the relation is the generic one, else none.
@@ -269,7 +270,7 @@ class RelationFit:
         if not registry.is_generic(str(relation or candidate.get("relation_type") or "")):
             return []
         page = page or self._page(str(candidate.get("from") or ""))
-        target = self._page(str(candidate.get("to") or ""))
+        target = target_page or self._page(str(candidate.get("to") or ""))
         if page is None or target is None:
             return []
         return relation_options.ranked_options(
@@ -812,6 +813,9 @@ def _retype_candidates(
     """
     from . import relation_sensor
 
+    rows = relation_sensor.sensed_rows_for(vault_root, [page.rel_path])
+    if not rows:
+        return []
     connection = snapshot
     if connection is None:
         connection = epistemic_graph_module.EpistemicGraphIndex(vault_root)._open_read_snapshot()
@@ -819,10 +823,10 @@ def _retype_candidates(
         return []
     try:
         return relation_sensor.retype_candidates(
-            vault_root,
             connection,
             page.rel_path,
             (fit or RelationFit(vault_root)).registry(page),
+            rows,
         )
     finally:
         if snapshot is None:
@@ -1375,22 +1379,12 @@ def _sensed_for_candidate(
     row = candidate.get("_sensed")
     if isinstance(row, dict):
         return row
-    rows = relation_sensor.sensed_rows(vault_root)
-    if not rows:
-        return None
     source = str(candidate.get("from") or "")
     target = str(candidate.get("to") or "")
-    anchor = str((candidate.get("evidence") or {}).get("anchor") or "")
-    if candidate.get("method") == "retype" and anchor:
-        return rows.get(relation_sensor.request_key(source, target, anchor))
-    matches = [
-        row
-        for row in rows.values()
-        if row.get("source_path") == source
-        and row.get("target_path") == target
-        and row.get("kind") == "wikilink"
-    ]
-    return matches[0] if len(matches) == 1 else None
+    if not source or not target:
+        return None
+    kind = "retype" if candidate.get("method") == "retype" else "wikilink"
+    return relation_sensor.sensed_for_candidate(vault_root, source, target, kind=kind)
 
 
 def accept(
@@ -1457,10 +1451,8 @@ def accept(
     sensed = _sensed_for_candidate(vault_root, candidate)
     proposed = None if sensed is None else str(sensed.get("verdict") or "")
     reading_id = None if sensed is None else str(sensed.get("reading_id") or "")
-    if proposed and proposed not in ("none", "abstain") and requested_relation is None:
-        # Accepting "the proposal" names the sensed relation; another offered
-        # relation stays allowed and is recorded beside it.
-        requested_relation = proposed
+    # The proposal is shown, never chosen: the agent names its relation as
+    # before; the audit reason cites the reading it acted on.
     if reading_id and reading_id not in str(why):
         why = f"{why} [reading {reading_id}]"
     if bind_page_hash:

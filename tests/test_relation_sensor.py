@@ -66,7 +66,7 @@ def _instrument(runtime=None):
     runtime = runtime or StubRuntime()
     pin = sensing_llm.SensorModelPin(
         model="stub/sensor", revision="1", weights_sha256="0" * 64,
-        runtime="stub", runtime_version="1",
+        runtime="stub", runtime_version="1", label_token_map="x" * 64,
     )
     return sensing_llm.SensorModelInstrument.from_runtime(pin, runtime)
 
@@ -171,7 +171,7 @@ def _evidence(**kw) -> sensing_llm.AdmissionEvidence:
 def test_evidence_bar() -> None:
     pin = sensing_llm.SensorModelPin(
         model="m", revision="r", weights_sha256="w" * 16,
-        runtime="llama.cpp", runtime_version="0.3.36",
+        runtime="llama.cpp", runtime_version="0.3.36", label_token_map="y" * 64,
     )
     good = _evidence(pin_id=pin.pin_id)
     assert sensing_llm.evidence_check(
@@ -237,7 +237,7 @@ def test_make_reading_stores_menu_columns() -> None:
     [result] = inst.judge_requests([request])
     reading = sensing.make_request_reading(
         request, inst.identity, vectors=result["vectors"],
-        abstain_reason=None, sensed_at="t", columns=result["columns"],
+        abstain_reason=None, sensed_at="t",
     )
     assert reading is not None
     assert reading.columns == ("supports", "refines", "none")

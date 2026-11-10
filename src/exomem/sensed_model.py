@@ -37,7 +37,7 @@ import math
 import sqlite3
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,7 +51,9 @@ log = logging.getLogger(__name__)
 #: can tell a projection that no longer describes the live page. 3 caps each
 #: page pair instead of each page, and is rebuilt from the ledger without
 #: re-sensing. 5 adds `relation_sensed`, the relation.type projection.
-SCHEMA_VERSION = 5
+#: 6 adds `relation_pages` (the producer's per-page hash table) and makes
+#: relation_sensed rows pending-at-submission with incremental verdict fills.
+SCHEMA_VERSION = 6
 FILENAME = "projection.sqlite"
 # This internal namespace belongs to the fixed unit-proposer queue protocol.
 _PAIR_JOB_SCOPE = ("pair-proposer", "units-v1")
@@ -140,12 +142,16 @@ _TABLES = (
     "PRIMARY KEY(owner, scope_key, request_key))",
     "CREATE INDEX IF NOT EXISTS sense_jobs_order ON sense_jobs(priority, order_key, owner, scope_key, request_key)",
     "CREATE INDEX IF NOT EXISTS sense_jobs_input ON sense_jobs(question_type, input_key)",
-    # relation.type's projected verdicts, one row per still-queued request.
+    # relation.type's projected verdicts, one row per requested link. Rows are
+    # written pending (verdict NULL) at submission and filled incrementally.
     "CREATE TABLE IF NOT EXISTS relation_sensed ("
     "request_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, target_path TEXT NOT NULL, "
-    "anchor TEXT, kind TEXT NOT NULL, reading_id TEXT NOT NULL, instrument_id TEXT NOT NULL, "
-    "verdict TEXT NOT NULL, p REAL, menu_digest TEXT NOT NULL, input_key TEXT NOT NULL)",
+    "anchor TEXT, kind TEXT NOT NULL, reading_id TEXT, instrument_id TEXT, "
+    "verdict TEXT, p REAL, menu_digest TEXT NOT NULL, input_key TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS relation_sensed_source ON relation_sensed(source_path)",
+    # The relation producer's per-page hash table and its tick cursor.
+    "CREATE TABLE IF NOT EXISTS relation_pages ("
+    "path TEXT PRIMARY KEY, source_hash TEXT NOT NULL)",
 )
 
 
@@ -1050,9 +1056,25 @@ def run_tick(
             now,
             cosine,
         )
+        # The relation producer's changed set is the tick's own detection,
+        # computed before _follow_pages advances the `pages` table.
+        rel_changed = sorted(
+            path
+            for path, sig in seen.items()
+            if (conn.execute("SELECT sig FROM pages WHERE path=?", (path,)).fetchone()
+                or (None,))[0] != sig
+        )
+        rel_removed = sorted(
+            path
+            for (path,) in conn.execute("SELECT path FROM pages")
+            if path not in seen
+        )
         _follow_seeding(store, conn, seen)
-        _relation_producer(vault_root, seen, report)
+        # Submissions use their own producer connection; the tables they leave
+        # are applied inside the write transaction below.
+        relation_result = _relation_producer(vault_root, conn, rel_changed, rel_removed, report)
         with store.write(conn):
+            _relation_bookkeeping(conn, rel_removed, relation_result)
             _retire_satisfied(conn, ledger)
             _relation_ingest(conn, ledger)
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
@@ -1066,26 +1088,57 @@ def run_tick(
     return report
 
 
-def _relation_producer(vault_root: Path, seen: Mapping[str, str], report: TickReport) -> None:
+def _relation_producer(
+    vault_root: Path,
+    proj: sqlite3.Connection,
+    changed: Sequence[str],
+    removed: Sequence[str],
+    report: TickReport,
+) -> dict[str, Any]:
     """Submit bounded `relation.type` scopes from published graph rows.
 
-    Runs inside the tick but never shares its failure with the pair pipeline,
-    never parses Markdown and never loads a model.
+    Returns what the write transaction applies: per-page hashes, deletions
+    and the new cursor. Silent while no relation.type instrument is admitted,
+    and never shares its failure with the pair pipeline.
     """
     try:
-        from . import epistemic_graph, relation_sensor
+        from . import epistemic_graph, relation_sensor, sensing_llm
 
-        index = epistemic_graph.EpistemicGraphIndex(vault_root)
-        conn = index._open_read_snapshot()
-        if conn is None:
-            return
+        if not sensing_llm.active_instruments():
+            return {"submitted": 0, "pages": [], "cursor": None}
+        if _get_meta(proj, "seeding") is not None:
+            return {"submitted": 0, "pages": [], "cursor": None}
+        cursor = str(_get_meta(proj, "relation_cursor") or "")
+        graph = epistemic_graph.EpistemicGraphIndex(vault_root)._open_read_snapshot()
+        if graph is None:
+            return {"submitted": 0, "pages": [], "cursor": None}
         try:
-            result = relation_sensor.produce(vault_root, conn, seen)
-            report.processed += int(result.get("pages") or 0)
+            result = relation_sensor.produce(
+                vault_root, graph, cursor=cursor, changed=changed
+            )
+            report.processed += len(result.get("pages") or [])
+            return result
         finally:
-            conn.close()
+            graph.close()
     except Exception:  # noqa: BLE001 - a producer failure never breaks the tick
         log.debug("relation sensor: producer failed", exc_info=True)
+        return {"submitted": 0, "pages": [], "cursor": None}
+
+
+def _relation_bookkeeping(
+    conn: sqlite3.Connection, removed: Sequence[str], result: Mapping[str, Any]
+) -> None:
+    """Apply one producer pass to `relation_pages`/`relation_sensed`."""
+    for path in removed:
+        conn.execute("DELETE FROM relation_pages WHERE path=?", (path,))
+        conn.execute("DELETE FROM relation_sensed WHERE source_path=?", (path,))
+    for path, source_hash in result.get("pages") or []:
+        conn.execute(
+            "INSERT OR REPLACE INTO relation_pages(path, source_hash) VALUES(?,?)",
+            (str(path), str(source_hash)),
+        )
+    if result.get("cursor") is not None:
+        _set_meta(conn, "relation_cursor", result["cursor"])
 
 
 def _relation_ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> None:
@@ -1624,6 +1677,7 @@ def submit_scope(
     requests: Iterable[OwnedRequest],
     *,
     complete: bool = True,
+    relation_rows: Iterable[Mapping[str, Any]] | None = None,
 ) -> Submission:
     if not isinstance(token, ScopeToken):
         return token
@@ -1648,8 +1702,34 @@ def submit_scope(
                 "DELETE FROM sense_jobs WHERE owner=? AND scope_key=?",
                 (token.owner, token.scope_key),
             )
+            # A relation-sensor scope is one source page: its projection rows
+            # are replaced atomically with its jobs, landing pending (verdict
+            # NULL) so a reading survives the job's retirement.
+            if relation_rows is not None:
+                conn.execute(
+                    "DELETE FROM relation_sensed WHERE source_path=?",
+                    (token.scope_key,),
+                )
         for job in jobs:
             _put_job(conn, token.owner, token.scope_key, job)
+        if relation_rows is not None:
+            for row in relation_rows:
+                conn.execute(
+                    "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(row["request_key"]),
+                        str(row["source_path"]),
+                        str(row["target_path"]),
+                        row.get("anchor"),
+                        str(row["kind"]),
+                        None,
+                        None,
+                        None,
+                        None,
+                        str(row["menu_digest"]),
+                        str(row["input_key"]),
+                    ),
+                )
         conn.execute(
             "INSERT OR REPLACE INTO sense_scopes VALUES(?,?,?,?)",
             (token.owner, token.scope_key, revision + 1, int(token.invocation)),
