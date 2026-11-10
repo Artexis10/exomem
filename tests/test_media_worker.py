@@ -23,6 +23,7 @@ from exomem import (
     extract,
     file_watcher,
     graph_sync,
+    image_codecs,
     index_sync,
     media_jobs,
     media_processing,
@@ -5601,6 +5602,9 @@ def test_a_camera_raw_parked_for_its_codec_returns_only_once_the_codec_is_instal
     pillow.__spec__ = importlib.machinery.ModuleSpec("PIL", None)
     monkeypatch.setitem(sys.modules, "PIL", pillow)
     monkeypatch.setitem(sys.modules, "rawpy", None)
+    # Only a real DNG takes the raw decoder that needs rawpy. The stub's bytes are no DNG, and the
+    # Pillow stub has no TIFF reader to check them, so the test declares the file a DNG.
+    monkeypatch.setattr(image_codecs, "_is_dng", lambda _path: True)
     result = _preserve_media_stub(vault, filename="portrait.dng")
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(
