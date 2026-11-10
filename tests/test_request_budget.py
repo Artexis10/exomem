@@ -205,9 +205,9 @@ def test_an_activation_budget_ends_with_its_own_seconds_or_before_the_request_wh
         assert request_budget.current() is None
 
 
-def test_the_activation_budget_defaults_to_fifteen_seconds_and_the_operator_sets_it() -> None:
-    assert request_budget.activation_budget_seconds({}) == 15.0
-    assert (
-        request_budget.activation_budget_seconds({request_budget.ACTIVATION_BUDGET_ENV_VAR: "2"})
-        == 2.0
-    )
+def test_an_activation_has_no_nearer_deadline_until_the_operator_sets_one() -> None:
+    """A default cap once made live calls abstain in the conversation carry where the request's deadline served them."""
+    variable = request_budget.ACTIVATION_BUDGET_ENV_VAR
+    assert request_budget.activation_budget_seconds({}) is None
+    assert request_budget.activation_budget_seconds({variable: "2"}) == 2.0
+    assert request_budget.activation_budget_seconds({variable: "soon"}) is None
