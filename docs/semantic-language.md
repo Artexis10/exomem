@@ -95,12 +95,9 @@ page's active standing and its ordinary rank: nothing replaced it, the question
 simply got an answer, and the negative result stays retrievable with the
 evidence that refuted it. A claim carries no confidence score and a verdict is a
 judgment in words, so a probability or percentage is never a valid `verdict`; the
-parser rejects one outright. A degree of belief is its own `## Belief` unit: the
-belief in prose, the unit rows `credence_holder` and `credence`, and an `assesses`
-relation to the claim. `credence` is a unit row, never a frontmatter field. It is a
-belief level or a probability from 0 to 1, a probability needs `credence_basis`, and
-nothing invents a number. A belief records what its holder stated; Exomem and the
-agent never write one on a holder's behalf. The
+parser rejects one outright. A degree of belief that its holder stated is a
+`## Belief` unit; "Recording a degree of belief" in the scaffold's
+`references/page-types.md` gives its form. The
 `prediction` governed kind names a unit that is a claim about the future, and
 pairs naturally with both keys. None of this adds a relation kind: attach the
 refuting or confirming material with the governed vocabulary you already have

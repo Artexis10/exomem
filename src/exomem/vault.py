@@ -178,21 +178,13 @@ def excluded_field_in_collection_frontmatter(
 
 def excluded_frontmatter_reason(field: str) -> str | None:
     """A refusal reason if `field` is a schema-excluded frontmatter key, else None."""
-    name = field.strip().casefold()
-    if name == "confidence":
+    if field.strip().casefold() in EXCLUDED_FRONTMATTER_FIELDS:
         return (
-            f"`{field}` is a schema-excluded frontmatter field: a claim carries no confidence "
-            "score. When the holder of a belief stated one, record it as a `## Belief` unit "
-            "in the page body, with `- credence_holder:`, `- credence:` (a belief level, or a "
-            "probability from 0 to 1 with `- credence_basis:`) and `- relations: assesses: "
-            "<the claim>`. Never write a belief on a holder's behalf (see SKILL.md). Omit "
-            "this field."
-        )
-    if name in EXCLUDED_FRONTMATTER_FIELDS:
-        return (
-            f"`{field}` is a schema-excluded frontmatter field. Exomem does not "
-            "record time-based decay/expiry — old material is never auto-decayed "
-            "(see SKILL.md). Omit this field."
+            f"`{field}` is a schema-excluded frontmatter field. A confidence or a degree of "
+            "belief is never frontmatter: a degree of belief that its holder stated is a "
+            "`## Belief` unit in the page body (see \"Recording a degree of belief\" in the "
+            "skill's page-types reference). Exomem records no time-based decay or expiry; old "
+            "material is never auto-decayed. Omit this field."
         )
     return None
 
