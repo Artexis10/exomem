@@ -1151,7 +1151,7 @@ def test_a_method_unit_statistics_build_the_warm_budget_ends_leaves_no_statistic
     from exomem import lexstore
 
     vault, pages = _method_unit_vault(tmp_path, monkeypatch)
-    # SQLite checks the budget every 1000 instructions, more than this three-page build runs.
+    # The production interval is longer than this three-page build, so check every instruction.
     monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
     build = lexstore.LexicalStore._admitted_unit_statistics
     delays = [0.3]
@@ -1184,8 +1184,8 @@ def test_a_method_unit_build_the_request_budget_stops_keeps_the_parents_it_inter
     from exomem import call_spans, lexstore, request_budget
 
     vault, pages = _method_unit_vault(tmp_path, monkeypatch)
-    # SQLite checks the budget every 1000 instructions, more than this three-page build runs. One row per
-    # batch lets the read finish a parent before it starts the next.
+    # The production interval is longer than this three-page build, so check every instruction.
+    # One row per batch lets the read finish a parent before it starts the next.
     monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
     monkeypatch.setattr(lexstore, "_OCCURRENCE_TRANSPORT_BATCH", 1)
     budget = request_budget.RequestBudget(seconds=60)
