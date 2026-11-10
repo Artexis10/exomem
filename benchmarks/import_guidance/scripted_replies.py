@@ -18,8 +18,14 @@ SCHEMA_FILES = ("mcp_tool_schemas.json", "mcp_cloud_only_tool_schemas.json")
 DEFAULT_SUITE = "import"
 
 
+#: The suite of a scenario written from a case (`replay_cases.py`); its scenarios live in a folder the caller names.
+REPLAY_SUITE = "context-replay"
+
+
 def scenario_dir(suite: str) -> Path:
-    return SCENARIO_DIR if suite == DEFAULT_SUITE else SCENARIO_DIR / suite
+    """A shipped suite's folder, or the folder a path names. A shipped name wins over a same-named path."""
+    shipped = SCENARIO_DIR if suite == DEFAULT_SUITE else SCENARIO_DIR / suite
+    return shipped if shipped.is_dir() or not Path(suite).is_dir() else Path(suite).resolve()
 
 
 @functools.cache
@@ -59,6 +65,12 @@ class Scenario:
     record: dict = field(default_factory=dict)
     # What the judge is told about a write that only the call log can show: `{"tool", "saved", "not_saved"}`.
     outcome_facts: dict = field(default_factory=dict)
+    # The engagement level that the recorded product and the staged hooks run under; None leaves the product default.
+    engagement: str | None = None
+    # Hook events of the arm's plugin to stage in the actor's settings (`session_close.plugin_hooks`).
+    hooks: tuple[str, ...] = ()
+    # `run`: the runner judges each run. `batch`: it does not; `judge_batch.py` judges all runs together, blind.
+    judge: str = "run"
 
 
 def resolve_shapes(reply: Any, shapes: Mapping[str, Any] | None) -> Any:
@@ -105,6 +117,9 @@ def load_scenario(path: Path, shapes: Mapping[str, Any] | None = None) -> Scenar
         reference=raw.get("reference", ""),
         record=dict(raw.get("record", {})),
         outcome_facts=dict(raw.get("outcome_facts", {})),
+        engagement=raw.get("engagement"),
+        hooks=tuple(raw.get("hooks", ())),
+        judge=raw.get("judge", "run"),
     )
 
 

@@ -214,29 +214,29 @@ def judge_row(case: Case, key: dict, row: dict, *, model: str, executable: Path 
 def run_judge(view: str, criteria: tuple[dict, ...], *, model: str, executable: Path | None, scratch: Path) -> list[checks.Outcome]:
     """The legacy Claude judge runs only when explicitly selected."""
     assert executable is not None
+    stdout = call_judge(judge_prompt(view, criteria), judge.answer_schema(criteria), model=model, executable=executable, scratch=scratch)
+    return checks.judged_outcomes(criteria, judge.parse_answer(stdout, criteria) if stdout is not None else None)
+
+
+def call_judge(prompt: str, schema: dict, *, model: str, executable: Path, scratch: Path) -> str | None:
+    """One judge process on one prompt, with no tools, no MCP server, no saved session and `schema` as its structured
+    output. Returns its stdout, or None when it could not start or timed out."""
     empty_mcp = scratch / "empty-mcp.json"
     empty_mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
     env, _removed = environment_floor(os.environ)
     env = {k: v for k, v in env.items() if not k.startswith("EXOMEM_")}
     try:
         done = subprocess.run(  # noqa: S603
-            runner.judge_argv(
-                executable,
-                judge_prompt(view, criteria),
-                judge.answer_schema(criteria),
-                empty_mcp=empty_mcp,
-                model=model,
-            ),
+            runner.judge_argv(executable, prompt, schema, empty_mcp=empty_mcp, model=model),
             cwd=str(scratch),
             env=env,
             capture_output=True,
             text=True,
             timeout=JUDGE_TIMEOUT_SECONDS,
         )
-        answer = judge.parse_answer(done.stdout, criteria)
     except (OSError, subprocess.TimeoutExpired):
-        answer = None
-    return checks.judged_outcomes(criteria, answer)
+        return None
+    return done.stdout
 
 
 def content_evidence(tool: str, data: object) -> tuple[bool, list[dict]]:
@@ -475,6 +475,12 @@ def read_native(path: Path, mapping_path: Path) -> tuple[dict, dict]:
     return mapping if isinstance(mapping, dict) else {}, answers
 
 
+def valid_answer(item: object, criteria: tuple[dict, ...]) -> dict | None:
+    """The judge's structured answer in one judgments line, or None when it is missing or not the rubric's object."""
+    answer = judge.parse_answer(json.dumps(item), criteria)
+    return answer if Draft202012Validator(judge.answer_schema(criteria)).is_valid(answer) else None
+
+
 def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: dict) -> dict:
     answers = {}
     identity = list(run_identity(row))
@@ -486,8 +492,7 @@ def native_answers(case: Case, key: dict, row: dict, mapping: dict, judgments: d
                    and item.get("run") in compatible and item.get("stage") == stage
                    and item.get("prompt_sha256") == hashlib.sha256(prompt.encode()).hexdigest()]
         item = judgments.get(matches[0]) if len(matches) == 1 else None
-        answer = judge.parse_answer(json.dumps(item), criteria)
-        answers[stage] = answer if Draft202012Validator(judge.answer_schema(criteria)).is_valid(answer) else None
+        answers[stage] = valid_answer(item, criteria)
     return answers
 
 
