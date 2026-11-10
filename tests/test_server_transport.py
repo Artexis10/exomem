@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import os
 from typing import Any
@@ -111,11 +112,32 @@ class _FakeMcp:
 
 
 @pytest.fixture
-def fake_mcp(monkeypatch: pytest.MonkeyPatch) -> _FakeMcp:
+def fake_mcp(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeMcp()
     monkeypatch.setattr(server, "build_server", lambda **_kwargs: fake)
     monkeypatch.setattr(logging_config, "configure_logging", lambda *_args, **_kwargs: None)
-    return fake
+    yield fake
+    # `run` freezes the heap it serves from; the test worker's later tests need theirs collected.
+    gc.unfreeze()
+
+
+def test_the_server_freezes_its_startup_heap_before_it_serves(
+    fake_mcp: _FakeMcp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full collection must not walk every object startup built.
+
+    Unfrozen, a collection pass inside a request walked the whole startup heap, and an
+    interactive records query in the installed-wheel journey exceeded its 200 ms budget
+    with 161 ms of that pass (seen in CI on 2026-11-09).
+    """
+    frozen_when_serving: list[int] = []
+    monkeypatch.setattr(
+        fake_mcp, "run", lambda **_kwargs: frozen_when_serving.append(gc.get_freeze_count())
+    )
+
+    server.run(transport="stdio")
+
+    assert frozen_when_serving and frozen_when_serving[0] > 0
 
 
 @pytest.mark.parametrize("transport", ["http", "streamable-http"])
