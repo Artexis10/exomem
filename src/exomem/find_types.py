@@ -179,12 +179,18 @@ class ParsedPage:
             return None
 
     @property
-    def file_kind(self) -> str:
-        if self.page_type == "dataset" or (
+    def is_dataset_card(self) -> bool:
+        # The structured-source-preservation spec fixes this card shape: `data_file` on a
+        # `dataset-export` source (the older `dataset` type has no source kind).
+        return self.page_type == "dataset" or (
             self.page_type == "source"
             and self.frontmatter.get("source_type") == "dataset-export"
-            and self.frontmatter.get("data_file")
-        ):
+            and bool(self.frontmatter.get("data_file"))
+        )
+
+    @property
+    def file_kind(self) -> str:
+        if self.is_dataset_card:
             fmt = self.frontmatter.get("format")
             return str(fmt).lower() if fmt else "dataset"
         if self.media_type:
@@ -345,7 +351,8 @@ class Hit:
     scene_frame: str | None = None
     scene_frame_ts: float | None = None
     #: For a Source whose extracted text continues on part pages: the part that matched and the
-    #: matched passage (`text`, `part`, `offset` into the whole text, `length`).
+    #: matched passage (`text`, `part`, `offset` into the whole text, `length`). A dataset value
+    #: hit has no parts: its `passage` holds `text` only and `matched_part` stays unset.
     matched_part: int | None = None
     passage: dict[str, object] | None = None
     transcript_ts: float | None = None
@@ -364,6 +371,9 @@ class Hit:
     result_type: str | None = None
     mixed_units_truncated: int = 0
     snapshot_hash: str | None = None
+    #: Set on a hit that `dataset_values` built from a dataset's values. It is raw content that
+    #: only the full release level may release, so egress drops it below that; never serialized.
+    dataset_value: bool = False
     # Selected excerpts and annotations can disclose separate source snapshots.
     evidence_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     # Release-plane annotation, attached by `governance.egress.annotate_hits`
@@ -400,6 +410,7 @@ class Hit:
                 out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
         if self.matched_part is not None:
             out["matched_part"] = self.matched_part
+        if self.passage is not None:
             out["passage"] = self.passage
         if self.transcript_ts is not None:
             out["transcript_match_at"] = _format_timestamp(self.transcript_ts)
@@ -473,6 +484,7 @@ class Hit:
                 out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
         if self.matched_part is not None:
             out["matched_part"] = self.matched_part
+        if self.passage is not None:
             out["passage"] = self.passage
         if self.transcript_ts is not None:
             out["transcript_match_at"] = _format_timestamp(self.transcript_ts)
