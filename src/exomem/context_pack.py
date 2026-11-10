@@ -561,13 +561,16 @@ def _neighborhood(
     max_neighbors: int,
     *,
     under_strip: Callable[[str], bool],
+    purpose: str | None = None,
 ) -> tuple[list[dict], int, list[str]]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
     excluded, ranked by co-citation (distinct packed notes linked), capped.
     The third value names each side whose neighbours are unknown (empty when none).
 
     For a reader other than the owner, links resolve over the pages it may see
-    and a neighbour it may not see is decided before ranking and the cap.
+    and a neighbour it may not see is decided before ranking and the cap. That
+    view is built under the `purpose` the request declares, as the hits' view is:
+    a rule that withholds a page only for a purpose must withhold it here too.
 
     A server request never builds the inbound index or the link resolver: it
     borrows the published ones, and on a miss leaves that side's neighbours out
@@ -577,7 +580,7 @@ def _neighborhood(
     """
     from .governance import egress
 
-    visible = egress.reader_view(vault_root)
+    visible = egress.reader_view(vault_root, purpose=purpose)
     packed_canon = {corpus_aware._canon(p.rel_path) for p in packed_pages}
     # canon -> {"path", "directions": set, "referenced_by": set}
     neigh: dict[str, dict] = {}
@@ -1206,7 +1209,7 @@ def assemble_pack(
 
     with find_module._span(timings, "pack.neighborhood"):
         neighborhood, n_dropped, incomplete = _neighborhood(
-            vault_root, packed_pages, max_neighbors, under_strip=under_strip
+            vault_root, packed_pages, max_neighbors, under_strip=under_strip, purpose=purpose
         )
     truncation.extend(incomplete)
     if n_dropped > 0:
