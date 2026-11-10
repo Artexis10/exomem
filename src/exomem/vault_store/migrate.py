@@ -501,7 +501,7 @@ def _require_published(root: Path, session, token, writer, claimed: marker.Decis
         cause = (
             "the publication finished, but the replica still does not show the claim"
             if published.status == "published"
-            else f"the publication reported {published.reason or published.status}"
+            else f"the publication did not finish: {published.reason or published.status}"
         )
         raise OpError(
             "VAULT_STORE_CLAIM_NOT_PUBLISHED",
