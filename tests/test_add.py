@@ -869,10 +869,19 @@ def test_prepared_captures_reuse_core_allocation_and_refresh_shared_bookkeeping(
     assert "First transfer" in activity and "Second transfer" in activity
 
 
+@pytest.mark.parametrize(
+    ("title", "tag"),
+    [
+        ("Tagged notes", "[[Unrelated page]]"),
+        # A stray backtick and a nested pair defeated a single escaping pass.
+        ("Tagged `notes", "[[ [[Unrelated page|]] ]]"),
+    ],
+)
 def test_an_activated_vault_keeps_a_wikilink_tag_inert_in_the_index(
-    activated_vault: Path, source_schema: schema_module.SourceSchema
+    activated_vault: Path, source_schema: schema_module.SourceSchema, title: str, tag: str
 ) -> None:
     """The gate does not classify the index a capture binds, so a tag must not become a live link there."""
+    from exomem import vault as vault_module
     from exomem.governance.principal import library_scope
 
     vault = activated_vault
@@ -880,13 +889,13 @@ def test_an_activated_vault_keeps_a_wikilink_tag_inert_in_the_index(
     with library_scope():
         result = add_module.add(
             vault, source_schema, content="Notes from the meeting.", source_type="session",
-            title="Tagged notes", tags=["[[Unrelated page]]"], today=TODAY,
+            title=title, tags=[tag], today=TODAY,
         )
 
     assert (vault / result.path).is_file()
-    [activity] = [line for line in _read(vault / "Knowledge Base/index.md").splitlines() if "Tagged notes" in line]
+    [activity] = [line for line in _read(vault / "Knowledge Base/index.md").splitlines() if "Tagged" in line]
     assert "unrelated-page" in activity
-    assert "[[" not in activity
+    assert vault_module.find_body_wikilinks(activity) == []
 
 
 def test_a_capture_whose_index_moved_before_its_commit_answers_busy(

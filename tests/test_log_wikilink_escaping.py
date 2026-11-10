@@ -31,6 +31,13 @@ def test_escapes_embed_and_multiple_links() -> None:
     assert "`img.png`" in out and "`X`" in out and "`Y`" in out
 
 
+def test_nested_links_after_a_stray_backtick_stay_inert() -> None:
+    """A single pass left `[[T|` ]]` live: the inner pair met the outer close after a code span shifted."""
+    out = vault.escape_wikilinks_for_log("` [[ [[T|]] ]]")
+    assert vault.find_body_wikilinks(out) == []
+    assert "[[" not in out
+
+
 def test_leaves_plain_text_untouched() -> None:
     text = "repoint secrets-architecture-hardening to its handoff note"
     assert vault.escape_wikilinks_for_log(text) == text

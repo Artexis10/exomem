@@ -9380,7 +9380,12 @@ def escape_wikilinks_for_log(text: str) -> str:
     any `[[...]]` / `![[...]]` as backticked code so it stays inert while the
     referenced text is preserved.
     """
-    return _LOG_WIKILINK_RE.sub(lambda m: f"`{m.group(1)}`", text)
+    # One pass can leave an inner `[[` paired with an outer `]]`, and a stray backtick then shifts
+    # the code span that hid it. Each pass removes one bracket pair, so repeat until none is left.
+    previous = None
+    while text != previous:
+        previous, text = text, _LOG_WIKILINK_RE.sub(lambda m: f"`{m.group(1)}`", text)
+    return text
 
 
 def document_newline(text: str) -> str:
