@@ -292,10 +292,10 @@ before Substrate signs with it, and remove the old key only when no relayed gran
 3. Add that public half as the second entry of `cellDeletion.grantPublicKeys`.
 4. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
 5. Count the grant keys as step 5 of "Triage an anomaly" says. Expect 2 in each namespace.
-6. Replace Substrate's key in place, so that the variable is never unset. Expect the command to end without an error:
+6. In the linked Substrate checkout, replace the key in place, so that the variable is never unset. Expect no error:
    `bwsx-run SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY_NEXT -- sh -c 'printf "%s\n" "$SUBSTRATE_EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY_NEXT" | vercel env update EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY production --yes'`
-7. Read the variable. Expect type `sensitive`, target `["production"]`, and an `updatedAt` after step 6:
-   `vercel env ls production --format json | jq '.envs[] | select(.key == "EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY") | {type, target, updatedAt}'`
+7. In the same checkout, read the variable. Expect a sensitive or secret value, target `["production"]`, and a new `updatedAt`:
+   `vercel env ls production --format json | jq '.envs[] | select(.key == "EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY") | {type, visibility, target, updatedAt}'`
 8. Redeploy Substrate as step 4 of "Create the grant signing key" says. Write down the switch time as Unix seconds.
 9. Count the relayed grants that Substrate signed before the switch:
    `kubectl -n exomem-cloud get configmap exomem-cell-deletions -o jsonpath='{.data.grants\.json}' | jq '[.[] | split(".")[1] | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson | select(.iat < <switch time>)] | length'`
