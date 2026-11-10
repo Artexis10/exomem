@@ -32,33 +32,37 @@ ELSEWHERE_REASON = (
 )
 
 
-def elsewhere_remedy(decision) -> str:
+def elsewhere_remedy(order) -> str:
     """What the owner does about ``VAULT_STORE_ELSEWHERE``: the release command and the claim id.
 
-    ``decision`` is the store claim that the replica carries (``marker.Decision``), or None when the
-    replica says store without a decision that this build can read: such a replica carries no id to
-    name, so the owner cannot release it from here.
+    ``order`` is what the replica's marker says (``marker.Order``). A decision names the claim to
+    release. A store bit with no decision is a claim from a build older than the register, which
+    ``--claim legacy`` releases. A decision that this build cannot read has no id to name, so the
+    owner needs a build that reads it, or the holder's rollback.
     """
+    from .marker import LEGACY_CLAIM
+
     start = (
         f"Start the service on the state root that holds the store, or run {ROLLBACK} there and "
         "let the replica sync back to this machine."
     )
-    if decision is None:
+    if not order.known:
         return (
-            f"{start} This replica carries no store claim that this build can read, so `exomem "
-            "store-mode release` is not available: use a build that reads it."
+            f"{start} This replica's store-mode decision is in a form that this build cannot read, "
+            "so `exomem store-mode release` is not available: use a build that reads it."
         )
+    claim = LEGACY_CLAIM if order.decision is None else order.decision.id
     return (
         f"{start} If that root is gone, stop every service, set "
         "EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN and run "
-        f"`exomem store-mode release --apply --claim {decision.id} --why REASON` on this root."
+        f"`exomem store-mode release --apply --claim {claim} --why REASON` on this root."
     )
 
 
-def elsewhere_error(decision) -> connection.CollectionStoreError:
+def elsewhere_error(order) -> connection.CollectionStoreError:
     """The refusal for a root that another root's store claim stands against."""
     return connection.CollectionStoreError(
-        STORE_ELSEWHERE, f"{ELSEWHERE_REASON} {elsewhere_remedy(decision)}"
+        STORE_ELSEWHERE, f"{ELSEWHERE_REASON} {elsewhere_remedy(order)}"
     )
 
 
@@ -120,7 +124,7 @@ def require_no_store_elsewhere(vault_root: Path) -> None:
 
     found = marker.conflict(vault_root)
     if found is not None:
-        raise elsewhere_error(found.order.decision)
+        raise elsewhere_error(found.order)
 
 
 def marker_inconsistency(vault_root: Path) -> str | None:

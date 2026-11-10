@@ -361,7 +361,8 @@ def test_a_takeover_keeps_the_newest_decision_and_this_roots_own_claim(tmp_path)
     kept = merged(own, {**decided(2, "b", mode.STORE_MODE), marker.CLAIM_KEY: "b"})
     assert kept[marker.CLAIM_KEY] == "a", "the claim never comes from the replica"
     garbled = {marker.KEY: marker.ACTIVE, marker.DECISION_KEY: "not json"}
-    assert merged(local_file, garbled) == local_file, "an unreadable order overwrites nothing"
+    assert merged(local_file, garbled) == garbled, "an unreadable replica is carried as it is"
+    assert merged(garbled, local_file) == garbled, "an unreadable local order is left as it is"
 
 
 def test_a_root_that_rolled_back_carries_the_marker_of_the_root_that_migrated_after_it(
@@ -597,7 +598,9 @@ def test_the_other_root_releases_a_claim_that_it_names_and_then_starts(
     assert store_mode(vault, "release", "--dry-run") == 0
     assert claim in last_reported(capsys)["outcome"]
     assert store_mode(vault, "release", "--apply", "--claim", "another-id", "--why", "gone") == 1
-    assert capsys.readouterr().err.startswith("VAULT_STORE_RELEASE_CLAIM_MISMATCH")
+    refusal = capsys.readouterr().err
+    assert refusal.startswith("VAULT_STORE_RELEASE_CLAIM_MISMATCH")
+    assert f"--claim {claim}" in refusal, "the refusal prints the remedy that names the real claim"
     assert marker.read_replica(vault).state == marker.STORE
     assert store_mode(vault, "release", "--apply", "--why", "gone") == 2
     capsys.readouterr()
@@ -639,9 +642,10 @@ def test_a_holder_that_returns_after_a_release_reads_displaced_and_does_not_repu
 def test_a_restored_replica_that_says_store_does_not_lock_out_a_root_that_saw_the_rollback(
     vault, tmp_path, monkeypatch  # noqa: F811
 ):
-    """A sync that brings back an old replica: the root that already merged the rollback refuses to
-    start on a decision that it knows is older. The publisher's own digest check, which flags a
-    replica that this store did not write, is a separate guard and is not under test."""
+    """A sync that brings back an old replica: the root that already merged the rollback starts,
+    because it knows the decision is older. Its next publication meets the publisher's own digest
+    guard, which flags a replica that this store did not write; the replica republishes only
+    through `exomem collections adopt-local`. That guard is separate and is not under test."""
     join_as_other_root(vault, tmp_path, monkeypatch)
     assert migrate_apply(vault) == 0
     saved = replica.replica_path(vault).read_bytes()
@@ -654,19 +658,64 @@ def test_a_restored_replica_that_says_store_does_not_lock_out_a_root_that_saw_th
     availability.require_servable(vault)
 
 
-def test_a_replica_with_the_bit_and_no_decision_refuses_a_root_that_has_no_decision(
-    vault, other_state_root, monkeypatch  # noqa: F811
+def test_a_takeover_republishes_a_replica_decision_that_this_build_cannot_read(
+    vault, tmp_path, monkeypatch  # noqa: F811
+):
+    """A takeover that keeps its own empty marker over a decision that a newer build wrote: its
+    next publication erases the claim, and the refused root starts beside the live store."""
+    join_as_other_root(vault, tmp_path, monkeypatch)
+    assert migrate_apply(vault) == 0
+    newer = json.dumps({"seq": 9, "holder": "newer-build", "mode": "store"})
+    with closing(sqlite3.connect(replica.replica_path(vault))) as copy:
+        copy.execute("UPDATE store_meta SET value = ? WHERE key = ?", (newer, marker.DECISION_KEY))
+        copy.commit()
+    as_root(monkeypatch, tmp_path, "other", state="other-state")
+    assert not marker.read_replica(vault).order.known
+    assert refused(vault).code == availability.STORE_ELSEWHERE
+
+    commit_as_current_root(vault)
+
+    assert marker.read_replica(vault).state == marker.STORE
+    assert marker.read_replica(vault).meta[marker.DECISION_KEY] == newer
+    assert refused(vault).code == availability.STORE_ELSEWHERE
+
+
+def test_a_replica_with_the_bit_and_no_decision_is_released_as_the_legacy_claim(
+    vault, tmp_path, monkeypatch, capsys  # noqa: F811
 ):
     """A replica from a build that wrote only the bit: reading it as clear starts a file-mode
-    service beside the store."""
+    service beside the store, and a refusal with no working remedy leaves the owner stuck once the
+    holder is gone. A decision that no build can read has no claim to name, and says so."""
     assert migrate_apply(vault) == 0
-    with closing(sqlite3.connect(replica.replica_path(vault))) as copy:
-        copy.execute("DELETE FROM store_meta WHERE key = ?", (marker.DECISION_KEY,))
-        copy.commit()
-    on_state_root(monkeypatch, other_state_root)
+    as_root(monkeypatch, tmp_path, "other", state="other-state")
+    legacy_replica = replica.replica_path(vault)
 
+    def rewrite_decision(value):
+        with closing(sqlite3.connect(legacy_replica)) as copy:
+            if value is None:
+                copy.execute("DELETE FROM store_meta WHERE key = ?", (marker.DECISION_KEY,))
+            else:
+                copy.execute(
+                    "UPDATE store_meta SET value = ? WHERE key = ?", (value, marker.DECISION_KEY)
+                )
+            copy.commit()
+
+    rewrite_decision("a decision from a newer build")
+    unreadable = refused(vault)
+    assert unreadable.code == availability.STORE_ELSEWHERE
+    assert "cannot read" in unreadable.reason
+    assert "--claim" not in unreadable.reason
+    capsys.readouterr()
+    assert store_mode(vault, "release", "--dry-run") == 1
+    assert capsys.readouterr().err.startswith("VAULT_STORE_RELEASE_ORDER_UNKNOWN")
+
+    rewrite_decision(None)
     error = refused(vault)
-
     assert error.code == availability.STORE_ELSEWHERE
-    assert "store-mode release" in error.reason
-    assert "is not available" in error.reason
+    assert "--claim legacy" in error.reason
+    assert store_mode(vault, "release", "--dry-run") == 0
+    assert "--claim legacy" in last_reported(capsys)["outcome"]
+    assert store_mode(vault, "release", "--apply", "--claim", "legacy", "--why", "gone") == 0
+
+    assert last_reported(capsys)["diagnostics"]["vault_marker"] == marker.CLEAR
+    availability.require_servable(vault)

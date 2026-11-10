@@ -1023,7 +1023,7 @@ def _check_vault_store_records(vault_root: Path | None) -> DoctorCheck | None:
     if elsewhere is not None:
         return _check(
             "vault_store_records", "fail",
-            availability.ELSEWHERE_REASON, availability.elsewhere_remedy(elsewhere.order.decision),
+            availability.ELSEWHERE_REASON, availability.elsewhere_remedy(elsewhere.order),
             details={"vault_marker": elsewhere.state})
     if inconsistency is not None:
         return _check("vault_store_records", "warn", inconsistency, f"Run {availability.ROLLBACK}.")

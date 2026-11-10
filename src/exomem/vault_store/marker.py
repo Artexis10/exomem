@@ -12,8 +12,10 @@ replica under the vault, so they travel with the vault:
   store mode takes ``n`` one above the largest ``n`` that the deciding root sees, in its own store
   and in the replica file, under the lease. The larger ``n`` is the newer decision. The bit always
   follows the newest decision and is written with it by one function. ``at`` is for people.
-- ``vault_store_claim`` is the id of this root's own store claim. It never travels: a takeover
-  keeps the claim of the root it runs on, never the replica's.
+- ``vault_store_claim`` is the id of this root's own store claim. It is root-local: the hand-back
+  copies the whole table, so the replica's copy carries the publisher's claim too, but nothing reads
+  it from there. The one door by which replica bytes become a live store is the takeover, and it
+  resets the claim to the local root's own through ``carry``.
 
 The order is data and not a clock or the lease epoch. A lease epoch is a strict token only within
 one coordinator, and a clock decides by luck which of two roots was later. A takeover merges the
@@ -61,6 +63,10 @@ STORE = "store"
 CLEAR = "clear"
 ABSENT = "absent"
 UNREADABLE = "unreadable"
+
+#: The claim id of a store bit that no decision names: a build older than the register wrote it. The
+#: owner names it on the command line to release such a claim, as for any other claim id.
+LEGACY_CLAIM = "legacy"
 
 #: What ``report`` says about this root's claim, a closed set of this module's own states.
 HOLDS = "holds"
@@ -180,13 +186,13 @@ class Replica:
 class HeldElsewhere(Exception):
     """Another root's store claim stands, so this root may not claim the store.
 
-    ``decision`` is that claim, or None when the replica says store without a decision this build
-    can read.
+    ``order`` is what the standing marker says: a claim, a store bit with no decision, or an
+    order that this build cannot read.
     """
 
-    def __init__(self, decision: Decision | None):
+    def __init__(self, order: Order):
         super().__init__("another state root holds this vault in store mode")
-        self.decision = decision
+        self.order = order
 
 
 def read_meta(conn: sqlite3.Connection) -> dict[str, str]:
@@ -286,11 +292,17 @@ def carry(
     ``local_meta`` is its own) or the adopted copy of the replica (adopt, where ``local_meta`` is
     the live store that the copy replaces). The bit follows the decision. The claim is the local
     root's, never the replica's. A takeover decides nothing: it only carries the newest decision
-    that either side already made. An unknown order on either side leaves ``conn``'s decision as it
-    is, so nothing that a newer build wrote is overwritten.
+    that either side already made.
+
+    A replica whose order this build cannot read is carried as it stands, bit and decision
+    verbatim: the next publication copies ``conn`` over the replica, so a ``conn`` that kept its own
+    keys would erase what a newer build wrote. A local order that cannot be read leaves ``conn``'s
+    keys as they are and forces no copy (``replica_stale``).
     """
     _put(conn, CLAIM_KEY, local_meta.get(CLAIM_KEY))
     newest = _newest(local_meta, replica_meta)
+    if newest is None and not order(replica_meta).known:
+        newest = replica_meta
     if newest is not None:
         for key in (KEY, DECISION_KEY):
             _put(conn, key, newest.get(key))
@@ -309,7 +321,16 @@ def merge_replica(tx: sqlite3.Connection, vault_root: Path) -> Replica:
     return found
 
 
-def require_free(tx: sqlite3.Connection, vault_root: Path) -> Standing:
+def _after(here: Order, found: Replica) -> int:
+    """The ``n`` that a new decision follows: the largest that this store and the replica show.
+
+    The two agree after a merge, except where this store's own order cannot be read: a decision
+    that restarted at 1 would then lose to the replica's.
+    """
+    return max(here.n, found.order.n if found.readable and found.order.known else 0)
+
+
+def require_free(tx: sqlite3.Connection, vault_root: Path) -> tuple[Standing, Replica]:
     """Merge the replica, then refuse with ``HeldElsewhere`` while another root's claim stands.
 
     It prevents two roots from both holding one vault's pages. A replica that says store with an
@@ -319,10 +340,10 @@ def require_free(tx: sqlite3.Connection, vault_root: Path) -> Standing:
     found = merge_replica(tx, vault_root)
     here = standing(read_meta(tx))
     if here.elsewhere:
-        raise HeldElsewhere(here.order.decision)
+        raise HeldElsewhere(here.order)
     if found.state == STORE and not found.order.known:
-        raise HeldElsewhere(None)
-    return here
+        raise HeldElsewhere(found.order)
+    return here, found
 
 
 def record(tx: sqlite3.Connection, vault_root: Path) -> Decision:
@@ -332,10 +353,10 @@ def record(tx: sqlite3.Connection, vault_root: Path) -> Decision:
     published in the meantime is never overwritten. A claim that this root already holds, left by
     a migration that died before it installed, is reused and takes no new ``n``.
     """
-    here = require_free(tx, vault_root)
+    here, found = require_free(tx, vault_root)
     if here.holds and here.order.decision is not None:  # ``holds`` is true only with a decision
         return here.order.decision
-    decision = _decide(tx, here.order.n, mode.STORE_MODE)
+    decision = _decide(tx, _after(here.order, found), mode.STORE_MODE)
     _put(tx, CLAIM_KEY, decision.id)
     return decision
 
@@ -359,7 +380,7 @@ def clear(tx: sqlite3.Connection, vault_root: Path) -> Decision | None:
     only its own claim: its rollback never displaces the root that holds the vault. A decision
     that is already ``file``, and a store that never held one, are left as they stand.
     """
-    merge_replica(tx, vault_root)
+    found = merge_replica(tx, vault_root)
     here = standing(read_meta(tx))
     decision = here.order.decision
     _put(tx, CLAIM_KEY, None)
@@ -367,18 +388,18 @@ def clear(tx: sqlite3.Connection, vault_root: Path) -> Decision | None:
         return None  # this store never held a decision, so there is none to supersede
     if decision is not None and (decision.mode == mode.FILE_MODE or decision.id != here.claim):
         return None
-    return _decide(tx, here.order.n, mode.FILE_MODE)
+    return _decide(tx, _after(here.order, found), mode.FILE_MODE)
 
 
-def release(tx: sqlite3.Connection) -> Decision:
+def release(tx: sqlite3.Connection, found: Replica) -> Decision:
     """Decide ``file`` over another root's store claim: the owner's release of a gone holder.
 
     The caller has merged the replica and checked, in this transaction, that the claim is the
     one that the owner named. It is a decision like any other: the replica carries it, the holder
     that returns merges it and reads displaced, and it cannot reassert its claim over the
-    release.
+    release. ``found`` is the replica that the caller merged.
     """
-    return _decide(tx, standing(read_meta(tx)).order.n, mode.FILE_MODE)
+    return _decide(tx, _after(standing(read_meta(tx)).order, found), mode.FILE_MODE)
 
 
 def replica_stale(vault_root: Path, store: sqlite3.Connection) -> bool:

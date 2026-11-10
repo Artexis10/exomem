@@ -42,15 +42,14 @@ def _refuse_if_pages_here(root: Path) -> None:
         )
 
 
-def _require_releasable(
-    here: marker.Standing, found: marker.Replica, claim: str | None
-) -> marker.Decision:
-    """The standing store claim of another root, or the refusal that names what the owner changes.
+def _require_releasable(here: marker.Standing, found: marker.Replica, claim: str | None) -> str:
+    """The id of the standing store claim of another root, or the refusal that names the change.
 
     It prevents a release of nothing, of this root's own claim, or of a claim that the owner did
     not name: the id on the command line is the owner's confirmation that this is the claim to
     override. A claim whose order this build cannot read is never released, because it may be
-    newer than the id that the owner read.
+    newer than the id that the owner read. A store bit with no decision is a claim from a build
+    older than the register: its id is ``marker.LEGACY_CLAIM``.
     """
     if not here.order.known or (found.readable and not found.order.known):
         raise OpError(
@@ -68,19 +67,23 @@ def _require_releasable(
             "release",
             f"Run {ROLLBACK} on this root to leave store mode.",
         )
-    if decision is None or decision.mode != mode.STORE_MODE:
+    if decision is None and here.order.bit:
+        standing_id = marker.LEGACY_CLAIM
+    elif decision is None or decision.mode != mode.STORE_MODE:
         raise OpError(
             "VAULT_STORE_RELEASE_NOTHING_HELD",
             "no state root holds this vault in store mode, so there is nothing to release",
             "Start the service: the vault is in file mode.",
         )
-    if claim is not None and claim != decision.id:
+    else:
+        standing_id = decision.id
+    if claim is not None and claim != standing_id:
         raise OpError(
             "VAULT_STORE_RELEASE_CLAIM_MISMATCH",
-            f"the standing store claim is {decision.id}, not {claim}",
-            f"Run this command again with --claim {decision.id} if that root is gone.",
+            f"the standing store claim is {standing_id}, not {claim}",
+            f"Run this command again with --claim {standing_id} if that root is gone.",
         )
-    return decision
+    return standing_id
 
 
 def dry_run(vault_root: Path) -> dict:
@@ -89,14 +92,17 @@ def dry_run(vault_root: Path) -> dict:
     admission.require_owner(root, "store-mode release")
     _refuse_if_pages_here(root)
     seen = marker.view(root)
-    decision = _require_releasable(seen.here, seen.replica, None)
+    claim = _require_releasable(seen.here, seen.replica, None)
+    decision = seen.here.order.decision
     return {
-        "outcome": f"Another state root holds this vault in store mode, claim {decision.id}; "
-        f"`--apply --claim {decision.id}` releases it.",
+        "outcome": f"Another state root holds this vault in store mode, claim {claim}; "
+        f"`--apply --claim {claim}` releases it.",
         "status": "dry-run",
         "diagnostics": {
-            "claim": decision.id,
-            "decision": {"n": decision.n, "mode": decision.mode, "at": decision.at},
+            "claim": claim,
+            "decision": None
+            if decision is None
+            else {"n": decision.n, "mode": decision.mode, "at": decision.at},
             "vault_marker": seen.replica.state,
         },
     }
@@ -149,10 +155,10 @@ def _release(root: Path, writer, *, claim: str, why: str) -> dict:
     with writer.handle.transaction() as tx:
         found = marker.merge_replica(tx, root)
         held = _require_releasable(marker.standing(marker.read_meta(tx)), found, claim)
-        decision = marker.release(tx)
+        decision = marker.release(tx, found)
     # The reason has no table to live in (a store_audit row needs a schema change): it is logged.
-    log.info("Released store claim %s: %s", held.id, why)
+    log.info("Released store claim %s: %s", held, why)
     return {
-        "released": held.id,
+        "released": held,
         "decision": {"n": decision.n, "id": decision.id, "mode": decision.mode, "at": decision.at},
     }

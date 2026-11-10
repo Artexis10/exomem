@@ -421,7 +421,10 @@ def _install(
     """Install the staged rows in one writer transaction; the vault state records the mode id before it commits.
 
     A refusal or a kill before the commit leaves the store without its mode row, which is file mode, whatever
-    the id says. A failure that leaves no store-mode row also drops the id, so the owner sees a clean refusal.
+    the id says. A failure that leaves no store-mode row withdraws the claim and, once the store
+    holds no claim, drops the id, so the owner sees a clean refusal. A claim that could not be
+    withdrawn keeps the id: the interrupted activation then names the rerun and the rollback, which
+    drops it.
     """
     authority_check = lambda: session.require(token)  # noqa: E731 - the one closure both id calls share
     state_migration.record_vault_store_compatibility(
@@ -437,14 +440,23 @@ def _install(
                 _install_rows(root, conn, source, staged, revision=revision, why=why)
     except BaseException:
         if not _store_row_says_store(writer.connection):
-            with suppress(Exception):
-                if claimed is not None:
+            if claimed is not None:
+                with suppress(Exception):
                     _withdraw(root, writer, before, claimed)
-            with suppress(Exception):
-                state_migration.record_vault_store_compatibility(
-                    root, authority_check=authority_check, active=False
-                )
+            if _holds_no_claim(writer):
+                with suppress(Exception):
+                    state_migration.record_vault_store_compatibility(
+                        root, authority_check=authority_check, active=False
+                    )
         raise
+
+
+def _holds_no_claim(writer) -> bool:
+    """Whether this store carries no claim of this root: unreadable counts as carrying one."""
+    try:
+        return marker.CLAIM_KEY not in marker.read_meta(writer.connection)
+    except sqlite3.Error:
+        return False
 
 
 def _require_no_other_claim(root: Path, writer) -> None:
@@ -458,7 +470,7 @@ def _require_no_other_claim(root: Path, writer) -> None:
         with writer.handle.transaction() as tx:
             marker.require_free(tx, root)
     except marker.HeldElsewhere as held:
-        raise availability.elsewhere_error(held.decision) from None
+        raise availability.elsewhere_error(held.order) from None
 
 
 def _record_claim(root: Path, writer) -> tuple[dict[str, str], marker.Decision]:
@@ -473,7 +485,7 @@ def _record_claim(root: Path, writer) -> tuple[dict[str, str], marker.Decision]:
             before = marker.read_meta(tx)
             return before, marker.record(tx, root)
     except marker.HeldElsewhere as held:
-        raise availability.elsewhere_error(held.decision) from None
+        raise availability.elsewhere_error(held.order) from None
 
 
 def _require_published(root: Path, session, token, writer, claimed: marker.Decision) -> None:
@@ -485,10 +497,16 @@ def _require_published(root: Path, session, token, writer, claimed: marker.Decis
     published = admission.publish_current_epoch(session, writer, token)
     shown = marker.read_replica(root).order.decision
     if shown is None or shown.id != claimed.id:
+        # A publication that finished but left no claim in the replica has no reason to report.
+        cause = (
+            "the publication finished, but the replica still does not show the claim"
+            if published.status == "published"
+            else f"the publication reported {published.reason or published.status}"
+        )
         raise OpError(
             "VAULT_STORE_CLAIM_NOT_PUBLISHED",
-            "the vault replica does not carry this root's store claim, so nothing was installed: "
-            f"{published.reason or published.status}",
+            f"the vault replica does not carry this root's store claim, so nothing was installed "
+            f"({cause})",
             "Fix what the publication reports, then run this command again.",
         )
 
@@ -496,19 +514,20 @@ def _require_published(root: Path, session, token, writer, claimed: marker.Decis
 def _withdraw(root: Path, writer, before: dict[str, str], claimed: marker.Decision) -> None:
     """Take back a claim whose install failed, so a refused migration leaves no claim behind.
 
-    A claim that the replica never carried is undone as it was. One that the replica carries, or
-    that cannot be told apart because the replica cannot be read, is superseded by a ``file``
-    decision: another root may have merged it already.
+    A claim that no readable replica carries is undone as it was, and a replica that cannot be read
+    counts as not carrying it: a ``file`` decision over a claim that nobody saw would outrank the
+    claim that another root makes next. One that the replica carries is superseded by a ``file``
+    decision, because another root may have merged it already.
     """
     shown = marker.read_replica(root)
-    unseen = shown.state in (marker.CLEAR, marker.ABSENT) and (
-        shown.order.decision is None or shown.order.decision.id != claimed.id
+    seen = shown.readable and (
+        shown.order.decision is not None and shown.order.decision.id == claimed.id
     )
     with writer.handle.transaction() as tx:
-        if unseen:
-            marker.restore(tx, before)
-        else:
+        if seen:
             marker.clear(tx, root)
+        else:
+            marker.restore(tx, before)
 
 
 def _install_rows(

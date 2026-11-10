@@ -2694,6 +2694,10 @@ def _store_mode_main(argv: list[str]) -> int:
     ) as error:
         code, message = getattr(error, "code", type(error).__name__), str(error)
         print(message if message.startswith(f"{code}:") else f"{code}: {message}", file=sys.stderr)
+        # An OpError carries what the owner changes next; a refusal without it leaves a dead end.
+        remediation = getattr(error, "remediation", None)
+        if remediation:
+            print(remediation, file=sys.stderr)
         details = getattr(error, "details", None)
         if details:
             print(json.dumps(details, sort_keys=True, default=str), file=sys.stderr)
