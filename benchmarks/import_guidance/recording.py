@@ -1,8 +1,8 @@
 """Record each arm's replies from its own code, so two arms differ only where the products differ.
 
 An arm is a checkout. `record_worker.py` runs inside that checkout's environment, makes the scenario's real tool
-calls (the product's terminal builder, its refusal envelope and its bootstrap) on a throwaway fixture vault,
-and the scripted server then serves what came back. A reply copied by hand into the scenario would be the same
+calls (the product's terminal builder, its refusal envelope and its bootstrap) on a throwaway fixture vault, or on a
+seeded vault when the scenario names a seed folder, and the scripted server then serves what came back. A reply copied by hand into the scenario would be the same
 for both arms by construction. The recording is made once per arm and scenario and then reused, so the ids it
 holds stay fixed for every run of that arm and the answer checks can look for them.
 """
@@ -60,20 +60,34 @@ def worker_env(arm: Arm, scratch: Path) -> dict[str, str]:
     }
 
 
+def seed_folder(scenario: Scenario) -> Path | None:
+    """The folder the scenario's `record.seed` names, relative to the scenario file; None when it names none."""
+    named = scenario.record.get("seed")
+    if named is None:
+        return None
+    return (scenario.path.parent / named if scenario.path else Path(named)).resolve()
+
+
 def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[str]:
     """Write the arm's recording of one scenario to `target` unless it exists. Returns the problems found."""
     if target.exists():
         return []
     if not scenario.record.get("steps"):
         return [f"{scenario.id} has no record steps"]
+    seed = seed_folder(scenario)
+    if seed is not None and not seed.is_dir():
+        return [f"{scenario.id}: the seed {seed} is not a folder"]
     scratch.mkdir(parents=True, exist_ok=True)
     plan = scratch / f"{scenario.id}.plan.json"
-    plan.write_text(json.dumps(scenario.record), encoding="utf-8")
+    plan.write_text(
+        json.dumps({**scenario.record, **({"engagement": scenario.engagement} if scenario.engagement else {})}),
+        encoding="utf-8",
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial")
     try:
         done = subprocess.run(  # noqa: S603
-            [sys.executable, str(WORKER), str(plan), str(arm.root), str(partial)],
+            [sys.executable, str(WORKER), str(plan), str(arm.root), str(partial), *([str(seed)] if seed else [])],
             cwd=scratch,
             env=worker_env(arm, scratch),
             capture_output=True,

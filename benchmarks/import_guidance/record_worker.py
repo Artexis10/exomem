@@ -1,7 +1,7 @@
 """Runs inside one arm's environment (`PYTHONPATH=<arm checkout>/src`): makes a scenario's real tool calls on a
 throwaway copy of that checkout's fixture vault and writes what the tools returned.
 
-    python record_worker.py <plan.json> <product root> <out.json>
+    python record_worker.py <plan.json> <product root> <out.json> [<seed folder>]
 
 The plan is the scenario's `record` object. Its `steps` run in order. A step is `{"tool", "arguments", "as"}`:
 `as` names the reply so a later step can read it (`{"$ref": "name.field"}`) and a scenario can serve it
@@ -10,6 +10,16 @@ The plan is the scenario's `record` object. Its `steps` run in order. A step is 
 top-level fields the reply must hold, so a scenario that assumes a state (indexing still pending) fails here
 instead of serving a different one. `{"settle_graph": true}` writes
 throwaway pages until the graph rebuild that a fresh vault starts has finished.
+
+With a seed folder the vault is not the fixture vault: it holds the arm's own scaffold with the seed's pages copied over
+it (`session_seed.py`, the same code a session-close run seeds with), and the recording writes nothing to it. A
+`settle_graph` step is refused there, because a throwaway page is one that `recall_context` could then serve.
+`"engagement"` in the plan pins `EXOMEM_PROMINENCE`, as a session-close run does for its case.
+
+A read step may carry `"warm": {"seconds": N, "ignore": [field, ...]}`. On a seeded vault the first read starts a
+background index pass and comes back cold (an empty slice, no leads), so the worker discards that read, waits N
+seconds, reads twice N seconds apart, and records the second reply only if it equals the first apart from the fields in
+`ignore` (ids that change on every call). A reply that is still changing fails the recording instead of being served.
 
 `"mode": "cloud"` in the plan makes the product report Exomem Cloud (`EXOMEM_CLOUD_CELL=1`), for this process only. The
 product refuses to build a Cloud server without a cell id and a bearer, so the worker invents throwaway ones; it makes
@@ -55,6 +65,23 @@ OFFLINE_ENV = {
 }
 
 
+def warmed_reply(call, tool: str, arguments: dict, warm: dict) -> dict:
+    """The reply of a read that the vault's background index pass has stopped changing; see the module docstring."""
+    seconds, ignore = float(warm["seconds"]), set(warm.get("ignore", ()))
+    call(tool, arguments)
+
+    def settled(reply: dict) -> dict:
+        return {key: value for key, value in reply.items() if key not in ignore}
+
+    time.sleep(seconds)
+    first = call(tool, arguments)
+    time.sleep(seconds)
+    second = call(tool, arguments)
+    if settled(first) != settled(second):
+        raise SystemExit(f"{tool} still changed between two reads {seconds:g}s apart: the index is not warm")
+    return second
+
+
 def resolve_refs(value: Any, replies: dict[str, Any], product: dict[str, str]) -> Any:
     """Replace `{"$ref": "name.field.sub"}` with that field of the named reply, and `{"$product": "name"}` with a
     value that the arm's own code computes (`product`)."""
@@ -73,12 +100,15 @@ def resolve_refs(value: Any, replies: dict[str, Any], product: dict[str, str]) -
     return value
 
 
-def main(plan_path: Path, product_root: Path, out_path: Path) -> None:
+def main(plan_path: Path, product_root: Path, out_path: Path, seed: Path | None = None) -> None:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    if seed is not None and any(step.get("settle_graph") for step in plan["steps"]):
+        raise SystemExit("settle_graph writes throwaway pages, which a seeded recording must not hold")
     scratch = Path(tempfile.mkdtemp(prefix="ig-record-"))
     state, vault = scratch / "state", scratch / "vault"
     state.mkdir()
-    shutil.copytree(product_root / "tests" / "fixtures", vault)
+    if seed is None:
+        shutil.copytree(product_root / "tests" / "fixtures", vault)
     os.environ.update(
         OFFLINE_ENV
         | {
@@ -87,6 +117,7 @@ def main(plan_path: Path, product_root: Path, out_path: Path) -> None:
             "EXOMEM_VAULT_PATH": str(vault),
             "EXOMEM_CONFIG_PATH": str(scratch / "no-such-exomem-config.json"),
         }
+        | ({"EXOMEM_PROMINENCE": plan["engagement"]} if plan.get("engagement") else {})
     )
     if plan.get("mode") == "cloud":
         os.environ.update(
@@ -104,8 +135,14 @@ def main(plan_path: Path, product_root: Path, out_path: Path) -> None:
 
     if not Path(exomem.__file__).resolve().is_relative_to(product_root / "src"):
         raise SystemExit(f"imported exomem from {exomem.__file__}, not from {product_root}/src")
-    authority = state_migration.assert_offline_migration_authority(source="write-narration")
-    state_migration.migrate_vault_state_offline(vault, authority=authority)
+    if seed is not None:
+        # `init_vault` has initialized this vault's state, as it does for a session-close run, so no migration follows.
+        import session_seed
+
+        session_seed.main(seed, vault, product_root)
+    else:
+        authority = state_migration.assert_offline_migration_authority(source="write-narration")
+        state_migration.migrate_vault_state_offline(vault, authority=authority)
     state_migration.reset_state_resolution_cache_for_tests()
     state_migration.require_vault_state_ready(vault)
     server_module.load_dotenv = lambda *args, **kwargs: None
@@ -134,7 +171,11 @@ def main(plan_path: Path, product_root: Path, out_path: Path) -> None:
             }
             arguments = {**earlier, **arguments}
         arguments = resolve_refs(arguments, replies, product)
-        reply = call(step["tool"], arguments)
+        reply = (
+            warmed_reply(call, step["tool"], arguments, step["warm"])
+            if "warm" in step
+            else call(step["tool"], arguments)
+        )
         for field, wanted in step.get("expect", {}).items():
             if reply.get(field) != wanted:
                 raise SystemExit(
@@ -174,4 +215,9 @@ def settle(call) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+    main(
+        Path(sys.argv[1]),
+        Path(sys.argv[2]),
+        Path(sys.argv[3]),
+        Path(sys.argv[4]) if len(sys.argv) > 4 else None,
+    )

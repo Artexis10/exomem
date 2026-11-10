@@ -59,6 +59,8 @@ class Scenario:
     record: dict = field(default_factory=dict)
     # What the judge is told about a write that only the call log can show: `{"tool", "saved", "not_saved"}`.
     outcome_facts: dict = field(default_factory=dict)
+    # The engagement level that the recorded product and the staged hooks run under; None leaves the product default.
+    engagement: str | None = None
 
 
 def resolve_shapes(reply: Any, shapes: Mapping[str, Any] | None) -> Any:
@@ -105,6 +107,7 @@ def load_scenario(path: Path, shapes: Mapping[str, Any] | None = None) -> Scenar
         reference=raw.get("reference", ""),
         record=dict(raw.get("record", {})),
         outcome_facts=dict(raw.get("outcome_facts", {})),
+        engagement=raw.get("engagement"),
     )
 
 
