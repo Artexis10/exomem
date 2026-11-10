@@ -44,6 +44,14 @@ from membench.outcome.stats import paired_interval
 from membench.outcome.workspace import head_of, pin
 from protocol.contracts import CONTRACTS_DIR, AmendmentAcknowledgmentPendingError
 
+
+@pytest.fixture(autouse=True)
+def _subscription_run(monkeypatch):
+    """A shell that carries an API key or a billing declaration must not decide what these tests run on."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("EXOMEM_OUTCOME_BILLING", raising=False)
+
+
 # What the operator's real service and vault would put in the environment of a shell that runs the harness.
 LIVE_ENV = {
     "EXOMEM_VAULT_PATH": "/live/vault",

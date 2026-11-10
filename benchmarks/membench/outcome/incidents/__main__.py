@@ -46,6 +46,7 @@ from epistemic.journeys.f27_replay import (
 
 from membench.trackc.witness_join import parse_stream_json_transcript
 
+from .. import billing
 from ..faults import init_faults
 from ..isolation import (
     ACTOR_MODEL,
@@ -229,7 +230,12 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
     seeded, done, record = play(case, arm, root, **session)
     transcript = parse_stream_json_transcript(done.stdout.splitlines())
     init = init_event(done.stdout)
-    record |= {"notional_usd": transcript.total_cost_usd, "model_reported": init.get("model")}
+    record |= {
+        "notional_usd": transcript.total_cost_usd,
+        "model_reported": init.get("model"),
+        "api_key_source": init.get("apiKeySource"),
+        "billing": billing.of_key_source(init.get("apiKeySource")),
+    }
     fault = fault_reason(done, transcript) or "; ".join(
         init_faults(init, model=session["model"], exomem=True)
     )

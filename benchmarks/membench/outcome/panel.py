@@ -118,6 +118,7 @@ def projection(suite: str, report: dict) -> dict:
         "struck_units": report.get("struck_units") or [],
         "judge": report.get("judge"),
         "judge_family": report.get("judge_family"),
+        "billing": report.get("billing"),
     }
 
 
@@ -200,6 +201,8 @@ def run_panel(
             if previous is None
             else {
                 "version": previous["version"],
+                # A panel stored before the billing field refused every source but the subscription login.
+                "billing": previous["actor"].get("billing", ["subscription"]),
                 "suites": {
                     s: compare(s, suites[s], previous["suites"][s])
                     for s in suites
@@ -233,13 +236,14 @@ def render(document: dict) -> str:
     lines = [
         f"# Outcome panel {document['version']}",
         "",
-        f"{document['label'].capitalize()}. Instrument evidence from subscription actors, not a gate and not a suite result.",
+        f"{document['label'].capitalize()}. Instrument evidence from actors billed to {', '.join(actor.get('billing') or ['unknown'])}, not a gate and not a suite result.",
         "",
         "## Actor and product",
         "",
         f"- CLI: {', '.join(actor['cli']) or 'unknown'}",
         f"- Model requested: {', '.join(actor['model_requested']) or 'unknown'}",
         f"- Model reported: {', '.join(actor['model_reported']) or 'unknown'}",
+        f"- Billing source: {', '.join(actor.get('billing') or []) or 'unknown'}",
         f"- Exomem: {', '.join(actor['exomem_version']) or 'unknown'}",
         "",
     ]
@@ -273,6 +277,13 @@ def render(document: dict) -> str:
         lines += [f"- {line}" for line in summary(report)] + [""]
     if document["vs_previous"]:
         lines += [f"## Against {document['vs_previous']['version']}", ""]
+        if document["vs_previous"]["billing"] != actor.get("billing"):
+            lines += [
+                f"Billing sources differ: this panel ran on {', '.join(actor.get('billing') or ['unknown'])}, "
+                f"{document['vs_previous']['version']} on {', '.join(document['vs_previous']['billing'])}. "
+                "Same model, different billing: read the difference as a run condition.",
+                "",
+            ]
         for suite, arms in document["vs_previous"]["suites"].items():
             for label, entry in arms.items():
                 if entry["mean_difference"] is None:

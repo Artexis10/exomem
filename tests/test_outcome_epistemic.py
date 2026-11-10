@@ -28,6 +28,14 @@ from membench.outcome.epistemic import run as epistemic_run
 from membench.outcome.faults import RETRIES
 from membench.outcome.stats import paired_interval, stratified_bootstrap_ci
 
+
+@pytest.fixture(autouse=True)
+def _subscription_run(monkeypatch):
+    """A shell that carries an API key or a billing declaration must not decide what these tests run on."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("EXOMEM_OUTCOME_BILLING", raising=False)
+
+
 # The shipped arms read their instruction block out of docs/prominence.md.
 pytestmark = pytest.mark.reads_repository_docs
 

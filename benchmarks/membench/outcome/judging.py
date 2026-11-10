@@ -21,6 +21,7 @@ from epistemic.journeys.f27_replay import discover_agent_envelope, refuse_unsafe
 
 from membench.utility.switch_eval.judge import JudgeError, _refuse_tool_use, claude_argv, codex_argv
 
+from . import billing
 from .isolation import claude_env
 
 #: A judge backend per model family; the choice is the operator's, the default model is the strongest one.
@@ -67,6 +68,21 @@ class JudgeSpec:
         return JUDGE_FAMILY[self.backend]
 
 
+def require_key_matches_billing(env: dict[str, str]) -> None:
+    """Refuse a judge whose environment would bill another account than the declared one.
+
+    The judge's json result names no credential source, so the environment is the only evidence: the
+    CLI bills the key when ``ANTHROPIC_API_KEY`` is set, and the login when it is not.
+    """
+    declared = billing.declared()
+    if bool(env.get("ANTHROPIC_API_KEY")) != (declared == "credits"):
+        raise SystemExit(
+            f"the run declares {billing.ENV_VAR}={declared}, but ANTHROPIC_API_KEY is "
+            f"{'set' if env.get('ANTHROPIC_API_KEY') else 'not set'} for the judge: "
+            "set both to the same account"
+        )
+
+
 _STDIN_PROMPT = "<prompt on stdin>"
 
 
@@ -89,6 +105,8 @@ class Judge:
         self.empty_mcp.write_text('{"mcpServers": {}}')
         self.schema_file = work / "verdict-schema.json"
         self.env = claude_env()[0]
+        if spec.backend == "claude":
+            require_key_matches_billing(self.env)
 
     def argv(self, schema: dict, out: Path) -> list[str]:
         """The judge's command. Both backends read the prompt from stdin: a matter's deliverable can
@@ -258,12 +276,20 @@ def judge_all(
     One judging directory has one judge: a different spec refuses, so a report never mixes judges.
     """
     stored = judge_dir / "judge.json"
-    if stored.exists() and json.loads(stored.read_text()) != spec.record():
-        raise SystemExit(
-            f"{judge_dir} was judged by {stored.read_text()}; one judge judges every item. "
-            f"Judge with that spec, or use another --run-id"
-        )
-    stored.write_text(json.dumps(spec.record(), indent=2))
+    # The claude judge's billing is declared, not observed: its json result carries no credential source.
+    # A judging directory from before the billing field ran on the subscription login.
+    claude = spec.backend == "claude"
+    record = {**spec.record(), **({"billing": billing.declared()} if claude else {})}
+    if stored.exists():
+        have = json.loads(stored.read_text())
+        if claude:
+            have.setdefault("billing", "subscription")
+        if have != record:
+            raise SystemExit(
+                f"{judge_dir} was judged by {stored.read_text()}; one judge judges every item. "
+                f"Judge with that spec and billing ({json.dumps(record)}), or use another --run-id"
+            )
+    stored.write_text(json.dumps(record, indent=2))
     judge = Judge(spec, judge_dir)
     sample = math.ceil(len(items) * rejudge_fraction)
     rejudge = random.Random(seed + 1).sample(items, sample)

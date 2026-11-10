@@ -55,6 +55,7 @@ from types import MappingProxyType
 from typing import Any
 
 import yaml
+from membench.outcome import billing
 from membench.trackc.natural_prompt_driver import write_mcp_config
 from membench.trackc.witness_join import parse_stream_json_transcript
 
@@ -275,8 +276,12 @@ def surface_mismatch(
         auto = str((init.get("memory_paths") or {}).get("auto") or "")
         if not auto or not Path(auto).is_relative_to(profile):
             return f"the session ran outside the pinned profile {profile}: memory path {auto!r}"
-        if init.get("apiKeySource") != "none":
-            return f"the session used API key source {init.get('apiKeySource')!r}, not the login"
+        declared = billing.declared()
+        if init.get("apiKeySource") != billing.KEY_SOURCES[declared]:
+            return (
+                f"the session reported credential source {init.get('apiKeySource')!r}, "
+                f"not the declared {declared} ({billing.KEY_SOURCES[declared]!r})"
+            )
         loaded = {
             str(p.get("path"))
             for p in init.get("plugins") or ()
@@ -561,6 +566,8 @@ def _record_invocation(
             "usage": result.get("usage"),
             "total_cost_usd": result.get("total_cost_usd"),
             "model": init.get("model"),
+            "api_key_source": init.get("apiKeySource"),
+            "billing": billing.of_key_source(init.get("apiKeySource")),
             "claude_code_version": init.get("claude_code_version"),
             "stream": proc.stdout or "",
             "stderr": proc.stderr or "",
@@ -858,6 +865,7 @@ def _table_row(record: Mapping[str, Any]) -> dict[str, Any]:
         "invocations": len(invocations),
         "agent_turns": None if None in turns else sum(turns),
         "models": sorted({call["model"] for call in invocations if call["model"]}),
+        "billing": sorted({call["billing"] for call in invocations}),
         "client_versions": sorted(
             {call["claude_code_version"] for call in invocations if call["claude_code_version"]}
         ),
@@ -937,6 +945,8 @@ def run_driver(
         "cli_executable": str(envelope.executable),
         "cli_version": envelope.version,
         "model": model,
+        # The billing source every session must report; each invocation records the one it reported.
+        "billing": billing.declared(),
         "max_turns_per_invocation": max_turns,
         "product": product,
         "prominence": {shape: client.ARMS[shape].prominence for shape in shapes},
@@ -1017,6 +1027,7 @@ def write_report(out_dir: Path, manifest: Mapping[str, Any], tables: Sequence[Ma
         "partial": "aborted" in manifest or not requested <= finished,
         "aborted": manifest.get("aborted"),
         "claim_status": manifest["claim_status"],
+        "billing": manifest["billing"],
         "hookless_label": manifest["hookless_label"],
         "cases": list(tables),
     }

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import discover_agent_envelope
 
+from . import billing
 from .isolation import REPO_ROOT, product_version
 
 #: What a call that continues a run shares with that run: the product under test and the CLI that drives it.
@@ -78,6 +79,9 @@ def observed(init: dict | None) -> dict:
     init = init or {}
     return {
         "model_reported": init.get("model"),
+        # What paid for the session: the CLI's own value, and its billing name (``billing.py``).
+        "api_key_source": init.get("apiKeySource"),
+        "billing": billing.of_key_source(init.get("apiKeySource")),
         "tools": sorted(init.get("tools") or []),
         "mcp_servers": init.get("mcp_servers"),
         "skills": sorted(init.get("skills") or []),
@@ -92,6 +96,7 @@ def run_identity(*run_dirs: Path) -> dict:
         "model_requested": set(),
         "model_reported": set(),
         "exomem_version": set(),
+        "billing": set(),
     }
     for run_dir in run_dirs:
         for path in [*run_dir.glob("*/manifest.json"), *run_dir.glob("*/*/result.json")]:
@@ -102,5 +107,6 @@ def run_identity(*run_dirs: Path) -> dict:
             seen["cli"].add(actor.get("cli"))
             seen["model_requested"].add(actor.get("model_requested") or data.get("model_requested"))
             seen["model_reported"].add((actor.get("observed") or {}).get("model_reported"))
+            seen["billing"].add((actor.get("observed") or {}).get("billing"))
             seen["exomem_version"].add((actor.get("product") or {}).get("exomem_version"))
     return {key: sorted(v for v in values if v) for key, values in seen.items()}

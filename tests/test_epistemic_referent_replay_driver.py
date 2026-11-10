@@ -585,7 +585,7 @@ def test_the_default_client_profile_is_refused(tmp_path) -> None:
     ("check", "shape", "init", "plugin", "extra", "reason"),
     [
         ("abort", "hookless", {"memory_paths": {"auto": "/elsewhere/projects/x/memory/"}}, False, None, "pinned profile"),
-        ("abort", "hookless", {"apiKeySource": "ANTHROPIC_API_KEY"}, False, None, "API key"),
+        ("abort", "hookless", {"apiKeySource": "ANTHROPIC_API_KEY"}, False, None, "credential source"),
         ("abort", "hookless", {}, True, None, "loaded plugins"),
         ("abort", "hooked", {}, False, None, "loaded plugins"),
         ("abort", "hookless", {}, False, "hook", "hookless shape"),
@@ -785,3 +785,29 @@ def test_pointer_origin_and_target_remain_governed(tmp_path, withheld, memory_or
         assert f"Knowledge Base/{withheld}.md" not in json.dumps(guarded)
         if withheld == "origin":
             assert origin_ref not in json.dumps(guarded)
+
+
+@pytest.mark.parametrize(
+    ("declared", "reported", "aborts"),
+    [
+        ("credits", "ANTHROPIC_API_KEY", False),
+        ("credits", "none", True),
+        ("subscription", "ANTHROPIC_API_KEY", True),
+        ("credits", "user", True),
+    ],
+)
+def test_f33_accepts_only_the_declared_billing_source(
+    tmp_path, monkeypatch, declared: str, reported: str, aborts: bool
+) -> None:
+    """Fails when a credit-billed session aborts the f33 run, or when a session on the other source
+    (or one the CLI does not document) is scored, which would mix billing sources inside one run."""
+
+    from epistemic.journeys import f27_replay as client
+
+    monkeypatch.setenv("EXOMEM_OUTCOME_BILLING", declared)
+    profile = _profile(tmp_path)
+    stdout = _stream(_init(profile, apiKeySource=reported), _result())
+    abort = _driver().surface_mismatch(
+        stdout, arm=client.ARMS["hookless"], plugin_dir=client.PLUGIN_DIR, profile=profile
+    )
+    assert (abort is not None) is aborts
