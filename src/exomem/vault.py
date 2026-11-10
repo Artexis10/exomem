@@ -6161,7 +6161,7 @@ def _batch_atomic_write_locked(
     canonical_started_monotonic = _fast_ack_monotonic()
     additive_guard = None
     try:
-        from . import vocabulary_gate
+        from . import vocabulary_auxiliaries, vocabulary_gate
         from .writer_lease import (
             log_active_mutation_phase,
             mark_active_mutation_committed,
@@ -6170,6 +6170,11 @@ def _batch_atomic_write_locked(
 
         additive_guard = vocabulary_gate.begin_batch(
             vault_root, staged, snapshots, auxiliary_manifest=_vocabulary_auxiliaries
+        )
+        # The staged plan no longer changes, so the per-write access check reuses one set of its images.
+        plan_images = (
+            tuple(vocabulary_auxiliaries.planned_images(vault_root, writes))
+            if vault_root is not None and _vocabulary_auxiliaries is not None else ()
         )
         validate_active_write_fence()
         if _prepare is None:
@@ -6209,6 +6214,7 @@ def _batch_atomic_write_locked(
                     granted_paths=(
                         additive_guard.effect_paths() if additive_guard is not None else frozenset()
                     ),
+                    planned_images=plan_images,
                 )
                 recheck_path_guards(
                     root,
@@ -6561,6 +6567,7 @@ def _validate_batch_write_access(
     auxiliary_manifest: Any | None = None,
     defer_registry: bool = False,
     granted_paths: frozenset[str] = frozenset(),
+    planned_images: tuple[Any, ...] | None = None,
 ) -> None:
     """Fail closed when any planned target is outside or newly write-protected.
 
@@ -6568,7 +6575,8 @@ def _validate_batch_write_access(
     caller's writable scopes. `defer_registry` leaves that storage to the later check.
     `granted_paths` are the paths that the authority's reservation for this exact batch
     names; the registry storage whose sealed primary is among them skips the writable-scope
-    rule, and every other write keeps it.
+    rule, and every other write keeps it. `planned_images` are the full plan's images when
+    the caller already built them, so a batch that revalidates per write hashes its plan once.
     """
     from . import access, vocabulary_auxiliaries, writer_lease
     from .governance import connector_boundary
@@ -6577,7 +6585,9 @@ def _validate_batch_write_access(
     writes = tuple(writes)
     full_plan = writes if proposed is None else tuple(proposed)
     roles = vocabulary_auxiliaries.validate(
-        vault_root, vocabulary_auxiliaries.planned_images(vault_root, full_plan), auxiliary_manifest,
+        vault_root,
+        vocabulary_auxiliaries.planned_images(vault_root, full_plan) if planned_images is None else planned_images,
+        auxiliary_manifest,
     )
     primary_bound_paths = {
         path for path, role in roles.items() if role in vocabulary_auxiliaries.PRIMARY_BOUND_ROLES

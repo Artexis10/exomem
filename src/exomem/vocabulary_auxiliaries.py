@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
@@ -89,6 +89,8 @@ def seal(
             path = _relative(root, Path(write.path))
             if path == primary_path:
                 raise ValueError("VOCABULARY_AUXILIARY_PRIMARY_COLLISION")
+            if not original_in_bound(primary_path, path):
+                raise ValueError("VOCABULARY_AUXILIARY_PATH_INVALID")
             entries.append(DerivedAuxiliary(role, path, None, write.content.sha256))
             continue
         if role not in _ROLES or not isinstance(getattr(write, "content", None), str) or guard is None:
@@ -133,8 +135,8 @@ def seal(
 def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
     """Adapt complete guarded plans to the same validator as staged images.
 
-    Lazy on purpose: `validate` reads no image without a manifest, and a batch of many writes
-    revalidates its plan once per write, so building the images up front hashed every write each time.
+    Lazy on purpose: `validate` reads no image without a manifest. A batch that revalidates its plan
+    once per write builds these images once and passes them to every check.
     """
     root = Path(vault_root).resolve()
     for write in writes:
@@ -156,18 +158,41 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
         )
 
 
-def declared_originals(vault_root: Path, manifest: Any) -> dict[str, str]:
-    """The Source originals that one sealed binding, or a tuple of them, declares: path to sha256.
+def original_in_bound(primary_path: str, path: str) -> bool:
+    """Whether an original sits beside its Source page, or in a container's payload folder beside it.
 
-    `validate` checks that each claim is exclusive to one primary.
+    An original is never a Markdown page or a registry file: those carry structural effects that
+    the gate must classify, and no writer stores an original under either name.
+    """
+    from . import document_containers
+    from .kbdir import kb_dirname
+
+    folded = path.casefold()
+    if folded.endswith(".md") or folded.startswith(f"{kb_dirname()}/_Schema/".casefold()):
+        return False
+    folder = PurePosixPath(primary_path).parent
+    container = document_containers.container_of(path)
+    return PurePosixPath(path).parent == folder or (
+        container is not None and PurePosixPath(container).parent == folder
+    )
+
+
+def declared_originals(vault_root: Path, manifest: Any) -> dict[str, tuple[str, str]]:
+    """The Source originals that one sealed binding, or a tuple of them, declares.
+
+    Each path maps to its sha256 and its Source page. `validate` checks that each claim is
+    exclusive to one primary.
     """
     root = Path(vault_root).resolve()
     manifests = manifest if isinstance(manifest, tuple) else () if manifest is None else (manifest,)
-    declared: dict[str, str] = {}
+    declared: dict[str, tuple[str, str]] = {}
     for item in manifests:
         if not isinstance(item, DerivedAuxiliaryManifest) or item._seal is not _SEAL or item.root != root:
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
-        declared.update((claim.path, claim.after_sha256) for claim in item.entries if claim.role == SOURCE_ORIGINAL)
+        declared.update(
+            (claim.path, (claim.after_sha256, item.primary_path))
+            for claim in item.entries if claim.role == SOURCE_ORIGINAL
+        )
     return declared
 
 

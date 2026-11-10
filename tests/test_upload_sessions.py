@@ -426,39 +426,12 @@ def test_an_incomplete_source_rollback_retains_the_upload_without_another_captur
     ("dataset.bin", b"\0" * (vocabulary_effects.MAX_IMAGE_BYTES + 1)),  # Above what the gate reads into memory.
 ], ids=["markdown", "over-image-bound"])
 def test_an_activated_vault_commits_an_uploaded_source_with_its_original(
-    vault, warm_managed_cell, monkeypatch, filename, data,
+    activated_vault, monkeypatch, filename, data,
 ) -> None:
     """An activated vault keeps a Source's original as opaque bytes beside the page, whatever its format or size."""
-    from test_vocabulary_authority import (
-        _activate,
-        _principal,
-        _store,
-        install_unit_session_boundary,
-    )
+    from exomem import commands
 
-    from exomem import (
-        activation_manifest,
-        commands,
-        epistemic_graph,
-        vocabulary_admission,
-        vocabulary_authority,
-    )
-    from exomem.governance.principal import library_scope
-
-    install_unit_session_boundary(monkeypatch)
-    with library_scope():
-        activation_manifest.ensure_manifest(vault)
-    warm_managed_cell(vault)
-    with library_scope():
-        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    authority = _store(vault)
-    _activate(authority, _principal())
-    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _root: authority)
-    # Admission binds its authority factory at import, so a patched class alone leaks between tests.
-    for admission in (vocabulary_admission.runtime_admission, vocabulary_admission.require_mutation_admission):
-        monkeypatch.setitem(admission.__kwdefaults__, "authority_factory", lambda _root: authority)
-    assert authority.runtime_status().mode == "v2"
-
+    vault = activated_vault
     client = _client(vault, monkeypatch)
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://example.invalid")
     monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)

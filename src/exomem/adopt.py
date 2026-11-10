@@ -42,6 +42,7 @@ from .vault import (
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
+    escape_wikilinks_for_log,
     kb_root,
     parse_frontmatter,
     plan_log_entries,
@@ -1001,7 +1002,8 @@ def commit_import_items(
         where = ", ".join(f"Sources/{folder}/" for folder in folders)
         top_index = kb / "index.md"
         if top_index.exists():
-            summary = (
+            # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
+            summary = escape_wikilinks_for_log(
                 f"{where} (imported sources) - copied "
                 f"{len(copied)} selected file(s) with original path/hash provenance"
             )

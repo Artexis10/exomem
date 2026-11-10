@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import vault, vocabulary_admission, vocabulary_authority, vocabulary_gate
+from exomem import vault, vocabulary_authority, vocabulary_gate
 from exomem.governance.principal import library_scope, request_scope
 
 
@@ -346,9 +346,6 @@ def _activated_root(tmp_path, monkeypatch):
     authority = _store(root)
     _activate(authority, _principal())
     monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _: authority)
-    # Admission binds its authority factory at import, so a patched class alone leaks between tests.
-    for admission in (vocabulary_admission.runtime_admission, vocabulary_admission.require_mutation_admission):
-        monkeypatch.setitem(admission.__kwdefaults__, "authority_factory", lambda _root: authority)
     return root
 
 
@@ -400,3 +397,73 @@ def test_v2_generic_write_of_a_non_markdown_file_without_a_source_page_is_refuse
         vault.batch_atomic_write([original], vault_root=root, post_commit_fanout=False)
     assert not original.path.exists()
 
+
+
+def test_v2_source_original_declared_as_a_markdown_page_is_refused(activated_vault):
+    """A page declared as an original would skip classification, so its entity and links would land ungoverned."""
+    import dataclasses
+
+    from exomem import vocabulary_auxiliaries
+
+    root = activated_vault
+    page = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt.md", "---\ntype: source\n---\n# Notes\n",
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    smuggled = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/smuggled.md",
+        _prepared(b"---\nentity_type: guild\n---\n# Smuggled\n\nSee [[Unrelated page]].\n"),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    with pytest.raises(ValueError, match="VOCABULARY_AUXILIARY_PATH_INVALID"):
+        vocabulary_auxiliaries.seal(root, primary=page, derived=[(vocabulary_auxiliaries.SOURCE_ORIGINAL, smuggled)])
+
+    # A declaration that reaches the gate without `seal`'s check must meet the same bound there.
+    forged = dataclasses.replace(
+        vocabulary_auxiliaries.seal(root, primary=page, derived=[]),
+        entries=(vocabulary_auxiliaries.DerivedAuxiliary(
+            vocabulary_auxiliaries.SOURCE_ORIGINAL, "Knowledge Base/Sources/Sessions/smuggled.md",
+            None, smuggled.content.sha256,
+        ),),
+    )
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="declared Source original is outside its Source",
+    ):
+        vault.batch_atomic_write(
+            [page, smuggled], vault_root=root, post_commit_fanout=False, _vocabulary_auxiliaries=forged,
+        )
+    assert not page.path.exists()
+    assert not smuggled.path.exists()
+
+
+def test_v2_refuses_an_undeclared_write_above_the_image_bound_without_reading_it(tmp_path, monkeypatch):
+    """Reading an oversized image into memory only to refuse it is the allocation the byte bound exists to prevent."""
+    import os
+
+    from exomem import vocabulary_effects
+
+    class CountingOS:
+        """`os` as the gate sees it, counting the bytes that the gate reads."""
+
+        read_bytes = 0
+
+        def read(self, descriptor, count):
+            chunk = os.read(descriptor, count)
+            self.read_bytes += len(chunk)
+            return chunk
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    root = _activated_root(tmp_path, monkeypatch)
+    counting = CountingOS()
+    monkeypatch.setattr(vocabulary_gate, "os", counting)
+    blob = vault.PlannedWrite(
+        root / "Knowledge Base/Evidence/blob.bin", _prepared(b"\0" * (vocabulary_effects.MAX_IMAGE_BYTES + 1)),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+
+    with library_scope(), pytest.raises(vocabulary_authority.VocabularyAuthorityDenied, match="byte bound"):
+        vault.batch_atomic_write([blob], vault_root=root, post_commit_fanout=False)
+    assert counting.read_bytes == 0
+    assert not blob.path.exists()

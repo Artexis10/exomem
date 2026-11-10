@@ -58,9 +58,11 @@ from .vault import (
     _NativePrepared,
     batch_atomic_write,
     content_hash,
+    escape_wikilinks_for_log,
     kb_root,
     parse_frontmatter,
     read_guarded_text,
+    refuse_busy_if_planned_write_moved,
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
@@ -942,7 +944,18 @@ def add(
         raise
     except source_capture.SourceCaptureError:
         raise
-    except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError):
+    except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError) as error:
+        if isinstance(error, PathGuardError) and error.code != "PATH_VARIANT_EXISTS":
+            # A writer outside the boundary moved an index or log that this capture planned: a retry re-plans it.
+            planned = [write for _role, write in derived]
+            refuse_busy_if_planned_write_moved(
+                vault_root,
+                (*required_guards, *(
+                    write.guard for write in writes
+                    if write.guard is not None and not any(write is auxiliary for auxiliary in planned)
+                )),
+                planned,
+            )
         if correction_plan is not None:
             raise ValueError("SOURCE_CORRECTION_STALE: correction inputs changed before commit; read the current Source and retry") from None
         raise
@@ -1630,11 +1643,15 @@ def _activity_summary(
     source_type: str,
     tags: list[str],
 ) -> str:
-    """One-liner for the top index's Recent activity bullet."""
+    """One-liner for the top index's Recent activity bullet.
+
+    The index is a derived output bound to the Source page, so the gate never classifies its
+    links: the caller's title and tags stay inert text here, as they do in the log body.
+    """
     base = f"`{rel_source_no_ext.replace(kb_prefix(), '')}` (source, {source_type}, mobile capture via exomem)"
     excerpt = f"\"{title.strip()}\""
     tags_part = f"; tags: {tags}" if tags else ""
-    return f"{base} — {excerpt}{tags_part}"
+    return f"{base} — {escape_wikilinks_for_log(excerpt + tags_part)}"
 
 
 def revision_activity_writes(

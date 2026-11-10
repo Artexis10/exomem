@@ -217,7 +217,7 @@ def _auxiliary_roles(root: Path, images, manifest) -> dict[str, str]:
         ) from error
 
 
-def _declared_originals(root: Path, manifest) -> dict[str, str]:
+def _declared_originals(root: Path, manifest) -> dict[str, tuple[str, str]]:
     from . import vocabulary_auxiliaries
     try:
         return vocabulary_auxiliaries.declared_originals(root, manifest)
@@ -238,6 +238,7 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         return None
     if status.mode != "v2":
         raise vocabulary_authority.VocabularyAuthorityUnavailable("activated authority is unavailable")
+    from . import vocabulary_auxiliaries
     from .kbdir import kb_dirname
 
     originals = _declared_originals(root, auxiliary_manifest)
@@ -256,8 +257,12 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
             continue
         if relative in originals:
             # A Source original is opaque content under its page: it has no structural effect, so its
-            # bytes are neither read nor classified. It binds only as new bytes of its declared digest.
-            if snapshot is not None or artifact.content_hash != originals[relative]:
+            # bytes are neither read nor classified. It binds only as new bytes of its declared digest,
+            # beside its page, and never as a page or registry file that would skip classification.
+            digest, page = originals[relative]
+            if not vocabulary_auxiliaries.original_in_bound(page, relative):
+                raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original is outside its Source")
+            if snapshot is not None or artifact.content_hash != digest:
                 raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
             unmatched.discard(relative)
             continue
