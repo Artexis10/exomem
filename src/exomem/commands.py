@@ -7049,13 +7049,10 @@ def op_activate_context(
                             request_budget_module.current() is not None
                             # The anchors rollback keeps its abstention for an exhausted budget; only maps serves what it found.
                             and working_set_runtime_module.activation_packet_mode() == "maps"
+                            and (activation_seconds := request_budget_module.activation_budget_seconds()) is not None
                         ):
-                            # A request that carries a deadline gives the activation its own, nearer one.
-                            activation_scope.enter_context(
-                                request_budget_module.capped(
-                                    request_budget_module.activation_budget_seconds()
-                                )
-                            )
+                            # A request that carries a deadline gives the activation the nearer one its operator set.
+                            activation_scope.enter_context(request_budget_module.capped(activation_seconds))
                         # Owed before the body runs, so its characters come out of the map's budget
                         # and a full map cannot starve it.
                         capture_policy = capture_carrier_module.current(

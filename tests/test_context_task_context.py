@@ -727,8 +727,8 @@ def test_a_deadline_during_the_text_query_stops_it_short_of_the_deadline_and_ser
     def stalls_past_the_query_share(self, conn, *args, **kwargs):
         # Only the task text query keeps raw material and leaves navigation out; no other lane asks for that pair.
         if kwargs.get("exclude_navigation") and not kwargs.get("exclude_raw_material"):
-            # 12 s of the 15 s the activation gets: past what the query may spend, with the projection reserve still unspent.
-            clock[0] += 12.0
+            # 46 s of the 50 s request: past what the query may spend, with the projection reserve still unspent.
+            clock[0] += 46.0
             try:
                 conn.execute(
                     "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500000) "
