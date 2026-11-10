@@ -159,21 +159,24 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
 
 
 def original_in_bound(primary_path: str, path: str) -> bool:
-    """Whether an original sits beside its Source page, or in a container's payload folder beside it.
+    """Whether an original sits beside its Source page, or in the payload folder of that page's container.
 
     An original is never a Markdown page or a registry file: those carry structural effects that
-    the gate must classify, and no writer stores an original under either name.
+    the gate must classify, and no writer stores an original under either name. Nor is it a spelling
+    that a platform reads as another name, such as `x.md.` for `x.md` on Windows.
     """
-    from . import document_containers
-    from .kbdir import kb_dirname
+    from . import document_containers, reserved_paths
+    from .vocabulary_effects import _SCHEMA_PREFIX
 
     folded = path.casefold()
-    if folded.endswith(".md") or folded.startswith(f"{kb_dirname()}/_Schema/".casefold()):
+    if (
+        folded.endswith(".md") or folded.startswith(_SCHEMA_PREFIX.casefold())
+        or reserved_paths.classify_logical(path).disposition is reserved_paths.PathDisposition.INVALID
+    ):
         return False
-    folder = PurePosixPath(primary_path).parent
-    container = document_containers.container_of(path)
-    return PurePosixPath(path).parent == folder or (
-        container is not None and PurePosixPath(container).parent == folder
+    # A container's page is `<artifact>.md`, so the page names the one container whose payloads it owns.
+    return PurePosixPath(path).parent == PurePosixPath(primary_path).parent or (
+        document_containers.container_of(path) == primary_path.removesuffix(".md")
     )
 
 

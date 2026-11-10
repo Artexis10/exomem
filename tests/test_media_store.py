@@ -1702,6 +1702,9 @@ def test_a_ticket_upload_is_admitted_from_the_recorded_census_and_refused_only_o
     evidence = _post(upload_env, _prepare(upload_env, data, lane="evidence"), data, filename="table.csv",
                      lane="evidence")
     assert evidence.status_code == 201, evidence.text
+    # An import archive is unpacked into a stage, never stored as an original, so it is not charged either.
+    archive = _post(upload_env, _prepare(upload_env, data, lane="import"), data, filename="folder.tar", lane="import")
+    assert archive.status_code == 201, archive.text
 
 
 def test_a_source_ticket_upload_that_its_length_shows_above_the_allowance_is_refused_before_its_body(

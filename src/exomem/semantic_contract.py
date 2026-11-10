@@ -27,6 +27,7 @@ from . import (
     activation_manifest,
     call_spans,
     capabilities,
+    find_corpus,
     foreground_priority,
     freshness,
     lifecycle_statuses,
@@ -2294,6 +2295,7 @@ def _corpus_census(root: Path) -> tuple | None:
     request_budget.checkpoint()
     entries: set[tuple[str, str, int, int]] = set()
     kb = vault.kb_root(root)
+    owned = _store_census_owns(root)
 
     def strict_walk(directory: Path) -> None:
         # Mirror of _build_identity_census: every canonical entry under KB,
@@ -2303,6 +2305,8 @@ def _corpus_census(root: Path) -> tuple | None:
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
+            if owned is not None and owned(path.relative_to(root).as_posix()):
+                continue
             # Alias refusal comes first and applies to EVERY entry, exactly as
             # in the walk this mirrors: an aliased subtree can hide or
             # duplicate pages whatever its name looks like, so filtering by
@@ -2342,6 +2346,8 @@ def _corpus_census(root: Path) -> tuple | None:
         for child in os.scandir(directory):
             request_budget.checkpoint()
             path = Path(child.path)
+            if owned is not None and owned(path.relative_to(root).as_posix()):
+                continue
             if child.is_dir():
                 if vault.in_excluded_scan_dir(path.relative_to(root).as_posix()):
                     continue
@@ -2374,15 +2380,11 @@ def _corpus_census(root: Path) -> tuple | None:
                 raise _CensusUnsafe
             strict_walk(kb)
         loose_walk(root)
-        for extra in _config_inputs(root):
-            request_budget.checkpoint()
-            marker = str(extra.relative_to(root).as_posix())
-            try:
-                info = extra.stat()
-            except FileNotFoundError:
-                entries.add((marker, "absent", -1, -1))
-            else:
-                entries.add((marker, _config_kind(root, extra), info.st_size, info.st_mtime_ns))
+        request_budget.checkpoint()
+        config = _config_census(root)
+        if config is None:
+            raise OSError("the semantic configuration inputs could not be read")
+        entries.update(config)
     except _CensusUnsafe:
         # A deliberate refusal: the tree holds an alias or a nonregular page.
         log.debug("corpus census refused an unsafe tree at %s", root)
@@ -2532,12 +2534,41 @@ def validity_stamp_current(
     return fresh_review is not None and fresh_review == sc_token[1]
 
 
+#: The census entry that stands for every stored page of a store-mode vault. A path never starts
+#: with "<", so it names no file.
+_STORE_CENSUS_MARKER = "<store>"
+
+
+def _store_census_owns(root: Path) -> Callable[[str], bool] | None:
+    """In store mode, the test for a path whose state the store revision stands for; else None.
+
+    A stored page's file is a projection that may trail the store, so the census never stats it:
+    its entry is the store's revision, which every commit moves.
+    """
+    from .vault_store import ownership
+
+    if not find_corpus.store_serves(root):
+        return None
+    return lambda rel: ownership.classify(rel) is ownership.Ownership.PAGE
+
+
 def _config_census(root: Path) -> tuple[tuple[str, str, int, int], ...] | None:
-    """O(1) freshness stamp for non-Markdown semantic inputs."""
+    """O(1) freshness stamp for non-Markdown semantic inputs.
+
+    In store mode it also holds the store's revision, so a commit that a file event never reports
+    still retires a cached context.
+    """
     entries: list[tuple[str, str, int, int]] = []
+    owned = _store_census_owns(root)
+    if owned is not None:
+        from .vault_store import read
+
+        entries.append((_STORE_CENSUS_MARKER, "r", read.current_revision(root), 0))
     try:
         for extra in _config_inputs(root):
             marker = extra.relative_to(root).as_posix()
+            if owned is not None and owned(marker):
+                continue
             try:
                 info = extra.stat()
             except FileNotFoundError:
@@ -3870,12 +3901,21 @@ def _build_corpus_context_uncached(
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     eligible: dict[str, Path] = {}
-    for disk_path in sorted(vault.walk_vault_md(root), key=lambda item: item.as_posix()):
+    paths = find_corpus.corpus_paths(root, "vault", lambda **walk: vault.walk_vault_md(root, **walk))
+    # A stored page's path is the store's: resolving its file would stat a projection.
+    stored = (
+        {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages}
+        if isinstance(paths, find_corpus.StoreCorpus)
+        else {}
+    )
+    for disk_path in sorted(paths, key=lambda item: item.as_posix()):
         request_budget.checkpoint()
-        try:
-            rel_path = disk_path.resolve().relative_to(root.resolve()).as_posix()
-        except ValueError:
-            continue
+        rel_path = stored.get(disk_path)
+        if rel_path is None:
+            try:
+                rel_path = disk_path.resolve().relative_to(root.resolve()).as_posix()
+            except ValueError:
+                continue
         if rel_path != candidate_path:
             eligible[rel_path] = disk_path
 
@@ -3937,6 +3977,38 @@ def _build_identity_census(
     request_budget.checkpoint()
     kb = vault.kb_root(root)
     entries: list[StableIdentityEntry] = []
+    owned = _store_census_owns(root)
+
+    def admit(rel: str, source: str, path: Path) -> None:
+        # Newlines as `_parse_page_state` and the reference scan read them:
+        # on raw bytes a CR-only page shows no frontmatter, so no identity.
+        logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
+        except vault.FrontmatterError as error:
+            raise activation_manifest.ActivationManifestError(
+                error.code,
+                f"could not safely inspect stable identity at {rel}",
+            ) from error
+        raw_identity = frontmatter.get(ID_FIELD)
+        identity: str | None = None
+        if raw_identity is not None:
+            identity = normalize_id(raw_identity)
+        entries.append(StableIdentityEntry(rel, identity))
+        if consume is not None:
+            consume(rel, source)
+
+    def unreadable(rel: str, path: Path) -> activation_manifest.ActivationManifestError:
+        code = (
+            "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
+            if activation.is_managed_governed_path(root, path)
+            and access.access_tier(root, rel) == access.TIER_READ_WRITE
+            else "IDENTITY_CENSUS_PAGE_UNREADABLE"
+        )
+        return activation_manifest.ActivationManifestError(
+            code,
+            f"could not safely inspect stable identity at {rel}",
+        )
 
     def walk(directory: Path) -> None:
         try:
@@ -3951,6 +4023,9 @@ def _build_identity_census(
             if _prune_identity_census_directory(kb, directory, child.name):
                 continue
             path = Path(child.path)
+            # The store holds this path's pages; their files are projections it reads below.
+            if owned is not None and owned(path.relative_to(root).as_posix()):
+                continue
             # Alias refusal comes first and applies to EVERY entry, exactly as
             # before: an aliased subtree can hide or duplicate pages whatever
             # its name looks like, so filtering by suffix ahead of this check
@@ -4026,37 +4101,44 @@ def _build_identity_census(
                 # missing from a snapshot.
                 continue
             except (OSError, UnicodeDecodeError) as error:
-                code = (
-                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
-                    if activation.is_managed_governed_path(root, path)
-                    and access.access_tier(root, rel) == access.TIER_READ_WRITE
-                    else "IDENTITY_CENSUS_PAGE_UNREADABLE"
-                )
-                raise activation_manifest.ActivationManifestError(
-                    code,
-                    f"could not safely inspect stable identity at {rel}",
-                ) from error
-            # Newlines as `_parse_page_state` and the reference scan read them:
-            # on raw bytes a CR-only page shows no frontmatter, so no identity.
-            logical_source = source.replace("\r\n", "\n").replace("\r", "\n")
-            try:
-                frontmatter, _, _ = vault.parse_frontmatter(logical_source, strict=True)
-            except vault.FrontmatterError as error:
-                raise activation_manifest.ActivationManifestError(
-                    error.code,
-                    f"could not safely inspect stable identity at {rel}",
-                ) from error
-            raw_identity = frontmatter.get(ID_FIELD)
-            identity: str | None = None
-            if raw_identity is not None:
-                identity = normalize_id(raw_identity)
-            entries.append(StableIdentityEntry(rel, identity))
-            if consume is not None:
-                consume(rel, source)
+                raise unreadable(rel, path) from error
+            admit(rel, source, path)
 
+    def stored_pages() -> None:
+        # The walk's name rules, applied to each folder and file name of a stored page's path.
+        from .vault_store import read
+
+        prefix = kb.relative_to(root).as_posix() + "/"
+        with read.snapshot(root) as view:
+            members = [
+                meta.path
+                for meta in view.pages(prefix)
+                if PurePosixPath(meta.path).suffix.casefold() == ".md"
+                and not any(
+                    _prune_identity_census_directory(kb, kb.joinpath(*parts[:depth]), name)
+                    for parts in (meta.path[len(prefix) :].split("/"),)
+                    for depth, name in enumerate(parts)
+                )
+            ]
+            for start in range(0, len(members), read.KEYS_PER_QUERY):
+                request_budget.checkpoint()
+                chunk = members[start : start + read.KEYS_PER_QUERY]
+                bodies = view.bodies(chunk)
+                for rel in chunk:
+                    path = root.joinpath(*rel.split("/"))
+                    try:
+                        source = bodies[rel].decode("utf-8")
+                    except UnicodeDecodeError as error:
+                        raise unreadable(rel, path) from error
+                    admit(rel, source, path)
+
+    if owned is not None:
+        stored_pages()
     try:
         root_info = kb.lstat()
     except FileNotFoundError:
+        if owned is not None:
+            return StableIdentityCensus(tuple(entries)), MappingProxyType({})
         return StableIdentityCensus(()), MappingProxyType({})
     except OSError as error:
         raise activation_manifest.ActivationManifestError(

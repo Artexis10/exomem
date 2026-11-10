@@ -647,7 +647,7 @@ Incomplete coverage cannot establish acceptance. A breach still diagnoses the
 retained slow observations. The existing startup grace, conditional sweep and
 hourly breach interval remain unchanged.
 
-`bootstrap` reports only the calling client's breaches. Structured breach events
+`read_instructions` (the `bootstrap` command) reports only the calling client's breaches. Structured breach events
 omit caller identities. `doctor` reads the ledger and activation log independently,
 including their archived or rotated segments, and also reports the process ring.
 A failed segment does not hide older samples. Each source exposes malformed rows,

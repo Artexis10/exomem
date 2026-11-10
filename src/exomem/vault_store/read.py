@@ -11,7 +11,7 @@ every other path.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -140,12 +140,41 @@ class StoreSnapshot:
         """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from."""
         return inbound_sources(self.connection, rel)
 
+    def inbound_sources_many(self, rels: Iterable[str]) -> dict[str, frozenset[str]]:
+        """``inbound_sources`` for each page in ``rels``, read in a few queries."""
+        return inbound_sources_many(self.connection, rels)
+
+    def held_pages(self, rels: Iterable[str]) -> frozenset[str]:
+        """The paths in ``rels`` that the store holds a page at, read in a few queries."""
+        return frozenset(path for path, in self._each(rels, "path"))
+
+    def bodies(self, rels: Iterable[str]) -> dict[str, bytes]:
+        """The exact bytes of each page in ``rels`` that the store holds, read in a few queries."""
+        return dict(self._each(rels, "path, body"))
+
+    def _each(self, rels: Iterable[str], columns: str) -> Iterator[tuple]:
+        wanted = list(dict.fromkeys(rels))
+        for start in range(0, len(wanted), KEYS_PER_QUERY):
+            chunk = wanted[start : start + KEYS_PER_QUERY]
+            yield from self.connection.execute(
+                f"SELECT {columns} FROM store_pages WHERE path IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            )
+
     def binary(self, rel: str) -> BinaryMeta | None:
         """The record of one binary, or None when the store records no such path."""
         row = self.connection.execute(
             "SELECT path, sha256, size, revision FROM store_binaries WHERE path = ?", (rel,)
         ).fetchone()
         return None if row is None else BinaryMeta(*row)
+
+    def holds_binaries_under(self, prefix: str) -> bool:
+        """Whether the store records a binary whose path starts with ``prefix``."""
+        row = self.connection.execute(
+            "SELECT 1 FROM store_binaries WHERE path >= ? AND path < ? LIMIT 1",
+            (prefix, prefix + _AFTER),
+        ).fetchone()
+        return row is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,11 +243,34 @@ def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
     revision that ``connection`` sees, which the projector's lag does not change. The page key's
     ``file:`` prefix is how the graph names a page, as ``epistemic_graph`` writes it.
     """
-    rows = connection.execute(
-        "SELECT DISTINCT source_path FROM graph_edges WHERE dst_page_key = ? AND source_path != ?",
-        (f"file:{rel}", rel),
-    )
-    return frozenset(row[0] for row in rows)
+    return inbound_sources_many(connection, (rel,))[rel]
+
+
+#: The most paths or page keys that one keyed store query binds. SQLite allows 32766 parameters;
+#: a smaller chunk keeps each statement short to prepare and each result small.
+KEYS_PER_QUERY = 500
+
+
+def inbound_sources_many(connection: Connection, rels: Iterable[str]) -> dict[str, frozenset[str]]:
+    """``inbound_sources`` for each page in ``rels``, in one query per 500 pages.
+
+    A writer that binds the linking pages of a whole folder would otherwise run one query for each
+    page. Every page in ``rels`` has an entry, empty when nothing links to it.
+    """
+    wanted = list(dict.fromkeys(rels))
+    found: dict[str, set[str]] = {rel: set() for rel in wanted}
+    for start in range(0, len(wanted), KEYS_PER_QUERY):
+        chunk = wanted[start : start + KEYS_PER_QUERY]
+        rows = connection.execute(
+            "SELECT dst_page_key, source_path FROM graph_edges"
+            f" WHERE dst_page_key IN ({', '.join('?' * len(chunk))})",
+            [f"file:{rel}" for rel in chunk],
+        )
+        for key, source in rows:
+            rel = key.removeprefix("file:")
+            if source != rel:
+                found[rel].add(source)
+    return {rel: frozenset(sources) for rel, sources in found.items()}
 
 
 def walk_member(rel: str) -> bool:
@@ -488,7 +540,8 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
 
 
 def current_revision(vault_root: Path) -> int:
-    """The store revision now: it moves by one for each committed change."""
+    """The store revision now: it moves by one for each committed change and for each batch of the
+    registry pass (``rederive.settle``), which changes derived rows without a page commit."""
     with snapshot(vault_root) as view:
         return view.revision
 

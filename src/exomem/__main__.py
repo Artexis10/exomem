@@ -4942,7 +4942,7 @@ def _core_op_main(argv: list[str]) -> int:
             )
         return 1
 
-    from .governance import authorization_transport
+    from .governance import credential_carrier
 
     fd_values: list[str] = []
     for index, item in enumerate(argv):
@@ -4954,11 +4954,11 @@ def _core_op_main(argv: list[str]) -> int:
         elif item.startswith("--authorization-session-fd="):
             fd_values.append(item.partition("=")[2])
     if not fd_values:
-        authorization_carrier = authorization_transport.CredentialCarrier.absent()
+        authorization_carrier = credential_carrier.CredentialCarrier.absent()
     elif len(fd_values) != 1:
-        authorization_carrier = authorization_transport.CredentialCarrier.invalid()
+        authorization_carrier = credential_carrier.CredentialCarrier.invalid()
     else:
-        authorization_carrier = authorization_transport.read_cli_authorization_fd(
+        authorization_carrier = credential_carrier.read_cli_authorization_fd(
             fd_values[0]
         )
     if authorization_carrier.is_invalid:

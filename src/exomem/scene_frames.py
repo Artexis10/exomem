@@ -114,7 +114,7 @@ def _refuse_in_store_mode(vault_root: Path, frames: Path) -> None:
     on disk, so the clear would leave pages behind. A video without frames and a file-mode vault
     clear as before. Callers that clear as a best-effort step log the refusal and go on.
     """
-    from .vault_store import availability, mode, ownership, targets
+    from .vault_store import availability, mode, ownership, read
 
     if not mode.store_mode_active(vault_root):
         return
@@ -124,7 +124,7 @@ def _refuse_in_store_mode(vault_root: Path, frames: Path) -> None:
         return
     if not ownership.owns_folder(relative):
         return
-    if frames.is_dir() or targets.holds_pages_under(vault_root, relative):
+    if frames.is_dir() or read.holds_folder(vault_root, relative):
         raise availability.unrouted(
             "clear_scene_frames",
             "a frame sidecar is a stored page, and removing its file does not remove the page",

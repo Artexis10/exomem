@@ -37,9 +37,6 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, NamedTuple, NotRequired, TypeVar, cast, get_args
 
-from fastmcp.tools import ToolResult
-from fastmcp.utilities.types import Image as FastMCPImage
-from mcp.types import TextContent
 from pydantic import ConfigDict, Field, StrictInt, StringConstraints, WithJsonSchema
 from typing_extensions import TypedDict
 
@@ -82,8 +79,8 @@ from . import episode_nudge as episode_nudge_module
 from . import episode_workflow as episode_workflow_module
 from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
-from . import find as find_module
 from . import (
+    fastmcp_types,
     find_types,
     note_types,
     operation_entries,
@@ -96,6 +93,7 @@ from . import (
     vault,
     vocabulary_resolution,
 )
+from . import find as find_module
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
@@ -6732,7 +6730,7 @@ def op_get_video_frames(
     start_sec: float | None = None,
     end_sec: float | None = None,
     max_side: int | Literal["original"] | None = None,
-) -> ToolResult:
+) -> fastmcp_types.ToolResult:
     """View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.
 
     Use this to see what a video actually contains (slides, screen
@@ -6806,9 +6804,9 @@ def op_get_video_frames(
     if result.not_shown:
         # Left out at the call's byte limit, in time order: a window that starts at the first one shows them.
         meta["not_shown"] = list(result.not_shown)
-    return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
-        + [FastMCPImage(data=f.jpeg, format="jpeg").to_image_content() for f in result.frames],
+    return fastmcp_types.ToolResult(
+        content=[fastmcp_types.TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        + [fastmcp_types.Image(data=f.jpeg, format="jpeg").to_image_content() for f in result.frames],
         structured_content=meta,
     )
 
@@ -10148,7 +10146,7 @@ def op_read_media(
     end_sec: float | None = None,
     max_side: int | Literal["original"] | None = None,
     region: list[float] | None = None,
-) -> ToolResult:
+) -> fastmcp_types.ToolResult:
     """Show stored images or sampled video frames inline (MCP only).
 
     Args:
@@ -10187,7 +10185,7 @@ def _show_images(
     paths: list[str] | None,
     max_side: int | str | None,
     region: list[float] | None,
-) -> ToolResult:
+) -> fastmcp_types.ToolResult:
     from . import artifact_recovery, image_view
 
     if path is not None and paths is not None:
@@ -10230,9 +10228,9 @@ def _show_images(
         meta["region"] = list(region)
     if result.not_shown:
         meta["not_shown"] = result.not_shown
-    return ToolResult(
-        content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
-        + [FastMCPImage(data=item.jpeg, format="jpeg").to_image_content() for item in shown],
+    return fastmcp_types.ToolResult(
+        content=[fastmcp_types.TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        + [fastmcp_types.Image(data=item.jpeg, format="jpeg").to_image_content() for item in shown],
         structured_content=meta,
     )
 
@@ -11718,6 +11716,7 @@ def op_adoption_studio(
     offset: Annotated[int, Field(ge=0)] = 0,
     limit: Annotated[int, Field(ge=1, le=adoption_run_module.STATUS_PAGE_ITEMS)] = adoption_run_module.STATUS_PAGE_ITEMS,
     revision: str | None = None,
+    upload: str | None = None,
 ) -> dict:
     """Review and import a collection in a resumable run.
 
@@ -11725,7 +11724,8 @@ def op_adoption_studio(
     Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     file imports a staged folder in one repeatable call: repeat it with the
-    `continuation` it returns until `filing` is not `working`. Other actions are
+    `continuation` it returns until `filing` is not `working`. An archive sent
+    with upload_files (lane import) is filed with `upload`. Other actions are
     the step path. start scans; select chooses; plan previews; apply copies into
     Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
     reports recall and coverage. Resume plan/apply with `continuation`.
@@ -11739,7 +11739,7 @@ def op_adoption_studio(
     Args:
         action: Lifecycle step.
         run_id: From `start`; omit only to start or list runs.
-        path: For `file`, the staged folder `_Imports/<id>`. For `start`, subtree
+        path: For `file`, the staged folder `_Imports/<id>`; not with `upload`. For `start`, subtree
             (default: whole vault; ask which folder). For `status`, count filed originals under it.
         include_hidden: For `start`, include hidden files.
         initialize_kb: For `start`, bootstrap a missing Knowledge Base.
@@ -11773,6 +11773,8 @@ def op_adoption_studio(
         offset: For status pages, a zero-based row offset.
         limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
         revision: For status pages, the preceding summary's revision; restart paging if it changed.
+        upload: For `file`, the `token` that upload_files returned for lane import, in place of `path`.
+            The first call unpacks the archive into a staged folder; repeats carry on. Its reply names `path`.
     """
     action = (action or "").strip()
     if action not in _ADOPTION_STUDIO_ACTIONS:
@@ -11828,11 +11830,26 @@ def op_adoption_studio(
         if action == "file":
             from . import due_state as due_state_module
 
+            if upload is not None:
+                from . import import_upload
+
+                if path:
+                    raise adoption_run_module.AdoptionRunError(
+                        "IMPORT_REQUEST_INVALID", "file takes an upload or a path, not both")
+                staged = import_upload.stage(vault_root, upload)
+                if staged.stopped is not None:
+                    return {"path": staged.path, **staged.stopped}
+                path = staged.path
             # Like `apply`, one call commits a bounded share of the import, so it is one batch at its terminal.
             with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
                 filed = adoption_run_module.file(
                     vault_root, path=path, collection=collection, continuation=continuation
                 )
+            if upload is not None:
+                # An upload's caller has no other way to learn the staged folder, and a later call may name it.
+                filed = {"path": path, **filed}
+                if staged.unrecorded:
+                    filed["person"] = [*filed.get("person", []), import_upload.unrecorded_note(path)]
             return _carrying_batch_advisories(vault_root, filed)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)

@@ -113,6 +113,15 @@ def run(writer, selector: str, raw, *, facade_profile: str,
             session.project_with(_LinkProjector.create(writer.root, manifest, policy=operation.policy,
                                                        authorize_path=operation.allows_file), fields=links)
         bound_refs: dict = {}
+        bound_inverses: dict = {}
+
+        def inverses(source_id, dotted):
+            """Bind one inverse expansion on this query's collection."""
+            bound = bound_inverses.get((source_id, dotted))
+            if bound is None:
+                bound = bound_inverses[source_id, dotted] = reference_resolution.bind_inverse(
+                    session, source_id, dotted, collection_id)
+            return bound
 
         def references(source_cid, dotted):
             """Bind one declared reference and describe its target to the validator."""
@@ -140,7 +149,8 @@ def run(writer, selector: str, raw, *, facade_profile: str,
                         item_key_withheld=plan.item_key_withheld)}
 
         result = validation.normalize_query(raw, declarations={collection_id: declaration},
-                                            collection=collection_id, references=references)
+                                            collection=collection_id, references=references,
+                                            inverses=inverses)
         if result.findings:
             finding = result.findings[0]
             if view is not None and finding.target_side:
@@ -174,12 +184,12 @@ def run(writer, selector: str, raw, *, facade_profile: str,
         if query.aggregate is not None:
             if filtered_reduction:
                 return {**view_meta, **reference_rows.reduce(
-                    session, query, bound_refs, basis=basis,
+                    session, query, bound_refs, bound_inverses, basis=basis,
                     uniform=uniform, manifest=manifest, as_of=query.as_of)}
             return {**view_meta, **session.reduce(query, as_of=query.as_of)}
         if named:
             return {**view_meta, **reference_rows.run(
-                session, query, bound_refs, basis=basis,
+                session, query, bound_refs, bound_inverses, basis=basis,
                 uniform=uniform, manifest=manifest, as_of=query.as_of)}
         if query.mode == "execute":
             return {**view_meta, **cursors.execute_page(session, query, as_of=query.as_of)}
@@ -278,7 +288,10 @@ def chapter(name: str | None) -> dict:
             "select": f"up to {limits['select']} declared fields; default every declared field; "
                       "a dotted path through a single-valued declared reference selects a target field",
             "related": "up to 8 entries naming declared references to expand per row; a string, or "
-                       "{field: <dotted declaration>, limit: 1-50 (default 10)} bounding many-valued expansion",
+                       "{field: <dotted declaration>, limit: 1-50 (default 10)} bounding many-valued expansion; "
+                       "{inverse: {collection: <source id>, field: <dotted declaration>}, limit} lists the "
+                       "source rows that refer to each returned row, as "
+                       "inverse:<source id>:<field> = {state: ready|warming, count, items, truncated}",
             "where": {"leaf": {"field": "<declared field or reference path>", "op": sorted(validation._OPS),
                                "value": "<typed>"},
                       "combine": ["all", "any", "not"], "max_leaves": limits["predicate_leaves"],
@@ -309,7 +322,8 @@ def chapter(name: str | None) -> dict:
                       "flagged_scope: rows whose local day is unknown, counted over the collection, never guessed",
             "references": "a row that names references carries references: {<chain>: resolved|unresolved|none} "
                           "and related: {<entry>: expanded rows}; a related row omits fields the caller "
-                          "cannot read; a group key that did not resolve is listed in the group's unresolved",
+                          "cannot read; a group key that did not resolve is listed in the group's unresolved; "
+                          "an inverse entry reads warming until its source index is built",
             "combined": "every query that names references or filters a reduction carries combined: count, "
                         "unresolved_rows, excluded_unresolved and unresolved_values (bounded, with truncated "
                         "and total); on a grouped result groups come whole on every page while "

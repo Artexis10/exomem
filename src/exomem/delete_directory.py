@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import itertools
 import json
 import logging
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,11 +32,13 @@ from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import (
+    DIRECTORY_TRANSITION_LIMIT,
     VaultPathError,
     batch_atomic_write,
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
+    missing_path_reason,
     plan_log_entry,
     resolve_under_vault,
     write_log_entry,
@@ -84,59 +88,8 @@ def _read_tree(vault_root: Path, rel_path: str) -> tuple[reserved_paths.GenericT
         raise DeleteDirectoryError(code=code, reason="directory could not be acquired through the generic boundary") from None
 
 
-def delete_directory(
-    vault_root: Path,
-    *,
-    path: str,
-    confirm: bool,
-    recursive: bool = False,
-    force_orphan: bool = False,
-    allow_curated: bool = False,
-    today: dt.date | None = None,
-    now: dt.datetime | None = None,
-) -> DeleteDirectoryResult:
-    with ExitStack() as originals_context:
-        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
-
-
-def _delete_directory_local(
-    vault_root: Path,
-    *,
-    path: str,
-    confirm: bool,
-    recursive: bool = False,
-    force_orphan: bool = False,
-    allow_curated: bool = False,
-    today: dt.date | None = None,
-    now: dt.datetime | None = None,
-    originals_context: ExitStack,
-) -> DeleteDirectoryResult:
-    if not confirm:
-        raise DeleteDirectoryError(
-            code="UNCONFIRMED",
-            reason=(
-                "delete_directory requires `confirm=true` explicitly. "
-                f"Deletes go to {kb_prefix()}_trash/ (recoverable) but the "
-                "action is still deliberate."
-            ),
-        )
-
-    # Trashing a folder needs one trash move and one sidecar for each page it holds, and that has no
-    # store form yet: a folder that the store owns refuses before anything changes.
-    store_targets.refuse_unrouted(
-        vault_root,
-        "delete_directory",
-        "trashing a folder needs a trash move and a sidecar for each page it holds, "
-        "and has no store form yet",
-        folders=(path,),
-    )
-    try:
-        abs_path, rel_path = resolve_under_vault(
-            vault_root, path, must_exist=True, must_be_dir=True
-        )
-    except VaultPathError as e:
-        raise DeleteDirectoryError(code=e.code, reason=e.reason) from e
-
+def _refuse_protected(vault_root: Path, rel_path: str, *, allow_curated: bool) -> str | None:
+    """Refuse a folder that no delete may trash; return its curated tree, if any."""
     try:
         lifecycle.assert_not_protected(vault_root, rel_path)
     except lifecycle.LifecycleError as error:
@@ -174,6 +127,188 @@ def _delete_directory_local(
                 f"Pass `allow_curated=true` only if you really mean it."
             ),
         )
+    return curated
+
+
+def _not_empty(rel_path: str, count: int) -> DeleteDirectoryError:
+    return DeleteDirectoryError(
+        code="NOT_EMPTY",
+        reason=(
+            f"{rel_path} contains {count} file(s). Pass "
+            f"`recursive=true` to trash the whole tree."
+        ),
+    )
+
+
+def _refuse_orphaning(
+    rel_path: str, inbound_total: int, inbound_samples: list[str], force_orphan: bool
+) -> list[str]:
+    """Refuse a trash that would orphan links from outside the folder; return its warnings."""
+    if inbound_total > 0 and not force_orphan:
+        sample = "; ".join(inbound_samples[:3])
+        more = (
+            f" (+{inbound_total - 3} more)" if inbound_total > 3 else ""
+        )
+        raise DeleteDirectoryError(
+            code="INBOUND_LINKS",
+            reason=(
+                f"{rel_path} contains files with {inbound_total} external "
+                f"inbound wikilink(s): {sample}{more}. Trashing would orphan "
+                f"those. Pass `force_orphan=true` to override."
+            ),
+        )
+
+    warnings: list[str] = []
+    if force_orphan and inbound_total > 0:
+        warnings.append(
+            f"force_orphan=true: trashed with {inbound_total} external "
+            f"inbound link(s) into the tree. Run `audit` to surface the "
+            f"new broken links."
+        )
+    return warnings
+
+
+def _disk_slot_taken(vault_root: Path, candidate: Path) -> bool:
+    relative = candidate.relative_to(vault_root).as_posix()
+    try:
+        reserved_paths.inspect_generic_path(vault_root, relative)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            return False
+        if error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise DeleteDirectoryError(
+                "RESERVED_PATH",
+                "trash destination is reserved for its owning subsystem",
+            ) from None
+        raise DeleteDirectoryError(
+            "DELETE_FAILED", "trash destination could not be acquired safely"
+        ) from None
+    return True
+
+
+def _free_trash_folder(planned: Path, taken: Callable[[Path], bool]) -> Path:
+    """The first of `planned`, `name-2`, `name-3`... whose payload, metadata and companion slots
+    `taken` all finds free."""
+    candidate, counter = planned, 2
+    while any(taken(slot) for slot in trash_metadata.destination_paths(candidate)):
+        candidate = planned.parent / f"{planned.name}-{counter}"
+        counter += 1
+    return candidate
+
+
+def _log_body(
+    rel_path: str,
+    trash_rel: str,
+    *,
+    files: int,
+    md_files: int,
+    inbound: int,
+    recursive: bool,
+    force_orphan: bool,
+    curated: str | None,
+) -> str:
+    """The log entry of a folder trash; ``curated`` is the curated tree it was allowed in."""
+    log_body = (
+        f"Trashed directory {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
+        f"files={files}, md_files={md_files}, "
+        f"inbound_links_at_trash={inbound}."
+    )
+    if recursive:
+        log_body += " recursive=true."
+    if force_orphan:
+        log_body += " force_orphan=true."
+    if curated:
+        log_body += f" allow_curated=true (target tree: {curated})."
+    return log_body
+
+
+def _trash_metadata(
+    rel_path: str,
+    now: dt.datetime,
+    *,
+    files: int,
+    md_files: int,
+    inbound: int,
+    recursive: bool,
+    force_orphan: bool,
+    curated: bool,
+) -> bytes:
+    """The sidecar of a folder trash; ``curated`` says a curated tree was allowed."""
+    meta = {
+        "original_path": rel_path,
+        "trashed_at": now.isoformat(),
+        "deleted_by": "exomem",
+        "file_count_at_trash": files,
+        "md_file_count_at_trash": md_files,
+        "inbound_link_count_at_trash": inbound,
+        "force_orphan_used": bool(force_orphan and inbound > 0),
+        "allow_curated_used": curated,
+        "recursive_used": bool(recursive),
+    }
+    return json.dumps(meta, indent=2, default=str).encode("utf-8")
+
+
+def delete_directory(
+    vault_root: Path,
+    *,
+    path: str,
+    confirm: bool,
+    recursive: bool = False,
+    force_orphan: bool = False,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+) -> DeleteDirectoryResult:
+    with ExitStack() as originals_context:
+        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
+
+
+def _delete_directory_local(
+    vault_root: Path,
+    *,
+    path: str,
+    confirm: bool,
+    recursive: bool = False,
+    force_orphan: bool = False,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    now: dt.datetime | None = None,
+    originals_context: ExitStack,
+) -> DeleteDirectoryResult:
+    if not confirm:
+        raise DeleteDirectoryError(
+            code="UNCONFIRMED",
+            reason=(
+                "delete_directory requires `confirm=true` explicitly. "
+                f"Deletes go to {kb_prefix()}_trash/ (recoverable) but the "
+                "action is still deliberate."
+            ),
+        )
+
+    # A folder that the store owns holds stored pages, which its store form trashes in one commit.
+    if store_targets.owns_any(vault_root, folders=(path,)):
+        return _delete_in_store(
+            vault_root,
+            path=path,
+            recursive=recursive,
+            force_orphan=force_orphan,
+            allow_curated=allow_curated,
+            today=today,
+            now=now,
+        )
+    try:
+        abs_path, rel_path = resolve_under_vault(
+            vault_root, path, must_exist=True, must_be_dir=True
+        )
+    except VaultPathError as e:
+        raise DeleteDirectoryError(code=e.code, reason=e.reason) from e
+
+    curated = _refuse_protected(vault_root, rel_path, allow_curated=allow_curated)
 
     # Acquire and classify every child before counts, link scans, markers, or
     # lifecycle planning.  The later lifecycle snapshot rechecks the same
@@ -192,13 +327,7 @@ def _delete_directory_local(
         DeleteDirectoryError,
     )
     if files and not recursive:
-        raise DeleteDirectoryError(
-            code="NOT_EMPTY",
-            reason=(
-                f"{rel_path} contains {len(files)} file(s). Pass "
-                f"`recursive=true` to trash the whole tree."
-            ),
-        )
+        raise _not_empty(rel_path, len(files))
 
     # Inbound-wikilink scan: any .md file inside the tree could have
     # external referents. Aggregate the count across all .md children.
@@ -223,61 +352,16 @@ def _delete_directory_local(
         for h in hits[:2]:
             inbound_samples.append(f"{h.path}:{h.line_number} → {md_rel}")
 
-    if inbound_total > 0 and not force_orphan:
-        sample = "; ".join(inbound_samples[:3])
-        more = (
-            f" (+{inbound_total - 3} more)" if inbound_total > 3 else ""
-        )
-        raise DeleteDirectoryError(
-            code="INBOUND_LINKS",
-            reason=(
-                f"{rel_path} contains files with {inbound_total} external "
-                f"inbound wikilink(s): {sample}{more}. Trashing would orphan "
-                f"those. Pass `force_orphan=true` to override."
-            ),
-        )
-
-    warnings: list[str] = []
-    if force_orphan and inbound_total > 0:
-        warnings.append(
-            f"force_orphan=true: trashed with {inbound_total} external "
-            f"inbound link(s) into the tree. Run `audit` to surface the "
-            f"new broken links."
-        )
+    warnings = _refuse_orphaning(rel_path, inbound_total, inbound_samples, force_orphan)
 
     # Move the whole tree into trash.
     now = now or dt.datetime.now()
     today = today or now.date()
-    trash_abs = vault_root / planned_trash_path(vault_root, rel_path, now)
+    trash_abs = _free_trash_folder(
+        vault_root / planned_trash_path(vault_root, rel_path, now),
+        lambda slot: _disk_slot_taken(vault_root, slot),
+    )
     trash_root = trash_abs.parent
-    trash_basename = trash_abs.name
-
-    def trash_destination_exists(candidate: Path) -> bool:
-        relative = candidate.relative_to(vault_root).as_posix()
-        try:
-            reserved_paths.inspect_generic_path(vault_root, relative)
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code == "MISSING":
-                return False
-            if error.code in {
-                "CAPABILITY_UNAVAILABLE",
-                "IDENTITY_CHANGED",
-                "RESERVED_PATH",
-                "UNSAFE_PATH",
-            }:
-                raise DeleteDirectoryError(
-                    "RESERVED_PATH",
-                    "trash destination is reserved for its owning subsystem",
-                ) from None
-            raise DeleteDirectoryError(
-                "DELETE_FAILED", "trash destination could not be acquired safely"
-            ) from None
-        return True
-
-    i = 2
-    while any(trash_destination_exists(slot) for slot in trash_metadata.destination_paths(trash_abs)):
-        trash_abs = trash_root / f"{trash_basename}-{i}"
-        i += 1
 
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
     meta_abs = trash_root / f"{trash_abs.name}{METADATA_SUFFIX}"
@@ -298,17 +382,16 @@ def _delete_directory_local(
             continue
 
     today_iso = today.isoformat()
-    log_body = (
-        f"Trashed directory {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
-        f"files={len(files)}, md_files={len(md_files)}, "
-        f"inbound_links_at_trash={inbound_total}."
+    log_body = _log_body(
+        rel_path,
+        trash_rel,
+        files=len(files),
+        md_files=len(md_files),
+        inbound=inbound_total,
+        recursive=recursive,
+        force_orphan=force_orphan,
+        curated=curated if allow_curated else None,
     )
-    if recursive:
-        log_body += " recursive=true."
-    if force_orphan:
-        log_body += " force_orphan=true."
-    if curated and allow_curated:
-        log_body += f" allow_curated=true (target tree: {curated})."
     log_plan = plan_log_entry(
         vault_root,
         date_iso=today_iso,
@@ -436,18 +519,16 @@ def _delete_directory_local(
         except Exception:  # noqa: BLE001 — suppression is best-effort
             log.debug("self-delete suppression registration failed", exc_info=True)
 
-    meta = {
-        "original_path": rel_path,
-        "trashed_at": now.isoformat(),
-        "deleted_by": "exomem",
-        "file_count_at_trash": len(files),
-        "md_file_count_at_trash": len(md_files),
-        "inbound_link_count_at_trash": inbound_total,
-        "force_orphan_used": bool(force_orphan and inbound_total > 0),
-        "allow_curated_used": bool(curated and allow_curated),
-        "recursive_used": bool(recursive),
-    }
-    metadata_bytes = json.dumps(meta, indent=2, default=str).encode("utf-8")
+    metadata_bytes = _trash_metadata(
+        rel_path,
+        now,
+        files=len(files),
+        md_files=len(md_files),
+        inbound=inbound_total,
+        recursive=recursive,
+        force_orphan=force_orphan,
+        curated=bool(curated and allow_curated),
+    )
     # Retained directory companions need their historical placement even after a crash.
     placement_required = originals.binding_for(vault_root) is not None
     placement_files = [(meta_rel, metadata_bytes)] if placement_required else []
@@ -610,4 +691,182 @@ def _delete_directory_local(
         inbound_link_count=inbound_total,
         warnings=warnings,
         index=index_feedback,
+    )
+
+
+def _delete_in_store(
+    vault_root: Path,
+    *,
+    path: str,
+    recursive: bool,
+    force_orphan: bool,
+    allow_curated: bool,
+    today: dt.date | None,
+    now: dt.datetime | None,
+) -> DeleteDirectoryResult:
+    """Trash a folder of stored pages in one store transaction.
+
+    The store moves each page under one trash folder with its rows, and the sidecar lands on disk
+    inside the same rollback window. A page that changed, or a link from a page that the inbound
+    check did not see, refuses the whole commit with nothing changed. No Markdown is written: the
+    projector moves the files afterwards. A folder that holds files whose bytes stay on disk, or a
+    page that carries its original or its part pages, refuses by name: it has no store form yet.
+    """
+    from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
+    from .vault_store import availability as store_availability
+    from .vault_store import batch as store_batch
+    from .vault_store import read as store_read
+    from .vault_store.write import Expect, PageMove, StoreConflict
+
+    root = Path(vault_root)
+    writer = store_availability.page_writer(root)
+    with ExitStack() as reading:
+        # The read phase sees one revision; the commit's expectations recheck all that it read.
+        reading.enter_context(store_read.request_snapshot(root))
+        try:
+            abs_path, rel_path = resolve_under_vault(root, path)
+        except VaultPathError as e:
+            raise DeleteDirectoryError(code=e.code, reason=e.reason) from e
+        with store_read.snapshot(root) as view:
+            if (
+                view.page_meta(rel_path) is not None
+                or view.binary(rel_path) is not None
+                or (abs_path.exists() and not abs_path.is_dir())
+            ):
+                raise DeleteDirectoryError(
+                    code="NOT_A_DIR", reason=f"path is not a directory: {rel_path}"
+                )
+            pages = [
+                meta.path
+                for meta in itertools.islice(
+                    view.pages(f"{rel_path}/"), DIRECTORY_TRANSITION_LIMIT + 1
+                )
+            ]
+        if not pages and not abs_path.is_dir():
+            raise DeleteDirectoryError(code="NOT_FOUND", reason=missing_path_reason(rel_path))
+        curated = _refuse_protected(root, rel_path, allow_curated=allow_curated)
+        if not pages:
+            raise store_availability.unrouted(
+                "delete_directory",
+                "the store holds no page below this folder, and a folder of files whose bytes "
+                "stay on disk has no store form",
+            )
+        if len(pages) > DIRECTORY_TRANSITION_LIMIT:
+            raise DeleteDirectoryError(
+                code="PATH_GUARD_LIMIT",
+                reason="directory exceeds the bounded trash census",
+            )
+        with store_read.snapshot(root) as view:
+            stored = view.bodies(pages)
+        refusal = store_targets.folder_form_gap(
+            root, rel_path, stored, error_class=DeleteDirectoryError
+        )
+        if refusal is not None:
+            raise store_availability.unrouted("delete_directory", refusal)
+        from .collection_store import authority as collection_authority
+
+        collection_authority.refuse_view_paths(root, (rel_path, *pages), DeleteDirectoryError)
+        if not recursive:
+            raise _not_empty(rel_path, len(pages))
+        hashes = {page: hashlib.sha256(body).hexdigest() for page, body in stored.items()}
+        store_targets.active_catalog_gap(
+            root,
+            "delete_directory",
+            error_class=DeleteDirectoryError,
+            removals=tuple(
+                catalog_publication.CatalogRemoval(page, hashes[page]) for page in pages
+            ),
+        )
+
+        # The links into the folder from outside it; a link between two of its pages moves with them.
+        checks = store_targets.inbound_links(root, pages)
+        counted = store_targets.visible_links(root, checks)
+        inbound_total = 0
+        inbound_samples: list[str] = []
+        for page in pages:
+            hits = [link for link in counted[page] if not link.path.startswith(f"{rel_path}/")]
+            inbound_total += len(hits)
+            inbound_samples.extend(f"{h.path}:{h.line_number} → {page}" for h in hits[:2])
+        warnings = _refuse_orphaning(rel_path, inbound_total, inbound_samples, force_orphan)
+
+        now = now or dt.datetime.now()
+        today = today or now.date()
+        trash_abs = _free_trash_folder(
+            root / planned_trash_path(root, rel_path, now),
+            lambda slot: store_targets.holds(root, slot.relative_to(root).as_posix())
+            or store_read.holds_folder(root, slot.relative_to(root).as_posix()),
+        )
+    trash_rel = trash_abs.relative_to(root).as_posix()
+    meta_rel = f"{trash_rel}{METADATA_SUFFIX}"
+    counts = {"files": len(pages), "md_files": len(pages), "inbound": inbound_total}
+    sidecar = PlannedWrite(
+        root / meta_rel,
+        _trash_metadata(
+            rel_path,
+            now,
+            **counts,
+            recursive=recursive,
+            force_orphan=force_orphan,
+            curated=bool(curated and allow_curated),
+        ).decode("utf-8"),
+        create_only=True,
+    )
+    # A page that a commit adds to the folder after this read stays where it is, with its rows.
+    moves = {page: f"{trash_rel}/{page[len(rel_path) + 1:]}" for page in pages}
+    trashing = store_batch.Lifecycle(
+        moves=tuple(PageMove(source, destination) for source, destination in moves.items()),
+        expect={
+            page: Expect(sha256=hashes[page], linked_from=checks[page].bound) for page in pages
+        },
+    )
+    try:
+        store_batch.commit_batch(writer, [sidecar], vault_root=root, lifecycle=trashing)
+    except StoreConflict as conflict:
+        if conflict.path in moves:
+            raise DeleteDirectoryError(
+                "PATH_GUARD_CHANGED",
+                f"directory contents changed before the trash transition ({conflict.reason})",
+            ) from conflict
+        raise DeleteDirectoryError(
+            "DELETE_FAILED", "Trash placement could not be published"
+        ) from conflict
+    except (CreateOnlyConflict, PathGuardError, OSError) as error:
+        raise DeleteDirectoryError("DELETE_FAILED", "Trash placement could not be published") from error
+
+    from . import due_state
+
+    # The pages as they stood, so the Sources they cited are re-judged once they are gone.
+    trashed_pages: list[due_state.PageWrite] = []
+    for page in pages:
+        try:
+            trashed_pages.append(
+                due_state.PageWrite(page, prior_markdown=stored[page].decode("utf-8"))
+            )
+        except UnicodeDecodeError:
+            continue
+    due_state.refresh_after_writes(root, trashed_pages)
+    log_warning = write_log_entry(
+        root,
+        date_iso=today.isoformat(),
+        op="delete_directory (trash)",
+        rel_path_no_ext=rel_path,
+        body=_log_body(
+            rel_path,
+            trash_rel,
+            **counts,
+            recursive=recursive,
+            force_orphan=force_orphan,
+            curated=curated if allow_curated else None,
+        ),
+    )
+    if log_warning:
+        warnings.append(log_warning)
+    return DeleteDirectoryResult(
+        path=rel_path,
+        trash_path=trash_rel,
+        trash_meta_path=meta_rel,
+        file_count=len(pages),
+        inbound_link_count=inbound_total,
+        warnings=warnings,
+        index=store_batch.row_report("delete", pages).as_dict(),
     )

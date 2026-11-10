@@ -585,6 +585,8 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
         raw.execute("ALTER TABLE collections DROP COLUMN item_key_scheme")
         for table in schema.VAULT_STORE_TABLES:  # schema 15 added these; a revision 13 store has none
             raw.execute(f"DROP TABLE {table}")
+        for table in ("item_references", "item_reference_state"):  # schema 17 added these
+            raw.execute(f"DROP TABLE {table}")
         raw.execute("UPDATE store_meta SET value='13' WHERE key=?", (schema.META_SCHEMA_VERSION,))
         raw.execute("UPDATE alembic_version SET version_num='13'")
 

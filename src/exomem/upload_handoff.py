@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextvars
 import hashlib
 import json
 import math
 import os
 import secrets
+import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
@@ -29,6 +31,8 @@ from . import (
 from .governance import principal, raw_protection
 
 TOKEN_PREFIX = "exomem-upload:"
+#: Lanes a ticket may name. The import lane is a ticket's alone: bearer tokens and `exomem attach` stay on the two lanes.
+HANDOFF_LANES = (*upload_tokens.UPLOAD_LANES, held_uploads.IMPORT_LANE)
 _TICKET_BYTES = 32
 MAX_BYTES = 100 * 1024 * 1024
 STORE_DIRNAME = "upload-handoffs"
@@ -66,6 +70,17 @@ def parse_handoff_token(value: object) -> str | None:
     return None
 
 
+def ticket_nonce(value: object) -> str | None:
+    """The nonce of an upload token in either published form, or None; it names the upload without proving it."""
+    return parse_ticket(value) or cloud_origin.envelope_nonce(value)
+
+
+def hold_secret(nonce: str) -> str:
+    """The secret of the hold that a ticket's upload becomes, derived so `imports.file` can name it from the token alone."""
+    digest = hashlib.sha256(f"exomem-import-hold:{nonce}".encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
 def upload_endpoint(value: str) -> str:
     """Accept only the fixed upload path over HTTPS or literal loopback HTTP."""
     import ipaddress
@@ -94,6 +109,18 @@ def upload_endpoint(value: str) -> str:
     return value
 
 
+def _import_steps(token: str, endpoint: str) -> list[dict]:
+    """The two steps after an import ticket: send the archive, then repeat `imports.file` with the token."""
+    header = shlex.quote(f"Authorization: Bearer {token}")
+    return [
+        {"step": "send", "text": "Send the tar or zip once, as multipart form fields. Replace <archive> with its path.",
+         "shell": f"curl -sS -H {header} -F lane=import -F hold=1 -F 'file=@<archive>' {shlex.quote(endpoint)}"},
+        {"step": "import", "tool": "manage_memory",
+         "arguments": {"operation": "imports.file", "arguments": {"upload": token}},
+         "text": "Repeat this call until `filing` is `done`; a call that is cut short resumes where it stopped."},
+    ]
+
+
 async def _active(root: Path, who: principal.RequestPrincipal) -> bool:
     # Audience alone identifies the owner across clients; it cannot identify a session.
     if (not who.resolved or who.surface != "mcp" or not who.issuer_family
@@ -114,9 +141,15 @@ def prepare_upload(
         from .source_capture import validate_sha256
 
         expected = validate_sha256(expected_sha256)
-        upload_tokens.upload_scope(lane)
+        if lane not in HANDOFF_LANES:
+            raise ValueError(f"INVALID_MODE: upload lane must be one of {HANDOFF_LANES}")
         who = replace(principal.effective_principal(), administrative_ingress=False)
         cloud = cloud_cell.is_cloud_issuer_family(who.issuer_family)
+        if cloud and lane == held_uploads.IMPORT_LANE:
+            # A Cloud cell takes an import as an encrypted archive from `exomem cloud import`; this unpacker is not on that path.
+            raise ValueError(
+                "UPLOAD_LANE_UNAVAILABLE: lane import is for a personal server. "
+                "A folder reaches Exomem Cloud with `exomem cloud import <folder>` on the person's computer")
         if who.client_binding is None or who.origin_session is None:
             if cloud:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Exomem Cloud request has no verified gateway origin")
@@ -178,12 +211,15 @@ def prepare_upload(
                 "expected_sha256": expected, "max_bytes": limit,
             }, temp_suffix=".part")
         token = cloud_origin.handoff_token(route, secret) if route is not None else TOKEN_PREFIX + secret
-        return {
+        descriptor = {
             "token": token, "upload_url": endpoint,
             "ttl_seconds": ttl, "hold": True, "lane": lane,
             "expected_sha256": expected, "max_bytes": limit,
             "handoff_status": "handoff_prepared", "committed": False,
         }
+        if lane == held_uploads.IMPORT_LANE:
+            descriptor["next"] = _import_steps(token, endpoint)
+        return descriptor
 
     try:
         asyncio.get_running_loop()
@@ -213,7 +249,7 @@ async def claim_upload(vault_root: Path, token: str) -> dict:
             if (not math.isfinite(float(record["expires"])) or float(record["expires"]) <= _now()
                     or record["deployment"] != artifact_recovery.deployment(vault_root)
                     or record["binding"] != held_uploads.principal_binding(who)
-                    or record["lane"] not in upload_tokens.UPLOAD_LANES
+                    or record["lane"] not in HANDOFF_LANES
                     or type(record["max_bytes"]) is not int
                     or not 0 < record["max_bytes"] <= MAX_BYTES):
                 raise _unavailable()
@@ -228,4 +264,4 @@ async def claim_upload(vault_root: Path, token: str) -> dict:
             path.unlink()
         except (OSError, ValueError, KeyError, TypeError):
             raise _unavailable() from None
-    return {**record, "principal": who}
+    return {**record, "principal": who, "nonce": secret}

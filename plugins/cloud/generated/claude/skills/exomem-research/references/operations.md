@@ -132,6 +132,19 @@ canonical files. Datasets are query-only in this delivery. A migration between
 shapes is explicit and provenance-preserving; a derived view never becomes
 canonical merely because it was generated.
 
+### Retiring a hand-kept back-link field
+
+A collection that kept a manual list of "which rows link to me" can retire it
+once a declared forward reference answers the same question:
+
+1. Declare the forward `references:` entry on the source collection and revise it.
+2. Call `read_records(operation={"kind": "inspect", "collection": <target>})` and confirm the bounded `inbound.declarations` list names the declaration with `state: ready`; when the report truncates, `truncated` and `total` say so.
+3. Query the target with `related: [{inverse: {collection: <source id>, field: <dotted name>}}]` and compare its `items` against the back-link field's contents.
+4. Remove the field from the target manifest with a `revise` under current guards.
+
+Expected result: the back-link field is gone; inverse expansion answers the same
+question and stays current as source rows change.
+
 Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
 The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
 their normal **Templates → Insert template** workflow. Exomem does not require
@@ -1031,7 +1044,7 @@ A durable, resumable session that turns an existing collection of notes, documen
 Every selected file is imported or refused with a per-path code; none is dropped silently. A UTF-8 text file becomes a Source that holds the exact text in a verbatim fence, with its links, embeds, tags and aliases kept outside the fence as graph structure. Any other file, and a text file that is not valid UTF-8, becomes a Source that keeps the original bytes as its artifact; media extraction then runs through the media job path.
 
 ### One call: `file`
-`file` imports a staged folder: `{path: "_Imports/<id>", collection?, continuation?}`. It runs `start`, `select`, `plan`, `apply` and `finish` for you, page after page, and files Sources only (own-note rules and `include_hidden` stay on the step path below: a hidden file in the stage stays staged and shows in the residual). Repeat the call with the `continuation` it returns until `filing` is `done` or `stopped`. Each call ends after one `apply` or `finish`, so an agent never threads a `run_id`, a `plan_id` or `next_after`.
+`file` imports a staged folder: `{path: "_Imports/<id>", collection?, continuation?}`, or an uploaded archive: `{upload: "<token>", collection?, continuation?}` with the token of `upload_files(lane="import")` in place of `path` (see [importing](importing.md)); the reply then also names the `path`. It runs `start`, `select`, `plan`, `apply` and `finish` for you, page after page, and files Sources only (own-note rules and `include_hidden` stay on the step path below: a hidden file in the stage stays staged and shows in the residual). Repeat the call with the `continuation` it returns until `filing` is `done` or `stopped`. Each call ends after one `apply` or `finish`, so an agent never threads a `run_id`, a `plan_id` or `next_after`.
 - Reply: `{run_id, collection, filing: working|stopped|done, continuation?, progress: {filed, skipped_duplicates, failed, remaining, pages_done, page: {number, phase, planned}}, summary, stop?: {code, reason}, person: [{need, text}], filed?}`. `need` is one of `free_space`, `review_residual`, `discard`, `report_to_operator`. `progress` and `summary` count the whole import. `skipped_duplicates` counts the files that were not stored again because the vault already held their bytes; they are handled, not failed or left. `filed` appears at `done` with the stage's `residual` and `last_finished_page`: the last `finish` report (`coverage`, `first_question` or `indexing`) about that one page only.
 - A page whose files fail retries them once, then finishes, or closes when every file failed; filing goes on to the next page, and the failed files stay in `progress.failed` and the residual.
 - A call with only `path` carries on the newest import of that path, and answers `done` again once it is done. A file that enters the stage later, such as one that a rerun of `exomem import` copies, makes it scan and file again. A `collection` other than the import's own is refused with `IMPORT_REQUEST_INVALID`, which names the import's collection. An error after committed work returns `filing: "stopped"` with its `code`, and the counts keep that work.

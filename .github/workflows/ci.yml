@@ -21,13 +21,13 @@ env:
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
   # Each pinned release comes with its published wheel's SHA-256 (scripts/ci_install_release.py).
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.166.0"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "090c6275c01b98964d4e3a865268eb660ba483b7b4949260702ae1320a43d099"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.170.0"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "5a8085114d8ac0ed8d48623393d7f695ee03789170d7e0bec0b97af678982b99"
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.167.0"
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: "ed569d487b5b84cfc2b07c91e32416e38f32ecbe1036c004f692219945a09e43"
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: ""
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: ""
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 

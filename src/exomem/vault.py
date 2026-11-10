@@ -26,6 +26,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import Context, ContextVar, copy_context
@@ -1408,6 +1409,12 @@ class PathGuard:
         if not read.serves(Path(vault_root), rel):
             raise PathGuardError("PATH_GUARD_INVALID", "the store does not serve this path")
         return _store_guard(rel, _stored_sha256(Path(vault_root), rel))
+
+    @classmethod
+    def of_stored(cls, target: str, sha256: str | None) -> PathGuard:
+        """Guard a stored page by the hash that the caller read in its own store snapshot, or by
+        its absence there when ``sha256`` is None: a folder's pages then cost no query each."""
+        return _store_guard("/".join(_safe_guard_target(target)), sha256)
 
     @classmethod
     def capture(
@@ -4090,6 +4097,11 @@ def _allowed_census_names(directory: Path, allowed_changes: Iterable[Path]) -> f
         if relative.parts:
             names.add(relative.parts[0])
     return frozenset(names)
+
+
+#: The most entries that one folder transition binds: the census of each folder that a directory
+#: recovery reads, and the pages that a store-mode folder trash or recovery moves in one transaction.
+DIRECTORY_TRANSITION_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -8294,12 +8306,27 @@ def find_inbound_wikilinks(
     )
 
 
-def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
-    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them."""
+def find_inbound_wikilinks_many(
+    vault_root: Path, targets: Iterable[str], *, held: bool = False
+) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them.
+
+    `held` says that the vault holds every target, as a store holds a page that may have no file
+    yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
+    does for one target, and the index answers which ones those are without a look at the disk.
+    """
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshots = {target: _snapshot_inbound(data, target) for target in targets}
-    return {target: _select_inbound_wikilinks(snapshot, target, None) for target, snapshot in snapshots.items()}
+    return {
+        target: _select_inbound_wikilinks(
+            snapshot,
+            target,
+            None,
+            target_has_no_file=held and target not in snapshot.sources,
+        )
+        for target, snapshot in snapshots.items()
+    }
 
 
 def cached_inbound_wikilinks(
@@ -9378,7 +9405,7 @@ def render_title_links(
 # ---------------- log helpers ----------------
 
 
-_LOG_WIKILINK_RE = re.compile(r"!?\[\[(.+?)\]\]")
+_LOG_WIKILINK_TOKEN = re.compile(r"\[\[|\]\]|\n")
 
 
 def escape_wikilinks_for_log(text: str) -> str:
@@ -9389,13 +9416,42 @@ def escape_wikilinks_for_log(text: str) -> str:
     broken_wikilink audit then re-flags — a self-inflicted drift class. Render
     any `[[...]]` / `![[...]]` as backticked code so it stays inert while the
     referenced text is preserved.
+
+    One left-to-right scan pairs each `]]` with the earliest unpaired `[[` before it on its line,
+    with at least one character between them. A paired `[[` (and a `!` just before it) and its `]]`
+    become backticks, so no `[[` is left before a `]]` on any line, however the brackets nest. A
+    regex substitution repeated until stable gave the same text on ordinary lines, but nested or
+    unclosed brackets made it quadratic.
     """
-    # One pass can leave an inner `[[` paired with an outer `]]`, and a stray backtick then shifts
-    # the code span that hid it. Each pass removes one bracket pair, so repeat until none is left.
-    previous = None
-    while text != previous:
-        previous, text = text, _LOG_WIKILINK_RE.sub(lambda m: f"`{m.group(1)}`", text)
-    return text
+    if "[[" not in text:
+        return text
+    pieces: list[str] = []
+    # Each unpaired `[[` on this line, earliest first: its index in `pieces` and its end in `text`.
+    opened: deque[tuple[int, int]] = deque()
+    position = 0
+    while (match := _LOG_WIKILINK_TOKEN.search(text, position)) is not None:
+        start, token = match.start(), match.group()
+        pieces.append(text[position:start])
+        position = match.end()
+        if token == "\n":
+            opened.clear()
+        elif token == "[[":
+            opened.append((len(pieces), position))
+        elif opened:
+            if opened[0][1] == start:
+                # `[[]]` holds nothing, so only a `]]` one character later can close it: `[[]]]`.
+                if not text.startswith("]", position):
+                    pieces.append(token)
+                    continue
+                pieces.append("]")
+                position += 1
+            index, _end = opened.popleft()
+            pieces[index] = "`"
+            pieces[index - 1] = pieces[index - 1].removesuffix("!")
+            token = "`"
+        pieces.append(token)
+    pieces.append(text[position:])
+    return "".join(pieces)
 
 
 def document_newline(text: str) -> str:

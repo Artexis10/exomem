@@ -188,16 +188,16 @@ def verify_local_authorization_transport(
     """Consume and verify the protected carrier before argument validation."""
     import time
 
-    from .governance import authorization_request, authorization_transport
+    from .governance import authorization_request, credential_carrier
     from .governance import principal as principal_module
 
     root = resolve_vault_for(cmd.name, raw_for_vault, vault_root)
     carrier = authorization_carrier
     if carrier is None:
         carrier = (
-            authorization_transport.CredentialCarrier.absent()
+            credential_carrier.CredentialCarrier.absent()
             if authorization_session_fd is None
-            else authorization_transport.read_cli_authorization_fd(
+            else credential_carrier.read_cli_authorization_fd(
                 authorization_session_fd
             )
         )

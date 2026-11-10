@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 0745e8a70957dd69109eb3348fe261c9c86a4e9f4cf7d2c3ecc60d977fd37411
+  skill_contract: 5cd0e8a07c95a96ea63029f24f583348906eef2cb900c74c8485be44780872f0
   version: "0.1.0"
 ---
 
@@ -81,7 +81,8 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    For a whole folder or collection of existing files, use `manage_memory` instead of
    capturing one by one. A folder outside the vault is staged first: run
    `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then call `manage_memory` with `operation` `imports.file`
+   absolute path. A personal server's remote client can send the folder as one archive
+   instead. For either, and for Cloud, follow [importing](references/importing.md): on Cloud, get the CLI command from `observe_transfer` and check its prerequisites. Then call `manage_memory` with `operation` `imports.file`
    and the staged `path`, with a `collection` name where the person gives one. Repeat the same
    call with the returned `continuation` until `filing` is not `working`. Report the whole
    import from `summary` and the `progress` counts, including the failed files, then the

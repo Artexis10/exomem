@@ -744,6 +744,9 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
                     filename=filename,
                     content_type=upload.content_type, max_bytes=maximum,
                     expected_sha256=ticket["expected_sha256"],
+                    # An import upload is named again by `imports.file` from the ticket token alone.
+                    secret=(upload_handoff.hold_secret(ticket["nonce"])
+                            if ticket["lane"] == held_uploads.IMPORT_LANE else None),
                 )
         return JSONResponse(held, status_code=201)
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):

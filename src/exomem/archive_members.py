@@ -89,12 +89,16 @@ def member_blob(sha256: str) -> str:
 
 
 class ArchiveError(Exception):
-    """A content-free refusal of an archive: `code` is `INVALID`, `TOO_LARGE` or `NO_SPACE`."""
+    """A content-free refusal of an archive: `code` is `INVALID`, `TOO_LARGE` or `NO_SPACE`.
+
+    `member` is the entry that `central_directory` refused, for a caller that tells its own client which one.
+    """
 
     def __init__(self, code: str, reason: str) -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
+        self.member: str | None = None
 
 
 def valid_component(part: str) -> bool:
@@ -203,30 +207,35 @@ def central_directory(zip_file: zipfile.ZipFile, *, max_entries: int | None = No
     entries: dict[str, Entry] = {}
     names: dict[str, bool] = {}
     for info in infos:
-        if info.is_dir() and not portable_paths:
-            continue
-        if info.flag_bits & _ZIP_FLAG_ENCRYPTED:
-            raise ArchiveError(INVALID, "the archive has an encrypted entry")
-        mode = stat.S_IFMT(info.external_attr >> 16)
-        # ZIP entry modes are closed filesystem protocol values; no device or link is a document.
-        if entry_is_symlink(info) or (portable_paths and mode not in (0, stat.S_IFREG, stat.S_IFDIR)):
-            raise ArchiveError(INVALID, "the archive has an unsupported entry type")
-        if portable_paths and info.filename != info.orig_filename:
-            raise ArchiveError(INVALID, "an archive entry uses a truncated or normalized name")
-        path = validated_member(info.orig_filename if portable_paths else info.filename)
-        if portable_paths and path != info.filename.removesuffix("/"):
-            raise ArchiveError(INVALID, "an archive entry uses a path alias")
-        if PureWindowsPath(path).drive:
-            raise ArchiveError(INVALID, "an archive entry has a drive path")
-        # Member pools preserve exact ZIP labels; document custody also refuses cross-platform aliases.
-        key = path.casefold() if portable_paths else path
-        if key in names:
-            raise ArchiveError(INVALID, "the archive names one member twice or uses a path alias")
-        names[key] = info.is_dir()
-        if info.file_size > MAX_MEMBER_BYTES:
-            raise ArchiveError(TOO_LARGE, "an archive member exceeds the expanded-byte limit")
-        if not info.is_dir():
-            entries[path] = Entry(path, info)
+        try:
+            if info.is_dir() and not portable_paths:
+                continue
+            if info.flag_bits & _ZIP_FLAG_ENCRYPTED:
+                raise ArchiveError(INVALID, "the archive has an encrypted entry")
+            mode = stat.S_IFMT(info.external_attr >> 16)
+            # ZIP entry modes are closed filesystem protocol values; no device or link is a document.
+            if entry_is_symlink(info) or (portable_paths and mode not in (0, stat.S_IFREG, stat.S_IFDIR)):
+                raise ArchiveError(INVALID, "the archive has an unsupported entry type")
+            if portable_paths and info.filename != info.orig_filename:
+                raise ArchiveError(INVALID, "an archive entry uses a truncated or normalized name")
+            path = validated_member(info.orig_filename if portable_paths else info.filename)
+            if portable_paths and path != info.filename.removesuffix("/"):
+                raise ArchiveError(INVALID, "an archive entry uses a path alias")
+            if PureWindowsPath(path).drive:
+                raise ArchiveError(INVALID, "an archive entry has a drive path")
+            # Member pools preserve exact ZIP labels; document custody also refuses cross-platform aliases.
+            key = path.casefold() if portable_paths else path
+            if key in names:
+                raise ArchiveError(INVALID, "the archive names one member twice or uses a path alias")
+            names[key] = info.is_dir()
+            if info.file_size > MAX_MEMBER_BYTES:
+                raise ArchiveError(TOO_LARGE, "an archive member exceeds the expanded-byte limit")
+            if not info.is_dir():
+                entries[path] = Entry(path, info)
+        except ArchiveError as error:
+            error.member = info.orig_filename
+            raise
+
     for key in names if portable_paths else ():
         if any(names.get(parent.as_posix()) is False for parent in PurePosixPath(key).parents):
             raise ArchiveError(INVALID, "an archive file aliases a directory")

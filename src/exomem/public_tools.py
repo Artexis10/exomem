@@ -640,15 +640,18 @@ def _save_episode(wire: dict[str, Any], ctx: Context) -> Translated:
 
 
 class UploadFiles(Wire):
-    lane: Literal["source", "evidence"] = Field(description="Where the bytes go: source (original material) or evidence (proof).")
+    lane: Literal["source", "evidence", "import"] = Field(
+        description="Where the bytes go: source (original), evidence (proof) or import (folder archive; not Cloud).")
     expected_sha256: str | None = Field(default=None, description="SHA-256 of the file you intend to send.")
     hold: bool | None = Field(default=None, description="Keep the upload for this session; needs expected_sha256.")
     detail: Detail | None = _DETAIL
 
 
 def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
+    # An import archive is only ever held for `imports.file`, so that lane implies the hold.
+    held = True if wire["lane"] == "import" else wire.get("hold")
     return "transfer_artifact", {"operation": "upload", **_given({
-        "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": wire.get("hold"),
+        "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": held,
         "response_detail": wire.get("detail")})}
 
 
