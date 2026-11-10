@@ -241,7 +241,8 @@ def _collection_fill(source_path: Path):
                 destination.execute(sql)
             check()
             # The schema fixes this set: store mode's tables stay in the copy, empty.
-            copied = [name for name in tables if name not in schema.VAULT_STORE_TABLES]
+            copied = [name for name in tables
+                      if name not in (*schema.VAULT_STORE_TABLES, *schema.DERIVED_INDEX_TABLES)]
             for name in copied:
                 columns = destination.execute(
                     "SELECT name, type, pk FROM pragma_table_xinfo(?, 'live') WHERE hidden = 0 ORDER BY cid", (name,)).fetchall()
@@ -255,6 +256,10 @@ def _collection_fill(source_path: Path):
                 listed = ", ".join(names)
                 destination.execute(f"INSERT INTO main.{_quoted(name)}({listed}) SELECT {listed} FROM live.{_quoted(name)}")
                 check()
+            # A copied index's state rows would read as built on the restored store; the
+            # declarations copy as warming so the restored store's backfill builds them.
+            if "item_reference_state" in copied:
+                destination.execute("UPDATE item_reference_state SET built_through=0, ready=0")
             # An AUTOINCREMENT counter outlives the rows it numbered (a dropped rollup keeps its id), so a copy that
             # derived it from its rows would reissue an id. The counters of the tables left empty stay out with them.
             destination.execute("DELETE FROM main.sqlite_sequence")

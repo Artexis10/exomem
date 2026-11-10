@@ -81,6 +81,7 @@ _INSPECTION_KEYS = frozenset(
         "observed_values",
         "coverage",
         "references",
+        "inbound",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -466,6 +467,23 @@ def inspection_references(value: Any) -> list[dict[str, Any]] | None:
     return out
 
 
+def inspection_inbound(value: Any) -> list[dict[str, Any]] | None:
+    """Bounded inbound-declaration entries: source id, declaration name and index state."""
+    if not isinstance(value, list) or len(value) > 64:
+        return None
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {"collection", "field", "state"}:
+            return None
+        if type(item["collection"]) is not str or type(item["field"]) is not str:
+            return None
+        if item["state"] not in {"ready", "warming"}:
+            return None
+        out.append({"collection": item["collection"], "field": item["field"],
+                    "state": item["state"]})
+    return out
+
+
 def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Reconstruct the report-only inspection union before it reaches egress."""
     kind = payload.get("kind")
@@ -543,6 +561,10 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         return None
     references = payload.get("references")
     normalized_references = inspection_references(references) if references is not None else None
+    inbound = payload.get("inbound")
+    normalized_inbound = inspection_inbound(inbound) if inbound is not None else None
+    if inbound is not None and normalized_inbound is None:
+        return None
     if references is not None and normalized_references is None:
         return None
     presentation = payload.get("presentation")
@@ -802,6 +824,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         **({"observed_values": normalized_observed} if normalized_observed is not None else {}),
         **({"coverage": normalized_coverage} if normalized_coverage is not None else {}),
         **({"references": normalized_references} if normalized_references is not None else {}),
+        **({"inbound": normalized_inbound} if normalized_inbound is not None else {}),
     }
     return result
 
@@ -927,6 +950,7 @@ egress.register_projector(
         "observed_values",
         "coverage",
         "references",
+        "inbound",
     ),
     validator=_validate_record_inspection,
 )
@@ -1782,7 +1806,7 @@ def inspect_collection(
                 "saved_views": saved_views,
                 # Store inspection lists declared-reference state; the file mode has no
                 # store database to report against, so it reports the empty list.
-                "references": [],
+                "references": [], "inbound": [],
                 "lifecycle_guards": guards,
                 "coverage": _collection_coverage(
                     root,

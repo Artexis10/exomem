@@ -54,6 +54,8 @@ def _chains(query, bound: dict) -> list[tuple[str, list]]:
     collection_id = query.source.ref
     chains: dict[str, list] = {}
     for entry in query.related:
+        if entry.inverse is not None:
+            continue
         chains.setdefault(entry.path, [bound[(collection_id, entry.path)]])
     for field in ir.fields(query):
         if field.alias is None:
@@ -76,20 +78,27 @@ def _targets(chains) -> dict:
 class _Execution:
     """The shared scan: dependencies, named chains, resolution and per-row reference state."""
 
-    def __init__(self, session, query, bound: dict, *, admitted, basis, uniform):
+    def __init__(self, session, query, bound: dict, inverses: dict | None = None, *,
+                 admitted, basis, uniform):
         self.session = session
         self.query = query
         self.bound = bound
+        self.bound_inverses = inverses or {}
         self.admitted, self.basis, self.uniform = admitted, basis, uniform
         self.collection_id = query.source.ref
         self.fields = list(ir.fields(query))
-        self.related: dict[str, int] = {entry.path: entry.limit for entry in query.related}
+        self.related: dict[str, int] = {entry.path: entry.limit for entry in query.related
+                                        if entry.inverse is None}
+        self.inverses: dict[str, tuple[int, object]] = {
+            entry.path: (entry.limit, self.bound_inverses[entry.inverse])
+            for entry in query.related if entry.inverse is not None}
         self.chains = _chains(query, bound)
         self.reads: dict = {}  # (bound, Target) -> the path fields read, for the scan
         self.shown: dict = {}  # (bound, Target) -> digest of every readable field, for a related target
         self.expansions: dict = {}  # (bound, Target) -> every readable field, for a rendered page row
         self._needed = self._target_fields()
         self._related_bounds = {hops[-1] for name, hops in self.chains if name in self.related}
+        self.inverse_seen: dict[str, list] = {name: [] for name in self.inverses}
         self.pairs: Counter = Counter()
         self.count = 0
         self.unresolved_rows = 0
@@ -127,7 +136,7 @@ class _Execution:
         return tuple(sorted(deps))
 
     def names(self) -> list[str]:
-        return [name for name, _ in self.chains]
+        return [name for name, _ in self.chains] + [name for name in self.inverses]
 
     def visit_charge(self) -> int:
         """The preview's charge: the admitted rows, plus one lookup per row for each bound reference.
@@ -306,6 +315,8 @@ class _Execution:
     def related_out(self, row: _Row) -> dict:
         """The ``related`` object of one output row: state, rows and bounded many-valued items."""
         result = {}
+        for name, (limit, bound) in self.inverses.items():
+            result[name] = self.inverse_out(name, row, bound, limit)
         for name, limit in self.related.items():
             bound = self.bound[(self.collection_id, name)]
             state = row.states[name]
@@ -328,6 +339,27 @@ class _Execution:
                             "truncated": len(items) < len(values)}
         return result
 
+    def inverse_out(self, name: str, row: _Row, bound, limit: int) -> dict:
+        """One row's inverse expansion: the source rows that refer to it, bounded and release-filtered."""
+        if not bound.ready(self.session.connection):
+            return {"state": "warming"}
+        natural = self.session.connection.execute(
+            "SELECT natural_key FROM items WHERE row_id=?", (row.row_id,)).fetchone()
+        candidates = bound.candidates(
+            self.session.connection, natural[0] if natural is not None else None, row.item_key)
+        # One visit per candidate whatever its release decision, so the cost reveals nothing.
+        self.session.charge_visits(len(candidates))
+        released = []
+        for row_id, key in candidates:
+            free = bound.released(key)
+            self.inverse_seen[name].append([key, free])
+            if free:
+                released.append((row_id, key))
+        released.sort(key=lambda item: item[1])
+        items = [{"item_key": key, **bound.read(row_id)} for row_id, key in released[:limit]]
+        return {"state": "ready", "count": len(released), "items": items,
+                "truncated": len(released) > len(items)}
+
     def digest(self) -> str:
         """The resolution digest a continuation binds: each distinct value's outcome and the values it shows."""
         seen = []
@@ -339,6 +371,9 @@ class _Execution:
                                     [target.item_key, self.reads.get((bound, target), {}),
                                      self.shown.get((bound, target))]])
                 seen.append([f"{name}#{position}", entries])
+        for name, (_, bound) in self.inverses.items():
+            seen.append([name, bound.ready(self.session.connection),
+                         sorted(self.inverse_seen[name], key=lambda pair: pair[0])])
         return cursors._hash(seen)
 
     def schema_hash(self) -> str:
@@ -498,11 +533,13 @@ def _explain_plan(session, query, execution, *, manifest, uniform, dependencies)
     return {**result, "admitted": True, "visit_charge": execution.visit_charge()}
 
 
-def run(session, query, bound: dict, *, basis, uniform, manifest, as_of=None) -> dict:
+def run(session, query, bound: dict, inverses: dict | None = None, *,
+        basis, uniform, manifest, as_of=None) -> dict:
     """Execute, explain, preview or dry-run a row query that names a reference."""
     _refuse(query, session)
     admitted = session.admit(query.source.ref)
-    execution = _Execution(session, query, bound, admitted=admitted, basis=basis, uniform=uniform)
+    execution = _Execution(session, query, bound, inverses,
+                           admitted=admitted, basis=basis, uniform=uniform)
     if query.mode in {"explain", "preview", "dry_run"}:
         return _explain_plan(session, query, execution, manifest=manifest,
                              uniform=uniform, dependencies=execution.dependencies())
@@ -525,12 +562,14 @@ def run(session, query, bound: dict, *, basis, uniform, manifest, as_of=None) ->
 # --- grouped reductions (C) -----------------------------------------------------
 
 
-def reduce(session, query, bound: dict, *, basis, uniform, manifest, as_of=None) -> dict:
+def reduce(session, query, bound: dict, inverses: dict | None = None, *,
+           basis, uniform, manifest, as_of=None) -> dict:
     """One filtered base-row reduction: whole groups plus a page of the combined rows."""
     _refuse(query, session)
     collection_id = query.source.ref
     admitted = session.admit(collection_id)
-    execution = _Execution(session, query, bound, admitted=admitted, basis=basis, uniform=uniform)
+    execution = _Execution(session, query, bound, inverses,
+                           admitted=admitted, basis=basis, uniform=uniform)
     execution.freeze(as_of)
     shape = reductions._shape(query, manifest, _targets(execution.chains))
     visit_reason = "filtered" if (query.where is not None

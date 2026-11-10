@@ -1779,13 +1779,14 @@ class StoreServer:
         due = [row for row in due if row[0] not in self._backfill_refused]
         if not due:
             return min((at - now for at in self._backfill_refused.values()), default=IMPORT_IDLE_SECONDS)
-        collection_id, projection, rollup = next((row for row in due if row[0] > self._backfill_last), due[0])
+        collection_id, projection, rollup, references = next(
+            (row for row in due if row[0] > self._backfill_last), due[0])
         self._backfill_last = collection_id
         try:
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 try:
                     _mutate(self.root, writer.backfill_derived, collection_id, limit=BACKFILL_BATCH_ROWS,
-                            projection=projection, rollup=rollup)
+                            projection=projection, rollup=rollup, references=references)
                 except Exception:  # noqa: BLE001 - one refused collection leaves the others to advance
                     logger.warning("derived backfill of %s could not advance; retrying later",
                                    collection_id, exc_info=True)

@@ -55,6 +55,7 @@ from . import (
     index_migrations,
     log_view,
     reference_declarations,
+    reference_index,
     references,
     rollups,
     schema,
@@ -612,6 +613,8 @@ class CollectionWriter:
                           if collections.declared_references(field_plan.manifest.schema) else [])
             return {"kind": "collection", "report_only": True,
                     "references": references,
+                    "inbound": reference_index.inbound(
+                        self._operation, self.connection, field_plan.manifest),
                     "contract": record_governance._inspection_contract(field_plan.manifest),
                     "snapshot": snapshot,
                     "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
@@ -737,6 +740,8 @@ class CollectionWriter:
         payload = {
             "kind": "collection", "report_only": True,
             "references": references,
+            "inbound": reference_index.inbound(
+                self._operation, self.connection, manifest),
             "contract": record_governance._inspection_contract(manifest),
             "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
@@ -2062,8 +2067,9 @@ class CollectionWriter:
                     for cid, facts in affected.items()}, why=why)
         return result
 
-    def backfill_derived(self, collection, *, limit=128, projection=True, rollup=True) -> tuple[bool, bool]:
-        """Advance this collection's query projection and building rollups by one batch each, in one transaction.
+    def backfill_derived(self, collection, *, limit=128, projection=True, rollup=True,
+                         references=True) -> tuple[bool, bool]:
+        """Advance this collection's query projection, building rollups and reference index by one batch each, in one transaction.
 
         Internal maintenance under the writer lease and current authority, not a
         public route; the serving store thread drives it. A collection with no
@@ -2081,8 +2087,18 @@ class CollectionWriter:
                 published = index_migrations.backfill_batch(accounted, manifest.collection_id, limit=limit)
             if rollup:
                 ready = rollups.backfill_batch(accounted, manifest.collection_id, limit=limit)
+            if references:
+                reference_index.backfill(accounted, manifest, limit=limit)
             self._precommit(manifest)
         return published, ready
+
+    def rebuild_references(self, collection) -> None:
+        """Reset the collection's reference index to warming for test and repair rebuilds."""
+        with self._mutation():
+            _, manifest, _ = self._collection(collection)
+            reference_index.rebuild(index_migrations.AccountedWriter(self.connection, self._execute),
+                                    manifest.collection_id)
+            self._precommit(manifest)
 
     def backfill_query_indexes(self, collection, *, limit=128) -> bool:
         """One projection batch alone; True when it publishes the projection."""
@@ -2209,6 +2225,10 @@ class CollectionWriter:
                 },
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
+            reference_index.revise(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                manifest.collection_id, dropped=(),
+                added=tuple(collections.declared_references(manifest.schema)), retargeted=())
             if manifest.view_mode == summary.SUMMARY:
                 # An empty summary collection publishes its native payload/query pair here.
                 if typed_storage.migrate_batch(index_migrations.AccountedWriter(self.connection, self._execute),
@@ -2698,6 +2718,8 @@ class CollectionWriter:
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
                                        previous=json.loads(before["values_json"]) if before else None)
+        reference_index.maintain(index_migrations.AccountedWriter(self.connection, self._execute),
+                                 manifest, row_id, values)
         for source_ordinal, source in enumerate(sources):
             self._execute(tables.INSERT_SOURCE, {"row_id": row_id, "row_version": version,
                           "ordinal": source_ordinal, "source_ref": source})
@@ -3567,6 +3589,16 @@ class CollectionWriter:
                 raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
+            old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
+            new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
+            reference_index.revise(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                current.collection_id,
+                dropped=tuple(sorted(set(old_refs) - set(new_refs))),
+                added=tuple(new_refs[name] for name in sorted(set(new_refs) - set(old_refs))),
+                retargeted=tuple(new_refs[name] for name in sorted(set(old_refs) & set(new_refs))
+                                 if new_refs[name].collection != old_refs[name].collection),
+            )
             if mode_change:
                 self._execute("UPDATE collections SET view_mode=? WHERE collection_id=?",
                               (proposed.view_mode, current.collection_id))
@@ -3690,6 +3722,16 @@ class CollectionWriter:
             manifest_text, proposed = conversion.summary_form(self.root, self._operation, current, declared, stored)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
+            old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
+            new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
+            reference_index.revise(
+                index_migrations.AccountedWriter(self.connection, self._execute),
+                current.collection_id,
+                dropped=tuple(sorted(set(old_refs) - set(new_refs))),
+                added=tuple(new_refs[name] for name in sorted(set(new_refs) - set(old_refs))),
+                retargeted=tuple(new_refs[name] for name in sorted(set(old_refs) & set(new_refs))
+                                 if new_refs[name].collection != old_refs[name].collection),
+            )
             self._execute("UPDATE collections SET view_mode=?, manifest_version=?, audit_reader_version=2 "
                           "WHERE collection_id=?", (summary.SUMMARY, txn["manifest_version_after"], cid))
             self._execute("DELETE FROM projection_state WHERE collection_id=? AND kind='item'", (cid,))
