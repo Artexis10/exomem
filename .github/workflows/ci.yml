@@ -26,8 +26,8 @@ env:
   # The earlier release that full runs qualify as the rollback application on a migrated store,
   # with its published wheel's SHA-256: any published release that reads the current store schema. A store schema bump empties both, because no earlier
   # release reads the new schema; the next release that ships that schema sets them again.
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: "0.167.0"
-  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: "ed569d487b5b84cfc2b07c91e32416e38f32ecbe1036c004f692219945a09e43"
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_VERSION: ""
+  EXOMEM_TEST_COMPATIBLE_APPLICATION_SHA256: ""
   # The dedicated TUI job owns this subtree; its optional conftest must not shadow lean-tier helpers.
   EXOMEM_TUI_TEST_DIRECTORY: tests/tui
 

@@ -17,7 +17,19 @@ from pathlib import Path
 
 from .. import held_fs, planning, record_formats, record_governance, records, vault
 from .. import structured_collections as collections
-from . import authority, chain, governance, legacy_originals, log_view, ownership, reference_index, summary, tokens, types, views
+from . import (
+    authority,
+    chain,
+    governance,
+    legacy_originals,
+    log_view,
+    ownership,
+    reference_index,
+    summary,
+    tokens,
+    types,
+    views,
+)
 from .connection import CollectionStoreError
 from .connection import checked_sql as checked_sql
 from .legacy import LegacyAuditProof, LegacyAuditSpool
