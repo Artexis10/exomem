@@ -479,10 +479,10 @@ def test_only_an_opus_judged_report_under_an_acknowledged_amendment_is_decision_
         "effort": ACTOR_EFFORT,
     }
 
-    def report(backend: str) -> dict:
+    def report(backend: str, judge_billing: str = "subscription") -> dict:
         return {
             "actor": {"model_reported": [ACTOR_MODEL]},
-            "judge": JudgeSpec.of(backend).record(),
+            "judge": {**JudgeSpec.of(backend).record(), "billing": judge_billing},
             "decision": {"status": "complete"},
         }
 
@@ -491,6 +491,10 @@ def test_only_an_opus_judged_report_under_an_acknowledged_amendment_is_decision_
     assert gate.evidence_of(report("claude"), stored, acknowledged) == "decision"
     assert gate.evidence_of(report("codex"), stored, acknowledged) == "instrument"
     assert gate.evidence_of(report("claude"), stored, pending) == "instrument"
+    # The preregistration pays decision runs from the subscription only.
+    assert gate.evidence_of(report("claude"), {**stored, "billing": "credits"}, acknowledged) == "instrument"
+    assert gate.evidence_of(report("claude", "credits"), stored, acknowledged) == "instrument"
+    assert gate.evidence_of(report("claude", "unknown"), stored, acknowledged) == "instrument"
 
 
 VERDICT = {

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -366,6 +367,8 @@ def run_suite(
     indexes = (
         [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
     )
+    # Refuses a credits declaration without a key before the record or any session exists.
+    billing.session_env(os.environ)
     run_dir = runs_dir() / run_id
     write_record(
         run_dir,
@@ -488,10 +491,7 @@ def report_suite(
             }
     run_dirs = [runs_dir() / r for r in run_ids]
     built["actor"] = record.run_identity(*run_dirs)
-    built["billing"] = {
-        "by_arm": billing.arm_sources(*run_dirs),
-        "compared": [list(pair) for pair in wanted],
-    }
+    built["billing"] = {"declared": stored.get("billing"), "observed": built["actor"]["billing"]}
     return built
 
 
@@ -523,11 +523,9 @@ def rejudge_sample(suite: str, run_id: str, primary: JudgeSpec, spec: JudgeSpec,
 
 def summary(report: dict) -> list[str]:
     """One line per paired measure and per arm's units, then the decision when the report has one."""
-    # Billing leads: a mixed comparison changes how every figure below reads.
-    lines = billing.lines(
-        (report.get("billing") or {}).get("by_arm") or {},
-        [tuple(p) for p in (report.get("billing") or {}).get("compared") or []] or None,
-    )
+    # Billing leads: a run whose sessions were billed otherwise than declared changes how every figure reads.
+    stated = report.get("billing") or {}
+    lines = [billing.line(stated.get("declared"), stated.get("observed") or [])]
     if report.get("suite") == "epistemic":
         from .epistemic.report import summary_lines
 

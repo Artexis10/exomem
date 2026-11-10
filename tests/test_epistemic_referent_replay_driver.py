@@ -811,3 +811,14 @@ def test_f33_accepts_only_the_declared_billing_source(
         stdout, arm=client.ARMS["hookless"], plugin_dir=client.PLUGIN_DIR, profile=profile
     )
     assert (abort is not None) is aborts
+
+
+def test_f33_refuses_a_credits_declaration_without_a_key_before_any_session(tmp_path, monkeypatch) -> None:
+    """Fails when an f33 run declared on credits starts without a key and bills the profile's login."""
+
+    monkeypatch.setenv("EXOMEM_OUTCOME_BILLING", "credits")
+    agent = _Agent(PET_TWIN, _profile(tmp_path))
+    parent = {"PATH": "/usr/bin", "HOME": str(tmp_path)}
+    with pytest.raises(SystemExit, match="ANTHROPIC_API_KEY"):
+        _run(tmp_path, agent, case_ids=[PET_TWIN], repeats=1, parent_env=parent)
+    assert agent.envs == [] and not (tmp_path / "out").exists()

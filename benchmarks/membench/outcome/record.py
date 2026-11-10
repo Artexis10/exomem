@@ -99,7 +99,11 @@ def run_identity(*run_dirs: Path) -> dict:
         "billing": set(),
     }
     for run_dir in run_dirs:
-        for path in [*run_dir.glob("*/manifest.json"), *run_dir.glob("*/*/result.json")]:
+        for path in [
+            *run_dir.glob("*/manifest.json"),
+            *run_dir.glob("*/*/result.json"),
+            *run_dir.glob("*/*/*/manifest.json"),
+        ]:
             data = json.loads(path.read_text())
             actor = data.get("actor")
             if not actor:
@@ -107,6 +111,6 @@ def run_identity(*run_dirs: Path) -> dict:
             seen["cli"].add(actor.get("cli"))
             seen["model_requested"].add(actor.get("model_requested") or data.get("model_requested"))
             seen["model_reported"].add((actor.get("observed") or {}).get("model_reported"))
-            seen["billing"].add((actor.get("observed") or {}).get("billing"))
+            seen["billing"].add((actor.get("observed") or {}).get("billing") or billing.UNKNOWN)
             seen["exomem_version"].add((actor.get("product") or {}).get("exomem_version"))
     return {key: sorted(v for v in values if v) for key, values in seen.items()}

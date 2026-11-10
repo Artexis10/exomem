@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import gate, record
+from . import billing, gate, record
 from .command import SUITES, refuse, report_suite, run_suite, runs_dir, summary
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
 from .judging import JudgeSpec
@@ -202,7 +202,7 @@ def run_panel(
             else {
                 "version": previous["version"],
                 # A panel stored before the billing field refused every source but the subscription login.
-                "billing": previous["actor"].get("billing", ["subscription"]),
+                "billing": previous["actor"].get("billing", [billing.DEFAULT]),
                 "suites": {
                     s: compare(s, suites[s], previous["suites"][s])
                     for s in suites

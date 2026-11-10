@@ -17,6 +17,7 @@ from protocol.contracts import (
     working_amendment_receipts,
 )
 
+from . import billing
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
 from .judging import DECISION_JUDGE
 from .record import checkout_state
@@ -128,7 +129,7 @@ def evidence_of(report: dict, stored: dict, repo_root: Path = REPO_ROOT) -> str:
     """What a report is worth, from what the run recorded: ``instrument``, ``void``, ``incomplete`` or ``decision``.
 
     A decision report is a gated held-out run whose actor and judge are the frozen ones and whose
-    decision no harness fault voided and nothing leaves incomplete, while the harness's amendment is
+    decision no harness fault voided and nothing leaves incomplete, billed to the subscription, while the harness's amendment is
     acknowledged. Anything else is instrument evidence, whatever the split says.
     """
     if stored["split"] != "heldout" or not stored.get("gate"):
@@ -137,8 +138,13 @@ def evidence_of(report: dict, stored: dict, repo_root: Path = REPO_ROOT) -> str:
         return "instrument"
     if report["actor"]["model_reported"] != [ACTOR_MODEL]:
         return "instrument"
+    # The preregistration pays decision runs from the subscription only; a credit run is instrument evidence.
+    if stored.get("billing", billing.DEFAULT) != billing.DEFAULT:
+        return "instrument"
     judge = report.get("judge")
     if judge is not None and (judge["backend"], judge["model"]) != DECISION_JUDGE:
+        return "instrument"
+    if judge is not None and judge["backend"] == "claude" and judge.get("billing") != billing.DEFAULT:
         return "instrument"
     status = report.get("decision", {}).get("status")
     if status in ("void", "incomplete"):

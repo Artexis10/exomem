@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -286,6 +287,8 @@ def main(argv: list[str] | None = None) -> None:
         ):
             raise SystemExit(f"--arm {name}: {path} holds no src/exomem and plugins/claude-code")
     cases = load_cases(args.case)
+    # Refuses a credits declaration without a key before the run directory or any session exists.
+    billing.session_env(os.environ)
     try:
         run_root = refuse_unsafe_out_dir(args.run_root)
     except JourneySetupError as error:
@@ -298,6 +301,8 @@ def main(argv: list[str] | None = None) -> None:
     manifest = {
         "cli": envelope.version,
         "actor": {"model_requested": args.model, "max_turns": args.max_turns},
+        # The billing source every session of this run must report (``billing.py``).
+        "billing": billing.declared(),
         "judge": judge.spec.record(),
         "cases": [case["id"] for case in cases],
         "repeats": args.repeats,

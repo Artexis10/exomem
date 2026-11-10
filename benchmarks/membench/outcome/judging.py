@@ -29,7 +29,8 @@ DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
 #: The Codex judge's reasoning effort. The Claude judge takes the CLI default, as before.
 DEFAULT_EFFORT = {"claude": None, "codex": "high"}
 #: The judge a decision needs (PREREGISTRATION section 7, sequence 10): Claude Opus on the Claude
-#: subscription. A held-out report judged by anything else never reads as decision evidence.
+#: subscription. A held-out report judged by another model or on API credits is instrument evidence
+#: (``gate.evidence_of``); decision runs stay on the subscription as registered.
 DECISION_JUDGE = ("claude", DEFAULT_MODELS["claude"])
 #: How a judge backend relates to the actor, which always runs through the Claude CLI. A Claude judge is
 #: the actor's own model family, so its reports say so; a Codex judge re-judges a sample for agreement only.
@@ -68,21 +69,6 @@ class JudgeSpec:
         return JUDGE_FAMILY[self.backend]
 
 
-def require_key_matches_billing(env: dict[str, str]) -> None:
-    """Refuse a judge whose environment would bill another account than the declared one.
-
-    The judge's json result names no credential source, so the environment is the only evidence: the
-    CLI bills the key when ``ANTHROPIC_API_KEY`` is set, and the login when it is not.
-    """
-    declared = billing.declared()
-    if bool(env.get("ANTHROPIC_API_KEY")) != (declared == "credits"):
-        raise SystemExit(
-            f"the run declares {billing.ENV_VAR}={declared}, but ANTHROPIC_API_KEY is "
-            f"{'set' if env.get('ANTHROPIC_API_KEY') else 'not set'} for the judge: "
-            "set both to the same account"
-        )
-
-
 _STDIN_PROMPT = "<prompt on stdin>"
 
 
@@ -104,9 +90,8 @@ class Judge:
         self.empty_mcp = work / "no-mcp.json"
         self.empty_mcp.write_text('{"mcpServers": {}}')
         self.schema_file = work / "verdict-schema.json"
+        # Refuses, before any judgement, a credits declaration that has no key to bill.
         self.env = claude_env()[0]
-        if spec.backend == "claude":
-            require_key_matches_billing(self.env)
 
     def argv(self, schema: dict, out: Path) -> list[str]:
         """The judge's command. Both backends read the prompt from stdin: a matter's deliverable can
@@ -277,20 +262,21 @@ def judge_all(
     """
     stored = judge_dir / "judge.json"
     # The claude judge's billing is declared, not observed: its json result carries no credential source.
-    # A judging directory from before the billing field ran on the subscription login.
+    # A judging directory from before the billing field never had its environment checked: unknown.
     claude = spec.backend == "claude"
     record = {**spec.record(), **({"billing": billing.declared()} if claude else {})}
     if stored.exists():
         have = json.loads(stored.read_text())
         if claude:
-            have.setdefault("billing", "subscription")
+            have.setdefault("billing", billing.UNKNOWN)
         if have != record:
             raise SystemExit(
                 f"{judge_dir} was judged by {stored.read_text()}; one judge judges every item. "
                 f"Judge with that spec and billing ({json.dumps(record)}), or use another --run-id"
             )
-    stored.write_text(json.dumps(record, indent=2))
+    # The guard runs before the record: a refused judge leaves no file that locks the directory.
     judge = Judge(spec, judge_dir)
+    stored.write_text(json.dumps(record, indent=2))
     sample = math.ceil(len(items) * rejudge_fraction)
     rejudge = random.Random(seed + 1).sample(items, sample)
     work = [(i, "verdicts") for i in items] + [(i, "rejudge") for i in rejudge]

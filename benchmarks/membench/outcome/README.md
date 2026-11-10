@@ -264,18 +264,24 @@ A run spends subscription quota or API credits. State the cost before starting o
 
 A session is billed to a subscription login or to API credits. It is the same model either way,
 so the source is a run condition to record, not a defect. A run declares its source with
-`EXOMEM_OUTCOME_BILLING` (`subscription`, the default, or `credits`). A credit run starts from a
-shell whose `ANTHROPIC_API_KEY` is a Console org's key, for example the one that
-`harness claude-credits run` uses; the judge's environment must then carry that key too.
+`EXOMEM_OUTCOME_BILLING` (`subscription`, the default, or `credits`). The declaration decides the
+environment of every actor and judge session: under `subscription` the sessions get no
+`ANTHROPIC_API_KEY`, even from a shell that holds one; under `credits` they get it, and the run
+refuses before its first session when the shell holds none. A credit run starts from a shell whose
+`ANTHROPIC_API_KEY` is a Console org's key, for example the one that `harness claude-credits run` uses.
 
-- A session whose `init` event reports another `apiKeySource` than the declared one (`none` for
+- Faults. A session whose `init` event reports another `apiKeySource` than the declared one (`none` for
   `subscription`, `ANTHROPIC_API_KEY` for `credits`) is a harness fault. A source outside that
   closed set is a fault too. One run never mixes sources by accident.
-- `outcome.json` stores the declared source. Each arm manifest stores the reported
-  `api_key_source` and its `billing` name beside the model. An arm with no recorded session reads
-  `unknown`.
-- Every report opens with `billing by arm: ...`, and with `billing sources are mixed: ...` when
-  two compared arms, or a run and the previous panel, differ. The comparison still runs.
+- Evidence. Credit runs are instrument evidence. Decision runs stay on the subscription as the
+  preregistration registers: a held-out run declared on credits, or judged on credits, never reads as
+  decision evidence.
+- Records. `outcome.json`, the incidents manifest and the f33 manifest store the declared source. Each
+  arm manifest stores the reported `api_key_source` and its `billing` name beside the model. A session
+  with no recorded source reads `unknown`.
+- Reports. Every report opens with one `billing:` line that sets the declared source against the
+  sources the run's sessions reported. It says plainly when they differ or one is unknown. The
+  panel also says when it ran on other sources than the previous panel.
 - The claude judge's billing is declared, not observed: its result names no credential source.
-  `judge.json` records the declaration, and a judging directory keeps one source.
-
+  `judge.json` records the declaration, and a judging directory keeps one source. A `judge.json`
+  from before the field reads `unknown`.

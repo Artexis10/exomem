@@ -27,7 +27,7 @@ from collections.abc import Callable, Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import billing as billing_source
+from . import billing
 
 RETRIES = 2
 #: f35 held-out: the orderings of the decision schedule, in the order they are added (PREREGISTRATION
@@ -103,19 +103,19 @@ def replayed(run_dir: Path, unit: str) -> list[dict]:
     ]
 
 
-def init_faults(init: dict, *, model: str, exomem: bool, billing: str | None = None) -> list[str]:
+def init_faults(init: dict, *, model: str, exomem: bool) -> list[str]:
     """What one ``init`` event shows about the session's own set-up.
 
-    ``billing`` is the declared billing source; the run's declaration when omitted (see ``billing``).
+    The credential source must be the one the run declared (see ``billing``).
     """
     faults = []
     if init.get("model") != model:
         faults.append(f"the CLI reported model {init.get('model')!r}, not the requested {model!r}")
-    declared = billing or billing_source.declared()
-    if init.get("apiKeySource") != billing_source.KEY_SOURCES[declared]:
+    declared = billing.declared()
+    if init.get("apiKeySource") != billing.KEY_SOURCES[declared]:
         faults.append(
             f"the CLI reported credential source {init.get('apiKeySource')!r}, "
-            f"not the declared {declared} ({billing_source.KEY_SOURCES[declared]!r})"
+            f"not the declared {declared} ({billing.KEY_SOURCES[declared]!r})"
         )
     if exomem:
         servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers") or []}

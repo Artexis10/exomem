@@ -20,7 +20,8 @@ client sessions:
 **Account.** Every child runs on the profile named by ``--claude-config-dir``
 (``CLAUDE_CONFIG_DIR``), never the default profile. ``HOME`` stays the real
 home; the f27 environment floor strips the variables that mark a nested session,
-and :data:`CHILD_ENV_REMOVED` strips API credentials.
+and :data:`CHILD_ENV_REMOVED` strips the bearer token. The run's billing declaration
+decides ``ANTHROPIC_API_KEY``.
 
 **Faults.** A harness fault blocks the run and is never scored: a non-zero exit,
 an error or non-success result, a login failure, a malformed line, a server
@@ -122,12 +123,11 @@ USES_RULE = {
     ),
 }
 #: Removed from every child: the hook's inject switches (current and legacy name),
-#: so a packet arrives only through activate_context, and API credentials, so the
-#: child runs on the profile's login.
+#: so a packet arrives only through activate_context, and the bearer token, which is no declared
+#: billing source. ``ANTHROPIC_API_KEY`` follows the run's billing declaration (``billing.session_env``).
 CHILD_ENV_REMOVED: tuple[str, ...] = (
     "EXOMEM_RETRIEVE_INJECT",
     "KB_RETRIEVE_INJECT",
-    "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
 )
 #: The CLI's own marker for a plugin it ships, as its `init` line writes it.
@@ -934,6 +934,10 @@ def run_driver(
     if out_dir.exists():
         raise client.JourneySetupError(f"{out_dir} exists; every driver run needs a fresh --out")
     floor, removed = client.environment_floor(parent)
+    # The declaration decides the key: dropped under subscription, required under credits.
+    billed = billing.session_env(floor)
+    removed = tuple(sorted({*removed, *(set(floor) - set(billed))}))
+    floor = billed
     out_dir.mkdir(parents=True)
     # The model is pinned as requested; the first invocation adds the client version.
     observed: dict[str, Any] = {"model": model}
