@@ -1776,8 +1776,8 @@ def test_a_stopped_unit_build_keeps_the_public_parents_it_finished_and_never_a_p
         epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
         lexstore.ensure_fresh(vault)
     lexstore.clear_stores()
-    # SQLite checks the budget every 1000 instructions, more than this build runs. One row per batch
-    # lets the read finish a parent before it starts the next.
+    # The production interval is longer than this build, so check every instruction. One row per
+    # batch lets the read finish a parent before it starts the next.
     monkeypatch.setattr(lexstore, "_BUDGET_CHECK_INSTRUCTIONS", 1)
     monkeypatch.setattr(lexstore, "_OCCURRENCE_TRANSPORT_BATCH", 1)
     budget = request_budget.RequestBudget(seconds=60)

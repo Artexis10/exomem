@@ -1289,7 +1289,7 @@ def test_a_stale_lookup_does_the_same_work_whether_or_not_the_id_exists(
             call_spans.pop_call_spans(token)
             call_spans.MCP_CALL_TOKEN.reset(handle)
         fields = next(r["fields"] for r in rows if r["name"] == "memory_refs.identity_census")
-        timings = {"cpu_ms", "thread_cpu_us", "process_cpu_us"}
+        timings = {"cpu_ms", *call_spans.CPU_FIELDS}
         spans[name] = {key: value for key, value in fields.items() if key not in timings}
 
     assert scans == []

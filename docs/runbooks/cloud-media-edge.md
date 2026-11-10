@@ -314,7 +314,7 @@ counts its evicted originals.
 1. Remove the cell from `mediaEdge.cellIds` in the private values file. Keep
    `mediaEdge.enabled=true`.
 2. Deploy the chart:
-   `helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform --values infra/helm/platform/values.yaml --values "$EXOMEM_PLATFORM_VALUES" --atomic --wait --timeout 10m`
+   `helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform --values "$EXOMEM_PLATFORM_VALUES" --atomic --wait --timeout 10m`
 3. Wait for cellctl to re-render the cell. Its pod restarts once.
 4. Read the cell's store settings:
    `kubectl -n exo-cell-<cell> get secret cell-credentials -o jsonpath='{.data.media-store\.json}' | base64 -d`

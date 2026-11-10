@@ -443,6 +443,57 @@ def test_a_changed_record_revises_a_crlf_page_in_place(vault: Path) -> None:
     assert retained["prior"]["source"].encode() == crlf
 
 
+def test_an_activated_vault_records_and_revises_a_recap_whose_capture_left_the_recent_list(
+    activated_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches an activated vault refusing the episode journal, or a revision whose index update
+    links the recap again once newer captures have pushed it off the recent list."""
+    from exomem import indexes
+
+    vault = activated_vault
+    monkeypatch.setattr(indexes, "RECENT_ACTIVITY_CAP", 1)
+    with request_scope(owner_principal(surface="mcp")):
+        first = _record(vault)
+        add_module.add(
+            vault, schema_module.load_source_schema(vault),
+            content="Notes from a later meeting.", title="A newer capture", source_type="session",
+        )
+        second = _record(vault, summary="The delivery date is now confirmed.")
+
+    path = first["source"]["path"]
+    assert (second["source"]["path"], second["revision"]) == (path, 2)
+    assert _frontmatter(vault / path)["summary"] == "The delivery date is now confirmed."
+    link = f"[[{path.removesuffix('.md')}]]"
+    assert link in (vault / "Knowledge Base/Sources/index.md").read_text(encoding="utf-8")
+    log = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
+    assert log.count(f"add | {path.removeprefix('Knowledge Base/').removesuffix('.md')}") == 2
+
+
+def test_a_revision_whose_index_moved_before_its_commit_answers_busy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An index changed by a writer outside the boundary is a race to retry, not a lost edit."""
+    from exomem.cli_ops import OpError
+
+    index = vault / "Knowledge Base/index.md"
+    commit = episode_memory.batch_atomic_write
+
+    def edit_outside_then_commit(writes, **kwargs):
+        index.write_text(index.read_text(encoding="utf-8") + "\nAn outside edit.\n", encoding="utf-8")
+        return commit(writes, **kwargs)
+
+    with request_scope(owner_principal(surface="mcp")):
+        path = _record(vault)["source"]["path"]
+        before = (vault / path).read_bytes()
+        monkeypatch.setattr(episode_memory, "batch_atomic_write", edit_outside_then_commit)
+        with pytest.raises(OpError) as refused:
+            _record(vault, summary="The delivery date is now confirmed.")
+
+    assert (refused.value.code, refused.value.details["cause"]) == ("MUTATION_BUSY", "auxiliary_changed")
+    assert "An outside edit." in index.read_text(encoding="utf-8")
+    assert (vault / path).read_bytes() == before
+
+
 def test_a_changed_record_revises_through_an_unresolved_vault_root(vault: Path) -> None:
     alias = vault / ".." / vault.name
     with request_scope(owner_principal(surface="mcp")):

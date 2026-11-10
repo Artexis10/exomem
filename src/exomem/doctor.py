@@ -3937,14 +3937,23 @@ def _check_recall_canary() -> DoctorCheck:
         "pass"
         if state == "healthy-availability"
         else "fail"
-        if state in ("failed", "old-success-after-failed-execution")
+        # nosemgrep: ep-word-membership -- These are the canary adapter's closed failing states.
+        if state in ("failed", "old-success-after-failed-execution", "invalid-cases")
         else "warn"
     )
+    remedy = "Inspect the independent observer with python -m exomem.canary_systemd status."
+    if state == "invalid-cases":
+        from .recall_canary import CASE_TOOLS
+
+        remedy = (
+            "The observer refused its case file. Set each case's tool to one of "
+            f"{', '.join(CASE_TOOLS)}, then install the observer again with the corrected file."
+        )
     return _check(
         "recall.canary",
         level,
         f"Read-only MCP canary: {state}. Delivery reaches the local unit, journal and doctor.",
-        "Inspect the independent observer with python -m exomem.canary_systemd status.",
+        remedy,
         details=observed,
     )
 

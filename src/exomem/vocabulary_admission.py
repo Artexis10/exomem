@@ -11,8 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import vocabulary_authority
 from .governance import authorization_custody
-from .vocabulary_authority import AuthorityStatus, VocabularyAuthority
+from .vocabulary_authority import AuthorityStatus
 
 
 class VocabularyAdmissionError(RuntimeError):
@@ -33,11 +34,12 @@ class RuntimeAdmission:
 def runtime_admission(
     vault_root: Path,
     *,
-    authority_factory: Callable[[Path], VocabularyAuthority] = VocabularyAuthority,
+    authority_factory: Callable[[Path], vocabulary_authority.VocabularyAuthority] | None = None,
     now: int | None = None,
 ) -> RuntimeAdmission:
     """Read the authority's startup status without opening request authority."""
-    authority = authority_factory(Path(vault_root))
+    # Resolved per call, as the gate resolves it, so admission and the gate read one authority.
+    authority = (authority_factory or vocabulary_authority.VocabularyAuthority)(Path(vault_root))
     status = authority.runtime_status() if now is None else authority.runtime_status(now=now)
     return RuntimeAdmission(status)
 
@@ -45,7 +47,7 @@ def runtime_admission(
 def require_mutation_admission(
     vault_root: Path,
     *,
-    authority_factory: Callable[[Path], VocabularyAuthority] = VocabularyAuthority,
+    authority_factory: Callable[[Path], vocabulary_authority.VocabularyAuthority] | None = None,
     now: int | None = None,
 ) -> RuntimeAdmission:
     admission = runtime_admission(Path(vault_root), authority_factory=authority_factory, now=now)
@@ -57,7 +59,7 @@ def require_mutation_admission(
 def require_restore_admission(
     vault_root: Path,
     *,
-    authority_factory: Callable[[Path], VocabularyAuthority] = VocabularyAuthority,
+    authority_factory: Callable[[Path], vocabulary_authority.VocabularyAuthority] | None = None,
     now: int | None = None,
 ) -> RuntimeAdmission:
     """Refuse offline replacement of an activated v2 custody generation.

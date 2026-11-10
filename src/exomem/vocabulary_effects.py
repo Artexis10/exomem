@@ -94,7 +94,7 @@ class ClassificationReason:
 
 
 def image_format_refusals(*, is_markdown: bool, size: int | None, ordinary: bool = True) -> tuple[str, ...]:
-    """The closed structural-image format checks shared with transport admission."""
+    """The closed structural-image format checks: the byte bound and the Markdown-only rule."""
     reasons = []
     if size is not None and size > MAX_IMAGE_BYTES:
         reasons.append("image_too_large")

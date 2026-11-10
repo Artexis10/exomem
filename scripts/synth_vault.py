@@ -455,9 +455,11 @@ def gen_collection_cases(fixture: dict, profile: dict) -> list[dict]:
     # Filter on the key (one row) and on each low-cardinality field (many rows).
     record_columns = [field["name"] for field in profile["records"]["fields"]
                       if field.get("key") or "distinct" in field]
-    for kind, tool, name, filter_names in (
-        ("records", "read_records", "records", record_columns),
-        ("planning", "read_plans", "planning", profile["planning"]["governed_fields"]),
+    # Each kind reads through its typed query tool, inspects one collection through the read door,
+    # and lists its collections with the query tool and no collection.
+    for kind, query_tool, inspect_operation, name, filter_names in (
+        ("records", "query_records", "records.inspect", "records", record_columns),
+        ("planning", "query_plan_items", "plans.inspect", "planning", profile["planning"]["governed_fields"]),
     ):
         rng = random.Random(f"{profile['seed']}:{kind}-cases")
         chosen = rng.sample(fixture[kind], min(spec["per_group"], len(fixture[kind])))
@@ -465,14 +467,14 @@ def gen_collection_cases(fixture: dict, profile: dict) -> list[dict]:
             row = rng.choice(collection["items"])
             column = filter_names[number % len(filter_names)]
             matched = sum(1 for item in collection["items"] if item[column] == row[column])
-            query = {"kind": "query", "collection": collection["manifest_path"],
+            query = {"collection": collection["manifest_path"],
                      "filters": [{"column": column, "op": "eq", "value": row[column]}]}
-            cases.append(_case(f"{name}-query", number, tool, {"operation": query},
+            cases.append(_case(f"{name}-query", number, query_tool, query,
                                state_path=["total_matched"], state=matched,
                                references=[(["collection_id"], collection["id"])], material=[["snapshot"]]))
         for number, collection in enumerate(chosen):
-            inspect = {"kind": "inspect", "collection": collection["manifest_path"]}
-            cases.append(_case(f"{name}-read", number, tool, {"operation": inspect},
+            inspect = {"operation": inspect_operation, "arguments": {"collection": collection["manifest_path"]}}
+            cases.append(_case(f"{name}-read", number, "inspect_memory", inspect,
                                state_path=["contract", "collection_id"], state=collection["id"],
                                references=[(["contract", "title"], collection["title"])],
                                material=[["snapshot"]]))
@@ -480,8 +482,8 @@ def gen_collection_cases(fixture: dict, profile: dict) -> list[dict]:
             listing = {"collections": {"type": "array", "minItems": len(fixture[kind])}}
             if kind == "records":
                 listing["legacy_trackers"] = {"type": "array", "minItems": len(fixture["legacy_trackers"])}
-            cases.append({"id": f"{name}-list-{number:02d}", "group": f"{name}-list", "tool": tool,
-                          "arguments": {"operation": {"kind": "inspect"}},
+            cases.append({"id": f"{name}-list-{number:02d}", "group": f"{name}-list", "tool": query_tool,
+                          "arguments": {},
                           "expected": {"response_schema": {"type": "object", "required": list(listing),
                                                            "properties": listing}}})
     return cases
@@ -505,10 +507,10 @@ def gen_note_cases(root: Path, rels: list[str], profile: dict, fixture: dict) ->
         pages.append((rel, frontmatter["title"], " ".join(body.split("\n\n")[0].split()[: spec["passage_words"]])))
     search_schema = {"type": "object", "required": ["hits"],
                      "properties": {"hits": {"type": "array", "minItems": 1,
-                                             "items": {"type": "object", "required": ["path", "title"]}}}}
+                                             "items": {"type": "object", "required": ["id", "title"]}}}}
     cases = []
     for number, (rel, title, _passage) in enumerate(pages[:size]):
-        cases.append(_case("note-read", number, "read_memory", {"path": rel}, state_path=["path"], state=rel,
+        cases.append(_case("note-read", number, "read_page", {"page": rel}, state_path=["path"], state=rel,
                            references=[(["frontmatter", "title"], title)], material=[["body"]]))
     for number, (_rel, _title, passage) in enumerate(pages[size:2 * size]):
         cases.append({"id": f"search-{number:02d}", "group": "search", "tool": "search_memory",

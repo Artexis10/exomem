@@ -412,6 +412,36 @@ def named_dimensions(plan: FilterPlan) -> frozenset[str]:
     return frozenset(found)
 
 
+def requested_groups(
+    expression: Mapping[str, Any] | None, resolve: Callable[[str], str]
+) -> tuple[str, ...]:
+    """The dimension keys a filter asks to group by, in the order it names them.
+
+    A filter asks for groups with a `unit.dimension` predicate at its top level, alone, beside
+    other fields or under a top-level `$and`: `$eq` names one group and `$in` one group for each
+    value. `$ne` and any predicate under `$or` or `$not` ask for none. The order comes from the
+    filter as written, because a compiled plan sorts `$in` values. `resolve` turns a key or label
+    into its key; the filter has compiled already, so every value resolves.
+    """
+    if not isinstance(expression, Mapping):
+        return ()
+    top = expression.get("$and") if set(expression) == {"$and"} else [expression]
+    found: dict[str, None] = {}
+    for clause in top if isinstance(top, list) else ():
+        if not isinstance(clause, Mapping):
+            continue
+        for name, operators in clause.items():
+            if name not in _MEMBERSHIP_FIELDS or not isinstance(operators, Mapping):
+                continue
+            for operator, operand in operators.items():
+                if operator == "$eq":
+                    found.setdefault(resolve(str(operand)))
+                elif operator == "$in" and isinstance(operand, list):
+                    for value in operand:
+                        found.setdefault(resolve(str(value)))
+    return tuple(found)
+
+
 def membership_expression(
     *, kinds: Collection[str], every_kind: bool, keys: Collection[str]
 ) -> FilterNode | None:

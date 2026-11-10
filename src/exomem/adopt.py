@@ -29,6 +29,7 @@ from . import (
     reserved_paths,
     semantic_census,
     source_taxonomy,
+    vocabulary_auxiliaries,
 )
 from . import compile_proposal as compile_proposal_module
 from . import overview as overview_module
@@ -41,6 +42,7 @@ from .vault import (
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
+    escape_wikilinks_for_log,
     kb_root,
     parse_frontmatter,
     plan_log_entries,
@@ -903,6 +905,9 @@ def commit_import_items(
     guards: list[PathGuard] = []
     completion_guards: list[PathGuard] = []
     held_sources: list[reserved_paths.GenericBinarySource] = []
+    # Each new page with its Source originals, in plan order.
+    pages: list[tuple[PlannedWrite, list[PlannedWrite]]] = []
+    derived: list[tuple[str, PlannedWrite]] = []
     with ExitStack() as originals:
         for item in items:
             placed = item.artifact is not None and item.artifact.placed
@@ -921,6 +926,7 @@ def commit_import_items(
                     raise AdoptError("SOURCE_CHANGED", "the original changed before import") from error
                 if digest != item.sha256 or size != item.bytes:
                     raise AdoptError("SOURCE_CHANGED", "the original changed before import")
+            page = None
             if reconcile and os.path.lexists(item.target):
                 current, guard = read_guarded_text(root, item.target)
                 if current != item.content:
@@ -928,12 +934,12 @@ def commit_import_items(
                 guards.append(guard)
                 existing_sources.add(item.target_rel)
             else:
-                writes.append(
-                    PlannedWrite(
-                        path=item.target, content=item.content,
-                        create_only=True, expected_hash=MISSING_CONTENT_HASH,
-                    )
+                page = PlannedWrite(
+                    path=item.target, content=item.content,
+                    create_only=True, expected_hash=MISSING_CONTENT_HASH,
                 )
+                writes.append(page)
+                pages.append((page, []))
             if existing_artifact:
                 completion_guards.append(PathGuard.capture(
                     root, item.artifact.target.relative_to(root).as_posix(), leaf_policy="content",
@@ -945,6 +951,8 @@ def commit_import_items(
                     item.artifact.digest, item.artifact.size,
                 )
                 writes.append(binary)
+                if page is not None:
+                    pages[-1][1].append(binary)
             copied.append(
                 {
                     "original_path": item.original_path,
@@ -975,8 +983,9 @@ def commit_import_items(
         sources_index = sources_dir / "index.md"
         warnings: list[str] = []
         if sources_index.exists():
+            sources_current, sources_guard = indexes.read_guarded_universal_text(root, sources_index)
             sources_text = indexes._replace_by_type_section(
-                sources_index.read_text(encoding="utf-8"),
+                sources_current,
                 folder_title=folders[0],
                 folder_description="copied legacy-vault material with provenance",
                 counts=post_counts,
@@ -986,19 +995,21 @@ def commit_import_items(
                 sources_text = indexes._prepend_recent_capture(
                     sources_text, date_iso=date_iso, rel_source_path=row["source_path"][:-3]
                 )
-            writes.append(PlannedWrite(path=sources_index, content=sources_text))
+            derived.append(("index", PlannedWrite(path=sources_index, content=sources_text, guard=sources_guard)))
         else:
             warnings.append(f"{kb_prefix()}Sources/index.md missing; skipped Sources index update")
 
         where = ", ".join(f"Sources/{folder}/" for folder in folders)
         top_index = kb / "index.md"
         if top_index.exists():
-            summary = (
+            # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
+            summary = escape_wikilinks_for_log(
                 f"{where} (imported sources) - copied "
                 f"{len(copied)} selected file(s) with original path/hash provenance"
             )
+            top_current, top_guard = indexes.read_guarded_universal_text(root, top_index)
             top_text, trim_note = indexes._update_top_index(
-                top_index.read_text(encoding="utf-8"),
+                top_current,
                 counts=post_counts,
                 date_iso=date_iso,
                 activity_summary=summary,
@@ -1010,10 +1021,8 @@ def commit_import_items(
                 include_sources_index=False,  # The Sources index write above supplies that page.
                 sources_counts=pre_counts,
             )
-            writes.append(
-                PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8"))
-            )
-            writes.extend(sub_writes)
+            derived.append(("index", PlannedWrite(path=top_index, content=top_text or top_current, guard=top_guard)))
+            derived.extend(("index", write) for write in sub_writes)
             if trim_note:
                 warnings.append(trim_note)
         else:
@@ -1049,13 +1058,24 @@ def commit_import_items(
                 [LogEntry(date_iso, "adopt-copy", f"{kb_prefix()}Sources", "\n".join(body_lines), token, provenance)],
                 operation_token=token,
             )
-            writes.extend(log_plan.writes)
+            derived.extend(("operation-log", write) for write in log_plan.writes)
             if log_plan.warning is not None:
                 warnings.append(log_plan.warning)
             if log_plan.rotation_note is not None:
                 warnings.append(log_plan.rotation_note)
 
+        writes.extend(write for _role, write in derived)
         writes.extend(extra_writes)
+        # Activated vocabulary classifies only the new pages. Each binds its originals; the first
+        # also binds the index and log outputs the import shares.
+        bound = tuple(
+            vocabulary_auxiliaries.seal(root, primary=page, derived=[
+                *(derived if index == 0 else ()),
+                *((vocabulary_auxiliaries.SOURCE_ORIGINAL, binary) for binary in binaries),
+            ])
+            for index, (page, binaries) in enumerate(pages)
+            if index == 0 or binaries
+        )
 
         def require_sources_current() -> None:
             for source in held_sources:
@@ -1063,6 +1083,7 @@ def commit_import_items(
 
         batch_atomic_write(
             writes, vault_root=root, required_guards=guards, completion_guards=completion_guards,
+            _vocabulary_auxiliaries=bound or None,
             _validate_prepared_bindings=require_sources_current
         )
     return {"copied_sources": copied, "warnings": warnings, "source_counts": post_counts}

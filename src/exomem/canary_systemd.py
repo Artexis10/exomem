@@ -136,7 +136,7 @@ def _properties(unit: str, interface: str) -> dict:
     return {key: value["data"] for key, value in reply["data"][0].items()}
 
 
-def _configuration(service: dict):
+def _configuration(service: dict, *, check_cases: bool = True):
     commands = service["ExecStart"]
     if len(commands) != 1:
         raise ValueError("one observer command required")
@@ -156,7 +156,8 @@ def _configuration(service: dict):
     if args.cases.stat().st_size > MAX_OFFLINE_BYTES:
         raise ValueError("case file exceeds the bounded offline read")
     validate_target(args.mcp_url)
-    _canary_cases(args.cases.read_bytes())
+    if check_cases:
+        _canary_cases(args.cases.read_bytes())
     return Path(commands[0][0]), environment, args
 
 
@@ -187,7 +188,8 @@ def status(*, unit_dir: Path | None = None, now: float | None = None) -> dict:
     except Exception:  # noqa: BLE001 - absent tools/bus and private D-Bus errors stay unavailable
         return base
     try:
-        _, _, args = _configuration(service)
+        # The installed observer judges its own case file; this package may accept other tools.
+        _, _, args = _configuration(service, check_cases=False)
     except Exception:  # noqa: BLE001 - never expose private paths or unit argument values
         return {**base, "state": "unconfigured"}
     # UnitFileState, ActiveState and Result are systemd's documented closed codes.
@@ -205,6 +207,9 @@ def status(*, unit_dir: Path | None = None, now: float | None = None) -> dict:
         # missing-token is the canary protocol's explicit configuration outcome.
         if report.get("failure") == "missing-token":
             return {**base, "state": "unconfigured"}
+        # invalid-cases is the canary protocol's outcome for a case file the observer refused to load.
+        if report.get("failure") == "invalid-cases":
+            return {**base, "state": "invalid-cases"}
         ended = report["ended_at"]
         if type(ended) not in (float, int) or not math.isfinite(ended):
             raise ValueError("unknown report window")

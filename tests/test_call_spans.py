@@ -7,6 +7,7 @@ spent no time anywhere. Several of these assert on absence for that reason.
 
 from __future__ import annotations
 
+import sys
 import time
 
 import pytest
@@ -103,6 +104,23 @@ def test_span_distinguishes_thread_cpu_from_elapsed_wait(token, monkeypatch) -> 
 
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux counts a thread's own waits")
+def test_span_counts_how_often_its_thread_waited_for_a_lock(token) -> None:
+    """Wall far above CPU did not say whether the thread waited once or kept losing the GIL."""
+    import threading
+
+    lock = threading.Lock()
+    lock.acquire()
+    releaser = threading.Timer(0.03, lock.release)
+    releaser.start()
+    with call_spans.span("phase.locked"):
+        lock.acquire()
+    lock.release()
+    releaser.join()
+
+    assert call_spans.pop_call_spans(token)[0]["fields"]["thread_waits"] >= 1
+
+
 def test_span_separates_other_threads_cpu_from_its_own(token, monkeypatch) -> None:
     """Wall far above thread CPU is contention when other threads burned the CPU."""
     thread_ticks = iter((1_000_000, 1_500_000))
@@ -139,7 +157,7 @@ def test_recall_stages_record_cpu_and_counts_when_a_stage_refuses(token, monkeyp
     assert fields["entry_ms"] <= row["ms"] <= fields["entry_ms"] + 2
     counts_and_thread_cpu = {
         key: value for key, value in fields.items()
-        if key not in {call_spans.PROCESS_CPU_US, "entry_ms"}
+        if key not in {call_spans.PROCESS_CPU_US, call_spans.THREAD_WAITS, "entry_ms"}
     }
     assert counts_and_thread_cpu == {
         "candidates": 6, "thread_cpu_us": 4000,

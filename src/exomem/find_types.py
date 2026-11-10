@@ -555,6 +555,10 @@ class SemanticUnitHit:
     vector_rank: int | None = None
     vector_score: float | None = None
     mixed_units_truncated: int = 0
+    # The requested dimension group that shows this unit in full, and its marks there
+    # (`dimension_display.group_hits`). Both stay None outside a request for groups.
+    dimension: str | None = None
+    display: dict[str, Any] | None = None
     # Private retrieval snapshot identity.  Governance consumes this before
     # projection so a result cannot be swapped between ranking and release;
     # it is deliberately absent from every public serializer below.
@@ -600,6 +604,7 @@ class SemanticUnitHit:
             out["relation_match"] = self.relation_match
         if self.mixed_units_truncated:
             out["mixed_units_truncated"] = self.mixed_units_truncated
+        self._add_group(out)
         signals: dict[str, Any] = {}
         if self.bm25_rank is not None:
             signals["bm25_rank"] = self.bm25_rank
@@ -635,7 +640,14 @@ class SemanticUnitHit:
             out["verdict"] = self.verdict
         if self.mixed_units_truncated:
             out["mixed_units_truncated"] = self.mixed_units_truncated
+        self._add_group(out)
         return out
+
+    def _add_group(self, out: dict[str, Any]) -> None:
+        if self.dimension is not None:
+            out["dimension"] = self.dimension
+        if self.display:
+            out["display"] = self.display
 
 
 #: Where a stage got its answer. `index` is a maintained index or catalogue,

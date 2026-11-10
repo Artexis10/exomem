@@ -880,6 +880,8 @@ _UNIT_FIELDS: frozenset[str] = frozenset(
         "relation_match",
         "mixed_units_truncated",
         "signals",
+        "dimension",
+        "display",
     }
 )
 

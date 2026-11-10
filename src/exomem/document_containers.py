@@ -158,9 +158,21 @@ def in_payload_tree(path: str) -> bool:
     return any(part.casefold().endswith(".asice.documents") for part in PurePosixPath(spelling).parts)
 
 
+_PAYLOAD_FOLDER_SUFFIX = ".documents"
+
+
 def child_path(parent: str, member: str) -> str:
     """Member names remain provenance; their hashes name collision-free custody paths."""
-    return f"{parent}.documents/{hashlib.sha256(member.encode('utf-8')).hexdigest()}{PurePosixPath(member).suffix.casefold()}"
+    digest = hashlib.sha256(member.encode('utf-8')).hexdigest()
+    return f"{parent}{_PAYLOAD_FOLDER_SUFFIX}/{digest}{PurePosixPath(member).suffix.casefold()}"
+
+
+def container_of(path: str) -> str | None:
+    """The container artifact whose payload folder holds `path`, or None outside one."""
+    folder = PurePosixPath(path).parent
+    if not folder.name.endswith(_PAYLOAD_FOLDER_SUFFIX):
+        return None
+    return folder.as_posix().removesuffix(_PAYLOAD_FOLDER_SUFFIX)
 
 
 def annotate(markdown: str, field_name: str, value: Mapping) -> str:

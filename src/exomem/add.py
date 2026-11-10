@@ -41,6 +41,7 @@ from . import (
     source_taxonomy,
     tag_variants,
     temporal,
+    vocabulary_auxiliaries,
     vocabulary_resolution,
 )
 from .kbdir import kb_prefix
@@ -57,9 +58,11 @@ from .vault import (
     _NativePrepared,
     batch_atomic_write,
     content_hash,
+    escape_wikilinks_for_log,
     kb_root,
     parse_frontmatter,
     read_guarded_text,
+    refuse_busy_if_planned_write_moved,
     render_wikilink_target,
     resolve_filename_slug,
     unique_path,
@@ -796,7 +799,6 @@ def add(
             source_counts=post_counts,
         )
 
-        kb = kb_root(vault_root)
         # Refresh the Notes/Entities counts in the top index alongside the
         # Sources counts that compute_updates() already handled. `add` doesn't
         # change Notes/Entities counts, so no override needed.
@@ -810,27 +812,19 @@ def add(
             top_with_counts if top_with_counts is not None
             else update.top_index_content
         )
-    from .governance import connector_boundary
-
-    effect_admitted = connector_boundary.effect_admission(vault_root)
+    derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
+    derived.extend(("index", write) for write in sub_writes)
     writes = [
         PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
-        *(
-            write for write in (
-                PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
-                PlannedWrite(path=kb / "index.md", content=top_index_final),
-                PlannedWrite(path=kb / "log.md", content=update.log_content),
-            )
-            if effect_admitted(write.path)
-        ),
+        *(write for _role, write in derived),
     ]
-    writes.extend(sub_writes)
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
     writes.extend(supersede_writes)
     if raw_protection:
         # Global index/log prose cannot carry the protected title or byte identity.
         writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
+        derived = []
     if correction_plan is not None:
         writes[0].create_only = True
         writes[0].expected_hash = MISSING_CONTENT_HASH
@@ -853,12 +847,14 @@ def add(
     # path becomes visible before the page (and any adoption receipt it owns)
     # can publish in the same rollback set.
     artifact_stream = None
+    originals: list[PlannedWrite] = []
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
         binary_write, artifact_stream = artifact_binary_write(
             artifact.staged_path, artifact_path, artifact_digest, artifact_size
         )
         writes.append(binary_write)
+        originals.append(binary_write)
 
     # The registry the domain resolved against must still be the one on disk.
     # A registration rewrites it in this batch under its own content guard.
@@ -884,7 +880,13 @@ def add(
             container_metadata = container_plan.metadata()
             writes[0].content = document_containers.annotate(source_md, "document_container", container_metadata)
             writes.extend(container_plan.writes)
+            originals.extend(write for write in container_plan.writes if isinstance(write.content, PreparedBinaryContent))
             core_paths.update(write.path for write in container_plan.writes)
+        # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
+        bound_outputs = vocabulary_auxiliaries.seal(
+            vault_root, primary=writes[0],
+            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
+        )
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
@@ -913,19 +915,32 @@ def add(
                 vault_root=vault_root,
                 required_guards=required_guards,
                 post_commit_fanout=False,
+                _vocabulary_auxiliaries=bound_outputs,
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
+                               _vocabulary_auxiliaries=bound_outputs,
                                _validate_prepared_bindings=validate_bindings,
                                _prepare=prepare_final if _prepare is not None else None)
     except _NativePrepared:
         raise
     except source_capture.SourceCaptureError:
         raise
-    except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError):
+    except (ContentHashMismatchError, CreateOnlyConflict, PathGuardError) as error:
+        if isinstance(error, PathGuardError) and error.code != "PATH_VARIANT_EXISTS":
+            # A writer outside the boundary moved an index or log that this capture planned: a retry re-plans it.
+            planned = [write for _role, write in derived]
+            refuse_busy_if_planned_write_moved(
+                vault_root,
+                (*required_guards, *(
+                    write.guard for write in writes
+                    if write.guard is not None and not any(write is auxiliary for auxiliary in planned)
+                )),
+                planned,
+            )
         if correction_plan is not None:
             raise ValueError("SOURCE_CORRECTION_STALE: correction inputs changed before commit; read the current Source and retry") from None
         raise
@@ -1613,24 +1628,51 @@ def _activity_summary(
     source_type: str,
     tags: list[str],
 ) -> str:
-    """One-liner for the top index's Recent activity bullet."""
+    """One-liner for the top index's Recent activity bullet.
+
+    The index is a derived output bound to the Source page, so the gate never classifies its
+    links: the caller's title and tags stay inert text here, as they do in the log body.
+    """
     base = f"`{rel_source_no_ext.replace(kb_prefix(), '')}` (source, {source_type}, mobile capture via exomem)"
     excerpt = f"\"{title.strip()}\""
     tags_part = f"; tags: {tags}" if tags else ""
-    return f"{base} — {excerpt}{tags_part}"
+    return f"{base} — {escape_wikilinks_for_log(excerpt + tags_part)}"
+
+
+def _derived_index_writes(
+    vault_root: Path, update: indexes.IndexUpdate, *, top_index_content: str
+) -> list[tuple[str, PlannedWrite]]:
+    """The index and log outputs of a Source write, each with its role and the guard of the read it came from.
+
+    They are derived outputs bound to the Source page, so activated vocabulary classifies the page,
+    not the links these lists carry.
+    """
+    from .governance import connector_boundary
+
+    kb = kb_root(vault_root)
+    effect_admitted = connector_boundary.effect_admission(vault_root)
+    return [
+        (role, write) for role, write in (
+            ("index", PlannedWrite(
+                path=indexes.sources_index_path(vault_root), content=update.sources_index_content,
+                guard=update.sources_index_guard,
+            )),
+            ("index", PlannedWrite(path=kb / "index.md", content=top_index_content, guard=update.top_index_guard)),
+            ("operation-log", PlannedWrite(path=kb / "log.md", content=update.log_content, guard=update.log_guard)),
+        )
+        if effect_admitted(write.path)
+    ]
 
 
 def revision_activity_writes(
     vault_root: Path, *, path: str, title: str, source_type: str, now: dt.datetime
-) -> list[PlannedWrite]:
-    """The index and log writes that a revision of the Source at `path` makes.
+) -> list[tuple[str, PlannedWrite]]:
+    """The index and log writes that a revision of the Source at `path` makes, with their roles.
 
     They are the writes `add` makes for a new Source, so a revision shows up in
     the recent-activity lists and the log as a new page did. A revision adds no
     page, so the folder counts stay the ones on disk.
     """
-    from .governance import connector_boundary
-
     page = Path(path)
     folder = page.parent.name
     rel_no_ext = page.with_suffix("").as_posix()
@@ -1649,17 +1691,7 @@ def revision_activity_writes(
             title=title, source_type=source_type, url=None, tags=[], why_captured=None
         ),
     )
-    kb = kb_root(vault_root)
-    effect_admitted = connector_boundary.effect_admission(vault_root)
-    return [
-        write
-        for write in (
-            PlannedWrite(path=indexes.sources_index_path(vault_root), content=update.sources_index_content),
-            PlannedWrite(path=kb / "index.md", content=update.top_index_content),
-            PlannedWrite(path=kb / "log.md", content=update.log_content),
-        )
-        if effect_admitted(write.path)
-    ]
+    return _derived_index_writes(vault_root, update, top_index_content=update.top_index_content)
 
 
 def _log_entry_body(

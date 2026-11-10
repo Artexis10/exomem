@@ -1475,3 +1475,29 @@ def warm_managed_cell(monkeypatch: pytest.MonkeyPatch):
         )
 
     return _warm
+
+
+@pytest.fixture
+def activated_vault(vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The fixture vault, warm and under activated (v2) vocabulary authority, with the real gate."""
+    from test_vocabulary_authority import (
+        _activate,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
+
+    from exomem import activation_manifest, epistemic_graph, vocabulary_authority
+    from exomem.governance.principal import library_scope
+
+    install_unit_session_boundary(monkeypatch)
+    with library_scope():
+        activation_manifest.ensure_manifest(vault)
+    warm_managed_cell(vault)
+    with library_scope():
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    authority = _store(vault)
+    _activate(authority, _principal())
+    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _root: authority)
+    assert authority.runtime_status().mode == "v2"
+    return vault

@@ -330,3 +330,140 @@ def test_v2_mixed_registry_addition_and_existing_definition_change_refuses_atomi
     ):
         vault.batch_atomic_write([vault.PlannedWrite(target, after)], vault_root=root, post_commit_fanout=False)
     assert target.read_text(encoding="utf-8") == before
+
+
+def _activated_root(tmp_path, monkeypatch):
+    from test_vocabulary_authority import (
+        _activate,
+        _principal,
+        _store,
+        install_unit_session_boundary,
+    )
+
+    install_unit_session_boundary(monkeypatch)
+    root = tmp_path / "vault"
+    root.mkdir()
+    authority = _store(root)
+    _activate(authority, _principal())
+    monkeypatch.setattr(vocabulary_authority, "VocabularyAuthority", lambda _: authority)
+    return root
+
+
+def _prepared(data: bytes) -> vault.PreparedBinaryContent:
+    import hashlib
+    import io
+
+    return vault.PreparedBinaryContent(io.BytesIO(data), len(data), hashlib.sha256(data).hexdigest())
+
+
+def test_v2_source_original_whose_bytes_changed_after_its_declaration_is_refused(tmp_path, monkeypatch):
+    """The original is opaque, so its declared digest is the only thing that binds it to its Source page."""
+    from exomem import vocabulary_auxiliaries
+
+    root = _activated_root(tmp_path, monkeypatch)
+    page = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt.md", "---\ntype: source\n---\n# Notes\n",
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    original = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt", _prepared(b"# Notes as uploaded\n"),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    bound = vocabulary_auxiliaries.seal(
+        root, primary=page, derived=[(vocabulary_auxiliaries.SOURCE_ORIGINAL, original)],
+    )
+    original.content = _prepared(b"# Other notes swapped in before the commit\n")
+
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="declared Source original changed",
+    ):
+        vault.batch_atomic_write(
+            [page, original], vault_root=root, post_commit_fanout=False, _vocabulary_auxiliaries=bound,
+        )
+    assert not page.path.exists()
+    assert not original.path.exists()
+
+
+def test_v2_generic_write_of_a_non_markdown_file_without_a_source_page_is_refused(tmp_path, monkeypatch):
+    root = _activated_root(tmp_path, monkeypatch)
+    original = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt", _prepared(b"# Notes as uploaded\n"),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="current supported evidence",
+    ):
+        vault.batch_atomic_write([original], vault_root=root, post_commit_fanout=False)
+    assert not original.path.exists()
+
+
+
+def test_v2_source_original_declared_as_a_markdown_page_is_refused(activated_vault):
+    """A page declared as an original would skip classification, so its entity and links would land ungoverned."""
+    import dataclasses
+
+    from exomem import vocabulary_auxiliaries
+
+    root = activated_vault
+    page = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/notes.md.txt.md", "---\ntype: source\n---\n# Notes\n",
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    smuggled = vault.PlannedWrite(
+        root / "Knowledge Base/Sources/Sessions/smuggled.md",
+        _prepared(b"---\nentity_type: guild\n---\n# Smuggled\n\nSee [[Unrelated page]].\n"),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    with pytest.raises(ValueError, match="VOCABULARY_AUXILIARY_PATH_INVALID"):
+        vocabulary_auxiliaries.seal(root, primary=page, derived=[(vocabulary_auxiliaries.SOURCE_ORIGINAL, smuggled)])
+
+    # A declaration that reaches the gate without `seal`'s check must meet the same bound there.
+    forged = dataclasses.replace(
+        vocabulary_auxiliaries.seal(root, primary=page, derived=[]),
+        entries=(vocabulary_auxiliaries.DerivedAuxiliary(
+            vocabulary_auxiliaries.SOURCE_ORIGINAL, "Knowledge Base/Sources/Sessions/smuggled.md",
+            None, smuggled.content.sha256,
+        ),),
+    )
+    with library_scope(), pytest.raises(
+        vocabulary_authority.VocabularyAuthorityDenied, match="declared Source original is outside its Source",
+    ):
+        vault.batch_atomic_write(
+            [page, smuggled], vault_root=root, post_commit_fanout=False, _vocabulary_auxiliaries=forged,
+        )
+    assert not page.path.exists()
+    assert not smuggled.path.exists()
+
+
+def test_v2_refuses_an_undeclared_write_above_the_image_bound_without_reading_it(tmp_path, monkeypatch):
+    """Reading an oversized image into memory only to refuse it is the allocation the byte bound exists to prevent."""
+    import os
+
+    from exomem import vocabulary_effects
+
+    class CountingOS:
+        """`os` as the gate sees it, counting the bytes that the gate reads."""
+
+        read_bytes = 0
+
+        def read(self, descriptor, count):
+            chunk = os.read(descriptor, count)
+            self.read_bytes += len(chunk)
+            return chunk
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    root = _activated_root(tmp_path, monkeypatch)
+    counting = CountingOS()
+    monkeypatch.setattr(vocabulary_gate, "os", counting)
+    blob = vault.PlannedWrite(
+        root / "Knowledge Base/Evidence/blob.bin", _prepared(b"\0" * (vocabulary_effects.MAX_IMAGE_BYTES + 1)),
+        create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+
+    with library_scope(), pytest.raises(vocabulary_authority.VocabularyAuthorityDenied, match="byte bound"):
+        vault.batch_atomic_write([blob], vault_root=root, post_commit_fanout=False)
+    assert counting.read_bytes == 0
+    assert not blob.path.exists()

@@ -30,7 +30,7 @@ import math
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -561,13 +561,16 @@ def _neighborhood(
     max_neighbors: int,
     *,
     under_strip: Callable[[str], bool],
+    purpose: str | None = None,
 ) -> tuple[list[dict], int, list[str]]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
     excluded, ranked by co-citation (distinct packed notes linked), capped.
     The third value names each side whose neighbours are unknown (empty when none).
 
     For a reader other than the owner, links resolve over the pages it may see
-    and a neighbour it may not see is decided before ranking and the cap.
+    and a neighbour it may not see is decided before ranking and the cap. That
+    view is built under the `purpose` the request declares, as the hits' view is:
+    a rule that withholds a page only for a purpose must withhold it here too.
 
     A server request never builds the inbound index or the link resolver: it
     borrows the published ones, and on a miss leaves that side's neighbours out
@@ -577,7 +580,7 @@ def _neighborhood(
     """
     from .governance import egress
 
-    visible = egress.reader_view(vault_root)
+    visible = egress.reader_view(vault_root, purpose=purpose)
     packed_canon = {corpus_aware._canon(p.rel_path) for p in packed_pages}
     # canon -> {"path", "directions": set, "referenced_by": set}
     neigh: dict[str, dict] = {}
@@ -875,6 +878,7 @@ def assemble_pack(
     timings: find_module.FindTimings | None = None,
     purpose: str | None = None,
     strip_for: Callable[[str], tuple[Any, ...]] | None = None,
+    dimension_groups: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -890,6 +894,11 @@ def assemble_pack(
 
     `strip_for` is the request's `egress.release_strip_resolver`, which `annotate_pack` must share so both
     decide a page once; without one this builds its own.
+
+    `dimension_groups` is the search's list of groups (`dimension_display.group_hits`), whose hits
+    come in group order and carry their marks. Each packed unit of a hit then carries the hit's
+    `display`, and the pack lists each group's unit refs in display order under `groups`, so a
+    member that the caps leave out stays in its group as a ref.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
@@ -936,6 +945,12 @@ def assemble_pack(
         return bool(strip_for(rel_path))
 
     parent_reads = find_module.UnitParentReads()
+    # A group's marks travel with each packed unit, so the pack's caps measure them too.
+    marks = {
+        hit.unit_ref: hit.display
+        for hit in hits
+        if getattr(hit, "display", None) and getattr(hit, "unit_ref", None)
+    }
     references = tuple(reference for hit in hits for reference in _selected_unit_refs(hit))
     visible = unit_corrections.reader_view(vault_root, purpose) if references else None
     tentative: dict[str, SemanticUnitHit] = {}
@@ -1110,6 +1125,8 @@ def assemble_pack(
                 block, dropped_metadata = _legacy_block_from_packed_unit(
                     unit, packed, whole=plan.whole
                 )
+            if unit.unit_ref in marks:
+                packed = {**packed, "display": marks[unit.unit_ref]}
             candidate_unit_map = {
                 **semantic_unit_map,
                 plan.page.rel_path: {
@@ -1192,7 +1209,7 @@ def assemble_pack(
 
     with find_module._span(timings, "pack.neighborhood"):
         neighborhood, n_dropped, incomplete = _neighborhood(
-            vault_root, packed_pages, max_neighbors, under_strip=under_strip
+            vault_root, packed_pages, max_neighbors, under_strip=under_strip, purpose=purpose
         )
     truncation.extend(incomplete)
     if n_dropped > 0:
@@ -1232,6 +1249,15 @@ def assemble_pack(
         "truncation": truncation,
         **({"correction_context": discovered["status"]} if references else {}),
     }
+    if dimension_groups is not None:
+        # Every member stays listed: one that the caps left out of `semantic_units` is a ref here.
+        result["groups"] = [
+            {
+                "dimension": group["dimension"],
+                "units": [unit["unit_ref"] for unit in group["units"]],
+            }
+            for group in dimension_groups
+        ]
     if graph_enrich:
         # Parent loading can consume the reserve checked before assembly.
         # Decide again at the actual stage entry, keeping earlier packed pages.

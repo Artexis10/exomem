@@ -14,8 +14,11 @@ from typing import Any
 import yaml
 
 from . import (
+    context_refs,
+    dimension_display,
     epistemic_dimensions,
     epistemic_graph,
+    lifecycle_statuses,
     relation_registry,
     relation_vocabulary,
     semantic_labels,
@@ -1226,20 +1229,34 @@ def _dimension_counts(
     registry: semantic_language_registry.SemanticLanguageRegistry,
     observations: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """How many scanned units, and on how many pages, belong to each dimension of `registry`.
+    """How many scanned units, and on how many pages, belong to each dimension of `registry`, and
+    how many of them carry each mark that the dimension's display behaviours count.
 
-    Membership is the `unit.dimension` filter's, from one graph read for the whole vault in the
-    caller's view, so an edge to a page withheld from the caller counts no unit. `edges`
-    says how a row was counted: "not_needed" for a dimension no edge decides, "counted" when the
-    graph answered, and "unavailable" when it could not. An unavailable row has no counts,
-    because a count without the edges would present a part as the whole. When the graph is
+    Membership is the `unit.dimension` filter's, and the marks are its groups', from one graph
+    read for the whole vault in the caller's view, so an edge to a page withheld from the caller
+    counts no unit and sets no mark. `edges` says how a row was counted: "not_needed" for a
+    dimension whose members and counted marks no edge decides, "counted" when the graph answered,
+    and "unavailable" when it could not. An unavailable row gives no count that edges decide,
+    because a count without the edges would present a part as the whole: its unit and page counts
+    are null when edges decide membership, and its mark counts are null. When the graph is
     missing or stale, a rebuild is scheduled, as the filter does, and the row names the
     operation that runs it now.
     """
     relations = relation_registry.load_registry(vault_root)
     lookups = epistemic_dimensions.membership(registry, relations)
+    # The display behaviours whose marks each row counts, as the dimension lists them.
+    counted = {
+        key: tuple(name for name in display if name in dimension_display.COUNTED_MARKS)
+        for key, display in lookups.display.items()
+    }
+    mark_behaviours = dimension_display.edge_behaviours(
+        name for names in counted.values() for name in names
+    )
     edges = epistemic_dimensions.read_edges(
-        vault_root, lookups, admission=find_module.caller_admission(vault_root)
+        vault_root,
+        lookups,
+        admission=find_module.caller_admission(vault_root),
+        behaviours=mark_behaviours,
     )
     if edges.status == "warming":
         epistemic_graph.schedule_background_rebuild(
@@ -1249,42 +1266,78 @@ def _dimension_counts(
             )._canonical_mutation_coordinator(),
         )
     answer = epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges)
+    status_basis = lifecycle_statuses.Basis(vault_root)
     units: Counter[str] = Counter()
     pages: dict[str, set[str]] = {}
+    shown: dict[str, list[dimension_display.DisplayUnit]] = {}
     for item in observations:
-        belongs = answer(
-            {"path": item["path"]},
-            {
-                "kind": item["kind"],
-                "form": item["form"],
-                "row_keys": item["row_keys"],
-                "occurrence": item["occurrence"],
-            },
-            # The report's registry is the public instance's, as a filter plan's is, so another
-            # instance's kind joins no dimension here either.
-            own_kind=not structured_filters.foreign_entry(
-                "unit.kind", item["kind"], item, PUBLIC_INSTANCE
-            ),
+        # The report's registry is the public instance's, as a filter plan's is, so another
+        # instance's kind joins no dimension and carries no trait here either.
+        own_kind = not structured_filters.foreign_entry(
+            "unit.kind", item["kind"], item, PUBLIC_INSTANCE
         )
+        view = {
+            "kind": item["kind"],
+            "form": item["form"],
+            "row_keys": item["row_keys"],
+            "occurrence": item["occurrence"],
+        }
+        belongs = answer({"path": item["path"]}, view, own_kind=own_kind)
+        unit: dimension_display.DisplayUnit | None = None
         for key in belongs:
             units[key] += 1
             pages.setdefault(key, set()).add(item["path"])
+            if counted.get(key):
+                unit = unit or _display_unit(item, view, own_kind, status_basis)
+                shown.setdefault(key, []).append(unit)
     edge_dimensions = frozenset().union(*lookups.by_family.values())
     counts: dict[str, dict[str, Any]] = {}
     for key in registry.label_definitions(semantic_labels.DIMENSIONS):
-        if key not in edge_dimensions:
+        reads_edges = bool(dimension_display.edge_behaviours(counted.get(key, ())))
+        if key not in edge_dimensions and not reads_edges:
             status = "not_needed"
         else:
             status = "counted" if edges.status == "available" else "unavailable"
-        counted = status != "unavailable"
+        members_known = key not in edge_dimensions or edges.status == "available"
         counts[key] = {
-            "unit_count": units[key] if counted else None,
-            "page_count": len(pages.get(key, ())) if counted else None,
+            "unit_count": units[key] if members_known else None,
+            "page_count": len(pages.get(key, ())) if members_known else None,
             "edges": status,
         }
-        if not counted and edges.status == "warming":
+        if counted.get(key):
+            view = dimension_display.display(
+                shown.get(key, ()),
+                counted[key],
+                language=registry,
+                relations=relations,
+                edges=edges if members_known else None,
+            )
+            for name in counted[key]:
+                mark = dimension_display.COUNTED_MARKS[name]
+                counts[key][mark] = view.counts.get(mark)
+        if status == "unavailable" and edges.status == "warming":
             counts[key]["repair"] = _GRAPH_REBUILD
     return counts
+
+
+def _display_unit(
+    item: Mapping[str, Any],
+    view: Mapping[str, Any],
+    own_kind: bool,
+    status_basis: lifecycle_statuses.Basis,
+) -> dimension_display.DisplayUnit:
+    """What a dimension's display reads of one scanned unit."""
+    frontmatter = item["frontmatter"]
+    return dimension_display.DisplayUnit(
+        ref=context_refs.vault_ref(item["path"]),
+        path=item["path"],
+        node=epistemic_dimensions.node_key(item["path"], view),
+        kind=item["kind"] if own_kind else None,
+        verdict=item.get("verdict"),
+        historical=dimension_display.page_is_history(
+            status_basis, frontmatter.get("status"), path=item["path"], frontmatter=frontmatter
+        ),
+    )
 
 
 #: The operation that refreshes the graph a dimension row could not read its edges from. A plain
@@ -1383,6 +1436,10 @@ def _scan_category_observations(
                     "occurrence": semantic_units.occurrence_key(
                         unit.form, unit.span, unit.source_hash
                     ),
+                    # What the dimension marks read: the unit's verdict and its page's
+                    # frontmatter, which carries the status and selects its instance.
+                    "verdict": unit.verdict,
+                    "frontmatter": page.frontmatter,
                     # A rich unit that omits ``- category:`` defaults its category
                     # to the governed kind; that is not an authored category
                     # choice and never seeds a registration candidate.

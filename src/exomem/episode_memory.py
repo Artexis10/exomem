@@ -59,12 +59,14 @@ from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
     FrontmatterError,
+    PathGuardError,
     PlannedWrite,
     batch_atomic_write,
     content_hash,
     document_newline,
     parse_frontmatter,
     read_guarded_text,
+    refuse_busy_if_planned_write_moved,
     with_newline,
     yaml_scalar,
 )
@@ -299,21 +301,30 @@ def revise_page(
     after = _revised_text(before, current, body, recap, when)
     primary = PlannedWrite(path=target, content=after, expected_hash=expected_hash, guard=guard)
     history = compiled_history.plan_episode_entry(root, path=path, before_source=before, after_source=after)
-    manifest = vocabulary_auxiliaries.seal(
-        root, primary=primary, derived=(("compiled-history", history),)
-    )
     activity = add_module.revision_activity_writes(
         root, path=path, title=recap.subject, source_type=source_taxonomy.EPISODE_KIND, now=when
     )
+    manifest = vocabulary_auxiliaries.seal(
+        root, primary=primary, derived=(("compiled-history", history), *activity)
+    )
+    planned = [write for _role, write in activity]
     intents: list[object] = []
-    with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
-        committed = batch_atomic_write(
-            [primary, history, *activity],
-            vault_root=root,
-            post_commit_fanout=False,
-            publication_intents_out=intents,
-            _vocabulary_auxiliaries=manifest,
-        )
+    try:
+        with reserved_paths._subsystem_authority_scope("compiled_history"):  # noqa: SLF001 - the store's own scope
+            committed = batch_atomic_write(
+                [primary, history, *planned],
+                vault_root=root,
+                post_commit_fanout=False,
+                publication_intents_out=intents,
+                _vocabulary_auxiliaries=manifest,
+            )
+    except PathGuardError as error:
+        if error.code != "PATH_VARIANT_EXISTS":
+            # A writer outside the boundary moved an index or log this revision planned: a retry re-plans it.
+            refuse_busy_if_planned_write_moved(
+                root, (write.guard for write in (primary, history) if write.guard is not None), planned
+            )
+        raise
     assert isinstance(committed, list)
     add_module.deferred_fanout(root, committed, created_paths=[history.path], publication_intents=intents)
     due_state.refresh_after_writes(root, [due_state.PageWrite(path, prior_markdown=before)])
