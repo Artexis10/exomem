@@ -460,6 +460,32 @@ def test_a_case_with_no_known_pair_is_unknown_and_counted_never_a_failure(tmp_pa
     assert "TimeoutExpired" in text.split("## Runs without a usable result")[1]
 
 
+def test_a_model_with_an_extra_repeat_weighs_no_more_in_its_case_than_a_model_with_one(tmp_path: Path) -> None:
+    """Catches a case value that averages (model, repeat) pairs as one flat list: a model rerun on the case would then
+    pull the difference and the length ratio toward its own result. Model A has two repeats with the baseline passing
+    and the candidate failing, model B one repeat with the reverse; per model the case is even, so the difference is 0."""
+    short, long = "s" * 100, "l" * 400
+    rows = [
+        stage_b_row("c0", "base", short, model="model-a", repeat=0, verdicts=checks.PASS),
+        stage_b_row("c0", "cand", long, model="model-a", repeat=0, verdicts=checks.FAIL),
+        stage_b_row("c0", "base", short, model="model-a", repeat=1, verdicts=checks.PASS),
+        stage_b_row("c0", "cand", long, model="model-a", repeat=1, verdicts=checks.FAIL),
+        stage_b_row("c0", "base", long, model="model-b", repeat=0, verdicts=checks.FAIL),
+        stage_b_row("c0", "cand", short, model="model-b", repeat=0, verdicts=checks.PASS),
+    ]
+    runs = write_rows(tmp_path / "b.jsonl", rows)
+    out = tmp_path / "batch"
+    judge_batch.prepare([runs], [], [invented_scenario("c0")], out=out)
+    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out)
+    sets = tmp_path / "case-sets.json"
+    sets.write_text(json.dumps({"c0": "S"}), encoding="utf-8")
+    text = replay_report.build([runs], judged=out / "judged.json", case_sets=sets, baseline="base", candidate="cand")
+    assert "- Set S, all models: difference +0.00 " in text
+    assert "| c0 | S | 2/3 | 1/3 | +0.00 |" in text
+    length = text.split("## Reply length")[1].split("\n- Set S, all models: ")[1]
+    assert length.startswith("mean log ratio +0.000 (candidate over baseline x1.00;")
+
+
 def test_a_run_that_used_a_tool_outside_the_script_is_counted_apart_and_is_neither_a_pass_nor_a_fail(tmp_path: Path) -> None:
     """Catches an agent that reached a built-in tool when the script allowed none: its answer did not rest on the replayed
     context, so scoring it would credit or blame the arm for something the replay never showed."""

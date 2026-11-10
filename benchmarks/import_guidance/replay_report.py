@@ -2,9 +2,11 @@
 
 An answer passes when every named judged criterion holds in the blind batch (`judge_batch.py`) and every deterministic
 check of the case passes. A run error, a missing judgment, an unreadable one, a missing arm and a run in which the agent
-used a tool outside the script are `unknown`: they are counted and listed, and never read as a failure or as zero. For
-each case the known (model, repeat) pairs are averaged; the interval is a 95% percentile bootstrap over cases
-(`store_report.paired_interval`). Reply length is the characters of the final answer, compared as a per-case log ratio.
+used a tool outside the script are `unknown`: they are counted and listed, and never read as a failure or as zero. A
+case's value is the mean over the models that ran it of each model's mean over its known repeats, so a model with an
+extra repeat weighs no more than one without. The interval is a 95% percentile bootstrap over cases
+(`store_report.paired_interval`). Reply length is the characters of the final answer, compared as a per-case log ratio
+with the same weighting.
 """
 
 from __future__ import annotations
@@ -47,41 +49,50 @@ def verdict_of(row: dict, judged: dict | None, criteria: Sequence[str]) -> str:
     return checks.verdict(None, [checks.Outcome(**o) for o in row["checks"]], judged_outcomes)
 
 
-def known_pairs(rows: Sequence[dict], baseline: str, candidate: str, value: Value) -> tuple[dict[str, list[tuple[float, float]]], int]:
-    """Per case, the (baseline, candidate) values of each (model, repeat) where both arms have one, and how many
+Pairs = dict[str, dict[str, list[tuple[float, float]]]]
+
+
+def known_pairs(rows: Sequence[dict], baseline: str, candidate: str, value: Value) -> tuple[Pairs, int]:
+    """Per case and model, the (baseline, candidate) values of each repeat where both arms have one, and how many
     (case, model, repeat) clusters lack one on either arm."""
     clusters: dict[tuple, dict[str, float | None]] = defaultdict(dict)
     for row in rows:
         clusters[(row["scenario"], row["model"], row["repeat"])][row["arm"]] = value(row)
-    per_case: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    per_case: Pairs = defaultdict(lambda: defaultdict(list))
     unknown = 0
-    for (case, _model, _repeat), values in clusters.items():
+    for (case, model, _repeat), values in clusters.items():
         pair = (values.get(baseline), values.get(candidate))
         if None in pair:
             unknown += 1
         else:
-            per_case[case].append(pair)
+            per_case[case][model].append(pair)
     return per_case, unknown
 
 
-def difference(per_case: dict[str, list[tuple[float, float]]], cases: Sequence[str], unknown_pairs: int, *, log: bool = False) -> str:
+def mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values)
+
+
+def case_value(by_model: dict[str, list[tuple[float, float]]]) -> tuple[float, float]:
+    """A case's (baseline, candidate) value: each model's mean over its known repeats, then the mean over models."""
+    per_model = [(mean([b for b, _ in pairs]), mean([c for _, c in pairs])) for pairs in by_model.values()]
+    return mean([b for b, _ in per_model]), mean([c for _, c in per_model])
+
+
+def difference(per_case: Pairs, cases: Sequence[str], unknown_pairs: int, *, log: bool = False) -> str:
     """One sentence: the mean per-case difference with its interval, the cases it rests on and the unknown ones."""
-    means = {
-        case: (sum(b for b, _ in pairs) / len(pairs), sum(c for _, c in pairs) / len(pairs))
-        for case, pairs in per_case.items()
-        if case in cases and pairs
-    }
+    means = {case: case_value(by_model) for case, by_model in per_case.items() if case in cases and by_model}
     missing = [case for case in cases if case not in means]
     rest = f"unknown cases ({len(missing)}): {', '.join(missing) or 'none'}; unknown (case, model, repeat) pairs: {unknown_pairs}"
     if not means:
         return f"no paired case of {len(cases)}; {rest}."
     low, high = paired_interval(list(means.values()))
-    mean = sum(c - b for b, c in means.values()) / len(means)
+    average = mean([c - b for b, c in means.values()])
     verdict = "no change" if low <= 0 <= high else "interval excludes zero"
     shown = (
-        f"mean log ratio {mean:+.3f} (candidate over baseline x{math.exp(mean):.2f}; 95% interval {low:+.3f} to {high:+.3f}; {verdict})"
+        f"mean log ratio {average:+.3f} (candidate over baseline x{math.exp(average):.2f}; 95% interval {low:+.3f} to {high:+.3f}; {verdict})"
         if log
-        else f"difference {mean:+.2f} (95% interval {low:+.2f} to {high:+.2f}; {verdict})"
+        else f"difference {average:+.2f} (95% interval {low:+.2f} to {high:+.2f}; {verdict})"
     )
     return f"{shown} over {len(means)} paired case(s) of {len(cases)}; {rest}."
 
@@ -142,8 +153,9 @@ def build(
         + "; ".join(f"{arm} {hook_counts([r for r in rows if r['arm'] == arm])}" for arm in (baseline, candidate))
         + ".",
         "",
-        f"Differences are candidate minus baseline. Per case, the known (model, repeat) pairs are averaged; the interval "
-        f"is a 95% percentile bootstrap over cases ({BOOTSTRAP_RESAMPLES} resamples, seed {BOOTSTRAP_SEED}). "
+        "Differences are candidate minus baseline. A case's value is each model's mean over its known repeats, averaged "
+        f"over the models; the interval is a 95% percentile bootstrap over cases ({BOOTSTRAP_RESAMPLES} resamples, seed "
+        f"{BOOTSTRAP_SEED}). "
         "An interval that includes zero reads no change.",
         "",
         "## Correctness by set",
@@ -178,8 +190,11 @@ def build(
         for arm in (baseline, candidate):
             found = [verdicts[run_key(r)] for r in mine if r["arm"] == arm]
             counts.append(f"{found.count(checks.PASS)}/{found.count(checks.PASS) + found.count(checks.FAIL)}")
-        pairs = known_pairs(mine, baseline, candidate, passes)[0].get(case)
-        shown = f"{sum(c - b for b, c in pairs) / len(pairs):+.2f}" if pairs else "unknown"
+        by_model = known_pairs(mine, baseline, candidate, passes)[0].get(case)
+        shown = "unknown"
+        if by_model:
+            base_value, cand_value = case_value(by_model)
+            shown = f"{cand_value - base_value:+.2f}"
         out.append(f"| {case} | {sets_of[case]} | {counts[0]} | {counts[1]} | {shown} |")
     split = [
         r
