@@ -1122,8 +1122,8 @@ def assemble_pack(
                 block, dropped_metadata = _legacy_block_from_packed_unit(
                     unit, packed, whole=plan.whole
                 )
-                if unit.unit_ref in marks:
-                    packed["display"] = marks[unit.unit_ref]
+            if unit.unit_ref in marks:
+                packed = {**packed, "display": marks[unit.unit_ref]}
             candidate_unit_map = {
                 **semantic_unit_map,
                 plan.page.rel_path: {

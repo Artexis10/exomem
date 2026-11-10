@@ -312,6 +312,43 @@ def test_an_open_question_is_open_only_until_another_page_answers_it(tmp_path: P
         assert reply["dimension_groups"][0]["open"] == (1 if not is_open else 2)
 
 
+def test_a_unit_the_pack_serves_as_a_correction_keeps_its_marks(tmp_path: Path) -> None:
+    """Catches a pack that serves a hit through its correction bundle without the hit's marks, so
+    a hypothesis that is open in the search reads as settled in the pack."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    vault = _vault(tmp_path, {}, graph=False)
+    for title, identity, body in (
+        ("Forecast", "44444444-4444-4444-8444-444444444444",
+         "## Belief\n- id: demand\n\nDemand will double next year."),
+        ("Doubt", "55555555-5555-4555-8555-555555555555",
+         f"## Hypothesis\n- id: flat\n- relations: contradicts: [[{NOTES}/Forecast#demand]]\n\n"
+         "Demand stays flat next year."),
+    ):
+        _write(
+            vault, f"{NOTES}/{title}.md",
+            f"---\ntype: insight\nexomem_id: {identity}\n---\n# {title}\n\n{body}\n",
+        )
+    # The pack looks for corrections only at a live recall checkpoint, with its resolver warm.
+    freshness.seed(
+        vault, "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)),
+    )
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    find_module.recall_resolver_snapshot(
+        vault, expected_checkpoint=freshness.live_recall_checkpoint(vault, "vault")
+    )
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
+
+    doubt = next(hit for hit in reply["hits"] if hit["excerpt"] == "Demand stays flat next year.")
+    assert doubt["display"] == {"open": True}
+    packed = _packed(reply)[doubt["unit_ref"]]
+    assert packed["corrects"] == "exomem://memory/44444444-4444-4444-8444-444444444444#demand"
+    assert packed["display"] == {"open": True}
+
+
 WITHHELD_ANSWER = "Patterns/Answers"
 
 
