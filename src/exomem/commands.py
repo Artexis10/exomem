@@ -7778,8 +7778,11 @@ def _op_activate_context_body(
             # only the anchors it may see: a withheld namesake must not turn a visible anchor into a question.
             reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
-            # Cooperative stage checks leave time for the map's mandatory guard; a synchronous stage can overrun.
-            with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
+            # Cooperative stage checks leave time for the map's mandatory guard and for task discovery; a
+            # synchronous stage can overrun.
+            with request_budget_module.leaving(
+                request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS + request_budget_module.task_context_reserve()
+            ):
                 compiled = _compile_guarded_activation(
                     vault_root,
                     turn=turn,

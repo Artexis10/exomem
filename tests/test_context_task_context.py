@@ -9,7 +9,7 @@ from test_activation_log import activation_log as activation_log  # noqa: F401  
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_context_catalogue import _built, _page, _source_schema, _write
-from test_context_views import _second_vault
+from test_context_views import _cold, _second_vault
 from test_governance_egress import _external, write_rule
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
@@ -783,6 +783,48 @@ def test_a_deadline_spent_by_the_turn_slice_marks_task_context_partial_and_keeps
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
     assert task["candidates"] == []
+
+
+def test_a_slow_retrieval_carry_leaves_task_discovery_its_reserve(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, activation_log: Path
+) -> None:
+    """The turn slice once ran to the activation's deadline inside its carry, so task discovery found the budget
+    gone and the call returned the map alone."""
+    from test_working_set_carry import CARRY_TURN, _seed_carry_pages, seed_ordinary_notes
+
+    from exomem import request_budget, working_set
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_BUDGET_SECONDS", "15")
+    _seed_carry_pages(vault)
+    seed_ordinary_notes(vault)
+    _seed_structure(vault)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    _cold()
+    clock = _clock_at(monkeypatch)
+    rare_terms = working_set_runtime.rare_turn_terms
+
+    def runs_to_the_slice_deadline(*args, **kwargs):
+        result = rare_terms(*args, **kwargs)
+        # The carry's query ran until the deadline it was given, and the stage after it overran that by 1.5 s.
+        clock[0] += request_budget.current().remaining() + 1.5
+        return result
+
+    with monkeypatch.context() as slow:
+        slow.setattr(working_set_runtime, "rare_turn_terms", runs_to_the_slice_deadline)
+        packet, budget = _activate_within(vault, 50, turn=CARRY_TURN, max_chars=8000)
+    _cold()
+    unhurried, _ = _activate_within(vault, 50, turn=CARRY_TURN, max_chars=8000)
+
+    leads = {item["source_ref"] for item in packet["task_context"]["candidates"]}
+    unhurried_leads = {item["source_ref"] for item in unhurried["task_context"]["candidates"]}
+    assert not packet.get("abstained") and packet["map"] == unhurried["map"]
+    assert packet["turn_slice"]["state"] == "skipped"
+    assert working_set.CARRY_STAGE in budget.truncated
+    assert unhurried_leads and unhurried_leads <= leads
+    limited, _ = _rows(activation_log)
+    assert limited["outcome"] == "served" and limited["activation_result"]["budget_limited"] is True
 
 
 def test_an_activation_stops_at_its_own_deadline_inside_a_longer_request_budget(

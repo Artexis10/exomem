@@ -730,3 +730,48 @@ def test_a_catalogue_query_in_a_carry_scope_stops_when_the_request_budget_is_spe
         assert not stop.hit
     finally:
         request_budget.reset_current(token)
+
+
+def test_a_title_listing_the_budget_refuses_is_a_gap_not_a_turn_that_names_nothing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The title listing asks the budget after the carry named nothing. A refusal leaves the compile with no
+    anchor, which reads as a turn that names nothing; the packet names the gap so the slice can say it did not look."""
+    from exomem import request_budget
+
+    _seed_turn_pages(vault)
+    _settle(vault)
+    monkeypatch.setattr(working_set, "_carry_groups_by_retrieval", lambda *args, **kwargs: ())
+    exhausted = working_set.budget_exhausted
+    refusing = [False]
+
+    def gate(stage, *args, **kwargs):
+        if refusing[0] and stage == working_set.CARRY_STAGE:
+            request_budget.current().note_skipped(stage)
+            return True
+        return exhausted(stage, *args, **kwargs)
+
+    monkeypatch.setattr(working_set, "budget_exhausted", gate)
+    related_asked: list[object] = []
+
+    def related_pages(*args, **kwargs):
+        related_asked.append(kwargs.get("window"))
+        return (), (), "available"
+
+    monkeypatch.setattr(working_set, "related_pages", related_pages)
+
+    def compile_packet() -> dict:
+        token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+        try:
+            return working_set.compile_packet(vault, turn=TITLE_TURN, max_chars=4000)
+        finally:
+            request_budget.reset_current(token)
+
+    listed = compile_packet()
+    assert [anchor["path"] for anchor in listed["anchors"]] == [TITLE_PAGE]
+    assert working_set.ANCHORS_BUDGET_GAP not in listed["missing"]
+    refusing[0] = True
+    refused = compile_packet()
+    assert refused["anchors"] == [] and working_set.ANCHORS_BUDGET_GAP in refused["missing"]
+    # A listing the budget refused leaves no retrieval to spend on the related pages either.
+    assert related_asked == []

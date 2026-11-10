@@ -1472,7 +1472,9 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
     everything withheld), give their leads: anchors, the senses of an ambiguous turn and related pages. A
     withheld packet so reads as a turn that reached nothing, and the slice says nothing about what was
     withheld. An abstention that the request budget caused (it carries `request_budget`) is `skipped`; any
-    other one (a fault, a warming index, evidence that changed under the compile) is `unavailable`.
+    other one (a fault, a warming index, evidence that changed under the compile) is `unavailable`. A turn
+    that reached no lead because the budget refused the retrieval carry (`ANCHORS_BUDGET_GAP`) is `skipped`
+    too: the compile did not look, so it never reads as a turn that names nothing.
 
     `recent_context` is turn-independent and is never a lead. An anchor that is one sense of an ambiguous
     turn is listed as `ambiguous` whatever its own status. Strongest match first, the compile's order within one.
@@ -1510,6 +1512,8 @@ def turn_leads(packet: Mapping[str, Any]) -> TurnLeads:
         if isinstance(item, Mapping):
             add(item, "related")
     leads = tuple(sorted(found.values(), key=lambda lead: MATCHES.index(lead.match)))
+    if not leads and working_set.ANCHORS_BUDGET_GAP in (packet.get("missing") or ()):
+        return TurnLeads(SLICE_SKIPPED, (), evidence, conversation)
     return TurnLeads(READY if leads else SLICE_EMPTY, leads, evidence, conversation)
 
 
