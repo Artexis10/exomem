@@ -304,6 +304,17 @@ RELATION_NOT_OFFERED_REMEDIATION = (
 )
 
 
+def _candidate_options(
+    candidate: dict[str, Any], page: Any, fit: "RelationFit"
+) -> list[dict[str, Any]]:
+    """The menu a candidate offers. A `retype` bullet still offers the generic
+    relation's menu: it is re-typed, not re-authored."""
+    relation = str(candidate.get("relation_type") or "")
+    if candidate.get("method") == "retype":
+        relation = relation_registry.generic_relation_key()
+    return fit.options(candidate, source_page=page, relation=relation)
+
+
 def require_relation_choice(
     vault_root: Path,
     candidate: dict[str, Any],
@@ -782,8 +793,40 @@ def _page_candidates(
         *_shared_source_candidates(
             vault_root, page.rel_path, limit=method_cap, snapshot=snapshot
         ),
+        *_retype_candidates(vault_root, page, snapshot=snapshot),
     ]
     return epistemic_graph_module._dedupe_candidates(generated)
+
+
+def _retype_candidates(
+    vault_root: Path,
+    page: Any,
+    *,
+    fit: "RelationFit | None" = None,
+    snapshot: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """Authored plain-link/generic bullets carrying a current relation verdict.
+
+    Method `retype`: they join the candidate set only while the projection
+    holds a relation verdict for the pair.
+    """
+    from . import relation_sensor
+
+    connection = snapshot
+    if connection is None:
+        connection = epistemic_graph_module.EpistemicGraphIndex(vault_root)._open_read_snapshot()
+    if connection is None:
+        return []
+    try:
+        return relation_sensor.retype_candidates(
+            vault_root,
+            connection,
+            page.rel_path,
+            (fit or RelationFit(vault_root)).registry(page),
+        )
+    finally:
+        if snapshot is None:
+            connection.close()
 
 
 def _page_for(vault_root: Path, rel_path: str) -> Any | None:
@@ -1302,7 +1345,7 @@ def _require_offered(
     outside them takes a recorded vocabulary decision and its exact binding. A candidate that
     offers none takes no requested relation: it writes its own.
     """
-    offered = fit.options(candidate, source_page=page)
+    offered = _candidate_options(candidate, page, fit)
     chosen = str(selected.get("relation_type") or "")
     # The plain link is the last resort the candidate always allows.
     if chosen == fit.registry(page).link_key or chosen in {option["key"] for option in offered}:
@@ -1317,6 +1360,37 @@ def _require_offered(
             "mutated": False,
         },
     )
+
+
+def _sensed_for_candidate(
+    vault_root: Path, candidate: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The current relation verdict for a candidate, or None.
+
+    `retype` candidates carry their row; a wikilink candidate's is found by
+    its source and target, since the anchor is not part of the candidate.
+    """
+    from . import relation_sensor
+
+    row = candidate.get("_sensed")
+    if isinstance(row, dict):
+        return row
+    rows = relation_sensor.sensed_rows(vault_root)
+    if not rows:
+        return None
+    source = str(candidate.get("from") or "")
+    target = str(candidate.get("to") or "")
+    anchor = str((candidate.get("evidence") or {}).get("anchor") or "")
+    if candidate.get("method") == "retype" and anchor:
+        return rows.get(relation_sensor.request_key(source, target, anchor))
+    matches = [
+        row
+        for row in rows.values()
+        if row.get("source_path") == source
+        and row.get("target_path") == target
+        and row.get("kind") == "wikilink"
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def accept(
@@ -1380,6 +1454,15 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
             f"exists; refresh the queue and inspect {ref} again"
         )
+    sensed = _sensed_for_candidate(vault_root, candidate)
+    proposed = None if sensed is None else str(sensed.get("verdict") or "")
+    reading_id = None if sensed is None else str(sensed.get("reading_id") or "")
+    if proposed and proposed not in ("none", "abstain") and requested_relation is None:
+        # Accepting "the proposal" names the sensed relation; another offered
+        # relation stays allowed and is recorded beside it.
+        requested_relation = proposed
+    if reading_id and reading_id not in str(why):
+        why = f"{why} [reading {reading_id}]"
     if bind_page_hash:
         expected_hash = _page_content_hash(page)
     store = review_state_module.ReviewStateStore(vault_root)
@@ -1410,15 +1493,32 @@ def accept(
     if requested_relation is not None and not bound:
         _require_offered(vault_root, candidate, selected, page, fit)
     bullet = _bullet(selected)
-    edit_result = edit_memory(
-        vault_root,
-        path=str(candidate.get("from") or ""),
-        why=why,
-        heading="Relations",
-        section_position="append",
-        new_string=bullet,
-        expected_hash=expected_hash,
-    )
+    if str(candidate.get("method") or "") == "retype":
+        # An authored plain-link/generic bullet is replaced by the typed one,
+        # exact line for exact line, bound by the page hash the queue read.
+        old_line = str((candidate.get("evidence") or {}).get("line") or "").strip()
+        if not old_line:
+            raise ValueError(
+                "REVIEW_ITEM_CHANGED: the retype candidate names no bullet line"
+            )
+        edit_result = edit_memory(
+            vault_root,
+            path=str(candidate.get("from") or ""),
+            why=why,
+            old_string=old_line,
+            new_string=bullet,
+            expected_hash=expected_hash,
+        )
+    else:
+        edit_result = edit_memory(
+            vault_root,
+            path=str(candidate.get("from") or ""),
+            why=why,
+            heading="Relations",
+            section_position="append",
+            new_string=bullet,
+            expected_hash=expected_hash,
+        )
     return {
         "accepted": True,
         "ref": ref,
@@ -1435,4 +1535,9 @@ def accept(
         "fingerprint": resolved.fingerprint,
         "bullet": bullet,
         "edit": edit_result,
+        **(
+            {"sensed": {"relation": proposed, "reading_id": reading_id}}
+            if proposed and proposed not in ("none", "abstain")
+            else {}
+        ),
     }

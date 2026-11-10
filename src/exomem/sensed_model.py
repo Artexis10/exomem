@@ -50,8 +50,8 @@ log = logging.getLogger(__name__)
 #: 2 added each page's content hash and each pair's instrument key, so a request
 #: can tell a projection that no longer describes the live page. 3 caps each
 #: page pair instead of each page, and is rebuilt from the ledger without
-#: re-sensing.
-SCHEMA_VERSION = 4
+#: re-sensing. 5 adds `relation_sensed`, the relation.type projection.
+SCHEMA_VERSION = 5
 FILENAME = "projection.sqlite"
 # This internal namespace belongs to the fixed unit-proposer queue protocol.
 _PAIR_JOB_SCOPE = ("pair-proposer", "units-v1")
@@ -140,6 +140,12 @@ _TABLES = (
     "PRIMARY KEY(owner, scope_key, request_key))",
     "CREATE INDEX IF NOT EXISTS sense_jobs_order ON sense_jobs(priority, order_key, owner, scope_key, request_key)",
     "CREATE INDEX IF NOT EXISTS sense_jobs_input ON sense_jobs(question_type, input_key)",
+    # relation.type's projected verdicts, one row per still-queued request.
+    "CREATE TABLE IF NOT EXISTS relation_sensed ("
+    "request_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, target_path TEXT NOT NULL, "
+    "anchor TEXT, kind TEXT NOT NULL, reading_id TEXT NOT NULL, instrument_id TEXT NOT NULL, "
+    "verdict TEXT NOT NULL, p REAL, menu_digest TEXT NOT NULL, input_key TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS relation_sensed_source ON relation_sensed(source_path)",
 )
 
 
@@ -170,6 +176,10 @@ def active_instruments(
     means no reading is consumed, so the status degrades to absence.
     """
     sensing.question(question_type)
+    if question_type == sensing.RELATION_TYPE:
+        from . import sensing_llm
+
+        return sensing_llm.active_instruments()
     if question_type != sensing.PAIR_RELATION:
         return {}
     from . import sensing_nli
@@ -1041,8 +1051,10 @@ def run_tick(
             cosine,
         )
         _follow_seeding(store, conn, seen)
+        _relation_producer(vault_root, seen, report)
         with store.write(conn):
             _retire_satisfied(conn, ledger)
+            _relation_ingest(conn, ledger)
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
         log.warning("sensed model: tick failed", exc_info=True)
         report.stop = "error"
@@ -1052,6 +1064,37 @@ def run_tick(
         if conn is not None:
             conn.close()
     return report
+
+
+def _relation_producer(vault_root: Path, seen: Mapping[str, str], report: TickReport) -> None:
+    """Submit bounded `relation.type` scopes from published graph rows.
+
+    Runs inside the tick but never shares its failure with the pair pipeline,
+    never parses Markdown and never loads a model.
+    """
+    try:
+        from . import epistemic_graph, relation_sensor
+
+        index = epistemic_graph.EpistemicGraphIndex(vault_root)
+        conn = index._open_read_snapshot()
+        if conn is None:
+            return
+        try:
+            result = relation_sensor.produce(vault_root, conn, seen)
+            report.processed += int(result.get("pages") or 0)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - a producer failure never breaks the tick
+        log.debug("relation sensor: producer failed", exc_info=True)
+
+
+def _relation_ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> None:
+    try:
+        from . import relation_sensor
+
+        relation_sensor.ingest(conn, ledger)
+    except Exception:  # noqa: BLE001 - a projection failure never breaks the tick
+        log.debug("relation sensor: ingest failed", exc_info=True)
 
 
 def _follow_ledger(store, conn, ledger) -> None:
@@ -1712,11 +1755,13 @@ def queued_pairs(conn: sqlite3.Connection, limit: int) -> list[QueuedPair]:
 
 def _question_active(question_type: str) -> dict[str, sensing.InstrumentIdentity]:
     # Preserve the established no-argument injection seam for pair.relation.
-    return (
-        active_instruments()
-        if question_type == sensing.PAIR_RELATION
-        else active_instruments(question_type)
-    )
+    if question_type == sensing.PAIR_RELATION:
+        return active_instruments()
+    if question_type == sensing.RELATION_TYPE:
+        from . import sensing_llm
+
+        return sensing_llm.active_instruments()
+    return active_instruments(question_type)
 
 
 def _retire_satisfied(

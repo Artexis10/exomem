@@ -34,12 +34,13 @@ SETTINGS: tuple[str, ...] = ("off", "on")
 DEFAULT_SETTING = "off"
 
 PAIR_RELATION = "pair.relation"
+RELATION_TYPE = "relation.type"
 
 #: Placements an instrument may run in. Only `local-cpu` exists in this build.
 PLACEMENTS = frozenset({"local-cpu", "cloud-plane", "api"})
 
 #: Why a reading abstained. A closed code, never prose.
-ABSTAIN_REASONS = frozenset({"directional_asymmetry", "input_too_long"})
+ABSTAIN_REASONS = frozenset({"directional_asymmetry", "input_too_long", "low_confidence"})
 
 #: Probabilities are stored at this precision, and every verdict is derived
 #: from the stored (rounded) vector, so a replay reproduces it exactly.
@@ -186,9 +187,56 @@ def _p(value: float) -> float:
     return round(float(value), VECTOR_DECIMALS)
 
 
+@dataclass(frozen=True)
+class RelationTypeLabelMap:
+    """`relation.type`'s versioned map over one menu-shaped `answer` vector.
+
+    Its columns are per-reading (the request's menu keys in order, then
+    `none`), so unlike `RelationLabelMap` it declares no fixed `columns`; the
+    stored reading's own columns validate and derive the verdict.
+
+    Rules, in order: an instrument abstention is already a verdict; the top
+    key is a relation verdict when the top column is a menu key at or above
+    `propose_min`; `none` when the top column is the none column; otherwise
+    `abstain: low_confidence`.
+    """
+
+    version: str
+    propose_min: float
+    #: A variable-column map declares no fixed columns; `None` tells readers
+    #: to take the stored reading's columns.
+    columns: None = None
+
+    def apply_vectors(
+        self,
+        vectors: Mapping[str, Sequence[float]] | None,
+        *,
+        columns: Sequence[str] | None,
+    ) -> Verdict | None:
+        if vectors is None or set(vectors) != {"answer"} or not columns:
+            return None
+        if str(columns[-1]) != "none":
+            return None
+        try:
+            vector = [float(value) for value in vectors["answer"]]
+        except (TypeError, ValueError):
+            return None
+        if len(vector) != len(columns) or any(not _finite(value) for value in vector):
+            return None
+        if abs(sum(vector) - 1.0) > 0.02:
+            return None
+        top = max(range(len(vector)), key=lambda index: vector[index])
+        key, p = str(columns[top]), vector[top]
+        if key != "none" and p >= self.propose_min:
+            return Verdict(key, _p(p))
+        if key == "none":
+            return Verdict("none", _p(p))
+        return Verdict("abstain", _p(p), None, "low_confidence")
+
+
 #: Every label map this build can load. The thresholds equal the stance
 #: verifier's reviewed `v2` ones, so its fixture evidence carries over.
-LABEL_MAPS: dict[str, RelationLabelMap] = {
+LABEL_MAPS: dict[str, RelationLabelMap | RelationTypeLabelMap] = {
     "relation-v1": RelationLabelMap(
         version="relation-v1",
         columns=("entailment", "neutral", "contradiction"),
@@ -196,10 +244,13 @@ LABEL_MAPS: dict[str, RelationLabelMap] = {
         restates_min=0.95,
         refines_min=0.95,
     ),
+    # Provisional until a pin's measured evidence fixes it (D6); admission
+    # refuses without evidence for this exact map.
+    "relation-type-v1": RelationTypeLabelMap(version="relation-type-v1", propose_min=0.5),
 }
 
 
-def label_map(version: str) -> RelationLabelMap:
+def label_map(version: str) -> RelationLabelMap | RelationTypeLabelMap:
     if not version:
         raise ValueError("label map version is required")
     try:
@@ -276,6 +327,25 @@ UNITS_V1 = UnitScope(
     ),
 )
 
+#: `relation.type` reads whole pages, not units: its scope admits nothing at
+#: unit level, so the unit proposer never feeds it.
+PAGES_V1 = UnitScope(
+    version="pages-v1",
+    compact_categories=frozenset(),
+    rich_kinds=frozenset(),
+)
+
+#: `relation.type`'s extractor per slot, in slot order. Other questions only
+#: constrain membership; this one's extractors are positional.
+SLOT_EXTRACTORS: dict[str, dict[str, str]] = {
+    RELATION_TYPE: {
+        "source": "page-excerpt-v1",
+        "target": "page-excerpt-v1",
+        "link": "link-sentence-v1",
+        "menu": "relation-menu-v1",
+    }
+}
+
 #: The registry. Later entries (`mention.same_referent`, `recap.covered_by`,
 #: ...) are specified in `add-sensed-epistemic-model` and land with their
 #: instruments; an entry exists here only once something can answer it.
@@ -286,6 +356,16 @@ QUESTIONS: dict[str, Question] = {
         label_map_version="relation-v1",
         unit_scope=UNITS_V1,
         fixture_set="relation-v1-multilingual",
+    ),
+    RELATION_TYPE: Question(
+        question_type=RELATION_TYPE,
+        template_version="relation-type-v1",
+        label_map_version="relation-type-v1",
+        unit_scope=PAGES_V1,
+        fixture_set="relation-type-v1-judged",
+        slot_names=("source", "target", "link", "menu"),
+        extractors=("page-excerpt-v1", "link-sentence-v1", "relation-menu-v1"),
+        vector_names=("answer",),
     ),
 }
 
@@ -537,6 +617,11 @@ class SenseRequest:
                 raise ValueError("input slots differ from the question contract")
             if any(item.extractor not in entry.extractors for item in self.inputs):
                 raise ValueError("input extractor differs from the question contract")
+            positional = SLOT_EXTRACTORS.get(self.question_type)
+            if positional is not None and any(
+                item.extractor != positional[item.slot] for item in self.inputs
+            ):
+                raise ValueError("input extractor differs from the slot contract")
         else:
             raise ValueError("unknown input version")
 
@@ -673,22 +758,30 @@ def rederive(
 ) -> Verdict | None:
     """Validate the stored output at the consumer boundary, then apply the active map."""
     mapping = label_map(version)
-    if columns is not None and tuple(columns) != mapping.columns:
+    # A variable-column map declares `columns = None`: the stored reading's own
+    # columns validate the width and the trailing none column.
+    fixed_columns = getattr(mapping, "columns", None)
+    if columns is not None and fixed_columns is not None and tuple(columns) != fixed_columns:
+        return None
+    if columns is not None and fixed_columns is None and (
+        not columns or str(columns[-1]) != "none"
+    ):
         return None
     if reading_vectors is None:
         return stored if stored.label == "abstain" else None
     if set(reading_vectors) != set(vector_names):
         return None
+    width = len(columns) if fixed_columns is None and columns is not None else len(fixed_columns)
     try:
         if any(
-            len(vector) != len(mapping.columns) or any(not _finite(float(v)) for v in vector)
+            len(vector) != width or any(not _finite(float(v)) for v in vector)
             for vector in reading_vectors.values()
         ):
             return None
     except (TypeError, ValueError):
         return None
     if hasattr(mapping, "apply_vectors"):
-        return mapping.apply_vectors(reading_vectors)
+        return mapping.apply_vectors(reading_vectors, columns=columns)
     return mapping.apply(reading_vectors.get("ab"), reading_vectors.get("ba"))
 
 
@@ -699,8 +792,10 @@ def make_request_reading(
     vectors: Mapping[str, Sequence[float]] | None,
     abstain_reason: str | None,
     sensed_at: str,
+    columns: Sequence[str] | None = None,
 ) -> Reading | None:
     entry = question(request.question_type)
+    mapping = label_map(entry.label_map_version)
     rounded = (
         None
         if vectors is None
@@ -712,9 +807,18 @@ def make_request_reading(
             raise ValueError("invalid instrument abstention")
     elif vectors is None:
         return None
-    verdict = rederive(rounded, stored, entry.label_map_version, vector_names=entry.vector_names)
+    verdict = rederive(
+        rounded,
+        stored,
+        entry.label_map_version,
+        columns=columns,
+        vector_names=entry.vector_names,
+    )
     if verdict is None:
         return None
+    # A fixed-column map stores its declared columns; a variable-column one
+    # stores the per-reading columns the instrument reported.
+    stored_columns = mapping.columns if mapping.columns is not None else tuple(columns or ())
     return Reading(
         request.reading_id(instrument.instrument_id),
         request.question_type,
@@ -724,7 +828,7 @@ def make_request_reading(
         verdict,
         sensed_at,
         instrument.placement,
-        label_map(entry.label_map_version).columns,
+        stored_columns,
         request.input_version,
     )
 

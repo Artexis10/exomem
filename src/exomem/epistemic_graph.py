@@ -9569,6 +9569,33 @@ class EpistemicGraphIndex:
                     generic, per_source_cap, branch_cap + 1,
                 ),
             ).fetchall()
+            # relation.type's authored plain-link/generic bullets, from the same
+            # rows the graph already published. Only candidates with a current
+            # relation verdict survive the read below.
+            retype_edge_rows: dict[str, list[tuple[str, str, str, str]]] = {
+                rel: [] for rel in selected
+            }
+            try:
+                for row in conn.execute(
+                    "SELECT source_path, dst_page_key, raw_relation, source_anchor, metadata "
+                    "FROM graph_edges WHERE origin='markdown_relation' "
+                    f"AND source_path IN ({placeholders})",
+                    tuple(selected),
+                ).fetchall():
+                    source, dst, raw_relation, anchor, metadata = row
+                    canonical = _core_relation(
+                        selected_registries[str(source)], str(raw_relation or "")
+                    )
+                    if canonical is None:
+                        continue
+                    registry = selected_registries[str(source)]
+                    if canonical != registry.link_key and not registry.is_generic(canonical):
+                        continue
+                    retype_edge_rows[str(source)].append(
+                        (str(dst), canonical, str(anchor or ""), str(metadata or "{}"))
+                    )
+            except sqlite3.Error:
+                retype_edge_rows = {rel: [] for rel in selected}
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
                 "status": "warming",
@@ -9635,10 +9662,37 @@ class EpistemicGraphIndex:
                     "wikilink",
                     "frontmatter_sources",
                     "shared_sources",
+                    "retype",
                 )
             }
             for rel in selected
         }
+        # relation.type readings: relation verdicts only. Empty when sensing is
+        # off, unadmitted or unprojected, and the queue is byte-identical.
+        from . import relation_sensor
+
+        sensed_by_key = relation_sensor.sensed_rows(self.vault_root)
+        for source, rows in retype_edge_rows.items():
+            for dst, canonical, anchor, metadata in rows:
+                target_rel = _page_rel(str(dst or "").removeprefix("file:"))
+                key = relation_sensor.request_key(source, target_rel, anchor)
+                row = sensed_by_key.get(key)
+                if row is None or str(row.get("verdict") or "") in ("none", "abstain"):
+                    continue
+                try:
+                    raw_line = str(_json(metadata).get("line") or "")
+                except Exception:  # noqa: BLE001
+                    raw_line = ""
+                methods[source]["retype"].append(
+                    {
+                        "from": source,
+                        "to": target_rel,
+                        "relation_type": canonical,
+                        "method": "retype",
+                        "evidence": {"line": raw_line, "anchor": anchor},
+                        "_sensed": row,
+                    }
+                )
         for row in wiki_and_authored_rows[:branch_cap]:
             (
                 kind,
@@ -9967,6 +10021,7 @@ class EpistemicGraphIndex:
             "wikilink",
             "frontmatter_sources",
             "shared_sources",
+            "retype",
         )
         fit = relation_queue.RelationFit(self.vault_root, basis=type_basis)
         for source in selected:
@@ -10066,6 +10121,27 @@ class EpistemicGraphIndex:
                     item["bullet"] = relation_queue._bullet(candidate)
                 if candidate.get("internal_evidence"):
                     item["internal_evidence"] = candidate["internal_evidence"]
+                sensed_row = candidate.get("_sensed")
+                if sensed_row is None and candidate.get("method") == "wikilink":
+                    occurrence = (candidate.get("internal_evidence") or {}).get("occurrence")
+                    if occurrence is not None:
+                        sensed_row = sensed_by_key.get(
+                            relation_sensor.request_key(
+                                source, target, f"occurrence-{occurrence}"
+                            )
+                        )
+                if sensed_row is not None:
+                    options = item.get("options")
+                    if options is None:
+                        options = fit.options(
+                            candidate,
+                            registry=selected_registries[source],
+                            relation=relation_registry.generic_relation_key(),
+                        )
+                        item["options"] = options
+                    block = relation_sensor.proposal(sensed_row, options or [])
+                    if block is not None:
+                        item["sensed"] = block
                 visible.append(item)
             if len(visible) > item_cap:
                 items_truncated = True
