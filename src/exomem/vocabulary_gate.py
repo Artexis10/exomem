@@ -238,9 +238,14 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         return None
     if status.mode != "v2":
         raise vocabulary_authority.VocabularyAuthorityUnavailable("activated authority is unavailable")
-    from . import vocabulary_auxiliaries
-    from .kbdir import kb_dirname
+    from . import curation, episode_store, vocabulary_auxiliaries
 
+    # Curation runs and episode journals are operational JSON, no knowledge or index input; their
+    # stores' own guards still apply.
+    operational = tuple(
+        f"{store.relative_to(root).as_posix()}/"
+        for store in (curation.CurationStore(root).root, episode_store.EpisodeStore(root).root)
+    )
     originals = _declared_originals(root, auxiliary_manifest)
     unmatched = set(originals)
     candidates = []
@@ -266,8 +271,8 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
                 raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
             unmatched.discard(relative)
             continue
-        if relative.startswith(f"{kb_dirname()}/_Governance/curation/runs/"):
-            continue  # Existing curation artifact guards still apply.
+        if relative.startswith(operational):
+            continue
         candidates.append((relative, artifact, snapshot))
     if unmatched:
         raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
