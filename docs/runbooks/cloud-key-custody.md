@@ -84,6 +84,7 @@ Do this before the purge is turned on, after "Pin the media watch". Agree the ch
 
 1. Run steps 2 to 6 with the HCP Terraform credentials, as [Cloud Terraform backend](cloud-terraform-backend.md) says.
    Map the BWS entries `EXOMEM_CELL_DATA_B2_MASTER_KEY_ID` and `EXOMEM_CELL_DATA_B2_MASTER_KEY` to `TF_VAR_cell_data_b2_application_key_id` and `TF_VAR_cell_data_b2_application_key`, through `bwsx-run`.
+   For step 3, also map the durability root's bootstrap key to `TF_VAR_b2_application_key_id` and `TF_VAR_b2_application_key`.
 2. Plan the cell-data root: `infra/scripts/plan.sh cell-data <plan file>`
    Expect one add, `key_watcher_backup_list`, and no other change.
 3. If the platform has the media watch, plan the durability root for the one key only:
@@ -100,7 +101,7 @@ Do this before the purge is turned on, after "Pin the media watch". Agree the ch
    `bwsx-run EXOMEM_KEY_WATCHER_ALERT_URL -- sh -c 'printf "%s" "$EXOMEM_KEY_WATCHER_ALERT_URL"' | sed 's#/api/exomem/alerts/#/api/exomem/cell-deletions/#' | gh secret set KEY_WATCHER_DELETIONS_URL --env key-watcher`
 9. Open your copy of the current pinned set.
 10. In the `cell-data` account, add the ID from `key_watcher_backup_list_application_key_id` to `pinned_key_ids`.
-11. If you applied step 3, add the ID from `cloud_media_edge_list_application_key_id` to `pinned_key_ids` in the `founder` account.
+11. If you planned step 3, add the ID from `cloud_media_edge_list_application_key_id` to `pinned_key_ids` in the `founder` account.
 12. Add the deletion watch at the top level, with the skew margin that you chose (the design proposes 60 minutes):
    `"deletions": {"account": "cell-data", "media_account": "founder", "backup_key_id_env": "B2_WATCHER_BACKUP_LIST_KEY_ID", "backup_key_env": "B2_WATCHER_BACKUP_LIST_KEY", "purge_capabilities": ["listFiles", "writeFiles"], "skew_margin_minutes": <minutes>}`
    On a platform without the media watch, set `media_account` to `null`.
@@ -271,7 +272,7 @@ prints `0`.
 4. Do steps 1 and 3 of "Upgrade the release" in the same runbook. Step 3 has no `--atomic`.
 5. If the upgrade fails, do "If the upgrade fails" in the same runbook.
 6. After a rollback, stop. Do not run release B.
-7. After a rollback, find the cause of the failure. Then start again at step 1.
+7. After a rollback, start again at step 1 once you know the cause of the failure.
 8. Wait until `cellctl` is Ready. Its liveness probe restarts the pod when its heartbeat file is older than 120 seconds.
    `kubectl --namespace exomem-cloud get pods --selector app.kubernetes.io/name=cellctl`
 9. Wait until each cell pod is replaced once. Allow up to 10 minutes for each cell.

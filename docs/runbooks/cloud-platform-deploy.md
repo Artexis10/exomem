@@ -436,24 +436,27 @@ A cell with local storage backs up each hour. Another cell backs up once a day, 
    ```
 
    The query leaves out a cell created after the copy, because the copy does not hold it.
-4. After 26 hours, read the recent cellctl log for each cell that still has no such backup.
+4. After 26 hours, read the cellctl log since the rollout end for each cell that still has no such backup.
 
    ```bash
    kubectl --namespace exomem-cloud logs deployment/cellctl --since-time=<rollout end> | grep -F '<cell id>'
    ```
 
-   If the cellctl pod restarted since the rollout end, run the command again with `--previous`.
+5. If the cellctl pod restarted since the rollout end, run the command of step 4 again with `--previous`.
+
    A cell with nightly backups logs a failure only inside its backup window. Finding no line is not a cause.
 
    cellctl unwraps the backup key before it makes the backup Job. A failed unwrap makes no Job, only this log line.
-5. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Stop here.
-6. For any other cause that you found, record it for that cell and continue.
-   If you found no cause, keep the copy and wait for the next backup window.
-7. Delete the temporary copy of the key columns.
+6. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Stop here.
+7. After a stop at step 6, fix forward as "If the upgrade fails" step 8 says. Then repeat this section.
+8. For any other cause that you found, fix it so that the cell can back up.
+9. After three windows with no backup and no log line, find why cellctl skips the cell, such as a park.
+10. Keep the copy while a listed cell has no backup after the rollout end. Repeat step 3 after its next window.
+11. When each listed cell has a backup after the rollout end, delete the temporary copy of the key columns.
 
-   ```bash
-   rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
-   ```
+    ```bash
+    rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+    ```
 
-Expected result: `cell-keys-before.csv` is gone. Each listed cell has a backup that is newer than the rollout end,
-or a recorded cause that is not the backup key.
+Expected result: `cell-keys-before.csv` is gone, and each listed cell has a backup that is newer than the rollout end.
+A cell that is deleted meanwhile leaves the query, so it does not hold the copy.
