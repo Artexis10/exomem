@@ -51,7 +51,7 @@ def test_a_stale_keyword_index_still_lets_the_dense_reading_find_the_page(
     vault: Path, planted: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Right after a cutover the keyword index lags; recall must return what the dense reading finds, marked partial."""
-    stale = SimpleNamespace(value=None, readiness=SimpleNamespace(complete=False))
+    stale = SimpleNamespace(value=None, readiness=SimpleNamespace(status="stale", complete=False))
     monkeypatch.setattr(lexstore, "search_bm25_result", lambda *args, **kwargs: stale)
     block, refs = _task(vault, PARAPHRASE)
     assert planted in refs
