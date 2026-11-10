@@ -39,4 +39,4 @@ relations:
   produces: {description: Produces or makes, family: production, direction: directed, origins: [semantic_relation]}
   precedes: {description: Comes before in time, family: order, direction: directed, inverse: follows, origins: [semantic_relation], behaviours: [earlier_than_target]}
   follows: {description: Comes after in time, family: order, direction: directed, inverse: precedes, origins: [semantic_relation], behaviours: [later_than_target]}
-  assesses: {description: Assesses how far a claim holds, family: assessment, direction: directed, origins: [semantic_relation]}
+  assesses: {description: Assesses how far a claim holds, family: assessment, direction: directed, origins: [semantic_relation], behaviours: [names_assessed_claim]}

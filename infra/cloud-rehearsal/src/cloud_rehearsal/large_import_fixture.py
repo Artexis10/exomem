@@ -2,8 +2,9 @@
 
 The generator decides what each file is expected to become. It never reads the product's own
 suffix lists or the cell's replies: a note or caption is text, every other visible file is an
-artifact, and a file's size against the adoption ceiling and its hidden state fix the rest. The
-manifest it writes (path, size, SHA-256, disposition) is the only truth the pass criteria use.
+artifact at any size, because a Cloud stage files a file above the adoption ceiling by rename,
+and a file's hidden state fixes the rest. The manifest it writes (path, size, SHA-256, disposition) is
+the only truth the pass criteria use.
 File names are ASCII, so a path compares equal before and after the cell normalises it.
 """
 
@@ -24,9 +25,8 @@ DEFAULT_FILES = 70_000
 DEFAULT_TARGET_BYTES = 6_000_000_000
 
 # Dispositions are this module's own closed result set, fixed by construction.
-FILED_ARTIFACT = "filed_artifact"  # a visible non-text file under the ceiling: Source, then consumed
+FILED_ARTIFACT = "filed_artifact"  # a visible non-text file, at any size: Source, then consumed
 FILED_TEXT = "filed_text"  # a note or caption: filed as text, then consumed when its page finishes
-OVER_CEILING = "over_ceiling"  # above the adoption ceiling: stays staged, never filed
 HIDDEN_FOLDER = "hidden_folder"  # inside a hidden folder that the client sent: stays staged
 HIDDEN_FILE = "hidden_file"  # a hidden file outside any hidden folder that the client sent
 LEFT_BEHIND = "left_behind"  # hidden and the client was not told to send it: never staged
@@ -34,7 +34,6 @@ LEFT_BEHIND = "left_behind"  # hidden and the client was not told to send it: ne
 # The product's residual report groups a staged leftover under these result keys. Mapping the
 # dispositions onto them is a fixed protocol of the report, not a vocabulary of the data.
 RESIDUAL_REASON = {
-    OVER_CEILING: "over_ceiling",
     HIDDEN_FOLDER: "ineligible",
     HIDDEN_FILE: "outside_run",
 }
@@ -115,14 +114,15 @@ class Sizing:
     note: str
 
 
-def disposition_of(kind: str, size: int, *, ceiling: int, hidden: str | None, include_hidden: bool) -> str:
+def disposition_of(kind: str, *, hidden: str | None, include_hidden: bool) -> str:
     if hidden is not None:
         if not include_hidden:
             return LEFT_BEHIND
         return HIDDEN_FOLDER if hidden == "folder" else HIDDEN_FILE
     if kind in TEXT_KINDS:
         return FILED_TEXT
-    return OVER_CEILING if size > ceiling else FILED_ARTIFACT
+    # A Cloud stage records each file's identity, so adoption files even a file above the ceiling by rename.
+    return FILED_ARTIFACT
 
 
 def word(number: int) -> str:
@@ -152,49 +152,48 @@ class _Fixed:
 
 
 def _large_sizes(count: int, ceiling: int, large_min: int) -> tuple[list[int], int]:
-    """Sizes spread from `large_min` up to just under the ceiling, and one size just over it."""
+    """Sizes spread from `large_min` up to just under the ceiling, and one size just over it, which a Cloud stage
+    files by rename like any other."""
     margin = max(1, (ceiling - large_min) // 10)
     high = max(large_min, ceiling - margin)
     sizes = [large_min + (high - large_min) * k // max(1, count - 1) for k in range(count)]
     return sizes, ceiling + margin
 
 
-def _hidden_specs(names: Sequence[tuple[str, str]], *, ceiling: int, include_hidden: bool) -> list[Spec]:
+def _hidden_specs(names: Sequence[tuple[str, str]], *, include_hidden: bool) -> list[Spec]:
     return [
-        Spec(path, "hidden", HIDDEN_BYTES, disposition_of("hidden", HIDDEN_BYTES, ceiling=ceiling,
-                                                           hidden=hidden, include_hidden=include_hidden),
+        Spec(path, "hidden", HIDDEN_BYTES, disposition_of("hidden", hidden=hidden, include_hidden=include_hidden),
              ordinal=n, hidden=hidden)
         for n, (path, hidden) in enumerate(names)
     ]
 
 
-def _binary(path: str, size: int, ordinal: int, ceiling: int) -> Spec:
-    return Spec(path, "binary", size, disposition_of("binary", size, ceiling=ceiling, hidden=None,
-                                                     include_hidden=False), ordinal=ordinal)
+def _binary(path: str, size: int, ordinal: int) -> Spec:
+    return Spec(path, "binary", size, disposition_of("binary", hidden=None, include_hidden=False), ordinal=ordinal)
 
 
 def _fixed(folder: str, files: int, *, ceiling: int, large_min: int, include_hidden: bool) -> _Fixed:
     if folder == "notes":
         sizes, over = _large_sizes(LARGE_NOTES, ceiling, large_min)
-        specs = [_binary(f"archive/backup-{k:02d}.dat", size, k, ceiling) for k, size in enumerate(sizes)]
-        specs.append(_binary("archive/disk-image.dat", over, len(sizes), ceiling))
+        specs = [_binary(f"archive/backup-{k:02d}.dat", size, k) for k, size in enumerate(sizes)]
+        specs.append(_binary("archive/disk-image.dat", over, len(sizes)))
         git = [(".git/HEAD", "folder"), (".git/config", "folder"), (".git/description", "folder"),
                (".git/refs/heads/main", "folder")]
         git += [(f".git/objects/{n % 256:02x}/{word(n)}", "folder") for n in range(GIT_FILES - len(git))]
         obsidian = [(f".obsidian/{name}.json", "folder")
                     for name in ("app", "appearance", "core-plugins", "workspace")[:OBSIDIAN_FILES]]
         loose = [(".DS_Store", "file"), (".hidden-note.md", "file"), ("notes/.draft.md", "file")]
-        hidden = _hidden_specs([*git, *obsidian, *loose], ceiling=ceiling, include_hidden=include_hidden)
+        hidden = _hidden_specs([*git, *obsidian, *loose], include_hidden=include_hidden)
         specs += hidden
         bulk = min(FLAT_ATTACHMENTS, files // 10)
         text = files - bulk - len(specs)
         text_bytes = text * NOTE_BYTES
     elif folder == "media":
         sizes, _ = _large_sizes(LARGE_MEDIA, ceiling, large_min)
-        specs = [_binary(f"masters/master-{k:02d}.dat", size, k, ceiling) for k, size in enumerate(sizes)]
+        specs = [_binary(f"masters/master-{k:02d}.dat", size, k) for k, size in enumerate(sizes)]
         hidden = _hidden_specs([(".DS_Store", "file"), (".hidden-caption.txt", "file"),
                                 ("clips/.thumbs/thumb-00.dat", "folder")],
-                               ceiling=ceiling, include_hidden=include_hidden)
+                               include_hidden=include_hidden)
         specs += hidden
         text = CAPTIONS
         bulk = files - len(specs) - text
@@ -242,12 +241,12 @@ def layout(folder: str, *, seed: str, files: int, total_bytes: int, ceiling: int
             path = f"notes/area-{leaf // 40:02d}/topic-{leaf % 40:03d}/{word(n)}.md"
             specs.append(Spec(path, "note", NOTE_BYTES, FILED_TEXT, ordinal=n,
                               marked=n == fixed.text_count // 2))
-        specs += [_binary(f"attachments/att-{n:05d}.dat", size, n, ceiling) for n, size in enumerate(sizes)]
+        specs += [_binary(f"attachments/att-{n:05d}.dat", size, n) for n, size in enumerate(sizes)]
     else:
         for n in range(fixed.text_count):
             specs.append(Spec(f"captions/caption-{n:02d}.txt", "caption", CAPTION_BYTES, FILED_TEXT,
                               ordinal=n, marked=n == 0))
-        specs += [_binary(f"clips/set-{n // 50:02d}/clip-{n:04d}.dat", size, n, ceiling)
+        specs += [_binary(f"clips/set-{n // 50:02d}/clip-{n:04d}.dat", size, n)
                   for n, size in enumerate(sizes)]
     return specs
 

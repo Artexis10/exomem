@@ -89,7 +89,7 @@ from .vault import (
     read_guarded_text,
 )
 from .vault_store import mode as store_mode
-from .writer_lease import get_manager
+from .writer_lease import TRANSIENT_WRITER_CODES, get_manager
 
 log = logging.getLogger(__name__)
 
@@ -123,20 +123,7 @@ _LANGUAGE_ACTION = (
 _COMPUTE_RUNTIME_ACTION = (
     "repair the CUDA/cuBLAS/cuDNN runtime or explicitly select bounded CPU, then retry"
 )
-_TRANSIENT_OPERATION_CODES = frozenset(
-    {
-        "MUTATION_BUSY",
-        "MUTATION_LOCK_UNAVAILABLE",
-        "WRITER_COORDINATOR_UNAVAILABLE",
-        # Deliberately transient too. A misconfigured coordinator URL is not
-        # fixed by asking again, but it IS fixed by an operator without
-        # restarting anything -- so the caller waits rather than crashing. What
-        # changes is only how often it asks; see the recheck cadence below.
-        "WRITER_COORDINATOR_CONTRACT_ABSENT",
-        "WRITER_FENCED",
-        "WRITER_LEASE_REQUIRED",
-    }
-)
+_TRANSIENT_OPERATION_CODES = TRANSIENT_WRITER_CODES
 _FOLLOWER_RECHECK_SECONDS = 5.0
 #: A coordinator URL that answers but does not serve the lease contract returns
 #: the same answer to every request, so the follower cadence buys nothing and

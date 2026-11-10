@@ -158,9 +158,11 @@ class Basis:
 
 
 def group_key(values, names) -> tuple:
-    """Tagged group values that keep a present null apart from a missing field."""
-    return tuple(("m",) if name not in values else ("n",) if values[name] is None else ("v", values[name])
-                 for name in names)
+    """Tagged group values that keep a present null, a missing field and an unresolved reference apart."""
+    from .row_predicates import UNRESOLVED
+
+    return tuple(("m",) if name not in values else ("u",) if values[name] is UNRESOLVED
+                 else ("n",) if values[name] is None else ("v", values[name]) for name in names)
 
 
 def rank(value, kind: str):

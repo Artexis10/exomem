@@ -200,6 +200,74 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 - **WHEN** the collection store publishes its in-vault replica in a store-mode vault
 - **THEN** the replica holds the collection tables and no page, lexical or graph table
 
+### Requirement: A change to the schema overlay settles the registry state in the background
+In store mode, a commit that changes a source of the schema overlay (a page under `_Schema/` or the access policy file) SHALL record its revision and return without deriving every page again. A background job SHALL then derive the stored pages again, one bounded transaction per batch, and SHALL record the overlay revision that the derived rows reflect. Status SHALL report `rebuilding` with the target revision while the rows reflect an older overlay, `current` when they reflect the latest, and `unknown` when no record says or the record of the last overlay change cannot be read, and SHALL count the overlay paths that wait for the projector or a hold. A tick with no batch to run SHALL NOT take the vault's mutation boundary. A batch and its cursor SHALL commit together, so a kill leaves the rows behind the store and never ahead of it, and the next start SHALL resume at the cursor. The job SHALL run on the store thread's scheduler and SHALL add no thread.
+
+#### Scenario: A policy change returns before its rows and the job then settles them
+- **WHEN** a commit changes the access policy of a store-mode vault
+- **THEN** the commit returns while status reports `rebuilding` with that commit's revision as the target
+- **AND** when the job finishes status reports `current`, and every derived table equals a fresh derivation from the stored bytes with the new policy
+
+#### Scenario: A kill inside a batch leaves the rows behind the store
+- **WHEN** the process is killed inside a batch of the job
+- **THEN** no derived row is ahead of the recorded overlay revision
+- **AND** the next start resumes the job and ends with the rows of a fresh derivation
+
+#### Scenario: A write does not wait for the job
+- **WHEN** a governed write commits between two batches of the job
+- **THEN** the write commits at once, and the job derives that page with the policy that the vault holds when it finishes
+
+### Requirement: A store-mode vault says so beside the vault
+Activation SHALL record its store-mode claim in the collection store's `store_meta` and publish it before the transaction that installs the store's rows, and rollback SHALL remove it in the transaction that records file mode. Every decision to enter or leave store mode SHALL carry a number that is one above the largest number that the deciding root sees, under the lease, in its own store and in the replica under the vault; the larger number SHALL be the newer decision, a tie SHALL go to the replica's copy, and the marker SHALL follow the newest decision. A takeover SHALL decide nothing: it SHALL merge the replica's decision into the new tenure's store so that the newest decision wins whichever root made it, it SHALL carry a replica decision that it cannot read as it stands, and it SHALL keep the claim of the root that it runs on, never the replica's. A root SHALL force the hand-back to copy the replica under the vault when its own decision is newer than the replica's, because store mode changes no collection head. `exomem store-mode migrate` SHALL check, after it takes the lease and merges the replica, that no other root's store claim stands, SHALL record and publish its claim and read it back from the replica before it installs any row, and SHALL leave the vault in file mode and remove its claim when the replica does not carry it. `exomem store-mode release --apply --claim ID --why TEXT` SHALL decide file mode over the named claim of another root, on a file-mode root while no service holds the lease, and SHALL refuse when this root holds the claim, when no store claim stands or when the id is not the standing claim; a store marker with no decision SHALL be the claim `legacy`. A holder whose claim was released or superseded SHALL read as displaced and SHALL NOT reassert it. A file-mode service on another state root SHALL read the marker from the replica, whatever store schema wrote it, when it starts and SHALL refuse with a named code, the reason and the remediation, which names the release command and the claim id, when the replica says store. An absent or unreadable replica SHALL NOT block a file-mode start, and a vault that never migrated SHALL start as before. A state root whose own store carries a newer decision than the replica's, or whose claim the replica carries, SHALL start. A decision that cannot be read, or that disagrees with the marker, SHALL leave the order unknown: it SHALL refuse on a store marker, SHALL NOT force a copy, and a takeover SHALL carry an unknown replica decision as it stands, so no publication drops it. `exomem store-mode status` and the doctor SHALL show the standing decision and whether this root holds, is displaced from or is refused by it.
+
+#### Scenario: Another state root refuses a store-mode vault
+- **WHEN** a vault is migrated into store mode and a file-mode service starts on another state root over the same vault
+- **THEN** the service refuses to start with `VAULT_STORE_ELSEWHERE` and names the rollback and the release command with the claim id
+
+#### Scenario: Rollback releases the vault
+- **WHEN** the vault is rolled back to file mode
+- **THEN** the replica no longer says store and the file-mode service on the other state root starts
+
+#### Scenario: A replica that cannot be read does not block a file-mode vault
+- **WHEN** the replica is absent or unreadable
+- **THEN** a file-mode service starts, and status names the unreadable replica
+
+#### Scenario: The newest decision wins at a takeover
+- **WHEN** a root rolled back and its clear replica was not published, and another root then takes the lease from a replica that still says store, whether it adopts the replica or continues from its head
+- **THEN** the root that rolled back starts, and its next hand-back publishes the clear replica, after which the other root starts
+
+#### Scenario: A rollback that published does not undo a later claim
+- **WHEN** a root rolled back and published the clear replica, another root then migrated, and the first root takes the lease again
+- **THEN** the replica that it publishes still says store, and the first root refuses to start
+
+#### Scenario: An old replica does not lock out a root that saw the newer decision
+- **WHEN** a sync restores a replica that says store, older than a rollback that a root already merged
+- **THEN** that root starts
+
+#### Scenario: A second root does not migrate a vault that another root holds
+- **WHEN** the replica says store and a root that does not hold the store runs `exomem store-mode migrate --apply`, even when its preflight read a replica that had not yet gained the claim
+- **THEN** the command refuses with `VAULT_STORE_ELSEWHERE` and the vault stays in file mode on that root
+
+#### Scenario: A claim that no replica carries installs nothing
+- **WHEN** the publication of a migration's claim fails
+- **THEN** the root stays in file mode, another root's migration succeeds, and one root holds the vault
+
+#### Scenario: The owner releases a claim whose holder is gone
+- **WHEN** the owner runs `exomem store-mode release --apply` on a refused root with the claim id that the refusal names, and no service holds the lease
+- **THEN** the replica says file, the root starts, and a wrong claim id refuses without a change
+
+#### Scenario: A holder that returns after a release is displaced
+- **WHEN** the released holder takes the lease again
+- **THEN** the replica stays clear, status shows it displaced, and its rollback decides nothing over the release
+
+#### Scenario: A replica that has the marker and no decision is released as the legacy claim
+- **WHEN** the replica says store without a decision, the root has none, and the owner runs `exomem store-mode release --apply --claim legacy`
+- **THEN** the replica says file and the root starts
+
+#### Scenario: A decision that this build cannot read survives a takeover
+- **WHEN** the replica carries a store marker whose decision this build cannot read, and a refused root commits as the new tenure
+- **THEN** the next publication still says store and the root still refuses to start
+
 ### Requirement: Freshness requirements follow store ownership
 For files the store owns, the requirements that keep derived sidecars in step with Markdown on disk SHALL NOT apply in store mode; a change on disk to such a file SHALL follow the outside-edit requirement of this capability, and caches SHALL key on store revision. For vault content outside the store, those requirements SHALL keep applying in store mode as they do in file mode.
 

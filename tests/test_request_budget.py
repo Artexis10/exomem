@@ -176,3 +176,38 @@ def test_an_expired_budget_reports_a_non_negative_remaining() -> None:
     block = budget.as_response_block()
     assert block is not None
     assert block["remaining_ms_at_return"] == 0
+
+
+def test_an_activation_budget_ends_with_its_own_seconds_or_before_the_request_whichever_is_sooner(
+    monkeypatch,
+) -> None:
+    """An activation that outlived its request's deadline would be work that finishes after the caller left."""
+    clock = [0.0]
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    parent = request_budget.RequestBudget(seconds=50.0)
+    token = request_budget.set_current(parent)
+    try:
+        with request_budget.capped(15.0):
+            assert request_budget.current() is not parent
+            assert request_budget.current().remaining() == 15.0
+        clock[0] = 40.0
+        with request_budget.capped(15.0):
+            # Ten seconds remain on the request; the activation leaves its stage reserve.
+            assert request_budget.current().remaining() == 9.0
+            request_budget.current().note_skipped("working_set.heat")
+            request_budget.current().note_truncated("working_set.task_context_text")
+        assert request_budget.current() is parent
+        assert parent.skipped == ["working_set.heat"]
+        assert parent.truncated == ["working_set.task_context_text"]
+    finally:
+        request_budget.reset_current(token)
+    with request_budget.capped(15.0):
+        assert request_budget.current() is None
+
+
+def test_an_activation_has_no_nearer_deadline_until_the_operator_sets_one() -> None:
+    """A default cap once made live calls abstain in the conversation carry where the request's deadline served them."""
+    variable = request_budget.ACTIVATION_BUDGET_ENV_VAR
+    assert request_budget.activation_budget_seconds({}) is None
+    assert request_budget.activation_budget_seconds({variable: "2"}) == 2.0
+    assert request_budget.activation_budget_seconds({variable: "soon"}) is None

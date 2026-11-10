@@ -1,6 +1,6 @@
 ## 0. Owner decision
 
-- [x] 0.1 The owner approves this change (2026-11-09, owner answer "Approve, build it (Recommended)"): a healthy import runs to completion while the login that started it stays valid, rechecked before every batch, with no hourly continuation.
+- [x] 0.1 The owner approves this change (approved 2026-11-09): a healthy import runs to completion while the login that started it stays valid, rechecked before every batch, with no hourly continuation.
 
 ## 1. Revalidate the login, not one token's lifetime
 

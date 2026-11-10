@@ -6,6 +6,8 @@
 - [x] 1.4 Verify before activation: a fresh derivation equals the migrated rows on whole tables, and a full projection reproduces every file byte for byte.
 - [x] 1.5 Add rollback with its preconditions (drain projection, refuse on unexported held items, export audit and canonicity records) and a drill that rebuilds file mode from the projection and compares search and graph answers.
 - [x] 1.6 Scope the store: keep page, lexical and graph tables out of the collection store's in-vault replica; make store-mode knowledge writes refuse with the store's unavailability reason; build the replica from a staging database filled in one read transaction; refuse to start or activate store mode while multi-host writer-lease coordination is configured; amend to file mode the knowledge-stays-out, knowledge-writes-continue and whole-file replica clauses in `move-structured-collections-to-sqlite` and `add-collection-query-engine`, the Markdown-authority and replay requirements in `add-graph-traversal-queries`, and the replication assumption in `multi-host-writer-lease`.
+- [x] 1.7 Give a root that refuses with `VAULT_STORE_ELSEWHERE` an owner escape for the case where the root that holds the store is gone, holds a newer tenure or sits at a moved vault path: an owner-run release step on a file-mode root, or a stated procedure. Done when a refused root has a working remedy that does not need the other root.
+- [x] 1.8 Order the store-mode marker's decisions, for example with a decision counter in the marker value where the newest decision wins. Today neither store records which decision is newer: after a failed rollback hand-back, another root's takeover can republish `store` and refuse both roots; a crash between the clear publication and spending the pending key can let the rolled-back root clear a later root's marker once. Also re-check the marker inside the migrate route after it takes the lease, so two roots that migrate at once cannot both pass. Done when two-root tests of both sequences and the concurrent migrate converge on the newest decision.
 
 ## 2. Write path
 
@@ -21,6 +23,7 @@
 - [ ] 3.2 Remove freshness witnesses, mtime checks and sync-on-first-use repair from the store-mode read path.
   - Left from 3.1: in store mode, `find`'s keyword mode answers the typed warming outcome once pages exist only in the store, because it reads the sidecar that is built from files; the managed browse and keyword readers and the semantic-unit and filter-eligibility catalogue readers read the same sidecar and are not yet probed.
   - Left from 3.1: store-mode `find` costs about 7 to 14 ms per page, because each `FrontmatterCache.get` opens its own snapshot. Before the gate opens, search must use one snapshot per request and meet a stated latency budget.
+- [ ] 3.3 Before a reader serves from the store, key each cache that D2 keys on the store revision on the registry revision too, or bump the store revision at the end of a re-derivation pass: a pass changes derived rows without a page commit.
 
 ## 4. Projection and outside edits
 

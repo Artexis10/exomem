@@ -144,7 +144,8 @@ def _residual(files, by_reason):
 
 
 def _recorded(consumed, *, residual):
-    return {"consumed": consumed, "residual": residual}
+    """The finish record as stored: unlike the done reply, its residual also counts the empty folders it removed."""
+    return {"consumed": consumed, "residual": {**residual, "removed_empty_folders": 0}}
 
 
 def test_filing_repeats_file_with_each_continuation_adds_up_consumed_and_keeps_the_last_page_residual():

@@ -32,7 +32,7 @@ from .. import (
 )
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
-from . import availability, mode, ownership, verify
+from . import availability, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
@@ -231,7 +231,8 @@ def preflight(vault_root: Path) -> dict:
     """Refuse a vault that cannot enter store mode; otherwise count what a migration would take. It takes no lease.
 
     Each refusal costs the owner one command to fix: the release gate, the lease topology, the collection store,
-    the mode and the two sidecars are the facts that a migration started on the wrong footing would fail on late.
+    the mode, the vault's marker and the sidecars are the facts that a migration on the wrong
+    footing would fail on late.
     """
     admission.require_owner(vault_root, "store-mode migrate")
     if not capability.vault_store_enabled():
@@ -253,6 +254,8 @@ def preflight(vault_root: Path) -> dict:
         )
     if mode.store_mode_active(vault_root):
         raise OpError("VAULT_STORE_ALREADY_ACTIVE", "this vault is already in store mode")
+    # Its replica says another state root holds the store: a second migration would fork the pages.
+    availability.require_no_store_elsewhere(vault_root)
     _require_sidecars(vault_root)
     skipped: list[ownership.Skipped] = []
     owned = Counter(
@@ -314,11 +317,14 @@ def apply_route(vault_root: Path, *, why: str) -> dict:
         raise ValueError("a store-mode migration needs a reason")
     root = Path(vault_root).resolve()
     preflight(root)
-    return admission.store_mode_route(
+    result = admission.store_mode_route(
         root,
         "store-mode migrate",
         lambda session, token, writer: _cutover(root, session, token, writer, why=why),
     )
+    # What the replica says once the hand-back ran: "store" means that a file-mode start on another
+    # state root now refuses.
+    return {**result, "vault_marker": marker.read_replica(root).state}
 
 
 def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
@@ -330,6 +336,7 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
             "VAULT_STORE_COLLECTION_OPERATION_PENDING",
             "a collection store operation is still pending; finish it before entering store mode",
         )
+    _require_no_other_claim(root, writer)
     revision = _next_revision(writer.connection)
     # An activation that died before its commit left the id and no mode row; this run records the id again and goes on.
     resumed = state_migration.VAULT_STORE_COMPATIBILITY_ID in (
@@ -414,23 +421,113 @@ def _install(
     """Install the staged rows in one writer transaction; the vault state records the mode id before it commits.
 
     A refusal or a kill before the commit leaves the store without its mode row, which is file mode, whatever
-    the id says. A failure that leaves no store-mode row also drops the id, so the owner sees a clean refusal.
+    the id says. A failure that leaves no store-mode row withdraws the claim and, once the store
+    holds no claim, drops the id, so the owner sees a clean refusal. A claim that could not be
+    withdrawn keeps the id: the interrupted activation then names the rerun and the rollback, which
+    drops it.
     """
     authority_check = lambda: session.require(token)  # noqa: E731 - the one closure both id calls share
     state_migration.record_vault_store_compatibility(
         root, authority_check=authority_check, active=True
     )
+    claimed = None
+    before: dict[str, str] = {}
     try:
+        before, claimed = _record_claim(root, writer)
+        _require_published(root, session, token, writer, claimed)
         with closing(sqlite3.connect(f"{staged_path.as_uri()}?mode=ro", uri=True)) as source:
             with writer.handle.transaction() as conn:
                 _install_rows(root, conn, source, staged, revision=revision, why=why)
     except BaseException:
         if not _store_row_says_store(writer.connection):
-            with suppress(Exception):
-                state_migration.record_vault_store_compatibility(
-                    root, authority_check=authority_check, active=False
-                )
+            if claimed is not None:
+                with suppress(Exception):
+                    _withdraw(root, writer, before, claimed)
+            if _holds_no_claim(writer):
+                with suppress(Exception):
+                    state_migration.record_vault_store_compatibility(
+                        root, authority_check=authority_check, active=False
+                    )
         raise
+
+
+def _holds_no_claim(writer) -> bool:
+    """Whether this store carries no claim of this root: unreadable counts as carrying one."""
+    try:
+        return marker.CLAIM_KEY not in marker.read_meta(writer.connection)
+    except sqlite3.Error:
+        return False
+
+
+def _require_no_other_claim(root: Path, writer) -> None:
+    """Merge the replica under the lease and refuse while another root's store claim stands.
+
+    The preflight's check is the fast refusal, before the lease. This one holds for two roots that
+    both passed it: the lease serialises them, so the second merges the first's claim and refuses
+    before it stages anything. A wrong refusal costs the owner the other root's rollback or release.
+    """
+    try:
+        with writer.handle.transaction() as tx:
+            marker.require_free(tx, root)
+    except marker.HeldElsewhere as held:
+        raise availability.elsewhere_error(held.order) from None
+
+
+def _record_claim(root: Path, writer) -> tuple[dict[str, str], marker.Decision]:
+    """Record this root's store claim in its own store; return the keys as they were, and the claim.
+
+    A root that installs first and publishes at the hand-back can lose the race: another root that
+    migrates meanwhile publishes its claim, and both then hold the vault's pages. So the claim goes
+    first, in the transaction that merges the replica and refuses another root's claim.
+    """
+    try:
+        with writer.handle.transaction() as tx:
+            before = marker.read_meta(tx)
+            return before, marker.record(tx, root)
+    except marker.HeldElsewhere as held:
+        raise availability.elsewhere_error(held.order) from None
+
+
+def _require_published(root: Path, session, token, writer, claimed: marker.Decision) -> None:
+    """Publish the claim and read it back from the replica; refuse before any row if it is absent.
+
+    It prevents an install whose claim no other root can see: that root would migrate too and both
+    would hold the pages. A wrong refusal costs the owner a rerun once the publication works.
+    """
+    published = admission.publish_current_epoch(session, writer, token)
+    shown = marker.read_replica(root).order.decision
+    if shown is None or shown.id != claimed.id:
+        # A publication that finished but left no claim in the replica has no reason to report.
+        cause = (
+            "the publication finished, but the replica still does not show the claim"
+            if published.status == "published"
+            else f"the publication did not finish: {published.reason or published.status}"
+        )
+        raise OpError(
+            "VAULT_STORE_CLAIM_NOT_PUBLISHED",
+            f"the vault replica does not carry this root's store claim, so nothing was installed "
+            f"({cause})",
+            "Fix what the publication reports, then run this command again.",
+        )
+
+
+def _withdraw(root: Path, writer, before: dict[str, str], claimed: marker.Decision) -> None:
+    """Take back a claim whose install failed, so a refused migration leaves no claim behind.
+
+    A claim that no readable replica carries is undone as it was, and a replica that cannot be read
+    counts as not carrying it: a ``file`` decision over a claim that nobody saw would outrank the
+    claim that another root makes next. One that the replica carries is superseded by a ``file``
+    decision, because another root may have merged it already.
+    """
+    shown = marker.read_replica(root)
+    seen = shown.readable and (
+        shown.order.decision is not None and shown.order.decision.id == claimed.id
+    )
+    with writer.handle.transaction() as tx:
+        if seen:
+            marker.clear(tx, root)
+        else:
+            marker.restore(tx, before)
 
 
 def _install_rows(
@@ -491,6 +588,7 @@ def _install_rows(
         "VALUES (?, NULL, 'migrate', ?, NULL, ?, ?)",
         (revision, Origin.MIGRATION.value, why, now),
     )
+    rederive.record_derived_from_files(conn, revision)
 
 
 def _recheck_files(root: Path, source: sqlite3.Connection) -> list[tuple[str, FileFact]]:

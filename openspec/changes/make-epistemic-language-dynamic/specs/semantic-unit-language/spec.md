@@ -16,7 +16,7 @@ The built-in unit kinds and verdicts SHALL be entries of the shipped vocabulary 
 - **THEN** activation counts, page claims and role-review results over a fixture vault are identical before and after
 
 ### Requirement: A belief is a unit owned by its holder
-The language SHALL recognize the kind `belief`. A belief unit SHALL state the belief in prose, SHALL carry a governed `credence_holder` and a governed `credence`, MAY carry a governed `credence_basis`, and SHALL point at the claim it assesses through the core relation `assesses`. `credence_holder` SHALL be a plain name or a link to an entity page. The `credence` value SHALL be a key or label of the belief-level registry (shipped entries speculative, plausible, likely and near-certain) or a probability from 0 to 1. A probability SHALL be valid only when the unit also carries a `credence_basis`. A belief unit without `credence_holder`, or with a probability and no `credence_basis`, SHALL produce a deterministic source-addressed error that names the missing key. A `credence`, `credence_holder` or `credence_basis` row on a unit of another kind SHALL produce an error that shows the belief-unit form. Exomem SHALL keep the stated value as written, SHALL accept any basis text, SHALL NOT override a holder's belief, and SHALL keep the beliefs of several holders about one claim side by side. Exomem SHALL NOT write a belief unit on a holder's behalf.
+The language SHALL recognize the kind `belief`. A belief unit is a unit whose kind has the `credence` kind trait, which ships on `belief`, so a vault kind with that trait is a belief unit too. A belief unit SHALL state the belief in prose, SHALL carry a governed `credence_holder` and a governed `credence`, MAY carry a governed `credence_basis`, and SHALL point at the claim it assesses through the core relation `assesses`. `credence_holder` SHALL be a plain name or a link to an entity page. The `credence` value SHALL be a key or label of the belief-level registry (shipped entries speculative, plausible, likely and near-certain) or a probability from 0 to 1. A probability SHALL be valid only when the unit also carries a `credence_basis`. A belief unit without `credence_holder`, or with a probability and no `credence_basis`, SHALL produce a deterministic source-addressed error that names the missing key. A `credence`, `credence_holder` or `credence_basis` row on a unit whose kind lacks the `credence` trait SHALL produce an error that shows the belief-unit form, and this error SHALL hold in the first release that reserves those keys, overriding the first-release warning rule for reserved keys. Exomem SHALL keep the stated value as written, SHALL accept any basis text, SHALL NOT override a holder's belief, and SHALL keep the beliefs of several holders about one claim side by side. Exomem SHALL NOT write a belief unit on a holder's behalf. In the first release that recognizes the kind, a belief unit that carries none of `credence`, `credence_holder` and `credence_basis` SHALL produce a warning that names the repair instead of an error, and every other problem it reports, including an empty `## Beliefs` section and an invalid ordinary row under it, SHALL be a warning in that release, so an older page with a plain `## Beliefs` section keeps parsing. In that release, a belief unit that carries its rows but no `assesses` relation SHALL produce a warning that names the relation to add.
 
 #### Scenario: A sourced forecast is accepted
 - **WHEN** a belief unit says "The release will probably ship by Friday" and carries `- credence_holder: Platform team`, `- credence: 0.7` and `- credence_basis: last six release cycles`, and `assesses` a prediction
@@ -51,7 +51,7 @@ A unit SHALL accept a governed `asserted_by` that is a plain name or a link to a
 
 ### Requirement: Event times, quantities and inference modes are governed keys
 The language SHALL recognize these governed unit-metadata keys:
-- `occurred_at` on a `timeline_event`: an ISO date or date and time.
+- `occurred_at` on a unit whose kind has the `dated_event` trait, which ships on `timeline_event`: an ISO date or date and time.
 - `quantity_value`, `quantity_unit` and `quantity_error`: one measured quantity. `quantity_value` and `quantity_error` SHALL be numbers, and `quantity_unit` SHALL be present whenever `quantity_value` is.
 - `inference_mode`: a key or label of the inference-mode registry (shipped entries deduction, induction, abduction, analogy, statistical inference and testimony), on a unit whose kind has the `assertion` trait.
 An invalid value SHALL produce a deterministic source-addressed error that names the key and the expected form.
@@ -65,7 +65,7 @@ An invalid value SHALL produce a deterministic source-addressed error that names
 - **THEN** the parsed unit's inference mode is `induction`
 
 ### Requirement: Registry labels are aliases in any language
-Every entry of the kind, verdict, modality, belief-level, inference-mode and dimension registries SHALL carry `labels` keyed by language. Parsing SHALL accept a label as an alias of its entry's key. The registry check SHALL refuse a label that collides with another entry's key or label in the same registry.
+Every entry of the kind, verdict, modality, belief-level, inference-mode and dimension registries SHALL carry `labels` keyed by language. Parsing SHALL accept a label as an alias of its entry's key. The registry check SHALL refuse a label that collides with another entry's key or label in the same registry. It SHALL also refuse a belief-level label shaped like a probability, a number from 0 to 1 or a percentage, because `credence` takes both and the label would hide the probability's basis rule.
 
 #### Scenario: A Finnish heading is the same kind
 - **WHEN** the kind `claim` carries the label `Väite` for Finnish, and a page contains `## Väite`
@@ -112,11 +112,15 @@ The semantic-unit language SHALL recognize `verdict` as a governed rich unit-met
 - **THEN** the unit remains an ordinary active unit and its parent page status is unchanged
 
 ### Requirement: Governed Unit Metadata Is Rich-Form Only And Reserved
-Governed unit-metadata keys SHALL be available only in the rich authoring form, because compact observations carry no metadata rows. `verdict`, `check_by`, `credence`, `credence_holder`, `credence_basis`, `asserted_by`, `modality`, `occurred_at`, `quantity_value`, `quantity_unit`, `quantity_error` and `inference_mode` SHALL be treated as reserved metadata rows, so a rich unit whose only content is governed metadata SHALL still be reported as an empty rich unit. For one release after a key becomes reserved, an invalid value of that key SHALL produce a warning instead of an error, so pages that already use the key as an ordinary row keep parsing. The warning SHALL name the key, its expected form and the repair: rename the row, or give it a valid value.
+Governed unit-metadata keys SHALL be available only in the rich authoring form, because compact observations carry no metadata rows. `verdict`, `check_by`, `credence`, `credence_holder`, `credence_basis`, `asserted_by`, `modality`, `occurred_at`, `quantity_value`, `quantity_unit`, `quantity_error` and `inference_mode` SHALL be treated as reserved metadata rows, so a rich unit whose only content is governed metadata SHALL still be reported as an empty rich unit. For one release after a key becomes reserved, an invalid value of that key SHALL produce a warning instead of an error, so pages that already use the key as an ordinary row keep parsing. The warning SHALL name the key, its expected form and the repair: rename the row, or give it a valid value. In that release, a rich unit whose body holds no content other than rows of keys that the release newly reserves SHALL keep parsing as the unit it was and SHALL produce an `empty_rich_unit` warning instead of an error.
 
 #### Scenario: A metadata-only prediction is still empty
 - **WHEN** a page contains `## Prediction` followed only by `- verdict: refuted` and `- check_by: 2026-11-01`
 - **THEN** the document reports an `empty_rich_unit` error for that heading
+
+#### Scenario: A unit emptied only by a newly reserved key still parses in its first release
+- **WHEN** a page written before this change holds `## Claim` whose body is only `### Detail` and `- modality: should`
+- **THEN** the document keeps the claim unit and reports an `empty_rich_unit` warning and no error
 
 #### Scenario: Compact observations carry no governed metadata
 - **WHEN** a compact observation line is parsed

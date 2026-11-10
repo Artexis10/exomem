@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any, NamedTuple
 
-from . import activation_result, working_set_anaphora
+from . import activation_result, request_budget, working_set_anaphora
 from .chance_band import semantic_band
 from .ranking_config import DEFAULT_RANKING, RankingConfig
 from .text_scripts import JAPANESE_PARTICLES, is_hiragana
@@ -1500,8 +1500,12 @@ def candidates_for(
     eligible_categories: frozenset[str] = frozenset(),
     row_lexicons: Mapping[str, RowLexicon] | None = None,
     retrieval_without: Callable[[frozenset[str], frozenset[str]], frozenset[str]] | None = None,
+    checkpoint: Callable[[], None] | None = None,
 ) -> tuple[CandidateFacts, ...]:
     """Assemble categorical evidence for every anchor this turn can reach.
+
+    `checkpoint` is called between rows, once per `request_budget.CHECKPOINT_EVERY`, so a request that has
+    run out of time can raise out of a loop that is otherwise CPU-bound over every anchor.
 
     `retrieval_without(pages, words)` answers which of `pages` are still
     lexical hits for the turn when `words` (folded lexical terms) and every
@@ -1587,6 +1591,11 @@ def candidates_for(
             known = lexicons[row.anchor_id] = row_lexicon(row)
         return known
 
+    def check_at(row_number: int) -> None:
+        every = request_budget.CHECKPOINT_EVERY
+        if checkpoint is not None and row_number and not row_number % every:
+            checkpoint()
+
     row_exact_phrases: dict[str, frozenset[str]] = {}
     own_covered: dict[str, frozenset[int]] = {}
     covered_positions: set[int] = set()
@@ -1597,7 +1606,8 @@ def candidates_for(
     # A word that is a whole name of ANY anchor is a name for every anchor it
     # reaches: two people share a first name, and only one is stored under it.
     whole_names: set[str] = set()
-    for row in rows:
+    for row_number, row in enumerate(rows):
+        check_at(row_number)
         whole_names.update(lexicon_of(row).whole_name_terms)
         matched = _exact_alias_phrases(lexicon_of(row), phrases, consumed_words)
         row_exact_phrases[row.anchor_id] = matched
@@ -1634,7 +1644,8 @@ def candidates_for(
     # Anchors whose recall hit may rest on the word they share: anchor id ->
     # (page, that word). The dependence check after the loop reads them.
     dependent: dict[str, tuple[str, frozenset[str]]] = {}
-    for row in rows:
+    for row_number, row in enumerate(rows):
+        check_at(row_number)
         evidence: set[str] = set()
         matched_phrases = row_exact_phrases[row.anchor_id]
         if matched_phrases:
