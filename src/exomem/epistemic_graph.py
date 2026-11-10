@@ -2633,8 +2633,8 @@ class EpistemicGraphIndex:
             # SQLite's defaults its temporary data goes to temp files and dirty
             # pages spill from a 2 MiB cache: one pass over a synthetic
             # 3,000-note vault (60 MB graph) passed 2.56 GB to write() by
-            # /proc/self/io wchar; with both settings, 180 MB, and the pass ran
-            # faster. The cost is 64 MiB more peak memory per rebuild, one
+            # /proc/self/io wchar; with both settings, 180 MB. The cost is
+            # 64 MiB more peak memory per rebuild, one
             # rebuild per vault at a time. With in-memory temp data the sorter
             # never spills, so a whole-table sort added here would sit in RAM.
             conn.execute(f"PRAGMA cache_size=-{_REBUILD_CACHE_KIB}")

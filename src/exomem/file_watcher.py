@@ -2181,8 +2181,9 @@ class FileWatcher:
             and inbound_current
             and resolver_current
         )
-        withdraw = graph_input or not freshness.external_pending_only_for(self._vault_root, ups)
-        if ack_ready and withdraw:
+        if ack_ready and (
+            graph_input or not freshness.external_pending_only_for(self._vault_root, ups)
+        ):
             candidate = epistemic_graph.EpistemicGraphIndex(self._vault_root)
             if candidate.path.exists():
                 try:

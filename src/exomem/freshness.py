@@ -1055,11 +1055,12 @@ def external_pending_only_for(vault_root: Path, paths: Iterable[Path | str]) -> 
     outside `paths`: an acknowledgement through the latest epoch retires those
     too, so only the batch that holds all of them may skip its own fencing.
     """
+    # Resolved before the lock: one filesystem lookup per path must not hold it.
+    own = {key for path in paths for key in (str(path), _external_path_key(path))}
     with _lock:
         root = _canon(vault_root)
         if root in _external_pending_unscoped:
             return False
-        own = {key for path in paths for key in (str(path), _external_path_key(path))}
         return set(_external_pending_paths.get(root, {})) <= own
 
 
