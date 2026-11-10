@@ -2259,7 +2259,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     message = _message(state, reason, deadline)
     if deadline:
         limit = {"expires_at": _iso(deadline[0])}
-    elif job.state in ("running", "partial"):
+    elif state == "running":
         limit = {"runs_while": "login_active"}
     else:
         limit = {}

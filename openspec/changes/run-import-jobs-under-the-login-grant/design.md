@@ -75,7 +75,7 @@ An unreadable answer never lets a batch commit. The job pauses as `store_unavail
 
 - These are the only deadlines.
 - The login never extends a governance authorization session.
-- Status for a job without a deadline reports `runs_while: "login_active"` and no `expires_at`.
+- Status for a running job without a deadline reports `runs_while: "login_active"` and no `expires_at`; a paused, cancelled or finished job without a deadline shows neither.
 - Status for a job with a deadline shows that deadline.
 - The window fields stay in the store and keep recording when the job last started or resumed.
 
