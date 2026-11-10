@@ -149,6 +149,7 @@ def load_cases(raw: bytes):
         @model_validator(mode="after")
         def read_only_operation(self):
             # These tool tokens fix the observer's collection-read protocol: two typed reads and the read door.
+            # nosemgrep: ep-word-membership -- closed tool names from the published tool surface.
             if self.tool not in ("query_records", "query_plan_items", "inspect_memory"):
                 return self
             from . import commands, operation_entries
@@ -166,6 +167,7 @@ def load_cases(raw: bytes):
             # The door carries every read; a case may only inspect or query a Records or Planning
             # collection, which are the observer protocol's closed collection operation tokens.
             collections = (operation_entries.RECORDS.command, operation_entries.PLANS.command)
+            # nosemgrep: ep-word-membership -- closed collection action tokens of the operation entries.
             if command.name not in collections or leaf.get("action") not in ("inspect", "query"):
                 raise ValueError("collection cases require inspect or query")
             return self

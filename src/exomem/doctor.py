@@ -3937,6 +3937,7 @@ def _check_recall_canary() -> DoctorCheck:
         "pass"
         if state == "healthy-availability"
         else "fail"
+        # nosemgrep: ep-word-membership -- These are the canary adapter's closed failing states.
         if state in ("failed", "old-success-after-failed-execution", "invalid-cases")
         else "warn"
     )
