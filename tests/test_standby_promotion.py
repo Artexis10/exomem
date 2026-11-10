@@ -972,22 +972,23 @@ def test_a_same_schema_stale_catalogue_prepares_without_admitting_retrieval(
     service_standby.discard()
 
 
-def _method_unit_vault(tmp_path: Path, monkeypatch) -> tuple[Path, set[str]]:
-    """A vault whose serving worker published a catalogue over pages that carry method units."""
+def _method_unit_vault(tmp_path: Path, monkeypatch, page_count: int = 3) -> tuple[Path, set[str]]:
+    """A vault whose serving worker published a catalogue over `page_count` method-unit pages."""
     from exomem import freshness, lexstore
 
     vault = tmp_path / "vault"
     notes = vault / "Knowledge Base" / "Notes"
     notes.mkdir(parents=True)
     pages = set()
-    for index, line in enumerate((
+    lines = (
         "- [procedure] rotate the harbor keys each quarter ^rotate",
         "- [technique] read depth from the harbor gauges ^gauges",
         "- [design] moorings share one chain length ^chains",
-    )):
+    )
+    for index in range(page_count):
         (notes / f"unit-{index}.md").write_text(
-            f"---\ntype: insight\nexomem_id: {index}1111111-1111-4111-8111-111111111111\n---\n"
-            f"# Unit {index}\n\n{line}\n",
+            f"---\ntype: insight\nexomem_id: {index:08x}-1111-4111-8111-111111111111\n---\n"
+            f"# Unit {index}\n\n{lines[index % len(lines)]}\n",
             encoding="utf-8",
         )
         pages.add(f"Knowledge Base/Notes/unit-{index}.md")
@@ -1221,6 +1222,47 @@ def test_a_method_unit_build_the_request_budget_stops_keeps_the_parents_it_inter
     assert int(measured[call_spans.UNIT_PARENTS_INTERPRETED]) == 3
     ranking = [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in cold.value]
     assert ranking and [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in resumed.value] == ranking
+
+
+def test_the_request_budget_stops_a_method_unit_build_at_the_production_check_interval(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Raising `_BUDGET_CHECK_INSTRUCTIONS` must not disable the stop for small and medium vaults.
+
+    SQLite counts only its own instructions, and this build works through each batch in Python, so
+    it runs few of them per page: past some interval a build is never checked and runs on after
+    its deadline. This build keeps the production interval and holds two batches of pages, so the
+    stop has a second batch's read to land in.
+    """
+    import time
+
+    from exomem import lexstore, request_budget
+
+    page_count = 2 * lexstore._OCCURRENCE_TRANSPORT_BATCH
+    vault, pages = _method_unit_vault(tmp_path, monkeypatch, page_count)
+    budget = request_budget.RequestBudget(seconds=60)
+    interpreted_paths: list[str] = []
+    unit = lexstore._SelectedUnits.unit
+
+    def unit_then_spend_the_budget(self, path, key):
+        found = unit(self, path, key)
+        if path not in interpreted_paths:
+            interpreted_paths.append(path)
+        if len(interpreted_paths) == 2:
+            budget.deadline = time.monotonic() - 1
+        return found
+
+    monkeypatch.setattr(lexstore._SelectedUnits, "unit", unit_then_spend_the_budget)
+    token = request_budget.set_current(budget)
+    try:
+        with lexstore.stopping_at_budget():
+            stopped, _measured = _method_search_result(vault, pages)
+    finally:
+        request_budget.reset_current(token)
+
+    assert budget.remaining() == 0, "the budget never ran out in the build, so this proved nothing"
+    assert stopped.readiness.status == lexstore.DEADLINE_STATUS
+    assert len(interpreted_paths) < page_count, "the build ran to its end past the request budget"
 
 
 def test_a_standby_warm_of_the_method_unit_statistics_writes_nothing(
