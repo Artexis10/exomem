@@ -502,6 +502,49 @@ def test_a_declared_purpose_withholds_a_page_from_the_relation_filter_as_it_does
         assert _hit_paths(declared[0])
 
 
+
+def _answer_or_refusal(run) -> object:
+    """A reply, or the refusal a caller receives instead, with the candidates it names."""
+    from exomem import page_names
+
+    try:
+        return run()
+    except page_names.AmbiguousTitle as refusal:
+        return {"refused": refusal.message, "details": refusal.details}
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+@pytest.mark.parametrize("ask", [False, True], ids=["op_find", "op_ask_memory"])
+def test_a_declared_purpose_resolves_a_relation_of_title_without_the_withheld_namesake(
+    tmp_path: Path, request: pytest.FixtureRequest, ask: bool, served: bool
+) -> None:
+    """Catches `relation_of` resolved by title before the declared purpose applies: a visible page
+    shares its title with a page the rule withholds only for `marketing`, so the title is ambiguous
+    and the refusal names the withheld page's id and title, where a vault that never had that page
+    answers with the visible one. Undeclared, the rule withholds nothing, so the same title is
+    ambiguous: that shows the namesake decides the declared answer."""
+    from test_governance_egress import _reset_caches
+
+    from exomem import epistemic_graph
+
+    namesake = f"{NOTES}/Old roadmap.md"
+    search = {"relation_of": "Old roadmap"}
+    declared, undeclared = [], []
+    for withheld in (True, False):
+        vault = _release_twin(tmp_path, withheld=withheld, rule_extra=_MARKETING_ONLY)
+        _write(vault, namesake, f"---\ntype: insight\n---\n# Old roadmap\n\n## Relations\n\n- supports [[{FINDINGS[:-3]}]]\n")
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        _reset_caches()
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        declared.append(_answer_or_refusal(lambda vault=vault: _search_as("external", vault, {**search, "purpose": "marketing"}, ask=ask)))
+        undeclared.append(_answer_or_refusal(lambda vault=vault: _search_as("external", vault, search, ask=ask)))
+
+    assert declared[0] == declared[1]
+    assert _hit_paths(declared[0]) == {FINDINGS}
+    assert "refused" in undeclared[0]
+
+
 @pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
 def test_a_restricted_callers_relation_hits_never_name_the_withheld_page(
     tmp_path: Path, search: str

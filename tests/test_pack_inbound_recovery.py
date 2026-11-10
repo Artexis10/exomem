@@ -47,7 +47,7 @@ def _pack_gaps(vault: Path) -> tuple[list[str], list[str]]:
     page = find_module._CACHE.get(vault / ANCHOR, vault)
     assert page is not None
     neighbours, _dropped, incomplete = context_pack._neighborhood(
-        vault, [page], 10, under_strip=lambda _path: False
+        vault, [page], 10, under_strip=lambda _path: False, purpose=None
     )
     return sorted(item["path"] for item in neighbours), incomplete
 

@@ -586,6 +586,18 @@ def request_scope(principal: RequestPrincipal) -> Iterator[None]:
 
 
 @contextmanager
+def declared_purpose_scope(purpose: str | None) -> Iterator[None]:
+    """Layer a request's declared `purpose` onto the bound principal, so every release decision taken
+    inside reads it; undeclared, bind nothing. `purpose` is a per-call parameter, not a surface
+    property, so a step that decides visibility before the purpose is bound decides without it."""
+    if purpose is None:
+        yield
+        return
+    with request_scope(effective_principal().with_purpose(purpose)):
+        yield
+
+
+@contextmanager
 def library_scope() -> Iterator[None]:
     """Declare an owner-local, in-process caller — the explicit form of what
     `effective_principal()` used to assume.

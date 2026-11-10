@@ -2911,7 +2911,9 @@ def op_find(
     if detail not in ("full", "compact"):
         raise ValueError(f"find: detail must be 'full' or 'compact', got {detail!r}")
     if relation_of:
-        relation_of = page_names_module.resolve_page(vault_root, relation_of, field="relation_of")
+        # A title is resolved over the pages this caller may see for the purpose it declares.
+        with principal_module.declared_purpose_scope(purpose):
+            relation_of = page_names_module.resolve_page(vault_root, relation_of, field="relation_of")
     projection_runtime = projection_runtime_module.load_active_projection_runtime(vault_root)
     if continuation is not None and projection_runtime is None:
         raise projection_runtime_module.ProjectedContinuationUnavailable(
@@ -3079,13 +3081,7 @@ def op_find(
         # principal so the edge view a relation filter or `unit.dimension` reads decides under the
         # purpose the release gate below decides under, or a purpose-conditioned rule withholds a
         # page from the hits and not from the filter that names it. Undeclared, nothing is rebound.
-        with (
-            principal_module.request_scope(
-                principal_module.effective_principal().with_purpose(purpose)
-            )
-            if purpose is not None
-            else nullcontext()
-        ):
+        with principal_module.declared_purpose_scope(purpose):
             hits = find_module.find(
                 vault_root,
                 query=query,
@@ -7538,7 +7534,8 @@ def _compile_guarded_activation(
                 agent_page = working_set_module._eligible_agent_page(vault_root, anchor)
                 if agent_page is None:
                     # A title or short id names the page when the value is no catalogue spelling.
-                    agent_page = _anchor_named_page(vault_root, anchor)
+                    with principal_module.declared_purpose_scope(purpose):
+                        agent_page = _anchor_named_page(vault_root, anchor)
                     if agent_page is not None:
                         anchor = agent_page
                 if agent_page is None or not egress_module.quick_page_visible(
