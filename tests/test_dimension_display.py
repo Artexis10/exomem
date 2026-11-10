@@ -425,12 +425,47 @@ def test_an_unreadable_graph_marks_nothing_open_and_says_the_links_are_unknown(
     )
 
 
+ARGUMENT_PAGES = {
+    "Plan": "## Claim\n- id: plan\n\nWe ship the export first.",
+    "Review": f"## Claim\n- relations: supports: [[{NOTES}/Plan#plan]]\n\nUsers asked for exports.",
+    "Test": (
+        f"## Finding\n- relations: contradicts: [[{NOTES}/Plan#plan]]\n\n"
+        "The export breaks on large vaults."
+    ),
+    "Judged": "## Hypothesis\n- verdict: refuted\n\nExports are rarely used.",
+}
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_dimension_with_no_display_behaviour_groups_the_units_its_filter_keeps(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches a group that places its members by a second reading of membership: a dimension
+    whose members come from relation families and that names no display behaviour reports an
+    empty group beside the hits its filter kept."""
+    vault = _vault(tmp_path, ARGUMENT_PAGES)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "argument"}}, deep=True)
+
+    refs = [hit["unit_ref"] for hit in reply["hits"]]
+    assert sorted(hit["excerpt"] for hit in reply["hits"]) == [
+        "The export breaks on large vaults.", "Users asked for exports.", "We ship the export first.",
+    ]
+    [group] = reply["dimension_groups"]
+    assert (group["count"], [unit["unit_ref"] for unit in group["units"]]) == (3, refs)
+    assert reply["user_summary"] == "3 units in 'Argument'."
+    assert reply["pack"]["groups"] == [{"dimension": "argument", "units": refs}]
+
+
 SERVED_GROUPS = {
     "currency": {"unit.dimension": {"$eq": "currency"}},
     "uncertainty": {"unit.dimension": {"$eq": "uncertainty"}},
     "order": {"unit.dimension": {"$eq": "order"}},
     "two groups": {"unit.dimension": {"$in": ["provenance", "attribution"]}},
     "questions": {"unit.dimension": {"$eq": "questions"}},
+    "argument": {"unit.dimension": {"$eq": "argument"}},
 }
 
 
@@ -448,7 +483,7 @@ def test_a_served_search_returns_the_scans_groups_with_one_graph_read_and_no_sca
     the display, or groups the same hits differently from the scan."""
     from exomem.vault import kb_dirname
 
-    vault = _vault(tmp_path, PAGES, registry=QUESTIONS_ONLY)
+    vault = _vault(tmp_path, {**PAGES, **ARGUMENT_PAGES}, registry=QUESTIONS_ONLY)
     offline = {name: _groups(_search(vault, filters)) for name, filters in SERVED_GROUPS.items()}
     find_module.clear_cache()
     warm_managed_cell(vault)

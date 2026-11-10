@@ -2169,25 +2169,21 @@ def find(
                     return copy.deepcopy(cached_hits)
         if _cache_probe:
             return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
-        # The edges the groups' display reads, once one read has them.
+        # The edges the groups' display reads, once one read has them, and the filter's own
+        # answer to `unit.dimension`, which places each unit in its groups.
         group_edges: epistemic_dimensions.DimensionEdges | None = None
+        filter_dimensions: epistemic_dimensions.UnitDimensions | None = None
         if dimension_lookups is not None and dimension_check is None:
-            if group_behaviours and dimension_lookups.needs_edges:
-                group_edges = _dimension_edges(
-                    vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot,
-                    behaviours=group_behaviours,
-                )
-                filter_plan = filter_plan.with_dimensions(
-                    epistemic_dimensions.UnitDimensions.from_edges(
-                        dimension_lookups, group_edges.edges
-                    )
-                )
-            else:
-                filter_plan = filter_plan.with_dimensions(
-                    _dimension_source(
-                        vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot
-                    )
-                )
+            membership_edges = _dimension_edges(
+                vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot,
+                behaviours=group_behaviours if dimension_lookups.needs_edges else (),
+            )
+            if dimension_lookups.needs_edges:
+                group_edges = membership_edges
+            filter_dimensions = epistemic_dimensions.UnitDimensions.from_edges(
+                dimension_lookups, membership_edges.edges
+            )
+            filter_plan = filter_plan.with_dimensions(filter_dimensions)
         unit_admitted = _admitted(walk_scope)
         with _span(timings, "semantic_units"):
             unit_hits = _find_semantic_units(
@@ -2221,13 +2217,18 @@ def find(
                     unit.relation_match = _relation_match_dict(match, matched="parent")
         if dimension_check is not None and dimension_lookups is not None:
             checked_count = len(unit_hits)
-            unit_hits, group_edges = _check_dimensions_on_hits(
+            unit_hits, group_edges, filter_dimensions = _check_dimensions_on_hits(
                 vault_root, unit_hits, dimension_check, dimension_lookups, keep=admit_path,
                 snapshot=snapshot, behaviours=group_behaviours,
             )
             if dimension_check_out is not None:
                 dimension_check_out.update(checked=checked_count, kept=len(unit_hits))
-        if group_keys and dimension_lookups is not None and dimension_groups_out is not None:
+        if (
+            group_keys
+            and dimension_lookups is not None
+            and filter_dimensions is not None
+            and dimension_groups_out is not None
+        ):
             with _span(timings, "dimension_groups"):
                 if group_behaviours and group_edges is None and unit_hits:
                     # Membership needed no edges, so the display reads them for the hits' pages.
@@ -2237,9 +2238,9 @@ def find(
                     )
                 dimension_groups_out.append(
                     _group_request(
-                        unit_hits, dimension_lookups, group_keys, edges=group_edges,
-                        language=language_registry, instance=filter_plan.unit_instance,
-                        status_basis=status_basis,
+                        unit_hits, dimension_lookups, group_keys, dimensions=filter_dimensions,
+                        edges=group_edges, language=language_registry,
+                        instance=filter_plan.unit_instance, status_basis=status_basis,
                     )
                 )
         def finish_units():
@@ -5051,17 +5052,20 @@ def _check_dimensions_on_hits(
     keep: Callable[[str], bool] | None,
     snapshot: FreshnessSnapshot,
     behaviours: Collection[str] = (),
-) -> tuple[list[Any], epistemic_dimensions.DimensionEdges | None]:
-    """The hits that `plan`'s `unit.dimension` predicates keep, in order, and the edges read for
-    them: one graph read for the pages of the whole hit set, which also serves the requested
-    groups' display `behaviours`. No edges when there are no hits."""
+) -> tuple[
+    list[Any], epistemic_dimensions.DimensionEdges | None, epistemic_dimensions.UnitDimensions
+]:
+    """The hits that `plan`'s `unit.dimension` predicates keep, in order, the edges read for them
+    and the answer that kept them: one graph read for the pages of the whole hit set, which also
+    serves the requested groups' display `behaviours`. No read when there are no hits."""
     if not hits:
-        return hits, None
+        return hits, None, epistemic_dimensions.UnitDimensions.from_edges(lookups, ())
     edges = _dimension_edges(
         vault_root, lookups, keep=keep, snapshot=snapshot, pages={hit.parent_path for hit in hits},
         behaviours=behaviours,
     )
-    checked = plan.with_dimensions(epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges))
+    dimensions = epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges)
+    checked = plan.with_dimensions(dimensions)
     kept = [
         hit
         for hit in hits
@@ -5069,7 +5073,7 @@ def _check_dimensions_on_hits(
             checked, page={"path": hit.parent_path}, unit=_unit_view_of(hit)
         )
     ]
-    return kept, edges
+    return kept, edges, dimensions
 
 
 def _unit_view_of(hit: Any) -> dict[str, Any]:
@@ -5097,6 +5101,7 @@ def _group_request(
     lookups: epistemic_dimensions.DimensionMembership,
     groups: Sequence[str],
     *,
+    dimensions: epistemic_dimensions.UnitDimensions,
     edges: epistemic_dimensions.DimensionEdges | None,
     language: Any,
     instance: str,
@@ -5105,15 +5110,13 @@ def _group_request(
     """What `dimension_display.group_hits` reads of a search's selected units: for each unit, by
     its ref, what its display reads and which requested `groups` it belongs to.
 
-    Membership comes from the same edges the display reads (`edges`), so a group never holds a
-    unit that the filter's own answer would not. A unit's page is history when its lifecycle class
-    says so, as `working_set_currency.state` reads it; an unclassified page is not history.
+    `dimensions` is the answer the filter kept the units by, so a group holds exactly the units
+    the filter placed in it. `edges` are the ones the display reads. A unit's page is history when
+    its lifecycle class says so, as `working_set_currency.state` reads it; an unclassified page is
+    not history.
     """
     from . import semantic_labels
 
-    answer = epistemic_dimensions.UnitDimensions.from_edges(
-        lookups, edges.edges if edges is not None else ()
-    )
     wanted = frozenset(groups)
     units: dict[str, tuple[dimension_display.DisplayUnit, frozenset[str]]] = {}
     for hit in hits:
@@ -5133,7 +5136,7 @@ def _group_request(
             holder=getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None),
             occurred_at=getattr(hit, "occurred_at", None),
         )
-        units[hit.unit_ref] = (unit, answer({"path": path}, view, own_kind=own_kind) & wanted)
+        units[hit.unit_ref] = (unit, dimensions({"path": path}, view, own_kind=own_kind) & wanted)
     definitions = language.label_definitions(semantic_labels.DIMENSIONS)
     return dimension_display.GroupRequest(
         groups=tuple(
