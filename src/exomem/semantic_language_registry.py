@@ -1079,7 +1079,7 @@ def _check_kind_labels(
     """Refuse a vault label that another kind answers to, or that no heading can spell.
 
     A label is a heading, so it collides with another kind's key, alias, heading alias or label
-    in the form a heading resolves under, and it needs the shape a heading alias has. A label
+    in the form a heading resolves under, and that form needs the shape a heading label has. A label
     never collides with a category: kinds and categories are separate namespaces, as a heading
     alias already is. The shipped spellings the vault keeps own their kind first, so a finding
     always points at something the vault wrote.
@@ -1101,13 +1101,9 @@ def _check_kind_labels(
     ]
     for where, key, text in sorted(written):
         form = normalize_label(text)
-        if not _valid_label(form):
-            findings.append(_finding(
-                "invalid_label",
-                where,
-                f"{text!r} must start with a letter and hold only letters, digits, spaces, "
-                "hyphens and underscores, as a heading does",
-            ))
+        problem = semantic_labels.heading_label_problem(form)
+        if problem is not None:
+            findings.append(_finding("invalid_label", where, f"{text!r} {problem}"))
             continue
         owner = owners.setdefault(form, key)
         if owner != key:
