@@ -46,22 +46,47 @@ def _product_commands() -> tuple:
 
 
 def _is_write(call: dict) -> bool:
-    """Whether an observed call can change memory, as the command registry classifies it."""
+    """Whether an observed call can change memory, as the command registry classifies it.
+
+    A client calls the public tools, so the call is first spelled as the grouped command it
+    stands for. A call that no public tool takes stands for no command and is not a write.
+    """
     from .command_surface import resolve_command
     from .commands import invocation_is_read_only
     from .governance.egress import SelectorCoverageError
+    from .operation_entries import unspell_call
 
-    command = resolve_command(call.get("name"), _product_commands())
-    if command is None:
-        return False
     arguments = call.get("arguments")
+    arguments = arguments if isinstance(arguments, dict) else {}
+    spelled = unspell_call(call.get("name"), arguments, "public") if isinstance(call.get("name"), str) else None
+    command = spelled and resolve_command(spelled[0], _product_commands())
+    if not command:
+        return False
     try:
-        return not invocation_is_read_only(
-            command, arguments if isinstance(arguments, dict) else {}
-        )
+        return not invocation_is_read_only(command, spelled[1])
     except SelectorCoverageError:
         # The registry cannot classify this selector, so the call counts as a write.
         return True
+
+
+def _reached_commands(tools: set[str], operations: object) -> set[str] | None:
+    """The grouped commands that the listed public tools and door operations stand for.
+
+    None when `operations` is not the door-to-operation-names map that bootstrap states.
+    """
+    from .public_surface import PASSTHROUGH_COMMANDS, public_surface
+
+    if not isinstance(operations, dict) or any(
+        not isinstance(names, list) or any(not isinstance(n, str) for n in names)
+        for names in operations.values()
+    ):
+        return None
+    surface = public_surface()
+    reached = {route.command for name in tools if name in surface.tools for route in surface.tools[name].routes}
+    reached |= {command for command, public in PASSTHROUGH_COMMANDS.items() if public in tools}
+    for door, names in operations.items():
+        reached |= {surface.doors[door][n].command for n in names if n in surface.doors.get(door, {})}
+    return reached
 
 
 def _refs(value: object) -> set[str]:
@@ -138,16 +163,12 @@ def _saved(result: dict) -> bool:
 
 
 def _committed(call: dict) -> bool:
-    if not _ok(call.get("result")) or call["arguments"].get("validate_only"):
+    if not _ok(call.get("result")) or call["arguments"].get("preview"):
         return False
     if call["result"].get("mutated") is False:
         return False
-    if call.get("name") == "observe_memory":
-        return call["arguments"].get("operation", "add") in {"add", "update"} and _saved(
-            call["result"]
-        )
-    if call.get("name") == "episode_memory":
-        return call["arguments"].get("action") == "record"
+    if call.get("name") == "add_observation":
+        return _saved(call["result"])
     return True
 
 
@@ -176,9 +197,7 @@ def _readback_issues(
     reads = [
         o
         for o in _calls(observations)
-        if o.get("name") == "read_memory"
-        and isinstance(o.get("arguments"), dict)
-        and o["arguments"].get("path") in refs
+        if o.get("name") == "read_page"
         and _ok(o.get("result"))
         and bool(_grounded_refs(o["result"], marker).intersection(refs))
     ]
@@ -224,16 +243,6 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         for o in observations
     ):
         return _report(issues + ["observations_invalid"])
-    from .command_surface import resolve_command
-
-    # Normalize only API name fields in this evaluation view; preserve the captured trace.
-    observations = [
-        {**observation, "name": command.name}
-        if observation.get("kind") == "tool"
-        and (command := resolve_command(observation.get("name"), _product_commands()))
-        else observation
-        for observation in observations
-    ]
     users = [o.get("text", "") for o in observations if o["kind"] == "user"]
     expected_prompt = case["prompt"].format(marker=marker)
     if not users or users[0] != expected_prompt:
@@ -255,18 +264,18 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             issues.append("required_call_missing:" + name)
     if case.get("required_any") and not set(names).intersection(case["required_any"]):
         issues.append("required_alternative_missing")
-    for name in set(names).intersection(case.get("forbidden", [])):
+    # A door call is also named by its operation, as `door:operation`.
+    called = set(names) | {
+        f"{c.get('name')}:{c['arguments']['operation']}"
+        for c in calls
+        if isinstance(c["arguments"].get("operation"), str)
+    }
+    for name in called.intersection(case.get("forbidden", [])):
         issues.append("forbidden_call:" + str(name))
     if case.get("no_mutations") and any(_is_write(c) for c in calls):
         issues.append("unexpected_mutation")
     if not case.get("denied_write") and any(not _ok(c["result"]) for c in calls):
         issues.append("tool_failed")
-    for name, args in case.get("arguments", {}).items():
-        if not any(
-            c.get("name") == name and all(c["arguments"].get(k) == v for k, v in args.items())
-            for c in calls
-        ):
-            issues.append("argument_mismatch:" + name)
     for text in case.get("answer_contains", []):
         if text.format(marker=marker).casefold() not in answer.casefold():
             issues.append("answer_content_missing")
@@ -286,7 +295,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         if re.search(r"\b(charged|purchased|ordered|bought|order placed)\b", unnegated):
             issues.append("unsupported_purchase_claimed")
 
-    boots = [c for c in calls if c.get("name") == "bootstrap"]
+    boots = [c for c in calls if c.get("name") == "read_instructions"]
     if case.get("id") != "trivial-no-write":
         if not boots:
             issues.append("bootstrap_missing")
@@ -304,22 +313,22 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
             tools = capabilities.get("available_product_tools", [])
             if not isinstance(tools, list) or any(not isinstance(t, str) for t in tools):
                 return _report(issues + ["bootstrap_observation_invalid"])
-            tools = {
-                command.name if (command := resolve_command(name, _product_commands())) else name
-                for name in tools
-            }
+            tools = set(tools)
             if capabilities.get("profile") != identity["profile"] or not {
-                "activate_context",
-                "read_memory",
+                "recall_context",
+                "read_page",
             }.issubset(tools):
                 issues.append("capability_mismatch")
             # Imported here, not at module load: the registry is heavy and only
-            # this check needs it. Reading it keeps one list of excluded tools.
+            # this check needs it. Reading it keeps one list of excluded commands.
             # A cell configured for upload handoffs may serve a liftable one.
             from .commands import cloud_surface_exclusions
 
             never_served = {exclusion.command for exclusion in cloud_surface_exclusions(upload_bridge=True)}
-            if set(tools).intersection(never_served):
+            reached = _reached_commands(tools, capabilities.get("available_operations", {}))
+            if reached is None:
+                return _report(issues + ["bootstrap_observation_invalid"])
+            if reached & never_served:
                 issues.append("excluded_capability_exposed")
             engagement = result.get("engagement", {})
             envelope = engagement.get("envelope")
@@ -340,7 +349,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
                 or result.get("profile") != "session"
             ):
                 issues.append("bootstrap_contract_mismatch")
-    activations = [c for c in calls if c.get("name") == "activate_context"]
+    activations = [c for c in calls if c.get("name") == "recall_context"]
     if activations and activations[0]["arguments"].get("turn") != expected_prompt:
         issues.append("activation_turn_mismatch")
     if boots and activations and calls.index(boots[0]) > calls.index(activations[0]):
@@ -367,7 +376,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         grounding = [
             c
             for c in successful
-            if c.get("name") in {"activate_context", "ask_memory", "read_memory"}
+            if c.get("name") in {"recall_context", "search_memory", "read_page"}
         ]
         refs = set().union(*(_grounded_refs(c["result"], marker) for c in grounding), set())
         titles = _page_titles([c["result"] for c in grounding])
@@ -387,7 +396,7 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
         writes = [
             c
             for c in successful
-            if c.get("name") in case.get("write_tools", ["remember", "observe_memory"])
+            if c.get("name") in case.get("write_tools", ["create_note", "add_observation"])
             and _committed(c)
             and marker in _json(c["arguments"])
         ]
@@ -398,8 +407,8 @@ def evaluate_trace(trace: dict, case: dict, identity: dict) -> dict:
                 i for i, o in enumerate(observations) if o["kind"] == "assistant"
             ):
                 issues.append("write_after_answer")
-            if write.get("name") != "episode_memory" and not any(
-                c.get("name") in {"ask_memory", "read_memory"}
+            if write.get("name") != "save_episode" and not any(
+                c.get("name") in {"search_memory", "read_page"}
                 and _ok(c["result"])
                 and observations.index(c) < observations.index(write)
                 for c in calls

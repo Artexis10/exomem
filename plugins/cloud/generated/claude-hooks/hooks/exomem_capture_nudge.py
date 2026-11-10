@@ -120,6 +120,7 @@ _KB_WRITES = (
     "add_plan_item",
     "add_record",
     "create_note",
+    "decide_review_item",
     "edit_note",
     "edit_plan_item",
     "edit_record",
