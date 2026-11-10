@@ -87,6 +87,10 @@ def _compile_response_schema(schema):
     return Draft202012Validator(schema, registry=Registry())
 
 
+#: The canary protocol's closed tool tokens, not vault vocabulary: the listed tools a case may call.
+CASE_TOOLS = ("search_memory", "recall_context", "read_page", "query_records", "query_plan_items", "inspect_memory")
+
+
 def load_cases(raw: bytes):
     """Parse and validate a case file; the sole loader for every runner of this observer."""
     from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
@@ -135,15 +139,7 @@ def load_cases(raw: bytes):
     class Case(BaseModel):
         model_config = ConfigDict(extra="forbid", strict=True)
         id: str = Field(min_length=1)
-        # These are the canary protocol's closed tool tokens, not vault vocabulary.
-        tool: Literal[
-            "search_memory",
-            "recall_context",
-            "read_page",
-            "query_records",
-            "query_plan_items",
-            "inspect_memory",
-        ]
+        tool: Literal[CASE_TOOLS]
         bar_id: str = Field(default="programme-public-warm", min_length=1)
         # A runner-owned label for reporting cases together; the observer never reads it.
         group: str | None = Field(default=None, min_length=1)
@@ -164,8 +160,9 @@ def load_cases(raw: bytes):
                     self.tool, self.arguments, commands.product_commands_for("mcp"),
                     strict=True, passthrough=frozenset(),
                 )
-            except OpError:
-                raise ValueError("collection case is not a valid read") from None
+            except OpError as refusal:
+                # The refusal names what to change; the case's own arguments are already in pydantic's error.
+                raise ValueError(f"collection case is not a valid read: {refusal}") from None
             # The door carries every read; a case may only inspect or query a Records or Planning
             # collection, which are the observer protocol's closed collection operation tokens.
             collections = (operation_entries.RECORDS.command, operation_entries.PLANS.command)
