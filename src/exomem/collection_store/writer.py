@@ -2169,32 +2169,7 @@ class CollectionWriter:
                 admission.check(identity, digest, replay)
             if replay is not None:
                 return replay
-            manifest = collections.parse_manifest_bytes(
-                self.root, manifest_path, manifest_text.encode()
-            )
-            declared = types.type_for_manifest(manifest)
-            if self._facade_profile is not None and manifest.semantic_profile != self._facade_profile:
-                raise collections.CollectionError(
-                    "PLANNING_PROFILE_REQUIRED" if self._facade_profile == "planning" else "RECORDS_PROFILE_REQUIRED",
-                    f"{self._facade_profile.title()} collection is required",
-                )
-            if self._facade_profile == "planning" and scaffold:
-                manifest_text = planning._with_default_scaffold(
-                    manifest_text, manifest, vault_root=self.root
-                )
-                manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
-            if declared.kind == "intended":
-                planning.require_planning_profile(manifest)
-            records._refuse_excluded_manifest_fields(manifest)
-            record_formats.validate_storage_contract(manifest)
-            if manifest.storage.strategy == "dataset":
-                raise collections.CollectionError(
-                    "READ_ONLY_COLLECTION", "datasets remain file-canonical"
-                )
-            if manifest.view_diagnostics:
-                diagnostic = manifest.view_diagnostics[0]
-                raise collections.CollectionError(diagnostic.code, diagnostic.reason)
-            reference_declarations.require_targets(self._operation, manifest)
+            manifest, manifest_text, declared = self._prepare_create(manifest_path, manifest_text, scaffold)
             try:
                 connector_boundary.require_create(self.root, manifest.path)
                 connector_boundary.require_create(self.root, manifest.storage.source)
@@ -2274,6 +2249,41 @@ class CollectionWriter:
         writer_lease.mark_active_mutation_committed()
         records._refresh_manifest_due_state(self.root, manifest)
         return receipt
+
+    def _prepare_create(self, manifest_path, manifest_text, scaffold):
+        """Every check on a new collection's manifest that reads no store state a create would write.
+
+        Returns the parsed manifest, its text (a Planning scaffold may add to it) and its type.
+        """
+        manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
+        declared = types.type_for_manifest(manifest)
+        if self._facade_profile is not None and manifest.semantic_profile != self._facade_profile:
+            raise collections.CollectionError(
+                "PLANNING_PROFILE_REQUIRED" if self._facade_profile == "planning" else "RECORDS_PROFILE_REQUIRED",
+                f"{self._facade_profile.title()} collection is required",
+            )
+        if self._facade_profile == "planning" and scaffold:
+            manifest_text = planning._with_default_scaffold(manifest_text, manifest, vault_root=self.root)
+            manifest = collections.parse_manifest_bytes(self.root, manifest_path, manifest_text.encode())
+        if declared.kind == "intended":
+            planning.require_planning_profile(manifest)
+        records._refuse_excluded_manifest_fields(manifest)
+        record_formats.validate_storage_contract(manifest)
+        if manifest.storage.strategy == "dataset":
+            raise collections.CollectionError("READ_ONLY_COLLECTION", "datasets remain file-canonical")
+        if manifest.view_diagnostics:
+            diagnostic = manifest.view_diagnostics[0]
+            raise collections.CollectionError(diagnostic.code, diagnostic.reason)
+        reference_declarations.require_targets(self._operation, manifest)
+        return manifest, manifest_text, declared
+
+    def validate_create(self, manifest_path, manifest_text, *, scaffold=True):
+        """Refuse a new manifest that create would refuse for its own content, with create's error.
+
+        Reads under the policy a create is held to and writes nothing.
+        """
+        with self.read_snapshot(mutation=True):
+            self._prepare_create(manifest_path, manifest_text, scaffold)
 
     def _new_item_key_scheme(self, manifest) -> str:
         """The item key scheme a collection takes at creation; the store fixes it for the collection's life.
@@ -3465,26 +3475,23 @@ class CollectionWriter:
         if refused is not None:
             raise refused
         records._refuse_excluded_manifest_fields(proposed)
-        dropped_references = {d.dotted for d in collections.declared_references(current.schema)} - {
-            d.dotted for d in collections.declared_references(proposed.schema)}
-        if dropped_references:
-            # A view that still names a removed reference is the revise's problem, not the
-            # view's — the caller must drop both in the same revise.
-            offending = sorted(
-                diagnostic.location.split(".", 1)[-1]
-                for diagnostic in proposed.view_diagnostics
-                if diagnostic.code == "SAVED_VIEW_REFERENCE_UNDECLARED"
-                and any(f"'{name}'" in diagnostic.reason for name in dropped_references)
+        kept = {item.dotted for item in collections.declared_references(proposed.schema)}
+        dropped = {item.dotted: item for item in collections.declared_references(current.schema)
+                   if item.dotted not in kept}
+        # A view that still names a removed reference is the revise's problem, not the
+        # view's: the caller must drop both in the same revise.
+        in_use = [diagnostic for diagnostic in proposed.view_diagnostics
+                  if diagnostic.code == "SAVED_VIEW_REFERENCE_UNDECLARED" and diagnostic.reference in dropped]
+        if in_use:
+            declaration = dropped[in_use[0].reference]
+            raise collections.CollectionError(
+                "REFERENCE_IN_USE",
+                "a saved view uses this reference; remove or revise those views in the same revise",
+                {"field": f"{declaration.location}.references",
+                 "views": sorted({diagnostic.location.split(".", 1)[-1] for diagnostic in in_use}),
+                 "expected": "no saved view naming the reference",
+                 "example": f"drop the view, or its {declaration.dotted} fields, in the same revise"},
             )
-            if offending:
-                name = sorted(dropped_references)[0]
-                raise collections.CollectionError(
-                    "REFERENCE_IN_USE",
-                    "a saved view uses this reference; remove or revise those views in the same revise",
-                    {"field": f"{offending[0]}.references", "views": offending,
-                     "expected": "no saved view naming the reference",
-                     "example": "drop the view or its site.* fields in the same revise"},
-                )
         if proposed.view_diagnostics:
             diagnostic = proposed.view_diagnostics[0]
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)

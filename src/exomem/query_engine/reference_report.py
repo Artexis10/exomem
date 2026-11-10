@@ -13,21 +13,14 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import closing
 
+from ..collection_store import typed_storage
 from ..structured_collections import declared_references
 from . import reductions, reference_resolution, runtime
 from .errors import QueryError
+from .reference_resolution import unresolved_values
 
-_MAX_VALUES = 20
 _WARN_VALUES = 5
 _UNAVAILABLE = {"COLLECTION_NOT_FOUND", "QUERY_FIELD_UNAVAILABLE", "QUERY_UNAVAILABLE"}
-
-
-def _bounded(pairs: Counter) -> dict:
-    entries = [{"reference": name, "value": value, "rows": rows}
-               for (name, value), rows in pairs.items()]
-    entries.sort(key=lambda item: (-item["rows"], item["reference"], item["value"]))
-    return {"values": entries[:_MAX_VALUES],
-            "truncated": len(entries) > _MAX_VALUES, "total": len(entries)}
 
 
 def _check(session, collection_id, rows) -> dict | None:
@@ -51,7 +44,7 @@ def _check(session, collection_id, rows) -> dict | None:
         return None
     report = {}
     if pairs:
-        report["unresolved_values"] = _bounded(pairs)
+        report["unresolved_values"] = unresolved_values(pairs)
     if unavailable:
         report["unavailable"] = unavailable
     return report
@@ -95,8 +88,13 @@ def _check_collection(session, collection_id) -> list:
         # Rows holding the same values collapse, so one scan keeps only the distinct value sets.
         held: Counter = Counter()
         with closing(session.connection.execute(sql, (collection_id,))) as cursor:
-            for raw in cursor:
-                values = declaration.values(decode(raw))
+            for visited, raw in enumerate(cursor, 1):
+                if not visited % reductions._CHECK_EVERY:
+                    session.check()
+                try:
+                    values = declaration.values(decode(raw))
+                except (typed_storage.TypedStorageError, ValueError, TypeError) as error:
+                    raise QueryError("QUERY_UNAVAILABLE") from error
                 if values:
                     held[values] += 1
         distinct = {value for values in held for value in values}
@@ -111,46 +109,45 @@ def _check_collection(session, collection_id) -> list:
         report.append({"reference": declaration.dotted, "collection": bound.collection_id,
                        "state": "available", "rows_with_values": with_values,
                        "resolved_rows": with_values - unresolved_rows, "unresolved_rows": unresolved_rows,
-                       "distinct_values": len(distinct), "unresolved_values": _bounded(pairs)})
+                       "distinct_values": len(distinct), "unresolved_values": unresolved_values(pairs)})
     return report
 
 
+def _incomplete(code: str) -> str:
+    return f"REFERENCE_CHECK_INCOMPLETE: the reference check stopped ({code}); run inspect to see resolution counts."
+
+
+def _unavailable(dotted: str) -> str:
+    return f"REFERENCE_UNAVAILABLE: {dotted} is unavailable to you, so its values were not checked."
+
+
+def _unresolved(unresolved: dict, *, whole_collection: bool) -> str:
+    shown = [f"{item['reference']} {item['value']!r}" for item in unresolved["values"][:_WARN_VALUES]]
+    rest = unresolved["total"] - len(shown)
+    listed = ", ".join(shown) + (f", and {rest} more" if rest > 0 else "")
+    if whole_collection:
+        # A collection report counts every row, so it cannot say which of them an import wrote.
+        return (f"REFERENCE_UNRESOLVED: the collection has {unresolved['total']} distinct value(s) that name "
+                f"no row you can read: {listed}. Each reads unresolved until a matching row exists.")
+    return (f"REFERENCE_UNRESOLVED: {unresolved['total']} value(s) name no row you can read: {listed}. "
+            "The rows are saved; each reference reads unresolved until a matching row exists.")
+
+
 def warnings(report) -> list[str]:
-    """The plain-language warnings a write result carries for its reference report."""
-    out = []
+    """The plain-language warnings a write result carries for its reference report.
+
+    ``report`` is one ``check_values`` result or the ``check_collection`` list of per-declaration entries.
+    """
     if report is None:
-        return out
-    if isinstance(report, list):
-        # check_collection output: one entry per declaration
-        for entry in report:
-            if "incomplete" in entry:
-                out.append(f"REFERENCE_CHECK_INCOMPLETE: the reference check stopped "
-                           f"({entry['incomplete']}); run inspect to see resolution counts.")
-            elif entry.get("state") == "unavailable":
-                out.append(f"REFERENCE_UNAVAILABLE: {entry['reference']} refers to a collection or "
-                           "key you cannot read, so its values were not checked.")
-            elif entry.get("unresolved_values", {}).get("total"):
-                shown = [f"{entry['reference']} {item['value']!r}"
-                         for item in entry["unresolved_values"]["values"][:_WARN_VALUES]]
-                rest = entry["unresolved_values"]["total"] - min(
-                    _WARN_VALUES, len(entry["unresolved_values"]["values"]))
-                listed = ", ".join(shown) + (f", and {rest} more" if rest > 0 else "")
-                out.append(f"REFERENCE_UNRESOLVED: {entry['unresolved_values']['total']} value(s) "
-                           f"name no row you can read: {listed}. The rows are saved; each reference "
-                           "reads unresolved until a matching row exists.")
-        return out
-    if "incomplete" in report:
-        return [f"REFERENCE_CHECK_INCOMPLETE: the reference check stopped ({report['incomplete']}); "
-                "run inspect to see resolution counts."]
-    unresolved = report.get("unresolved_values")
-    if unresolved:
-        shown = [f"{item['reference']} {item['value']!r}" for item in unresolved["values"][:_WARN_VALUES]]
-        rest = unresolved["total"] - min(_WARN_VALUES, len(unresolved["values"]))
-        listed = ", ".join(shown) + (f", and {rest} more" if rest > 0 else "")
-        out.append(f"REFERENCE_UNRESOLVED: {unresolved['total']} value(s) name no row you can read: "
-                   f"{listed}. The rows are saved; each reference reads unresolved until a matching "
-                   "row exists.")
-    for dotted in report.get("unavailable", ()):
-        out.append(f"REFERENCE_UNAVAILABLE: {dotted} refers to a collection or key you cannot read, "
-                   "so its values were not checked.")
+        return []
+    out = []
+    whole_collection = isinstance(report, list)
+    for entry in report if whole_collection else [report]:
+        if "incomplete" in entry:
+            out.append(_incomplete(entry["incomplete"]))
+        if entry.get("state") == "unavailable":
+            out.append(_unavailable(entry["reference"]))
+        out.extend(_unavailable(dotted) for dotted in entry.get("unavailable", ()))
+        if entry.get("unresolved_values", {}).get("total"):
+            out.append(_unresolved(entry["unresolved_values"], whole_collection=whole_collection))
     return out

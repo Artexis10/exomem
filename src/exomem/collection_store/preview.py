@@ -564,6 +564,10 @@ def dispatch(
     writer._facade_profile = profile
     if action == "validate":
         if args.get("collection") is None:
+            # The file-mode preflight still builds the result; the store adds the refusals a create would make.
+            if "manifest_path" in args and "manifest_text" in args:
+                writer.validate_create(args["manifest_path"], args["manifest_text"],
+                                       scaffold=args.get("scaffold", True))
             return False, None
         return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
     # Records inspection is generic in file mode; only its mutations require
@@ -596,7 +600,7 @@ def dispatch(
                     "a version-1 saved view accepts only query={version, page} alongside view")
             merged = dict(raw_view_query)
             if paging is not None:
-                merged["page"] = {**merged.get("page", {}), **(paging.get("page") or {})}
+                merged["page"] = {**(merged.get("page") or {}), **(paging.get("page") or {})}
             merged["version"] = 1
             return True, route.run(writer, args["collection"], merged,
                                    facade_profile=profile, view=view.name,

@@ -1451,7 +1451,13 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
         )
     ):
         return None
-    return dict(value)
+    result = dict(value)
+    if "references" in value:
+        # The same bounded report the Records inspection admits, so one shape reaches egress.
+        result["references"] = record_governance.inspection_references(value["references"])
+        if result["references"] is None:
+            return None
+    return result
 
 
 def update(

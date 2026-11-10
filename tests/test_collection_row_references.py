@@ -9,8 +9,12 @@ from test_collection_store_governance import _record_writer
 from test_collection_store_writer import store as store
 from test_governance_egress import write_rule, write_scope
 
+from exomem import commands
 from exomem import structured_collections as collections
-from exomem.governance.principal import request_scope
+from exomem.cli_ops import OpError
+from exomem.collection_store.preview import preview_store
+from exomem.governance.principal import owner_principal, request_scope
+from exomem.writer_lease import invoke_command
 
 SITES = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 SKILLS = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
@@ -130,6 +134,19 @@ def test_a_target_that_does_not_exist_is_refused_with_the_generic_target_error(s
     error = refused(store, SITE_FIELD.replace(SITES, GONE), how)
     assert error.code == "INVALID_REFERENCE_TARGET"
     assert error.details["field"] == "item_schema.fields.site.references.collection"
+
+
+def test_validate_of_a_new_manifest_refuses_a_missing_target_as_create_does(store):
+    """A preflight that passes what create refuses sends an agent into a create that then fails."""
+    fields = SITE_FIELD.replace(SITES, GONE)
+    validate = next(command for command in commands.COMMANDS if command.name == "record_memory")
+    with request_scope(owner_principal()), preview_store(store.root, store.handle), \
+            pytest.raises(OpError) as validated:
+        invoke_command(validate, store.root, action="validate", manifest_path=path("Diary"),
+                       manifest_text=diary_text(fields))
+    created = refused(store, fields, "create")
+    assert validated.value.code == created.code == "INVALID_REFERENCE_TARGET"
+    assert validated.value.details["field"] == created.details["field"]
 
 
 def test_a_target_the_author_cannot_read_is_refused_exactly_like_a_missing_one(store, tmp_path, monkeypatch):

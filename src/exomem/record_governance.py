@@ -428,7 +428,7 @@ def _inspection_scalar(value: Any) -> bool:
     return value is None or type(value) in (str, int, float, bool)
 
 
-def _inspection_references(value: Any) -> list[dict[str, Any]] | None:
+def inspection_references(value: Any) -> list[dict[str, Any]] | None:
     """Bounded declared-reference report entries: scalars and one level of bounded containers."""
     if not isinstance(value, list) or len(value) > 64:
         return None
@@ -542,7 +542,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
     if any(view is None for view in normalized_views):
         return None
     references = payload.get("references")
-    normalized_references = _inspection_references(references) if references is not None else None
+    normalized_references = inspection_references(references) if references is not None else None
     if references is not None and normalized_references is None:
         return None
     presentation = payload.get("presentation")

@@ -104,8 +104,8 @@ def test_an_update_warns_on_a_newly_unresolvable_value(world):
     assert any("Nowhere" in text for text in result["warnings"])
 
 
-def test_inspect_counts_resolution_under_the_callers_view(world):
-    """Inspect reports resolved and unresolved rows; withheld and missing targets read alike."""
+def test_inspect_counts_resolved_and_unresolved_rows(world):
+    """The owner's inspect counts the rows whose reference resolves and those whose does not."""
     row(world, SITES, NORTH, {"code": "North-Field", "name": "North field"})
     row(world, DIARY, K1, {"title": "d1", "site": "North-Field"})
     row(world, DIARY, "00000000-0000-4000-8000-0000000000c2", {"title": "d2", "site": "East-Gate"})

@@ -136,12 +136,6 @@ _SAVED_VIEW_QUERY_KEYS = frozenset(
 # Version-1 query views: the query object is the same one the query engine's
 # route.run accepts, minus keys that are request- rather than view-scoped.
 _SAVED_VIEW_V1_MAX_BYTES = 16 * 1024
-_SAVED_VIEW_V1_QUERY_KEYS = frozenset(
-    {
-        "version", "where", "order_by", "select", "page", "group_by", "aggregates",
-        "having", "joins", "text", "as_of", "execution_profile", "graph", "related",
-    }
-)
 _SAVED_VIEW_SHARED_SYSTEM_FIELDS = frozenset(
     {"collection_id", "item_version", "inferred", "ambiguous", "parent_record_id"}
 )
@@ -875,6 +869,8 @@ class CollectionDiagnostic:
     code: str
     reason: str
     location: str = ""
+    #: The reference a saved view names that the manifest does not declare (SAVED_VIEW_REFERENCE_UNDECLARED).
+    reference: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2207,7 +2203,8 @@ def _parse_saved_views(
             accepted[name] = definition
             normalized[name] = normalized_view
         except CollectionError as error:
-            diagnostics.append(CollectionDiagnostic(error.code, error.reason, location))
+            diagnostics.append(CollectionDiagnostic(
+                error.code, error.reason, location, error.details.get("reference", "")))
     return (
         _freeze_mapping(accepted, "views"),
         _freeze_mapping(normalized, "views"),
@@ -2362,19 +2359,6 @@ def _v1_view_field_names(query: Mapping) -> tuple[set[str], list[str]]:
     return names, related
 
 
-def saved_view_references(definition: object) -> frozenset:
-    """The declared-reference names a version-1 saved view uses (empty for legacy views)."""
-    if not isinstance(definition, Mapping):
-        return frozenset()
-    query = definition.get("query")
-    if not isinstance(query, Mapping) or "version" not in query:
-        return frozenset()
-    names, related = _v1_view_field_names(query)
-    return frozenset(
-        {name.split(".", 1)[0] for name in names if "." in name} | set(related)
-    )
-
-
 def _normalize_saved_view_v1(
     raw_query: Mapping,
     fields: set[str],
@@ -2385,6 +2369,8 @@ def _normalize_saved_view_v1(
     Target-side fields are not checked — they belong to another collection's schema and
     surface as SAVED_VIEW_STALE at run time.
     """
+    from .query_engine import validation  # it imports this module, so it loads here, not at the top
+
     try:
         encoded = json.dumps(raw_query, ensure_ascii=False, sort_keys=True).encode("utf-8")
     except (TypeError, ValueError):
@@ -2394,7 +2380,7 @@ def _normalize_saved_view_v1(
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query exceeds 16 KiB")
     if raw_query.get("version") != 1:
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query version must be 1")
-    if not _mapping_has_only_keys(raw_query, _SAVED_VIEW_V1_QUERY_KEYS):
+    if not _mapping_has_only_keys(raw_query, validation.VIEW_KEYS):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query has unknown fields")
     page = raw_query.get("page")
     if page is not None and (not isinstance(page, Mapping) or "after" in page):
@@ -2410,6 +2396,7 @@ def _normalize_saved_view_v1(
             raise CollectionError(
                 "SAVED_VIEW_REFERENCE_UNDECLARED",
                 f"saved view field '{name}' uses undeclared reference '{head}'",
+                {"reference": head},
             )
         raise CollectionError(
             "INVALID_SAVED_VIEW", f"saved view field '{name}' is not declared")
@@ -2418,6 +2405,7 @@ def _normalize_saved_view_v1(
             raise CollectionError(
                 "SAVED_VIEW_REFERENCE_UNDECLARED",
                 f"saved view related entry '{entry}' uses undeclared reference '{entry}'",
+                {"reference": entry},
             )
     return {"query": json.loads(encoded)}
 
@@ -3227,6 +3215,7 @@ def _parse_field_reference(value: object, at: str) -> FieldReference | None:
 
 
 #: The natural-key field types whose values one text value can match, which fixes what a reference may target.
+# nosemgrep: ep-word-set -- the manifest schema's closed field types fix which natural keys one text value can match
 REFERENCE_KEY_TYPES = ("string", "date", "datetime")
 
 
