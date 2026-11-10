@@ -8,6 +8,7 @@ bytes. Every case here runs on a real vault and a real resolver.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -234,6 +235,46 @@ def test_a_stored_snippet_is_not_matched_inside_a_path_the_agent_cannot_see(vaul
     assert slipped.value.code == in_path.value.code == "STRING_NOT_FOUND"
 
 
+def _preview(vault: Path, body: str, old_string: str) -> edit.EditValidation:
+    rel = "Knowledge Base/Notes/Research/Taste/scratch-taste.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: research-note\nproject: taste\nstatus: active\n"
+        "created: 2026-05-29\nupdated: 2026-05-29\ntags: [taste]\n---\n" + body,
+        encoding="utf-8",
+    )
+    return edit.edit(
+        vault,
+        path=rel,
+        why="preview",
+        old_string=old_string,
+        new_string="x",
+        validate_only=True,
+        today=dt.date(2026, 6, 1),
+    )
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_preview_of_a_refused_snippet_shows_no_line_with_a_hidden_path(vault: Path) -> None:
+    target = _page(vault, "retry-budget", "Retry Budget")
+
+    preview = _preview(vault, f"The Retry Budget caps load. See [[{target}]].\n", "budget")
+
+    assert preview.match_count == 0
+    assert preview.matches == []
+
+
+@pytest.mark.usefixtures("public_shape")
+def test_a_preview_of_a_stored_snippet_shows_its_line_as_the_agent_reads_it(vault: Path) -> None:
+    target = _page(vault, "retry-budget", "Retry Budget")
+
+    preview = _preview(vault, f"See [[{target}]] now, and [[{target}]] later.\n", f"[[{target}]] now")
+
+    assert preview.match_count == 1
+    assert preview.matches == ["See [[Retry Budget]] now, and [[Retry Budget]] later."]
+
+
 @pytest.mark.usefixtures("public_shape")
 def test_a_snippet_that_is_also_inside_a_link_title_is_refused_as_ambiguous(vault: Path) -> None:
     target = _page(vault, "retry-budget", "Retry Budget")
@@ -362,18 +403,22 @@ def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault) 
         cold = await _call(client, "read_page", {"page": "Retry policy"})
         _resident_resolver(vault)
         read = await _call(client, "read_page", {"page": "Retry policy"})
+        raw = await _call(client, "read_page", {"page": "Retry policy", "options": {"include_raw": True}})
         span = "Cap retries at 30 s as in [[Backoff ceiling]]"
         edited = await _call(client, "edit_note", {
             "note": "Retry policy", "why": "Cap changed after review", "action": "replace_text",
             "old_text": span, "new_text": "Cap retries at 10 s as in [[Backoff ceiling]]",
         })
-        return cold, read, span, edited
+        return cold, read, raw, span, edited
 
-    cold, read, span, edited = _session(build(), scenario)
+    cold, read, raw, span, edited = _session(build(), scenario)
 
     # With no resolver resident a read builds none: the links stay as stored.
     assert "[[Knowledge Base/Notes/Insights/backoff-ceiling]]" in cold["body"], cold
     assert span in read["body"] and "Knowledge Base/" not in read["body"], read
+    # The raw file reads like the body: its frontmatter is as stored, its links are shown by title.
+    assert raw["content"].startswith("---\n") and raw["content"].endswith(raw["body"]), raw
+    assert span in raw["content"] and "Knowledge Base/Notes/Insights/backoff-ceiling" not in raw["content"], raw
     assert "error" not in edited, edited
     stored = _stored(vault, "Retry policy")
     assert "Cap retries at 10 s as in [[Knowledge Base/Notes/Insights/backoff-ceiling]]" in stored

@@ -8473,10 +8473,10 @@ def _show_links_by_title(vault_root: Path, result: dict) -> dict:
 
     An agent on the public tool shape types a page's title, never its vault path, so it reads links
     the way it writes them (`edit_note` takes the shown form back; `vault.render_title_links`). The
-    stored bytes, `content_hash` and `id` are not touched. Only a page released in full is shown
-    this way: a lower release level returns a projection, not the page's own text. A raw page
-    (Source, Evidence) keeps its recorded text. A read never builds or copies a resolver: it
-    borrows the resident one, and with none current the links stay as stored.
+    stored bytes, `content_hash` (the hash of the stored file) and `id` are not touched. Only a page
+    released in full is shown this way: a lower release level returns a projection, not the page's
+    own text. A raw page (Source, Evidence) keeps its recorded text. A read never builds or copies a
+    resolver: it borrows the resident one, and with none current the links stay as stored.
     """
     if result.get("release_level", egress_module.LEVEL_FULL) != egress_module.LEVEL_FULL:
         return result
@@ -8499,6 +8499,10 @@ def _show_links_by_title(vault_root: Path, result: dict) -> dict:
     shown_result = dict(result)
     if isinstance(body, str):
         shown_result["body"] = shown(body)
+        # `include_raw` also returns the whole file; its body ends the file, so it reads like `body`.
+        content = result.get("content")
+        if isinstance(content, str) and content.endswith(body):
+            shown_result["content"] = content[: len(content) - len(body)] + shown_result["body"]
     if isinstance(units, list):
         shown_result["units"] = [
             {**unit, "text": shown(unit["text"])} if isinstance(unit, dict) and isinstance(unit.get("text"), str) else unit

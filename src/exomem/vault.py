@@ -9242,6 +9242,13 @@ class TitleLinkView:
         last = self._stored_offset(end)
         return None if first is None or last is None else (first, last)
 
+    def shown_range(self, start: int, end: int) -> tuple[int, int]:
+        """The shown range that the stored range `[start, end)` stands for.
+
+        The stored range must not cut a link: a link wholly inside it maps to the whole shown link.
+        """
+        return self._shown_offset(start), self._shown_offset(end)
+
     def links_in(self, start: int, end: int) -> tuple[tuple[int, int, int, int], ...]:
         """The rewritten links that lie wholly inside the shown range `[start, end)`."""
         first = bisect.bisect_left(self.spans, start, key=operator.itemgetter(2))
@@ -9256,6 +9263,11 @@ class TitleLinkView:
         if inside and (inside[0][0] < start or inside[-1][1] > end):
             return None
         return inside
+
+    def _shown_offset(self, stored: int) -> int:
+        # Each link that ends at or before the offset moved every later offset by what it gained or lost.
+        index = bisect.bisect_right(self.spans, stored, key=operator.itemgetter(1)) - 1
+        return stored + (self.spans[index][3] - self.spans[index][1] if index >= 0 else 0)
 
     def _stored_offset(self, shown: int) -> int | None:
         index = bisect.bisect_right(self.spans, shown, key=operator.itemgetter(2)) - 1

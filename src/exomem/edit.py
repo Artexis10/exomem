@@ -32,9 +32,11 @@ even though they didn't create a new file.
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import functools
 import logging
+import operator
 import os
 import re
 from collections.abc import Callable
@@ -309,7 +311,11 @@ def edit(
                 snapshot,
             )
             match_count = found.count
-            matches = _match_contexts(found.shown or body, old_string)  # type: ignore[arg-type]
+            matches = (
+                _match_contexts(body, old_string)  # type: ignore[arg-type]
+                if found.shown_ranges is None
+                else _lines_of(found.shown, found.shown_ranges)
+            )
             if match_count == 0 or found.cuts or (match_count > 1 and not replace_all):
                 return EditValidation(
                     path=rel_path,
@@ -749,8 +755,10 @@ class OldStringMatch:
     links: tuple[tuple[tuple[str, str], ...], ...] = ()
     #: Occurrences in the shown body that start or end inside a link, so no stored bytes stand for them.
     cuts: int = 0
-    #: The shown body that `ranges` came from, for the lines an occurrence spans.
+    #: The shown body, and the range in it of each occurrence counted, for the lines each spans in a
+    #: preview. None when the caller sees the stored bytes.
     shown: str = ""
+    shown_ranges: tuple[tuple[int, int], ...] | None = None
 
 
 def match_old_string(
@@ -778,10 +786,12 @@ def match_old_string(
         return stored
     ranges: list[tuple[int, int]] = []
     links: list[tuple[tuple[str, str], ...]] = []
+    shown_ranges: list[tuple[int, int]] = []
     cuts = 0
     at = view.text.find(old_string)
     while at != -1:
         end = at + len(old_string)
+        shown_ranges.append((at, end))
         stored_range = view.stored_range(at, end)
         if stored_range is None:
             cuts += 1
@@ -795,10 +805,13 @@ def match_old_string(
             )
         at = view.text.find(old_string, end)
     if cuts or ranges:
-        return OldStringMatch(len(ranges) + cuts, tuple(ranges), tuple(links), cuts, view.text)
+        return OldStringMatch(
+            len(ranges) + cuts, tuple(ranges), tuple(links), cuts, view.text, tuple(shown_ranges)
+        )
     # Not in the shown body: a snippet in the stored form, as a read with no resolver resident shows
-    # it. An occurrence inside the path of a link shown by title is text the agent never saw.
-    ranges, links = [], []
+    # it. An occurrence inside the path of a link shown by title is text the agent never saw, and a
+    # preview shows the lines of the occurrences it accepts, in the shown form.
+    ranges, links, shown_ranges = [], [], []
     at = body.find(old_string)
     while at != -1:
         end = at + len(old_string)
@@ -806,28 +819,50 @@ def match_old_string(
         if inside is not None:
             ranges.append((at, end))
             links.append(tuple((body[start:stop], body[start:stop]) for start, stop, _, _ in inside))
+            shown_ranges.append(view.shown_range(at, end))
         at = body.find(old_string, end)
-    return OldStringMatch(len(ranges), tuple(ranges), tuple(links))
+    return OldStringMatch(
+        len(ranges), tuple(ranges), tuple(links), 0, view.text, tuple(shown_ranges)
+    )
+
+
+def _live_links_after(
+    body: str, ranges: tuple[tuple[int, int], ...], new_string: str
+) -> list[list[tuple[int, int]]]:
+    """Per occurrence in `ranges`: the links in `new_string` that are live in the page as edited.
+
+    A link is live where a write reads it as a link, by the same masking: a link that `new_string`
+    quotes in code is not, and a snippet that starts inside a code span is read in its page. The
+    page is masked once, with every occurrence replaced. Each range is relative to `new_string`.
+    """
+    edited: list[str] = []
+    regions: list[int] = []
+    cursor = length = 0
+    for start, end in ranges:
+        edited.append(body[cursor:start])
+        length += start - cursor
+        regions.append(length)
+        edited.append(new_string)
+        length += len(new_string)
+        cursor = end
+    edited.append(body[cursor:])
+    live = rewritable_link_ranges("".join(edited))
+    per_occurrence = []
+    for region in regions:
+        first = bisect.bisect_left(live, region, key=operator.itemgetter(0))
+        last = bisect.bisect_right(live, region + len(new_string), key=operator.itemgetter(1))
+        per_occurrence.append([(start - region, end - region) for start, end in live[first:last]])
+    return per_occurrence
 
 
 def _restore_repeated_links(
-    body: str, start: int, end: int, new_string: str, links: tuple[tuple[str, str], ...]
+    new_string: str, links: tuple[tuple[str, str], ...], live: list[tuple[int, int]]
 ) -> list[tuple[str, bool]]:
     """`new_string` in pieces: text to normalize, and the stored bytes of each repeated link.
 
     A link of the matched text that `new_string` repeats unchanged keeps its stored bytes, so it is
-    not resolved by title again and is not normalized. It counts only where it is a live link in the
-    page as edited (`body[start:end]` replaced), so a link that `new_string` quotes in code stays
-    as written, and a snippet that starts inside a code span is read in its page.
+    not resolved by title again and is not normalized. `live` is where `new_string` holds links.
     """
-    if not links:
-        return [(new_string, False)]
-    candidate = body[:start] + new_string + body[end:]
-    live = [
-        (found_start - start, found_end - start)
-        for found_start, found_end in rewritable_link_ranges(candidate)
-        if found_start >= start and found_end <= start + len(new_string)
-    ]
     pieces: list[tuple[str, bool]] = []
     cursor = 0
     next_live = 0
@@ -857,13 +892,21 @@ def replace_old_string(
     """
     if found.ranges is None:
         return body.replace(old_string, normalized(new_string), -1 if replace_all else 1)
-    chosen = range(len(found.ranges)) if replace_all else range(1)
-    for index in reversed(chosen):
-        start, end = found.ranges[index]
-        pieces = _restore_repeated_links(body, start, end, new_string, found.links[index])
-        inserted = "".join(text if kept else normalized(text) for text, kept in pieces if text)
-        body = body[:start] + inserted + body[end:]
-    return body
+    chosen = found.ranges if replace_all else found.ranges[:1]
+    live = (
+        _live_links_after(body, chosen, new_string)
+        if "[[" in new_string and any(found.links[: len(chosen)])
+        else [[] for _ in chosen]
+    )
+    edited: list[str] = []
+    cursor = 0
+    for index, (start, end) in enumerate(chosen):
+        edited.append(body[cursor:start])
+        pieces = _restore_repeated_links(new_string, found.links[index], live[index])
+        edited.extend(text if kept else normalized(text) for text, kept in pieces if text)
+        cursor = end
+    edited.append(body[cursor:])
+    return "".join(edited)
 
 
 def apply_surgical_replace(
@@ -1237,18 +1280,27 @@ def _match_contexts(body: str, old_string: str, *, max_matches: int = 5) -> list
     Used by validate_only so the caller can eyeball *which* rows a match (or a
     replace_all) would touch before committing.
     """
-    contexts: list[str] = []
+    ranges: list[tuple[int, int]] = []
     start = 0
-    while len(contexts) < max_matches:
+    while len(ranges) < max_matches:
         idx = body.find(old_string, start)
         if idx == -1:
             break
-        line_start = body.rfind("\n", 0, idx) + 1
         end = idx + len(old_string)
-        nl = body.find("\n", end)
-        line_end = nl if nl != -1 else len(body)
-        contexts.append(body[line_start:line_end])
+        ranges.append((idx, end))
         start = end if end > idx else idx + 1
+    return _lines_of(body, ranges, max_matches=max_matches)
+
+
+def _lines_of(
+    text: str, ranges: tuple[tuple[int, int], ...] | list[tuple[int, int]], *, max_matches: int = 5
+) -> list[str]:
+    """The full line(s) that each of the first `max_matches` of `ranges` spans in `text`."""
+    contexts: list[str] = []
+    for start, end in ranges[:max_matches]:
+        line_start = text.rfind("\n", 0, start) + 1
+        nl = text.find("\n", end)
+        contexts.append(text[line_start : nl if nl != -1 else len(text)])
     return contexts
 
 
