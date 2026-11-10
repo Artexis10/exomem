@@ -233,9 +233,11 @@ def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -
 
 #: `CatalogReadiness.status` of a query that the request budget stopped; see `stopping_at_budget`.
 DEADLINE_STATUS = "deadline"
-#: SQLite calls the budget check once per this many VM instructions: the stop lands within a few
-#: milliseconds, and the check is a clock read.
-_BUDGET_CHECK_INSTRUCTIONS = 1000
+#: SQLite calls the budget check once per this many VM instructions. Each call re-takes the GIL,
+#: which another busy thread holds for up to one 5 ms switch interval, so a frequent check made a
+#: contended query several times slower. A million instructions is about 10 to 65 ms of query CPU,
+#: so the stop still lands well inside a stage's reserve.
+_BUDGET_CHECK_INSTRUCTIONS = 1_000_000
 
 
 class BudgetStop:
