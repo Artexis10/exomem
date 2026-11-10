@@ -71,6 +71,7 @@ from . import (
     working_set_conversation,
     working_set_heat,
     working_set_index,
+    working_set_marks,
     working_set_resolve,
 )
 from .activation_result import DISABLED, UNAVAILABLE
@@ -2928,6 +2929,10 @@ def serve(
     # Retain this request's coverage, but never cache a transient lookup failure.
     if any(entry.get("reason") in {"lane_failed", "task_lookup_unavailable", "task_lookup_budget"}
            for entry in packet.get("missing", ())):
+        return packet
+    # Edges the marks could not read are as transient: a cached copy would go on saying they are
+    # unknown after the graph caught up, since the graph is not in the cache key.
+    if packet["generation"].get(working_set_marks.GENERATION_KEY) == working_set_marks.UNKNOWN:
         return packet
     # A carry that the request budget refused is this call's clock, not the vault's: a later call has its own.
     if working_set.ANCHORS_BUDGET_GAP in packet.get("missing", ()):

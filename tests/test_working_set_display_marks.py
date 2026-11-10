@@ -72,9 +72,11 @@ def _vault(
     answer_page: str = ANSWER_PAGE,
     hub_page: str = HUB_PAGE,
     name: str = "vault",
+    graph: bool = True,
 ) -> Path:
     """The fixture vault, with `hub_page` as its hub and `answer_page` at `answer`, or without
-    an answering page when `answer` is None, and every index the packet reads built."""
+    an answering page when `answer` is None, and every index the packet reads built: the
+    relation graph only when `graph` is true."""
     from conftest import initialize_vault_state_offline
 
     vault = tmp_path / name
@@ -91,7 +93,8 @@ def _vault(
         (vault / rel).write_text(body, encoding="utf-8")
     find_module.clear_cache()
     lexstore.ensure_fresh(vault)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    if graph:
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     working_set_runtime.reset_caches_for_tests()
     working_set_index.WorkingSetIndex(vault).rebuild()
     return vault
@@ -341,3 +344,26 @@ def test_a_packet_with_nothing_to_mark_is_unchanged(
         packet.pop("timings", None)
         packet.pop("continuity", None)
     assert marked == unmarked
+
+
+def test_unread_edges_mark_nothing_open_and_the_packet_says_they_are_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a packet that takes a graph it could not read for one with no answers, so every
+    question reads as open, and a cached packet that goes on saying the edges are unknown after
+    the graph caught up."""
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
+    vault = _vault(tmp_path, graph=False)
+
+    packet = _recall(vault)
+
+    assert packet["generation"]["display_edges"] == "unknown"
+    units = _units(packet)
+    assert "Who owns orchard launch support?" in units
+    assert not any("open" in unit.get("display", {}) for unit in packet["units"])
+
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    caught_up = _recall(vault)
+
+    assert "display_edges" not in caught_up["generation"]
+    assert _units(caught_up)["Who owns orchard launch support?"]["display"] == {"open": True}
