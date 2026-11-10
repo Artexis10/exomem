@@ -10,7 +10,14 @@ is built or a return annotation that names one is resolved.
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # Type checkers see the real classes; at run time `__getattr__` loads them.
+    from fastmcp.tools import ToolResult
+    from fastmcp.utilities.types import Image
+    from mcp.types import TextContent, ToolAnnotations
+
+    __all__ = ["Image", "TextContent", "ToolAnnotations", "ToolResult"]
 
 #: Each class this module serves, with the module that defines it.
 _SOURCES = {

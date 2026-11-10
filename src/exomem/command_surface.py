@@ -1121,11 +1121,11 @@ def bind_vault(
 def _request_dependencies() -> types.ModuleType | None:
     """FastMCP's request-context accessors, or None where no MCP call can be active.
 
-    Only FastMCP's server sets a request context, and a process imports FastMCP before it
-    serves. A process that never imported it, such as a CLI command, has no MCP call;
+    Only FastMCP or the MCP SDK sets a request context, and a process imports them before it
+    serves. A process that imported neither, such as a CLI command, has no MCP call;
     importing FastMCP to find that out cost each CLI start about half a second.
     """
-    if "fastmcp" not in sys.modules:
+    if "fastmcp" not in sys.modules and "mcp" not in sys.modules:
         return None
     from fastmcp.server import dependencies
 

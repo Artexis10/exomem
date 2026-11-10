@@ -28,7 +28,6 @@ from ..command_surface import mcp_request_correlation
 from ..log_events import log_event
 from . import authorization_sessions, connector_boundary
 from . import principal as principal_module
-from .credential_carrier import CredentialCarrier
 from .authorization_request import (
     INVALID_CREDENTIAL,
     AuthorizationContextUnavailable,
@@ -37,6 +36,7 @@ from .authorization_request import (
     enforce_credential_rule,
     verify_authorization_context,
 )
+from .credential_carrier import CredentialCarrier
 
 AUTHORIZATION_SESSION_HEADER_NAME: Final = "X-Exomem-Authorization-Session"
 AUTHORIZATION_SESSION_HEADER: Final = AUTHORIZATION_SESSION_HEADER_NAME.lower().encode()

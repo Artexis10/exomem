@@ -2,7 +2,7 @@
 
 The CLI reads a carrier on every vault command, so this module imports no MCP,
 HTTP or session-store machinery: those cost about a quarter of a second at CLI
-start-up. The server's transport (`authorization_transport`) re-exports both names.
+start-up. The server's transport (`authorization_transport`) imports the carrier from here.
 """
 
 from __future__ import annotations
