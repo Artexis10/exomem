@@ -439,6 +439,19 @@ class Destinations:
         path = self.root / rel_path
         self._names(path.parent).add(path.name.casefold())
 
+    @classmethod
+    def frozen_by(cls, root: Path, items: list[dict]) -> Destinations:
+        """Destinations that already hold every path the plan items froze, so a new path never takes a later item's."""
+        destinations = cls(root)
+        for item in items:
+            frozen = [(item.get("note") or {}).get("target_path")]
+            if item["action"] == "copy-as-source":
+                frozen += [item["target_path"], item.get("artifact_path")]
+            for rel_path in frozen:
+                if rel_path:
+                    destinations.reserve(rel_path)
+        return destinations
+
     def taken(self, rel_path: str) -> bool:
         path = self.root / rel_path
         return path.name.casefold() in self._names(path.parent)
@@ -465,7 +478,7 @@ class Destinations:
             attempt += 1
 
 
-def _folder_for(root: Path, classification: Mapping[str, Any] | None,
+def folder_for(root: Path, classification: Mapping[str, Any] | None,
                 taxonomy: source_taxonomy.SourceTaxonomy | None) -> Path | str:
     """Where this item's Source lives, or a refusal code when the registry no longer agrees."""
     # A note rule alone leaves the Source copy unclassified: it files under Imported.
@@ -1026,7 +1039,7 @@ def plan_item(
                 item["previous_note"] = previous
                 owes_note = False
 
-    folder = _folder_for(root, classification, taxonomy)
+    folder = folder_for(root, classification, taxonomy)
     if isinstance(folder, str):
         return {"path": original_path, "code": folder,
                 "reason": "the Source taxonomy no longer accepts this rule's kind or domain"}
@@ -1057,15 +1070,7 @@ def plan_item(
         )
         item["existing_ref"] = item["target_ref"]
         return holds_source(item)
-    slug, slug_warning = slugify_with_truncation_check(item["title"])
-    suffix = None
-    if item["form"] == "artifact":
-        from .add import stored_artifact_suffix
-        from .preserve import _sanitize_filename
-
-        # A `.md` original is an artifact when its bytes are not UTF-8 text or exceed the inline bound.
-        suffix = stored_artifact_suffix(Path(_sanitize_filename(Path(original_path).name) or "").suffix)
-    page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
+    page, artifact, slug_warning = allocate_source(item, folder, destinations, date_iso=date_iso)
     reason = access.writable_reason(root, page)
     if reason is not None:
         return {"path": original_path, "code": "WRITE_REFUSED", "reason": reason}
@@ -1084,6 +1089,22 @@ def plan_item(
     if seen is not None:
         seen.setdefault((item["original_sha256"], protected, item["form"]), item)
     return item, text
+
+
+def allocate_source(
+    item: Mapping[str, Any], folder: Path, destinations: Destinations, *, date_iso: str
+) -> tuple[str, str | None, str | None]:
+    """A free Source page path in `folder`, the artifact path beside it for an artifact item, and the slug warning."""
+    slug, slug_warning = slugify_with_truncation_check(item["title"])
+    suffix = None
+    if item["form"] == "artifact":
+        from .add import stored_artifact_suffix
+        from .preserve import _sanitize_filename
+
+        # A `.md` original is an artifact when its bytes are not UTF-8 text or exceed the inline bound.
+        suffix = stored_artifact_suffix(Path(_sanitize_filename(Path(item["original_path"]).name) or "").suffix)
+    page, artifact = destinations.allocate(folder, f"{date_iso}-{slug}", artifact_suffix=suffix)
+    return page, artifact, slug_warning
 
 
 def seen_in_plan(items: Iterable[Mapping[str, Any]]) -> dict[tuple[str, bool, str], Mapping[str, Any]]:

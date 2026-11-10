@@ -37,7 +37,7 @@ TODAY = dt.date(2026, 7, 14)
 SOURCES = "Knowledge Base/Sources"
 
 
-def _vault(tmp_path: Path, files: dict[str, str | bytes]) -> Path:
+def _vault(tmp_path: Path, files: dict[str, str | bytes], *, indexed: bool = True) -> Path:
     vault = tmp_path / "vault"
     kb = vault / "Knowledge Base"
     (kb / "Notes").mkdir(parents=True)
@@ -54,7 +54,8 @@ def _vault(tmp_path: Path, files: dict[str, str | bytes]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data if isinstance(data, bytes) else data.encode("utf-8"))
     # A live vault has its duplicate index built by the background repair; no door builds it inline.
-    assert lexstore.get_store(vault).rebuild_atomic()
+    if indexed:
+        assert lexstore.get_store(vault).rebuild_atomic()
     return vault
 
 
@@ -1478,6 +1479,57 @@ def test_two_identical_photos_plan_one_write_and_apply_stores_one_original_with_
         # Every item of the re-run found its bytes stored: the two photos and the note.
         assert rerun["apply_result"]["skipped_duplicates"] == 3
     assert _kept_files(vault) == before
+
+
+def test_two_identical_photos_import_when_the_duplicate_index_is_not_built_and_map_the_second_to_the_first(
+    tmp_path: Path,
+) -> None:
+    """The plan names the first photo's Source for the second, so apply needs no index to confirm it."""
+    vault = _vault(
+        tmp_path,
+        {"_Imports/first/Coll/trip/IMG_1.png": PHOTO, "_Imports/first/Coll/backup/IMG_1 copy.png": PHOTO},
+        indexed=False,
+    )
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    first, second = planned["plan"]["items"]
+
+    assert [first["action"], second["action"]] == ["copy-as-source", "duplicate-of"]
+    assert first["duplicate_check_unavailable"] is True
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    assert applied["phase"] == "applied"
+    held, mapped = (applied["outcomes"][item["original_path"]] for item in (first, second))
+    assert [held["status"], mapped["status"]] == ["applied", "already-applied"]
+    assert mapped["mapped"] is True
+    assert mapped["source_ref"] == held["source_ref"]
+    [stored] = _stored_photos(vault)
+    assert stored.read_bytes() == PHOTO
+    frontmatter, _body = _page(vault, held["target_path"])
+    assert [entry["imported_from"] for entry in frontmatter["also_imported_from"]] == [second["original_path"]]
+
+
+def test_a_photo_whose_named_first_copy_was_never_stored_is_stored_as_its_own_source_not_failed_as_stale(
+    tmp_path: Path,
+) -> None:
+    """The first photo changed after the plan, so no Source holds the planned bytes; the second is not lost with it."""
+    vault = _vault(
+        tmp_path,
+        {"_Imports/first/Coll/trip/IMG_1.png": PHOTO, "_Imports/first/Coll/backup/IMG_1 copy.png": PHOTO},
+        indexed=False,
+    )
+    run_id, planned = _import(vault, path="_Imports/first", include=["_Imports/first"])
+    first, second = planned["plan"]["items"]
+    (vault / first["original_path"]).write_bytes(PHOTO + b" edited")
+
+    applied, _calls = _apply_all(vault, run_id, planned["plan"]["plan_id"])
+
+    held, own = (applied["outcomes"][item["original_path"]] for item in (first, second))
+    assert (held["status"], held["code"]) == ("failed", "SOURCE_CHANGED")
+    assert own["status"] == "applied"
+    assert "stored as a Source of their own" in own["stored_own_copy"]
+    assert own["target_path"] != second["target_path"]
+    assert (vault / own["artifact_path"]).read_bytes() == PHOTO
+    assert _stored_photos(vault) == [vault / own["artifact_path"]]
 
 
 def test_a_photo_the_vault_stores_under_another_collection_plans_no_write_and_records_its_path(

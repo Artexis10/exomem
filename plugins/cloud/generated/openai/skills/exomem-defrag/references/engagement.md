@@ -76,7 +76,7 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   `create_note` or `read_connections/change_connections`, run
   `read_connections(operation={'kind': 'suggest-links'})`, use `suggest-relations` when
   directional meaning matters, and run the near-duplicate check first,
-  then write and report one line: `Saved -> <path>`.
+  then write and report one line: `Saved -> <title>`.
 - Resolve entity candidates against the active entity registry and selected knowledge packs.
   Call `read_connections(operation={'kind': 'resolve-entity', 'name': ...})` first. If one active page
   matches, use `edit_note` for a small stable-fact correction or the canonical

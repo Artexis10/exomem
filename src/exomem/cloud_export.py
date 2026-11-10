@@ -19,7 +19,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from . import cloud_containment, cloud_grant, vault_portability
@@ -43,9 +43,11 @@ UPLOAD_TIMEOUT_SECONDS = 300
 class ExportRefused(Exception):
     """A content-free export failure with its C6 code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: dict[str, int | str] | None = None) -> None:
         super().__init__(code)
         self.code = code
+        # Content-free fields for the diagnostic that name the cause, such as an HTTP status.
+        self.detail = detail or {}
 
 
 def etag_digest(etags: list[str]) -> str:
@@ -75,15 +77,19 @@ def _put(url: str, chunk) -> str:
             with urlopen(Request(url, data=chunk, headers=headers, method="PUT"), timeout=UPLOAD_TIMEOUT_SECONDS) as response:
                 etag = response.headers.get("ETag")
                 if not etag:
-                    raise ExportRefused(EXPORT_UPLOAD_FAILED)
+                    raise ExportRefused(EXPORT_UPLOAD_FAILED, {"status": response.status, "missing": "ETag"})
                 return etag
         except HTTPError as error:
             # A refused signature or an expired URL does not heal on retry.
             if error.code < 500 or attempt == UPLOAD_ATTEMPTS:
-                raise ExportRefused(EXPORT_UPLOAD_FAILED) from None
-        except OSError:
+                cause = {"cause": type(error).__name__, "status": error.code}
+                raise ExportRefused(EXPORT_UPLOAD_FAILED, cause) from None
+        except OSError as error:
             if attempt == UPLOAD_ATTEMPTS:
-                raise ExportRefused(EXPORT_UPLOAD_FAILED) from None
+                # urllib wraps a failure to connect, verify TLS or send in URLError, whose reason names it.
+                failure = error.reason if isinstance(error, URLError) and isinstance(error.reason, BaseException) else error
+                # The class names the failure; an SSL error's number is a library code, not an errno.
+                raise ExportRefused(EXPORT_UPLOAD_FAILED, {"cause": type(failure).__name__}) from None
     raise AssertionError("unreachable")
 
 
@@ -221,6 +227,8 @@ def _failure_diagnostic(error: Exception) -> dict:
     if isinstance(error, MediaStoreError):
         # The media store's fixed codes tell an unverified object from an outage; the message may name one.
         detail["code"] = error.code
+    if isinstance(error, ExportRefused):
+        detail.update(error.detail)
     cause = error
     if not isinstance(error, OSError):
         # A refusal raised from or while handling an OSError keeps that error's class and number,

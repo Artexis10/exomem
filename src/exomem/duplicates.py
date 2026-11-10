@@ -244,21 +244,39 @@ def find_duplicate(
         return DuplicateLookup(available=False)
     first: Duplicate | None = None
     for rel in candidates:
-        if vault.in_append_only_tree(rel) != lane or raw_protection.marked(rel) != protected:
+        hit = named_duplicate(
+            vault_root, rel, sha256=sha256, lane=lane, protected=protected, keeps_original=keeps_original
+        )
+        if hit is None:
             continue
-        payload = readable_page(vault_root, rel)
-        if (payload is None or payload.sha256 != sha256 or payload.lane != lane
-                or payload.protected != protected or payload.ref is None):
-            continue
-        if keeps_original is not None and (payload.artifact_path is not None) != keeps_original:
-            continue
-        if payload.artifact_path is not None and not original_intact(vault_root, rel, payload):
-            continue
-        hit = Duplicate(path=rel, ref=payload.ref, payload=payload)
         if prefer is None or prefer(hit):
             return DuplicateLookup(hit)
         first = first or hit
     return DuplicateLookup(first)
+
+
+def named_duplicate(
+    vault_root, rel: str, *, sha256: str, lane: str, protected: bool, keeps_original: bool | None = None
+) -> Duplicate | None:
+    """The page at `rel` when it still stores `sha256` in `lane` and the protection class, else None.
+
+    The one re-verification of a candidate, shared by `find_duplicate` and by a door that already holds the
+    page it means (an apply of a plan that named it) and so needs no catalogue. The page's bytes are read
+    again and re-derived (a text payload) or re-hashed (an original), and only a caller who may read the page in
+    full gets it; a page that fails any test reads as absent. `keeps_original` narrows the form as in
+    `find_duplicate`.
+    """
+    if vault.in_append_only_tree(rel) != lane or raw_protection.marked(rel) != protected:
+        return None
+    payload = readable_page(vault_root, rel)
+    if (payload is None or payload.sha256 != sha256 or payload.lane != lane
+            or payload.protected != protected or payload.ref is None):
+        return None
+    if keeps_original is not None and (payload.artifact_path is not None) != keeps_original:
+        return None
+    if payload.artifact_path is not None and not original_intact(vault_root, rel, payload):
+        return None
+    return Duplicate(path=rel, ref=payload.ref, payload=payload)
 
 
 def unavailable_warning(subject: str) -> str:

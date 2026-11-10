@@ -103,8 +103,11 @@ def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply
 
     seeded = stored_sources()
     text = "Quarterly retention fell two points after the pricing change."
-    first = capture(title="Retention note", content=text, url="https://Example.com:443/a#top", tags=["metrics"])
-    page = vault / first["path"]
+    # A compact reply names the page by title and id; the vault path shows under `response_detail="full"`.
+    first = capture(title="Retention note", content=text, url="https://Example.com:443/a#top", tags=["metrics"],
+                    response_detail="full")
+    first_path = first["diagnostics"]["operational"]["path"]
+    page = vault / first_path
     stored = page.read_bytes()
     assert "duplicate_of" not in first and "same_url" not in first
 
@@ -115,12 +118,12 @@ def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply
     assert again["capture_outcome"] == "reused"
     # `mutated` is an operational field, so it shows under `response_detail="full"`.
     assert again["diagnostics"]["operational"]["mutated"] is False
-    assert again["duplicate_of"]["path"] == first["path"]
+    assert again["duplicate_of"]["path"] == first_path
     first_ref = again["duplicate_of"]["ref"]
-    # The reply names the stored source once, by the path every read takes; `duplicate_of` keeps the ref.
-    assert again["source"] == {"path": first["path"]}
+    # The reply names the stored source once, by title and id; `duplicate_of` keeps the ref.
+    assert again["source"] == {"title": "Retention note", "id": first["id"]}
     # Nothing was written: the reply leads with its outcome and says nothing of a durable write or graph sync.
-    assert again["user_summary"].startswith(f"Already saved -> {first['path']}")
+    assert again["user_summary"].startswith("Already saved -> Retention note")
     # One lead: the summary comes first and no second sentence says the same thing.
     assert next(iter(again)) == "user_summary"
     assert "notice" not in again
@@ -135,18 +138,18 @@ def test_published_capture_reuses_identical_text_and_names_what_it_did_not_apply
 
     other_text = capture(title="Other text, same page", content=text + " It held through the second quarter.",
                          url="https://example.com/a", tags=["metrics"])
-    assert other_text["path"] != first["path"]
+    assert other_text["id"] != first["id"]
     assert "duplicate_of" not in other_text
     advisory = other_text["same_url"]
     assert advisory["count"] == 1
     assert [(row["ref"], row["path"], row["title"]) for row in advisory["sources"]] == [
-        (first_ref, first["path"], "Retention note")
+        (first_ref, first_path, "Retention note")
     ]
     assert len(stored_sources() - seeded) == 2
 
     identified = capture(title="Retention note, keyed", content=text, tags=["metrics"],
                          source_identity={"system": "archive", "record_id": "item-1", "revision": "r1"})
     assert identified["capture_outcome"] == "created"
-    assert identified["path"] not in (first["path"], other_text["path"])
+    assert identified["id"] not in (first["id"], other_text["id"])
     assert page.read_bytes() == stored
     assert len(stored_sources() - seeded) == 3

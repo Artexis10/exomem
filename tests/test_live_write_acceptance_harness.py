@@ -44,6 +44,7 @@ fan-out -- are named in the lane's result, not smuggled in as harness changes.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -54,6 +55,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from exomem import page_ids
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -996,6 +999,10 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
     monkeypatch.setattr(module, "_full_receipt_count", lambda _root, **_kw: 0)
     monkeypatch.setattr(module, "_reconciliation_demanded", lambda _root, **_kw: 0)
 
+    def id_of(path):
+        """The short id of the page as it reads now: its version part follows its content."""
+        return page_ids.page_id(None, path, hashlib.sha256(notes[path].encode()).hexdigest())
+
     def public_call(client, name, arguments):
         import uuid
 
@@ -1016,20 +1023,21 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
         elif name == "remember":
             path = f"Knowledge Base/Notes/Insights/accepted-{len(notes)}.md"
             notes[path] = arguments["content"]
-            result = {"path": path, "ref": f"memory:{len(notes)}"}
+            # A compact MCP write reply names the page by title and short id, not by path.
+            result = {"title": arguments["title"], "id": id_of(path), "ref": f"memory:{len(notes)}"}
         elif name == "edit_memory":
-            path = arguments["path"]
+            path = next(path for path in notes if id_of(path) == arguments["path"])
             operation = arguments["operation"]
             notes[path] = notes[path].replace(operation["old_string"], operation["new_string"])
-            result = {"path": path}
+            result = {"id": id_of(path)}
         elif name == "ask_memory":
-            result = {"hits": [{"path": path, "ref": f"memory:{index}"} for index, (path, body) in enumerate(notes.items(), 1) if arguments["query"] in body]}
+            result = {"hits": [{"id": id_of(path), "path": path, "ref": f"memory:{index}"} for index, (path, body) in enumerate(notes.items(), 1) if arguments["query"] in body]}
             if not arguments["query"]:
-                result = {"hits": [{"path": "Knowledge Base/Notes/Insights/existing.md"}]}
+                result = {"hits": [{"id": "existing.aaaa", "path": "Knowledge Base/Notes/Insights/existing.md"}]}
         elif name == "read_memory":
             index = int(arguments["path"].split(":")[1]) - 1
             path = list(notes)[index]
-            result = {"path": path, "body": notes[path]}
+            result = {"path": path, "id": id_of(path), "body": notes[path]}
         else:
             pytest.fail(f"unexpected public command {name}")
         return 1.0, result
@@ -1058,9 +1066,9 @@ def test_connector_observes_service_without_local_runtime_writes(isolated_connec
     ({"success": False, "error": {"code": "NOT_FOUND"}}, "independent-marker", "unknown"),
     ({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "status": "warming", "complete": False}}, "independent-marker", "warming"),
     ({"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "status": "temporarily_unavailable", "complete": False}}, "independent-marker", "unavailable"),
-    ({"hits": [{"path": "different.md"}]}, "independent-marker", "stale"),
-    ({"hits": [{"path": "accepted.md", "ref": "memory:1"}]}, "old-marker", "stale"),
-    ({"hits": [{"path": "accepted.md", "ref": "memory:1"}]}, "independent-marker", "exact"),
+    ({"hits": [{"id": "bbbbbbb.bbbb", "path": "different.md"}]}, "independent-marker", "stale"),
+    ({"hits": [{"id": "aaaaaaa.aaaa", "path": "accepted.md", "ref": "memory:1"}]}, "old-marker", "stale"),
+    ({"hits": [{"id": "aaaaaaa.aaaa", "path": "accepted.md", "ref": "memory:1"}]}, "independent-marker", "exact"),
 ])
 def test_connector_readback_uses_public_marker_and_returned_reference(response, body, expected):
     module = _acceptance()
@@ -1069,9 +1077,9 @@ def test_connector_readback_uses_public_marker_and_returned_reference(response, 
     class Client:
         def call(self, name, arguments):
             calls.append((name, arguments))
-            return 1.0, response if name == "ask_memory" else {"path": "accepted.md", "body": body}
+            return 1.0, response if name == "ask_memory" else {"path": "accepted.md", "id": "aaaaaaa.aaaa", "body": body}
 
-    assert module._connector_read_your_write(Client(), "independent-marker", "accepted.md") == expected
+    assert module._connector_read_your_write(Client(), "independent-marker", "aaaaaaa.aaaa") == expected
     assert calls[0][1]["query"] == "independent-marker"
     if expected == "exact":
         assert calls[1] == ("read_memory", {"path": "memory:1"})

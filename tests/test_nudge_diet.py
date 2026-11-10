@@ -35,7 +35,8 @@ checkpoint = _load("exomem_continuation_checkpoint")
 
 #: Byte ceilings for what a hook injects (served-JSON is a few bytes larger).
 CEILINGS = {
-    "capture short": (capture.REMINDER_SHORT, 285),
+    # 285 -> 320: advice the user says failed is superseded at once (2026-11-09 dogfood incident).
+    "capture short": (capture.REMINDER_SHORT, 320),
     # 195 -> 270 (189 -> 268 in use): the ask gains the close sentence, which keeps the
     # live-policy condition, a valid record call and the completion-before-citation rule.
     "episode ask": (capture.EPISODE_ASK, 270),
@@ -66,7 +67,8 @@ def test_a_whole_mcp_block_stays_one_short_paragraph():
     """The client prints the whole reason in its block box, so the sum is the budget."""
     key = capture.episode_key("claude", "s-size")
     fires = {
-        "capture": (_mcp_fire(capture.REMINDER_SHORT), 370),
+        # 370 -> 405 with the short capture check's 285 -> 320 above.
+        "capture": (_mcp_fire(capture.REMINDER_SHORT), 405),
         "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 385),
     }
     for name, (reason, ceiling) in fires.items():

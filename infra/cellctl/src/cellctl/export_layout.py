@@ -12,6 +12,8 @@ from .storage_config import GIB
 # The cell command's own phases (`exomem cell-export --phase`), and the step
 # that verifies the completed version. Each names one Job of the export.
 PAUSE, PACK, UPLOAD, VERIFY = "pause", "pack", "upload", "verify"
+# Every step Job of one export, in the order cellctl starts them.
+STEPS = (PAUSE, UPLOAD, PACK, VERIFY)
 # C6: the part URLs cover the planned archive plus 2% for what the plan cannot count.
 SIZE_MARGIN_PERCENT = 102
 # One presigned URL is one Job argument; this keeps a Job object far inside the

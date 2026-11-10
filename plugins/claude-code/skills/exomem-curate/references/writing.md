@@ -97,7 +97,7 @@ Use this loop whenever a durable conclusion should enter Exomem:
    `write_feedback.suggestions.computed` tells you whether they ran.
 7. If a near-duplicate warning fires, prefer `edit_note` or `supersede_note` over a parallel page. If suggestions are useful, add them with a follow-up `edit_note`.
 8. If the write returned a `structure_suggestion`, handle it as below.
-9. Report one line: `Saved -> <path>`.
+9. Report one line: `Saved -> <title>`.
 
 ## Closing a multi-step workflow
 

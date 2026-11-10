@@ -156,9 +156,11 @@ The exit code is 0 only on a pass, which means no loss on the first pass, no unk
 ## Owner export
 
 The optional owner-export stage connects the real Substrate owner endpoints to C6,
-the running controller, the export Job and versioned storage. It creates one
-invented source in the disposable owner's cell, requests its export, downloads
-the issued version and runs the canonical archive verifier in the Cloud image.
+the running controller, the export's step Jobs and versioned storage. It creates one
+invented source in the disposable owner's cell and requests its export. When the
+export is ready, it waits until no step Job, step pod, staging claim or verification
+Secret of the export remains in the cell namespace. Next, it downloads the issued
+version and runs the canonical archive verifier in the Cloud image.
 It then expires only that fixture's row and checks deletion and return to Ready.
 
 Select `owner-export` in the existing `Cloud rehearsal` workflow. This runs steps

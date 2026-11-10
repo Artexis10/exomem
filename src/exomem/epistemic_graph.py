@@ -13434,7 +13434,7 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     }
     if "/" not in cleaned:
         found.update(resolver.stems.get(cleaned, ()))
-        found.update(resolver.titles.get(cleaned.lower(), ()))
+        found.update(resolver.titles.get(vault_module.title_key(cleaned), ()))
     return {f"{candidate}.md" for candidate in found}
 
 

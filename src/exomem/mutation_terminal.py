@@ -2677,7 +2677,11 @@ def _commit_metadata_projection(leaf: Any) -> dict[str, str]:
     these identities. Semantic hashes are copied only from the same committed
     primary path, not an auxiliary page or a preflight preview.
     """
-    if not isinstance(leaf, Mapping) or not isinstance(leaf.get("path"), str):
+    if not isinstance(leaf, Mapping):
+        return {}
+    # A replace reports the successor it wrote as `new_path`; its hashes are that page's.
+    page = leaf.get("path") if isinstance(leaf.get("path"), str) else leaf.get("new_path")
+    if not isinstance(page, str):
         return {}
     projection = {
         key: leaf[key] for key in ("before_hash", "after_hash") if _hash(leaf.get(key))
@@ -2686,11 +2690,20 @@ def _commit_metadata_projection(leaf: Any) -> dict[str, str]:
     if (
         "after_hash" not in projection
         and isinstance(semantic, Mapping)
-        and semantic.get("path") == leaf["path"]
+        and semantic.get("path") == page
         and semantic.get("mutated") is True
         and _hash(semantic.get("after_hash"))
     ):
         projection["after_hash"] = semantic["after_hash"]
+    creation = leaf.get("creation")
+    if (
+        "after_hash" not in projection
+        and isinstance(creation, Mapping)
+        and creation.get("mutated") is True
+        and _hash(creation.get("after_hash"))
+    ):
+        # A page this write created: its own commit, which is the leaf's page by construction.
+        projection["after_hash"] = creation["after_hash"]
     for key in ("unit_ref", "removed_unit_ref"):
         value = leaf.get(key)
         if not isinstance(value, str) or len(value) > 128:
