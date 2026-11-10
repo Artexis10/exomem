@@ -39,6 +39,7 @@ from . import context_refs
 if TYPE_CHECKING:
     from .epistemic_dimensions import DimensionEdges
     from .epistemic_graph import UnitEdge
+    from .lifecycle_statuses import Basis
     from .relation_registry import RelationRegistry
     from .semantic_language_registry import SemanticLanguageRegistry
 
@@ -75,7 +76,7 @@ class DisplayUnit:
 
     `node` is the unit's graph node key, or None when it has none. `kind` is its kind key, or None
     when the kind is another vocabulary instance's entry, which has no trait here. `historical` is
-    whether its page's lifecycle class is history (`lifecycle_statuses.Classification.historical`).
+    whether its page's lifecycle class is history (`page_is_history`).
     """
 
     ref: str
@@ -229,6 +230,16 @@ def _is_open(unit: DisplayUnit, index: _EdgeIndex, language: SemanticLanguageReg
         and not unit.verdict
         and not any(end in index.settled for end in unit.ends)
     )
+
+
+def page_is_history(
+    status_basis: Basis, status: Any, *, path: str, frontmatter: Mapping[str, Any] | None
+) -> bool:
+    """The lifecycle half of `replaced`: whether a unit's page is history, as its lifecycle class
+    says. An unclassified page is not history."""
+    # Debt: `working_set_currency.state` also treats an expired `until` as replaced; this view does not.
+    classification = status_basis.classify(status, path=path, frontmatter=frontmatter)
+    return classification.lifecycle_class is not None and classification.historical
 
 
 def _replaced(unit: DisplayUnit, index: _EdgeIndex, name) -> dict[str, str] | bool | None:

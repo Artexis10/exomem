@@ -5111,9 +5111,7 @@ def _group_request(
     its ref, what its display reads and which requested `groups` it belongs to.
 
     `dimensions` is the answer the filter kept the units by, so a group holds exactly the units
-    the filter placed in it. `edges` are the ones the display reads. A unit's page is history when
-    its lifecycle class says so, as `working_set_currency.state` reads it; an unclassified page is
-    not history.
+    the filter placed in it. `edges` are the ones the display reads.
     """
     from . import semantic_labels
 
@@ -5125,14 +5123,15 @@ def _group_request(
         own_kind = not structured_filters.foreign_entry("unit.kind", view.get("kind"), view, instance)
         frontmatter = hit.frontmatter if isinstance(hit, _UnitCandidate) else None
         status = frontmatter.get("status") if frontmatter is not None else hit.parent_status
-        classification = status_basis.classify(status, path=path, frontmatter=frontmatter)
         unit = dimension_display.DisplayUnit(
             ref=hit.unit_ref,
             path=path,
             node=epistemic_dimensions.node_key(path, view),
             kind=str(view.get("kind")) if own_kind else None,
             verdict=view.get("verdict"),
-            historical=classification.lifecycle_class is not None and classification.historical,
+            historical=dimension_display.page_is_history(
+                status_basis, status, path=path, frontmatter=frontmatter
+            ),
             holder=getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None),
             occurred_at=getattr(hit, "occurred_at", None),
         )

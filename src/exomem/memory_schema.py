@@ -1326,19 +1326,17 @@ def _display_unit(
     own_kind: bool,
     status_basis: lifecycle_statuses.Basis,
 ) -> dimension_display.DisplayUnit:
-    """What a dimension's display reads of one scanned unit. Its page is history when its lifecycle
-    class says so; an unclassified page is not."""
+    """What a dimension's display reads of one scanned unit."""
     frontmatter = item["frontmatter"]
-    classification = status_basis.classify(
-        frontmatter.get("status"), path=item["path"], frontmatter=frontmatter
-    )
     return dimension_display.DisplayUnit(
         ref=context_refs.vault_ref(item["path"]),
         path=item["path"],
         node=epistemic_dimensions.node_key(item["path"], view),
         kind=item["kind"] if own_kind else None,
         verdict=item.get("verdict"),
-        historical=classification.lifecycle_class is not None and classification.historical,
+        historical=dimension_display.page_is_history(
+            status_basis, frontmatter.get("status"), path=item["path"], frontmatter=frontmatter
+        ),
     )
 
 
