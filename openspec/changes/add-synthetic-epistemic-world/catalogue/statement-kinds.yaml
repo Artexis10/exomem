@@ -1,0 +1,25 @@
+# The kinds of statement that a holder can make in a world. A kind is an open word. Its
+# `commitment` is a closed attribute from `attributes.yaml`, and it is the only thing about a kind
+# that code reads. These are the neutral world's own kinds. A product's projection maps them.
+schema_version: 1
+statement_kinds:
+  fact: {commitment: asserted, description: "The holder states that something is the case."}
+  decision: {commitment: asserted, description: "The holder decides a value that the holder governs."}
+  observation: {commitment: asserted, description: "The holder reports what the holder saw."}
+  measurement: {commitment: asserted, description: "The holder reports a measured value."}
+  result: {commitment: asserted, description: "The holder reports the outcome of a test or a check."}
+  instruction: {commitment: none, description: "The holder tells someone to do something."}
+  rule: {commitment: asserted, description: "The holder states a rule, a default or an exception."}
+  definition: {commitment: asserted, description: "The holder fixes what a term means."}
+  estimate: {commitment: proposed, description: "The holder gives a value without measuring it."}
+  plan: {commitment: proposed, description: "The holder states what is to be done."}
+  proposal: {commitment: proposed, description: "The holder puts an option forward for others to decide."}
+  hypothesis: {commitment: proposed, description: "The holder offers an explanation that is still under test."}
+  assumption: {commitment: proposed, description: "The holder takes something as given without checking it."}
+  prediction: {commitment: proposed, description: "The holder says what will happen, with or without a probability."}
+  opinion: {commitment: proposed, description: "The holder states a preference or a judgement."}
+  report: {commitment: reported, description: "The holder passes on what another holder said."}
+  question: {commitment: none, description: "The holder asks something."}
+  supposition: {commitment: none, description: "The holder reasons from something taken as true for the sake of argument."}
+  example: {commitment: none, description: "The holder illustrates a point with one case."}
+  story: {commitment: none, description: "The holder tells something that is not meant as a report."}
