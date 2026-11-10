@@ -15,9 +15,9 @@ Each behaviour reads only closed schema values, so a vault dimension that names 
   unit or at its page.
 - `order_in_time` sorts a group by `occurred_at`, earliest first, with undated units after the
   dated ones. Each edge between two members whose relation has the `earlier_than_target` or
-  `later_than_target` behaviour then orders its two ends, by a stable topological sort that keeps
-  the first order wherever no edge decides. Units whose edges form a cycle keep their first order,
-  and the group names them as an order conflict.
+  `later_than_target` behaviour then orders its two ends, and a unit that no edge orders keeps its
+  place wherever the edges allow. The edges inside a cycle decide nothing: its units keep their
+  first order, and the group names them as an order conflict.
 
 A behaviour changes only order and marks; it never removes a unit. Every mark comes from the edges
 that the request read in its caller's view (`epistemic_dimensions.read_edges`), so a page withheld
@@ -27,6 +27,7 @@ orders the group, and the group says that its edge state is unknown.
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -285,8 +286,11 @@ def _by_edges(
     """`order` changed only where an order edge between two members decides, and the members whose
     edges form a cycle.
 
-    A cycle's members are one component that keeps its first order. The components are then sorted
-    topologically, taking at each step the waiting component that comes first in `order`.
+    The edges between members of one cycle decide nothing, so those members keep their first
+    order and stay apart. The rest are placed from the end: each step takes, of the members that
+    no unplaced member must follow, the one latest in `order`. So a member moves only when an edge
+    puts it ahead of a member that came before it, and then just ahead of that member; every
+    member before it in `order` stays before it.
     """
     reached: dict[End, list[int]] = {}
     for i, unit in enumerate(units):
@@ -310,32 +314,27 @@ def _by_edges(
         return seen
 
     reach = {i: reachable(i) for i in order}
-    # Each component is named by its first member in `order`.
-    component: dict[int, int] = {}
-    for i in order:
-        if i not in component:
-            for j in order:
-                if j == i or (j in reach[i] and i in reach[j]):
-                    component.setdefault(j, i)
-    waiting_on: dict[int, set[int]] = {c: set() for c in component.values()}
+    in_cycle = tuple(i for i in order if i in reach[i])
+    # Two members that reach each other share a cycle, and the edge between them decides nothing.
+    later = {i: {j for j in after if i not in reach[j]} for i, after in later.items()}
+    earlier: dict[int, set[int]] = {i: set() for i in order}
     for i, after in later.items():
         for j in after:
-            if component[i] != component[j]:
-                waiting_on[component[j]].add(component[i])
+            earlier[j].add(i)
     position = {i: p for p, i in enumerate(order)}
-    pending = sorted(waiting_on, key=position.__getitem__)
-    placed: set[int] = set()
-    result: list[int] = []
-    while pending:
-        # The condensed graph has no cycle, so some pending component always waits on none.
-        ready = next(c for c in pending if waiting_on[c] <= placed)
-        pending.remove(ready)
-        placed.add(ready)
-        result.extend(i for i in order if component[i] == ready)
-    sizes: dict[int, int] = {}
-    for c in component.values():
-        sizes[c] = sizes.get(c, 0) + 1
-    return result, tuple(i for i in order if sizes[component[i]] > 1)
+    waiting = {i: len(after) for i, after in later.items()}
+    ready = [-position[i] for i in order if not waiting[i]]
+    heapq.heapify(ready)
+    placed: list[int] = []
+    while ready:
+        i = order[-heapq.heappop(ready)]
+        placed.append(i)
+        for j in earlier[i]:
+            waiting[j] -= 1
+            if not waiting[j]:
+                heapq.heappush(ready, -position[j])
+    placed.reverse()
+    return placed, in_cycle
 
 
 @dataclass(frozen=True, slots=True)

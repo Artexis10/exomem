@@ -728,3 +728,42 @@ def test_order_in_time_keeps_the_date_order_of_a_cycle_and_names_it() -> None:
 
     assert [units[i].node for i in view.order] == ["d", "c", "b", "a"]
     assert sorted(units[i].node for i in view.order_conflict) == ["a", "b", "c"]
+
+
+def _dated(node: str, month: str | None = None) -> dimension_display.DisplayUnit:
+    return _unit(T, node, "timeline_event", occurred_at=f"2026-{month}-01" if month else None)
+
+
+def test_order_in_time_moves_only_the_units_an_edge_orders() -> None:
+    """Catches an edge that pushes dated events, which no edge orders, ahead of the events it does
+    order: an undated step before January's event must not let February to May jump ahead."""
+    units = (_dated("jan", "01"), _dated("feb", "02"), _dated("mar", "03"), _dated("may", "05"),
+             _dated("prep"))
+
+    view = _show(units, ["order_in_time"], (UnitEdge(T, "prep", T, "jan", "precedes"),))
+
+    assert [units[i].node for i in view.order] == ["prep", "jan", "feb", "mar", "may"]
+    # A chain into an event that is not the latest dated one lands just before that event.
+    chain = (_dated("jan", "01"), _dated("feb", "02"), _dated("mar", "03"), _dated("draft"),
+             _dated("review"))
+    edges = (
+        UnitEdge(T, "draft", T, "review", "precedes"),
+        UnitEdge(T, "review", T, "feb", "precedes"),
+    )
+
+    view = _show(chain, ["order_in_time"], edges)
+
+    assert [chain[i].node for i in view.order] == ["jan", "draft", "review", "feb", "mar"]
+    assert view.order_conflict == ()
+
+
+def test_order_in_time_leaves_a_unit_between_two_in_a_cycle_where_its_date_puts_it() -> None:
+    """Catches a cycle that is kept together as one block, so the event dated between its two
+    members is pushed after both of them."""
+    units = (_dated("a", "01"), _dated("b", "02"), _dated("c", "03"))
+    edges = (UnitEdge(T, "a", T, "c", "precedes"), UnitEdge(T, "c", T, "a", "precedes"))
+
+    view = _show(units, ["order_in_time"], edges)
+
+    assert [units[i].node for i in view.order] == ["a", "b", "c"]
+    assert sorted(units[i].node for i in view.order_conflict) == ["a", "c"]

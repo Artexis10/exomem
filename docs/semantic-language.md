@@ -213,8 +213,9 @@ vault dimension that names one needs no code change:
 - `order_in_time` sorts the group by `occurred_at`, earliest first, with undated
   units after the dated ones. Each edge between two members whose relation has
   the `earlier_than_target` or `later_than_target` behaviour then orders its two
-  ends. When those edges form a cycle, its units keep the date order, and the
-  group lists them in `order_conflict`.
+  ends. A unit that no such edge orders keeps its place in the date order
+  wherever the edges allow. The edges inside a cycle decide nothing: its units
+  keep the date order, and the group lists them in `order_conflict`.
 
 A display behaviour changes only order and marks. It never removes a unit or
 changes the unit's fields. Marks read only the edges that the caller may see, so
