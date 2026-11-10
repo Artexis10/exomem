@@ -33,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -112,7 +113,7 @@ class GitHub:
     def __init__(self, settings: Settings, transport: Transport) -> None:
         self.settings, self.transport = settings, transport
 
-    def _get(self, path: str) -> object:
+    def _get(self, path: str) -> Any:
         status, body = self.transport("GET", f"{self.settings.github_api}{path}", {
             "Authorization": f"Bearer {self.settings.github_token}",
             "Accept": "application/vnd.github+json",
@@ -240,13 +241,17 @@ def uncrossed_barriers(release: str, deployments: list[dict], barriers: dict) ->
     """Entries at or below the release that no successful platform Deployment crossed."""
 
     target = parse_release(release)
-    crossed = set()
+    if target is None:
+        raise Stop("RELEASE_NOT_FOUND", ok=False)
+    crossed: set[str] = set()
     for deployment in deployments:
         listed = deployment["payload"].get("barriers_crossed")
         if isinstance(listed, list):
             crossed.update(entry for entry in listed if isinstance(entry, str))
+    # An entry whose version cannot be read stops the run rather than being crossed unseen.
     return [entry["id"] for entry in barriers["barriers"]
-            if parse_release(entry["version"]) <= target and entry["id"] not in crossed]
+            if ((version := parse_release(entry["version"])) is None or version <= target)
+            and entry["id"] not in crossed]
 
 
 def verify_attestation(repository: str, image: str, tag: str) -> bool:
