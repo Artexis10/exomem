@@ -39,7 +39,10 @@
     "pvc_reserved_free_bytes": 1073741824,
     "recall_lag_warn_seconds": 900,
     "cell_log_cap_bytes": 134217728,
-    "safe_volume_attachments_remaining": 10
+    "safe_volume_attachments_remaining": 10,
+    "rollout_held_warn_seconds": 3600,
+    "rollout_stalled_warn_seconds": 259200,
+    "canary_wait_warn_seconds": 3600
   },
   "prohibited_log_fields": [
     "email",

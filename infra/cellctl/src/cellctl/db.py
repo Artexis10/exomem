@@ -217,6 +217,26 @@ async def retire_content_keys(connection: asyncpg.Connection, now: datetime, *, 
         f"OR cell_root_key_wrapped IS NOT NULL OR backup_key_wrapped IS NOT NULL{media_held})", now, *arguments)
 
 
+# automate-cloud-releases D1: Substrate's record of every image that was ever
+# cell_image, with its release tag (NULL for a seeded image that matches no
+# published release; Substrate migration 0085). cellctl's role reads it and
+# never writes it.
+IMAGE_HISTORY_TABLE = "exomem_cloud_image_history"
+
+
+async def read_image_releases(connection: asyncpg.Connection) -> dict[str, str]:
+    """Each recorded digest's release tag, keyed by its `sha256:` digest. A digest
+    with no tag is left out: the forward-only rule reads it as unmapped. The table
+    holds one row per release, so the read stays small."""
+
+    from .barriers import image_digest
+
+    records = await connection.fetch(
+        f"SELECT image, release_tag FROM {IMAGE_HISTORY_TABLE} WHERE release_tag IS NOT NULL"
+    )
+    return {image_digest(record["image"]) or record["image"]: record["release_tag"] for record in records}
+
+
 async def read_cell_image(connection: asyncpg.Connection) -> str | None:
     value = await connection.fetchval(
         "SELECT value FROM exomem_cloud_settings WHERE key = 'cell_image'"

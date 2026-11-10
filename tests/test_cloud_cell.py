@@ -468,6 +468,80 @@ def test_cloud_health_port_answers_readiness_and_nothing_else(
         _teardown_activation(mcp)
 
 
+def test_cloud_cell_counts_mcp_requests_and_serves_the_history_on_the_health_port(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """automate-cloud-releases D4 (task 1.5). Probes never count, only MCP requests
+    do; readiness reports the requests in flight and the newest request's age (null
+    before the first request) but never the history; the history is served only on
+    the health-only port, in the shape cellctl parses; a corrupt counts file starts
+    new counts and the cell serves; and the counts file stays outside the vault."""
+    import json
+    import os
+    import socket
+
+    from cellctl_cell_readiness import cell_readiness
+
+    from exomem import cell_traffic, readiness, state_paths
+
+    monkeypatch.setattr(
+        readiness, "retrieval_admission", lambda _vault_root=None: {"state": "ready", "admitted": True}
+    )
+    counts = state_paths.state_store_root() / cell_traffic.FILE_NAME
+    counts.parent.mkdir(parents=True, exist_ok=True)
+    counts.write_bytes(b"\x00 not json")
+    with socket.create_server(("127.0.0.1", 0)) as probe:
+        port = probe.getsockname()[1]
+    monkeypatch.setenv(cell_readiness.CELL_HEALTH_PORT_ENV, str(port))
+    _spy_dotenv(monkeypatch)
+    _cloud_env(monkeypatch)
+    mcp = server.build_server(require_auth=True, http_host="127.0.0.1")
+    try:
+        app = mcp.http_app(stateless_http=True, json_response=True)
+
+        async def scenario():
+            async with app.router.lifespan_context(app):
+                async with (
+                    httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app), base_url="http://cell.local"
+                    ) as main_port,
+                    httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as health_port,
+                ):
+                    for _ in range(3):
+                        await main_port.get("/health")
+                        await main_port.get(cell_readiness.CELL_READINESS_PATH)
+                        await health_port.get(cell_readiness.CELL_READINESS_PATH)
+                    fresh = await health_port.get(cell_readiness.CELL_READINESS_PATH)
+                    probes_only = await health_port.get(cell_readiness.CELL_TRAFFIC_HISTORY_PATH)
+                    await main_port.post(
+                        "/mcp",
+                        headers=_headers(TOKEN),
+                        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                    )
+                    after = await health_port.get(cell_readiness.CELL_READINESS_PATH)
+                    history = await health_port.get(cell_readiness.CELL_TRAFFIC_HISTORY_PATH)
+                    on_main = await main_port.get(cell_readiness.CELL_TRAFFIC_HISTORY_PATH)
+                    return fresh, probes_only, after, history, on_main
+
+        fresh, probes_only, after, history, on_main = asyncio.run(scenario())
+        assert cell_readiness.traffic_idle(fresh.content) == (0, None)
+        assert sum(cell_readiness.traffic_history(probes_only.content)[2]) == 0
+        inflight, age = cell_readiness.traffic_idle(after.content)
+        assert inflight == 0 and age is not None
+        parsed = cell_readiness.traffic_history(history.content)
+        assert parsed is not None and sum(parsed[2]) == 1
+        for answer in (fresh, after):
+            assert "requests" not in answer.text and "observed_seconds" not in answer.text
+            assert "retention_hours" not in json.loads(answer.content)["traffic"]
+        assert on_main.status_code == 404
+        # The stop flushed the counts outside the vault.
+        assert json.loads(counts.read_text(encoding="utf-8"))["requests"][-1] == 1
+        assert not counts.resolve().is_relative_to(vault.resolve())
+        assert cell_traffic.FILE_NAME not in {name for _, _, files in os.walk(vault) for name in files}
+    finally:
+        _teardown_activation(mcp)
+
+
 def test_cloud_health_routes_disclose_no_vault_content(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
