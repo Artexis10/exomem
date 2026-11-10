@@ -1330,16 +1330,15 @@ class FileWatcher:
         owned_rel = self._import_target(path)
         if self._importer is None and path.suffix.lower() != ".md" and self._is_kb(path):
             from . import media_store
-            from .vault_store.media import DEFER, SUPPRESS
 
             disposition = media_store.managed_event(self._vault_root, path)
-            if disposition == DEFER:
+            if disposition == media_store.DEFER:
                 with self._lock:
                     self._managed_media_events[path] = deleted
                     self._last_change = time.monotonic()
                 self._wake.set()
                 return
-            if disposition == SUPPRESS:
+            if disposition == media_store.SUPPRESS:
                 return
         if notify_views:
             # A same-stat external save can match index suppression; edit-back still needs its hint.

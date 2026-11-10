@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from .. import held_fs, lexstore, vault
 from ..cli_ops import OpError
+from ..media_store import DEFER, SUPPRESS
 from . import media, ownership, projector, read, write
 from .projector import HELD_DELETE, HELD_EDIT, Facts, OnDisk, Runner
 
@@ -377,9 +378,9 @@ class Importer:
             answer = media.managed(self._root, rel)
             if answer is None:
                 settled.append(rel)
-            elif answer == media.SUPPRESS:
+            elif answer == SUPPRESS:
                 report.managed.append(rel)
-            elif answer == media.DEFER:
+            elif answer == DEFER:
                 report.deferred.append(rel)
             else:
                 report.unjudged[rel] = MEDIA_STORE_UNREADABLE

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import types
@@ -251,6 +252,41 @@ def test_evicting_and_restoring_an_original_is_no_outside_change(
 
     assert restored.imported == [] and named.imported == []
     assert media_state(vault, rel) == before
+
+
+def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and_restored(
+    stored, selected_store, store_thread
+):
+    """An offload that reads the sidecar back from a Markdown file that store mode has not
+    projected: it commits the reference, then raises and leaves the original unfinished (cached,
+    its protection kept, no proof that the cache matches), so the eviction has nothing to rest on.
+    """
+    settling = importer.Importer(stored, run=store_thread.run)
+    (stored / PICTURE).write_bytes(PICTURE_BYTES)
+    settling.import_paths([PICTURE])
+
+    reference = _offload(stored, stored / PICTURE)
+
+    assert reference is not None
+    assert reference.object.encode() in stored_sidecar(stored, PICTURE)
+    assert media_store.original_state(stored, PICTURE).state == "cached"
+    assert media_store.cache_matches(stored, stored / PICTURE)
+    with sqlite3.connect(media_jobs.job_store_path(stored)) as ledger:
+        assert ledger.execute("SELECT count(*) FROM media_protections").fetchone() == (0,)
+    settling.sweep()
+    before = media_state(stored, PICTURE)
+
+    assert media_store.evict(stored, stored / PICTURE)
+    assert not (stored / PICTURE).exists()
+    evicted = settling.sweep()
+
+    assert evicted.removed == [] and media_state(stored, PICTURE) == before
+
+    assert media_store.hydrate_evicted(stored, stored / PICTURE)
+    restored = settling.sweep()
+
+    assert restored.imported == [] and media_state(stored, PICTURE) == before
+    assert before["held"] == []
 
 
 def test_a_media_result_that_lands_while_the_store_is_busy_commits_on_the_store_thread(

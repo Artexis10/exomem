@@ -37,10 +37,6 @@ log = logging.getLogger(__name__)
 
 _Result = TypeVar("_Result")
 
-#: The two answers of ``media_store.managed_event``, which this lane does not edit. The file-mode
-#: watcher compares the same strings and imports them from here, so each is written once.
-DEFER = "defer"
-SUPPRESS = "suppress"
 #: What ``managed`` answers for a missing file when the media store cannot be read: the importer
 #: cannot tell an eviction from a delete, so it settles nothing and the next sweep looks again.
 UNREADABLE = "unreadable"
@@ -147,6 +143,6 @@ def managed(root: Path, rel: str) -> str | None:
     ):
         log.warning("media store state unreadable for %s", rel, exc_info=True)
         return None if os.path.lexists(path) else UNREADABLE
-    if answer == SUPPRESS and os.path.lexists(path):
+    if answer == media_store.SUPPRESS and os.path.lexists(path):
         return None
     return answer
