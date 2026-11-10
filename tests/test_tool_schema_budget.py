@@ -95,11 +95,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # 6,700 B. read_import names `file` as the next step and measures 3,119 B, so its ceiling rounds to 3,150 B.
 # The kind replaces a six-call import loop.
 # With every change above, the complete local wire measures 172,142 B, so the budget is 172,150 B.
-# The `verdict` parameter of observe_memory says that its five verdicts are the shipped ones and names the
-# schema read that lists a vault's own, so an agent does not read the five as the accepted set.
-# change_observations measures 6,232 B and its ceiling rounds to 6,250 B; prepare_note shares the text
-# and stays under its ceiling. The complete local wire measures 172,396 B, so the budget is 172,400 B.
-TOTAL_BUDGET = 172_400
+TOTAL_BUDGET = 172_150
 
 #: Per-tool ceilings for nested jobs and hidden grouped compatibility spellings.
 TOOL_CEILINGS: dict[str, int] = {
@@ -114,7 +110,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "change_files": 7100,
     "change_governance": 4650,
     "change_media": 1600,
-    "change_observations": 6250,
+    "change_observations": 6200,
     "change_plans": 3400,
     "change_records": 5550,
     "change_schema": 9450,

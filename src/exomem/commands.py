@@ -8691,9 +8691,7 @@ def op_observe_memory(
         tags: Replaces on update.
         context: Replaces on update.
         relations: {kind, target} objects. Replaces on update.
-        verdict: Rich: a verdict key or label, never a number. Shipped: abandoned, confirmed,
-            inconclusive, qualified, refuted; `schema_memory(subject="categories",
-            operation="infer")` lists a vault's. '' clears.
+        verdict: Rich verdict in words, never a number; `read_schema` lists them. '' clears.
         check_by: Rich ISO revisit date; '' clears.
         as_of: Rich ISO start date; '' clears.
         until: Rich ISO last valid date; '' clears.
