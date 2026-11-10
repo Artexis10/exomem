@@ -40,8 +40,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
+_CHANGED_TESTS = pytest.StashKey[frozenset[Path]]()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    # An option, not an environment variable: xdist workers receive it, and a nested pytest
+    # run inside a test, such as a full-suite collection check, does not inherit it.
+    parser.addoption(
+        "--changed-tests",
+        default="",
+        help="Collect only these space-separated repository-relative test modules (CI's changed-tests job).",
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(RepositoryDocsReads(), "repository-docs-reads")
+    config.stash[_CHANGED_TESTS] = frozenset(REPO_ROOT / module for module in config.getoption("changed_tests", "").split())
 
 
 #: Set only by scripts/ci-prepare-bytecode.sh: "<part>/<parts>" collects one disjoint share of the
@@ -50,7 +64,14 @@ _COLLECT_PART = os.environ.get("EXOMEM_COLLECT_PART", "").strip()
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    if not _COLLECT_PART or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+    if collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    # --changed-tests ignores every other module; the tier and --ignore rules still decide the
+    # named ones, which a module named as a command-line argument would bypass.
+    changed = config.stash[_CHANGED_TESTS]
+    if changed and collection_path.resolve() not in changed:
+        return True
+    if not _COLLECT_PART:
         return None
     part, parts = (int(value) for value in _COLLECT_PART.split("/"))
     if not 0 <= part < parts:
