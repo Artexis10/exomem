@@ -25,8 +25,8 @@
 ## 4. Projection and outside edits
 
 - [x] 4.1 Add the projector: durable write, then manifest; startup sweep of temporary files; coalescing; queue depth and oldest-intent age in status. Before replacing a file, compare it with the manifest and hold on a difference; never project a held path. Optional, for D12: project a store move as a rename, through the queue's move intent, when the file on disk matches the manifest.
-- [ ] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
-- [ ] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
+- [x] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
+- [x] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
 - [ ] 4.4 List held items in the review tool and resolve each with keep-mine or keep-store in the repair tool: keep-mine adopts the person's current file behind a store-revision check; keep-store saves the person's bytes to a dated folder outside the vault first; one audit row per resolution; ship before 4.2 and 4.3 import.
 
 ## 5. Stage 2: semantic units and canonicity
@@ -42,6 +42,8 @@
   - Known gap: a page that recall policy did not admit keeps a stamp without rows, so a later policy relaxation does not re-embed it until the page changes.
 - [ ] 6.2 Let a Cloud cell run without per-write projection and export Markdown on request.
 - [ ] 6.3 Run the acceptance set on native Windows/NTFS.
+- [ ] 6.4 Write the derived media rows that `media_processing.reconcile_media` writes from the store thread in store mode. The importer records each imported or renamed media binary as waiting for this writer and calls no media processing, which `VAULT_STORE_OFF_THREAD` refuses off the store thread. Done when an outside media file gains its derived rows from the store thread.
+- [ ] 6.5 Before store mode serves, route the media store's originals eviction and restore through `media_store.managed_event`. Otherwise the importer reads each eviction as an outside delete of a binary and each restore as an outside create.
 
 ## 7. Acceptance and switch
 

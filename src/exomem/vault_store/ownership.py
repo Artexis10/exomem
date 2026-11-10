@@ -72,6 +72,12 @@ def _claimed(rel: str) -> Ownership | None:
     return None
 
 
+def is_markdown(rel: str) -> bool:
+    """Whether a vault-relative path names a Markdown file, in any letter case."""
+    # A file extension is a closed set that the format fixes; it names the format, not the meaning.
+    return rel.lower().endswith(".md")
+
+
 def classify(rel: str) -> Ownership:
     """Who owns one vault-relative POSIX path. It does no I/O, and the first matching rule wins.
 
@@ -98,8 +104,7 @@ def classify(rel: str) -> Ownership:
         return claimed
     if len(parts) > 1 and parts[0] == vault.SCHEMA_OVERLAY_DIRNAME:
         return Ownership.PAGE
-    # A file extension is a closed set that the format fixes; it names the format, not the meaning.
-    if rel.lower().endswith(".md"):
+    if is_markdown(rel):
         return Ownership.PAGE
     return Ownership.BINARY
 

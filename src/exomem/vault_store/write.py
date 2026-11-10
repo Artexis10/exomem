@@ -124,9 +124,14 @@ class BinaryRecord:
 
 @dataclass(frozen=True, slots=True)
 class BinaryDelete:
-    """Drop a binary's record and queue the removal of its file."""
+    """Drop a binary's record and queue the removal of its file.
+
+    ``on_disk`` says that the file is already gone, so the commit queues no removal: a file that a
+    person restores before the projector runs is then never taken away.
+    """
 
     rel: str
+    on_disk: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,7 +285,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for record in change.binaries:
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
-            _delete_binary(tx, binary.rel, audit)
+            _delete_binary(tx, binary, audit)
         derive.apply(tx, writer.root, change, existing)
         _enqueue(tx, audit.intents, revision, now)
         for held in change.resolves_held:
@@ -555,12 +560,12 @@ def _record_binary(tx: Connection, record: BinaryRecord, revision: int, audit: _
     audit.wrote(record.rel, record.sha256, queue=False)
 
 
-def _delete_binary(tx: Connection, rel: str, audit: _Trail) -> None:
-    row = tx.execute("SELECT sha256 FROM store_binaries WHERE path = ?", (rel,)).fetchone()
+def _delete_binary(tx: Connection, binary: BinaryDelete, audit: _Trail) -> None:
+    row = tx.execute("SELECT sha256 FROM store_binaries WHERE path = ?", (binary.rel,)).fetchone()
     if row is None:
-        raise StoreConflict(rel, "the store records no binary to delete")
-    tx.execute("DELETE FROM store_binaries WHERE path = ?", (rel,))
-    audit.removed(rel, row[0])
+        raise StoreConflict(binary.rel, "the store records no binary to delete")
+    tx.execute("DELETE FROM store_binaries WHERE path = ?", (binary.rel,))
+    audit.removed(binary.rel, row[0], queue=not binary.on_disk)
 
 
 def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:

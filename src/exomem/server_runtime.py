@@ -1204,7 +1204,13 @@ def _create_file_watcher(vault_root: Path) -> Any | None:
     from . import file_watcher as file_watcher_module
 
     try:
-        return file_watcher_module.FileWatcher(vault_root)
+        from .vault_store import importer, mode
+
+        # A store-mode vault's files are the store's projection: the watcher hands what it sees to
+        # the importer. A file-mode vault, and one whose mode records disagree, keeps its own path.
+        store_mode = mode.store_mode_active(vault_root)
+        store_importer = importer.Importer(vault_root) if store_mode else None
+        return file_watcher_module.FileWatcher(vault_root, importer=store_importer)
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher unavailable; core service continuing: %s", exc)
         return None
