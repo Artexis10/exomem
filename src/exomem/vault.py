@@ -8284,12 +8284,27 @@ def find_inbound_wikilinks(
     )
 
 
-def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
-    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them."""
+def find_inbound_wikilinks_many(
+    vault_root: Path, targets: Iterable[str], *, held: bool = False
+) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them.
+
+    `held` says that the vault holds every target, as a store holds a page that may have no file
+    yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
+    does for one target, and the index answers which ones those are without a look at the disk.
+    """
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshots = {target: _snapshot_inbound(data, target) for target in targets}
-    return {target: _select_inbound_wikilinks(snapshot, target, None) for target, snapshot in snapshots.items()}
+    return {
+        target: _select_inbound_wikilinks(
+            snapshot,
+            target,
+            None,
+            target_has_no_file=held and target not in snapshot.sources,
+        )
+        for target, snapshot in snapshots.items()
+    }
 
 
 def cached_inbound_wikilinks(

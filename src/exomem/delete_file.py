@@ -303,12 +303,17 @@ def _delete_file_local(
             pass
 
     if store_writer is not None:
-        refusal = _store_form_gap(vault_root, rel_path, fm)
+        refusal = store_targets.page_only_form_gap(vault_root, rel_path, fm)
         if refusal is not None:
             raise store_availability.unrouted("delete_file", refusal)
         # Before validation returns, so a plan that validates is a plan that commits.
         assert catalog_before_hash is not None  # a page that reaches here is Markdown and was read
-        _refuse_active_catalog(vault_root, rel_path, catalog_before_hash)
+        store_targets.active_catalog_gap(
+            vault_root,
+            "delete_file",
+            error_class=DeleteFileError,
+            removals=(catalog_publication.CatalogRemoval(rel_path, catalog_before_hash),),
+        )
 
     # Normalize expected_dead_inbound for filtering.
     expected_set: set[str] = set()
@@ -333,7 +338,9 @@ def _delete_file_local(
     # projection and the notes nothing has imported, so a store-mode check reads both. The commit
     # binds the sources that the store named; the others are checked here, once, as file mode does.
     stored_check = (
-        None if store_writer is None else store_targets.inbound_links(vault_root, rel_path)
+        None
+        if store_writer is None
+        else store_targets.inbound_links(vault_root, [rel_path])[rel_path]
     )
     linked = (
         find_inbound_wikilinks(vault_root, rel_path) if stored_check is None else stored_check.links
@@ -794,56 +801,6 @@ def _trash_metadata_bytes(
         "frontmatter_snapshot": _make_json_safe(fm),
     }
     return json.dumps(meta, indent=2, default=str).encode("utf-8")
-
-
-def _store_form_gap(vault_root: Path, rel_path: str, fm: dict) -> str | None:
-    """Why a store-mode vault cannot trash this file yet, or None when it has a store form.
-
-    The store form is one page moved to the trash, with its sidecar beside it. Each case below has a
-    file-mode step that the store has no form for, so the delete refuses before it changes anything.
-    """
-    from . import extraction_parts
-
-    # `.md` fixes the page format; any other file is a binary whose bytes stay on disk.
-    if not rel_path.lower().endswith(".md"):
-        return "only a Markdown page is held by the store, and a file's bytes stay on disk"
-    if lifecycle.policy_governs_anything(vault_root):
-        return "a governance policy is declared, and its tombstones and receipts go to files"
-    # The folder is a dot folder, on disk, except for a page marked raw, whose parts are pages.
-    parts_folder = extraction_parts.folder_for(Path(rel_path)).as_posix()
-    if (
-        "stored_object" in fm
-        or extraction_parts.count_of(fm) > 1
-        or (Path(vault_root) / parts_folder).is_dir()
-        or store_targets.holds_pages_under(vault_root, parts_folder)
-    ):
-        return "its stored original or its part pages move with it, and they have no store form"
-    return None
-
-
-def _refuse_active_catalog(vault_root: Path, rel_path: str, before_hash: str) -> None:
-    """Refuse a store-mode delete while the vault's catalog publication is active.
-
-    The catalog publishes a removal in files after the delete commits, and the store has no form
-    for them, so a delete that committed would leave the catalog naming a page that is gone. It
-    prevents that, and a wrong refusal costs a rollback of store mode. It is the same call that
-    file mode makes before it changes anything, with no log or graph writes: they matter only to a
-    publication that the store never carries, and an enrolled vault is refused with or without them.
-    """
-    try:
-        target = catalog_publication.prepare_catalog_membership_batch(
-            vault_root,
-            removals=(catalog_publication.CatalogRemoval(rel_path, before_hash),),
-            now=int(time.time()),
-        )
-    except catalog_publication.CatalogPublicationError as error:
-        raise DeleteFileError(
-            code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", reason=str(error)
-        ) from error
-    if target is not None:
-        raise store_availability.unrouted(
-            "delete_file", "the vault's active catalog publication has no store form"
-        )
 
 
 def _trash_in_store(
