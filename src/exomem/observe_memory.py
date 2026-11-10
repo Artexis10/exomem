@@ -15,6 +15,7 @@ from . import (
     access,
     capabilities,
     edit,
+    find,
     kbdir,
     note_types,
     origin_bindings,
@@ -270,8 +271,8 @@ def observe_memory(
             ):
                 raise ObserveMemoryError(
                     "UNIT_NOT_FOUND",
-                    "the unit's heading is a vault kind or a vault label, which observe_memory "
-                    "cannot address yet",
+                    "the unit's heading is a vault kind or a vault label, which "
+                    f"{capabilities.active_tools_text('observe_memory')} cannot address yet",
                     "Edit the unit in the page body with "
                     f"{capabilities.active_tools_text('edit_memory')}.",
                 )
@@ -286,6 +287,7 @@ def observe_memory(
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
     dropped_outcome: str | None = None
+    link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
         after_body = _remove_unit(
@@ -307,6 +309,12 @@ def observe_memory(
         )
         normalized_category = _canonical_category(str(category))
         normalized_content = str(content).strip()
+        if "[[" in normalized_content:
+            # A link in a unit is stored as the vault stores one in a note body: `[[Title]]` becomes
+            # the page's path form. A forward reference stays as written.
+            normalized_content, link_warnings = vault.normalize_body_wikilinks(
+                normalized_content, vault_root, resolver=find.writer_resolver_snapshot(vault_root)
+            )
         normalized_tags = _canonical_tags(tags or [])
         normalized_context = _canonical_context(context)
         normalized_relations = _canonical_relations(relations or [])
@@ -469,11 +477,12 @@ def observe_memory(
         # cannot act on this one the way it can act on schema history: the
         # tier itself forbids the write, whatever the page's compiled type,
         # so no `resolution` is offered here.
+        tools = capabilities.active_tools_text("observe_memory")
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
-            "observe_memory only mutates writable compiled pages",
+            f"{tools} only mutates writable compiled pages",
             f"This page's access tier is {access_tier!r}, which is "
-            "policy-protected; observe_memory has no override for it, "
+            f"policy-protected; {tools} has no override for it, "
             "regardless of the page's compiled type.",
         )
     # The authored type is looked up as written; a withheld definition refuses.
@@ -482,7 +491,8 @@ def observe_memory(
         resolution = _legacy_edit_resolution(editable.rel_path)
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
-            "observe_memory only mutates writable compiled pages",
+            f"{capabilities.active_tools_text('observe_memory')} only mutates "
+            "writable compiled pages",
             # `role` is a closed attribute the note-type registry schema declares,
             # not an entry key.
             _entity_observation_remediation(editable.rel_path)
@@ -566,6 +576,7 @@ def observe_memory(
             semantic=preflight.as_dict(),
             dropped_relations=dropped_relations,
             dropped_outcome=dropped_outcome,
+            warnings=link_warnings,
         )
 
     try:
@@ -629,6 +640,7 @@ def observe_memory(
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
+        warnings=link_warnings,
     )
 
 
@@ -1291,6 +1303,7 @@ def _result(
     dropped_relations: tuple[tuple[str, str], ...] = (),
     dropped_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "operation": operation,
@@ -1307,6 +1320,8 @@ def _result(
         value["outcome"] = dropped_outcome
     if timings is not None:
         value["timings"] = timings
+    if warnings:
+        value["warnings"] = warnings
     if unit is not None:
         value["unit_ref"] = unit.unit_ref
         value["unit_id"] = unit_id(unit)

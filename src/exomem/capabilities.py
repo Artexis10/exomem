@@ -136,6 +136,11 @@ def current_tool_shape() -> str:
     return "grouped" if active is None else active.tool_shape
 
 
+def shows_links_by_title() -> bool:
+    """Whether the surface serving this call shows a page's links as `[[Title]]` (the public tool shape)."""
+    return current_tool_shape() == "public"
+
+
 def active_spell_call(command: str, arguments: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
     """The tool and arguments that call a grouped command on the surface serving this call."""
     return operation_entries.spell_call(command, arguments, current_tool_shape())

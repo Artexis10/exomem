@@ -22,4 +22,4 @@ The decision: **the agent surface lists 23 typed tools and two doors, and an int
 - A client that calls an old tool name gets a refusal. Plugin, skill and server ship together. The skill-contract digest pins the pair.
 - The tool-surface digest moves once. The ChatGPT draft needs one refresh after release, because ChatGPT offers no API for it.
 - REST and CLI keep their names, fields and reply shapes.
-- Deferred: the proposal's `service.*` operations and `memory.export` (new MCP capabilities), `[[Title]]` rendering of stored bodies, and one-call folder import.
+- Deferred: the proposal's `service.*` operations and `memory.export` (new MCP capabilities), `[[Title]]` rendering of stored bodies (moved to `render-title-links-for-agents`), and one-call folder import.

@@ -531,7 +531,8 @@ A surface without the required edit owner reports that limit; it does not invent
 An update rebuilds the whole unit. `verdict`, `check_by` and the unit id persist
 (`edit_note` carries none of them), and metadata rows the tool does not own are
 carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
-clears it, so resend what should stay. `verdict` is a categorical epistemic outcome,
+clears it, so resend what should stay. A link in a body or in a unit reads and writes as
+`[[Title]]`; the vault stores the page's path form. `verdict` is a categorical epistemic outcome,
 a judgment in words and never a confidence score;
 `inspect_memory(operation="schema.infer", arguments={'subject': 'categories'})`
 lists the accepted verdicts under `verdicts`. `add_observation` sets it on a new
