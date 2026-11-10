@@ -1218,8 +1218,10 @@ def test_a_prose_only_belief_update_names_the_assesses_relation_it_drops(tmp_pat
     assert "missing_rich_assessed_claim" in warnings
 
 
-def test_the_dropped_relation_outcome_names_a_route_the_public_tools_can_call(tmp_path: Path) -> None:
-    """Catches a hint that sends an agent to `relations` on a surface whose edit tool has no such field."""
+def test_the_dropped_relation_outcome_names_a_route_the_public_tools_can_call(
+    tmp_path: Path,
+) -> None:
+    """Catches a hint that sends an agent to `relations` where the edit tool has no such field."""
     page = _write_belief_page(tmp_path)
     unit = _belief_unit(tmp_path)
     descriptor = capabilities.ActiveSurfaceDescriptor(
@@ -1234,7 +1236,8 @@ def test_the_dropped_relation_outcome_names_a_route_the_public_tools_can_call(tm
             kind="belief", category="belief", content="Dana thinks the release mostly holds.",
         )
 
-    assert "write them back on the unit's `relations:` line in the page body with edit_note" in result["outcome"]
+    route = "write them back on the unit's `relations:` line in the page body with edit_note"
+    assert route in result["outcome"]
     assert "`relations`, with" not in result["outcome"]
 
 

@@ -1261,13 +1261,15 @@ def _dropped_relations_outcome(dropped: tuple[tuple[str, str], ...], *, compact:
             f"This update makes the unit a compact observation, which carries no relations, so "
             f"it loses {count} ({named})."
         )
-    # `edit_note` carries `links` but no `kind`, and an update that sends relations must name its rich
-    # kind, so on the listed tools the only way back is the unit's `relations:` line in the page body.
+    # `edit_note` carries `links` but no `kind`, and an update that sends relations must name its
+    # rich kind, so on the listed tools the only way back is the unit's `relations:` line in the
+    # page body.
     if capabilities.current_tool_shape() == "grouped":
         restore = "to keep them, send them again in `relations`, with the unit's `kind`"
     else:
         restore = (
-            "to restore them, write them back on the unit's `relations:` line in the page body with "
+            "to restore them, write them back on the unit's `relations:` line in the page body "
+            "with "
             f"{capabilities.active_tools_text('edit_memory')}"
         )
     return (
