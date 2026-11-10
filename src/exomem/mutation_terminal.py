@@ -2317,6 +2317,11 @@ def project_terminal(
         # Named at render time from the deployment, so a replay of the stored terminal reads the
         # same. Two connectors can present one display name; the sentence says which store it was.
         compact["user_summary"] = f"{user_summary} ({cloud_cell.store_identity()['name']})"
+        # An update that dropped relations says so where the person reads, with the repair.
+        if isinstance(leaf, Mapping) and leaf.get("relations_dropped") and isinstance(
+            leaf.get("outcome"), str
+        ):
+            compact["user_summary"] += f". {leaf['outcome']}"
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]

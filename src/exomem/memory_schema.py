@@ -1192,10 +1192,7 @@ def infer_category_registry(
         **{
             labels.section: [
                 {
-                    "key": definition.key,
-                    "labels": dict(definition.labels),
-                    "description": definition.description,
-                    "shipped": definition.core,
+                    **_label_entry(definition),
                     # A dimension also lists what makes a unit belong to it, how context shows it
                     # and how many units of this scan belong to it.
                     **{
@@ -1213,6 +1210,11 @@ def infer_category_registry(
             ]
             for labels in semantic_labels.REGISTRIES
         },
+        # Every kind with its labels in each language. A `##` heading names each rich kind; a
+        # compact kind, such as `observation`, is in the list too, and no heading names it.
+        "kinds": [
+            _label_entry(definition) for definition in registry.kind_label_definitions().values()
+        ],
         "proposal": semantic_language_registry.registry_proposal(registry),
         "content_hash": registry.content_hash,
         "registry_findings": [item.as_dict() for item in registry.findings],
@@ -1293,6 +1295,16 @@ _GRAPH_REBUILD: dict[str, Any] = {
     "reason": "The graph that records typed edges is missing or stale; a rebuild has been "
     "scheduled, and this operation runs it now.",
 }
+
+
+def _label_entry(definition: semantic_labels.LabelDefinition) -> dict[str, Any]:
+    """One entry of a label list in the schema read: a kind or an entry of a label registry."""
+    return {
+        "key": definition.key,
+        "labels": dict(definition.labels),
+        "description": definition.description,
+        "shipped": definition.core,
+    }
 
 
 def category_observations(
@@ -1405,15 +1417,19 @@ def validate_category_registry(
         else semantic_language_registry.load_registry(vault_root)
     )
     findings: list[dict[str, Any]] = [item.as_dict() for item in registry.findings]
+    outcome = None
     if proposal is not None:
+        current = semantic_language_registry.load_registry(vault_root)
         # The save refuses a proposal that drops a saved label-registry entry, such as a
         # verdict, so validation reports it too.
         findings.extend(
             dropped.as_dict()
             for _labels, dropped in semantic_language_registry.dropped_label_findings(
-                semantic_language_registry.load_registry(vault_root), registry
+                current, registry
             )
         )
+        # The save leads with the same sentences, so a caller sees what a label changes first.
+        outcome = kind_label_outcome(vault_root, current, registry)
     # A non-fatal registry finding (e.g. a `core_category_shadowed` warning) must
     # NOT suppress unrelated observation validation. Category resolution only
     # collapses to `registry_invalid` when the registry carries an actual error
@@ -1453,6 +1469,7 @@ def validate_category_registry(
         )
     )
     return {
+        **({"outcome": outcome} if outcome else {}),
         "subject": "categories",
         "valid": not any(item.get("severity") == "error" for item in findings),
         "strict": strict,
@@ -1466,24 +1483,39 @@ def diff_category_registries(
     before: semantic_language_registry.SemanticLanguageRegistry,
     after: semantic_language_registry.SemanticLanguageRegistry,
 ) -> dict[str, Any]:
-    """Diff reviewed categories, custom kinds and each label registry as distinct namespaces."""
+    """Diff reviewed categories, custom kinds, kind labels and each label registry as distinct
+    namespaces.
+
+    `kinds` compares the vault's own kinds without their labels, and `kind_labels` lists the
+    labels the vault adds or removes on any kind. A labels-only entry under a shipped kind's key
+    is no vault kind, so removing it removes labels and never a kind.
+    """
     before_proposal = semantic_language_registry.registry_proposal(before)
     after_proposal = semantic_language_registry.registry_proposal(after)
     # A label-registry section is in a proposal only when the vault has entries in it.
     label_sections = tuple(labels.section for labels in semantic_labels.REGISTRIES)
     # nosemgrep: ep-word-set -- the registry document's own sections, fixed by its schema
-    namespaces = ("categories", "kinds", *label_sections)
-    changes = {
+    namespaces = ("categories", *label_sections)
+    changes: dict[str, Any] = {
         namespace: _definition_changes(
             before_proposal.get(namespace, {}), after_proposal.get(namespace, {})
         )
         for namespace in namespaces
     }
+    changes["kinds"] = _definition_changes(
+        semantic_language_registry.kinds_without_labels(before),
+        semantic_language_registry.kinds_without_labels(after),
+    )
+    changes["kind_labels"] = _kind_label_changes(before, after)
+    kind_labels_changed = bool(changes["kind_labels"]["added"] or changes["kind_labels"]["removed"])
     return {
         "subject": "categories",
-        "changed": any(_definition_changes_present(value) for value in changes.values()),
+        "changed": kind_labels_changed or any(
+            _definition_changes_present(changes[namespace]) for namespace in (*namespaces, "kinds")
+        ),
         "categories_changed": _definition_changes_present(changes["categories"]),
         "kinds_changed": _definition_changes_present(changes["kinds"]),
+        "kind_labels_changed": kind_labels_changed,
         **{
             f"{section}_changed": _definition_changes_present(changes[section])
             for section in label_sections
@@ -1492,6 +1524,135 @@ def diff_category_registries(
         "after_hash": after.content_hash,
         "changes": changes,
     }
+
+
+def _kind_label_changes(
+    before: semantic_language_registry.SemanticLanguageRegistry,
+    after: semantic_language_registry.SemanticLanguageRegistry,
+) -> dict[str, dict[str, dict[str, str]]]:
+    """The labels the vault adds and removes, by kind and language. A changed label is both."""
+    old = semantic_language_registry.written_kind_labels(before)
+    new = semantic_language_registry.written_kind_labels(after)
+
+    def missing(these: dict[str, dict[str, str]], others: dict[str, dict[str, str]]):
+        out = {
+            kind: {
+                language: text for language, text in labels.items()
+                if others.get(kind, {}).get(language) != text
+            }
+            for kind, labels in these.items()
+        }
+        return {kind: labels for kind, labels in out.items() if labels}
+
+    return {"added": missing(new, old), "removed": missing(old, new)}
+
+
+def kind_label_outcome(
+    vault_root: Path,
+    current: semantic_language_registry.SemanticLanguageRegistry,
+    candidate: semantic_language_registry.SemanticLanguageRegistry,
+) -> str | None:
+    """One sentence for each kind label that `candidate` adds or removes against `current`.
+
+    A label names a `##` heading, so each sentence says how many stored headings, on how many
+    pages, start or stop being units of a kind, as the lexical store counts them. The store
+    keeps every heading in that spelling, so each count is an upper bound. A count the store
+    cannot give is unknown, never zero. None when no label changes, or when `candidate`
+    has an error finding: its vault labels then name no heading, and the save refuses it.
+    """
+    if any(finding.severity == "error" for finding in candidate.findings):
+        return None
+    changes = _kind_label_changes(current, candidate)
+    labels = [
+        (change, kind, language, text)
+        for change in ("removed", "added")
+        for kind, written in changes[change].items()
+        for language, text in written.items()
+    ]
+    if not labels:
+        return None
+    forms = {semantic_language_registry.normalize_label(text) for *_rest, text in labels}
+    counts = _stored_heading_counts(vault_root, forms)
+    return " ".join(
+        _kind_label_sentence(
+            change, kind, language, text, counts,
+            before=_heading_kind(current, text), after=_heading_kind(candidate, text),
+        )
+        for change, kind, language, text in labels
+    )
+
+
+def _heading_kind(
+    registry: semantic_language_registry.SemanticLanguageRegistry, text: str
+) -> str | None:
+    """The kind a `## text` heading names, also where a vault kind's project or page-type scope
+    keeps it from naming that heading on some pages."""
+    resolution = registry.resolve_heading(text)
+    if resolution.resolved is None and resolution.status == "scope_violation":
+        return getattr(resolution.definition, "key", None)
+    return resolution.resolved
+
+
+def _stored_heading_counts(
+    vault_root: Path, forms: set[str]
+) -> dict[str, tuple[int, int, int]] | str:
+    """The lexical store's count per heading form, or why the count is unknown."""
+    from . import lexstore
+    from .vocabulary import usage
+
+    if usage.restricted(vault_root) is not None:
+        return "this caller may not count headings across the whole vault"
+    counts = lexstore.get_store(Path(vault_root)).heading_unit_counts(forms)
+    return "the lexical store is not current" if counts is None else counts
+
+
+def _kind_label_sentence(
+    change: str,
+    kind: str,
+    language: str,
+    text: str,
+    counts: dict[str, tuple[int, int, int]] | str,
+    *,
+    before: str | None,
+    after: str | None,
+) -> str:
+    head = (
+        f"Adding the {language} label {text!r} to {kind}" if change == "added"
+        else f"Removing the {language} label {text!r} from {kind}"
+    )
+    if before == after:
+        names = after or "no kind"
+        return f"{head} changes no unit: a heading {text!r} names {names} either way."
+    if before is None:
+        effect = f"start being {after} units"
+    elif after is None:
+        effect = f"stop being {before} units"
+    else:
+        effect = f"change from {before} to {after} units"
+    if isinstance(counts, str):
+        return (
+            f"{head}: the stored headings {text!r} {effect}; how many is unknown, because {counts}."
+        )
+    form = semantic_language_registry.normalize_label(text)
+    headings, pages, inside = counts.get(form, (0, 0, 0))
+    if not headings:
+        return f"{head}: no stored heading spells {text!r}, so no unit changes."
+    # The store keeps every heading in its spelling, so each count is an upper bound.
+    stored = f"{_count(headings, 'stored heading')} {text!r} on up to {_count(pages, 'page')}"
+    sentence = (
+        f"{head}: up to {stored} {effect}. Each count is an upper bound: a heading nested in "
+        "another unit, or on a page outside the kind's scope, is no unit of its own."
+    )
+    observations = _count(inside, "compact observation")
+    if inside and before is None:
+        sentence += f" Up to {observations} under those headings join the new units."
+    elif inside and after is None:
+        sentence += f" Up to {observations} under those headings become observations again."
+    return sentence
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
 def _definition_changes(

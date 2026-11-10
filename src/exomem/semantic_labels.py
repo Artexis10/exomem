@@ -103,6 +103,50 @@ def is_probability(text: str) -> bool:
     return bool(NUMBER_RE.match(text)) and 0 <= float(text) <= 1
 
 
+# ZERO WIDTH NON-JOINER and ZERO WIDTH JOINER, which Unicode lets a word carry between two
+# letters in scripts such as Persian or Malayalam.
+# nosemgrep: ep-word-set -- two code points that the Unicode standard fixes, not words
+_JOINERS = frozenset({"\u200c", "\u200d"})
+
+
+def heading_label_problem(form: str) -> str | None:
+    """Why `form`, a kind label in the registry's heading form, cannot name a heading; else None.
+
+    The heading form is NFKC-normalised and casefolded, with separators folded to `_`. A
+    character is valid when its Unicode general category is a letter, a mark or a number, when
+    it is that `_`, or when it is a joiner between two letters, marks or numbers. The first
+    character is a letter or a number, and at least one character is a letter, so a label never
+    turns every numbered heading into a unit. The rule reads Unicode categories, never a script
+    list.
+    """
+    if not form:
+        return "has no letter or number, so no heading can spell it"
+    for index, char in enumerate(form):
+        if _word_character(char) and (index > 0 or unicodedata.category(char)[0] != "M"):
+            continue
+        if char == "_" and index > 0:
+            continue
+        if char in _JOINERS and 0 < index < len(form) - 1 and all(
+            _word_character(form[index + step]) for step in (-1, 1)
+        ):
+            continue
+        return (
+            f"holds U+{ord(char):04X}; a heading label holds only letters, marks, numbers and "
+            "separators, and starts with a letter or a number"
+        )
+    if not any(unicodedata.category(char)[0] == "L" for char in form):
+        return (
+            f"holds no letter, so every heading '## {form}' would become a unit; give the label "
+            "at least one letter"
+        )
+    return None
+
+
+def _word_character(char: str) -> bool:
+    """A letter, a mark or a number, by its Unicode general category."""
+    return unicodedata.category(char)[0] in "LMN"
+
+
 @dataclass(frozen=True, slots=True)
 class LabelDefinition:
     """One entry: a key, its labels and what it says. No behaviour.
@@ -155,6 +199,8 @@ def read_labels(raw: object) -> tuple[tuple[tuple[str, str], ...], list[tuple[st
     The tag is casefolded, because a language tag is case-insensitive: `pt-BR` and `pt-br`
     are one language. The pack loader and the vault parser both read labels through here.
     """
+    # A row matches a label as whole folded text, so a verdict label may hold punctuation; a
+    # kind label becomes a heading key, so its registry also applies `heading_label_problem`.
     if not isinstance(raw, dict):
         return None
     labels: dict[str, str] = {}

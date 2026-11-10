@@ -205,6 +205,16 @@ def test_first_excluded_field_returns_original_name_and_reason(
     assert result == (expected, vault.excluded_frontmatter_reason(expected))
 
 
+def test_each_excluded_field_is_refused_with_its_own_remedy() -> None:
+    """Catches one shared refusal that sends an agent writing `expires_at` to the belief unit."""
+    confidence = vault.excluded_frontmatter_reason("Confidence")
+    expiry = vault.excluded_frontmatter_reason("expires_at")
+
+    assert confidence is not None and expiry is not None
+    assert "## Belief" in confidence and "schedule" not in confidence
+    assert "supersede or archive the page" in expiry and "Belief" not in expiry
+
+
 @pytest.mark.parametrize("names", [(), (None, 42, object()), ("title", "status")])
 def test_first_excluded_field_returns_none_for_clean_input(names: tuple[object, ...]) -> None:
     assert vault.first_excluded_field(names) is None
