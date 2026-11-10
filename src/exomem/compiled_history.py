@@ -454,7 +454,7 @@ def read(
     from .governance import egress
 
     size, after = record_history._page_bounds(limit, continuation)
-    current = commands.op_read_memory(root, path=path)
+    current = commands.read_memory_stored(root, path=path)
     if not isinstance(current.get("content_hash"), str):
         raise ValueError("NOT_FOUND: page is unavailable")
     # Only admission that resolves prose names depends on lookup currency.

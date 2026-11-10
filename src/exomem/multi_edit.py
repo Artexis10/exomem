@@ -17,6 +17,7 @@ re-syncs and defeat the entire point.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,9 @@ from .edit import (
     apply_surgical_replace,
     commit_edit,
     load_editable,
+    match_old_string,
     render_editable,
+    replace_old_string,
 )
 
 _INVALID_EDIT_ITEM = "__exomem_invalid_edit_item__"
@@ -163,6 +166,10 @@ def multi_edit(
 
     # ---- validate-only: per-pair counts against the evolving body, no write ----
     if validate_only:
+        from . import find as find_module
+
+        # Built on the first pair that needs it, and once for the rest.
+        resolver_of = functools.cache(lambda: find_module.writer_resolver_snapshot(vault_root))
         work = editable.body
         previews: list[dict] = []
         fully_renderable = True
@@ -170,19 +177,18 @@ def multi_edit(
             old = e["old_string"]
             new = e["new_string"]
             ra = bool(e.get("replace_all", False))
-            count = work.count(old)
+            found = match_old_string(work, old, vault_root, resolver_of)
+            count = found.count
             previews.append({"index": i, "match_count": count, "replace_all": ra})
-            if count == 0 or (count > 1 and not ra):
+            if count == 0 or found.cuts or (count > 1 and not ra):
                 fully_renderable = False
             # Apply (raw — normalization is irrelevant to a count preview) so
             # later pairs see realistic state.
-            if count >= 1:
-                work = work.replace(old, new, -1 if ra else 1)
+            if count >= 1 and not found.cuts:
+                work = replace_old_string(work, found, old, new, ra)
         semantic: dict | None = None
         if fully_renderable:
-            from . import find as find_module
-
-            resolver = find_module.writer_resolver_snapshot(vault_root)
+            resolver = resolver_of()
             rendered = editable.body
             try:
                 for i, e in enumerate(edits):

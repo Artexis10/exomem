@@ -13,4 +13,4 @@
 
 - [x] 3.1 Prove the workflow end to end on a temporary vault: create, read by title, edit by id, stale id and its retry, ambiguity and its retry, and a restricted caller.
 - [x] 3.2 Confirm the tool-surface digest and `tool_surface_contract.json` are unchanged.
-- [ ] 3.3 After release, count title-not-found and ambiguity refusals and the retries each costs, on the benchmark session.
+- [x] 3.3 After release, count title-not-found and ambiguity refusals and the retries each costs, on the benchmark session. Superseded, not run: `replace-agent-tool-surface` replaced the tool surface that this count was for. Its task 7.2 refreshes the ChatGPT draft and does not measure refusals, so nothing carries this count over.

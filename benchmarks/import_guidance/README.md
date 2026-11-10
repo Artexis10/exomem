@@ -113,7 +113,7 @@ Limits:
 
 ## Context-replay suite
 
-This suite tests what a real agent does with the context that `recall_context` returns, on cases that live outside the repository. It compares two checkouts, called arms. For each case and arm, no model records the arm's real `bootstrap` and `recall_context` replies on a vault seeded from the case's seed. A real agent then runs with the arm's skill, tool text and `UserPromptSubmit` hook. It can call only those two tools, and the scripted server returns the recorded replies whatever the agent sends. Closed checks and one blind judge batch score the final answer.
+This suite tests what a real agent does with the context that `recall_context` returns, on cases that live outside the repository. It compares two checkouts, called arms. For each case and arm, no model records the arm's real `read_instructions` and `recall_context` replies on a vault seeded from the case's seed. A real agent then runs with the arm's skill, tool text and `UserPromptSubmit` hook. It can call only those two tools, and the scripted server returns the recorded replies whatever the agent sends. Closed checks and one blind judge batch score the final answer.
 
 A case folder holds:
 

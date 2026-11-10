@@ -1,0 +1,27 @@
+## Context
+
+The roster row used: "The model keeps misusing a tool/MCP surface". The agent copies spans of what it reads, so what it reads must be what the server accepts. Either the server shows the stored form, or it accepts the shown form. This change does both ends of the second option and keeps one stored form.
+
+## Decisions
+
+**D1. One stored form.** `normalize_body_wikilinks` keeps writing the path form. A body on disk never holds a title link that the vault resolved. No migration, and the indexers, the link graph and the REST and CLI replies read what they read today.
+
+**D2. Round-trip invariant.** A link is shown as `[[Title]]` only when writing `[[Title]]` back through the write-side resolver resolves to the same page. The check calls the resolver in the same order that the write path uses, so a duplicate title and a title that equals another page's stem fail it and keep the stored form. Titles that contain a link-syntax character (`/ # | [ ]`, a newline or a backtick) keep the stored form, since they cannot be written inside a link: a write masks code spans, and a backtick would pair with a later one. The check runs the link through the same masking a write uses, and the link must come out whole. The set is link syntax, not vocabulary.
+
+**D3. Titles in memory.** The link resolver kept a lower-cased `title_key` per page. It now keeps the display title beside it, from the same read, in the same entries. A render makes in-memory lookups only, and it costs O(links). A read never builds or copies a resolver, since a copy costs O(pages) per read. It borrows the resident, current resolver as a read-only reference, because rendering only looks entries up. With none resident the links stay as stored, and the first recall or write that warms the resolver restores the titles. The edit accepts both forms, so a cold read costs the agent no retry.
+
+**D4. Visibility.** A target that the caller may not see keeps its stored form, and its title is not read. Only a page released in full is shown by title: a lower release level returns a projection, not the page's own text. A raw page (Source, Evidence) keeps its recorded text.
+
+**D5. Inversion.** `render_title_links` returns the shown text and one span per rewritten link: the stored range and the shown range. On the public tool shape, `old_text` is counted in the shown body, because the agent cannot see the bytes of a path and its text must not match inside one. The text outside a link is the same in both views, so a snippet without a link matches in the same places. Only a shown count of 0 counts the stored bytes, so a snippet in the stored form, as a cold read shows it, still applies. That count drops an occurrence that covers only part of a link shown by title, for the same reason, and keeps one that sits outside links or covers a link whole. A caller that never saw the shown form (REST, CLI) counts the stored bytes only. A match maps back to stored offsets: an edge at a span boundary or outside every span maps by the offset difference, and an edge inside a span has no mapping. A snippet that starts or ends inside a link's title is refused: `STRING_NOT_FOUND` with a hint when every occurrence is of that kind, and `AMBIGUOUS_MATCH` with a hint to add surrounding text when others are outside links, whatever `replace_all` says. `replace_all`, `AMBIGUOUS_MATCH` and the validate-only preview use the same count. The preview takes its context lines from the shown body at the occurrences it counts, so a refused preview shows no line that holds a path.
+
+Each link of the matched text that `new_text` repeats unchanged is put back as its stored bytes, and those bytes skip normalization, in the one function that does the replacement. An untouched link is then neither resolved by title again nor rewritten. The link counts only where it is a live link in the page as edited, by the masking that a write uses, so a link that `new_text` quotes in code stays as written and a snippet that starts inside a code span is read in its page. The page as edited is masked once per edit, whatever the number of occurrences. The rest of `new_text` goes through the existing normalization.
+
+**D6. Placement of the read.** The public shape is told apart by `capabilities.current_tool_shape()`. The render wraps the read leaf `op_read_memory`, after `op_get` has compared and hashed the stored bytes, so the evidence version and the extracted-text windows are not affected. An internal reader that never shows the page (`compiled_history`) calls the unwrapped `read_memory_stored` and pays nothing. `include_raw` also returns the whole file: its body, which ends the file, is shown like `body`, its frontmatter stays as stored, and `content_hash` stays the hash of the stored file.
+
+**D7. Observation text.** `add_observation` and `edit_observation` pass the unit text through `normalize_body_wikilinks` with the writer's resolver, so a unit stores the same form as a body. Typed `relations` (`kind: target`) are not link syntax, and they resolve when the page is derived, so they stay as written.
+
+## Risks
+
+- A link inside a unit that the agent writes as a title, for a page that does not exist yet, stays as written, as in a body.
+- A stored link whose target is a retired collection path keeps its stored form.
+- Residual surfaces, in the proposal, show the stored form. They are read-only, and an agent does not copy their spans into `old_text`.

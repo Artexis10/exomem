@@ -8,12 +8,14 @@ list_directory, etc.).
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import errno
 import functools
 import hashlib
 import json
 import logging
+import operator
 import os
 import re
 import secrets
@@ -752,8 +754,8 @@ def title_key(title: str) -> str:
     return unicodedata.normalize("NFC", title).strip().lower()
 
 
-def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
-    """The wikilink resolver's lower-cased display title of a page's bytes, as a file read gives it.
+def display_title_from_bytes(raw: bytes, path: Path | str) -> str | None:
+    """The display title of a page's bytes, as a file read gives it.
 
     ``path`` (absolute or vault-relative) only supplies the filename fallback of the title
     precedence. It returns None when the bytes are not UTF-8 text.
@@ -764,7 +766,15 @@ def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
         return None
     # A text-mode read translates newlines before it parses; the bytes path parses the same text.
     fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
-    title = resolve_display_title(fm, body, path)
+    return resolve_display_title(fm, body, path) or None
+
+
+def title_key_from_bytes(raw: bytes, path: Path | str) -> str | None:
+    """The wikilink resolver's lower-cased display title of a page's bytes, as a file read gives it.
+
+    It returns None when the bytes are not UTF-8 text.
+    """
+    title = display_title_from_bytes(raw, path)
     return title_key(title) if title else None
 
 
@@ -8495,10 +8505,15 @@ def _insert_into_bucket(mapping: dict[str, tuple[str, ...]], key: str, *values: 
 
 @dataclass(frozen=True, slots=True)
 class WikilinkCandidate:
-    """One indexed page's physical path and its own normalized title."""
+    """One indexed page's physical path and its own normalized title.
+
+    `display_title` keeps the title's own spelling, which an agent reads in a link, so two builds
+    that disagree on it are not the same candidate.
+    """
 
     path: str
     title_key: str | None
+    display_title: str | None = None
 
 
 def _wikilink_path_key(path: str) -> str:
@@ -8522,6 +8537,13 @@ def wikilink_candidates(
             if visible is None or visible(candidate.path):
                 matches[candidate.path] = candidate
     return [matches[path] for path in sorted(matches)]
+
+
+def _keyed_title(title: object) -> tuple[str | None, str | None]:
+    """A page's title as the resolver files it: its key, and the title as spelled; both None if blank."""
+    if not title or not str(title).strip():
+        return None, None
+    return title_key(str(title)), str(title).strip()
 
 
 class WikilinkResolver:
@@ -8565,15 +8587,12 @@ class WikilinkResolver:
             vault_root, full_paths=(), kb_stripped=(), stems={}, titles={}, candidates_by_key={}
         )
         normalized = sorted(
-            (
-                str(rel_path).replace("\\", "/").lstrip("/"),
-                title_key(str(title)) if title and str(title).strip() else None,
-            )
+            (str(rel_path).replace("\\", "/").lstrip("/"), *_keyed_title(title))
             for rel_path, title in entries
         )
-        for rel_path, title_lower in normalized:
+        for rel_path, title_lower, display in normalized:
             request_budget.checkpoint()
-            resolver._add_entry(rel_path, title_lower)
+            resolver._add_entry(rel_path, title_lower, display)
         return resolver
 
     def _build(self) -> None:
@@ -8601,9 +8620,9 @@ class WikilinkResolver:
                     page = view.page(rel)
                     if page is None:
                         continue  # deleted since the corpus was listed
-                    self._add_entry(rel, title_key_from_bytes(page.body, rel))
+                    self._add_entry(rel, *_keyed_title(display_title_from_bytes(page.body, rel)))
                 else:
-                    self._add_entry(rel, self._read_title_lower(md))
+                    self._add_entry(rel, *_keyed_title(self._read_title(md)))
 
     @classmethod
     def from_maps(
@@ -8663,18 +8682,24 @@ class WikilinkResolver:
     # same on-disk state (parity is what keeps the graph lane's recall
     # unchanged — only the cost model differs).
 
-    def _add_entry(self, rel_path: str, title_lower: str | None) -> None:
+    def _add_entry(
+        self, rel_path: str, title_lower: str | None, display_title: str | None = None
+    ) -> None:
         """Index one file's path/stem (always) and title (when present).
 
         Mirrors `_build`'s historical per-file body exactly: the path + stem
         edges are added even for an unreadable file (title read failed), the
         title edge only when a display title (`resolve_display_title`) was read.
+        `display_title` is that title as the page spells it, for a reader that shows it.
         """
         no_ext = _wikilink_path_key(rel_path)
         self._remove_entry(rel_path)
         self.candidates_by_key[no_ext] = tuple(
             sorted(
-                (*self.candidates_by_key.get(no_ext, ()), WikilinkCandidate(rel_path, title_lower)),
+                (
+                    *self.candidates_by_key.get(no_ext, ()),
+                    WikilinkCandidate(rel_path, title_lower, display_title if title_lower else None),
+                ),
                 key=lambda candidate: candidate.path,
             )
         )
@@ -8714,8 +8739,8 @@ class WikilinkResolver:
                 _insert_into_bucket(self.titles, candidate.title_key, no_ext)
 
     def _current_title(self, vault_root: Path, rel_path: str) -> tuple[bool, str | None]:
-        """Whether the page exists now, and its title key: from the store when it serves the page,
-        else the file.
+        """Whether the page exists now, and its display title: from the store when it serves the
+        page, else the file.
         """
         from .vault_store import read
 
@@ -8724,19 +8749,19 @@ class WikilinkResolver:
         except FileNotFoundError:
             return False, None
         if page is not None:
-            return True, title_key_from_bytes(page.body, rel_path)
+            return True, display_title_from_bytes(page.body, rel_path)
         abs_path = vault_root / rel_path
         if not abs_path.is_file():
             return False, None
-        return True, self._read_title_lower(abs_path)
+        return True, self._read_title(abs_path)
 
     @staticmethod
-    def _read_title_lower(abs_path: Path) -> str | None:
+    def _read_title(abs_path: Path) -> str | None:
         try:
             raw = abs_path.read_bytes()
         except OSError:
             return None
-        return title_key_from_bytes(raw, abs_path)
+        return display_title_from_bytes(raw, abs_path)
 
     def on_files_changed(
         self,
@@ -8786,7 +8811,7 @@ class WikilinkResolver:
         for rel_path in sorted(changed):
             found, title = self._current_title(vault_root, rel_path)
             if found:
-                self._add_entry(rel_path, title)
+                self._add_entry(rel_path, *_keyed_title(title))
 
     def on_entries_changed(
         self,
@@ -8804,15 +8829,12 @@ class WikilinkResolver:
         def _path(rel: str) -> str:
             return str(rel).replace("\\", "/").lstrip("/")
 
-        changed = {
-            _path(rel): (title_key(str(title)) if title and str(title).strip() else None)
-            for rel, title in entries
-        }
+        changed = {_path(rel): _keyed_title(title) for rel, title in entries}
         deleted = {_path(rel) for rel in deleted_rels}
         for rel_path in deleted | set(changed):
             self._remove_entry(rel_path)
-        for rel_path, title_lower in sorted(changed.items()):
-            self._add_entry(rel_path, title_lower)
+        for rel_path, (title_lower, display) in sorted(changed.items()):
+            self._add_entry(rel_path, title_lower, display)
 
     def add_pending(self, no_ext_path: str, *, title: str | None = None) -> None:
         """Register a file the writer is about to create.
@@ -8821,7 +8843,7 @@ class WikilinkResolver:
         note's path) resolve before the file lands on disk.
         """
         no_ext = no_ext_path.removesuffix(".md").lstrip("/")
-        self._add_entry(no_ext + ".md", title_key(title) if title and title.strip() else None)
+        self._add_entry(no_ext + ".md", *_keyed_title(title))
 
 
 def _strip_wikilink_brackets(s: str) -> str:
@@ -9133,6 +9155,14 @@ def _rewritable_wikilinks(text: str) -> list[re.Match[str]]:
     return [match for match in matches if not inside(match.start(), match.end())]
 
 
+def rewritable_link_ranges(text: str) -> list[tuple[int, int]]:
+    """The `(start, end)` of each link in `text` that a write reads as a live link.
+
+    A link in code, a fence or an origin carrier is not one.
+    """
+    return [(match.start(), match.end()) for match in _rewritable_wikilinks(text)]
+
+
 def normalize_body_wikilinks(
     body: str,
     vault_root: Path,
@@ -9160,7 +9190,9 @@ def normalize_body_wikilinks(
     # is consumed by a non-capturing branch), so we parse the full match
     # text to recover the alias.
     for m in reversed(matches):
-        full = m.group(0)  # '[[target]]' or '[[target|alias]]'
+        # '[[target]]' or '[[target|alias]]', read from the body: the matches come from text whose
+        # code spans are blanked, which would blank an alias that holds inline code.
+        full = body[m.start() : m.end()]
         inner = full[2:-2]
         alias: str | None = None
         if "|" in inner:
@@ -9181,6 +9213,146 @@ def normalize_body_wikilinks(
         replacement = f"[[{rendered}|{alias}]]" if alias is not None else f"[[{rendered}]]"
         new_body = new_body[: m.start()] + replacement + new_body[m.end() :]
     return new_body, warnings
+
+
+#: A title that holds one of these cannot be written as a link: the link grammar reads `/` as a path,
+#: `#` as an anchor, `|` as an alias, the brackets as the link's own edge, and a line break ends it.
+#: A backtick opens a code span, which blanks the link, or the links up to the next backtick, for a writer.
+_LINK_TITLE_REFUSED = frozenset("/#|[]`\r\n")
+
+
+@dataclass(frozen=True, slots=True)
+class TitleLinkView:
+    """A body with its links shown by page title, and the way back to the stored bytes.
+
+    `spans` lists each rewritten link as `(stored_start, stored_end, shown_start, shown_end)`,
+    in order. Nothing is stored in this form: the view is for a reader, and `stored_range` turns
+    a span of the shown text back into the stored one.
+    """
+
+    text: str
+    spans: tuple[tuple[int, int, int, int], ...] = ()
+
+    def stored_range(self, start: int, end: int) -> tuple[int, int] | None:
+        """The stored range that the shown range `[start, end)` stands for.
+
+        None when either edge falls inside a rewritten link: half a link has no stored bytes.
+        """
+        first = self._stored_offset(start)
+        last = self._stored_offset(end)
+        return None if first is None or last is None else (first, last)
+
+    def shown_range(self, start: int, end: int) -> tuple[int, int]:
+        """The shown range that the stored range `[start, end)` stands for.
+
+        The stored range must not cut a link: a link wholly inside it maps to the whole shown link.
+        """
+        return self._shown_offset(start), self._shown_offset(end)
+
+    def links_in(self, start: int, end: int) -> tuple[tuple[int, int, int, int], ...]:
+        """The rewritten links that lie wholly inside the shown range `[start, end)`."""
+        first = bisect.bisect_left(self.spans, start, key=operator.itemgetter(2))
+        last = bisect.bisect_right(self.spans, end, key=operator.itemgetter(3))
+        return self.spans[first:last]
+
+    def links_in_stored(self, start: int, end: int) -> tuple[tuple[int, int, int, int], ...] | None:
+        """The rewritten links wholly inside the stored range `[start, end)`; None if it cuts one."""
+        first = bisect.bisect_right(self.spans, start, key=operator.itemgetter(1))
+        last = bisect.bisect_left(self.spans, end, key=operator.itemgetter(0))
+        inside = self.spans[first:last]
+        if inside and (inside[0][0] < start or inside[-1][1] > end):
+            return None
+        return inside
+
+    def _shown_offset(self, stored: int) -> int:
+        # Each link that ends at or before the offset moved every later offset by what it gained or lost.
+        index = bisect.bisect_right(self.spans, stored, key=operator.itemgetter(1)) - 1
+        return stored + (self.spans[index][3] - self.spans[index][1] if index >= 0 else 0)
+
+    def _stored_offset(self, shown: int) -> int | None:
+        index = bisect.bisect_right(self.spans, shown, key=operator.itemgetter(2)) - 1
+        if index >= 0 and shown < self.spans[index][3]:
+            if shown > self.spans[index][2]:
+                return None
+            index -= 1  # the offset is the link's own first character, so the links before it count
+        # Each link before the offset moved every later offset by the length it gained or lost.
+        moved = self.spans[index][3] - self.spans[index][1] if index >= 0 else 0
+        return shown - moved
+
+
+def render_title_links(
+    body: str,
+    vault_root: Path,
+    *,
+    resolver: WikilinkResolver,
+    visible: Callable[[str], bool] | None = None,
+) -> TitleLinkView:
+    """Show each body link by its page's title, where the title writes back to that same page.
+
+    `[[Notes/Insights/slug#Part|alias]]` shows as `[[Display Title#Part|alias]]`. A link keeps its
+    stored bytes unless its target resolves to one page that `visible` admits, the page's title
+    holds none of the characters a link cannot carry, and `[[Title]]` written back resolves, by the
+    same order and stem priority as a write (`normalize_wikilink`), to that same page. A duplicate
+    title, a title that is another page's filename stem, and a withheld page therefore stay as
+    stored, and a withheld page's title is never read. Skips code, fences and origin carriers, as
+    a write does. The cost is one pass over the body and in-memory lookups.
+    """
+    admitted: dict[str, bool] = {}
+
+    def keep(path: str) -> bool:
+        if visible is None:
+            return True
+        if path not in admitted:
+            admitted[path] = visible(path)
+        return admitted[path]
+
+    def resolve(target: str) -> WikilinkCandidate | None:
+        # No `retired` lookup: a collection's retired path is stored data to leave as stored, and
+        # asking costs a read per link.
+        _, warning, candidate = _normalize_wikilink(
+            target, vault_root, resolver=resolver, strict=False,
+            visible=keep if visible is not None else None, retired=lambda _path: None,
+        )
+        return None if warning else candidate
+
+    shown_by_target: dict[str, str | None] = {}
+
+    def shown(target: str) -> str | None:
+        if target not in shown_by_target:
+            shown_by_target[target] = None
+            candidate = resolve(target)
+            title = candidate.display_title if candidate is not None else None
+            if candidate is not None and title and _LINK_TITLE_REFUSED.isdisjoint(title):
+                link = f"[[{title}]]"
+                # A writer reads the link through the same masking, so it must come out whole.
+                whole = [found.group(0) for found in _rewritable_wikilinks(link)] == [link]
+                written_back = resolve(title) if whole else None
+                if written_back is not None and written_back.path == candidate.path:
+                    shown_by_target[target] = title + split_wikilink_target(target)[1]
+        return shown_by_target[target]
+
+    pieces: list[str] = []
+    spans: list[tuple[int, int, int, int]] = []
+    cursor = 0
+    shown_length = 0
+    for match in _rewritable_wikilinks(body):
+        # Read from the body: the match comes from text with its code spans blanked.
+        original = body[match.start() : match.end()]
+        target, separator, alias = original[2:-2].partition("|")
+        title = shown(target.strip())
+        if title is None:
+            continue
+        replacement = f"[[{title}{separator}{alias}]]"
+        if replacement == original:
+            continue
+        pieces.append(body[cursor : match.start()])
+        shown_length += match.start() - cursor
+        spans.append((match.start(), match.end(), shown_length, shown_length + len(replacement)))
+        pieces.append(replacement)
+        shown_length += len(replacement)
+        cursor = match.end()
+    pieces.append(body[cursor:])
+    return TitleLinkView("".join(pieces), tuple(spans))
 
 
 # ---------------- log helpers ----------------

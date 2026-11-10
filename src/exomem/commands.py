@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -8275,7 +8275,7 @@ def _refuse_unused_offset(result: dict, offset: int | None) -> dict:
     return result
 
 
-def op_read_memory(
+def read_memory_stored(
     vault_root: Path,
     path: str,
     frontmatter_only: bool = False,
@@ -8328,7 +8328,7 @@ def op_read_memory(
         with principal_module.request_scope(
             principal_module.effective_principal().with_purpose(purpose)
         ):
-            return op_read_memory(
+            return read_memory_stored(
                 vault_root,
                 path=path,
                 frontmatter_only=frontmatter_only,
@@ -8452,6 +8452,63 @@ def op_read_memory(
     if units:
         result["units"] = observe_memory_module.page_units(vault_root, result)
     return result
+
+
+# The read leaf an agent calls. Its own text is `read_memory_stored`'s, so the command's published
+# fields and help are unchanged; an internal reader that never shows the page calls
+# `read_memory_stored` and pays nothing for the title view.
+@wraps(read_memory_stored)
+def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
+    result = read_memory_stored(vault_root, *args, **kwargs)
+    if capabilities_module.shows_links_by_title():
+        result = _show_links_by_title(vault_root, result)
+    return result
+
+
+op_read_memory.__name__ = op_read_memory.__qualname__ = "op_read_memory"
+
+
+def _show_links_by_title(vault_root: Path, result: dict) -> dict:
+    """`result` with the links of its body and unit texts shown as `[[Title]]`, for an agent.
+
+    An agent on the public tool shape types a page's title, never its vault path, so it reads links
+    the way it writes them (`edit_note` takes the shown form back; `vault.render_title_links`). The
+    stored bytes, `content_hash` (the hash of the stored file) and `id` are not touched. Only a page
+    released in full is shown this way: a lower release level returns a projection, not the page's
+    own text. A raw page (Source, Evidence) keeps its recorded text. A read never builds or copies a
+    resolver: it borrows the resident one, and with none current the links stay as stored.
+    """
+    if result.get("release_level", egress_module.LEVEL_FULL) != egress_module.LEVEL_FULL:
+        return result
+    body, units = result.get("body"), result.get("units")
+    if not isinstance(body, str) and not isinstance(units, list):
+        return result
+    frontmatter = result.get("frontmatter")
+    if not isinstance(frontmatter, dict):
+        return result
+    if note_types.Basis(vault_root).selects(str(frontmatter.get("type") or "").casefold(), note_types.raw):
+        return result
+    visible = egress_module.visible_page_filter(vault_root)
+    resolver = find_module.borrow_query_resolver(vault_root, visible, schedule_rebuild=False)
+    if resolver is None:
+        return result
+
+    def shown(text: str) -> str:
+        return vault.render_title_links(text, vault_root, resolver=resolver, visible=visible).text
+
+    shown_result = dict(result)
+    if isinstance(body, str):
+        shown_result["body"] = shown(body)
+        # `include_raw` also returns the whole file; its body ends the file, so it reads like `body`.
+        content = result.get("content")
+        if isinstance(content, str) and content.endswith(body):
+            shown_result["content"] = content[: len(content) - len(body)] + shown_result["body"]
+    if isinstance(units, list):
+        shown_result["units"] = [
+            {**unit, "text": shown(unit["text"])} if isinstance(unit, dict) and isinstance(unit.get("text"), str) else unit
+            for unit in units
+        ]
+    return shown_result
 
 
 def op_browse_memory(
