@@ -235,13 +235,21 @@ def test_leading_with_the_current_view_hides_nothing_in_search_or_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The spec's "Leading with the current view hides nothing". Catches a replaced decision that
-    a group drops, or that the pack loses from its group when its cap leaves no room for it."""
+    a group drops, that the pack loses from its group when its cap leaves no room for it, or whose
+    own fields a mark rewrites."""
     vault = _display_vault(tmp_path)
     current, earlier = _ref("Decision log", "after"), _ref("Decision log", "before")
 
     reply = _search(vault, {"unit.dimension": {"$eq": "currency"}}, deep=True)
 
     assert [hit["unit_ref"] for hit in reply["hits"]] == [current, earlier]
+    # Each unit keeps the standing an ungrouped search of the same units gives it.
+    ungrouped = _search(vault, {"$or": [{"unit.dimension": {"$eq": "currency"}}]}, deep=True)
+    group_fields = {"dimension", "display"}
+    assert {
+        hit["unit_ref"]: {key: value for key, value in hit.items() if key not in group_fields}
+        for hit in reply["hits"]
+    } == {hit["unit_ref"]: hit for hit in ungrouped["hits"]}
     assert _packed(reply)[earlier]["display"] == {"replaced": {"by": current}}
     assert "display" not in _packed(reply)[current]
     assert reply["pack"]["groups"] == [{"dimension": "currency", "units": [current, earlier]}]
