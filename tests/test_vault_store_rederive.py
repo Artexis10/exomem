@@ -296,11 +296,12 @@ def test_a_second_overlay_commit_during_a_pass_restarts_it_at_the_new_target(
     project(writer, stored)
     assert rederive.settle(stored, writer) == rederive.ADVANCED
     commit_policy(writer, stored, "readonly:\n  - Notes/\n  - Sources/\n")
+    second_overlay = revision(stored)
     project(writer, stored)
 
     settle_to_the_end(stored, writer, limit=200)
 
-    assert mode.status(stored)["registry_revision"] == revision(stored)
+    assert mode.status(stored)["registry_revision"] == second_overlay
     assert_cold_derivation(stored, tmp_path)
 
 
