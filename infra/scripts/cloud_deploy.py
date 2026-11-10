@@ -50,6 +50,9 @@ BARRIER_ALERT = "cloud-release-barrier"
 # Substrate's two answers that say the release is not newer than the fleet: nothing to do.
 NOT_NEWER = ("CELL_IMAGE_SEEN", "CELL_RELEASE_OLDER")
 HTTP_TIMEOUT = 30
+# The newest platform Deployments one run reads to find the newest success. Each failed
+# upgrade adds one unsuccessful Deployment; this many in a row needs a person anyway.
+PLATFORM_SCAN_LIMIT = 20
 
 Transport = Callable[[str, str, dict[str, str], bytes | None], tuple[int, bytes]]
 
@@ -129,25 +132,33 @@ class GitHub:
             raise Stop("RELEASE_NOT_FOUND", ok=False)
         return tag
 
-    def platform_deployments(self) -> list[dict]:
-        """Each successful platform Deployment, newest first: its ref and its payload.
-        A Deployment's state is its newest status, which GitHub lists first."""
+    def newest_platform_deployment(self) -> dict | None:
+        """The newest successful platform Deployment's ref and payload, or None when the
+        environment has none. GitHub lists Deployments newest first, and a Deployment's
+        state is its newest status, which GitHub also lists first. The read stops at the
+        first success, so a run costs a few calls however many upgrades were recorded."""
 
         repository = self.settings.repository
-        found = []
-        for page in range(1, 11):
-            deployments = self._get(
-                f"/repos/{repository}/deployments?environment={PLATFORM_ENVIRONMENT}&per_page=100&page={page}")
-            for deployment in deployments:
-                statuses = self._get(f"/repos/{repository}/deployments/{deployment['id']}/statuses?per_page=1")
-                if statuses and statuses[0].get("state") == "success":
-                    payload = deployment.get("payload")
-                    if isinstance(payload, str):
-                        payload = json.loads(payload or "{}")
-                    found.append({"ref": deployment.get("ref"), "payload": payload if isinstance(payload, dict) else {}})
-            if len(deployments) < 100:
-                break
-        return found
+        deployments = self._get(f"/repos/{repository}/deployments?environment={PLATFORM_ENVIRONMENT}"
+                                f"&per_page={PLATFORM_SCAN_LIMIT}")
+        if not isinstance(deployments, list):
+            raise Stop("PLATFORM_DEPLOYMENT_UNREADABLE", ok=False)
+        for deployment in deployments:
+            statuses = self._get(f"/repos/{repository}/deployments/{deployment['id']}/statuses?per_page=1")
+            if not (statuses and statuses[0].get("state") == "success"):
+                continue
+            payload = deployment.get("payload")
+            try:
+                if isinstance(payload, str):
+                    payload = json.loads(payload or "{}")
+            except ValueError:
+                raise Stop("PLATFORM_DEPLOYMENT_UNREADABLE", ok=False) from None
+            return {"ref": deployment.get("ref"), "payload": payload if isinstance(payload, dict) else {}}
+        if len(deployments) >= PLATFORM_SCAN_LIMIT:
+            # More unsuccessful Deployments than one read covers: an older success may
+            # exist, so the run fails visibly rather than reading the platform as absent.
+            raise Stop("PLATFORM_DEPLOYMENT_SCAN_LIMIT", ok=False, detail=str(PLATFORM_SCAN_LIMIT))
+        return None
 
 
 class Substrate:
@@ -237,17 +248,16 @@ def git_changed_paths(base: str, head: str) -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
-def uncrossed_barriers(release: str, deployments: list[dict], barriers: dict) -> list[str]:
-    """Entries at or below the release that no successful platform Deployment crossed."""
+def uncrossed_barriers(release: str, deployment: dict, barriers: dict) -> list[str]:
+    """Entries at or below the release that the newest successful platform Deployment
+    does not list. Each Deployment lists every entry crossed so far (the runbook carries
+    the previous list forward), so the newest one is the whole record."""
 
     target = parse_release(release)
     if target is None:
         raise Stop("RELEASE_NOT_FOUND", ok=False)
-    crossed: set[str] = set()
-    for deployment in deployments:
-        listed = deployment["payload"].get("barriers_crossed")
-        if isinstance(listed, list):
-            crossed.update(entry for entry in listed if isinstance(entry, str))
+    listed = deployment["payload"].get("barriers_crossed")
+    crossed = {entry for entry in listed if isinstance(entry, str)} if isinstance(listed, list) else set()
     # An entry whose version cannot be read stops the run rather than being crossed unseen.
     return [entry["id"] for entry in barriers["barriers"]
             if ((version := parse_release(entry["version"])) is None or version <= target)
@@ -313,18 +323,20 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
         raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
 
     # D2: the platform gate.
-    deployments = github.platform_deployments()
+    deployment = github.newest_platform_deployment()
     include, exclude = gate
-    changed = (platform_inputs(tools.changed_paths(deployments[0]["ref"], tag), include, exclude)
-               if deployments and isinstance(deployments[0]["ref"], str) else None)
-    if changed is None or changed:
+    ref = deployment["ref"] if deployment else None
+    if deployment is None or not isinstance(ref, str):
         send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
-        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail="NO_PLATFORM_DEPLOYMENT" if changed is None
-                   else f"{len(changed)} platform input(s) changed")
+        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail="NO_PLATFORM_DEPLOYMENT")
+    changed = platform_inputs(tools.changed_paths(ref, tag), include, exclude)
+    if changed:
+        send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, True, tools.now())
+        raise Stop(PLATFORM_NEEDED_ALERT, ok=False, detail=f"{len(changed)} platform input(s) changed")
     send_alert(settings, tools.transport, PLATFORM_NEEDED_ALERT, False, tools.now())
 
     # D3: every barrier entry at or below the release must be crossed.
-    uncrossed = uncrossed_barriers(tag, deployments, barriers)
+    uncrossed = uncrossed_barriers(tag, deployment, barriers)
     if uncrossed:
         send_alert(settings, tools.transport, BARRIER_ALERT, True, tools.now())
         raise Stop(BARRIER_ALERT, ok=False, detail=" ".join(uncrossed))

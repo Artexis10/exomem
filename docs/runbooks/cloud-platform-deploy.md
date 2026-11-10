@@ -422,6 +422,9 @@ The `cloud-deploy` workflow sets a release's cell image only when the platform r
 controller. A GitHub Deployment in the `cloud-platform` environment records which release the platform runs.
 Record one after each successful upgrade.
 
+The workflow reads only the newest successful platform Deployment. So each Deployment lists every barrier entry
+crossed so far, not only the entries that its own upgrade crossed.
+
 1. Set the release tag that you upgraded to, for example `TAG=v0.171.0`.
 2. If this is the first platform Deployment, list every barrier entry at or below the live release as crossed:
 
@@ -429,21 +432,32 @@ Record one after each successful upgrade.
    CROSSED=$(jq -c --arg v "${TAG#v}" '[.barriers[] | select((.version | split(".") | map(tonumber)) <= ($v | split(".") | map(tonumber))) | .id]' infra/contracts/upgrade-barriers-v1.json)
    ```
 
-3. Otherwise, list only the entries that this upgrade crossed, after you did each entry's runbook step, for example
-   `CROSSED='["secret-matrix-0.172.0"]'`. With none, set `CROSSED='[]'`.
-4. Create the Deployment and mark it successful:
+3. Otherwise, read the list from the newest successful platform Deployment:
+
+   ```bash
+   PREVIOUS=$(for id in $(gh api "repos/Artexis10/exomem/deployments?environment=cloud-platform&per_page=20" --jq '.[].id'); do if [ "$(gh api "repos/Artexis10/exomem/deployments/$id/statuses?per_page=1" --jq '.[0].state')" = success ]; then gh api "repos/Artexis10/exomem/deployments/$id" --jq '.payload | if type == "string" then fromjson else . end | .barriers_crossed // [] | tojson'; break; fi; done)
+   ```
+
+4. After you did each entry's runbook step, add the entries that this upgrade crossed. With none, use `'[]'`:
+
+   ```bash
+   CROSSED=$(jq -cn --argjson previous "$PREVIOUS" --argjson new '["secret-matrix-0.172.0"]' '$previous + $new | unique')
+   ```
+
+   The command prints an error when `PREVIOUS` is empty. Then no successful Deployment exists, and step 2 applies.
+5. Create the Deployment and mark it successful:
 
    ```bash
    id=$(jq -n --arg ref "$TAG" --argjson crossed "$CROSSED" '{ref: $ref, environment: "cloud-platform", auto_merge: false, required_contexts: [], payload: {barriers_crossed: $crossed}, description: "Platform upgrade"}' | gh api repos/Artexis10/exomem/deployments --input - --jq .id) && gh api "repos/Artexis10/exomem/deployments/$id/statuses" -f state=success --jq .state
    ```
 
-5. Start the workflow on `main`, so that it sets the release's cell image:
+6. Start the workflow on `main`, so that it sets the release's cell image:
 
    ```bash
    gh workflow run cloud-deploy.yml --ref main -R Artexis10/exomem
    ```
 
-Expected result: step 4 prints `success`, and the next `cloud-deploy` run ends with `cloud-deploy: CANARY_ON_TARGET`
+Expected result: step 5 prints `success`, and the next `cloud-deploy` run ends with `cloud-deploy: CANARY_ON_TARGET`
 or `cloud-deploy: CELL_IMAGE_CURRENT`.
 
 If the upgrade failed, record nothing: the newest successful Deployment keeps naming the release the platform runs.

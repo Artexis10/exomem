@@ -11,6 +11,16 @@
   },
   "github_platform_deployments": [
     {
+      "id": 9003,
+      "ref": "v0.171.0",
+      "environment": "cloud-platform",
+      "task": "deploy",
+      "payload": {
+        "barriers_crossed": []
+      },
+      "created_at": "2026-11-10T18:00:00Z"
+    },
+    {
       "id": 9002,
       "ref": "v0.170.0",
       "environment": "cloud-platform",

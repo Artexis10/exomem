@@ -58,10 +58,9 @@ class Recorded:
             return 200, json.dumps(ANSWERS["github_release_latest"]).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments?"):
             return 200, json.dumps(self.deployments).encode()
-        if path.startswith("/repos/example-owner/example-repo/deployments/9002/statuses"):
-            return 200, json.dumps(ANSWERS["github_statuses_success"]).encode()
-        if path.startswith("/repos/example-owner/example-repo/deployments/9001/statuses"):
-            return 200, json.dumps(ANSWERS["github_statuses_failure"]).encode()
+        if path.startswith("/repos/example-owner/example-repo/deployments/") and "/statuses?" in path:
+            succeeded = path.split("/")[5] == "9002"
+            return 200, json.dumps(ANSWERS["github_statuses_success" if succeeded else "github_statuses_failure"]).encode()
         if method == "GET" and path == cloud_deploy.ROLLOUT_PATH:
             answer = self.rollout.pop(0) if len(self.rollout) > 1 else self.rollout[0]
             return 200, json.dumps(answer).encode()
@@ -186,6 +185,30 @@ def test_no_platform_deployment_sets_nothing_and_raises_the_platform_alert(capsy
     assert (code, recorded.puts()) == (1, [])
     assert recorded.alerts() == [(cloud_deploy.PLATFORM_NEEDED_ALERT, True)]
     assert "NO_PLATFORM_DEPLOYMENT" in log
+
+
+def test_the_platform_gate_reads_statuses_only_down_to_the_newest_successful_deployment(capsys) -> None:
+    # Catches one status call per platform Deployment ever recorded: the newest one
+    # failed, the next one succeeded, and nothing older is read.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"])
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert code == 0 and "CANARY_ON_TARGET" in log
+    statuses = [url.split("/")[-2] for _, url, _ in recorded.calls if "/statuses?" in url]
+    assert statuses == ["9003", "9002"]
+
+
+def test_a_full_page_of_unsuccessful_deployments_fails_visibly_and_sets_nothing(capsys) -> None:
+    # Catches a scan that runs out of reads and treats the platform as absent or crossed.
+    failed = [{"id": 8000 + index, "ref": "v0.171.0", "payload": {}} for index in range(cloud_deploy.PLATFORM_SCAN_LIMIT)]
+    recorded = Recorded(["substrate_rollout_behind"], deployments=failed)
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert code == 1
+    assert "PLATFORM_DEPLOYMENT_SCAN_LIMIT" in log
+    assert recorded.puts() == [] and recorded.alerts() == []
 
 
 def test_controller_tests_and_markdown_alone_pass_the_platform_gate(capsys) -> None:
