@@ -140,9 +140,10 @@ def vault_bytes(root, *, outside=None):
             and (outside is None or not path.is_relative_to(root / outside))}
 
 
-#: The two query-row fields whose migration change the design's contract table records:
-#: the concurrency token (§8 C2) and a migrated log row's ``inferred`` flag (§8 C25).
-REPRESENTATION = ("item_version", "inferred")
+#: The query-row fields whose migration change the design's contract table records:
+#: the concurrency token (§8 C2), a migrated log row's ``inferred`` flag (§8 C25), and the
+#: public row ``id``, which is the key joined to that token.
+REPRESENTATION = ("item_version", "inferred", "id")
 
 
 def rows(root, collection):

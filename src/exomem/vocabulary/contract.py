@@ -678,12 +678,14 @@ def propose(vault_root: Path, spec: RegistrySpec, delta: object) -> dict[str, An
 
 
 def _restore_route(spec: RegistrySpec, version: str) -> str:
-    selector = (f', registry_scope="{spec.instance_id}"'
-                if spec.instance_id != registry.PUBLIC_INSTANCE else "")
-    return (
-        f'schema_memory(subject="{spec.name}", operation="restore", version="{version}", '
-        f"expected_hash, why{selector})"
-    )
+    """The restore call, written the way the serving surface spells it."""
+    from .. import capabilities
+
+    scope = {} if spec.instance_id == registry.PUBLIC_INSTANCE else {"registry_scope": spec.instance_id}
+    return capabilities.active_call_text("schema_memory", {
+        "subject": spec.name, "operation": "restore", "version": version,
+        "expected_hash": "<hash>", "why": "<reason>", **scope,
+    })
 
 
 def _removal_line(spec: RegistrySpec, key: str, outcome: Mapping[str, Any], route: str) -> str:

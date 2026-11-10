@@ -103,8 +103,8 @@ async def main():
         # Older SDKs yield (read, write, session_id), newer (read, write).
         async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
-            recall = await session.call_tool("ask_memory", {"query": sys.argv[1]})
-            written = await session.call_tool("remember", {"title": "Scratch restore write", "content": NOTE, "status": "draft"})
+            recall = await session.call_tool("search_memory", {"query": sys.argv[1]})
+            written = await session.call_tool("create_note", {"title": "Scratch restore write", "content": NOTE, "unlinked_reason": "A scratch note that links nothing."})
             def structured(result):
                 return getattr(result, "structuredContent", None) or getattr(result, "structured_content", None) or {}
 
@@ -524,8 +524,8 @@ async def step_2_provision(ctx: Context, record: StepRecord) -> None:
 # Read the running image's registry and configured discovery shape; command names can share a public rendering.
 CLOUD_DISCOVERY_POLICY_COMMAND = (
     "import json,os;from exomem.commands import product_commands_for;"
-    "from exomem.command_surface import listed_names;from exomem.server import _tool_shape_from_environment;"
-    "from exomem import cloud_origin;shape=_tool_shape_from_environment();tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
+    "from exomem.command_surface import DEFAULT_TOOL_SHAPE,listed_names;"
+    "from exomem import cloud_origin;shape=DEFAULT_TOOL_SHAPE;tier2=not os.environ.get('EXOMEM_DISABLE_TIER2');"
     "personal=product_commands_for('mcp',expose_tier2=tier2);"
     "cloud=product_commands_for('mcp',expose_tier2=tier2,cloud=True,upload_bridge=cloud_origin.upload_enabled());"
     "names=lambda commands:{name for command in commands for name in listed_names(command,shape)};"
@@ -599,22 +599,22 @@ async def step_4_capture(ctx: Context, record: StepRecord) -> None:
     )
     async with ctx.a.client.mcp() as session:
         result = await session.call(
-            "capture_source",
+            "save_source",
             {"title": f"Estuary sighting {ctx.a.phrase}", "content": body, "source_kind": "note",
-             "why_captured": "rehearsal capture"},
+             "why": "rehearsal capture"},
         )
         if result.is_error or result.error_code:
-            raise StepFailure(f"capture_source failed: {result.error_code or result.text()[:500]}")
+            raise StepFailure(f"save_source failed: {result.error_code or result.text()[:500]}")
         ctx.report.sample("capture", result.seconds)
         record.evidence["capture"] = {"seconds": round(result.seconds, 4), "result_keys": sorted(result.structured)[:20]}
         for index in range(LATENCY_ITERATIONS - 1):
             extra = await session.call(
-                "capture_source",
+                "save_source",
                 {"title": f"Rehearsal latency sample {index} {secrets.token_hex(3)}",
                  "content": f"Latency sample {index}: tide tables for the northern mudflats.", "source_kind": "note"},
             )
             if extra.is_error or extra.error_code:
-                raise StepFailure(f"capture_source sample {index} failed: {extra.error_code}")
+                raise StepFailure(f"save_source sample {index} failed: {extra.error_code}")
             ctx.report.sample("capture", extra.seconds)
     record.evidence["samples"] = len(ctx.report.samples.get("capture", []))
 
@@ -625,16 +625,17 @@ async def step_5_cited_recall(ctx: Context, record: StepRecord) -> None:
     async with ctx.a.client.mcp() as session:
         answers = []
         for _ in range(LATENCY_ITERATIONS):
-            result = await session.call("ask_memory", {"query": query})
+            result = await session.call("search_memory", {"query": query, "detail": "full"})
             if result.is_error or result.error_code:
-                raise StepFailure(f"ask_memory failed: {result.error_code or result.text()[:300]}")
+                raise StepFailure(f"search_memory failed: {result.error_code or result.text()[:300]}")
             answers.append(result)
             ctx.report.sample("cited_recall", result.seconds)
     text = answers[0].text()
     # RecallResult returns either a hit list or an envelope containing that list.
-    hits = answers[0].structured["result"]
+    # search_memory answers {"hits": [...]}; a producer may wrap a non-object reply under `result`.
+    hits = answers[0].structured.get("hits", answers[0].structured.get("result", []))
     if isinstance(hits, dict):
-        hits = hits["hits"]
+        hits = hits.get("hits", [])
     record.evidence.update(
         {
             "query_is_paraphrase": ctx.a.phrase not in query,
@@ -680,12 +681,11 @@ async def step_6_write_after_pod_kill(ctx: Context, record: StepRecord) -> None:
                     f"We decided to survey the estuary only on falling tides after the {ctx.a.phrase} sighting.\n\n"
                     "## Observations\n\n- [survey] Survey the estuary on falling tides only #fieldwork\n"
                 ),
-                "status": "draft",
             }
         )
         if write.is_error or write.error_code:
             raise StepFailure(f"the governed write after the pod kill failed: {write.error_code or write.text()[:400]}")
-        readback = await session.call("ask_memory", {"query": f"{ctx.a.phrase} falling tides survey decision"})
+        readback = await session.call("search_memory", {"query": f"{ctx.a.phrase} falling tides survey decision"})
     modes = ctx.exec_in(
         namespace, ctx.runtime_pod(ctx.a.cell_id)["metadata"]["name"],  # type: ignore[index]
         "python3", "-c",
@@ -737,7 +737,7 @@ async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
     ctx.report.single["upgrade_seconds_per_cell"] = upgrade
     rollout = await ctx.rollout()
     async with ctx.a.client.mcp() as session:
-        recall = await session.call("ask_memory", {"query": "which wading bird did we see at the estuary at dawn?"})
+        recall = await session.call("search_memory", {"query": "which wading bird did we see at the estuary at dawn?"})
     record.evidence.update(
         {
             "upgrade_seconds": round(upgrade, 2),
@@ -762,7 +762,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     marker = f"Pre-canary marker {secrets.token_hex(4)}"
     async with ctx.a.client.mcp() as session:
         write = await session.governed_write(
-            {"title": marker, "content": f"{marker}: written after the upgrade, before the canary.\n\n## Observations\n\n- [rehearsal] canary marker #rehearsal\n", "status": "draft"}
+            {"title": marker, "content": f"{marker}: written after the upgrade, before the canary.\n\n## Observations\n\n- [rehearsal] canary marker #rehearsal\n"}
         )
         if write.error_code:
             raise StepFailure(f"pre-canary governed write failed: {write.error_code}")
@@ -829,9 +829,9 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     record.evidence["controller_restart"]["upgrade_hold_preserved"] = True
     rollout = await ctx.rollout()
     async with ctx.a.client.mcp() as session:
-        readback = await session.call("ask_memory", {"query": marker})
+        readback = await session.call("search_memory", {"query": marker})
         after = await session.governed_write(
-            {"title": f"After restore {secrets.token_hex(3)}", "content": "Written after the restore-based return.\n\n## Observations\n\n- [rehearsal] post-restore write #rehearsal\n", "status": "draft"}
+            {"title": f"After restore {secrets.token_hex(3)}", "content": "Written after the restore-based return.\n\n## Observations\n\n- [rehearsal] post-restore write #rehearsal\n"}
         )
     record.evidence.update(
         {
@@ -874,9 +874,9 @@ async def step_9_read_only(ctx: Context, record: StepRecord) -> None:
     row = await ctx.wait_cell(ctx.a.cell_id, lambda r: r.get("observed_state") == "read_only" and bool(r.get("ready")), timeout=600, description="tenant A to serve read-only")
     async with ctx.a.client.mcp() as session:
         refused = await session.call(
-            "remember", {"title": f"Refused {secrets.token_hex(3)}", "content": "must be refused\n\n## Observations\n\n- [rehearsal] refused #rehearsal\n", "status": "draft"}
+            "create_note", {"title": f"Refused {secrets.token_hex(3)}", "content": "must be refused\n\n## Observations\n\n- [rehearsal] refused #rehearsal\n", "unlinked_reason": "A rehearsal note that links nothing."}
         )
-        read = await session.call("ask_memory", {"query": "estuary wading bird"})
+        read = await session.call("search_memory", {"query": "estuary wading bird"})
     record.evidence.update(
         {
             "cell": cell_summary(row),
@@ -899,7 +899,7 @@ async def step_9_read_only(ctx: Context, record: StepRecord) -> None:
     await ctx.wait_cell(ctx.a.cell_id, lambda r: r.get("observed_state") == "running" and bool(r.get("ready")), timeout=600, description="tenant A to serve writes again")
     async with ctx.a.client.mcp() as session:
         write = await session.governed_write(
-            {"title": f"Recovered {secrets.token_hex(3)}", "content": "writes work again\n\n## Observations\n\n- [rehearsal] recovered #rehearsal\n", "status": "draft"}
+            {"title": f"Recovered {secrets.token_hex(3)}", "content": "writes work again\n\n## Observations\n\n- [rehearsal] recovered #rehearsal\n"}
         )
     record.evidence["write_after_recovery"] = write.error_code or "committed"
     if write.error_code:
@@ -944,11 +944,11 @@ async def _step_10(ctx: Context, record: StepRecord) -> None:
     record.evidence["phase"] = "B write and cross-recall"
     async with ctx.b.client.mcp() as session:
         write = await session.governed_write(
-            {"title": f"Garden plan {ctx.b.phrase}", "content": f"Plant the {ctx.b.phrase} beans by the south fence.\n\n## Observations\n\n- [garden] beans by the south fence #garden\n", "status": "draft"}
+            {"title": f"Garden plan {ctx.b.phrase}", "content": f"Plant the {ctx.b.phrase} beans by the south fence.\n\n## Observations\n\n- [garden] beans by the south fence #garden\n"}
         )
         if write.error_code:
             raise StepFailure(f"tenant B's governed write failed: {write.error_code}")
-        b_sees_a = await session.call("ask_memory", {"query": ctx.a.phrase})
+        b_sees_a = await session.call("search_memory", {"query": ctx.a.phrase})
     record.evidence["phase"] = "A cross-recall"
     a_probe = await raw_mcp_post(ctx.resolver, token=ctx.a.client.access_token)
     if a_probe.status_code == 503:
@@ -956,7 +956,7 @@ async def _step_10(ctx: Context, record: StepRecord) -> None:
         a_sees_b = None
     else:
         async with ctx.a.client.mcp() as session:
-            a_sees_b = await session.call("ask_memory", {"query": ctx.b.phrase})
+            a_sees_b = await session.call("search_memory", {"query": ctx.b.phrase})
     denials: dict[str, Any] = {"selector": {}, "forged": {}, "anonymous": {}}
     record.evidence["denial_probes"] = denials
     record.evidence["phase"] = "selector header denial"

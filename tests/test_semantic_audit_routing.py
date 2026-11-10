@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -423,53 +424,27 @@ def test_mcp_audit_routes_reject_boolean_sample_limits_before_leaf_execution(
         return audit_module.AuditReport(findings=[], summary={})
 
     monkeypatch.setattr(audit_module, "audit", fake_audit)
-    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
     mcp = server_module.build_server(require_auth=False)
-    schemas = {
-        tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
-        for tool in asyncio.run(mcp.list_tools(run_middleware=False))
-    }
-    routes = (
-        ("audit", {"categories": ["broken_wikilink"]}),
-        (
-            "review_memory",
-            {"mode": "audit", "categories": ["broken_wikilink"]},
-        ),
-        (
-            "maintain_memory",
-            {"mode": "audit", "categories": ["broken_wikilink"]},
-        ),
-    )
-
-    from exomem.operation_entries import spell_call
-
-    for name, arguments in routes:
-        public_name, _ = spell_call(name, arguments, "nested")
-        if public_name == name:
-            properties = schemas[name]["properties"]
-        else:
-            operation = schemas[public_name]["properties"]["operation"]
-            audit = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "audit")
-            properties = {**audit["properties"], **operation.get("properties", {})}
-        sample_schema = properties["legacy_sample_limit"]
+    # The grouped commands are hidden from listings but registered; a lookup by name finds them.
+    # They keep the bound in their schema, and the door passes `arguments` through to them.
+    for name in ("review_memory", "maintain_memory"):
+        schema = asyncio.run(mcp.get_tool(name)).to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
+        sample_schema = schema["properties"]["legacy_sample_limit"]
         assert sample_schema["type"] == "integer"
         assert sample_schema["minimum"] == 0
         assert sample_schema["maximum"] == audit_module.MAX_LEGACY_SAMPLE_LIMIT
-        for invalid in (False, True):
-            request = spell_call(name, {**arguments, "legacy_sample_limit": invalid}, "nested")[1]
-            if public_name == name:
-                with pytest.raises(Exception, match="legacy_sample_limit"):
-                    asyncio.run(mcp.call_tool(public_name, request, run_middleware=True))
-            else:
-                result = asyncio.run(
-                    mcp.call_tool(
-                        public_name,
-                        request,
-                        run_middleware=True,
-                    )
-                )
-                assert result.structured_content["error"]["code"] == "INVALID_OPERATION_ARGUMENTS"
-                assert "legacy_sample_limit" in result.structured_content["error"]["message"]
+    for invalid in (False, True):
+        result = asyncio.run(
+            mcp.call_tool(
+                "inspect_memory",
+                {
+                    "operation": "maintenance.audit",
+                    "arguments": {"categories": ["broken_wikilink"], "legacy_sample_limit": invalid},
+                },
+                run_middleware=True,
+            )
+        )
+        assert "legacy_sample_limit" in json.dumps(result.structured_content)
 
     assert calls == []
 

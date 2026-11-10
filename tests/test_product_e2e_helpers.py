@@ -55,7 +55,7 @@ def test_relation_contexts_wait_for_each_profile_snapshot(monkeypatch, interrupt
 
     async def call(_client, _tool, arguments, _timeout):
         nonlocal unavailable_sent
-        profile = arguments["traversal_profile"]
+        profile = arguments["arguments"]["traversal_profile"]
         calls.append(profile)
         # The first graph can be ready before a later drain starts.
         if profile == interrupted_profile and not unavailable_sent:
@@ -113,7 +113,7 @@ def test_relation_contexts_do_not_retry_an_available_graph_with_wrong_edges(monk
             "graph": {
                 "available": True,
                 "profile": {
-                    "name": arguments["traversal_profile"],
+                    "name": arguments["arguments"]["traversal_profile"],
                 },
                 "edges": [],
             }
@@ -335,9 +335,8 @@ def test_unauthenticated_records_request_requires_exact_challenge_and_no_disclos
                 "id": "records-auth-refusal",
                 "method": "tools/call",
                 "params": {
-                    "name": "record_memory",
+                    "name": "query_records",
                     "arguments": {
-                        "action": "inspect",
                         "collection": "Knowledge Base/Records/Health/X3/_collection.md",
                     },
                 },
@@ -381,9 +380,8 @@ def test_unauthenticated_planning_request_requires_exact_challenge_and_no_disclo
         "id": "planning-auth-refusal",
         "method": "tools/call",
         "params": {
-            "name": "plan_memory",
+            "name": "query_plan_items",
             "arguments": {
-                "action": "inspect",
                 "collection": "Knowledge Base/Planning/Software/_collection.md",
             },
         },
@@ -465,7 +463,7 @@ def test_single_affected_path_accepts_human_structured_filename() -> None:
     path = "Knowledge Base/Planning/Software/Items/Ship Planning query surface.md"
 
     assert e2e_product_loop._single_affected_path(
-        {"affected_paths": [path]}, operation="plan_memory add"
+        {"affected_paths": [path]}, operation="add_plan_item"
     ) == path
 
 
@@ -665,8 +663,8 @@ def test_operator_reconcile_output_rejects_non_success(stdout: str) -> None:
 def test_mutation_diagnostics_rejects_noncommitted_or_nonfull_results(
     result: dict[str, object],
 ) -> None:
-    with pytest.raises(RuntimeError, match="remember mutation"):
-        e2e_product_loop._mutation_diagnostics(result, operation="remember")
+    with pytest.raises(RuntimeError, match="create_note mutation"):
+        e2e_product_loop._mutation_diagnostics(result, operation="create_note")
 
 
 def test_the_convergence_digest_rescues_lines_the_tail_has_scrolled_past(

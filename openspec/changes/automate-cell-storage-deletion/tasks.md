@@ -11,7 +11,7 @@
 
 ## 2. Substrate (D1, D4)
 
-- [ ] 2.1 Substrate (separate repository): add the deletion grant and the watcher's endpoint.
+- [x] 2.1 Substrate (separate repository): add the deletion grant and the watcher's endpoint.
   - Add the `deletion_grant` column, readable and not writable by `cellctl`'s role.
   - Sign the grant, with no `exp`, when Substrate sets a cell's desired state to deleted.
   - Refuse any change to a deleted cell's desired state in the database.
@@ -29,14 +29,14 @@
 
 ## 3. cellctl (D1, D6)
 
-- [ ] 3.1 In `cellctl`, relay each grant into the ConfigMap `exomem-cell-deletions`, and add its admission exception outside the edge's switch. Remove a grant only after the list-only views of both buckets show no `upload` and no `start` entry under the prefix. Raise `cell-storage-cleanup-pending` only for a cell with data in the legacy backup bucket. Verify these with tests:
+- [x] 3.1 In `cellctl`, relay each grant into the ConfigMap `exomem-cell-deletions`, and add its admission exception outside the edge's switch. Remove a grant only after the list-only views of both buckets show no `upload` and no `start` entry under the prefix. Raise `cell-storage-cleanup-pending` only for a cell with data in the legacy backup bucket. Verify these with tests:
   - reconcile tests for deleted and live rows;
   - a grant stays while either bucket shows an `upload` or `start` entry under the prefix, and goes once neither does;
   - the K3s Live job admits a `cellctl` write only for that ConfigMap name and key, with the edge on and off.
 
 ## 4. Key custodian (D1, D2)
 
-- [ ] 4.1 Add the backup purge to the custodian, with its own grant verifier, and move `pyjwt[crypto]` to `cellctl`'s runtime dependencies. The custodian deletes the cell's key once the namespace is gone. After `purge_after`, it mints the purge key, hides, deletes the purge key, and marks the cell done. Verify with fake B2 and a fake key store:
+- [x] 4.1 Add the backup purge to the custodian, with its own grant verifier, and move `pyjwt[crypto]` to `cellctl`'s runtime dependencies. The custodian deletes the cell's key once the namespace is gone. After `purge_after`, it mints the purge key, hides, deletes the purge key, and marks the cell done. Verify with fake B2 and a fake key store:
   - the verifier passes the shared grant fixture;
   - a missing, forged or other-cell grant causes no action;
   - a malformed entry is skipped, a valid grant beside it acts, and a new cell namespace still gets its key;
@@ -51,7 +51,7 @@
 
 ## 5. Media edge (D1, D3)
 
-- [ ] 5.1 Add the edge's internal purge pass, with its own grant verifier, using the list-only key and persisted `hide` intents. Verify with tests:
+- [x] 5.1 Add the edge's internal purge pass, with its own grant verifier, using the list-only key and persisted `hide` intents. Verify with tests:
   - the verifier passes the shared grant fixture;
   - a missing, forged or other-cell grant causes no hide;
   - a malformed entry is skipped, and a valid grant beside it acts;
@@ -64,11 +64,11 @@
 
 ## 6. Terraform (D3, D4)
 
-- [ ] 6.1 Add `<prefix>-media-edge-list`, with only `listFiles` on the media bucket, to the durability stack. Add a watcher key with only `listFiles` on the backup bucket to the cell-data stack. Output both key IDs, and update each stack's `OWNERSHIP.md`. Verify: `terraform test` shows each key's exact bucket and capabilities.
+- [x] 6.1 Add `<prefix>-media-edge-list`, with only `listFiles` on the media bucket, to the durability stack. Add a watcher key with only `listFiles` on the backup bucket to the cell-data stack. Output both key IDs, and update each stack's `OWNERSHIP.md`. Verify: `terraform test` shows each key's exact bucket and capabilities.
 
 ## 7. Key watcher (D4)
 
-- [ ] 7.1 Add the deletion set, the watch window, the per-cell states, the anomaly alert and the three account-level changes to the watcher. Add the backup list key and the endpoint address to the workflow's secrets. Verify with synthetic listings:
+- [x] 7.1 Add the deletion set, the watch window, the per-cell states, the anomaly alert and the three account-level changes to the watcher. Add the backup list key and the endpoint address to the workflow's secrets. Verify with synthetic listings:
   - each state is reached, and each per-cell alert fires and resolves;
   - a done cell with no key and no current file is Hidden, and raises no pending or anomaly alert;
   - each anomaly condition fires;
@@ -82,16 +82,16 @@
 
 ## 8. Cleanup script (D5, D6)
 
-- [ ] 8.1 In `infra/scripts/cell_storage_cleanup.py`, replace the apply modes for the cell-data account and the media bucket with `--rescue`, and keep the `founder` mode. Verify: a test shows that `--rescue` never deletes an `upload` entry.
+- [x] 8.1 In `infra/scripts/cell_storage_cleanup.py`, replace the apply modes for the cell-data account and the media bucket with `--rescue`, and keep the `founder` mode. Verify: a test shows that `--rescue` never deletes an `upload` entry.
 
 ## 9. Chart and runbooks (D1, D2, D3, D5, D6)
 
-- [ ] 9.1 Add `cellDeletion.holdCells`, as a mounted file, and the grant public key to the custodian and the edge. Give the custodian `get` on `exomem-cell-deletions` and a write of its own `exomem-key-custodian-purges`. Verify with chart tests:
+- [x] 9.1 Add `cellDeletion.holdCells`, as a mounted file, and the grant public key to the custodian and the edge. Give the custodian `get` on `exomem-cell-deletions` and a write of its own `exomem-key-custodian-purges`. Verify with chart tests:
   - both values render into the custodian and the edge;
   - only the edge mounts the edge list key;
   - the custodian's admission allows only its Secret and its own ConfigMap;
   - the `cellctl` admission exception renders with the edge off.
-- [ ] 9.2 Update three runbooks:
+- [x] 9.2 Update three runbooks:
   - `docs/runbooks/cloud-key-custody.md`: the cell clean-up, the media bucket of a deleted cell and the pinned set;
   - `docs/runbooks/cloud-media-edge.md`: the deletion of a cell that used the media store;
   - `docs/runbooks/cloud-cell-deletion.md`: step 8.

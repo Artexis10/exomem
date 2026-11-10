@@ -7042,13 +7042,14 @@ def _enrich_contradiction_polarity(
         sensed_model.submit_scope(vault_root, sense_scope, jobs, complete=complete)
 
 
-_ASSERTED_FIX = (
-    "Surfaced for REVIEW only — this is YOUR authored `contradicts` edge, not a "
-    "server judgment about which side is right. Read both: `replace` (supersede) "
-    "the stale one, `reconcile` them, or — if they are genuine rivals you intend "
-    "to keep — record the competing-alternatives stance with `triage_memory` "
-    "using `action='competing'`. Never auto-acted."
-)
+def _asserted_fix() -> str:
+    competing = capabilities.active_call_text("triage_memory", {"action": "competing", "item_id": "<id>"})
+    return (
+        "Surfaced for REVIEW only — this is YOUR authored `contradicts` edge, not a "
+        "server judgment about which side is right. Read both: `replace` (supersede) "
+        "the stale one, `reconcile` them, or — if they are genuine rivals you intend "
+        f"to keep — record the competing-alternatives stance with {competing}. Never auto-acted."
+    )
 
 
 def _asserted_contradictions(
@@ -7084,7 +7085,7 @@ def _asserted_contradictions(
                 "conflict. Is the conflict still live, or has one side become the "
                 "stale view?"
             ),
-            proposed_fix=_ASSERTED_FIX,
+            proposed_fix=_asserted_fix(),
             paths=[a, b],
             meta={
                 # Distinct from the proximity signal version for the same pair, so

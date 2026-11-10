@@ -25,6 +25,8 @@ FETCH_PATH = "/internal/artifacts/fetch/v1"
 BROKER_PORT = 8767
 GRANT_AUDIENCE = "exomem-artifact-broker"
 MAX_GRANT_CHARS = 8192
+#: The tool that a grant covers, by artifact lane. The gateway signs the called tool's name into the grant's `op`.
+GRANT_OPERATIONS = {"source": "save_source", "evidence": "save_evidence"}
 MAX_FILENAME_BYTES = 1024
 _MIME_TOKEN = r"[A-Za-z0-9!#$&^_.+\-]+"
 _PRIVATE_NETWORKS = tuple(
@@ -172,7 +174,7 @@ def stage_cloud_artifact(
     batch_deadline: float | None = None,
 ) -> artifacts.StagedArtifact:
     endpoint = broker_endpoint(os.environ.get("EXOMEM_CLOUD_ARTIFACT_BROKER_URL", ""))
-    operation = {"source": "capture_source", "evidence": "preserve_artifacts"}.get(lane)
+    operation = GRANT_OPERATIONS.get(lane)
     if operation is None:
         raise _failure()
     cell = os.environ.get("EXOMEM_CLOUD_CELL_ID", "")

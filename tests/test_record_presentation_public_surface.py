@@ -65,15 +65,8 @@ def test_mcp_fixture_and_capability_contract_have_matching_bounded_arguments() -
     fixture = json.loads(
         (Path(__file__).parent / "fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
     )
-    # The grouped command is hidden; its fields live in the branches of the operation tools.
-    properties = {
-        name: schema
-        for tool in ("read_records", "change_records")
-        for branch in fixture[tool]["inputSchema"]["properties"]["operation"]["oneOf"]
-        for name, schema in branch["properties"].items()
-    }
+    # `refresh_presentation` is a typed field of `edit_record`; the grouped command stays hidden.
+    refresh = fixture["edit_record"]["inputSchema"]["properties"]["refresh_presentation"]
 
-    assert properties["expand_child"]["type"] == "string"
-    assert "declared child" in properties["expand_child"]["description"]
-    assert properties["refresh_presentation"]["type"] == "boolean"
-    assert "managed Markdown" in properties["refresh_presentation"]["description"]
+    assert refresh["type"] == "boolean"
+    assert "Markdown view" in refresh["description"]

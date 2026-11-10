@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from conftest import _drain_background_threads
 from test_episode_coverage_citation import _cite
 from test_episode_memory_command import _record, _withhold_notes_from
@@ -53,7 +54,7 @@ def record_episode(vault: Path, monkeypatch: pytest.MonkeyPatch):
 
     def call(**fields: object) -> dict:
         operation = {"kind": "record", "subject": "Harbor Lamp purchase", "summary": "Chose the brass lamp.", **fields}
-        called = asyncio.run(mcp.call_tool("record_episode", {"operation": operation}, run_middleware=True))
+        called = asyncio.run(mcp.call_tool(*public_call("record_episode", {"operation": operation}), run_middleware=True))
         structured = called.structured_content
         return structured if isinstance(structured, dict) else json.loads(called.content[0].text)
 

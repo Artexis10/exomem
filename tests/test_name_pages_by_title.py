@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _public_call import public_call
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
 from fastmcp import Client
 from test_derived_identifier_egress import (
@@ -28,7 +29,6 @@ from test_derived_identifier_egress import (
     _reset,
     _write_door_fixture,
 )
-from test_mcp_schema_fidelity import TOOL_SURFACE_CONTRACT_PATH, _tool_surface_sha256
 
 from exomem import call_ledger, command_surface, find, page_names, writer_lease
 from exomem import server as server_module
@@ -36,7 +36,6 @@ from exomem import vault as vault_module
 from exomem.governance.principal import request_scope
 
 _ID = re.compile(r"[a-z2-7]{7}\.[a-z2-7]{4}")
-_STANDALONE = {"relation_disposition": "reviewed_none", "relation_review_reason": "standalone"}
 
 
 @pytest.fixture
@@ -52,7 +51,7 @@ def build(vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 async def _tool(client: Client, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    result = await client.call_tool(name, arguments, raise_on_error=False)
+    result = await client.call_tool(*public_call(name, arguments), raise_on_error=False)
     assert result.structured_content is not None
     return result.structured_content
 
@@ -64,13 +63,13 @@ def _new_note(title: str) -> dict[str, Any]:
             f"# {title}\n\n## Observations\n\n"
             "- [operating constraint] Keep retries bounded #reliability\n"
         ),
-        "note_type": "insight",
-        **_STANDALONE,
+        "type": "insight",
+        "unlinked_reason": "standalone",
     }
 
 
-def _replace(old: str, new: str, **operation: Any) -> dict[str, Any]:
-    return {"kind": "replace_string", "old_string": old, "new_string": new, **operation}
+def _replace(old: str, new: str) -> dict[str, Any]:
+    return {"action": "replace_text", "old_text": old, "new_text": new}
 
 
 def test_an_agent_names_pages_by_title_and_id_end_to_end(build) -> None:
@@ -83,110 +82,62 @@ def test_an_agent_names_pages_by_title_and_id_end_to_end(build) -> None:
             assert "path" not in created
 
             # A page created a second ago resolves by its title, and read replies carry the same id.
-            read = await _tool(
-                client, "read_memory", {"operation": {"kind": "page", "path": "Retry policy"}}
-            )
+            read = await _tool(client, "read_page", {"page": "Retry policy"})
             assert "Keep retries bounded" in read["body"]
             assert read["id"] == created["id"]
 
-            # An edit names the page by id and needs no `expected_hash`.
+            # An edit names the page by its id: the id is also the version the edit is checked against.
             edited = await _tool(
                 client,
                 "edit_note",
-                {
-                    "path": created["id"],
-                    "operation": _replace("bounded", "capped"),
-                    "why": "tighten",
-                },
+                {"note": created["id"], **_replace("bounded", "capped"), "why": "tighten"},
             )
             assert edited["title"] == "Retry policy"
             head = created["id"].partition(".")[0]
             assert edited["id"].startswith(f"{head}.") and edited["id"] != created["id"]
 
-            # A guard that names a version the page moved past refuses with the current id.
+            # An id for a version the page moved past refuses with the current id.
             # One retry using that refusal's own arguments succeeds.
-            stale_call = {
-                "path": created["id"],
-                "operation": _replace("capped", "limited", expected_hash=created["id"]),
-                "why": "tighten",
-            }
+            stale_call = {"note": created["id"], **_replace("capped", "limited"), "why": "tighten"}
             refused = await _tool(client, "edit_note", stale_call)
             assert refused["error"]["code"] == "STALE_EDIT"
             assert edited["id"] in refused["error"]["message"]
             fix = refused["error"]["retry"]["arguments"]
-            assert fix["path"] == edited["id"]
-            retried = await _tool(
-                client,
-                "edit_note",
-                {
-                    **stale_call,
-                    **fix,
-                    "operation": {**stale_call["operation"], **fix["operation"]},
-                },
-            )
+            assert fix["note"] == edited["id"]
+            retried = await _tool(client, "edit_note", {**stale_call, **fix})
             assert retried["title"] == "Retry policy"
             assert "path" not in retried
 
-            # A KB-relative path with an id guard compares the id's version, as a vault path does.
-            shorthand = await _tool(
+            # An edit by title takes the page as it is now and needs no id.
+            by_title = await _tool(
                 client,
                 "edit_note",
-                {
-                    "path": read["path"].removeprefix("Knowledge Base/"),
-                    "operation": _replace("limited", "bounded", expected_hash=retried["id"]),
-                    "why": "restore",
-                },
+                {"note": "Retry policy", **_replace("limited", "bounded"), "why": "restore"},
             )
-            assert shorthand["title"] == "Retry policy"
+            assert by_title["title"] == "Retry policy"
 
-            # The frontmatter writer compares the id's version too: the version before `shorthand`
+            # The tag writer compares the id's version too: the version before `by_title`
             # is refused, and the version it left is taken.
-            patch = {"kind": "patch_frontmatter", "field": "tags", "value": ["ops"]}
-            stale_patch = await _tool(
-                client,
-                "edit_note",
-                {
-                    "path": created["id"],
-                    "operation": {**patch, "expected_hash": retried["id"]},
-                    "why": "tag",
-                },
-            )
-            assert stale_patch["error"]["code"] == "STALE_EDIT"
-            patched = await _tool(
-                client,
-                "edit_note",
-                {
-                    "path": created["id"],
-                    "operation": {**patch, "expected_hash": shorthand["id"]},
-                    "why": "tag",
-                },
-            )
+            tag = {"action": "set_tags", "tags": ["ops"], "why": "tag"}
+            stale_tag = await _tool(client, "edit_note", {"note": retried["id"], **tag})
+            assert stale_tag["error"]["code"] == "STALE_EDIT"
+            patched = await _tool(client, "edit_note", {"note": by_title["id"], **tag})
             assert patched["title"] == "Retry policy"
 
             # Two pages share the title: the refusal offers both, the picked id resolves.
             await _tool(client, "create_note", _new_note("Retry policy"))
-            ambiguous = await _tool(
-                client, "read_memory", {"operation": {"kind": "page", "path": "Retry policy"}}
-            )
+            ambiguous = await _tool(client, "read_page", {"page": "Retry policy"})
             error = ambiguous["error"]
             assert error["code"] == "AMBIGUOUS_REFERENCE"
             assert error["message"] == "2 pages are titled “Retry policy”."
             assert [set(row) for row in error["candidates"]] == [
                 {"title", "type", "date", "id"}
             ] * 2
-            assert error["retry"]["arguments"]["operation"]["path"] == "<id>"
-            picked = await _tool(
-                client,
-                "read_memory",
-                {"operation": {"kind": "page", "path": error["candidates"][0]["id"]}},
-            )
+            assert error["retry"]["arguments"]["page"] == "<id>"
+            picked = await _tool(client, "read_page", {"page": error["candidates"][0]["id"]})
             assert picked["id"] == error["candidates"][0]["id"]
 
     asyncio.run(run())
-
-    # No published tool schema or description moved.
-    digest, _ = _tool_surface_sha256(build())
-    assert json.loads(TOOL_SURFACE_CONTRACT_PATH.read_text(encoding="utf-8"))["sha256"] == digest
 
 
 def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
@@ -290,21 +241,17 @@ async def _keyed(
     client: Client, name: str, arguments: dict[str, Any], key: str
 ) -> dict[str, Any]:
     meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: key}
-    result = await client.call_tool(name, arguments, meta=meta, raise_on_error=False)
+    result = await client.call_tool(*public_call(name, arguments), meta=meta, raise_on_error=False)
     assert result.structured_content is not None
     return result.structured_content
 
 
-async def _overwrite_is_refused(client: Client, page: str, guard: str) -> None:
-    """An edit that carries `guard` is refused once another writer has changed `page`."""
+async def _overwrite_is_refused(client: Client, guard: str) -> None:
+    """An edit that names the version `guard` is refused once another writer has changed the page."""
     refused = await _tool(
         client,
         "edit_note",
-        {
-            "path": page,
-            "operation": _replace("limited", "dropped", expected_hash=guard),
-            "why": "overwrite",
-        },
+        {"note": guard, **_replace("limited", "dropped"), "why": "overwrite"},
     )
     assert refused["error"]["code"] == "STALE_EDIT"
 
@@ -313,21 +260,13 @@ def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(b
     async def run() -> None:
         async with Client(build()) as client:
             created = await _tool(client, "create_note", _new_note("Retry policy"))
-            first_edit = {
-                "path": created["id"],
-                "operation": _replace("bounded", "capped"),
-                "why": "tighten",
-            }
+            first_edit = {"note": created["id"], **_replace("bounded", "capped"), "why": "tighten"}
             first = await _keyed(client, "edit_note", first_edit, "first-edit-key")
             # Another writer changes the page after the first edit.
             await _keyed(
                 client,
                 "edit_note",
-                {
-                    "path": created["id"],
-                    "operation": _replace("capped", "limited"),
-                    "why": "tighten more",
-                },
+                {"note": first["id"], **_replace("capped", "limited"), "why": "tighten more"},
                 "second-edit-key",
             )
 
@@ -335,7 +274,7 @@ def test_a_replayed_write_names_the_version_it_wrote_not_the_page_as_it_is_now(b
             assert replayed["id"] == first["id"]
 
             # The id of the replayed reply cannot guard an edit of the other writer's version.
-            await _overwrite_is_refused(client, created["id"], replayed["id"])
+            await _overwrite_is_refused(client, replayed["id"])
 
     asyncio.run(run())
 
@@ -349,18 +288,14 @@ def test_a_replayed_create_names_the_version_it_wrote_not_the_page_as_it_is_now(
             await _tool(
                 client,
                 "edit_note",
-                {
-                    "path": created["id"],
-                    "operation": _replace("bounded", "limited"),
-                    "why": "tighten",
-                },
+                {"note": created["id"], **_replace("bounded", "limited"), "why": "tighten"},
             )
 
             replayed = await _keyed(client, "create_note", create, "create-key")
             assert replayed["id"] == created["id"]
 
             # The id of the replayed reply cannot guard an edit of the other writer's version.
-            await _overwrite_is_refused(client, created["id"], replayed["id"])
+            await _overwrite_is_refused(client, replayed["id"])
 
     asyncio.run(run())
 
@@ -369,25 +304,21 @@ def test_a_replayed_supersede_names_the_successor_it_wrote(build) -> None:
     async def run() -> None:
         async with Client(build()) as client:
             old = await _tool(client, "create_note", _new_note("Retry policy"))
-            supersede = {**_new_note("Retry policy v2"), "old_path": old["id"], "reason": "revise"}
+            supersede = {**_new_note("Retry policy v2"), "note": old["id"], "why": "revise"}
             first = await _keyed(client, "supersede_note", supersede, "supersede-key")
             successor = first["pages"][1]
             # Another writer changes the successor after the supersede.
             await _tool(
                 client,
                 "edit_note",
-                {
-                    "path": successor["id"],
-                    "operation": _replace("bounded", "limited"),
-                    "why": "tighten",
-                },
+                {"note": successor["id"], **_replace("bounded", "limited"), "why": "tighten"},
             )
 
             replayed = await _keyed(client, "supersede_note", supersede, "supersede-key")
             assert replayed["pages"] == first["pages"]
 
             # The id of the replayed successor cannot guard an edit of the other writer's version.
-            await _overwrite_is_refused(client, successor["id"], replayed["pages"][1]["id"])
+            await _overwrite_is_refused(client, replayed["pages"][1]["id"])
 
     asyncio.run(run())
 

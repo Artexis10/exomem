@@ -286,7 +286,7 @@ def compilation_routes(paths: Sequence[str]) -> dict[str, Any]:
             }}
             for path in paths
         ]
-        out["preparation_route"] = {"tool": "prepare_note", "args": {"sources": list(paths)}}
+        out["preparation_route"] = {"tool": "compile_source", "args": {"sources": list(paths)}}
     return out
 
 

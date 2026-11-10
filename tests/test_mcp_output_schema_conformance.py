@@ -11,6 +11,7 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+from _public_call import public_call
 from test_mcp_schema_fidelity import _build_server
 
 from exomem import cli_ops
@@ -46,7 +47,7 @@ def _validate(schema: dict, structured: dict) -> None:
 def test_ask_memory_structured_content_matches_declared_schema(server, case: str) -> None:
     tool = asyncio.run(server.get_tool("ask_memory"))
     schema = tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["outputSchema"]
-    result = asyncio.run(server.call_tool("ask_memory", ASK_MEMORY_CASES[case]))
+    result = asyncio.run(server.call_tool(*public_call("ask_memory", ASK_MEMORY_CASES[case])))
     assert result.structured_content is not None
     _validate(schema, result.structured_content)
     if case == "operation_error":
@@ -70,4 +71,6 @@ def test_every_tool_schema_admits_the_failure_envelope(server) -> None:
         for reply in (envelope, full_envelope):
             _validate(schema, {"result": reply} if wrapped else reply)
         checked += 1
-    assert checked >= 2, json.dumps(checked)
+    # Only `recall_context` declares an output schema: the typed tools save the bytes, so a
+    # client reads their structured result without one.
+    assert checked >= 1, json.dumps(checked)

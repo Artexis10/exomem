@@ -18,10 +18,12 @@ from . import (
     kbdir,
     note_types,
     origin_bindings,
+    page_ids,
     provenance,
     semantic_authoring,
     semantic_contract,
     semantic_index,
+    semantic_kinds,
     semantic_labels,
     semantic_language_registry,
     semantic_units,
@@ -29,6 +31,7 @@ from . import (
     temporal,
     vault,
 )
+from .governance import egress
 from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate"]
@@ -130,6 +133,7 @@ def observe_memory(
     until: str | None = None,
     id: str | None = None,
     unit_ref: str | None = None,
+    unit: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -147,12 +151,19 @@ def observe_memory(
             "INVALID_OBSERVE_OPERATION",
             "operation must be add, update, remove, or validate",
         )
-    if op in {"update", "remove"} and not unit_ref:
+    if unit is not None and unit_ref:
+        raise ObserveMemoryError(
+            "INVALID_OBSERVE_INPUT",
+            "give the unit id in `unit`, or unit_ref with its guards, not both",
+        )
+    # A unit id names the unit and the version the caller saw; the guards are filled from the
+    # page the write reads under the lease, once the unit id has matched it.
+    if op in {"update", "remove"} and not (unit_ref or unit):
         raise ObserveMemoryError(
             "UNIT_REFERENCE_REQUIRED",
             f"{op} requires the current unit_ref",
         )
-    if op in {"update", "remove"} and (
+    if op in {"update", "remove"} and unit is None and (
         not expected_hash or not expected_fingerprint
     ):
         raise ObserveMemoryError(
@@ -181,7 +192,7 @@ def observe_memory(
             "INVALID_OBSERVE_INPUT",
             "remove accepts only the parent, unit reference, and drift guards",
         )
-    proposal_mode = "update" if op == "validate" and unit_ref else op
+    proposal_mode = "update" if op == "validate" and (unit_ref or unit) else op
     if proposal_mode in {"add", "update"} and (
         category is None or not str(category).strip() or content is None
     ):
@@ -238,6 +249,8 @@ def observe_memory(
         vault_root, editable.rel_path, source=editable.original_text
     )
     current_unit = None
+    if unit is not None:
+        unit_ref, expected_fingerprint = _bind_unit_id(vault_root, current.document, unit)
     if unit_ref:
         resolution = current.document.resolve_unit(
             unit_ref,
@@ -249,6 +262,19 @@ def observe_memory(
                 "ambiguous": "AMBIGUOUS_UNIT_REFERENCE",
                 "missing": "UNIT_NOT_FOUND",
             }.get(resolution.status, "UNIT_NOT_FOUND")
+            # A ref this parse cannot find reads as missing, or as stale when it names a
+            # fingerprint; the page's own registry tells which of those is a vault heading.
+            if resolution.status in {"missing", "stale"} and _a_vault_heading_holds(
+                vault_root, editable.rel_path, editable.original_text, unit_ref,
+                expected_fingerprint,
+            ):
+                raise ObserveMemoryError(
+                    "UNIT_NOT_FOUND",
+                    "the unit's heading is a vault kind or a vault label, which observe_memory "
+                    "cannot address yet",
+                    "Edit the unit in the page body with "
+                    f"{capabilities.active_tools_text('edit_memory')}.",
+                )
             raise ObserveMemoryError(
                 code,
                 f"unit reference is {resolution.status}; re-read the parent and retry",
@@ -258,6 +284,8 @@ def observe_memory(
     frontmatter, body, _ = vault.parse_frontmatter(editable.original_text)
     target_anchor: str | None = None
     removed_unit = None
+    dropped_relations: tuple[tuple[str, str], ...] = ()
+    dropped_outcome: str | None = None
     if proposal_mode == "remove":
         assert current_unit is not None
         after_body = _remove_unit(
@@ -294,6 +322,13 @@ def observe_memory(
                 "or author a canonical note-level relation.",
             )
         base_unit = current_unit if proposal_mode == "update" else None
+        if base_unit is not None and relations is None and base_unit.relations:
+            # `relations` replaces on update, so a call that omits it removes every relation the
+            # unit had. A list the caller sent, even an empty one, is its stated intent.
+            dropped_relations = tuple((item.kind, item.target) for item in base_unit.relations)
+            dropped_outcome = _dropped_relations_outcome(
+                dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
+            )
         normalized_verdict = _resolve_verdict(
             verdict,
             base_unit,
@@ -496,8 +531,8 @@ def observe_memory(
         ):
             if fact.logical_source_ref != getattr(proposed_unit, "unit_ref", None):
                 continue
-            if "corrects" not in semantic_contract.page_relation_behaviours(
-                preflight.after, preflight.after_corpus, fact.canonical_relation
+            if not semantic_contract.page_relation_has(
+                preflight.after, preflight.after_corpus, fact.canonical_relation, "corrects"
             ):
                 continue
             if fact.target_unit_status != "found" or fact.logical_target_ref is None:
@@ -529,6 +564,8 @@ def observe_memory(
             unit=proposed_unit,
             removed_unit=removed_unit,
             semantic=preflight.as_dict(),
+            dropped_relations=dropped_relations,
+            dropped_outcome=dropped_outcome,
         )
 
     try:
@@ -587,10 +624,69 @@ def observe_memory(
         unit=final_unit,
         removed_unit=removed_unit,
         semantic=committed.as_dict(),
+        dropped_relations=dropped_relations,
+        dropped_outcome=dropped_outcome,
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
     )
+
+
+def unit_id(unit: Any) -> str:
+    """The short id that names one unit and its current version."""
+    return page_ids.part_id(str(unit.unit_ref), str(unit.fingerprint))
+
+
+def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
+    """The units of a page just read, each with the id an edit of it takes.
+
+    A principal that sees a released view of the page gets `unavailable`: the unit refs and
+    fingerprints come from the full page, so listing them would name what the view withholds.
+    """
+    if egress.restricted_release_filter(vault_root) is not None:
+        return {
+            "status": "unavailable",
+            "reason": "this principal sees a released view of the page",
+        }
+    path = page.get("path")
+    if not isinstance(path, str) or not path.endswith(".md"):
+        return []
+    document = semantic_index.current_parent_index_state(vault_root, path).document
+    return [
+        {"id": unit_id(unit), "category": unit.category, "text": unit.content}
+        for unit in document.units if unit.unit_ref
+    ]
+
+
+def _bind_unit_id(vault_root: Path, document: Any, unit: str) -> tuple[str, str]:
+    """The unit_ref and fingerprint of the one unit `unit` names, or a refusal that says why.
+
+    A principal that sees a released view is never given unit ids (`page_units`), so a unit reads
+    as unknown to it, and a stale-id refusal cannot name the current id of a withheld unit.
+    """
+    head, _, version = str(unit).partition(".")
+    visible = egress.restricted_release_filter(vault_root) is None
+    found = [
+        u for u in document.units
+        if visible and u.unit_ref and page_ids.part_head(u.unit_ref) == head
+    ]
+    if not found:
+        raise ObserveMemoryError(
+            "UNIT_NOT_FOUND",
+            f"unit id {unit} names no unit of this note; read the note's units for the current ids",
+        )
+    if len(found) > 1:
+        raise ObserveMemoryError(
+            "AMBIGUOUS_UNIT_REFERENCE", f"unit id {unit} names more than one unit of this note"
+        )
+    current = found[0]
+    if unit_id(current) != unit:
+        raise ObserveMemoryError(
+            "STALE_UNIT_REFERENCE",
+            f"unit id {unit} is stale; the unit now has id {unit_id(current)}. "
+            "Read the unit again and retry with the current id.",
+        )
+    return str(current.unit_ref), str(current.fingerprint)
 
 
 def _legacy_page_given_form(path: str) -> str:
@@ -659,11 +755,30 @@ def _select_kind(
         # This tool takes no holder or credence, so a new belief from it would be nobody's.
         raise ObserveMemoryError(
             "UNSUPPORTED_SEMANTIC_KIND",
-            f"kind {raw!r} records one holder's credence, and observe_memory takes no holder "
-            "or credence",
+            f"kind {raw!r} records one holder's credence, and "
+            f"{capabilities.active_tools_text('observe_memory')} takes no holder or credence",
             _belief_remediation(),
         )
     return resolution.resolved
+
+
+def _a_vault_heading_holds(
+    vault_root: Path, rel_path: str, source: str, unit_ref: str, fingerprint: str | None
+) -> bool:
+    """Whether `unit_ref` names a current unit that only the page's own registry reads.
+
+    This tool parses a page with the shipped kinds, so a unit under a vault kind's heading or a
+    vault label is missing to it. The page's registry parses the page once, on the refusal path
+    only, so the refusal can say what is true.
+    """
+    frontmatter, _body, _ = vault.parse_frontmatter(source)
+    language = semantic_language_registry.load_for_page(vault_root, rel_path, frontmatter)
+    if language is semantic_language_registry.core_registry():
+        return False
+    state = semantic_contract._parse_page_state(
+        vault_root, rel_path, source, language_registry=language
+    )
+    return state.document.resolve_unit(unit_ref, expected_fingerprint=fingerprint).status == "found"
 
 
 def _belief_remediation() -> str:
@@ -671,7 +786,7 @@ def _belief_remediation() -> str:
     return (
         f"{semantic_units.BELIEF_FORM} Write that unit into the page body with "
         f"{capabilities.active_tools_text('edit_memory')}, or with "
-        f"{capabilities.active_tools_text('create_memory')} for a new page."
+        f"{capabilities.active_tools_text('remember')} for a new page."
     )
 
 
@@ -1125,6 +1240,44 @@ def _assert_round_trip(
         )
 
 
+#: How many dropped relations the outcome sentence names before it counts the rest.
+_DROPPED_RELATIONS_NAMED = 5
+
+
+def _dropped_relations_outcome(dropped: tuple[tuple[str, str], ...], *, compact: bool) -> str:
+    """The sentence for an update that omits `relations` while its unit had some.
+
+    A prose-only update of a belief drops its `assesses` relation, so the belief then warns that
+    it names no claim; this names the relations that went. A rich unit keeps them when the call
+    sends them again; a compact observation carries none, so no call can keep them there.
+    """
+    named = "; ".join(f"{kind}: {target}" for kind, target in dropped[:_DROPPED_RELATIONS_NAMED])
+    more = len(dropped) - _DROPPED_RELATIONS_NAMED
+    if more > 0:
+        named += f"; and {more} more"
+    count = f"{len(dropped)} relation{'s' if len(dropped) > 1 else ''}"
+    if compact:
+        return (
+            f"This update makes the unit a compact observation, which carries no relations, so "
+            f"it loses {count} ({named})."
+        )
+    # `edit_note` carries `links` but no `kind`, and an update that sends relations must name its
+    # rich kind, so on the listed tools the only way back is the unit's `relations:` line in the
+    # page body.
+    if capabilities.current_tool_shape() == "grouped":
+        restore = "to keep them, send them again in `relations`, with the unit's `kind`"
+    else:
+        restore = (
+            "to restore them, write them back on the unit's `relations:` line in the page body "
+            "with "
+            f"{capabilities.active_tools_text('edit_memory')}"
+        )
+    return (
+        f"This update drops {count} the unit had ({named}). An update replaces a unit's "
+        f"relations: {restore}."
+    )
+
+
 def _result(
     *,
     operation: str,
@@ -1135,6 +1288,8 @@ def _result(
     unit: Any | None,
     removed_unit: Any | None,
     semantic: dict[str, Any],
+    dropped_relations: tuple[tuple[str, str], ...] = (),
+    dropped_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
@@ -1145,12 +1300,19 @@ def _result(
         "after_hash": after_hash,
         "semantic": semantic,
     }
+    if dropped_relations:
+        value["relations_dropped"] = [
+            {"kind": kind, "target": target} for kind, target in dropped_relations
+        ]
+        value["outcome"] = dropped_outcome
     if timings is not None:
         value["timings"] = timings
     if unit is not None:
         value["unit_ref"] = unit.unit_ref
+        value["unit_id"] = unit_id(unit)
         value["unit"] = unit.to_dict()
     if removed_unit is not None:
         value["removed_unit_ref"] = removed_unit.unit_ref
+        value["removed_unit_id"] = unit_id(removed_unit)
         value["removed_unit"] = removed_unit.to_dict()
     return value

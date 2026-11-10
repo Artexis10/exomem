@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, writer_lease
+from exomem import commands, review_ids, writer_lease
 from exomem import find as find_module
 from exomem.capabilities import ActiveSurfaceDescriptor, active_surface
 
@@ -206,7 +206,7 @@ def test_activation_surfaces_the_relevant_sixth_due_item(vault: Path) -> None:
     )
 
     assert packet.get("relevant_due_refs") == [{
-        "ref": row["ref"], "fingerprint": row["fingerprint"],
+        "ref": row["ref"], "fingerprint": row["fingerprint"], "id": review_ids.item_id(row),
         "category": row["category"], "due_since": row["due_since"],
         "anchor": packet["anchors"][0]["ref"],
     }]

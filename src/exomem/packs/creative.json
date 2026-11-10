@@ -47,7 +47,7 @@
     {
       "title": "Log a production",
       "intent": "Turn a creative artifact into a durable production record with outcomes and lessons.",
-      "route": "note with note_type production-log, then connect recurring people, tools, and ideas",
+      "route": "note of type production-log, then connect recurring people, tools, and ideas",
       "example": "Turn this draft into a production log."
     }
   ],

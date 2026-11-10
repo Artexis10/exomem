@@ -8,7 +8,7 @@ addressable through the public product commands. Markdown remains the source of
 truth; lexical, vector, and graph stores are rebuildable sidecars.
 
 <!-- BEGIN GENERATED SEMANTIC AUTHORING CONTRACT -->
-<!-- exomem-semantic-authoring:v10 sha256:6d3a3c179884e0f1ca899363e04286375dcdccf9870c8022db25fee91d1cf955 -->
+<!-- exomem-semantic-authoring:v11 sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -30,17 +30,17 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Compact anchor: one optional stable authored unit identifier. Write `^anchor`. Use 1-64 ASCII letters, digits, or hyphens and begin and end alphanumeric. Place it at the end of the line.
 - Compact exclusions: observation-shaped rows inside fenced code blocks; task labels `[ ]`, `[x]`, `[X]`, and `[-]`; reserved or punctuation-bearing bracket labels outside category grammar. Compact units do not carry typed unit relations; use a canonical note-level relation or the rich form.
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`, `- as_of: <ISO start date>`, `- until: <ISO last valid date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict, check_by, as_of and until; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
-- Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request bootstrap with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_memory(include_history=true), optionally for unit_ref, using history_limit and history_continuation. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
+- Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request read_instructions with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_page(part=history), optionally for unit_ref, using history_limit and history_continuation in options. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
-- Exact applicability: obtain `bootstrap(operation={'kind': 'instructions', 'profile': 'compact', 'section': 'authoring'})` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. If the exposed bootstrap schema lacks `section`, use `bootstrap(operation={'kind': 'instructions', 'profile': 'full'})` instead; released profiles reject section arguments. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`, `procedure` in `Notes/Procedures`. More may be registered; `read_schema(operation={'kind': 'inspect', 'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `read_schema(operation={'kind': 'inspect', 'subject': 'homes'})` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
+- Exact applicability: obtain `read_instructions(profile='compact', section='authoring')` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`, `procedure` in `Notes/Procedures`. More may be registered; `inspect_memory(operation='schema.inspect', arguments={'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `inspect_memory(operation='schema.inspect', arguments={'subject': 'homes'})` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
-- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `change_observations` for one unit, and `edit_note` for a small edit or activation. Tier 2 change_files create, overwrite, and append receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
+- Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `add_observation/edit_note` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory `files.create` and `files.append` receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.
 - Findings: `missing_semantic_unit` means an applicable live-class compiled result has no valid non-empty unit; `empty_rich_unit` means a recognized rich heading has no substantive body. Add substantive body content or remove the empty recognized heading.
 - Compact remediation: Add `## Observations` and `- [operating constraint] Keep retries bounded #reliability`.
 - Rich remediation: Alternatively add `## Decision`, a blank line, and a substantive body.
 - Semantic-unit coverage and relation-review disposition are independent obligations.
-- Validation review: Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful relation applies, revalidate with relation_disposition="reviewed_none" and a bounded evidence-based relation_review_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority and returned guards.
+- Validation review: Validation evaluates the proposed result without saving content or review state; the request includes relation assessment. Inspect the current page and candidate evidence. If no truthful link applies, preview again with a bounded evidence-based unlinked_reason. Missing edges prove nothing; preserve typed relations and metadata. Report insufficient evidence or unresolved material choices. Commit needs separate write authority.
 - Portable categories: Choose exactly one primary category: prefer a meaningful epistemic or operational role and put the domain in tags, but if the role would only be a generic fact, finding, or observation and the domain is the durable lens, use a domain category instead. The category vocabulary is open: these core keys are a shared starting point, not a closed list. When no core key is a good primary fit, author a new meaningful category rather than forcing an ill-fitting one. Use exactly one primary category; kind is the governed form, tags are secondary facets, and relations are typed edges. The rich form's category defaults to its kind, so `category: decision` is redundant when the kind is Decision. Create multiple distinct semantic observations and typed relations when the source genuinely supports them, but never multiply units or relations to satisfy a quota and never duplicate the same fact. Core keys are `action`, `assumption`, `code`, `config`, `constraint`, `decision`, `design`, `fact`, `finding`, `insight`, `preference`, `problem`, `question`, `requirement`, `risk`, `technique`. Core aliases are `actions` → `action`, `assumptions` → `assumption`, `configs` → `config`, `configuration` → `config`, `configurations` → `config`, `constraints` → `constraint`, `decisions` → `decision`, `designs` → `design`, `facts` → `fact`, `findings` → `finding`, `insights` → `insight`, `open_question` → `question`, `open_questions` → `question`, `preferences` → `preference`, `problems` → `problem`, `questions` → `question`, `requirements` → `requirement`, `risks` → `risk`, `techniques` → `technique`. Role example: `- [decision] Relocate to a coastal city next spring #life ^relocation`. Domain example: `- [nutrition] Evening protein improves adherence #experiment ^evening-protein`. Breadth example (life, finance, legal/travel, and career alongside one retained code line):
 
 ```markdown
@@ -79,11 +79,12 @@ when present and are omitted when absent, so an unjudged unit is distinguishable
 from a judged one.
 
 Both are answered from the maintained catalogue rather than by reading pages, so
-a due-date query costs an index read on a served cell. The one filter field with
-no index answer is `page.frontmatter:/<pointer>`, which is open-ended by
-construction; a served request naming it is refused with `UNSUPPORTED_FILTER_FIELD`
-rather than silently falling back to a corpus scan, while an offline CLI caller
-keeps the exact scan. A date bound is answered exactly when it names a whole
+a due-date query costs an index read on a served cell. One filter field has no
+index answer: `page.frontmatter:/<pointer>`, which is open-ended by construction.
+A served request naming it is refused with `UNSUPPORTED_FILTER_FIELD` rather than
+silently falling back to a corpus scan, while an offline CLI caller keeps the
+exact scan. `unit.dimension` (below) has no column either, and a served request
+answers it without a scan. A date bound is answered exactly when it names a whole
 day, so `updated_after`, `updated_before`, `recency_days` and a bare ISO date can
 all be negated with `$not`; a bound carrying a timestamp is refused under the same
 code when nothing else in the filter narrows it, because a day column cannot
@@ -92,8 +93,11 @@ decide the hour and a wrong negation would silently drop pages.
 `verdict` is state, not supersession, and not a score. A refuted unit keeps its
 page's active standing and its ordinary rank: nothing replaced it, the question
 simply got an answer, and the negative result stays retrievable with the
-evidence that refuted it. Exomem stores no numeric confidence, so a probability
-or percentage is never a valid `verdict`; the parser rejects one outright. The
+evidence that refuted it. A claim carries no confidence score and a verdict is a
+judgment in words, so a probability or percentage is never a valid `verdict`; the
+parser rejects one outright. A degree of belief that its holder stated is a
+`## Belief` unit; "Recording a degree of belief" in the scaffold's
+`references/page-types.md` gives its form. The
 `prediction` governed kind names a unit that is a claim about the future, and
 pairs naturally with both keys. None of this adds a relation kind: attach the
 refuting or confirming material with the governed vocabulary you already have
@@ -142,6 +146,48 @@ plans fail before candidate retrieval and never silently widen.
 
 An empty query plus filters is a filter-only lookup. It uses the documented
 filtered-most-recent sort tuple; it does not fabricate a text score.
+
+`unit.dimension` filters units by epistemic dimension, with `$eq`, `$in` and
+`$ne`. It takes a dimension key or a label in any language, and a name that no
+registry entry holds is refused with the known keys. A unit belongs to a
+dimension when its kind is a member, when it carries a member key, or when it is
+an end of a typed edge whose family is a member. A unit's own `relations` row
+starts an edge at that unit, and a link with an anchor, such as `[[#before]]`,
+ends one at the unit the anchor names. An edge written in frontmatter, in a
+page's relations section or as a link with no anchor starts or ends at the whole
+page, and that end reaches every unit of the page. A vault adds a dimension in
+`_Schema/semantic-language-registry.yaml`, and the filter takes it with no code
+change. A vault may also remove a dimension it added: no page stores a dimension
+key, and a filter that still names it is refused with the keys that exist.
+
+```json
+{"filters": {"unit.dimension": {"$eq": "currency"}}, "result_level": "unit"}
+```
+
+A dimension with a family member reads the edge graph in one query for the
+units it tests. While the graph sidecar is missing or stale the request raises
+the typed warming outcome and never answers as if no edge existed. A caller sees
+an edge only when it may see both of its pages.
+
+A served request answers `unit.dimension` without reading pages. A dimension
+with no family member, whose member keys each have an index column, becomes the
+equivalent kind and key predicates, anywhere in the filter. Any other dimension
+is checked on the best units the search found, with one graph read for them,
+so the predicate must sit at the top level of the filter or under a top-level
+`$and`; under `$or` or `$not` it is refused with `UNSUPPORTED_FILTER_FIELD`.
+The limit applies before that check, so when it drops units the reply's
+`user_summary` says that the filter ran only on the best matches, how many of
+them it kept, and that more may exist. The offline CLI evaluates every dimension on every unit.
+
+The category report (`schema_memory` with `operation="infer"` and `subject="categories"`, which counts units by category) lists every
+dimension with its members and display behaviours, and with `unit_count` and
+`page_count` for the units it scanned. Its `edges` value says how the count was
+made: `not_needed` when no edge decides the dimension, `counted` when the graph
+answered, and `unavailable` when it could not, where both counts are `null`
+instead of a number that leaves out the edges. While the graph is missing or
+stale, the report schedules its rebuild, and the row's `repair` names the
+`maintain_memory` call that runs the rebuild now. A dimension a vault adds appears
+there with no code change.
 
 ## Explain ranking without inventing confidence
 

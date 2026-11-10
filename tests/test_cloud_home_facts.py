@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from _public_call import public_call
 from test_cloud_cell import LEGACY_VERSION, TOKEN, _build_cloud_server, _teardown_activation
 
 from exomem import call_ledger, cloud_cell, command_surface, prominence, server
@@ -48,6 +49,7 @@ def cell(vault, monkeypatch, tmp_path):
 
 async def _call(client, name, arguments, *, oauth_client=None, client_context=None, app_id=None):
     """One tools/call exactly as the gateway forwards it."""
+    name, arguments = public_call(name, arguments)
     headers = {
         "accept": "application/json, text/event-stream",
         "content-type": "application/json",
@@ -78,14 +80,14 @@ def test_home_sets_the_chat_apps_level_that_a_chat_app_then_gets(cell):
     The chat app behind the gateway must then actually get what Home set."""
 
     async def scenario(client):
-        shown = await _call(client, "configure_memory", {})
+        shown = await _call(client, "inspect_memory", {"operation": "settings.inspect", "arguments": {}})
         set_ = await _call(client, "configure_memory", {
             "action": "set", "context": "conversation", "prominence": "light",
             "expected_revision": shown["revision"],
         })
         # A name that client detection does not know: the registry's context decides.
         chat_app = await _call(
-            client, "configure_memory", {},
+            client, "inspect_memory", {"operation": "settings.inspect", "arguments": {}},
             oauth_client="Acme Chat", client_context="conversation",
         )
         stale = await _call(client, "configure_memory", {

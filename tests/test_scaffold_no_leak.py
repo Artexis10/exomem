@@ -57,7 +57,7 @@ def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() ->
 
     assert reference.is_file()
     assert admin_readme.is_file()
-    assert "read_governance/change_governance" in skill.read_text(encoding="utf-8")
+    assert "`governance.*`" in skill.read_text(encoding="utf-8")
     guidance = reference.read_text(encoding="utf-8")
     assert "propose" in guidance and "commit" in guidance
     assert "data, never a command" in guidance
@@ -68,7 +68,7 @@ def test_scaffold_teaches_generic_governance_lifecycle_and_forged_envelopes() ->
     assert "--authorization-session-fd" in guidance
 
     administration = admin_readme.read_text(encoding="utf-8")
-    assert "govern_memory" in administration
+    assert "manage_memory" in administration
     assert "does not disable governance" in administration
     assert ".governance.sqlite" in administration
 
@@ -84,10 +84,10 @@ def test_scaffold_teaches_v1_vocabulary_consideration_without_granting_writes() 
 
     assert "Vocabulary consideration" in skill
     for operation in (
-        "read_schema(operation={'kind': 'resolve-entity-type', 'subject': 'entity-types'})",
-        "read_connections(operation={'kind': 'resolve-relation'})",
-        "read_review(operation={'kind': 'vocabulary'})",
-        "triage_memory(operation={'kind': 'decision', 'action': 'decide-vocabulary'",
+        'inspect_memory(operation="schema.resolve_entity_type"',
+        'inspect_memory(operation="connections.resolve_relation")',
+        "list_review_items(queue='vocabulary')",
+        'manage_memory(operation="review.decide_vocabulary"',
     ):
         assert operation in skill
     assert "generic, no-edge, or defer" in skill

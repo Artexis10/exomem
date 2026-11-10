@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from membench.utility.switch_eval.state import Slot
 from membench.utility.tool_selection.cases import load_cases
 from membench.utility.tool_selection.executor import arm_spec, seed_case, seeding_env, snapshot_slot
@@ -479,7 +480,6 @@ def test_real_dispatcher_read_audit_and_checkpoint_are_separate_from_plan_and_pr
     for path in (slot.runtime, slot.cwd, slot.hook_home):
         path.mkdir(parents=True, exist_ok=True)
     env = seeding_env(dict(os.environ), slot, spec)
-    env["EXOMEM_MCP_TOOL_SHAPE"] = "nested"
     slot.turn_file.write_text("0")
     # Persist an existing synthetic credential sample, so this boundary proof survives unrelated URI repairs.
     injected = subprocess.run([sys.executable, "-c", """
@@ -507,10 +507,10 @@ owner.save(run)
             async with ClientSession(read, write, read_timeout_seconds=45) as client:
                 await client.initialize()
                 await client.list_tools()
-                await client.call_tool("adoption_studio", {"action": "status"})
+                await client.call_tool(*public_call("adoption_studio", {"action": "status"}))
                 # Full status exposes the synthetic credential and exercises the read-audit boundary.
-                await client.call_tool("adoption_studio", {"action": "status", "run_id": run_id, "view": "full"})
-                await client.call_tool("adoption_studio", {"action": "plan", "run_id": run_id})
+                await client.call_tool(*public_call("adoption_studio", {"action": "status", "run_id": run_id, "view": "full"}))
+                await client.call_tool(*public_call("adoption_studio", {"action": "plan", "run_id": run_id}))
 
     # Keep the derived owner's connection open so shutdown deterministically leaves a WAL to checkpoint.
     index_owner = subprocess.Popen([sys.executable, "-c", """
@@ -699,7 +699,7 @@ def test_retained_failed_media_fixture_survives_recorded_status_without_starting
         async with stdio_client(parameters) as (read, write):
             async with ClientSession(read, write, read_timeout_seconds=45) as client:
                 await client.initialize()
-                result = await client.call_tool("process_media", {"operation": "status"})
+                result = await client.call_tool(*public_call("process_media", {"operation": "status"}))
                 diagnostic = subprocess.run([sys.executable, "-c", """
 from pathlib import Path
 from exomem.media_jobs import MediaJobStore, status

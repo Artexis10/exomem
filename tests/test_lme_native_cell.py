@@ -130,9 +130,9 @@ def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path, mo
             product_root=ROOT,
             profile="fixture",
         ) as cell:
-            assert {"bootstrap", "capture_source", "read_memory"} <= cell.schemas.keys()
-            assert cell.schemas["capture_source"]["description"]
-            assert cell.schemas["capture_source"]["inputSchema"]["type"] == "object"
+            assert {"read_instructions", "save_source", "read_page"} <= cell.schemas.keys()
+            assert cell.schemas["save_source"]["description"]
+            assert cell.schemas["save_source"]["inputSchema"]["type"] == "object"
             assert cell.bootstrap["engagement"]["level"] == "maximal"
             assert cell.runtime_receipt["vault_root"] == str(cell.vault)
             assert cell.runtime_receipt["working_directory"] == str(cell_root / "runtime")
@@ -143,17 +143,17 @@ def test_native_cell_uses_real_public_mcp_and_keeps_the_vault(tmp_path: Path, mo
             assert empty_snapshot["compiled_count"] == 0
 
             captured = await cell.call(
-                "capture_source",
+                "save_source",
                 {
                     "title": "Native cell fixture",
                     "content": "The native-cell test sentinel is sapphire.",
-                    "source_type": "conversation",
-                    "response_detail": "full",
+                    "source_kind": "conversation",
+                    "detail": "full",
                 },
             )
             assert captured["isError"] is False
             source_path = _product_result(captured)["diagnostics"]["operational"]["path"]
-            read = await cell.call("read_memory", {"path": source_path})
+            read = await cell.call("read_page", {"page": source_path})
             assert read["isError"] is False
             assert "sapphire" in _product_result(read)["body"]
 
@@ -234,17 +234,17 @@ def test_native_cell_scrubs_caller_environment_and_denies_external_ingest(
             assert readiness["actualserverreceipt"] == cell.runtime_receipt
             with pytest.raises(PermissionError):
                 await cell.call(
-                    "capture_source",
+                    "save_source",
                     {"title": "denied", "url": "https://example.invalid/private"},
                 )
             with pytest.raises(PermissionError):
-                await cell.call("preserve_artifacts", {})
+                await cell.call("save_evidence", {})
 
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("name", ("ask_memory", "search_memory"))
-def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path: Path, name: str) -> None:
+def test_native_cell_preserves_result_lists_and_reads_their_diagnostics(tmp_path: Path) -> None:
+    name = "search_memory"
     cell = NativeCell(
         tmp_path / "cell",
         python=PYTHON,
@@ -297,28 +297,28 @@ def test_native_cells_with_conflicting_paths_do_not_share_state(tmp_path: Path) 
             NativeCell(second_root, python=PYTHON, product_root=ROOT) as second,
         ):
             first_write = await first.call(
-                "capture_source",
+                "save_source",
                 {
                     "title": "Same title",
                     "content": "only-first",
-                    "source_type": "conversation",
-                    "response_detail": "full",
+                    "source_kind": "conversation",
+                    "detail": "full",
                 },
             )
             second_write = await second.call(
-                "capture_source",
+                "save_source",
                 {
                     "title": "Same title",
                     "content": "only-second",
-                    "source_type": "conversation",
-                    "response_detail": "full",
+                    "source_kind": "conversation",
+                    "detail": "full",
                 },
             )
             first_path = _product_result(first_write)["diagnostics"]["operational"]["path"]
             second_path = _product_result(second_write)["diagnostics"]["operational"]["path"]
             assert first_path == second_path
-            first_read = _product_result(await first.call("read_memory", {"path": first_path}))
-            second_read = _product_result(await second.call("read_memory", {"path": second_path}))
+            first_read = _product_result(await first.call("read_page", {"page": first_path}))
+            second_read = _product_result(await second.call("read_page", {"page": second_path}))
             assert "only-first" in first_read["body"]
             assert "only-second" not in first_read["body"]
             assert "only-second" in second_read["body"]

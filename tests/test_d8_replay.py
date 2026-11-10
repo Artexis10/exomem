@@ -167,10 +167,10 @@ def test_a_rich_turn_promotes_the_boat_and_leaves_the_incidental_and_one_off_nam
     created = {}
     for name, plan in PROMOTIONS.items():
         route = listed[name]["route"]
-        created[name] = call(route["tool"], {"operation": {
-            **route["args"]["operation"], **plan,
+        created[name] = call(route["tool"], {**route["args"], "arguments": {
+            **route["args"]["arguments"], **plan,
             "relations": [{"kind": "located_at", "target": _page_path(harbour).removesuffix(".md")}],
-        }, "response_detail": "full"})
+        }, "detail": "full"})
         assert "error" not in created[name], created[name]
     boat_path = _page_path(created[BOAT])
     _author_edge(call, _page_path(person), PERSON_SUMMARY, f"- owns [[{boat_path.removesuffix('.md')}]]")

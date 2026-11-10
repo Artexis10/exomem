@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _public_call import public_call
 from import_guidance import checks, session_close, session_score
 from import_guidance.session_close import Case
 
@@ -680,7 +681,7 @@ def test_new_stdio_server_recalls_the_canonical_update_after_capture_closes(tmp_
             self.client = client
 
         async def invoke(self, tool: str, args: dict) -> tuple:
-            return decode(await self.client.call_tool(tool, args, raise_on_error=False))
+            return decode(await self.client.call_tool(*public_call(tool, args), raise_on_error=False))
 
     def transport(name: str) -> StdioTransport:
         return StdioTransport(
@@ -696,30 +697,25 @@ def test_new_stdio_server_recalls_the_canonical_update_after_capture_closes(tmp_
         async with Client(transport("capture"), timeout=30, init_timeout=30) as client:
             calls = Calls(client)
             outcome, recap, record = await calls.call(
-                "record_episode",
-                {"operation": {"kind": "record", "episode": "ep-" + "b2" * 16,
-                               "subject": "Meal-prep routine update",
-                               "summary": "Moved the grocery order to Friday evening.",
-                               "decided": ["Order the groceries on Friday evening instead of Saturday afternoon."]}},
+                "save_episode",
+                {"episode": "ep-" + "b2" * 16,
+                 "subject": "Meal-prep routine update",
+                 "summary": "Moved the grocery order to Friday evening.",
+                 "decided": ["Order the groceries on Friday evening instead of Saturday afternoon."]},
                 journey="session-close", step="record-recap",
             )
             assert outcome == "ok", record
             assert recap["source"]["path"]
-            operation = {"kind": "batch_replace", "edits": [
-                {"old_string": "Saturday afternoon", "new_string": "Friday evening"},
-                {"old_string": "## Relations", "new_string": "## Observations\n\n- [rule] Place the grocery order on Friday evening. ^order-day\n\n## Relations"},
-            ]}
-            arguments = {"path": ROUTINE, "why": "Record the change settled in this session.", "operation": operation}
-            outcome, preview, record = await calls.call("edit_note", arguments | {"validate_only": True}, journey="session-close", step="preview-edit")
+            arguments = {
+                "note": ROUTINE, "why": "Record the change settled in this session.", "action": "replace_text",
+                "edits": [
+                    {"old_text": "Saturday afternoon", "new_text": "Friday evening"},
+                    {"old_text": "## Relations", "new_text": "## Observations\n\n- [rule] Place the grocery order on Friday evening. ^order-day\n\n## Relations"},
+                ],
+                "unlinked_reason": "The scheduling change adds no relation.",
+            }
+            outcome, preview, record = await calls.call("edit_note", arguments | {"preview": True}, journey="session-close", step="preview-edit")
             assert outcome == "ok", (record, preview)
-            semantic = preview.get("semantic") or {}
-            if semantic.get("transition_token"):
-                operation.update(
-                    transition_token=semantic["transition_token"],
-                    relation_disposition="reviewed-none",
-                    relation_review_hash=semantic["transition_hash"],
-                    relation_review_reason="The scheduling change adds no relation.",
-                )
             outcome, _edited, record = await calls.call("edit_note", arguments, journey="session-close", step="commit-edit")
             assert outcome == "ok", (record, _edited)
         captured = session_close.snapshot(tmp_path / "vault")
@@ -727,13 +723,13 @@ def test_new_stdio_server_recalls_the_canonical_update_after_capture_closes(tmp_
         async with Client(transport("fresh"), timeout=30, init_timeout=30) as fresh:
             calls = Calls(fresh)
             outcome, found, record = await calls.call(
-                "search_memory", {"query": "Sunday meal-prep routine", "mode": "keyword", "rerank": False},
+                "search_memory", {"query": "Sunday meal-prep routine", "options": {"mode": "keyword", "rerank": False}},
                 journey="session-close", step="find-canonical-page",
             )
             assert outcome == "ok", record
             hit = next(hit for hit in found["hits"] if hit["title"] == "Sunday meal-prep routine")
             outcome, page, record = await calls.call(
-                "read_memory", {"operation": {"kind": "page", "path": hit["id"]}},
+                "read_page", {"page": hit["id"]},
                 journey="session-close", step="read-canonical-page",
             )
             assert outcome == "ok", record

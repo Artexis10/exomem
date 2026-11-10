@@ -40,9 +40,13 @@ VALUE_STATUSES = frozenset({STATUS_READY, STATUS_LIMITED})
 #: Moves whenever `render_values` changes how it lays out records, so a stored record number
 #: is never read against a different layout.
 RENDERING_VERSION = "2"
-VALUE_TRUNCATION_LINE = (
-    f"[Value rendering truncated at {VALUE_RENDERING_BYTES // 1024} KiB; query_dataset reads every row.]"
-)
+
+
+def value_truncation_line(reads_rows: str) -> str:
+    """The note on a value hit whose rendering was cut: `reads_rows` is the call that reads every row."""
+    return f"[Value rendering truncated at {VALUE_RENDERING_BYTES // 1024} KiB; {reads_rows} reads every row.]"
+
+
 LITERAL_SUFFIXES = frozenset({".yaml", ".yml", ".jsonl", ".ndjson", ".xml", ".toml"})
 
 

@@ -15,6 +15,7 @@ import dreamer_fixture as fx
 import pytest
 
 from exomem import (
+    capabilities,
     commands,
     dreamer,
     dreamer_families,
@@ -85,6 +86,26 @@ def test_dismiss_snooze_reopen_bind_to_the_current_fingerprint(tmp_path: Path) -
         commands.op_triage_memory(vault, ref=ref, action="competing")
 
 
+def test_every_item_carries_a_decision_route_the_public_surface_lists(tmp_path: Path) -> None:
+    vault = _settled(tmp_path)
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+    )
+    with capabilities.active_surface(public):
+        items = upkeep.review(vault, limit=50)["items"]
+    assert {item["family"] for item in items} >= {"upkeep_link", "upkeep_hydration"}
+    for item in items:
+        dispose = item["dispose"]
+        assert dispose["tool"] == "decide_review_item", item["ref"]
+        assert dispose["args"]["review_item"] == item["id"]
+        # The id the route carries decides the item, link and hydration alike.
+        result = commands.op_triage_memory(
+            vault, item_id=item["id"], action="dismiss", why="false_positive: x"
+        )
+        assert result["state"] == "dismissed"
+    assert upkeep.review(vault)["items"] == []
+
+
 def test_stale_expected_fingerprint_is_refused(tmp_path: Path) -> None:
     vault = _settled(tmp_path)
     row = _hydration(vault)
@@ -126,11 +147,8 @@ def test_triage_stops_delivery_in_process_at_once(tmp_path: Path) -> None:
 def test_link_items_triage_through_the_relation_namespace(tmp_path: Path) -> None:
     vault = _settled(tmp_path)
     listed = upkeep.review(vault, categories=["upkeep_link"])["items"]
-    link = next(
-        item for item in listed if item["dispose"]["args"].get("source_path") == fx.CAVITATION
-    )
+    link = next(item for item in listed if item["route"]["args"].get("path") == fx.CAVITATION)
     assert link["ref"].startswith("exomem://review/relation/")
-    assert link["dispose"]["args"]["ref"] == link["ref"]
     assert link["route"]["args"]["ref"] == link["ref"]
     assert link["context_route"]["args"]["ref"].startswith(upkeep.UPKEEP_PREFIX)
     view = dreamer_store.read_view(vault)

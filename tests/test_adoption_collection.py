@@ -486,15 +486,15 @@ def test_a_finished_run_names_the_reconcile_tool_of_the_surface_that_reads_it(
 
     # The search answers without the imported page, so finish names a reconcile.
     monkeypatch.setattr(find, "find", lambda *a, **k: [Hit(f"Knowledge Base/Notes/{Path(target).name}")])
-    nested = capabilities.ActiveSurfaceDescriptor(
-        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
     )
-    with capabilities.active_surface(nested):
+    with capabilities.active_surface(public):
         finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
     read_later = adoption_run.status(vault, run_id=run_id)
 
     assert finished["finish"]["recall_check"]["next_action"] == {
-        "tool": "repair_memory", "args": {"operation": {"kind": "reconcile"}},
+        "tool": "manage_memory", "args": {"operation": "maintenance.reconcile"},
     }
     assert read_later["finish"]["recall_check"]["next_action"] == {
         "tool": "maintain_memory", "args": {"mode": "reconcile"},
@@ -521,11 +521,11 @@ def test_a_stored_route_that_no_longer_spells_still_lets_the_run_be_read(
     retired = {"tool": "maintain_memory", "args": {"mode": "retired-mode"}}
     run["finish"]["recall_check"]["next_action"] = retired
     store.save(run)
-    nested = capabilities.ActiveSurfaceDescriptor(
-        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="nested"
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
     )
 
-    with capabilities.active_surface(nested):
+    with capabilities.active_surface(public):
         read = adoption_run.status(vault, run_id=run_id)
 
     assert read["phase"] == "done"

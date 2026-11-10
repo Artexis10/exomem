@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import commands, relation_queue, relation_registry, server, writer_lease
@@ -204,11 +205,15 @@ def test_real_mcp_rest_cli_resolver_rejects_unbounded_and_cross_mode_inputs(
     mcp = server.build_server(require_auth=False)
     request = {"operation": "resolve-relation", **arguments}
 
+    # The door refuses a field its operation does not carry before the leaf runs; REST and the
+    # CLI reach the leaf, which names the same mistake by its own code.
+    mcp_code = code if code == "RELATION_LIMIT_INVALID" else "INVALID_OPERATION_ARGUMENTS"
     mcp_result = asyncio.run(
-        mcp.call_tool("connect_memory", request, run_middleware=True)
+        mcp.call_tool(*public_call("connect_memory", request), run_middleware=True)
     )
     mcp_refusal = json.loads(mcp_result.content[0].text)
-    assert mcp_refusal["error"]["code"] == code
+    mcp_refusal = mcp_refusal.get("result", mcp_refusal)
+    assert mcp_refusal["error"]["code"] == mcp_code
 
     rest_response = TestClient(mcp.http_app()).post(
         "/api/connect_memory",
@@ -390,7 +395,7 @@ def test_real_mcp_rest_cli_facades_reach_the_same_relation_leaf(
     expected = _product_command(name).leaf(vault, **arguments)
 
     mcp_result = asyncio.run(
-        mcp.call_tool(name, arguments, run_middleware=True)
+        mcp.call_tool(*public_call(name, arguments), run_middleware=True)
     ).structured_content
     if isinstance(mcp_result, dict) and set(mcp_result) == {"result"}:
         mcp_result = mcp_result["result"]
@@ -409,6 +414,16 @@ def test_real_mcp_rest_cli_facades_reach_the_same_relation_leaf(
     assert cli_result == {"success": True, "data": expected}
 
 
+def _constraints(schema: dict[str, object]) -> dict[str, object]:
+    """A parameter's validation constraints: no prose, and an optional value read as its one type."""
+    kept = {key: value for key, value in schema.items() if key not in ("description", "title")}
+    options = kept.pop("anyOf", None)
+    if options is not None:
+        [kept_option] = [option for option in options if option != {"type": "null"}]
+        kept.update(kept_option)
+    return kept
+
+
 def test_mcp_and_openapi_contracts_share_relation_parameter_schemas(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -417,33 +432,25 @@ def test_mcp_and_openapi_contracts_share_relation_parameter_schemas(
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
     mcp = server.build_server(require_auth=False)
-    live_tools = {
-        item.name: item.to_mcp_tool().model_dump(mode="json", by_alias=True)
-        for item in asyncio.run(mcp.list_tools())
-    }
     openapi = TestClient(mcp.http_app()).get("/api/openapi.json").json()
     selected = {
-        "connect_memory": ("read_connections", "resolve-relation", {"requested_relation", "continuation", "limit"}),
-        "schema_memory": ("read_schema", "propose-relation", {"date_from", "date_to", "continuation", "limit"}),
-        "triage_memory": ("triage_memory", "decision", {"source_path"}),
+        "connect_memory": ("connections.resolve_relation", {"requested_relation", "continuation", "limit"}),
+        "schema_memory": ("schema.propose_relation", {"date_from", "date_to", "continuation", "limit"}),
     }
 
-    for name, (public_name, kind, parameter_names) in selected.items():
-        operation = live_tools[public_name]["inputSchema"]["properties"]["operation"]
-        branch = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == kind)
-        mcp_properties = {**branch["properties"], **operation.get("properties", {})}
+    for name, (operation, parameter_names) in selected.items():
+        # An agent learns an operation's arguments from read_instructions.
+        mcp_properties = asyncio.run(
+            mcp.call_tool("read_instructions", {"topic": operation}, run_middleware=True)
+        ).structured_content["arguments"]
         rest_properties = openapi["paths"][f"/api/{name}"]["post"][
             "requestBody"
         ]["content"]["application/json"]["schema"]["properties"]
         for parameter_name in parameter_names:
             # Discovery compacts prose; both surfaces retain the same validation constraints.
-            assert {
-                key: value for key, value in rest_properties[parameter_name].items()
-                if key != "description"
-            } == {
-                key: value for key, value in mcp_properties[parameter_name].items()
-                if key != "description"
-            }
+            assert _constraints(rest_properties[parameter_name]) == _constraints(
+                mcp_properties[parameter_name]
+            )
         if "limit" in parameter_names:
             assert mcp_properties["limit"]["minimum"] == 1
             assert mcp_properties["limit"]["maximum"] == 64

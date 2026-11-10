@@ -41,7 +41,7 @@ class Doors:
         from exomem.commands import product_commands_for
         from exomem.operation_entries import spell_call
 
-        tool, spelled = spell_call(command, dict(arguments), "nested")
+        tool, spelled = spell_call(command, dict(arguments), "public")
         if tool == command:
             public = {c.name: c.public_name for c in product_commands_for("mcp")}
             tool = public.get(command, command)

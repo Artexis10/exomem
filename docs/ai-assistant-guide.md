@@ -78,11 +78,11 @@ routes.
 
 | Simple action | User intent | Product command |
 | --- | --- | --- |
-| `ask` | "What do I know?", "find what I concluded", "show the context" | `search_memory(detail="compact", rerank=false)`, then `read_memory`; use `search_memory(deep=true)` for synthesis |
+| `ask` | "What do I know?", "find what I concluded", "show the context" | `search_memory(detail="compact", rerank=false)`, then `read_page`; use `search_memory(deep=true)` for synthesis |
 | `create_note` | "remember this conclusion", "save this decision", "write this up" | `create_note`; use `supersede_note` when it supersedes an old conclusion |
-| `capture` | "save this source", "preserve this receipt", "keep this proof" | `capture_source` for raw sources; `preserve_evidence` or `transfer_artifact` for Evidence |
-| `review` | "what needs review?", "show stale/disconnected knowledge", "what is unprocessed?" | `review_memory`; `triage_memory` for explicit dismiss/snooze/reopen |
-| `connect` | "what should this link to?", "suggest relations", "show related ideas" | `connect_memory`; entity writes stay explicit through its write-capable mode |
+| `capture` | "save this source", "preserve this receipt", "keep this proof" | `save_source` for raw sources; `save_evidence` or `upload_files` for Evidence |
+| `review` | "what needs review?", "show stale/disconnected knowledge", "what is unprocessed?" | `list_review_items`; `decide_review_item` for explicit dismiss/snooze/reopen |
+| `connect` | "what should this link to?", "suggest relations", "show related ideas" | `inspect_memory` with the `connections` operations; entity writes stay explicit through `manage_memory` |
 | `adopt` | "import/adopt this existing vault safely" | `adopt_vault(mode="scan-only")`; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check/fix vault health" | Remote tools may audit or dry-run; actual `fix`/`reconcile` writes require the host operator CLI |
 
@@ -168,7 +168,7 @@ Save this article as a source and keep the URL.
 
 Agent behavior:
 
-1. Use `capture_source` for the raw article or excerpt.
+1. Use `save_source` for the raw article or excerpt.
 2. Keep the URL and capture rationale.
 3. Classify on two independent open axes: `source_kind` is what the artifact
    **is** (`research-report`, `invoice-receipt`, `field-notebook`), `domain` is
@@ -181,7 +181,7 @@ Agent behavior:
    catch-all, and `other` is retired.
 5. Offer to compile a note only if there is a durable conclusion to extract.
 
-For one observation or rich unit, use `observe_memory` rather than page-wide
+For one observation or rich unit, use `edit_note` rather than page-wide
 string editing. For reviewed creation, validate first and commit the unchanged
 `draft_id`, `draft_hash`, and `draft_token`. When required, echo the returned
 `relation_review_hash` with `relation_disposition="reviewed_none"` and an
@@ -199,7 +199,7 @@ Keep this receipt for the warranty case.
 Agent behavior:
 
 1. Treat it as a proof-bearing record, not a research source.
-2. Preserve the original file or text with `preserve_evidence` or `transfer_artifact`.
+2. Preserve the original file or text with `save_evidence` or `upload_files`.
 3. Report the stored path and any metadata the server returns.
 
 ### Adopt a generated artifact
@@ -215,8 +215,8 @@ ordinary requested action.
 
 Choose Source or Evidence from purpose before transport: reasoning material is
 a Source, while a deliverable or proof-bearing final is Evidence. MIME never
-chooses. Pass the closed `adoption` envelope to `capture_source` or
-`preserve_artifacts`. Use one `key` per hand-over, such as the file name plus a
+chooses. Pass the closed `adoption` envelope to `save_source` or
+`save_evidence`. Use one `key` per hand-over, such as the file name plus a
 version, and name the handed-over handle in `selected_file_id`. A revision you
 hand over later is kept beside the first, and identical bytes return
 `already_stored`. When no usable handle exists, report a non-committing
@@ -259,10 +259,10 @@ Show me conclusions that may be stale.
 
 Agent behavior:
 
-1. Run `review_memory` with the appropriate review mode.
+1. Run `list_review_items` with the appropriate review mode.
 2. Present candidates as review items only.
 3. Ask whether to keep, connect, edit, supersede, archive, dismiss, or snooze.
-   Use `triage_memory` only for an explicit review decision. Do not auto-decay
+   Use `decide_review_item` only for an explicit review decision. Do not auto-decay
    old knowledge or auto-accept suggested relations.
 
 ### Supersede old conclusion
@@ -299,7 +299,7 @@ so it discloses nothing about any other page. It never changes `status`,
 `mutated`, `warnings_count`, mutation identity, or replay, and a failure to
 compute it omits the field rather than affecting the write. The runtime counts
 size and asks; it never judges the page or reorganises the vault. To keep the page
-whole, dismiss the item through `triage_memory` with a reason that starts
+whole, dismiss the item through `decide_review_item` with a reason that starts
 `intentional:`; it stays quiet until the next size step. To split it, propose a
 plan through the curation lane and ask the user to confirm the exact plan. A hub
 by design carries a breadth tag. The same items sit in due-state as a backlog.

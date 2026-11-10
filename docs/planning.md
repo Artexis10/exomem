@@ -12,10 +12,10 @@ Planning is human-authored intended future state. A collection lives under
 store collection keeps canonical rows and history in SQLite, with readable
 Markdown views at the existing paths.
 
-Use `plan_memory` with `describe`, `validate`, `inspect`, `create`, `query`, `add`,
-`update`, `triage`, `revise`, `rebaseline`, or `history`.
+Use `query_plan_items`, `add_plan_item` and `edit_plan_item` for the daily work. Use the `plans` operations
+of `inspect_memory` and `manage_memory` to validate, create, revise, rebaseline or read the history of a collection.
 Minimal capture creates a candidate work item in the authored
-`inbox` horizon. `triage` is the explicit path for kind, status, priority,
+`inbox` horizon. `edit_plan_item` is the explicit path for kind, status, priority,
 commitment, horizon, area, and parent changes; time never moves an item.
 
 Kinds are area, outcome, initiative, and work-item. Areas are ongoing
@@ -25,7 +25,7 @@ through `schema_memory(subject="planning-values")`: a status declares its
 planning class (`open`, `done`, or `dropped`), and a kind declares the kinds
 that may be its parent. Only a done or dropped status may be archived. Planning
 may keep opaque Records evidence descriptors and opaque external execution
-pointers, but `plan_memory` itself does not resolve them or infer progress.
+pointers, but `add_plan_item` itself does not resolve them or infer progress.
 Planning works standalone by default. A resolved user-authored workflow contract
 may declare a companion owner for an execution artifact; the pointer remains
 opaque, and neither the declaration nor the pointer proves tool availability or
@@ -48,7 +48,7 @@ its discontinuity. The store supports one lease holder, not two independent writ
 
 ## Planned versus recorded
 
-`review_memory(mode="plan-progress")` is the read-only review that resolves
+`list_review_items(queue="plan_progress")` is the read-only review that resolves
 those evidence descriptors. It selects active, committed items that carry
 `progress_evidence`, `motivation`, or both, runs each bound Records saved view
 through the ordinary governed read path, and presents authored intent next to

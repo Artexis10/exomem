@@ -235,6 +235,9 @@ RETRIEVAL_CARRY_BUDGET_MULTIPLE = 2.5
 
 #: The request-budget stage name of the retrieval carry, on both rungs (phrase and title).
 CARRY_STAGE = "working_set.carry"
+#: The `missing` entry of an `unresolved` abstention whose retrieval carry the request budget refused to start.
+#: It says the compile did not look, which the turn slice must not read as "the turn names nothing".
+ANCHORS_BUDGET_GAP = {"role": "anchors", "reason": "budget"}
 
 #: A stem is DISTINCTIVE when it occurs on no more than this share of the
 #: indexed pages. Corpus-relative on purpose: "rare" is a statement about
@@ -3098,18 +3101,20 @@ def _carry_groups_by_retrieval(
     visible: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     query_context=None,
-) -> tuple[tuple[tuple[str, float], ...], ...]:
+) -> tuple[tuple[tuple[str, float], ...], ...] | None:
     """`_carry_by_retrieval`, one group of pages per phrase the turn named.
 
     Same refusals, same budget rule, same bounded catalogue. `skip_terms` is
     the words a resolved anchor already consumed, so a turn that resolved one
-    thing only asks about what else it said.
+    thing only asks about what else it said. `None` means the request budget
+    refused the carry before it asked anything (noted on the budget); `()`
+    means it asked and the turn named nothing, which is a different answer.
     """
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     if budget_exhausted(
         CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
-        return ()
+        return None
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -3269,7 +3274,7 @@ def _title_named_anchors(
     index: working_set_index.WorkingSetIndex | None = None,
     exclude: frozenset[str] = frozenset(),
     query_context=None,
-) -> tuple[tuple[dict[str, Any], ...], tuple[tuple[str, float], ...] | None]:
+) -> tuple[tuple[dict[str, Any], ...], tuple[tuple[str, float], ...] | None] | None:
     """The pages an unresolved turn names by their title in ordinary words,
     as `retrieval_named` anchor entries, for an abstention the carry named
     nothing in (`working_set_runtime.title_listing`), and that query's ranked
@@ -3285,12 +3290,13 @@ def _title_named_anchors(
     budget rule, readiness refusals and timing span are the carry's own; a
     page the caller may not see, or one the packet already lists (`exclude`),
     is dropped before the `RETRIEVAL_CARRY_MAX_DOMAINS` cap, so it never
-    takes a slot.
+    takes a slot. `None` means the request budget refused the listing before it
+    asked anything (noted on the budget), which is not "no page is named".
     """
     if budget_exhausted(
         CARRY_STAGE, reserve=RETRIEVAL_CARRY_BUDGET_MULTIPLE * max(0.0, lexical_seconds)
     ):
-        return (), None
+        return None
     freshness = None
     recall_checkpoint = None
     if freshness_snapshot is not None:
@@ -3917,7 +3923,7 @@ def _carry_admission(
         targets = {vault._strip_wikilink_brackets(str(relation.get("target") or ""))
             .split("|", 1)[0].strip().casefold()
             for relation in hit.relations
-            if "names_subject" in names_subject.behaviours_of_label(str(relation.get("kind") or ""))}
+            if names_subject.has_label(str(relation.get("kind") or ""), "names_subject")}
         category = registries[path].resolve_category(hit.category_raw, page_type=hit.parent_type)
         if category.status not in {"core", "extension", "alias", "unregistered"}:
             return False
@@ -5187,6 +5193,9 @@ def _compile_packet(
     # Set when the carry below named no page at all, which is the one turn the
     # final abstention lists title-named pages for (`_title_named_anchors`).
     carry_named_nothing = False
+    # Set when the request budget refused a retrieval rung before it asked anything: the abstention then
+    # says so, since nothing was asked and the turn did not name nothing.
+    budget_refused = False
     query_context = None
     if not anchor and resolution.status == "unresolved" and not analysis.referential:
         from . import working_set_runtime
@@ -5204,7 +5213,9 @@ def _compile_packet(
             status_basis=status_basis,
             query_context=query_context,
         )
-        carry_named_nothing = not groups
+        budget_refused = groups is None
+        groups = groups or ()
+        carry_named_nothing = not groups and not budget_refused
         domains, _contested = named_domains(groups)
         every: dict[str, float] = {}
         for group in groups:
@@ -5365,7 +5376,7 @@ def _compile_packet(
         # agent to pick; nothing is served from it and the turn stays
         # `unresolved`.
         listed = tuple(anchor.as_dict() for anchor in resolution.anchors)
-        titled, title_window = (
+        title_listing = (
             _title_named_anchors(
                 root,
                 turn=turn,
@@ -5383,6 +5394,8 @@ def _compile_packet(
             if carry_named_nothing
             else ((), None)
         )
+        budget_refused = budget_refused or title_listing is None
+        titled, title_window = title_listing or ((), None)
         # A turn that abstains with nothing listed may still list pages two
         # independent readings agree on (`related_pages`). Nothing is served.
         related: tuple[dict[str, Any], ...] = ()
@@ -5391,6 +5404,7 @@ def _compile_packet(
             not anchor
             and not analysis.referential
             and carry_named_nothing
+            and not budget_refused
             and not resolution.anchors
             and not titled
             and analysis.content_words
@@ -5413,6 +5427,7 @@ def _compile_packet(
             ambiguity=resolution.ambiguity,
             missing=(
                 *(({"role": "anchors", "reason": "lane_truncated"},) if resolution.truncated else ()),
+                *((dict(ANCHORS_BUDGET_GAP),) if budget_refused else ()),
                 *related_missing,
             ),
             recent_context=recent,
@@ -5629,7 +5644,8 @@ def _named_beside(
         )
     except BudgetExhausted:
         groups = ()  # the carry yielded to the deadline (noted on the budget); the resolved material stands
-    domains, _contested = named_domains(groups, exclude=frozenset(exclude))
+    # A carry the budget refused (`None`) names nothing beside what resolved, and the resolved material stands.
+    domains, _contested = named_domains(groups or (), exclude=frozenset(exclude))
     if not domains:
         return (), (), (), tuple(dict(role) for role in selected_roles)
     try:

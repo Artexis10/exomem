@@ -75,7 +75,7 @@ def test_a_whole_mcp_block_stays_one_short_paragraph():
         assert len(reason.encode("utf-8")) <= ceiling, (name, len(reason.encode("utf-8")))
     preamble = _mcp_fire("").strip()
     assert len(preamble.encode("utf-8")) <= 90
-    for word in ("Skip", "not connected", "cannot capture", "bootstrap first"):
+    for word in ("Skip", "not connected", "cannot capture", "read_instructions first"):
         assert word in preamble
 
 
@@ -85,8 +85,7 @@ def test_the_short_capture_check_uses_rules_available_without_a_vault_copy():
     A vault reference can be absent even when Exomem is connected and can capture.
     """
     assert "Exomem skill" in capture.REMINDER_SHORT
-    assert 'operation.kind="instructions"' in capture.REMINDER_SHORT
-    assert 'profile="compact"' in capture.REMINDER_SHORT
+    assert "read_instructions" in capture.REMINDER_SHORT
     assert "read_memory" not in capture.REMINDER_SHORT
 
 
@@ -110,7 +109,7 @@ def test_the_short_capture_check_keeps_the_incident_rules_by_name():
 
 def test_the_episode_ask_keeps_the_record_call_the_key_and_the_escape():
     text = capture.EPISODE_ASK
-    assert 'operation.kind="record"' in text and "record_episode" in text
+    assert "save_episode" in text
     assert "{key}" in text
     assert "Otherwise do nothing." in text
 

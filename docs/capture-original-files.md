@@ -7,7 +7,7 @@ Retyping an original can change it silently. A SHA-256 assertion makes an altere
 
 ## ChatGPT attachments
 
-ChatGPT supplies file handles to `capture_source` and `preserve_artifacts` through the top-level `files` argument.
+ChatGPT supplies file handles to `save_source` and `save_evidence` through the top-level `files` argument.
 Each handle requires `download_url` and `file_id`; `mime_type` and `file_name` are optional.
 The `file_id` correlates the attachment with its receipt. The ID alone cannot fetch bytes; an HTTPS `download_url` provides them.
 
@@ -19,10 +19,10 @@ Verify the capture receipt and stored SHA-256 before treating the original as pr
 ## HTTP MCP clients
 
 1. Compute the file's SHA-256 in the client process; retain the digest.
-2. Call `transfer_artifact` with `operation="upload"`, `lane="source"`, `hold=true` and `expected_sha256`; receive a handoff.
+2. Call `upload_files` with `operation="upload"`, `lane="source"`, `hold=true` and `expected_sha256`; receive a handoff.
 3. Save the returned handoff JSON to a local file; keep its short-lived token private.
 4. Run `exomem attach original.txt --handoff-file handoff.json --root .`; receive a held file handle.
-5. Call `capture_source` with the returned `file` in `files`, a title, source kind and digest; receive the custody receipt.
+5. Call `save_source` with the returned `file` in `files`, a title, source kind and digest; receive the custody receipt.
 
 The upload handoff uses the current MCP authorization. It needs no separate local client token.
 The CLI reads the original under the selected root. The service receives bytes and cannot select a client filesystem path.
@@ -39,11 +39,11 @@ This covers claude.ai, Claude desktop chat and Cowork. It needs the user's opt-i
 It needs no user token.
 
 1. Compute the file's SHA-256 in the sandbox, for example with `sha256sum original.txt`; retain the digest.
-2. Call `transfer_artifact` with `operation="upload"`, `lane="source"`, `hold=true` and `expected_sha256`; receive a handoff.
+2. Call `upload_files` with `operation="upload"`, `lane="source"`, `hold=true` and `expected_sha256`; receive a handoff.
 3. Save the returned handoff JSON to `handoff.json` in the sandbox; keep its token private.
 4. Run `pip install exomem`, then `exomem attach original.txt --handoff-file handoff.json --root .`; receive a held file handle.
 5. If the sandbox cannot run that command, send the fallback request below instead; receive the same reply.
-6. Call `capture_source` with the returned `file` in `files`, a title, source kind and digest; receive the custody receipt.
+6. Call `save_source` with the returned `file` in `files`, a title, source kind and digest; receive the custody receipt.
 
 The fallback request is one multipart `POST` to the handoff's `upload_url`.
 It carries the header `Authorization: Bearer <token>` and the form fields `file`, `hold=1` and `lane` (the handoff's lane).
@@ -70,8 +70,8 @@ Its token starts with `exomem-cloud-upload:v1:`, and its `upload_url` is the Clo
 The gateway checks that the issuing login is still current before it reads any bytes.
 Only that login can capture the held file. Treat the token as private, as on a personal server.
 
-On a cell without this configuration, `transfer_artifact` is not offered. Use a supported client file handle instead.
-On Cloud, `transfer_artifact` prepares held uploads only. It does not issue download links.
+On a cell without this configuration, `upload_files` is not offered. Use a supported client file handle instead.
+On Cloud, `upload_files` prepares held uploads only. It does not issue download links.
 
 ## Signed document containers
 
@@ -93,9 +93,9 @@ A payload and its text parts inherit the container's current access restrictions
 Changing the container's restrictions also changes payload search, reads and original downloads.
 Explicit raw protection covers the entire payload subtree.
 
-1. For an older opaque container, call `change_media(operation={"kind": "process", "path": container_path})`; receive payload custody and processing states.
-2. After fixing a processing failure, call `change_media(operation={"kind": "retry", "path": container_path})`; reuse the preserved originals.
-3. For completed payloads needing new extraction, call `change_media(operation={"kind": "reprocess", "path": payload_path})`; retain previous text until replacement succeeds.
+1. For an older opaque container, call `manage_memory(operation="media.process", arguments={"path": container_path})`; receive payload custody and processing states.
+2. After fixing a processing failure, call `manage_memory(operation="media.retry", arguments={"path": container_path})`; reuse the preserved originals.
+3. For completed payloads needing new extraction, call `manage_memory(operation="media.reprocess", arguments={"path": payload_path})`; retain previous text until replacement succeeds.
 
 Repeated preservation returns `already_stored` without changing companions or repairing missing payloads.
 Explicit processing creates missing payload pairs and can restore missing provenance only when existing bytes match exactly.

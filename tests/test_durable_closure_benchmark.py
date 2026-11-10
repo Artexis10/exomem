@@ -572,6 +572,13 @@ def test_missing_required_public_tool_is_a_refusal_not_a_reduced_workflow(names)
     assert missing == ["preserve_artifacts", "process_media", "read_memory"]
 
 
+def test_the_public_tools_that_carry_the_workflow_satisfy_the_required_surface() -> None:
+    names = {"create_note", "search_memory", "read_page", "save_evidence", "inspect_memory", "manage_memory"}
+
+    assert benchmark.required_tools_missing(names) == []
+    assert benchmark.required_tools_missing(names - {"manage_memory"}) == ["process_media"]
+
+
 def test_stress_variant_places_a_public_probe_after_each_mutating_step() -> None:
     optimized = benchmark.workflow_plan("optimized")
     stress = benchmark.workflow_plan("stress")

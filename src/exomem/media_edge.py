@@ -13,6 +13,12 @@ restart can never turn an unknown write into an acknowledged drain.
 A collector credential, which only the backup Job holds, may call one operation:
 `condemn`, which hides a name of its own cell (collect-released-media D3). Every
 other operation takes a runtime credential.
+
+An internal pass purges the media of each deleted cell (automate-cell-storage-deletion
+D3). It acts only on a deletion grant that Substrate signed, only for a cell that the
+loaded set no longer admits, and only after the grant's `purge_after`. No caller can
+start it. It lists the cell's prefix with a second, list-only key and hides each
+current name through a persisted `hide` intent, as a condemn does.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager
@@ -35,7 +42,7 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from . import held_fs
+from . import cell_deletion_grant, held_fs
 from .cloud_cell import CELL_ID_PATTERN
 from .media_edge_b2 import (
     B2,
@@ -80,6 +87,11 @@ _MAX_PARTS = 10_000
 _NONCE_INFO = "exomem_nonce"
 _SHA256_INFO = "exomem_sha256"
 _BLOCK = 64 * 1024
+# The provider's list actions (closed by its API): a `start` entry is an unfinished large file, which the
+# bucket rule cancels, so it never decides whether a name is current.
+_UPLOAD_ACTION, _START_ACTION = "upload", "start"
+# A purge lists again after each round of hides, until no current name remains or the rounds run out.
+_PURGE_ROUNDS = 5
 
 _UNAVAILABLE = "MEDIA_STORE_UNAVAILABLE"
 _TOO_LARGE = "MEDIA_OBJECT_TOO_LARGE"
@@ -103,6 +115,14 @@ class EdgeConfig:
     max_requests: int = 64
     recovery_seconds: float = 15.0
     provider_attempts: int = 3
+    # The purge pass (automate-cell-storage-deletion D3) runs only with the list key. The files are mounts:
+    # the relayed grants, and the chart-owned grant public keys and hold list.
+    list_key_id: str | None = None
+    list_application_key: str | None = None
+    grants_file: Path | None = None
+    grant_public_keys_file: Path | None = None
+    hold_list_file: Path | None = None
+    purge_seconds: float = 3600.0
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str] | None = None) -> EdgeConfig:
@@ -134,7 +154,18 @@ class EdgeConfig:
             max_requests=optional("MAX_REQUESTS", cls.max_requests, int),
             recovery_seconds=optional("RECOVERY_SECONDS", cls.recovery_seconds, float),
             provider_attempts=optional("PROVIDER_ATTEMPTS", cls.provider_attempts, int),
+            list_key_id=optional("LIST_KEY_ID", None, str),
+            list_application_key=optional("LIST_APPLICATION_KEY", None, str),
+            grants_file=optional("GRANTS_FILE", None, Path),
+            grant_public_keys_file=optional("GRANT_PUBLIC_KEYS_FILE", None, Path),
+            hold_list_file=optional("HOLD_LIST_FILE", None, Path),
+            purge_seconds=optional("PURGE_SECONDS", cls.purge_seconds, float),
         )
+
+    @property
+    def purges(self) -> bool:
+        return None not in (self.list_key_id, self.list_application_key, self.grants_file,
+                            self.grant_public_keys_file, self.hold_list_file)
 
 
 @dataclass
@@ -258,6 +289,20 @@ class _Response:
         await self.chunk(b"", more=False)
 
 
+def _current_names(entries: list[FileInfo]) -> list[str]:
+    """The names whose newest entry, apart from `start` entries, is an upload. The provider lists each
+    name's entries newest first. cellctl's `storage.interface.current_names` holds the same provider rule
+    for the key custodian, which cannot import this package."""
+    names, decided = [], set()
+    for entry in entries:
+        if entry.name in decided or entry.action == _START_ACTION:
+            continue
+        decided.add(entry.name)
+        if entry.action == _UPLOAD_ACTION:
+            names.append(entry.name)
+    return names
+
+
 async def _disconnected(receive) -> None:
     while (await receive())["type"] != "http.disconnect":
         pass
@@ -266,9 +311,12 @@ async def _disconnected(receive) -> None:
 class MediaEdge:
     """One-process ASGI service. All mutable state belongs to its event loop."""
 
-    def __init__(self, config: EdgeConfig, provider: B2):
+    def __init__(self, config: EdgeConfig, provider: B2, lister: B2 | None = None):
         self.config = config
         self.provider = provider
+        # The list-only provider client of the purge pass, or None when the pass is off.
+        self.lister = lister if config.purges else None
+        self.clock: Callable[[], float] = time.time
         key = serialization.load_pem_public_key(config.public_key_file.read_bytes())
         if not isinstance(key, Ed25519PublicKey):
             raise ValueError("the media edge public key must be Ed25519")
@@ -294,6 +342,7 @@ class MediaEdge:
             for intent in (Intent(**json.loads(item.read_bytes())) for item in sorted(self._intents_dir.glob("*.json")))
         }
         self._recovery: asyncio.Task | None = None
+        self._purging: asyncio.Task | None = None
         self.refresh()
 
     @classmethod
@@ -302,7 +351,13 @@ class MediaEdge:
         client = httpx.AsyncClient(timeout=httpx.Timeout(config.idle_seconds))
         provider = B2(client, key_id=config.b2_key_id, application_key=config.b2_application_key,
                       bucket=config.bucket, attempts=config.provider_attempts)
-        return cls(config, provider)
+        lister = None
+        if config.purges:
+            lister = B2(client, key_id=config.list_key_id, application_key=config.list_application_key,
+                        bucket=config.bucket, attempts=config.provider_attempts)
+        else:
+            log.warning("the purge pass is off: the list key or a deletion file is not configured")
+        return cls(config, provider, lister)
 
     # Active set and generation
 
@@ -393,14 +448,21 @@ class MediaEdge:
             counts[intent.cell] = counts.get(intent.cell, 0) + 1
         return counts
 
-    async def _resolve(self, intent: Intent) -> Outcome:
-        """Ask the provider what became of a write. Anything short of an answer is unknown."""
+    async def _resolve(self, intent: Intent, *, resend: bool = False) -> Outcome:
+        """Ask the provider what became of a write. Anything short of an answer is unknown. With `resend`, a
+        hide whose name still shows is sent again."""
         try:
             if intent.kind == "hide":
                 # The name's writes and hides are serial, so a hidden name means that this hide landed.
                 if await self.provider.head_name(intent.key) is None:
                     return Outcome(True, intent.file_id)
-                return Outcome(False)  # a name that still shows does not prove that the hide will never land
+                if not resend:
+                    return Outcome(False)  # a name that still shows does not prove that the hide will never land
+                # The intent holds the name, so nothing else wrote to it. Only recovery sends again, after the
+                # first hide had time to land; one that lands even later adds a second marker and hides nothing.
+                await self.provider.hide_file(intent.key)
+                log.info("write recovery sent the hide of %s for cell %s again", intent.key, intent.cell)
+                return Outcome(True, intent.file_id)
             if intent.kind == "small":
                 # Writes to one name are serial, so the newest version is this write's or none of them.
                 head = await self.provider.head_name(intent.key)
@@ -434,7 +496,7 @@ class MediaEdge:
                 continue
             self._resolving.add(intent.id)
             try:
-                outcome = await self._resolve(intent)
+                outcome = await self._resolve(intent, resend=True)
                 if outcome.settled:
                     log.info("settled write intent %s for cell %s with version %s", intent.id, intent.cell, outcome.version)
                     await self._drop(intent)
@@ -551,8 +613,8 @@ class MediaEdge:
 
         return await self._dispatch(intent, finish)
 
-    async def _condemn(self, cell: str, generation: int, key: str) -> bool:
-        """Hide the name while a HEAD by name still shows it. A repeated condemn hides nothing."""
+    async def _hide(self, cell: str, generation: int, key: str, route: str) -> bool:
+        """Hide the name while a HEAD by name still shows it. A repeated hide hides nothing."""
         self._check_free(key)
         self._writing.add(key)
         try:
@@ -570,10 +632,65 @@ class MediaEdge:
             await self._dispatch(intent, hide)
             # The burst triage matches each hide marker to one such line: a marker without one
             # came by another route.
-            log.info("condemn hid %s for cell %s", key, cell)
+            log.info("%s hid %s for cell %s", route, key, cell)
             return True
         finally:
             self._writing.discard(key)
+
+    # Purge of a deleted cell (automate-cell-storage-deletion D3)
+
+    async def purge_pass(self) -> None:
+        """Purge each cell that a valid grant names and that every condition of D3 allows."""
+        config = self.config
+        if self.lister is None:
+            return
+        self.refresh()
+        if self.loaded is None:
+            return  # without a loaded set, nothing proves that a cell is revoked
+        keys = cell_deletion_grant.read_public_keys(config.grant_public_keys_file)
+        if keys is None:
+            return
+        held = cell_deletion_grant.read_hold_list(config.hold_list_file)
+        if held is None:
+            log.error("purge: the hold list cannot be read; no cell is purged")
+            return
+        for cell, grant in cell_deletion_grant.read_grants(config.grants_file, keys).items():
+            if cell in held or self._admitted(cell) or self._writes_pending(cell) or self.clock() < grant.purge_after:
+                continue
+            try:
+                await self._purge_cell(cell)
+            except (ProviderError, Reply) as error:
+                log.warning("purge of cell %s waits for the next pass: %s", cell, error)
+
+    def _admitted(self, cell: str) -> bool:
+        self.refresh()
+        return cell in self.cells or cell in self.collectors
+
+    def _writes_pending(self, cell: str) -> bool:
+        """A pending intent, or a write still receiving its body, could land after the listing and leave a
+        current name behind."""
+        prefix = object_key(cell, "")
+        return cell in self.pending_by_cell() or any(key.startswith(prefix) for key in self._writing)
+
+    async def _purge_cell(self, cell: str) -> None:
+        for _ in range(_PURGE_ROUNDS):
+            names = _current_names(await self.lister.list_versions(object_key(cell, "")))
+            if not names:
+                return
+            for key in names:
+                # A set that admits the cell again stops the purge before its next hide.
+                if self._admitted(cell):
+                    return
+                await self._hide(cell, self.loaded, key, "purge")
+        log.warning("purge of cell %s still lists current names after %d rounds", cell, _PURGE_ROUNDS)
+
+    async def _purge_loop(self) -> None:
+        while True:
+            try:
+                await self.purge_pass()
+            except Exception:
+                log.exception("purge pass failed")
+            await asyncio.sleep(self.config.purge_seconds)
 
     # Reads
 
@@ -631,7 +748,7 @@ class MediaEdge:
         key = object_key(cell, name)
         with self._accepted(generation):
             if action == CONDEMN_ACTION:
-                await response.json(200, {"hidden": await self._condemn(cell, generation, key)})
+                await response.json(200, {"hidden": await self._hide(cell, generation, key, "condemn")})
                 return
             if method in {"GET", "HEAD"}:
                 version = parse_qs(scope["query_string"].decode("latin-1")).get("version", [""])[0]
@@ -685,10 +802,13 @@ class MediaEdge:
             event = await receive()
             if event["type"] == "lifespan.startup":
                 self._recovery = asyncio.create_task(self._recovery_loop())
+                if self.lister is not None:
+                    self._purging = asyncio.create_task(self._purge_loop())
                 await send({"type": "lifespan.startup.complete"})
             elif event["type"] == "lifespan.shutdown":
-                if self._recovery is not None:
-                    self._recovery.cancel()
+                for task in (self._recovery, self._purging):
+                    if task is not None:
+                        task.cancel()
                 await send({"type": "lifespan.shutdown.complete"})
                 return
 

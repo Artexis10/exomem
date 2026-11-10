@@ -1,9 +1,10 @@
 """Backblaze B2 native API (v3) for the media edge, over httpx.
 
-Only the calls the edge needs. The edge key lacks `deleteFiles`, and no call here
-lists or deletes a version. The one hide serves the collector's `condemn`. A
-rejected call did not take effect; an uncertain one may have. The write paths in
-`media_edge` depend on that split.
+Only the calls the edge needs. The edge key lacks `deleteFiles` and `listFiles`, and
+no call here deletes a version. The hide serves the collector's `condemn` and the
+purge of a deleted cell. Only the purge lists versions, with a second, list-only key
+(automate-cell-storage-deletion D3). A rejected call did not take effect; an
+uncertain one may have. The write paths in `media_edge` depend on that split.
 """
 
 from __future__ import annotations
@@ -18,6 +19,11 @@ import httpx
 AUTHORIZE_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
 _INFO_HEADER = "x-bz-info-"
 _OCTET_STREAM = "application/octet-stream"
+
+
+# A listing that needs more pages than this fails, never stops short: 2.5 million versions, as the key
+# watcher's own listing.
+_MAX_LIST_PAGES = 2500
 
 
 class ProviderError(RuntimeError):
@@ -192,6 +198,27 @@ class B2:
     async def hide_file(self, key: str) -> None:
         """Make the name's newest version non-current. The version stays readable by ID until the bucket rule runs."""
         await self._post("b2_hide_file", {"bucketId": (await self._authorized()).bucket_id, "fileName": key})
+
+    async def list_versions(self, prefix: str) -> list[FileInfo]:
+        """Every entry under the prefix, by name, and newest first within a name, as the provider lists them."""
+        session = await self._authorized()
+        entries: list[FileInfo] = []
+        start: dict[str, str] = {}
+        seen: set[tuple[str, str]] = set()
+        for _ in range(_MAX_LIST_PAGES):
+            payload = await self._post("b2_list_file_versions", {
+                "bucketId": session.bucket_id, "prefix": prefix, "maxFileCount": 1000, **start})
+            with _shape():
+                entries += [FileInfo(str(item["fileId"]), str(item["fileName"]), int(item.get("contentLength") or 0),
+                                     str(item["action"]), dict(item.get("fileInfo") or {})) for item in payload["files"]]
+                if payload.get("nextFileName") is None:
+                    return entries
+                cursor = (str(payload["nextFileName"]), str(payload["nextFileId"]))
+            if cursor in seen:
+                raise ProviderUncertain("the provider repeated a listing cursor")
+            seen.add(cursor)
+            start = {"startFileName": cursor[0], "startFileId": cursor[1]}
+        raise ProviderUncertain("the provider listing did not end")
 
     async def file_info(self, file_id: str) -> FileInfo | None:
         try:

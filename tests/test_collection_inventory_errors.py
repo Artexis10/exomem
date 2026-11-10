@@ -231,15 +231,15 @@ def test_a_bare_title_is_not_reported_as_a_path_that_escaped_the_vault(
     _seed_planning_collection(tmp_path)
 
     with pytest.raises(OpError) as raised:
-        plan_memory(tmp_path, "query", collection="Planning work")
+        plan_memory(tmp_path, "query", collection="Unplanned work")
 
     error = raised.value
     assert error.code == "INVALID_COLLECTION_PATH"
     assert error.message == (
-        "collection reference must be the collection's `_collection.md` manifest path "
-        "(a title is not a reference)"
+        "collection reference must be a collection's title or its `_collection.md` manifest path; "
+        "no collection has this title"
     )
-    assert error.remediation == "pass the manifest path; use the collection's UUID if you have it"
+    assert error.remediation == "pass an existing collection's title, or its manifest path or UUID"
 
 
 # --- the remediation's gates: it may name a manifest only when that manifest is

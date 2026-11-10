@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _public_call import public_call
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware.middleware import Middleware
 from starlette.middleware import Middleware as ASGIMiddleware
@@ -52,7 +53,7 @@ def test_generated_mcp_schema_keeps_authorization_carriers_out_of_task_inputs(
         for tool in asyncio.run(_server(vault, monkeypatch).list_tools())
     }
 
-    for name in ("search_memory", "manage_authorization_session"):
+    for name in ("search_memory", "inspect_memory", "manage_memory"):
         schema = tools[name]["inputSchema"]
         assert "authorization_session_credential" not in schema["properties"]
         assert "principal" not in schema["properties"]
@@ -191,7 +192,7 @@ def test_invalid_mcp_credential_wins_before_fastmcp_argument_validation(
                 "id": 41,
                 "method": "tools/call",
                 "params": {
-                    "name": "ask_memory",
+                    "name": "search_memory",
                     "arguments": {
                         "authorization_session_credential": presented,
                         "limit": "malformed",
@@ -246,8 +247,10 @@ def test_mcp_verifies_present_credential_before_route_selector_validation(
                 "id": 44,
                 "method": "tools/call",
                 "params": {
-                    "name": "govern_memory",
+                    "name": "manage_memory",
                     "arguments": {
+                        "operation": "session.status",
+                        "arguments": {},
                         "authorization_session_credential": CANONICAL_UNKNOWN_BEARER,
                     },
                 },
@@ -328,7 +331,7 @@ def test_mcp_duplicate_arguments_objects_cannot_hide_a_bearer(
     presented = "not-a-session-bearer"
     body = (
         '{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{'
-        '"name":"ask_memory","arguments":{'
+        '"name":"search_memory","arguments":{'
         f'"authorization_session_credential":"{presented}"'
         '},"arguments":{"limit":"malformed"}}}'
     )
@@ -403,15 +406,15 @@ def test_actual_stdio_refuses_and_correlates_without_logging_bearer(
         async with Client(transport, timeout=30, init_timeout=30, mode=connect) as client:
             assert (client.protocol_version == "2026-07-28") == (connect == "auto")
             refused = await client.call_tool(
-                "ask_memory",
+                *public_call("search_memory",
                 {
                     "authorization_session_credential": presented,
                     "limit": "malformed",
-                },
+                }),
                 raise_on_error=False,
             )
             successful = await client.call_tool(
-                "bootstrap", {"operation": {"kind": "instructions", "profile": "compact"}},
+                *public_call("bootstrap", {"operation": {"kind": "instructions", "profile": "compact"}}),
                 raise_on_error=False,
             )
             return refused, successful

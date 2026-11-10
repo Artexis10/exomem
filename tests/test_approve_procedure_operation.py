@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from fastmcp import Client
 from mcp.types import Implementation
 from test_confined_writers import confined as confined
@@ -69,7 +70,7 @@ def call(mcp, tool: str, operation: dict) -> dict:
 
     async def run():
         async with Client(mcp) as client:
-            result = await client.call_tool(tool, {"operation": operation}, raise_on_error=False)
+            result = await client.call_tool(*public_call(tool, {"operation": operation}), raise_on_error=False)
             return result.structured_content
 
     return asyncio.run(run())
@@ -134,8 +135,8 @@ def test_the_entry_records_the_client_name_from_the_mcp_handshake(vault, mcp) ->
     async def named_client_approves():
         async with Client(mcp, client_info=Implementation(name="claude-ai", version="9.9")) as client:
             await client.call_tool(
-                "approve_procedure",
-                {"operation": {"kind": "approve", "ref": REF, "expected_version": version}},
+                *public_call("approve_procedure",
+                {"operation": {"kind": "approve", "ref": REF, "expected_version": version}}),
             )
 
     asyncio.run(named_client_approves())
@@ -399,16 +400,15 @@ def test_the_command_is_owner_only_and_off_cloud_with_the_declared_annotations(m
             return {tool.name: tool for tool in await client.list_tools()}
 
     listed = asyncio.run(tools())
-    tool = listed["approve_procedure"]
-    kinds = {branch["properties"]["kind"]["const"]
-             for branch in tool.input_schema["properties"]["operation"]["oneOf"]}
-    review_kinds = {branch["properties"]["kind"]["const"]
-                    for branch in listed["read_review"].input_schema["properties"]["operation"]["oneOf"]}
+    operations = set(listed["manage_memory"].input_schema["properties"]["operation"]["enum"])
+    queues = listed["list_review_items"].input_schema["properties"]["queue"]["enum"]
 
-    assert kinds == {"approve", "revoke", "quarantine"}
-    assert "procedure_approvals" in review_kinds
-    hints = tool.annotations
-    assert (hints.read_only_hint, hints.destructive_hint, hints.idempotent_hint) == (False, False, True)
+    assert {"procedures.approve", "procedures.revoke", "procedures.quarantine"} <= operations
+    assert "procedure_approvals" in queues
+    # No host lists the command; REST and the CLI name it, and it still writes.
+    assert "approve_procedure" not in listed
+    assert asyncio.run(mcp.get_tool("approve_procedure")).annotations.read_only_hint is False
+    assert listed["manage_memory"].annotations.read_only_hint is False
     for surface in ("mcp", "rest", "cli"):
         assert "approve_procedure" in {c.name for c in commands.product_commands_for(surface)}
     assert "approve_procedure" not in {c.name for c in commands.product_commands_for("mcp", cloud=True)}

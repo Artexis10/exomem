@@ -15,25 +15,28 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+# The public tools the diagnostic may call. File and remote ingestion (`save_evidence`, `upload_files`,
+# `download_files`), episodes and recall continuity are left out: the text-only run has no use for them.
 _CALLABLE_TOOLS = frozenset(
     {
-        "bootstrap",
-        "ask_memory",
-        "browse_memory",
-        "read_memory",
-        "capture_source",
-        "compile_source",
-        "remember",
-        "observe_memory",
-        "edit_memory",
-        "replace_memory",
-        "connect_memory",
-        "review_memory",
-        "review_item_context",
-        "triage_memory",
-        "schema_memory",
-        "plan_memory",
-        "record_memory",
+        "read_instructions",
+        "search_memory",
+        "read_page",
+        "save_source",
+        "create_note",
+        "add_observation",
+        "edit_note",
+        "supersede_note",
+        "query_records",
+        "add_record",
+        "edit_record",
+        "query_plan_items",
+        "add_plan_item",
+        "edit_plan_item",
+        "list_review_items",
+        "decide_review_item",
+        "inspect_memory",
+        "manage_memory",
     }
 )
 _REMOTE_INGEST_ARGUMENTS = frozenset(
@@ -197,7 +200,7 @@ class NativeCell:
             }
             self._runtime_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
             self._verify_runtime_receipt()
-            bootstrap = await self.call("bootstrap", {"profile": "compact"})
+            bootstrap = await self.call("read_instructions", {"profile": "compact"})
             if bootstrap["isError"]:
                 raise RuntimeError(f"native cell bootstrap failed: {bootstrap['content']!r}")
             payload = _product_payload(bootstrap)
@@ -224,13 +227,9 @@ class NativeCell:
             raise
 
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        from exomem.command_surface import resolve_command
-        from exomem.commands import PRODUCT_COMMANDS
-
         if self._client is None:
             raise RuntimeError("native cell is not running")
-        command = resolve_command(name, (command for command in PRODUCT_COMMANDS if command.name in _CALLABLE_TOOLS))
-        if command is None:
+        if name not in _CALLABLE_TOOLS:
             raise PermissionError(f"native cell tool is not allowed: {name}")
         if not isinstance(arguments, dict):
             raise TypeError("native cell tool arguments must be an object")
@@ -245,7 +244,7 @@ class NativeCell:
             "structuredContent": _json_value(result.structured_content),
             "isError": bool(result.is_error),
         }
-        if command.name == "ask_memory" and not envelope["isError"]:
+        if name == "search_memory" and not envelope["isError"]:
             observed = _fallback_observation(envelope)
             if observed is True or (observed is False and self._fallback_detected is not True):
                 self._fallback_detected = observed
@@ -259,7 +258,7 @@ class NativeCell:
     async def readiness(self) -> dict[str, Any]:
         if self._client is None:
             raise RuntimeError("native cell is not running")
-        actual = await self._client.call_tool_mcp("coordination_status", {})
+        actual = await self._client.call_tool_mcp("inspect_memory", {"operation": "writer.status"})
         actual_envelope = {
             "content": _json_value(actual.content),
             "structuredContent": _json_value(actual.structured_content),
@@ -869,6 +868,7 @@ class _ReadinessRecorder:
                     from exomem.command_surface import resolve_command
                     from exomem.commands import PRODUCT_COMMANDS
 
+                    # The server's middleware sees the grouped command that a public tool translates to.
                     command = resolve_command(str(context.message.name), PRODUCT_COMMANDS)
                     writes = command is not None and not command.read_only
                     recorder.paths.update(_committed_paths(result, recorder.vault, writes=writes))

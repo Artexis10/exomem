@@ -7,6 +7,7 @@ import json
 import types
 from pathlib import Path
 
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 
@@ -286,9 +287,10 @@ def test_vocabulary_review_context_and_decision_reach_the_real_leaves(
     )
     VocabularyState(tmp_path).observe(item)
 
-    assert commands.op_review_memory(tmp_path, mode="vocabulary") == vocabulary_review.review(
-        tmp_path
-    )
+    listed = commands.op_review_memory(tmp_path, mode="vocabulary")
+    for row in listed["items"]:
+        row.pop("id")  # the command stamps the short review id; the review itself does not
+    assert listed == vocabulary_review.review(tmp_path)
     context = commands.op_review_item_context(tmp_path, ref=item.ref)
     decision = {
         "item_ref": context["item"]["ref"],
@@ -314,8 +316,9 @@ def test_vocabulary_review_context_and_decision_reach_the_real_leaves(
     from exomem.operation_entries import spell_call
 
     name, arguments = spell_call(
-        "triage_memory", {"ref": item.ref, "action": "decide-vocabulary", "decision": decision}, "nested"
+        "triage_memory", {"ref": item.ref, "action": "decide-vocabulary", "decision": decision}, "public"
     )
+    assert (name, arguments["operation"]) == ("manage_memory", "review.decide_vocabulary")
     validate(
         arguments,
         schemas[name]["inputSchema"],
@@ -418,10 +421,9 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
     mcp = server_module.build_server(require_auth=False)
     from exomem.operation_entries import spell_call
 
-    name, arguments = spell_call("schema_memory", request, "nested")
-    assert name == "read_schema"
-    assert arguments["operation"]["kind"] == "resolve-entity-type"
-    mcp_result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=True))
+    name, arguments = spell_call("schema_memory", request, "public")
+    assert (name, arguments["operation"]) == ("inspect_memory", "schema.resolve_entity_type")
+    mcp_result = asyncio.run(mcp.call_tool(*public_call(name, arguments), run_middleware=True))
     rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=request,
@@ -450,14 +452,10 @@ def test_entity_type_resolution_schema_and_dispatch_match_across_surfaces(
     )
     assert json.loads(capsys.readouterr().out) == {"success": True, "data": direct}
 
-    triage_schema = next(
-        tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
-        for tool in asyncio.run(mcp.list_tools())
-        if tool.name == "triage_memory"
-    )
-    operation = triage_schema["properties"]["operation"]
-    decision_branch = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "decision")
-    decision_schema = {**decision_branch["properties"], **operation.get("properties", {})}["decision"]
+    triage_schema = asyncio.run(mcp.get_tool("triage_memory")).to_mcp_tool().model_dump(
+        mode="json", by_alias=True
+    )["inputSchema"]
+    decision_schema = triage_schema["properties"]["decision"]
     assert decision_schema["additionalProperties"] is False
     assert set(decision_schema["required"]) == {
         "item_ref",

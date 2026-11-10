@@ -94,10 +94,11 @@ async def main():
             async with ClientSession(streams[0], streams[1]) as session:
                 await session.initialize()
                 if write == "write":
-                    result = await session.call_tool("remember", {"title": phrase,
-                        "content": phrase + chr(10) * 2 + "## Observations" + chr(10) * 2 + "- [rehearsal] " + phrase + " #rehearsal" + chr(10), "status": "draft"})
+                    result = await session.call_tool("create_note", {"title": phrase,
+                        "content": phrase + chr(10) * 2 + "## Observations" + chr(10) * 2 + "- [rehearsal] " + phrase + " #rehearsal" + chr(10),
+                        "unlinked_reason": "A rehearsal note that links nothing."})
                 else:
-                    result = await session.call_tool("ask_memory", {"query": phrase})
+                    result = await session.call_tool("search_memory", {"query": phrase})
                 wire = result.model_dump(by_alias=True)
                 print(json.dumps({"is_error": wire["isError"], "result": wire.get("structuredContent") or {}}))
 

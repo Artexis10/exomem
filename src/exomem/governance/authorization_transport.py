@@ -701,6 +701,53 @@ class AuthorizationCarrierMiddleware:
             await self.app(sanitized_scope, request_receive, send)
 
 
+def take_presented_carrier(context: Any, arguments: dict[str, object]) -> CredentialCarrier:
+    """The bearer a tool call presents, popped off `arguments` (stdio) or read from the request (HTTP)."""
+    if MCP_CREDENTIAL_PARAMETER in arguments:
+        return CredentialCarrier.from_value(arguments.pop(MCP_CREDENTIAL_PARAMETER))
+    request_context = context.fastmcp_context.request_context
+    if request_context is not None:
+        candidate = getattr(request_context.request, "authorization_carrier", None)
+        if isinstance(candidate, CredentialCarrier):
+            return candidate
+    return current_request_authorization_carrier() or CredentialCarrier.absent()
+
+
+async def refuse_unverified_credential(vault_root: Path, context: Any) -> None:
+    """Raise the common credential refusal when a call presents a credential that does not verify.
+
+    A call refused before authorization (an unlisted tool, or arguments that no operation owns)
+    still answers an invalid credential with the credential refusal, never with a validation
+    detail. A call that presents none passes: no route was classified, so none requires one.
+    """
+    carrier = take_presented_carrier(context, dict(context.message.arguments or {}))
+    if carrier.is_absent:
+        return
+    started = time.perf_counter()
+    with mcp_request_correlation() as request_id:
+        try:
+            await anyio.to_thread.run_sync(partial(
+                verify_authorization_context, vault_root,
+                principal=principal_module.resolve_mcp_principal(),
+                credential=carrier.consume(), now=int(time.time()),
+            ))
+        except AuthorizationContextUnavailable as error:
+            _observe_authorization(request_id, "entry", (time.perf_counter() - started) * 1000, None)
+            raise ToolError(str(error)) from None
+
+
+def _observe_authorization(request_id: str, phase: str, entry_ms: float, post_ms: float | None) -> None:
+    try:
+        log_event(_call_log, logging.INFO, "authorization_observation", fields={
+            "request_id": request_id,
+            "phase": phase,
+            "entry_ms": round(entry_ms, 2),
+            "post_ms": round(post_ms, 2) if post_ms is not None else None,
+        })
+    except Exception:  # noqa: BLE001 - observation must not change the call outcome
+        pass
+
+
 class AuthorizationSessionMiddleware(Middleware):
     """Verify MCP capability context before tracing and FunctionTool validation."""
 
@@ -720,21 +767,7 @@ class AuthorizationSessionMiddleware(Middleware):
         with mcp_request_correlation() as request_id:
             try:
                 arguments = dict(context.message.arguments or {})
-                request_context = context.fastmcp_context.request_context
-                protected_carrier = None
-                if request_context is not None:
-                    request = request_context.request
-                    candidate = getattr(request, "authorization_carrier", None)
-                    if isinstance(candidate, CredentialCarrier):
-                        protected_carrier = candidate
-                if MCP_CREDENTIAL_PARAMETER in arguments:
-                    carrier = CredentialCarrier.from_value(
-                        arguments.pop(MCP_CREDENTIAL_PARAMETER)
-                    )
-                elif protected_carrier is not None:
-                    carrier = protected_carrier
-                else:
-                    carrier = current_request_authorization_carrier() or CredentialCarrier.absent()
+                carrier = take_presented_carrier(context, arguments)
                 try:
                     principal = principal_module.resolve_mcp_principal()
                     admission = await anyio.to_thread.run_sync(
@@ -785,15 +818,7 @@ class AuthorizationSessionMiddleware(Middleware):
                 if entry_ms is None:
                     entry_ms = (finished - entry_started) * 1000
                 post_ms = (finished - post_started) * 1000 if post_started is not None else None
-                try:
-                    log_event(_call_log, logging.INFO, "authorization_observation", fields={
-                        "request_id": request_id,
-                        "phase": phase,
-                        "entry_ms": round(entry_ms, 2),
-                        "post_ms": round(post_ms, 2) if post_ms is not None else None,
-                    })
-                except Exception:  # noqa: BLE001 - observation must not change the call outcome
-                    pass
+                _observe_authorization(request_id, phase, entry_ms, post_ms)
 
     async def _read_content(self, context, call_next, error_type):
         who = principal_module.resolve_mcp_principal()

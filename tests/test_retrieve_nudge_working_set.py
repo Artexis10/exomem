@@ -360,7 +360,8 @@ def test_relevant_due_rendering_keeps_both_guards_or_omits_the_entire_candidate(
     full = hook._format_working_set_block(packet, 4000)
     (line,) = [line for line in full.splitlines() if line.startswith("- relevant due:")]
     assert json.dumps(candidate, ensure_ascii=True, separators=(",", ":")) in line
-    assert "review_item_context" in line and "triage_memory" in line
+    assert "review.item_context" in line and "decide_review_item" in line
+    assert "triage_memory" not in line and "review_item_context" not in line
     assert "one due item" in line and "compaction" in line and "OAuth renewal" in line
 
     tight = hook._format_working_set_block(packet, len(full) - 1)
@@ -2226,7 +2227,7 @@ def test_the_referent_line_follows_what_actually_supplied_the_referent(
 
 
 # --------------------------------------------------------------------------- #
-# Episode recaps: a raw-material line, so `read_memory` is the follow-up
+# Episode recaps: a raw-material line, so `read_page` is the follow-up
 # --------------------------------------------------------------------------- #
 
 
@@ -2265,9 +2266,9 @@ def test_an_episode_entry_renders_as_a_session_line_with_its_summary() -> None:
     lines = hook._recent_lines(packet)
 
     assert lines == [f"- session: Harbor Lamp purchase — summary: Chose the brass lamp. [{path}]"]
-    # The header still routes a session line to `read_memory` (reworded when
+    # The header still routes a session line to `read_page` (reworded when
     # it gained the already-activated sentence, round-2 ruling Q1).
-    assert "`read_memory` a `unit`, `pointer`, `state` or `session` line" in hook._WORKING_SET_HEADER
+    assert "`read_page` a `unit`, `pointer`, `state` or `session` line" in hook._WORKING_SET_HEADER
 
 
 def test_the_deployed_retrieve_hook_still_matches_the_packaged_one() -> None:
@@ -2410,7 +2411,12 @@ def _upkeep_item(title: str = "Orbit Pump") -> dict:
         "disposition": {"state": "open", "delivered_before": 0},
         "route": {"tool": "maintain_memory", "args": {"mode": "curation"}},
         "context_route": {"tool": "review_item_context", "args": {"ref": ref}},
-        "dispose": {"tool": "triage_memory", "actions": ["dismiss", "snooze"], "args": {"ref": ref}},
+        "id": "qo5tgbx.rbs7",
+        "dispose": {
+            "tool": "decide_review_item",
+            "actions": ["dismiss", "snooze"],
+            "args": {"review_item": "qo5tgbx.rbs7", "decision": "dismiss"},
+        },
         "permission": "consideration does not authorize mutation",
     }
 
@@ -2435,9 +2441,12 @@ def test_upkeep_line_renders_whole_or_not_at_all() -> None:
     block = hook._format_working_set_block(packet, 4000)
     (line,) = _upkeep_lines(block)
     assert line.startswith("- upkeep (Facts about an entity live on other pages): Orbit Pump — ")
-    assert "review_item_context" in line
-    assert "maintain_memory" in line
-    assert "triage_memory dismiss|snooze" in line
+    assert "inspect_memory review.item_context" in line
+    # The packet's route names a REST command, which an MCP agent cannot call; item_context returns the route.
+    assert "act through the route it returns" in line
+    assert "maintain_memory" not in line
+    assert "decide_review_item dismiss|snooze on review_item qo5tgbx.rbs7" in line
+    assert "triage_memory" not in line
     assert line.endswith("[exomem://review/upkeep/0123456789abcdef01234567]")
     # It is the packet's last line, so the ceiling cuts it first, and whole.
     assert block.splitlines()[-1] == line

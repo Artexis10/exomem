@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 
 from exomem import commands, review_state, semantic_index
 from exomem import server as server_module
@@ -30,7 +31,12 @@ def _build(monkeypatch: pytest.MonkeyPatch):
     return server_module.build_server(require_auth=False)
 
 
-def _call(mcp, name: str, args: dict, *, run_middleware: bool = True) -> dict:
+def _call(mcp, command: str, args: dict, *, run_middleware: bool = True) -> dict:
+    """Call one grouped command through the public tool that carries it."""
+    return _tool(mcp, *public_call(command, args), run_middleware=run_middleware)
+
+
+def _tool(mcp, name: str, args: dict, *, run_middleware: bool = True) -> dict:
     result = asyncio.run(mcp.call_tool(name, args, run_middleware=run_middleware))
     sc = getattr(result, "structured_content", None)
     if isinstance(sc, dict):
@@ -90,7 +96,7 @@ def test_read_memory_exact_unit_matches_canonical_response(
 
 # ---------------- edit: mode routing ----------------
 
-def test_edit_memory_discovery_is_one_discriminated_operation(
+def test_edit_note_discovery_is_one_discriminated_operation(
     vault: Path, monkeypatch
 ) -> None:
     tools = {
@@ -98,66 +104,34 @@ def test_edit_memory_discovery_is_one_discriminated_operation(
         for tool in asyncio.run(_build(monkeypatch).list_tools())
     }
     schema = tools["edit_note"]["inputSchema"]
-    description = tools["edit_note"]["description"]
 
-    assert "returned guards" in description
-    assert "- supports [[Knowledge Base/Notes/Research/example-target]]" in description
-    assert "supports:: [[...]]" in description
-    assert "not supported relation syntax" in description
-
-    assert set(schema["properties"]) == {
-        "path",
-        "why",
-        "operation",
-        "identity_decision",
-        "response_detail",
-        "validate_only",
-    }
-    assert set(schema["required"]) == {"path", "why", "operation"}
-    operation = schema["properties"]["operation"]
-    assert operation["discriminator"]["propertyName"] == "kind"
-    branches = {
-        branch["properties"]["kind"]["const"]: branch
-        for branch in operation["oneOf"]
-    }
-    assert set(branches) == {
+    assert set(schema["required"]) == {"note", "why", "action"}
+    assert set(schema["properties"]["action"]["enum"]) == {
+        "replace_text",
+        "replace_section",
         "replace_body",
-        "replace_tags",
-        "replace_string",
-        "batch_replace",
-        "edit_section",
-        "patch_frontmatter",
+        "set_tags",
+        "set_fields",
         "fill_row",
+        "edit_observation",
+        "remove_observation",
     }
+    for field in ("edits", "links", "preview", "detail", "unlinked_reason"):
+        assert field in schema["properties"]
+    edit = schema["properties"]["edits"]["items"]
+    assert set(edit["required"]) == {"old_text", "new_text"}
+    assert set(edit["properties"]) == {"old_text", "new_text", "replace_all"}
 
-    fill = branches["fill_row"]
-    frontmatter = branches["patch_frontmatter"]
-    string = branches["replace_string"]
-    batch = branches["batch_replace"]
-    assert fill["additionalProperties"] is False
-    semantic_fields = {
-        "expected_hash",
-        "validate_only",
-        "transition_token",
-        "relation_disposition",
-        "relation_review_hash",
-        "relation_review_reason",
-    }
-    for branch in branches.values():
-        assert semantic_fields <= set(branch["properties"])
-    assert {"kind", "row_key", "take", "overwrite"} <= set(fill["properties"])
-    assert "expected_hash" in frontmatter["properties"]
-    assert {"old_string", "new_string", "replace_all", "tags", "expected_hash", "validate_only"} <= set(string["properties"])
-    assert "field" not in string["properties"]
-    edits = batch["properties"]["edits"]
-    assert edits["minItems"] == 1
-    assert set(edits["items"]["required"]) == {"old_string", "new_string"}
-    assert edits["items"]["additionalProperties"] is False
-    assert set(edits["items"]["properties"]) == {
-        "old_string",
-        "new_string",
-        "replace_all",
-    }
+def test_edit_note_refuses_a_field_it_does_not_take(vault: Path, monkeypatch) -> None:
+    """The published schema leaves extra fields open to fit the budget; the server refuses them."""
+    mcp = _build(monkeypatch)
+    rel = _make_page(vault, "# S\n\nalpha\n")
+
+    out = _tool(mcp, "edit_note", {"note": rel, "why": "w", "action": "replace_body", "body": "x", "bogus": 1})
+
+    assert "error" in out
+    assert "bogus" in json.dumps(out["error"])
+
 
 def test_edit_batch_mode_routes_to_multi_edit(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
@@ -188,31 +162,21 @@ def test_edit_batch_mode_accepts_connector_encoded_object_strings(
         tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp.list_tools())
     }
-    operation_schema = tools["edit_note"]["inputSchema"]["properties"]["operation"]
-    batch = next(
-        branch
-        for branch in operation_schema["oneOf"]
-        if branch["properties"]["kind"].get("const") == "batch_replace"
-    )
-    edits_schema = batch["properties"]["edits"]
-    assert edits_schema["items"]["type"] == "object"
+    assert tools["edit_note"]["inputSchema"]["properties"]["edits"]["items"]["type"] == "object"
 
-    out = _call(
+    out = _tool(
         mcp,
-        "edit_memory",
+        "edit_note",
         {
-            "path": rel,
+            "note": rel,
             "why": "connector-encoded batch",
-            "operation": {
-                "kind": "batch_replace",
-                "edits": [
-                    json.dumps({"old_string": "alpha", "new_string": "ALPHA"}),
-                    json.dumps({"old_string": "beta", "new_string": "BETA"}),
-                ],
-            },
-            "response_detail": "full",
+            "action": "replace_text",
+            "edits": [
+                json.dumps({"old_text": "alpha", "new_text": "ALPHA"}),
+                json.dumps({"old_text": "beta", "new_text": "BETA"}),
+            ],
+            "detail": "full",
         },
-        run_middleware=True,
     )
 
     assert out["diagnostics"]["edits_applied"] == 2
@@ -220,52 +184,29 @@ def test_edit_batch_mode_accepts_connector_encoded_object_strings(
     assert "ALPHA" in text and "BETA" in text
 
 
-def test_edit_batch_malformed_encoded_item_keeps_invalid_edit_error(
-    vault: Path, monkeypatch
-) -> None:
-    mcp = _build(monkeypatch)
-    rel = _make_page(vault, "# S\n\nalpha\n", name="malformed-encoded-edit.md")
-
-    with pytest.raises(Exception, match="INVALID_EDIT"):
-        _call(
-            mcp,
-            "edit_memory",
-            {
-                "path": rel,
-                "why": "invalid connector batch",
-                "operation": {"kind": "batch_replace", "edits": ["[]"]},
-            },
-            run_middleware=True,
-        )
-
-
 @pytest.mark.parametrize(
     "edits",
     [
         [],
-        [{"old_string": "alpha"}],
-        [{"old_string": "alpha", "new_string": "ALPHA", "ignored": True}],
-        [{"old_string": "alpha", "new_string": "alpha"}],
+        ["[]"],
+        [{"old_text": "alpha"}],
+        [{"old_text": "alpha", "new_text": "ALPHA", "ignored": True}],
+        [{"old_text": "alpha", "new_text": "alpha"}],
     ],
 )
-def test_edit_batch_invalid_items_are_rejected_before_the_leaf(
+def test_edit_batch_invalid_items_are_refused_and_change_nothing(
     vault: Path, monkeypatch, edits: list
 ) -> None:
     rel = _make_page(vault, "# S\n\nalpha\n", name="invalid-batch-edit.md")
     before = (vault / rel).read_text(encoding="utf-8")
 
-    with pytest.raises(Exception, match="INVALID_EDIT"):
-        _call(
-            _build(monkeypatch),
-            "edit_memory",
-            {
-                "path": rel,
-                "why": "invalid batch",
-                "operation": {"kind": "batch_replace", "edits": edits},
-            },
-            run_middleware=True,
-        )
+    out = _tool(
+        _build(monkeypatch),
+        "edit_note",
+        {"note": rel, "why": "invalid batch", "action": "replace_text", "edits": edits},
+    )
 
+    assert out["error"]["code"] == "INVALID_ARGUMENT"
     assert (vault / rel).read_text(encoding="utf-8") == before
 
 
@@ -277,19 +218,17 @@ def test_edit_batch_encoded_blob_is_rejected_by_middleware(
     before = (vault / rel).read_text(encoding="utf-8")
     encoded = json.dumps(
         {
-            "old_string": "alpha",
-            "new_string": "data:image/png;base64," + "A" * 40_000,
+            "old_text": "alpha",
+            "new_text": "data:image/png;base64," + "A" * 40_000,
         }
     )
 
-    with pytest.warns(DeprecationWarning):
-        with pytest.raises(Exception, match="BINARY_BLOB_REJECTED"):
-            _call(
-                mcp,
-                "edit_memory",
-                {"path": rel, "why": "must be rejected", "edits": [encoded]},
-                run_middleware=True,
-            )
+    with pytest.raises(Exception, match="BINARY_BLOB_REJECTED"):
+        _tool(
+            mcp,
+            "edit_note",
+            {"note": rel, "why": "must be rejected", "action": "replace_text", "edits": [encoded]},
+        )
 
     assert (vault / rel).read_text(encoding="utf-8") == before
 
@@ -343,61 +282,23 @@ def test_edit_default_surgical_still_works(vault: Path, monkeypatch) -> None:
     assert "goodbye world" in (vault / rel).read_text(encoding="utf-8")
 
 
-def test_edit_rejects_two_modes_at_once(vault: Path, monkeypatch) -> None:
+def test_edit_refuses_a_field_that_the_action_does_not_take(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     rel = _make_page(vault, "# S\n\nx\n")
-    with pytest.raises(Exception) as exc:
-        _call(
-            mcp,
-            "edit_memory",
-            {
-                "path": rel,
-                "why": "bad",
-                "operation": {"kind": "fill_row", "row_key": "x", "take": "y"},
-                "field": "status",
-                "value": "active",
-            },
-            run_middleware=True,
-        )
-    assert "INVALID_EDIT" in str(exc.value)
-    assert "cannot combine" in str(exc.value)
+    before = (vault / rel).read_text(encoding="utf-8")
 
-    with pytest.raises(Exception) as exc:
-        _call(
-            mcp,
-            "edit_memory",
-            {
-                "path": rel,
-                "why": "unknown operation",
-                "operation": {"kind": "nonsense"},
-            },
-            run_middleware=True,
-        )
-    assert "INVALID_EDIT" in str(exc.value)
-    assert "nonsense" in str(exc.value)
+    two_actions = _tool(
+        mcp,
+        "edit_note",
+        {"note": rel, "why": "bad", "action": "fill_row", "row": "x", "take": "y", "fields": {"status": "active"}},
+    )
+    assert two_actions["error"]["code"] == "INVALID_ARGUMENT"
+    assert "fields does not apply to fill_row" in two_actions["error"]["message"]
 
-
-def test_edit_legacy_flat_call_is_translated_before_fastmcp_validation(
-    vault: Path, monkeypatch
-) -> None:
-    rel = _make_page(vault, "# S\n\nBefore\n", name="legacy-flat-edit.md")
-
-    with pytest.warns(DeprecationWarning):
-        out = _call(
-            _build(monkeypatch),
-            "edit_memory",
-            {
-                "path": rel,
-                "why": "legacy compatibility",
-                "old_string": "Before",
-                "new_string": "After",
-                "response_detail": "full",
-            },
-            run_middleware=True,
-        )
-
-    assert out["diagnostics"]["path"] == rel
-    assert "After" in (vault / rel).read_text(encoding="utf-8")
+    unknown = _tool(mcp, "edit_note", {"note": rel, "why": "unknown action", "action": "nonsense"})
+    assert unknown["error"]["code"] == "INVALID_ARGUMENT"
+    assert "replace_text" in unknown["error"]["message"]
+    assert (vault / rel).read_text(encoding="utf-8") == before
 
 
 # ---------------- get: frontmatter_only routing ----------------
@@ -474,8 +375,8 @@ def test_delete_detects_directory(vault: Path, monkeypatch) -> None:
 
 # ---------------- note: project key description is stable + open ----------------
 
-def test_remember_project_description_is_stable_and_open(vault: Path, monkeypatch) -> None:
-    """The `remember` schema must expose a stable open-set project contract.
+def test_create_note_project_description_is_stable_and_open(vault: Path, monkeypatch) -> None:
+    """The `create_note` schema must expose a stable open-set project contract.
 
     Regression: claude.ai burned reasoning cycles (and nearly misfiled a note)
     treating an unlisted scope like `home` as illegal, because the docstring
@@ -485,17 +386,16 @@ def test_remember_project_description_is_stable_and_open(vault: Path, monkeypatc
     must not leak into the tool description and cause per-vault schema drift.
     """
     mcp = _build(monkeypatch)
-    tool = asyncio.run(mcp.get_tool("remember"))
+    tool = next(t for t in asyncio.run(mcp.list_tools()) if t.name == "create_note")
     project_desc = tool.parameters["properties"]["project"]["description"]
     projects_desc = tool.parameters["properties"]["projects"]["description"]
 
     # The sentinel must be fully substituted at registration time.
     assert "__PROJECT_KEYS_HINT__" not in project_desc
     assert "__PROJECT_KEYS_HINT__" not in projects_desc
-    # Open-set framing: the model must know unlisted keys are legal.
-    assert "auto-register" in project_desc.lower()
-    assert "any slug" in project_desc.lower()
-    assert "auto-register" in projects_desc.lower()
+    # Open-set framing: the model must know a new key is legal.
+    assert "registers itself" in project_desc.lower()
+    assert "registers itself" in projects_desc.lower()
     # Live registry values must not alter the discovery surface.
     assert "project-alpha" not in project_desc
     assert "personal" not in project_desc
@@ -581,22 +481,22 @@ def test_review_item_context_mcp_composes_stable_bounded_context(
     } <= set(out)
 
 
-def test_triage_memory_mcp_write_is_explicit_and_reversible(vault: Path, monkeypatch) -> None:
+def test_decide_review_item_write_is_explicit_and_reversible(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
-    review = _call(mcp, "review_memory", {"mode": "attention", "limit": 1})
+    review = _tool(mcp, "list_review_items", {"limit": 1})
     item = review["items"][0]
 
-    dismissed = _call(
+    dismissed = _tool(
         mcp,
-        "triage_memory",
-        {"ref": item["ref"], "action": "dismiss", "why": "reviewed"},
+        "decide_review_item",
+        {"review_item": item["id"], "decision": "dismiss", "why": "reviewed", "detail": "full"},
     )
     assert dismissed["state"] == "dismissed"
     assert review_state.state_path(vault).exists()
 
-    reopened = _call(
+    reopened = _tool(
         mcp,
-        "triage_memory",
-        {"ref": item["ref"], "action": "reopen"},
+        "decide_review_item",
+        {"review_item": item["id"], "decision": "reopen", "detail": "full"},
     )
     assert reopened["state"] == "open"

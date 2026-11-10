@@ -90,11 +90,11 @@ def test_a_peak_over_ticks_that_could_not_read_the_cell_is_unknown_not_zero():
 # --- filing ---------------------------------------------------------------------------------
 
 
-STATUS = "read_import.status"
+STATUS = "inspect_memory.status"
 
 
 class Scripted:
-    """An agent that answers each import_memory kind, and each read of a run, from a script and remembers what it was asked."""
+    """An agent that answers each imports.* kind, and each read of a run, from a script and remembers what it was asked."""
 
     def __init__(self, replies):
         self.replies = {kind: list(items) for kind, items in replies.items()}
@@ -134,7 +134,7 @@ def _done(run_id, *, filed, failed=0, residual=None):
 
 
 def _stored(rows, *, stage=STAGE, finish=None):
-    """The page as read_import status reports it: the inventory, the recorded stage and, once finished, the filed count."""
+    """The page as imports.status reports it: the inventory, the recorded stage and, once finished, the filed count."""
     return {"inventory": [{"path": f"_Imports/i-1/{n}", "eligible": True} for n in rows], "stage": stage,
             **({"finish": finish} if finish else {})}
 
@@ -284,7 +284,7 @@ def test_a_transport_failure_while_the_cell_restarts_is_retried_and_counted(no_w
     client = Client([ConnectionError("503 while the pod restarts"), _reply({"ok": True})])
     agent = large_import.Agent(client)
 
-    body, _ = asyncio.run(agent.call("ask_memory", {"query": "q"}))
+    body, _ = asyncio.run(agent.call("search_memory", {"query": "q"}))
 
     assert body == {"ok": True} and len(agent.retries) == 1
 
@@ -293,9 +293,9 @@ def test_a_warming_mutation_is_retried_after_the_wait_it_names(no_waiting):
     warming = _reply({"error": {"code": "MUTATION_WARMING", "retry_after_ms": 10}}, is_error=True)
     agent = large_import.Agent(Client([warming, _reply({"ok": True})]))
 
-    body, _ = asyncio.run(agent.call("import_memory", {}))
+    body, _ = asyncio.run(agent.call("manage_memory", {}))
 
-    assert body == {"ok": True} and agent.retries == ["import_memory: MUTATION_WARMING"]
+    assert body == {"ok": True} and agent.retries == ["manage_memory: MUTATION_WARMING"]
 
 
 def test_a_refusal_from_the_tool_is_not_retried(no_waiting):
@@ -303,7 +303,7 @@ def test_a_refusal_from_the_tool_is_not_retried(no_waiting):
     agent = large_import.Agent(Client([refused, _reply({"ok": True})]))
 
     with pytest.raises(StepFailure, match="INVALID_PHASE"):
-        asyncio.run(agent.call("import_memory", {}, kind="apply"))
+        asyncio.run(agent.call("manage_memory", {}, kind="apply"))
     assert agent.retries == []
 
 

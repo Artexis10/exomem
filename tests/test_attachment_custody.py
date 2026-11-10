@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 import pytest
+from _public_call import public_call
 
 # The real-worker harness of the local-ingress threat tests, reused so the
 # end-to-end case runs through the same manager doors production uses.
@@ -194,8 +195,8 @@ _LOCAL_PATH_ARGUMENT = re.compile(
     r"|(^|[._\[\]])filepath$",
     re.IGNORECASE,
 )
-#: Every argument of a command that receives a file's bytes.
-_FILE_INTAKE_COMMANDS = ("capture_source", "preserve_artifacts", "preserve_evidence", "transfer_artifact")
+#: Every listed tool that receives a file's bytes.
+_FILE_INTAKE_TOOLS = ("save_source", "save_evidence", "upload_files")
 
 
 def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
@@ -205,10 +206,10 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
     for name, tool in schemas.items():
         names = _schema_property_names(tool["inputSchema"])
         assert not [n for n in names if _LOCAL_PATH_ARGUMENT.search(n)], name
-    for name in _FILE_INTAKE_COMMANDS:
+    for name in _FILE_INTAKE_TOOLS:
         names = _schema_property_names(schemas[name]["inputSchema"])
         assert not [n for n in names if "path" in n.lower() or "dir" in n.lower()], name
-    for name in ("capture_source", "preserve_artifacts"):
+    for name in ("save_source", "save_evidence"):
         files = schemas[name]["inputSchema"]["properties"]["files"]
         assert list(files["items"]["properties"]) == [
             "download_url",
@@ -216,8 +217,6 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
             "mime_type",
             "file_name",
         ]
-    transcriptions = schemas["preserve_artifacts"]["inputSchema"]["properties"]["transcriptions"]
-    assert sorted(transcriptions["items"]["properties"]) == ["file_id", "text"]
 
 
 # ---- Local clients: held uploads -------------------------------------------------
@@ -848,6 +847,12 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
     app = real_worker.app
 
     async def call(client: httpx.AsyncClient, handle: dict, request_id: int) -> dict:
+        name, arguments = public_call("preserve_artifacts", {
+            "scope": "Clinic",
+            "category": "Appointments",
+            "files": [handle],
+            "transcriptions": [{"file_id": handle["file_id"], "text": TRANSCRIPTION}],
+        })
         response = await client.post(
             "/mcp",
             headers={
@@ -856,7 +861,7 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
                 "content-type": "application/json",
                 "mcp-protocol-version": PROTOCOL_VERSION,
                 "mcp-method": "tools/call",
-                "mcp-name": "preserve_artifacts",
+                "mcp-name": name,
             },
             json={
                 "jsonrpc": "2.0",
@@ -871,15 +876,8 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
                             "version": "1",
                         },
                     },
-                    "name": "preserve_artifacts",
-                    "arguments": {
-                        "scope": "Clinic",
-                        "category": "Appointments",
-                        "files": [handle],
-                        "transcriptions": [
-                            {"file_id": handle["file_id"], "text": TRANSCRIPTION}
-                        ],
-                    },
+                    "name": name,
+                    "arguments": arguments,
                 },
             },
         )

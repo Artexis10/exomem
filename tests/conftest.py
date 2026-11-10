@@ -40,8 +40,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
+_CHANGED_TESTS = pytest.StashKey[frozenset[Path]]()
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    # An option, not an environment variable: xdist workers receive it, and a nested pytest
+    # run inside a test, such as a full-suite collection check, does not inherit it.
+    parser.addoption(
+        "--changed-tests",
+        default="",
+        help="Collect only these space-separated repository-relative test modules (CI's changed-tests job).",
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.pluginmanager.register(RepositoryDocsReads(), "repository-docs-reads")
+    config.stash[_CHANGED_TESTS] = frozenset(REPO_ROOT / module for module in config.getoption("changed_tests", "").split())
 
 
 #: Set only by scripts/ci-prepare-bytecode.sh: "<part>/<parts>" collects one disjoint share of the
@@ -50,7 +64,14 @@ _COLLECT_PART = os.environ.get("EXOMEM_COLLECT_PART", "").strip()
 
 
 def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool | None:
-    if not _COLLECT_PART or collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+    if collection_path.suffix != ".py" or not collection_path.name.startswith("test_"):
+        return None
+    # --changed-tests ignores every other module; the tier and --ignore rules still decide the
+    # named ones, which a module named as a command-line argument would bypass.
+    changed = config.stash[_CHANGED_TESTS]
+    if changed and collection_path.resolve() not in changed:
+        return True
+    if not _COLLECT_PART:
         return None
     part, parts = (int(value) for value in _COLLECT_PART.split("/"))
     if not 0 <= part < parts:
@@ -893,6 +914,22 @@ def _process_env_isolation():
     for key, value in saved.items():
         if os.environ.get(key) != value:
             os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _hooks_resolve_a_scratch_client_home(tmp_path_factory, monkeypatch):
+    """No test writes a hook log, stamp or cooldown under a real client home.
+
+    The hooks resolve their state home from `EXOMEM_HOOK_HOME`, else `CLAUDE_CONFIG_DIR` or
+    `CODEX_HOME`, else the home directory. A developer's shell or an agent session often exports
+    one of them, and a test that runs a hook without setting its own home would then write there.
+    The shared override is cleared and both client homes point at a scratch directory; a test that
+    needs a specific home sets it after this runs, and still wins.
+    """
+    scratch = tmp_path_factory.getbasetemp() / f"client-home-{time.monotonic_ns()}"
+    monkeypatch.delenv("EXOMEM_HOOK_HOME", raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(scratch / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(scratch / "codex"))
 
 
 @pytest.fixture(autouse=True)

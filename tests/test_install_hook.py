@@ -349,6 +349,7 @@ def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkey
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("CODEX_HOME")  # the default home under HOME is what this test reads
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
     hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
 
@@ -2028,12 +2029,12 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
 
 
 def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
-    env = {
-        **os.environ,
-        "HOME": str(home),
-        "USERPROFILE": str(home),
-        **(extra_env or {}),
-    }  # redirect Path.home()
+    # Redirect Path.home(), and drop the variables that override it, so the state lands under `home`.
+    inherited = {
+        key: value for key, value in os.environ.items()
+        if key not in ("EXOMEM_HOOK_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+    }
+    env = {**inherited, "HOME": str(home), "USERPROFILE": str(home), **(extra_env or {})}
     return subprocess.run(
         [sys.executable, str(script)],
         input=json.dumps(event),
@@ -2637,11 +2638,13 @@ def test_no_marker_means_the_nudge_behaves_exactly_as_before(
 @pytest.mark.parametrize(
     "tool,payload",
     [
-        ("mcp__claude_ai_Exomem__record_memory", {"action": "append"}),
-        ("mcp__claude_ai_Exomem__record_memory", {"action": "update"}),
-        ("mcp__claude_ai_Exomem__plan_memory", {"action": "add"}),
-        ("mcp__claude_ai_Exomem__plan_memory", {"action": "triage"}),
-        ("mcp__claude_ai_Exomem__observe_memory", {"operation": "update"}),
+        ("mcp__claude_ai_Exomem__add_record", {"collection": "Training"}),
+        ("mcp__claude_ai_Exomem__edit_record", {"collection": "Training"}),
+        ("mcp__claude_ai_Exomem__add_plan_item", {"collection": "Plans"}),
+        ("mcp__claude_ai_Exomem__edit_plan_item", {"collection": "Plans"}),
+        ("mcp__claude_ai_Exomem__add_observation", {"note": "Notes/Topic.md"}),
+        ("mcp__claude_ai_Exomem__manage_memory", {"operation": "records.revise"}),
+        ("mcp__claude_ai_Exomem__manage_memory", {"operation": "plans.create"}),
     ],
 )
 def test_capture_silent_after_a_lifecycle_write(
@@ -2667,6 +2670,7 @@ def test_capture_silent_after_a_lifecycle_write(
         CAPTURE_SCRIPT,
         {"transcript_path": str(t), "session_id": f"lifecycle-{tool}-{sorted(payload.values())[0]}"},
         home,
+        {"EXOMEM_PROMINENCE": "maximal"},
     )
 
     assert r.stdout.strip() == ""
@@ -2675,10 +2679,10 @@ def test_capture_silent_after_a_lifecycle_write(
 @pytest.mark.parametrize(
     "tool,payload",
     [
-        ("mcp__claude_ai_Exomem__record_memory", {"action": "inspect"}),
-        ("mcp__claude_ai_Exomem__record_memory", {"action": "query"}),
-        ("mcp__claude_ai_Exomem__plan_memory", {"action": "inspect"}),
-        ("mcp__claude_ai_Exomem__plan_memory", {"action": "query"}),
+        ("mcp__claude_ai_Exomem__query_records", {"collection": "Training"}),
+        ("mcp__claude_ai_Exomem__query_plan_items", {"collection": "Plans"}),
+        ("mcp__claude_ai_Exomem__inspect_memory", {"operation": "records.inspect"}),
+        ("mcp__claude_ai_Exomem__inspect_memory", {"operation": "plans.inspect"}),
     ],
 )
 def test_capture_still_fires_after_read_only_lifecycle_discovery(
@@ -2698,66 +2702,6 @@ def test_capture_still_fires_after_read_only_lifecycle_discovery(
     r = _run(
         CAPTURE_SCRIPT,
         {"transcript_path": str(t), "session_id": f"readonly-{tool}-{sorted(payload.values())[0]}"},
-        home,
-        {"EXOMEM_PROMINENCE": "maximal"},
-    )
-
-    assert '"decision": "block"' in r.stdout
-
-
-_RENDERED_WRITES = [
-    pytest.param("change_records", {"operation": {"kind": "append"}}, id="nested-records-append"),
-    pytest.param("change_records", {"action": "update"}, id="flat-records-update"),
-    pytest.param("change_plans", {"operation": {"kind": "triage"}}, id="nested-plans-triage"),
-    pytest.param("change_plans", {"action": "add"}, id="flat-plans-add"),
-]
-_RENDERED_READS = [
-    pytest.param("read_records", {"operation": {"kind": "inspect"}}, id="nested-records-inspect"),
-    pytest.param("read_records", {"action": "query"}, id="flat-records-query"),
-    pytest.param("read_plans", {"operation": {"kind": "inspect"}}, id="nested-plans-inspect"),
-    pytest.param("read_plans", {"action": "query"}, id="flat-plans-query"),
-]
-
-
-@pytest.mark.parametrize("tool,payload", _RENDERED_WRITES)
-def test_capture_silent_after_a_single_purpose_change(tmp_path: Path, tool: str, payload: dict) -> None:
-    """A filed record through `change_records` is the write the capture contract asks for."""
-    home = tmp_path / "home"
-    home.mkdir()
-    t = _transcript(
-        tmp_path,
-        "q?",
-        "Three deliverables were produced and logged. " + "x" * 450,
-        assistant_tool=f"mcp__claude_ai_Exomem__{tool}",
-        assistant_tool_input=payload,
-    )
-
-    r = _run(
-        CAPTURE_SCRIPT,
-        {"transcript_path": str(t), "session_id": f"single-purpose-write-{tmp_path.name}"},
-        home,
-        {"EXOMEM_PROMINENCE": "maximal"},
-    )
-
-    assert r.stdout.strip() == ""
-
-
-@pytest.mark.parametrize("tool,payload", _RENDERED_READS)
-def test_capture_still_fires_after_a_single_purpose_read(tmp_path: Path, tool: str, payload: dict) -> None:
-    """Reading through `read_records` or `read_plans` is discovery; the check stays armed."""
-    home = tmp_path / "home"
-    home.mkdir()
-    t = _transcript(
-        tmp_path,
-        "q?",
-        "Looked at what is queued and nothing was written. " + "x" * 450,
-        assistant_tool=f"mcp__claude_ai_Exomem__{tool}",
-        assistant_tool_input=payload,
-    )
-
-    r = _run(
-        CAPTURE_SCRIPT,
-        {"transcript_path": str(t), "session_id": f"single-purpose-read-{tmp_path.name}"},
         home,
         {"EXOMEM_PROMINENCE": "maximal"},
     )

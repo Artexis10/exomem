@@ -2,9 +2,9 @@
 
 A client with a Stop hook is asked to record an episode by that hook. claude.ai,
 ChatGPT and a generic MCP client have none, so the one call they make every
-turn -- `activate_context` -- carries the ask instead: after
+turn -- `recall_context` -- carries the ask instead: after
 `EPISODE_NUDGE_ACTIVATIONS` activations from one caller with no
-`record_episode` record, the packet gets a one-sentence `episode_due` block, at
+`save_episode` record, the packet gets a one-sentence `episode_due` block, at
 most once per `EPISODE_NUDGE_COOLDOWN_SECONDS`. Claude Code and Codex over MCP
 are asked too, unless this vault's activation log shows their hook served them
 within that window: then their Stop hook is asking, and twice is noise. With
@@ -41,7 +41,7 @@ LEDGER_CAP = 512
 
 EPISODE_RULE = (
     "This conversation has run several turns without a recap. At its next "
-    "stopping point, record one with record_episode: what was worked on, decided "
+    "stopping point, save one with save_episode: what was worked on, decided "
     "and left open. A later record reuses its `episode` key and replaces the recap, "
     "so make it cover the whole conversation. Compile or explicitly dismiss every Decided item "
     "before citing it from updated compiled notes. Skip it if nothing durable happened."

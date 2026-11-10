@@ -8,6 +8,7 @@ import typing
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 
 from exomem import (
     command_surface,
@@ -184,11 +185,18 @@ def _mcp(monkeypatch: pytest.MonkeyPatch):
 
 def _call(mcp, name: str, arguments: dict) -> dict:
     with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
-        result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=True))
+        result = asyncio.run(mcp.call_tool(*public_call(name, arguments), run_middleware=True))
     structured = getattr(result, "structured_content", None)
     if isinstance(structured, dict):
         return structured
     return json.loads(result.content[0].text)
+
+
+def _leaf_call(mcp, name: str, arguments: dict) -> dict:
+    """Call a grouped command as the tool wrapper runs it, past the public-name rewrite."""
+    with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+        result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=False))
+    return result.structured_content
 
 
 def test_a_review_error_through_the_tool_names_the_field_and_never_an_empty_list(
@@ -197,11 +205,11 @@ def test_a_review_error_through_the_tool_names_the_field_and_never_an_empty_list
     mcp = _mcp(monkeypatch)
     _seed_peer(vault)
     arguments = _unconnected_page()
-    validation = _call(mcp, "create_note", {**arguments, "validate_only": True})
+    validation = _leaf_call(mcp, "remember", {**arguments, "validate_only": True})
 
-    refused = _call(
+    refused = _leaf_call(
         mcp,
-        "create_note",
+        "remember",
         {
             **_commit_arguments(arguments, validation),
             "relation_disposition": "reviewed_none",
@@ -214,6 +222,22 @@ def test_a_review_error_through_the_tool_names_the_field_and_never_an_empty_list
     assert "relation_review_hash" in refused["error"]["message"]
     assert "(missing: [])" not in refused["error"]["message"]
     assert refused["error"]["message"].endswith("Nothing was saved.")
+
+
+def test_the_public_tool_asks_for_a_reason_when_a_page_stands_alone(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = _mcp(monkeypatch)
+    _seed_peer(vault)
+    page = {"title": "Alone", "content": _PAGE}
+
+    refused = _call(mcp, "create_note", page)
+    saved = _call(mcp, "create_note", {**page, "unlinked_reason": REASON})
+
+    assert refused["error"]["code"] == "RELATION_DISPOSITION_MISSING"
+    assert refused["error"]["retry"]["arguments"] == {"unlinked_reason": "<why this page stands alone>"}
+    assert saved["title"] == "Alone"
+    assert relation_review.load_relation_reviews(vault)[-1].reason == REASON
 
 
 def _manage_file(vault: Path, **arguments: object) -> dict:

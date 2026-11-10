@@ -825,9 +825,8 @@ def test_bootstrap_is_registry_generated_on_public_surfaces(
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     mcp = server.build_server(require_auth=False)
     names = _tool_names(mcp)
-    assert "bootstrap" in names
-    assert {"read_import", "import_memory"} <= names
-    assert "adopt" not in names
+    assert {"read_instructions", "inspect_memory", "manage_memory"} <= names
+    assert not {"bootstrap", "read_import", "import_memory", "adopt"} & names
 
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(

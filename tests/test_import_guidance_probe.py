@@ -16,13 +16,13 @@ IMP = "imp-1"
 
 
 def scenario(replies: dict) -> Scenario:
-    return Scenario("s", "t", "p", ("import_memory",), (), replies, {"default": True}, (), ())
+    return Scenario("s", "t", "p", ("manage_memory",), (), replies, {"default": True}, (), ())
 
 
 def test_reply_prefers_tool_kind_over_tool_and_falls_back_to_default() -> None:
-    s = scenario({"read_import.status": "kind", "read_import": "tool"})
-    assert pick_reply(s, "read_import", {"operation": {"kind": "status"}}, 0) == "kind"
-    assert pick_reply(s, "read_import", {"operation": {"kind": "scan-only"}}, 0) == "tool"
+    s = scenario({"inspect_memory.imports.status": "kind", "inspect_memory": "tool"})
+    assert pick_reply(s, "inspect_memory", {"operation": "imports.status"}, 0) == "kind"
+    assert pick_reply(s, "inspect_memory", {"operation": "imports.scan"}, 0) == "tool"
     assert pick_reply(s, "transfer_memory", {"action": "import_cancel"}, 0) == {"default": True}
 
 
@@ -42,9 +42,9 @@ def call(tool: str, kind: str | None, arguments: dict, t: float = 0.0) -> dict:
 
 def ack(paths: list[str]) -> dict:
     return call(
-        "import_memory",
-        "acknowledge",
-        {"operation": {"kind": "acknowledge", "import_id": IMP, "paths": paths}},
+        "manage_memory",
+        "imports.acknowledge",
+        {"operation": "imports.acknowledge", "arguments": {"import_id": IMP, "paths": paths}},
     )
 
 
@@ -55,10 +55,10 @@ def evidence(
 
 
 EXACT = {
-    "tool": "import_memory",
-    "kind": "acknowledge",
+    "tool": "manage_memory",
+    "kind": "imports.acknowledge",
     "once": True,
-    "where": {"operation": {"kind": "acknowledge", "import_id": IMP, "paths": ["a", "b"]}},
+    "where": {"operation": "imports.acknowledge", "arguments": {"import_id": IMP, "paths": ["a", "b"]}},
 }
 
 
@@ -75,7 +75,7 @@ def test_a_second_acknowledge_with_other_paths_fails_a_once_check() -> None:
 
 
 def test_no_acknowledge_passes_never_called_and_one_fails_it() -> None:
-    spec = {"tool": "import_memory", "kind": "acknowledge"}
+    spec = {"tool": "manage_memory", "kind": "imports.acknowledge"}
     assert checks.never_called(spec, evidence()).verdict == checks.PASS
     assert checks.never_called(spec, evidence(ack(["a"]))).verdict == checks.FAIL
 
@@ -96,15 +96,15 @@ def test_a_validate_only_save_is_not_a_committed_write() -> None:
 
 
 def test_a_tool_outside_the_scenario_is_an_invented_tool() -> None:
-    served = ("import_memory",)
-    ok = evidence(tools=("mcp__exomem__import_memory",))
-    bad = evidence(tools=("mcp__exomem__import_memory", "mcp__exomem__upload_files"))
+    served = ("manage_memory",)
+    ok = evidence(tools=("mcp__exomem__manage_memory",))
+    bad = evidence(tools=("mcp__exomem__manage_memory", "mcp__exomem__upload_files"))
     assert checks.only_scripted_tools({}, ok, served=served, builtin=()).verdict == checks.PASS
     assert checks.only_scripted_tools({}, bad, served=served, builtin=()).verdict == checks.FAIL
 
 
 def start(t: float) -> dict:
-    return call("import_memory", "start", {"operation": {"kind": "start"}}, t)
+    return call("manage_memory", "imports.start", {"operation": "imports.start"}, t)
 
 
 def test_filing_while_the_command_runs_passes_and_filing_after_it_exits_fails() -> None:
@@ -187,7 +187,7 @@ def test_every_scenario_status_reads_through_the_product_reader() -> None:
     """Catches a scripted status in a shape the tool never returns (a bare-integer figure, a string classification,
     counts that disagree with the listed windows), which the real rounds would then judge the agent against."""
     for scenario in runner.load_scenarios("all"):
-        reply = scenario.replies["read_import.status"]
+        reply = scenario.replies["inspect_memory.imports.status"]
         reading = Reading.of(reply)
         assert not reading.older_cell and reading.windows_unknown is None, scenario.id
         figures = (
@@ -305,18 +305,18 @@ def test_a_second_run_into_the_same_folder_does_not_pass_on_the_first_runs_calls
     [scenario_03] = runner.load_scenarios("03")
     acknowledge = {
         "t": 1.0,
-        "tool": "import_memory",
-        "kind": "acknowledge",
+        "tool": "manage_memory",
+        "kind": "imports.acknowledge",
         "arguments": {
-            "operation": {
-                "kind": "acknowledge",
+            "operation": "imports.acknowledge",
+            "arguments": {
                 "import_id": "5b0e9c1e-7f1d-4a39-9d52-2f6c1d0a8b11",
                 "paths": ["Scans/receipt-2019.pdf", "Misc/backup.dmg"],
-            }
+            },
         },
     }
     first = FakeClaude(
-        scenario_03, stream(SERVER_UP, tools=("mcp__exomem__import_memory",)), [acknowledge]
+        scenario_03, stream(SERVER_UP, tools=("mcp__exomem__manage_memory",)), [acknowledge]
     )
     second = FakeClaude(scenario_03, stream(SERVER_UP))
     assert drive(scenario_03, first, tmp_path)["verdict"] == "pass"

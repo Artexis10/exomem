@@ -252,7 +252,6 @@ def test_windows_service_installer_supports_release_env_and_cuda() -> None:
     assert "Install-ExomemPackage" in install
     assert "Repair-TorchCuda" in install
     assert "AppEnvironmentExtra" in install
-    assert "EXOMEM_MCP_LEGACY_COMPAT" in install
     assert "Test-McpEndpoint -HostName $BindHost -EndpointPort $Port" in install
 
     # `--refresh-package exomem` is not decoration: uv serves the package index

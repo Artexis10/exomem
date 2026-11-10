@@ -1082,14 +1082,14 @@ class _ScriptedAgent:
         # counted as a structured write, and a stand-in that never made one
         # could not prove that.
         tool_uses: list[tuple[str, dict]] = [
-            ("mcp__exomem__plan_memory", {"action": "inspect", "collection": PLANNING_PATH})
+            ("mcp__exomem__query_plan_items", {"collection": PLANNING_PATH})
         ]
         if turn is not None and self.land:
             for consequence in turn.consequences:
                 if consequence.tier == "intent":
                     self._file(consequence.title)
                     tool_uses.append(
-                        ("mcp__exomem__plan_memory", {"action": "add", "title": consequence.title})
+                        ("mcp__exomem__add_plan_item", {"title": consequence.title})
                     )
                 elif consequence.tier == "outcome":
                     self._append(
@@ -1099,23 +1099,23 @@ class _ScriptedAgent:
                     )
                     tool_uses.append(
                         (
-                            "mcp__exomem__record_memory",
-                            {"action": "append", "title": consequence.title},
+                            "mcp__exomem__add_record",
+                            {"title": consequence.title},
                         )
                     )
                 else:
                     self._settle(consequence.title, consequence.status)
                     tool_uses.append(
                         (
-                            "mcp__exomem__plan_memory",
-                            {"action": "triage", "title": consequence.title},
+                            "mcp__exomem__edit_plan_item",
+                            {"title": consequence.title},
                         )
                     )
         if turn is not None and turn.turn_id in dict(self.spurious):
             title, event_type = dict(self.spurious)[turn.turn_id]
             self._append(title, event_type, "2026-08-07")
             tool_uses.append(
-                ("mcp__exomem__record_memory", {"action": "append", "title": title})
+                ("mcp__exomem__add_record", {"title": title})
             )
         session_id = argv[argv.index("--session-id") + 1] if "--session-id" in argv else (
             argv[argv.index("--resume") + 1]
@@ -1413,7 +1413,7 @@ def test_the_full_offline_path_runs_for_both_arms(tmp_path) -> None:
         # One firing and three invocations per turn, per the shaped fixture.
         assert row["capture_nudge_firings"] == len(corpus.turns)
         assert row["hook_invocations"] == 3 * len(corpus.turns)
-        assert row["structured_write_tool_uses"]["mcp__exomem__record_memory"] >= 1
+        assert row["structured_write_tool_uses"]["mcp__exomem__add_record"] >= 1
         assert row["usage"]["input_tokens"] > 0
     assert by_arm["hooked"]["extras_count"] == 1
     assert "total" not in report and "score" not in report
@@ -2052,7 +2052,7 @@ def test_two_runs_pinned_to_one_timestamp_use_different_session_ids(tmp_path) ->
 
 
 def test_only_write_actions_count_as_structured_writes() -> None:
-    """m4. Live, both arms opened with `plan_memory(action="inspect")` — a read."""
+    """m4. Live, both arms opened by reading the collection — a read, not a filing."""
 
     from epistemic.journeys import f27_replay as journey
     from membench.trackc.witness_join import parse_stream_json_transcript
@@ -2063,20 +2063,23 @@ def test_only_write_actions_count_as_structured_writes() -> None:
             _fabricated_stream(
                 "s",
                 tool_uses=(
-                    ("mcp__exomem__plan_memory", {"action": "inspect"}),
-                    ("mcp__exomem__plan_memory", {"action": "add"}),
-                    ("mcp__exomem__record_memory", {"action": "query"}),
-                    ("mcp__exomem__record_memory", {"action": "append"}),
+                    ("mcp__exomem__query_plan_items", {}),
+                    ("mcp__exomem__add_plan_item", {"title": "t", "preview": True}),
+                    ("mcp__exomem__add_plan_item", {"title": "t"}),
+                    ("mcp__exomem__query_records", {}),
+                    ("mcp__exomem__add_record", {"title": "t"}),
                     ("Skill", {"command": "exomem"}),
                 ),
             ).splitlines()
         ),
     )
     assert result.structured_write_tool_uses() == {
-        "mcp__exomem__plan_memory": 1,
-        "mcp__exomem__record_memory": 1,
+        "mcp__exomem__add_plan_item": 1,
+        "mcp__exomem__edit_plan_item": 0,
+        "mcp__exomem__add_record": 1,
+        "mcp__exomem__edit_record": 0,
     }
-    assert result.tool_uses()["mcp__exomem__plan_memory"] == 2
+    assert result.tool_uses()["mcp__exomem__add_plan_item"] == 2
     assert result.tool_uses()["Skill"] == 1
 
 

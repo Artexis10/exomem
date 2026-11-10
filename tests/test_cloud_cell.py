@@ -122,6 +122,12 @@ async def _call_tool(
     )
 
 
+def _door_operations(tools, door: str) -> set[str]:
+    """The closed `operation` enum a listed door publishes."""
+    wire = next(tool for tool in tools if tool.name == door).to_mcp_tool().model_dump(mode="json", by_alias=True)
+    return set(wire["inputSchema"]["properties"]["operation"]["enum"])
+
+
 def _teardown_activation(mcp) -> None:
     activation = mcp._exomem_local_runtime_activation
     assert activation._shutdown.is_set() or True
@@ -626,15 +632,16 @@ def test_cloud_tool_list_allows_staged_adoption(
     try:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        assert "transfer_artifact" not in names
-        assert {"read_import", "import_memory"} <= names
-        assert "change_media" in names
+        # Without the gateway's upload handoff a cell lists neither transfer tool.
+        assert not {"upload_files", "download_files", "transfer_artifact"} & names
+        reads, writes = _door_operations(tools, "inspect_memory"), _door_operations(tools, "manage_memory")
+        assert {"imports.scan", "imports.status"} <= reads
+        assert {"imports.start", "imports.apply"} <= writes
         # Media status remains available; Cloud still omits the video-frame command.
-        media = next(tool for tool in tools if tool.name == "read_media")
-        kinds = {branch["properties"]["kind"]["const"]
-                 for branch in media.to_mcp_tool().input_schema["properties"]["operation"]["oneOf"]}
-        assert kinds == {"status"}
-        assert {"change_settings"} <= names
+        assert "media.status" in reads
+        assert not {"media.video", "media.image"} & reads
+        assert "media.process" in writes
+        assert {"settings.set"} <= writes
         assert "recall_context" in names
         assert "search_memory" in names
         assert "create_note" in names
@@ -724,28 +731,6 @@ def test_a_transfer_call_that_reaches_a_cell_is_refused_before_the_writer_lease(
         _teardown_activation(mcp)
 
 
-def test_cloud_never_registers_legacy_aliases_even_with_the_opt_in_set(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cell has no legacy clients, and a legacy leaf would re-expose the
-    leaves of the commands `CLOUD_SURFACE_EXCLUSIONS` just removed (design
-    D1.3) -- so the operator-env compatibility opt-in is refused in cloud
-    mode, not merely left unset."""
-    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
-    mcp, _ = _build_cloud_server(monkeypatch)
-    try:
-        tools = asyncio.run(mcp.list_tools())
-        names = {tool.name for tool in tools}
-        assert "note" not in names
-        assert "create_file" not in names
-        # The excluded commands stay excluded -- a legacy alias must not
-        # re-expose what CLOUD_SURFACE_EXCLUSIONS just removed.
-        assert "transfer_artifact" not in names
-        assert {"read_import", "import_memory"} <= names
-    finally:
-        _teardown_activation(mcp)
-
-
 # ---------------------------------------------------------------------------
 # Content-free logging
 # ---------------------------------------------------------------------------
@@ -772,7 +757,7 @@ def test_cloud_call_trace_omits_a_distinctive_query_phrase(
                 ) as client:
                     await _initialize(client, token=TOKEN)
                     return await _call_tool(
-                        client, token=TOKEN, name="ask_memory", arguments={"query": phrase}
+                        client, token=TOKEN, name="search_memory", arguments={"query": phrase}
                     )
 
         with caplog.at_level("DEBUG"):
@@ -804,14 +789,14 @@ def test_cloud_read_only_refuses_a_write_but_serves_a_read(
                     write = await _call_tool(
                         client,
                         token=TOKEN,
-                        name="remember",
-                        arguments={"content": "should not land", "title": "RO Test", "status": "draft"},
+                        name="create_note",
+                        arguments={"content": "should not land", "title": "RO Test", "unlinked_reason": "synthetic"},
                         request_id=3,
                     )
                     read = await _call_tool(
                         client,
                         token=TOKEN,
-                        name="ask_memory",
+                        name="search_memory",
                         arguments={"query": "anything"},
                         request_id=4,
                     )
@@ -848,8 +833,8 @@ def test_cloud_not_read_only_allows_writes(
                     return await _call_tool(
                         client,
                         token=TOKEN,
-                        name="remember",
-                        arguments={"content": "should land", "title": "Non-RO Test", "status": "draft"},
+                        name="create_note",
+                        arguments={"content": "should land", "title": "Non-RO Test", "unlinked_reason": "synthetic"},
                         request_id=3,
                     )
 
@@ -882,8 +867,9 @@ def test_standalone_server_unaffected_by_cloud_module(
     try:
         tools = asyncio.run(mcp.list_tools())
         names = {tool.name for tool in tools}
-        # The standalone server keeps commands cloud mode would exclude.
-        assert {"read_import", "import_memory"} <= names
+        # The standalone server keeps the transfer tools cloud mode would exclude.
+        assert {"upload_files", "download_files"} <= names
+        assert {"media.video", "media.image"} <= _door_operations(tools, "inspect_memory")
         assert "search_memory" in names
     finally:
         _teardown_activation(mcp)
@@ -968,7 +954,7 @@ def test_cloud_logs_and_ledger_never_carry_caller_header_text(
                             "jsonrpc": "2.0",
                             "id": 2,
                             "method": "tools/call",
-                            "params": {"name": "ask_memory", "arguments": {"query": "x"}},
+                            "params": {"name": "search_memory", "arguments": {"query": "x"}},
                         },
                     )
 
@@ -1161,8 +1147,8 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
         monkeypatch.setenv(name, "1")
     inputs = {
         "title": "Service record", "content": "An immutable source body", "source_kind": "session",
-        "source_identity": {"system": "archive", "record_id": "item-4", "revision": "r2"},
-        "response_detail": "full",
+        "options": {"source_identity": {"system": "archive", "record_id": "item-4", "revision": "r2"}},
+        "detail": "full",
     }
     mcp, _ = _build_cloud_server(monkeypatch, previous_token=PREVIOUS_TOKEN)
 
@@ -1172,23 +1158,24 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://cell.local") as client:
                 await _initialize(client, token=TOKEN)
                 if restart:
-                    return [await _call_tool(client, token=PREVIOUS_TOKEN, name="capture_source", arguments=inputs,
+                    return [await _call_tool(client, token=PREVIOUS_TOKEN, name="save_source", arguments=inputs,
                                              metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "new-attempt"})]
-                first = await _call_tool(client, token=TOKEN, name="capture_source", arguments=inputs,
+                first = await _call_tool(client, token=TOKEN, name="save_source", arguments=inputs,
                                          metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
-                rotated = await _call_tool(client, token=PREVIOUS_TOKEN, name="capture_source", arguments=inputs,
+                rotated = await _call_tool(client, token=PREVIOUS_TOKEN, name="save_source", arguments=inputs,
                                            request_id=3, metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
-                changed = await _call_tool(client, token=TOKEN, name="capture_source",
+                changed = await _call_tool(client, token=TOKEN, name="save_source",
                                            arguments={**inputs, "content": "Conflicting input"}, request_id=4,
                                            metadata={command_surface.MCP_IDEMPOTENCY_META_KEY: "attempt-1"})
                 promoted = await _call_tool(
-                    client, token=TOKEN, name="manage_memory_file", request_id=5,
-                    arguments={"operation": "move",
-                               "old_path": first.json()["result"]["structuredContent"]
-                               ["diagnostics"]["operational"]["source_path"],
-                               "new_path": "Knowledge Base/Evidence/Archive/records/service-record.md",
-                               "promotion_reason": "The captured record now supports a documented claim.",
-                               "response_detail": "legacy"},
+                    client, token=TOKEN, name="manage_memory", request_id=5,
+                    arguments={"operation": "files.move",
+                               "arguments": {
+                                   "old_path": first.json()["result"]["structuredContent"]
+                                   ["diagnostics"]["operational"]["source_path"],
+                                   "new_path": "Knowledge Base/Evidence/Archive/records/service-record.md",
+                                   "promotion_reason": "The captured record now supports a documented claim."},
+                               "detail": "full"},
                 )
                 return [first, rotated, changed, promoted]
 
@@ -1202,7 +1189,7 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
     assert replay["source"] == original["source"]
     assert replay["capture_outcome"] == "created"
     assert "IDEMPOTENCY_KEY_REUSED" in changed.text
-    assert promoted.json()["result"]["structuredContent"]["new_path"] == "Knowledge Base/Evidence/Archive/records/service-record.md", promoted.text
+    assert promoted.json()["result"]["structuredContent"]["diagnostics"]["new_path"] == "Knowledge Base/Evidence/Archive/records/service-record.md", promoted.text
     assert not (vault / original["diagnostics"]["operational"]["source_path"]).exists()
     before = {p: p.read_bytes() for lane in ("Sources", "Evidence")
               for p in (vault / "Knowledge Base" / lane).rglob("*.md")}

@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from record_fixtures import (
     LEDGER_COLLECTION_PATH,
     copy_dataset_fixture,
@@ -172,10 +173,10 @@ def test_an_agent_runs_the_preflight_through_check_memory(tmp_path, monkeypatch)
 
     async def run():
         async with Client(server) as client:
-            report = await client.call_tool("check_memory", {"operation": {"kind": "collections-store"}},
+            report = await client.call_tool(*public_call("check_memory", {"operation": {"kind": "collections-store"}}),
                                             raise_on_error=False)
             foreign = await client.call_tool(
-                "check_memory", {"operation": {"kind": "collections-store", "cursor": "bm90LWEtY3Vyc29y"}},
+                *public_call("check_memory", {"operation": {"kind": "collections-store", "cursor": "bm90LWEtY3Vyc29y"}}),
                 raise_on_error=False)
             return report, foreign
 

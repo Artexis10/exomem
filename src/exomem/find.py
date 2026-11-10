@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from collections import ChainMap, OrderedDict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -25,11 +25,12 @@ from datetime import date
 from functools import partial, wraps
 from inspect import signature as inspect_signature
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     call_spans,
     cli_ops,
+    epistemic_dimensions,
     find_candidates,
     find_corpus,
     find_policy,
@@ -56,6 +57,9 @@ from .find_types import (
 )
 from .governance import policy as governance_policy
 from .kbdir import kb_dirname, kb_prefix
+
+if TYPE_CHECKING:
+    from .vault import WikilinkResolver
 
 log = logging.getLogger(__name__)
 
@@ -1556,6 +1560,7 @@ def find(
     admit_path: Callable[[str], bool] | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    dimension_check_out: dict[str, int] | None = None,
     _catalog_admission: Any | None = None,
     _pending_coverage: Any | None = None,
     _cache_probe: bool = False,
@@ -1578,6 +1583,12 @@ def find(
     name here and bumps `degradation_counts()`. The caller surfaces this as a
     `degraded` envelope marker, distinct from `warming`. A failed result is also
     never cached (a transient sidecar/model failure must not stick).
+
+    `dimension_check_out`: optional caller-owned dict. When a managed runtime
+    checks a `unit.dimension` predicate on its hits, it records how many of the
+    best `limit` units it checked (`checked`) and how many are in the dimension
+    (`kept`), because the limit applied before the check and more units in the
+    dimension may exist.
 
     `scope` controls the walk root:
     - "kb" (default): only `Knowledge Base/`. Compiled material + sources.
@@ -1865,6 +1876,30 @@ def find(
             )
         return resolution.resolved or resolution.key
 
+    def _resolve_dimension_name(value: str) -> str:
+        nonlocal language_registry
+        if language_registry is None:
+            from . import semantic_language_registry
+
+            language_registry = semantic_language_registry.load_registry(vault_root)
+        from . import semantic_labels
+
+        key = language_registry.resolve_label(semantic_labels.DIMENSIONS, value)
+        if key is None:
+            known = ", ".join(language_registry.label_keys(semantic_labels.DIMENSIONS))
+            raise structured_filters.FilterError(
+                "INVALID_FILTER_VALUE",
+                "$.unit.dimension",
+                f"unknown dimension {value!r}",
+                expected=f"a dimension key or label: {known}",
+                remediation=(
+                    "Name one of the listed dimensions, or add the dimension to the vault's "
+                    "semantic-language registry; a vault dimension is unavailable while that "
+                    "registry has an error."
+                ),
+            )
+        return key
+
     filter_plan = structured_filters.compile_filter(
         filters,
         shortcuts=structured_filters.FilterShortcuts(
@@ -1884,7 +1919,18 @@ def find(
         ),
         resolve_category=lambda value: _resolve_language_value(value, namespace="category"),
         resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
+        resolve_dimension=_resolve_dimension_name,
     )
+    # Membership lookups are registry reads; the graph read waits until a cache miss. A managed
+    # reader rewrites an indexed dimension and checks the others on its hits, so `unit.dimension`
+    # leaves its plan before the refusal below.
+    requested_plan = filter_plan
+    dimension_lookups = _dimension_lookups(vault_root, filter_plan, language=language_registry)
+    dimension_check: structured_filters.FilterPlan | None = None
+    if dimension_lookups is not None and managed_runtime:
+        filter_plan, dimension_check = _managed_dimension_plan(
+            filter_plan, dimension_lookups, result_level=result_level
+        )
     if filter_plan.root is not None and managed_runtime:
         # A managed reader refuses a field no index can evaluate, and refuses it
         # HERE — before the freshness key, the hot cache, any catalogue query or
@@ -1897,15 +1943,19 @@ def find(
         refused_shapes = _refused_filter_shapes(filter_plan)
         if refused_shapes:
             raise _unsupported_filter_shape_error(refused_shapes)
+    # The language registry that decides membership is in the freshness key already
+    # (`unit_filters`), and the graph by the `relation_filter` flag that `dimension_edges` sets: a
+    # cached answer from a graph that has since gone stale is not current.
+    dimension_edges = dimension_lookups is not None and dimension_lookups.needs_edges
     filter_key = json.dumps(
-        filter_plan.to_dict(),
+        requested_plan.to_dict(),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
     effective_result_level = structured_filters.resolve_result_level(
         result_level,
-        filter_plan,
+        requested_plan,
     )
     if retrieval_trace is not None and not _cache_probe:
         retrieval_trace.record_plan(
@@ -1925,6 +1975,19 @@ def find(
         updated_after = updated_before = None
         recency_days = None
 
+    # One freshness snapshot + one parsed-page memo per request: every
+    # consumer below (relation filter, hot cache, BM25, resolver, auto-widen, boost passes)
+    # shares them instead of re-walking / re-stat'ing. The snapshot is built first because a
+    # restricted caller's relation filter binds its link resolver to it.
+    snapshot = FreshnessSnapshot(
+        vault_root,
+        require_live_recall=require_live_recall,
+        timings=timings,
+        expected_recall_checkpoints=catalog_proof,
+        stale_recall_scopes=stale_recall_scopes,
+        pending=pending,
+    )
+
     # Resolve the relation filter before any caching so a warming/disabled sidecar
     # raises the typed outcome instead of being masked by a stale cache hit, and an
     # unknown relation key is rejected up front. `relation_paths` is None when no
@@ -1939,19 +2002,9 @@ def find(
         relation_of=relation_of,
         relation_direction=relation_direction,
         keep=admit_path,
+        snapshot=snapshot,
     )
 
-    # One freshness snapshot + one parsed-page memo per request: every
-    # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
-    # shares them instead of re-walking / re-stat'ing.
-    snapshot = FreshnessSnapshot(
-        vault_root,
-        require_live_recall=require_live_recall,
-        timings=timings,
-        expected_recall_checkpoints=catalog_proof,
-        stale_recall_scopes=stale_recall_scopes,
-        pending=pending,
-    )
     page_memo: dict[str, ParsedPage | None] = {}
     unit_reads = UnitParentReads()
 
@@ -2010,7 +2063,14 @@ def find(
         degraded.append(_PENDING_VISIBILITY_COMPONENT)
     if effective_result_level == "unit":
         unit_algebra = structured_filters.plan_index_candidates(filter_plan)
-        cache_size = 0 if retrieval_trace is not None or pending_active or admit_path is not None else _find_cache_size()
+        # A dimension checked on the hits reports its counts to the caller, which a cached
+        # answer does not carry.
+        cache_size = (
+            0
+            if retrieval_trace is not None or pending_active or admit_path is not None
+            or dimension_check is not None
+            else _find_cache_size()
+        )
         if timings is not None:
             timings.cache["enabled"] = cache_size > 0
         _set_rerank_timing_profile(
@@ -2034,7 +2094,7 @@ def find(
                     snapshot=snapshot,
                     unit_filters=True,
                     metadata_only_catalog=unit_algebra.status == "complete",
-                    relation_filter=relation_active,
+                    relation_filter=relation_active or dimension_edges,
                 )
             unit_request_key = (
                 "unit",
@@ -2071,6 +2131,10 @@ def find(
                     return copy.deepcopy(cached_hits)
         if _cache_probe:
             return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
+        if dimension_lookups is not None and dimension_check is None:
+            filter_plan = filter_plan.with_dimensions(
+                _dimension_source(vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot)
+            )
         unit_admitted = _admitted(walk_scope)
         with _span(timings, "semantic_units"):
             unit_hits = _find_semantic_units(
@@ -2102,6 +2166,14 @@ def find(
                 match = relation_provenance.get(unit.parent_path)
                 if match is not None:
                     unit.relation_match = _relation_match_dict(match, matched="parent")
+        if dimension_check is not None and dimension_lookups is not None:
+            checked_count = len(unit_hits)
+            unit_hits = _check_dimensions_on_hits(
+                vault_root, unit_hits, dimension_check, dimension_lookups, keep=admit_path,
+                snapshot=snapshot,
+            )
+            if dimension_check_out is not None:
+                dimension_check_out.update(checked=checked_count, kept=len(unit_hits))
         def finish_units():
             verified = _finish_unit_candidates(
                 vault_root, unit_hits, parent_reads=unit_reads, pages=page_memo, failed_out=failed,
@@ -2202,7 +2274,7 @@ def find(
                     not query_norm
                     and structured_filters.plan_index_candidates(filter_plan).status == "complete"
                 ),
-                relation_filter=relation_active,
+                relation_filter=relation_active or dimension_edges,
             )
         delta_cache_eligible = bool(
             mode == "keyword"
@@ -2306,6 +2378,10 @@ def find(
     # sidecar/model recovers. Tracked internally even when the caller passes None.
     if _cache_probe:
         return _QueryPreparation(unit=mixed, page=True)
+    if dimension_lookups is not None and dimension_check is None:
+        filter_plan = filter_plan.with_dimensions(
+            _dimension_source(vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot)
+        )
     mixed_unit_hits: list[SemanticUnitHit] = []
     mixed_unit_window = _UnitCandidateWindow()
     if mixed:
@@ -3092,6 +3168,9 @@ def _unit_metadata_records(
             if parent.metadata.get("parent_source_hash") != metadata.content_hash:
                 raise ValueError("SEMANTIC_STRUCTURE_UNAVAILABLE")
             spans = semantic_index.prose_carrier_spans(parent.metadata, projected=projected)
+            page_view = (
+                metadata.view if plan.dimensions is None else {**metadata.view, "path": path}
+            )
             selected_by_key = {unit.occurrence_key: unit for unit in parent.structure.units}
             order_by_key = {unit.occurrence_key: order for order, unit in enumerate(parent.structure.units)}
             # Structural format fixes these candidate families and offset fields.
@@ -3106,12 +3185,21 @@ def _unit_metadata_records(
                 if any(start < occurrence["end_offset"] and occurrence["start_offset"] < end
                        for start, end in spans):
                     continue
-                if structured_filters.evaluate_filter(plan, page=metadata.view, unit=unit_view):
-                    records.setdefault(path, []).append(_UnitCandidate(
-                        row, metadata, parent, selected, unit_view, source_order,
-                        vault_root=vault_root,
-                        pending_page=pending.page(path) if pending is not None and pending.covers(path) else None,
-                    ))
+                candidate = _UnitCandidate(
+                    row, metadata, parent, selected, unit_view, source_order,
+                    vault_root=vault_root,
+                    pending_page=pending.page(path) if pending is not None and pending.covers(path) else None,
+                )
+                # The stored view holds no membership facts; only a plan that tests a dimension
+                # reads them.
+                evaluated = unit_view if plan.dimensions is None else {
+                    **unit_view,
+                    **structured_filters.membership_facts(
+                        candidate, occurrence=selected.occurrence_key
+                    ),
+                }
+                if structured_filters.evaluate_filter(plan, page=page_view, unit=evaluated):
+                    records.setdefault(path, []).append(candidate)
     except (ValueError, TypeError, KeyError, StopIteration) as error:
         raise RetrievalIndexWarming(site="semantic_unit_metadata_incomplete") from error
     return records
@@ -4669,11 +4757,15 @@ def _resolve_relation_filter(
     relations: list[str] | None,
     relation_of: str | None,
     relation_direction: str,
+    snapshot: FreshnessSnapshot,
     keep: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
-    plus per-path provenance and advisory findings. `keep` is a restricted
-    caller's admission (`None` for the owner): its edges resolve in that view.
+    plus per-path provenance and advisory findings. `keep` is the request's content
+    admission (`None` for the owner); the edges resolve in the view that adds the
+    release plane to it (`egress.edge_view`), as a vault without the withheld pages
+    would hold them. A caller with such a view re-derives the links that resolve
+    differently for it, with the resolver of the request's `snapshot`.
     A withheld anchor yields an authoritative empty before registry selection.
 
     Each requested relation is canonicalized through the registry; an unknown key
@@ -4713,8 +4805,13 @@ def _resolve_relation_filter(
                 details={"relation": raw, "suggestions": suggestions, "candidates": suggestions},
             )
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
+    view = egress.edge_view(vault_root, keep)
     result = graph_index.relation_participants(
-        relations or (), anchor=relation_of, direction=relation_direction, keep=keep
+        relations or (),
+        anchor=relation_of,
+        direction=relation_direction,
+        keep=view,
+        resolver=_request_resolver(vault_root, snapshot)() if view is not None else None,
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
@@ -4725,8 +4822,180 @@ def _resolve_relation_filter(
         epistemic_graph.schedule_background_rebuild(
             vault_root, mutation_coordinator=graph_index._canonical_mutation_coordinator()
         )
+        # Debt (make-epistemic-language-dynamic design): the outcome advises a retry, though after a
+        # direct file edit only a reconcile ends this state.
         raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return result.paths, dict(result.provenance), plan.findings
+
+
+def _request_resolver(
+    vault_root: Path, snapshot: FreshnessSnapshot
+) -> Callable[[], WikilinkResolver]:
+    """The request's link resolver, built on call, for a graph read that re-derives links.
+
+    A restricted caller's graph read re-derives the links that resolve differently for it. Inside
+    an admitted catalogue view only the request's own checkpoint opens a resolver, so it comes
+    from `snapshot`, as the graph lane's does. The owner never calls it.
+    """
+    return lambda: recall_resolver_snapshot(
+        vault_root,
+        allow_fallback=not snapshot.requires_live_recall,
+        expected_checkpoint=snapshot.recall_checkpoint("vault"),
+    )
+
+
+def _dimension_lookups(
+    vault_root: Path, plan: structured_filters.FilterPlan, *, language: Any
+) -> epistemic_dimensions.DimensionMembership | None:
+    """The membership lookups of the dimensions a plan's `unit.dimension` predicates name, or None
+    when it names none. Registry reads only: the graph read waits for `_dimension_source`."""
+    named = structured_filters.named_dimensions(plan)
+    if not named:
+        return None
+    from . import relation_registry
+
+    return epistemic_dimensions.membership(
+        language, relation_registry.load_registry(vault_root), only=named
+    )
+
+
+def _dimension_source(
+    vault_root: Path,
+    lookups: epistemic_dimensions.DimensionMembership,
+    *,
+    keep: Callable[[str], bool] | None,
+    snapshot: FreshnessSnapshot,
+    pages: Collection[str] | None = None,
+) -> epistemic_dimensions.UnitDimensions:
+    """What answers `unit.dimension` for one candidate set, with one graph read for the set.
+
+    `pages` is the candidate set's pages, or None when the set is every unit a scan reads. `keep`
+    is the request's content admission; the read adds the release plane to it, so an edge to a
+    page the caller cannot see gives no membership. A missing or stale sidecar raises the typed
+    warming outcome and schedules a rebuild, as the relation filter does; an empty set from a
+    current one is real. A restricted caller's re-derived links resolve with the request's
+    resolver (`_request_resolver`).
+    """
+    from . import epistemic_graph
+
+    edges = epistemic_dimensions.read_edges(
+        vault_root,
+        lookups,
+        pages=pages,
+        admission=keep,
+        resolver=_request_resolver(vault_root, snapshot),
+    )
+    if edges.status == "temporarily_unavailable":
+        raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
+    if edges.status != "available":
+        epistemic_graph.schedule_background_rebuild(
+            vault_root,
+            mutation_coordinator=epistemic_graph.EpistemicGraphIndex(
+                vault_root
+            )._canonical_mutation_coordinator(),
+        )
+        # Debt (make-epistemic-language-dynamic design): the outcome advises a retry, though after a
+        # direct file edit only a reconcile ends this state.
+        raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
+    return epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges)
+
+
+def _managed_dimension_plan(
+    plan: structured_filters.FilterPlan,
+    lookups: epistemic_dimensions.DimensionMembership,
+    *,
+    result_level: str,
+) -> tuple[structured_filters.FilterPlan, structured_filters.FilterPlan | None]:
+    """A managed reader's `unit.dimension`: the plan its index answers, and the predicates it
+    checks on its hits.
+
+    A dimension whose members the index can answer is rewritten into indexed fields, anywhere in
+    the plan. Every other dimension is checked on the hits, which needs its predicate at the top
+    level of the plan and unit results; anything else is refused by field, never scanned.
+    """
+    from . import semantic_labels
+
+    expressions = {}
+    for key, members in lookups.members.items():
+        if members.get("families"):
+            continue
+        kinds = members.get("kinds", ())
+        expression = structured_filters.membership_expression(
+            kinds=[kind for kind in kinds if kind != semantic_labels.ALL_KINDS],
+            every_kind=semantic_labels.ALL_KINDS in kinds,
+            keys=members.get("keys", ()),
+        )
+        if expression is not None:
+            expressions[key] = expression
+    split = structured_filters.split_checked_dimensions(
+        structured_filters.rewrite_dimensions(plan, expressions)
+    )
+    if split.nested:
+        raise structured_filters.FilterError(
+            "UNSUPPORTED_FILTER_FIELD",
+            split.nested[0],
+            "this unit.dimension predicate sits under $or or $not, and this server checks its "
+            "dimension on the search's best matches, which only a top-level condition allows",
+            expected="unit.dimension as a top-level condition of the filter, or under its top-level $and",
+            remediation=(
+                "Move the unit.dimension predicate to the top level of the filter, or run one "
+                "search for each branch of the $or."
+            ),
+        )
+    if split.checked is not None and (
+        structured_filters.resolve_result_level(result_level, plan) != "unit"
+    ):
+        raise structured_filters.FilterError(
+            "UNSUPPORTED_FILTER_FIELD",
+            "$.unit.dimension",
+            "this server checks this dimension on the matching units, so it cannot rank pages by it",
+            expected='result_level "unit" or "auto"',
+            remediation='Search with result_level "unit" or "auto" to filter units by this dimension.',
+        )
+    return split.index, split.checked
+
+
+def _check_dimensions_on_hits(
+    vault_root: Path,
+    hits: list[Any],
+    plan: structured_filters.FilterPlan,
+    lookups: epistemic_dimensions.DimensionMembership,
+    *,
+    keep: Callable[[str], bool] | None,
+    snapshot: FreshnessSnapshot,
+) -> list[Any]:
+    """The hits that `plan`'s `unit.dimension` predicates keep, in order, with one graph read for
+    the pages of the whole hit set."""
+    if not hits:
+        return hits
+    from . import semantic_units
+
+    source = _dimension_source(
+        vault_root, lookups, keep=keep, snapshot=snapshot, pages={hit.parent_path for hit in hits}
+    )
+    checked = plan.with_dimensions(source)
+    kept = []
+    for hit in hits:
+        if isinstance(hit, _UnitCandidate):
+            unit = {
+                **hit.unit_view,
+                **structured_filters.membership_facts(
+                    hit, occurrence=hit.selected_unit.occurrence_key
+                ),
+            }
+        else:
+            unit = {
+                **structured_filters.unit_view(hit),
+                # A finished hit serializes its span; the occurrence key reads only its offsets.
+                "occurrence": (
+                    hit.form,
+                    semantic_units.SourceSpan(**hit.source_span, text=""),
+                    hit.source_hash,
+                ),
+            }
+        if structured_filters.evaluate_filter(checked, page={"path": hit.parent_path}, unit=unit):
+            kept.append(hit)
+    return kept
 
 
 def _resolve_eligible_filter_paths(

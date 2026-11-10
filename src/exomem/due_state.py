@@ -3373,8 +3373,11 @@ def for_activation(
         for row in rows:
             anchor = material.get(str(row.get("path") or ""))
             if anchor:
+                from . import review_ids  # imported here: review_ids reaches the public tool table, which due_state must not load at import
+
                 packet["relevant_due_refs"] = [{
                     "ref": row["ref"], "fingerprint": row["fingerprint"],
+                    "id": review_ids.item_id(row),
                     "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
                 }]
                 return

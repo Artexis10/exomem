@@ -224,7 +224,9 @@ def _query_parity_projection(result):
     for key in ("snapshot", "continuation", "generated_at", "source_versions", "source_hashes"):
         projected.pop(key, None)
     for row in projected.get("rows", []):
+        # The row `id` embeds the item version, which differs between the two modes.
         row.pop("item_version", None)
+        row.pop("id", None)
     if isinstance(projected.get("aggregate"), dict):
         latest = projected["aggregate"].get("row")
         if isinstance(latest, dict):

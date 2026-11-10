@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 
@@ -129,12 +130,12 @@ def test_schema_memory_entity_type_selector_reaches_the_mcp_leaf(
 
     saved = asyncio.run(
         mcp.call_tool(
-            "schema_memory",
+            *public_call("schema_memory",
             {
                 "operation": "save-entity-types",
                 "proposal": {"schema_version": 1, "entity_types": {}},
                 "why": "Exercise the public selector classifier.",
-            },
+            }),
             run_middleware=True,
         )
     )
@@ -263,29 +264,23 @@ def test_validate_uses_argument_presence_and_returns_repair_findings_for_saved_m
 
 
 def test_context_is_exact_at_runtime_and_in_the_published_schema() -> None:
-    import json
-
     invalid = _schema(Path("/tmp"), "resolve", context={"unexpected": "value"})
     assert invalid == {
         "resolved": False,
         "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
     }
 
-    operation = json.loads(
-        Path("tests/fixtures/mcp_tool_schemas.json").read_text(encoding="utf-8")
-    )["read_schema"]["inputSchema"]["properties"]["operation"]
-    resolve = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "resolve")
-    schema = {**resolve["properties"], **operation.get("properties", {})}["context"]
-    # Optional-null structure is no longer published; the leaves still accept null.
-    context_schema = {key: value for key, value in schema.items() if key != "description"}
-    assert context_schema == {
+    # The door publishes no per-operation schema; `read_instructions(topic=...)` lists one operation's arguments.
+    from exomem.commands import PRODUCT_COMMANDS
+    from exomem.public_surface import help_for
+
+    published = help_for("schema.resolve", PRODUCT_COMMANDS)
+    assert "context" in published["required"]
+    nullable_text = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert published["arguments"]["context"] == {
         "type": "object",
         "additionalProperties": False,
-        "properties": {
-            "project": {"type": "string"},
-            "domain": {"type": "string"},
-            "activity": {"type": "string"},
-        },
+        "properties": {"project": nullable_text, "domain": nullable_text, "activity": nullable_text},
     }
 
 
@@ -293,7 +288,6 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from conftest import initialize_vault_state_offline
-    from fastmcp.exceptions import ValidationError
 
     from exomem import server as server_module
     from exomem.__main__ import main
@@ -337,19 +331,19 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
 
     invalid = asyncio.run(
         mcp.call_tool(
-            "schema_memory",
-            invalid_request,
+            *public_call("schema_memory",
+            invalid_request),
             run_middleware=True,
         )
     )
     valid = asyncio.run(
         mcp.call_tool(
-            "schema_memory",
+            *public_call("schema_memory",
             {
                 "subject": "workflow-contracts",
                 "operation": "resolve",
                 "context": {"domain": None, "activity": "implementation"},
-            },
+            }),
             run_middleware=True,
         )
     )
@@ -368,10 +362,9 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
         "operation": "resolve",
         "context": {"activity": "implementation"},
     }
-    name, arguments = spell_call("schema_memory", public_request, "nested")
-    assert name == "read_schema"
-    assert arguments["operation"]["kind"] == "resolve"
-    public_result = asyncio.run(mcp.call_tool(name, arguments, run_middleware=True))
+    name, arguments = spell_call("schema_memory", public_request, "public")
+    assert (name, arguments["operation"]) == ("inspect_memory", "schema.resolve")
+    public_result = asyncio.run(mcp.call_tool(*public_call(name, arguments), run_middleware=True))
     expected = _schema(vault, "resolve", context=public_request["context"])
     assert public_result.structured_content == json.loads(json.dumps(expected))
 
@@ -392,9 +385,12 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
         "resolved": False,
         "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
     }
-    assert asyncio.run(
-        mcp.call_tool("schema_memory", null_context, run_middleware=True)
-    ).structured_content == null_expected
+    # The door reads a null `context` as a missing required field and refuses it before the leaf;
+    # REST and the CLI reach the leaf, which refuses with its own code.
+    refused = asyncio.run(
+        mcp.call_tool(*public_call("schema_memory", null_context), run_middleware=True)
+    ).structured_content
+    assert refused["error"]["code"] == "INVALID_OPERATION_ARGUMENTS"
     null_rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=null_context,
@@ -428,7 +424,7 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
         expected = _schema(vault, "resolve", context=request["context"])
         assert expected == {"resolved": False, "code": "WORKFLOW_CONTRACT_INVALID"}
         assert asyncio.run(
-            mcp.call_tool("schema_memory", request, run_middleware=True)
+            mcp.call_tool(*public_call("schema_memory", request), run_middleware=True)
         ).structured_content == expected
         malformed_rest = TestClient(mcp.http_app()).post(
             "/api/schema_memory",
@@ -445,14 +441,13 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
             "resolved": False,
             "code": "WORKFLOW_CONTRACT_INVALID_ARGUMENTS",
         }
-        with pytest.raises(ValidationError, match="context"):
-            asyncio.run(
-                mcp.call_tool(
-                    "schema_memory",
-                    {**invalid_request, "context": malformed_context},
-                    run_middleware=True,
-                )
+        refused = asyncio.run(
+            mcp.call_tool(
+                *public_call("schema_memory", {**invalid_request, "context": malformed_context}),
+                run_middleware=True,
             )
+        ).structured_content
+        assert "context" in json.dumps(refused)
     non_mapping_rest = TestClient(mcp.http_app()).post(
         "/api/schema_memory",
         json=non_mapping,
@@ -474,13 +469,10 @@ def test_live_workflow_context_refusals_and_schema_match_across_surfaces(
     ) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "BAD_JSON"
 
-    operation = next(
-        tool.to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]["properties"]["operation"]
-        for tool in asyncio.run(mcp.list_tools())
-        if tool.name == "read_schema"
-    )
-    resolve = next(branch for branch in operation["oneOf"] if branch["properties"]["kind"]["const"] == "resolve")
-    mcp_schema = {**resolve["properties"], **operation.get("properties", {})}["context"]
+    # The door takes `arguments` as an open object, so the typed `context` schema lives on the registered command.
+    mcp_schema = asyncio.run(mcp.get_tool("schema_memory")).to_mcp_tool().model_dump(
+        mode="json", by_alias=True
+    )["inputSchema"]["properties"]["context"]
     rest_schema = TestClient(mcp.http_app()).get("/api/openapi.json").json()["paths"][
         "/api/schema_memory"
     ]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"][

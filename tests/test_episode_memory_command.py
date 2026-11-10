@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import (
@@ -1627,7 +1628,7 @@ def test_material_binding_and_keyed_read_cross_the_three_public_doors(vault, mon
     ]
     selected = {"kind": "material", "episode": KEY, "input_revision": 2, "material_key": "reading"}
     with request_scope(owner_principal(surface="mcp")):
-        called = asyncio.run(mcp.call_tool("read_episode", {"operation": selected}, run_middleware=True))
+        called = asyncio.run(mcp.call_tool(*public_call("read_episode", {"operation": selected}), run_middleware=True))
     native = called.structured_content
     assert native["reading"]["status"] == "available"
     try:
@@ -1756,6 +1757,6 @@ def test_the_scaffold_skill_routes_conversation_recaps_to_the_tool() -> None:
     routing = (scaffold / "references" / "operation-routing.md").read_text(encoding="utf-8")
     engagement = (scaffold / "references" / "engagement.md").read_text(encoding="utf-8")
 
-    assert "`record_episode/read_episode`" in skill
-    assert "**record_episode/read_episode**" in routing
-    assert "record_episode" in engagement and "episode_due" in engagement
+    assert "`save_episode`" in skill and "`episodes.*`" in skill
+    assert "**save_episode** and **inspect_memory**" in routing
+    assert "save_episode" in engagement and "episode_due" in engagement

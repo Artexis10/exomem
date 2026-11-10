@@ -1,4 +1,4 @@
-"""`import_memory` kind `file` files a staged folder with one call that the agent repeats until it reports done.
+"""The `imports.file` operation of `manage_memory` files a staged folder with one call that the agent repeats until it reports done.
 
 The journey runs through the rendered MCP tool; the cut and edge cases call the module function that the tool
 runs. Every case stages five PDFs and sets the page size to two, so a folder is three pages.
@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 
 import pytest
+from _public_call import public_call
 from fastmcp import Client
 from test_adoption_paging import PDF, _stage
 
@@ -49,9 +50,9 @@ def _runs(vault: Path) -> list[Path]:
 
 
 async def _file(client: Client, key: str, **operation):
-    """One `import_memory` file call under its own idempotency key; the reply is what the agent reads."""
+    """One `imports.file` call under its own idempotency key; the reply is what the agent reads."""
     return await client.call_tool(
-        "import_memory", {"operation": {"kind": "file", **operation}}, raise_on_error=False,
+        *public_call("import_memory", {"operation": {"kind": "file", **operation}}), raise_on_error=False,
         meta={command_surface.MCP_IDEMPOTENCY_META_KEY: key})
 
 

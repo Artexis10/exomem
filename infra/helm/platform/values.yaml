@@ -269,6 +269,17 @@ keyCustodian:
     requests: {cpu: 20m, memory: 64Mi}
     limits: {cpu: 200m, memory: 192Mi}
 
+# automate-cell-storage-deletion: the key custodian and the media edge purge a deleted cell's files only on a
+# deletion grant that Substrate signed. Both read these values from a mounted file on each pass, so a change
+# restarts neither (runbook: cloud-cell-deletion.md).
+cellDeletion:
+  # The grant public keys as PEM strings: the current key and, during a rotation, the next one. A grant that
+  # either key verifies is valid. An empty list verifies no grant, so neither executor purges any cell.
+  grantPublicKeys: []
+  # The hold list: the cell IDs that neither executor purges. Add a cell during its grace to stop a wrong
+  # deletion; take it off to resume the purge on its existing grant.
+  holdCells: []
+
 # D9: capacity is observed from the cluster (CSINode allocatable + live
 # VolumeAttachments), never a chart constant or a Hetzner server id. The old
 # cellctl.nodeName/attachmentsLimit values are gone -- nothing reads them.
@@ -354,6 +365,10 @@ mediaEdge:
   # the follow-on change destroys them; it is an operator's starting figure, raised or lowered from readings.
   physicalHeadroom: 2
   b2SecretName: exomem-media-edge-b2
+  # automate-cell-storage-deletion D3: the edge's list-only key for its purge pass, the
+  # `cloud_media_edge_list_application_key` output, as keyId and applicationKey. Only the edge mounts it.
+  # Until the Secret exists, the edge serves as before and purges nothing.
+  purgeListSecretName: exomem-media-edge-list
   signingKeySecretName: exomem-media-edge-signing-key
   signingKeySecretKey: signing-key
   publicKeySecretName: exomem-media-edge-public-key

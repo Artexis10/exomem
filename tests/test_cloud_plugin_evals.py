@@ -42,13 +42,18 @@ def trace(name="grounded-recall"):
         "active_capabilities": {
             "profile": "product-cloud",
             "available_product_tools": [
-                "activate_context",
-                "ask_memory",
-                "read_memory",
-                "remember",
-                "observe_memory",
-                "episode_memory",
+                "recall_context",
+                "search_memory",
+                "read_page",
+                "read_instructions",
+                "create_note",
+                "add_observation",
+                "edit_note",
+                "save_episode",
+                "inspect_memory",
+                "manage_memory",
             ],
+            "available_operations": {"inspect_memory": ["media.status"], "manage_memory": ["media.process"]},
         },
         "engagement": {
             "level": "balanced",
@@ -75,12 +80,12 @@ def trace(name="grounded-recall"):
         "observations": [
             {"kind": "user", "text": prompt},
             tool(
-                "bootstrap",
+                "read_instructions",
                 {"profile": "session", "skill_contract": IDENTITY["skill_contract"]},
                 boot,
             ),
             tool(
-                "activate_context",
+                "recall_context",
                 {"turn": prompt},
                 {
                     "status": "activated",
@@ -144,18 +149,18 @@ def test_marker_and_citation_must_belong_to_same_hit():
 
 def test_observe_validation_is_not_a_capture():
     value = capture_trace()
-    write = next(o for o in value["observations"] if o.get("name") == "remember")
-    write["name"] = "observe_memory"
-    write["arguments"]["operation"] = "validate"
+    write = next(o for o in value["observations"] if o.get("name") == "create_note")
+    write["name"] = "add_observation"
+    write["arguments"] = {"note": "Sample dry run", "category": "finding", "text": value["marker"], "preview": True}
     write["result"] = {"operation": "validate", "mutated": False, "path": "exomem://memory/sample"}
     assert not checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
 
 
 def test_observe_add_requires_actual_mutation():
     value = capture_trace()
-    write = next(o for o in value["observations"] if o.get("name") == "remember")
-    write["name"] = "observe_memory"
-    write["arguments"]["operation"] = "add"
+    write = next(o for o in value["observations"] if o.get("name") == "create_note")
+    write["name"] = "add_observation"
+    write["arguments"] = {"note": "Sample dry run", "category": "finding", "text": value["marker"]}
     write["result"] = {
         "operation": "add",
         "mutated": True,
@@ -170,9 +175,9 @@ def test_observe_add_requires_actual_mutation():
 
 def test_observe_add_is_a_capture_when_the_minimal_reply_leads_with_its_outcome():
     value = capture_trace()
-    write = next(o for o in value["observations"] if o.get("name") == "remember")
-    write["name"] = "observe_memory"
-    write["arguments"]["operation"] = "add"
+    write = next(o for o in value["observations"] if o.get("name") == "create_note")
+    write["name"] = "add_observation"
+    write["arguments"] = {"note": "Sample dry run", "category": "finding", "text": value["marker"]}
     write["result"] = {"user_summary": "Saved sample.md (Personal)", "path": "exomem://memory/sample"}
     assert checks.evaluate_trace(value, case("proactive-outcome"), IDENTITY)["ok"]
     write["result"] = {"path": "exomem://memory/sample"}
@@ -314,37 +319,25 @@ def test_recall_checks_can_pass_without_becoming_native_evidence():
     assert checks.evaluate_trace(trace(), case("grounded-recall"), IDENTITY)["ok"]
 
 
-def test_preferred_recall_calls_and_capabilities_keep_grounded_trace_valid():
-    from exomem.command_surface import resolve_command
-    from exomem.commands import PRODUCT_COMMANDS
-
+def test_a_retired_tool_name_does_not_satisfy_the_recall_requirement():
     value = trace()
-    for observation in value["observations"]:
-        if observation.get("kind") == "tool":
-            command = resolve_command(observation["name"], PRODUCT_COMMANDS)
-            observation["name"] = command.public_name
-    capabilities = value["observations"][1]["result"]["active_capabilities"]
-    capabilities["available_product_tools"] = [
-        resolve_command(name, PRODUCT_COMMANDS).public_name
-        for name in capabilities["available_product_tools"]
-    ]
-    original = copy.deepcopy(value)
-
-    assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY) == {
-        "ok": True,
-        "issues": [],
-    }
-    assert value == original
+    value["observations"][2]["name"] = "activate_context"
+    report = checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)
+    assert "required_call_missing:recall_context" in report["issues"]
 
 
 def capture_trace():
     value = trace("proactive-outcome")
-    value["observations"].insert(-1, tool("ask_memory", {"query": "sample dry run"}, {"hits": []}))
+    value["observations"].insert(-1, tool("search_memory", {"query": "sample dry run"}, {"hits": []}))
     value["observations"].insert(
         -1,
         tool(
-            "remember",
-            {"content": "sample-unique-731 compact retrieval result", "sources": []},
+            "create_note",
+            {
+                "title": "Sample dry run",
+                "content": "sample-unique-731 compact retrieval result",
+                "unlinked_reason": "No related page exists.",
+            },
             {
                 "success": True,
                 "ref": "exomem://memory/sample",
@@ -359,8 +352,8 @@ def capture_trace():
         "observations": [
             {"kind": "user", "text": case("proactive-outcome")["readback_prompt"]},
             tool(
-                "read_memory",
-                {"path": "exomem://memory/sample"},
+                "read_page",
+                {"page": "Sample dry run"},
                 {
                     "body": "sample-unique-731 compact retrieval result",
                     "ref": "exomem://memory/sample",
@@ -386,15 +379,14 @@ def test_capture_can_extend_existing_note(case_id):
     value["observations"][2]["arguments"]["turn"] = prompt
     value["readback"]["prompt"] = scenario["readback_prompt"]
     value["readback"]["observations"][0]["text"] = scenario["readback_prompt"]
-    write = next(o for o in value["observations"] if o.get("name") == "remember")
-    write["name"] = "edit_memory"
+    write = next(o for o in value["observations"] if o.get("name") == "create_note")
+    write["name"] = "edit_note"
     write["arguments"] = {
-        "path": "exomem://memory/sample",
+        "note": "Sample dry run",
         "why": "Extend existing knowledge rather than create a duplicate",
-        "operation": {
-            "kind": "append_section",
-            "content": "sample-unique-731 compact retrieval result",
-        },
+        "action": "replace_text",
+        "old_text": "sample result",
+        "new_text": "sample-unique-731 compact retrieval result",
     }
     write["result"]["mutated"] = True
     assert checks.evaluate_trace(value, scenario, IDENTITY)["ok"]
@@ -419,25 +411,25 @@ def test_capture_can_extend_existing_note(case_id):
 )
 def test_capture_rejects_false_success(mutation):
     value = capture_trace()
-    write = next(o for o in value["observations"] if o.get("name") == "remember")
+    write = next(o for o in value["observations"] if o.get("name") == "create_note")
     if mutation == "no_readback":
         value.pop("readback")
     elif mutation == "same_chat":
         value["readback"]["conversation_id"] = value["conversation_id"]
     elif mutation == "wrong_ref":
-        value["readback"]["observations"][1]["arguments"]["path"] = "exomem://memory/other"
+        value["readback"]["observations"][1]["result"]["ref"] = "exomem://memory/other"
     elif mutation == "missing_marker":
         value["readback"]["observations"][1]["result"]["body"] = "empty"
     elif mutation == "failed_write":
         write["result"] = {"success": False, "error": "denied"}
     elif mutation == "missing_duplicates_check":
-        value["observations"] = [o for o in value["observations"] if o.get("name") != "ask_memory"]
+        value["observations"] = [o for o in value["observations"] if o.get("name") != "search_memory"]
     elif mutation == "answer_in_prompt":
         value["readback"]["prompt"] += " sample-unique-731"
     elif mutation == "explicit_save_prompt":
         value["observations"][0]["text"] = "Please save " + value["observations"][0]["text"]
     elif mutation == "validate_only":
-        write["arguments"]["validate_only"] = True
+        write["arguments"]["preview"] = True
     else:
         value["observations"].remove(write)
         value["observations"].append(write)
@@ -449,8 +441,8 @@ def test_denied_write_cannot_be_reported_saved():
     value["observations"].insert(
         -1,
         tool(
-            "remember",
-            {"content": "sample-unique-731"},
+            "create_note",
+            {"title": "Sample", "content": "sample-unique-731", "unlinked_reason": "No related page exists."},
             {"success": False, "error": "permission denied"},
         ),
     )
@@ -475,7 +467,7 @@ def test_trivial_turn_rejects_mutations():
         {"kind": "assistant", "text": "You're welcome."},
     ]
     assert checks.evaluate_trace(value, case("trivial-no-write"), IDENTITY)["ok"]
-    value["observations"].insert(1, tool("remember", {"content": "thanks"}, {"success": True}))
+    value["observations"].insert(1, tool("create_note", {"title": "Thanks", "content": "thanks"}, {"success": True}))
     assert not checks.evaluate_trace(value, case("trivial-no-write"), IDENTITY)["ok"]
 
 
@@ -483,14 +475,29 @@ def test_no_mutation_case_classifies_a_call_by_its_operation():
     # A recall-only turn may read media status, but queuing media work is a write.
     value = trace()
     value["observations"].insert(
-        3, tool("process_media", {"operation": "status"}, {"operation": "status", "counts": {}})
+        3, tool("inspect_memory", {"operation": "media.status"}, {"operation": "status", "counts": {}})
     )
     assert checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)["ok"]
     value["observations"][3] = tool(
-        "process_media", {"operation": "process"}, {"operation": "process", "requeued": 0}
+        "manage_memory", {"operation": "media.process"}, {"operation": "process", "requeued": 0}
     )
     report = checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)
     assert "unexpected_mutation" in report["issues"]
+
+
+def test_boundary_case_rejects_a_door_operation_that_reaches_a_forbidden_capability():
+    value = all_case_trace("cloud-capability-boundary")
+    value["observations"].insert(2, tool("inspect_memory", {"operation": "media.image"}, {"status": "ok"}))
+    report = checks.evaluate_trace(value, case("cloud-capability-boundary"), IDENTITY)
+    assert "forbidden_call:inspect_memory:media.image" in report["issues"]
+
+
+def test_bootstrap_that_lists_a_door_operation_of_a_never_served_command_is_rejected():
+    value = trace()
+    served = value["observations"][1]["result"]["active_capabilities"]["available_operations"]
+    served["manage_memory"].append("procedures.approve")
+    report = checks.evaluate_trace(value, case("grounded-recall"), IDENTITY)
+    assert "excluded_capability_exposed" in report["issues"]
 
 
 def test_readiness_without_evidence_is_not_ready(tmp_path, monkeypatch):
@@ -648,20 +655,17 @@ def all_case_trace(name):
         value["observations"][0]["text"] = case(name)["prompt"].format(marker=value["marker"])
         value["observations"][2]["arguments"]["turn"] = value["observations"][0]["text"]
         if name == "bounded-recap":
-            write = next(o for o in value["observations"] if o.get("name") == "remember")
-            write["name"] = "episode_memory"
-            write["arguments"] = {
-                "action": "record",
-                "summary": value["marker"] + " check complete",
-            }
+            write = next(o for o in value["observations"] if o.get("name") == "create_note")
+            write["name"] = "save_episode"
+            write["arguments"] = {"summary": value["marker"] + " check complete"}
         value["readback"]["prompt"] = case(name)["readback_prompt"]
         value["readback"]["observations"][0]["text"] = case(name)["readback_prompt"]
     elif name == "denied-write":
         value["observations"].insert(
             -1,
             tool(
-                "remember",
-                {"content": value["marker"]},
+                "create_note",
+                {"title": "Sample", "content": value["marker"], "unlinked_reason": "No related page exists."},
                 {"success": False, "error": "permission denied"},
             ),
         )

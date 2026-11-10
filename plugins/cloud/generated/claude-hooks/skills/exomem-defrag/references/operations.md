@@ -10,16 +10,16 @@ commands.
 
 | Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_memory`; use `search_memory(deep=true)` for synthesis |
+| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis |
 | `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
-| `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `capture_source` (`content` for text, `files` for attachments). Proof-bearing -> `preserve_evidence` for text, `preserve_artifacts` for attachments, `transfer_artifact` when the client has no file handles |
-| `plan` | Capture, inspect, query, update, or triage intended future state | `read_plans` or `change_plans` for a configured Planning collection |
-| `record` | Capture, correct, inspect, or query a durable observed event or current state | `read_records` or `change_records` for a configured Record collection |
-| `review` | Review stale, contradictory, or unprocessed knowledge | `read_review/triage_memory` |
-| `connect` | Suggest links or return graph, evidence, provenance, and history context | `read_connections/change_connections`; use `operation="context"` for the unified read-only view |
-| `adopt` | Assess or import an existing vault safely | `read_import(operation={"kind": "scan-only"})` first; explicit modes for manifest/copy/compile planning |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
+| `plan` | Capture, inspect, query, update, or triage intended future state | `query_plan_items` or `add_plan_item` for a configured Planning collection |
+| `record` | Capture, correct, inspect, or query a durable observed event or current state | `query_records` or `add_record` for a configured Record collection |
+| `review` | Review stale, contradictory, or unprocessed knowledge | `list_review_items` and `decide_review_item` |
+| `connect` | Suggest links or return graph, evidence, provenance, and history context | `inspect_memory` and `manage_memory`; use `operation="context"` for the unified read-only view |
+| `adopt` | Assess or import an existing vault safely | `inspect_memory(operation="imports.scan")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids` or `reconcile` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
-| `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `read_schema/change_schema`; inference is proposal-only and saving is explicit |
+| `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `inspect_memory` and `manage_memory`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
@@ -40,17 +40,18 @@ accepting a queued relation requires `link_acceptance`; merge or substantial cur
 confirmed `restructure_execution`.
 
 For a resolved Entity, add the facet as one compact unit line under `## Observations`
-with `edit_note` and `{"kind": "edit_section", "heading": "Observations", "create_missing": true,
-"new_string": "<unit line>", "expected_hash": "<content_hash>"}`; `prepare_note/change_observations`
+with `edit_note(action="replace_section", heading="Observations", create_missing=true,
+new_text="<unit line>", position="append", why=...)`; `add_observation`
 does not write an Entity. A facet field that the entity type declares goes through `patch_frontmatter`.
 
 ## Planning
 
-`read_plans` and `change_plans` are the public tools for human-owned intended future
-state. `read_plans` carries the read-only operations `inspect`, `validate`, and `query`;
-`change_plans` carries the guarded `create`, `add`, `update`, `triage`, `revise`, and
-`rebaseline`. Each call names its operation as `operation={"kind": ...}`.
-Use `read_plans(operation={"kind": "inspect"})` without `collection` to discover Planning
+`query_plan_items`, `add_plan_item` and `edit_plan_item` are the public tools for human-owned
+intended future state: read items, add one, and change one. The `plans` operations of
+`inspect_memory` (`plans.inspect`, `plans.validate`, `plans.history`) and `manage_memory`
+(`plans.create`, `plans.revise`, `plans.rebaseline`) cover a collection's contract. Each tool takes its
+own fields; `read_instructions(topic=<tool>)` shows them.
+Use `query_plan_items()` without `collection` to discover Planning
 collections. Copy a returned `manifest_path` to inspect one collection.
 Canonical Planning is one ordinary Markdown item file per plan under
 `Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
@@ -62,19 +63,19 @@ The plan UUID is durable identity. A manifest may render a human filename from
 stable descriptive fields and a readable managed body from canonical
 frontmatter. Keep status, priority, horizon, and other mutable state out of the
 filename. Existing UUID-named collections move only through
-`check_memory(operation={'kind': 'structured-files', 'collection': ...})`: inspect the
+`inspect_memory(operation="maintenance.structured_files", arguments={'collection': ...})`: inspect the
 read-only preview, resolve every collision or immutable/withheld inbound-link
 blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
 
 ## Governed curation
 
 MCP and REST expose curation `work-item`, `preview`, and `status` through
-`check_memory`, and proposals, apply, resume and compensation through
-`repair_memory`. The CLI `maintain_memory` command with `mode="curation"` runs
+`inspect_memory`, and proposals, apply, resume and compensation through
+`manage_memory`. The CLI `manage_memory` command with `mode="curation"` runs
 the same actions. Retain the grouped `curation_action` selector and the returned
 identifiers on either route.
 
-Use `check_memory(operation={'kind': 'curation-work-item'})` when one reviewed structural improvement
+Use `inspect_memory(operation="curation.work_item")` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,
 edit, supersession, move, delete, or recovery. The active agent remains the
 semantic author: `curation_action="work-item"` assembles only explicit refs and
@@ -99,17 +100,18 @@ duplicate Source or Evidence page, or an episode's old recap files.
 
 ## Records
 
-`read_records` and `change_records` are the public product tools for human-owned
-observed state. `read_records` carries `describe`, `validate`, `inspect`, and
-`query`; `change_records` carries `create`, `append`, `update`, `revise`, and
-`rebaseline`. Do not replace them with storage-specific tools. `describe` returns the complete contract;
+`query_records`, `add_record` and `edit_record` are the public product tools for human-owned
+observed state: `query` reads a collection, `append` adds an event, `update` changes one item. The
+`records` operations of `inspect_memory` (`records.describe`, `records.validate`, `records.inspect`,
+`records.history`) and `manage_memory` (`records.create`, `records.revise`, `records.rebaseline`) cover a
+collection's contract. Do not replace them with storage-specific tools. `describe` returns the complete contract;
 `validate` is read-only preflight; `inspect` is report-only; `query` returns a
 bounded current view; `create` explicitly creates a reviewed collection contract;
 `append` adds a new event; `update` changes one item with current stale-write
 guards and a concise reason; `revise` changes a validated manifest under its
 current guards; and `rebaseline` explicitly records a valid direct-edit audit
 gap. Remote callers preview generic derived-index repair with
-`check_memory(operation={'kind': 'reconcile', 'dry_run': true})` and run it as a
+`inspect_memory(operation="maintenance.reconcile", arguments={'dry_run': true})` and run it as a
 maintenance job with the preview's `plan_id` and a `why` (see vault care).
 
 Route durable observed events or current state here without waiting for a magic
@@ -180,8 +182,8 @@ bookkeeping updates:
    `audit`. (`find` doesn't append because it's read-only.)
 
 These two updates are non-negotiable for every write operation below. Read-only
-operations such as `bootstrap`, `find`, `get`, `suggest_links`, `graph_context`, `suggest_relations`, `overview`,
-`propose_compilation`, `query_data`, `provenance_report`, and `download` do not
+operations such as `read_instructions`, `find`, `get`, `suggest_links`, `graph_context`, `suggest_relations`, `overview`,
+`inspect_memory`, `query_data`, `provenance_report`, and `download` do not
 update indexes or logs. The per-operation specs note their primary writes; the
 index + log update is implicit.
 
@@ -202,7 +204,7 @@ being inspected or debugged. Do not embed the canonical ref as a Markdown link
 target when a client could expose its UUID; use a plain title-first citation.
 
 Do not manually create, copy, or modify IDs. Legacy pages remain untouched until
-`check_memory(operation={'kind': 'backfill-ids'})` is requested. That mode is a dry run by
+`inspect_memory(operation="maintenance.backfill_ids")` is requested. That mode is a dry run by
 default. It writes only with `dry_run=false`; a remote client runs it as a maintenance job
 with the preview's `plan_id` and a `why`. Duplicate and malformed IDs are
 reported by audit and make canonical resolution fail rather than selecting an
@@ -219,9 +221,10 @@ shorter list means the remainder was trimmed. Upload receipts carry their
 warnings as per-file rows under `files`, and a terminal rebuilt from a portable
 receipt reports only the count, since that receipt retains no leaf content.
 Corpus write advisories include a review ref and complete 24-character signal
-fingerprint in their warning text. Triage binds to that exact fingerprint (dismiss
-requires a reason); a stale fingerprint simply lets the advisory re-emit when the
-counterpart changes or the written page changes the detected signal class.
+fingerprint in their warning text. `decide_review_item(review_item=<that ref>,
+decision="dismiss", why=...)` binds the fingerprint the server last showed (dismiss
+requires a reason); the advisory re-emits when the counterpart changes or the
+written page changes the detected signal class.
 
 A compiled-note write may additionally return `structure_suggestion` with `kind`
 `note_cohesion` while the written page has reached a size step and that step is
@@ -233,9 +236,8 @@ changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and
 failure to compute it omits the field rather than affecting the write. The runtime
 never creates, moves, renames, or deletes anything as a result.
 
-`response_detail="full"` adds the existing leaf result under
-`diagnostics`. `response_detail="legacy"` returns that old raw leaf result and
-is retained for at least one compatibility release. The response-detail choice
+`detail="full"` adds the existing leaf result under
+`diagnostics`. The detail choice
 is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 
@@ -250,31 +252,27 @@ same identity rather than creating a new write.
 It never holds the mutation boundary and never means the Exomem tool is disabled;
 retry the unchanged call after `retry_after_ms`.
 
-`edit_note` is one tool. New calls supply `path`, `why`, and one nested
-`operation` selected by `kind`:
+`edit_note` is one tool. A call supplies `note` (a title), `why` and one `action`; each
+action takes its own fields, and `read_instructions(topic="edit_note")` shows them:
 
-- `replace_body`: `new_body` and `expected_hash`, the `content_hash` of a
-  whole-page read (a windowed read of a long Source returns none); optional
-  `tags` and semantic review fields.
-- `replace_tags`: `tags`; optional `expected_hash` and semantic review fields.
-- `replace_string`: `old_string`, `new_string`; optional `replace_all`, `tags`,
-  `validate_only`, `expected_hash`, and semantic review fields.
-- `batch_replace`: non-empty `edits` of `old_string`/`new_string` pairs with
-  optional per-item `replace_all`; optional `validate_only`, `expected_hash`,
-  and semantic review fields.
-- `edit_section`: `heading`, `new_string`; optional `section_position`, `tags`,
-  `expected_hash`, and semantic review fields.
-- `patch_frontmatter`: `field`, explicit `value`; optional `allow_curated`,
-  `validate_only`, and semantic review fields.
-- `fill_row`: `row_key`, `take`; optional `overwrite`.
+- `replace_body`: `body`, with the page `id` as `note` to guard against a concurrent
+  edit; optional `tags`.
+- `set_tags`: `tags`.
+- `replace_text`: `old_text`, `new_text`; optional `replace_all`, or `edits` for several
+  changes in one commit.
+- `replace_section`: `heading`, `new_text`; optional `position` and `create_missing`.
+- `set_fields`: `fields`, one field and its value per call.
+- `fill_row`: `row`, `take`; optional `overwrite`.
+- `edit_observation` and `remove_observation`: `observation`, the unit id from
+  `read_page(part="units")`.
 
-Legacy flat edit arguments remain runtime-only compatibility for at least one
-release. They are deprecated, absent from public discovery schemas, cannot be
-combined with nested `operation`, and must not be generated by new clients.
+Every action also takes `preview`, `detail` and, for a note that links nothing,
+`unlinked_reason`. The server reads the page again under the writer lease, so no call
+carries a content hash.
 
 ---
 
-## bootstrap
+## read_instructions
 
 **Goal:** Return a portable, versioned operating contract so generic MCP clients
 can use Exomem without relying on a client-specific skill.
@@ -456,8 +454,8 @@ an explicit reviewed operation because paths are graph addresses.
 ## recurring entity lifecycle
 
 At balanced or maximal prominence, spend one ordinary recurrence read once per session,
-on the first turn after bootstrap, after primary work and before the final response:
-`read_review(operation={'kind': 'attention', 'categories': ['entity_recurrence'], 'limit': 3})`.
+on the first turn after `read_instructions`, after primary work and before the final response:
+`list_review_items(queue='due', categories=['entity_recurrence'], limit=3)`.
 Do not repeat it on later ordinary prompts. The response is deterministic
 evidence for the active agent, not an Entity decision. It returns at most three
 candidates and eight contexts each; absence from default attention or due-state
@@ -466,10 +464,10 @@ does not mean the explicit category is clean.
 For a candidate, resolve exact and alias matches, stop on ambiguity, hydrate a
 single match before considering a duplicate, and promote only a stable reusable
 no-match. Open the exact review ref with
-`check_memory(operation={'kind': 'curation-work-item', 'curation_action': 'work-item', 'review_ref': ...})`; the returned signal, context batch, target, grammar, and
+`inspect_memory(operation="curation.work_item", arguments={'curation_action': 'work-item', 'review_ref': ...})`; the returned signal, context batch, target, grammar, and
 registry bindings must round-trip unchanged into the agent-authored plan.
 Register an unknown durable kind separately through guarded
-`change_schema(operation={'kind': 'save-entity-types'})`, then refresh; curation never
+`manage_memory(operation="schema.save_entity_types")`, then refresh; curation never
 edits `_Schema`.
 
 After one separately confirmed hydration batch reaches a terminal receipt, one
@@ -494,16 +492,16 @@ model, embedding, or due-state claim.
 
 ### Inputs to gather
 - Entity name (becomes filename — see `page-types.md` § entity naming)
-- Entity type — a stable ID from the active entity registry returned by bootstrap.
+- Entity type — a stable ID from the active entity registry returned by `read_instructions`.
 - For new entities: a one-paragraph summary; relevant frontmatter fields.
 - For updates: the field or section to change.
 
 ### Procedure
 1. Read the active entity registry and selected knowledge-pack priorities.
-2. Call `read_connections(operation={'kind': 'resolve-entity', 'name': ...})`. If one active entity matches, use a guarded
+2. Call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})`. If one active entity matches, use a guarded
    `edit_note` correction or the canonical relation workflow instead of create.
 3. If no entity matches and the identity is stable, and central or recurring,
-   and useful beyond this source, call `change_connections(operation={'kind': 'create-entity'})`.
+   and useful beyond this source, call `manage_memory(operation="connections.create_entity")`.
 4. Draft the page using `page-types.md` and write under the served promotion class and current write scope.
 5. For an existing entity, show a guarded diff and update through `edit_note`.
 6. Refresh the entity index and top-level counts through the governed writer.
@@ -536,7 +534,7 @@ preservation.
 
 ### Delivering the bytes — direct handles first, never inline through the model
 
-Binaries are never inline as a tool argument (`preserve_evidence` takes text
+Binaries are never inline as a tool argument (`save_evidence` takes text
 only). Two questions, in this order.
 
 **First, which lane?** That is decided by what the artifact is *for*, never by
@@ -550,9 +548,9 @@ cannot be undone.
 **Then, which channel?** Pick by client capability:
 
 - **When the client can provide file handles:** call
-  **`capture_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "..."}])`**
+  **`save_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "..."}])`**
   for raw material, or
-  **`preserve_artifacts(scope="...", category="...", files=[...])`** for
+  **`save_evidence(scope="...", category="...", files=[...])`** for
   proof-bearing artifacts. Same handle shape either way. Use one call for the
   whole batch. A successful response contains the stored path, `size`, and
   `hash`; never treat an upload token as proof that bytes landed.
@@ -562,7 +560,7 @@ cannot be undone.
   and works on Exomem Cloud, which accepts no other upload, and on a personal server.
 
 - **Without file handles, on a personal server:** request
-  `transfer_artifact(operation="upload", lane="source")` for raw material, or
+  `upload_files(lane="source")` for raw material, or
   `lane="evidence"` for proof. The short-lived token fixes that lane.
   Only where the runtime holding the file can reach `upload_url`, multipart-POST
   each attached file there with `Authorization: Bearer <token>`.
@@ -587,7 +585,7 @@ cannot be undone.
   credential from the user's environment or machine.
 - **Phone / curl / a shortcut (personal server only; a Cloud cell accepts only the held
   upload above):** multipart-POST to the exact `upload_url`
-  returned by `transfer_artifact(operation="upload")`
+  returned by `upload_files`
   (`file`, `scope`, `category`, optional `filename`, `description`, `text`) with
   `Authorization: Bearer <returned short-lived token>` (the token is **always** required).
   Lands straight in `Evidence/<scope>/<category>/`, zero token cost.
@@ -607,10 +605,10 @@ is a Source; a deliverable or proof-bearing output is Evidence. MIME never
 chooses. With a direct handle, pass the closed envelope on the normal command:
 
 ```text
-capture_source(..., files=[...],
-  adoption={"key": "...", "trigger": "handed_over", "selected_file_id": "..."})
-preserve_artifacts(..., files=[...],
-  adoption={"key": "...", "trigger": "handed_over", "selected_file_id": "..."})
+save_source(..., files=[...],
+  options={"adoption": {"key": "...", "trigger": "handed_over", "selected_file_id": "..."}})
+save_evidence(..., files=[...],
+  options={"adoption": {"key": "...", "trigger": "handed_over", "selected_file_id": "..."}})
 ```
 
 `key` is one per hand-over, such as the file name plus a version.
@@ -626,14 +624,13 @@ Records collection has a declared link field, append the caller-authored item
 with the optional validation envelope:
 
 ```text
-change_records(operation={"kind": "append", "collection": "...", "item": {...}, "why": "...",
-  "delivery": {
+add_record(collection="...", item={...}, why="...", delivery={
     "evidence_page": "Knowledge Base/Evidence/.../<artifact>.md",
     "link_field": "<declared-link-field>",
     "reported_remote_ref": "<reported-platform-reference>",
     "reported_remote_field": "<declared-string-field>",
     "verified_remote_field": "<declared-boolean-field>"
-  }})
+  })
 ```
 
 The envelope validates those mapped item values; it does not set them or create
@@ -670,16 +667,16 @@ need confirmed `restructure_execution`. An independently authored edge follows t
 
 **Goal:** Recover the exact stored original after its external source disappears.
 Notes and exports use their separate read and export paths. To look at a stored
-image, use `read_media` kind `image`; it needs no download.
+image, use `inspect_memory` kind `image`; it needs no download.
 
 ### Procedure
-1. Call `transfer_artifact(operation="download", artifact="<stored artifact or custody page>")` to receive the available delivery paths.
+1. Call `download_files(pages=["<title of the stored artifact or custody page>"])` to receive the available delivery paths.
 2. Give the person `deliveries.https.url`; it is a short link that downloads the original in any browser.
 3. If the client supports MCP blobs, `deliveries.native_resource.uri` returns the bounded original to the agent instead.
 4. Check the recovered SHA-256 and size against `artifact` to confirm the version.
 5. Preserve a derivative through the existing writer with provenance to the original to retain its source.
 
-Supply `expected_sha256` when a particular version is required. A prepared handoff
+Name a page by its title, or by its id for one version. A prepared handoff
 proves no consumption. The link delegates only the named artifact version until
 expiry; current session and disclosure checks still apply. A changed or withheld
 original requires a fresh authorized handoff. Large payloads use HTTPS before
@@ -743,7 +740,7 @@ None.
 **Goal:** Return one bounded, read-only context envelope containing stored page
 bodies and semantic blocks, typed graph edges, provenance, evidence,
 supersession history, unresolved targets, warnings, and explicit truncation.
-Call `read_connections(operation={'kind': 'context'})`; `graph-context` remains a
+Call `inspect_memory(operation="connections.context")`; `graph-context` remains a
 compatibility alias with the same response.
 
 ### Triggers
@@ -770,7 +767,7 @@ Markdown.
 
 ---
 
-## read_schema/change_schema
+## inspect_memory and manage_memory
 
 **Goal:** Govern optional corpus contracts, relation extensions, and traversal
 profiles through one proposal-first surface.
@@ -788,13 +785,13 @@ profiles through one proposal-first surface.
 5. Use `operation="diff"` to compare a saved contract with current corpus
    reality or another named contract.
 6. Before authoring a typed edge, call
-   `read_connections(operation={'kind': 'resolve-relation'})`; reuse a specific truthful
+   `inspect_memory(operation="connections.resolve_relation")`; reuse a specific truthful
    registered meaning. A write that adds the generic relation is refused
    with a ranked list of specific relations; when none fits, propose a new relation type,
    or write a plain link as the last resort (see [mutation-results](mutation-results.md)).
    Prefer no edge to an invented label.
 7. For a durable recurring distinction, call
-   `read_schema(operation={'kind': 'propose-relation', 'subject': 'relations'})` with a
+   `inspect_memory(operation="schema.propose_relation", arguments={'subject': 'relations'})` with a
    reviewed parent, description, and direction. Review its full duplicate
    evidence and delta, then call `operation="save-relations"` with that delta,
    its `expected_hash`, and `why`. The hash is mandatory. Add aliases rather
@@ -819,13 +816,13 @@ vault or assign truth.
 migration.
 
 ### Procedure
-1. Call `check_memory(operation={'kind': 'backfill-ids'})`; the default `dry_run=true`
+1. Call `inspect_memory(operation="maintenance.backfill_ids")`; the default `dry_run=true`
    reports affected pages and identity problems without writing. A remote owner gets a
    `run_id`: follow it with `maintenance-job`; the receipt holds the `plan_id` and lists
    the affected pages page by page.
 2. Review the complete proposal and resolve duplicate or malformed IDs first.
 3. After explicit confirmation, repeat with `dry_run=false`. A remote client sends the
-   preview's `plan_id` and a `why` with `repair_memory`, follows the returned `run_id` with
+   preview's `plan_id` and a `why` with `manage_memory`, follows the returned `run_id` with
    `maintenance-job`, and reads the minted IDs page by page through the receipt's `next_cursor`. The write preserves all
    existing valid IDs; a page that changed after the preview is skipped and reported.
 
@@ -859,7 +856,7 @@ are review-only and never write to the vault.
    `edit`); do not treat suggestions as an automatic write. A candidate that the
    relation queue holds open carries `review` (`ref`, `fingerprint`,
    `source_content_hash`): pass those to
-   `change_connections(operation={'kind': 'accept-relation'})` as `ref`,
+   `decide_review_item(decision='accept')` as `ref`,
    `expected_fingerprint` and `expected_hash`, with a `why`. When the candidate has
    `options`, set `requested_relation` to one option's `key`.
 
@@ -927,7 +924,7 @@ See `supersession.md`. Summary:
 
 Structured query over a CSV/JSON **data file** under the vault — the retrieval
 half of the data-search pattern. `search_memory` surfaces a dataset's markdown card;
-`read_memory` reads the raw file the card's `data_file:` points at and returns
+`read_page` reads the raw file the card's `data_file:` points at and returns
 exact rows or an aggregate. Read-only. Raw CSV/JSON are not `find`-searchable;
 this is how you query their values.
 
@@ -954,14 +951,14 @@ this is how you query their values.
 ### Writes performed
 - None (read-only).
 
-## record_episode/read_episode
+## save_episode and inspect_memory
 
-Use only when explicitly requested or the live `proactive_capture` disposition from `bootstrap` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. An episode keeps one page. Recording again under the same `episode` with changed content rewrites that page in place and keeps the previous text, without limit, in the page's history; read it with `read_memory` and `include_history` ([supersession](supersession.md)). An identical retry writes nothing.
+Use only when explicitly requested or the live `proactive_capture` disposition from `read_instructions` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. An episode keeps one page. Recording again under the same `episode` with changed content rewrites that page in place and keeps the previous text, without limit, in the page's history; read it with `read_page` and `part="history"` ([supersession](supersession.md)). An identical retry writes nothing.
 
 ### Preserved materials
 
-`record_episode` with `operation.kind="input"` binds already-preserved material to an existing episode; it creates no Source or destination effect.
-Supply the current `input_revision` and `journal_digest` from `read_episode` with `operation.kind="candidates"`.
+`manage_memory(operation="episodes.input")` binds already-preserved material to an existing episode; it creates no Source or destination effect.
+Supply the current `input_revision` and `journal_digest` from `inspect_memory(operation="episodes.candidates")`.
 Supply `materials: {version: 1, items: [...]}` within 16 KiB, with at most eight uniquely keyed items.
 Each item has `key` (160 characters), `original_reference`, `reading_reference`, or both (canonical references, 2048 characters each).
 An original reference names its whole companion page; a reading reference may select an exact semantic unit.
@@ -977,7 +974,7 @@ Read `candidates` after the write for stable handles with the original binding `
 A byte-equivalent replacement under current guards adds no revision.
 After a lost reply, inspect public state before another mutation; stale guards refuse without writing or transparently resealing a retry.
 
-`read_episode` with `operation.kind="material"`, `episode`, binding `input_revision` and `material_key` reads one material.
+`inspect_memory(operation="episodes.material")` with `episode`, binding `input_revision` and `material_key` reads one material.
 It reports original and reading states independently: `available`, `stale` or content-free `unavailable`.
 Original availability requires current authorized bytes; a readable companion or an old preservation receipt is insufficient.
 A changed reading is stale and never silently rebound; an unavailable original does not suppress a usable reading.
@@ -1029,7 +1026,7 @@ Older strict readers refuse those plans before applying them; legacy unmarked pl
 
 ## Collection adoption
 
-A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `read_import` carries `status` and `work-item`. `import_memory` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `inspect_memory` carries `status` and `work-item`. `manage_memory` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
 
 Every selected file is imported or refused with a per-path code; none is dropped silently. A UTF-8 text file becomes a Source that holds the exact text in a verbatim fence, with its links, embeds, tags and aliases kept outside the fence as graph structure. Any other file, and a text file that is not valid UTF-8, becomes a Source that keeps the original bytes as its artifact; media extraction then runs through the media job path.
 
@@ -1059,4 +1056,4 @@ Per-run `status` defaults to a compact summary. Detail views (`inventory`, `sele
 
 ## One-shot adoption
 
-One-shot adoption preserves originals. Use `read_import` with `operation.kind="scan-only"` to inspect first. Use `import_memory` with `operation.kind` set to `save-manifest`, `copy-as-sources` or `compile-selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. `copy-as-sources` skips a file whose bytes the vault already stores (`ALREADY_IMPORTED`, with the existing Source's ref) or an earlier selected file holds (`DUPLICATE_IN_SELECTION`), and records no import mapping. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.
+One-shot adoption preserves originals. Use `inspect_memory(operation="imports.scan")` to inspect first. Use `manage_memory` with `operation` set to `imports.save_manifest`, `imports.copy_as_sources` or `imports.compile_selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. `imports.copy_as_sources` skips a file whose bytes the vault already stores (`ALREADY_IMPORTED`, with the existing Source's ref) or an earlier selected file holds (`DUPLICATE_IN_SELECTION`), and records no import mapping. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

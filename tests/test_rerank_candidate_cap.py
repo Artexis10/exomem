@@ -391,24 +391,20 @@ def test_product_and_canonical_mcp_schemas_are_strict_bounded_integers(
         "EXOMEM_WRITER_LEASE_STATE_DIR",
         str(vault.parent / "writer-lease-state"),
     )
-    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
     mcp = server.build_server(require_auth=False)
-    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools(run_middleware=False))}
-
-    for name in ("search_memory", "find"):
-        schema = tools[name].to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
-        cap = _integer_branch(schema["properties"]["rerank_max_candidates"])
-        assert cap["minimum"] == 1
-        assert cap["maximum"] == find_module.MAX_RERANK_CANDIDATES
-        for invalid in (False, True):
-            with pytest.raises(Exception, match="rerank_max_candidates"):
-                asyncio.run(
-                    mcp.call_tool(
-                        name,
-                        {"query": "", "rerank_max_candidates": invalid},
-                        run_middleware=False,
-                    )
-                )
+    # The grouped command is hidden from listings but registered, so a lookup by name finds it.
+    schema = asyncio.run(mcp.get_tool("ask_memory")).to_mcp_tool().model_dump(mode="json", by_alias=True)["inputSchema"]
+    cap = _integer_branch(schema["properties"]["rerank_max_candidates"])
+    assert cap["minimum"] == 1
+    assert cap["maximum"] == find_module.MAX_RERANK_CANDIDATES
+    with pytest.raises(Exception, match="rerank_max_candidates"):
+        asyncio.run(mcp.call_tool("ask_memory", {"query": "", "rerank_max_candidates": True}, run_middleware=False))
+    # The public tool carries the knob in `options`; the same bound refuses a boolean there.
+    refused = asyncio.run(
+        mcp.call_tool("search_memory", {"query": "", "options": {"rerank_max_candidates": True}})
+    ).structured_content
+    assert refused["error"]["code"] == "INVALID_ARGUMENT"
+    assert "rerank_max_candidates" in refused["error"]["message"]
 
 
 def test_rest_cli_descriptors_and_product_forwarding_include_candidate_cap(

@@ -470,12 +470,11 @@ DEFAULT_TOOL_SHAPE = operation_entries.DEFAULT_TOOL_SHAPE
 def listed_names(command: Command, shape: str) -> tuple[str, ...]:
     """The names MCP discovery lists for a command on a surface of this shape.
 
-    A command with renderings is listed by them, and its own name stays callable but
-    hidden; every other command, and every command on the `grouped` shape, is listed
-    under its public name.
+    On the `public` shape these are the typed tools and doors that carry the command; on the
+    `grouped` shape the command is listed under its public name.
     """
-    if command.renderings and shape != "grouped":
-        return tuple(rendering.name for rendering in command.renderings)
+    if shape == "public":
+        return operation_entries.listed_tools(command.name, shape)
     return (command.public_name,)
 
 
@@ -505,6 +504,7 @@ def resolve_invocation(
     shape: str = DEFAULT_TOOL_SHAPE,
     passthrough: frozenset[str] = frozenset(),
     strict: bool = True,
+    subject: str | None = None,
 ) -> tuple[Command, dict[str, typing.Any]]:
     """Resolve one public call to its command and the arguments a direct call would carry.
 
@@ -515,6 +515,7 @@ def resolve_invocation(
     The caller then dispatches the command exactly as if it had been called directly.
     `passthrough` names transport-owned top-level keys that cross untouched. `strict`
     is the server's `strict_input_validation`, which FastMCP applies to the grouped call.
+    `subject` is how a type refusal names the call, for a caller whose tool is not the rendering.
 
     Raises the command's own refusal for arguments the rendering does not carry, and
     `UnresolvedInvocation` for a name nothing resolves: a name that routes no call
@@ -550,8 +551,8 @@ def resolve_invocation(
                         if rendering.name == public_name]
         if len(contributors) == 1:
             # One source owns the refusal format, but an invalid kind still owns no execution target.
-            contributors[0][0].argument_rules.refuse(f"{public_name} needs a valid operation.kind")
-        raise OpError("INVALID_OPERATION", f"{public_name} needs a valid operation.kind")
+            contributors[0][0].argument_rules.refuse(f"{subject or public_name} needs a valid operation.kind")
+        raise OpError("INVALID_OPERATION", f"{subject or public_name} needs a valid operation.kind")
     command, rendering = selected
     rules = command.argument_rules
     if rules is None:
@@ -574,7 +575,7 @@ def resolve_invocation(
                     flat.setdefault(constraint.path[0], constraint.value)
     try:
         return _resolve_rendered(command, rendering, arguments, carried, tool_arguments,
-                                 parsed, strict=strict)
+                                 parsed, strict=strict, subject=subject)
     except OpError as error:
         error.command = command
         error.arguments = flat
@@ -582,11 +583,11 @@ def resolve_invocation(
         raise
 
 
-def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, parsed, *, strict):
+def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, parsed, *, strict, subject=None):
     """Validate business fields after the public discriminator selects its command."""
     rules = command.argument_rules
     if parsed is None:
-        rules.refuse(f"{rendering.name} takes an operation object and nothing else")
+        rules.refuse(f"{subject or rendering.name} takes an operation object and nothing else")
     kind, fields = parsed
     try:
         fields = rendering.leaf_fields(fields)
@@ -597,7 +598,9 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
     if variant is None:
         sibling = next(
             (
-                other.name
+                # The tool that serves the other side on this surface; a grouped call names the rendering.
+                (capabilities.active_tools_text(command.name, other.effect)
+                 if capabilities.current_tool_shape() != "grouped" else "") or other.name
                 for other in command.renderings
                 if other is not rendering and other.variant_for(kind, fields) is not None
             ),
@@ -607,7 +610,7 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
             rules.refuse(f"{kind} is not a {rendering.effect} operation: send it to {sibling}")
         if hint := rendering.constraint_hint(kind):
             rules.refuse(hint)
-        rules.refuse(f"{rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
+        rules.refuse(f"{subject or rendering.name} takes {label} as one of: {', '.join(rendering.kinds)}")
     fields = rendering.selected_arguments(variant, fields)
     fields.pop(rendering.selector, None)
     rules.validate(variant.action, fields)
@@ -620,7 +623,7 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
     wrong = _type_errors(command, {**fields, **tool_arguments}, skip=rendering.selector, strict=strict)
     if wrong:
         # FastMCP's own error for the grouped call would name a tool the host cannot call.
-        rules.refuse(f"wrong type in {rendering.name} {kind}: {'; '.join(wrong)}")
+        rules.refuse(f"wrong type in {subject or f'{rendering.name} {kind}'}: {'; '.join(wrong)}")
     # The selector goes last: a field spelt like it must not replace the variant's action.
     return command, {**fields, **tool_arguments, **carried,
                      **({rendering.selector: variant.action} if rendering.selector else {})}
@@ -1042,6 +1045,9 @@ def bind_vault(
                             observation.capture(result)
                     except Exception:  # noqa: BLE001 - telemetry must not change the response
                         pass
+                if isinstance(result, dict):
+                    # The leaves author a route as a grouped call; the host calls the tool its surface lists.
+                    result = capabilities.project_call_routes(result, strict=False)
                 if getattr(command, "names_pages", False) and isinstance(result, dict):
                     from . import page_names
 

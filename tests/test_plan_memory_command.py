@@ -365,7 +365,7 @@ def test_planning_discovery_supplies_exact_selectors_and_relationship_refs(tmp_p
         assert inspected["contract"]["collection_id"] == candidate["collection_id"]
     with pytest.raises(OpError) as raised:
         public_plan_memory(tmp_path, action="inspect", collection="Planning work")
-    assert raised.value.code == "INVALID_COLLECTION_PATH"
+    assert raised.value.code == "AMBIGUOUS_COLLECTION"
 
     selected = candidates[0]
     selector = f"exomem://memory/{selected['collection_id']}"
@@ -441,7 +441,8 @@ def test_plan_memory_argument_refusal_stays_within_the_message_cap(tmp_path: Pat
     """The worst case sends every argument that the action does not accept."""
     from exomem import plan_memory as planning_command
 
-    names = set(inspect.signature(planning_command.plan_memory).parameters) - {"vault_root", "action"}
+    # `item_id` is bound before the action's argument check and has its own refusal.
+    names = set(inspect.signature(planning_command.plan_memory).parameters) - {"vault_root", "action", "item_id"}
     for action in sorted(planning_command.ACTIONS):
         surplus = names - planning_command._ACTION_FIELDS[action]
         with pytest.raises(OpError) as raised:
@@ -467,7 +468,7 @@ def test_plan_memory_update_names_the_missing_argument(tmp_path: Path) -> None:
         )
 
     assert raised.value.code == "INVALID_PLAN_ARGUMENTS"
-    assert "missing for update: expected_item_version" in raised.value.message
+    assert "missing: expected_item_version" in raised.value.message
     assert "991acdd4-16b9-4396-8220-2cb37b7e8516" not in raised.value.message
 
 

@@ -24,7 +24,7 @@ The measurements below predate HEIC support; they do not qualify an owner-sized 
 
 ## On-demand video frames
 
-The `frames` engine enables the video operation of `read_media` on selected Cloud cells.
+The `frames` engine enables the video operation of `inspect_memory` on selected Cloud cells.
 It stays off by default and uses the existing per-cell and fleet engine selection.
 The media-status operation remains available when the frame engine is off.
 Selecting `frames` enables no transcription, model or persistent scene-frame generation.
@@ -261,11 +261,11 @@ The ledger stores each reason in its `blocked_reason` column. Runtime status rep
 
 ## Tenant tools
 
-Cloud cells serve `process_media`, the same tool as the personal service. A tenant's assistant can call it with these operations:
+Cloud cells serve the `media.status`, `media.process` and `media.retry` operations of `inspect_memory` and `manage_memory`, the same operations as the personal service. A tenant's assistant can call these three:
 
-- `status` reads the media job counts and each job's state.
-- `process` queues one file, or a list of files, now instead of waiting for automatic ingestion. Without a path it does bounded work over all media.
-- `retry` queues a failed file again after the cause is fixed.
+- `media.status` reads the media job counts and each job's state.
+- `media.process` queues one file, or a list of files, now instead of waiting for automatic ingestion. Without a path it does bounded work over all media.
+- `media.retry` queues a failed file again after the cause is fixed.
 
 Every operation shows memory-blocked and engine-waiting work only as pending. The reasons, the worker process and the store path stay in `exomem doctor`. The same holds for GPU facts: a busy GPU, the GPU preflight verdict and a crash loop of the media child show in a tool's status on a personal install only.
 

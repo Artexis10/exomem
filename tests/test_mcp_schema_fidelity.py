@@ -29,10 +29,12 @@ import shutil
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from conftest import initialize_vault_state_offline
 from starlette.testclient import TestClient
 
 from exomem import project_keys as project_keys_module
+from exomem import public_surface
 from exomem import server as server_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +89,11 @@ def _live_schemas(mcp) -> dict[str, dict]:
         mt = t.to_mcp_tool().model_dump(mode="json", by_alias=True)
         out[t.name] = {"description": mt["description"], "inputSchema": mt["inputSchema"]}
     return out
+
+
+def _hidden(mcp, name: str) -> dict:
+    """The schema of a registered command that no host lists; REST and the CLI keep its name."""
+    return asyncio.run(mcp.get_tool(name)).to_mcp_tool().model_dump(mode="json", by_alias=True)
 
 
 def _canonical(entry: dict) -> str:
@@ -193,11 +200,7 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    live = _live_schemas(_build_server(monkeypatch, tmp_path))
-    operation = live["change_files"]["inputSchema"]["properties"]["operation"]
-    branches = operation["oneOf"]
-    by_kind = {branch["properties"]["kind"]["const"]: branch["properties"] for branch in branches}
-    properties = {**by_kind["create"], **by_kind["append"], **operation.get("properties", {})}
+    properties = _hidden(_build_server(monkeypatch, tmp_path), "manage_memory_file")["inputSchema"]["properties"]
     required = {
         "validate_only",
         "semantic_transition_token",
@@ -214,12 +217,12 @@ def test_manage_memory_file_schema_exposes_overwrite_and_append_review_protocol(
     ]
 
 
-def test_maintain_memory_schema_documents_the_reconcile_only_graph_reset() -> None:
-    schema = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))["check_memory"]
-    operation = schema["inputSchema"]["properties"]["operation"]
-    branches = operation["oneOf"]
-    reconcile = next(branch for branch in branches if branch["properties"]["kind"]["const"] == "reconcile")
-    rebuild_graph = {**reconcile["properties"], **operation.get("properties", {})}["rebuild_graph"]
+def test_maintain_memory_schema_documents_the_reconcile_only_graph_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rebuild_graph = _hidden(_build_server(monkeypatch, tmp_path), "maintain_memory")["inputSchema"]["properties"][
+        "rebuild_graph"
+    ]
 
     assert rebuild_graph["default"] is False
     assert "reconcile" in rebuild_graph["description"].lower()
@@ -252,7 +255,6 @@ def test_remember_discovery_schema_is_vault_invariant(
 def test_readiness_fingerprint_matches_actual_registered_surface(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
     mcp = _build_server(monkeypatch, tmp_path)
     actual_digest, _ = _tool_surface_sha256(mcp)
 
@@ -279,13 +281,7 @@ def test_hand_registered_exceptions_are_explicit(
     mcp = _build_server(monkeypatch, tmp_path)
     live = set(_live_schemas(mcp))
 
-    generated = {c.public_name for c in commands_module.PRODUCT_COMMANDS if "mcp" in c.surfaces}
-    generated |= {
-        rendering.name
-        for c in commands_module.PRODUCT_COMMANDS
-        if "mcp" in c.surfaces
-        for rendering in c.renderings
-    }
+    generated = set(public_surface.public_surface().listed_names(commands_module.product_commands_for("mcp")))
     exceptions = set(commands_module.HAND_REGISTERED_EXCEPTIONS)
 
     # No tool is both generated and a hand-registered exception.
@@ -313,21 +309,23 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     mcp = _build_server(monkeypatch, tmp_path)
     vault = tmp_path / "schema_vault"
     tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
-    tool = tools["change_media"].to_mcp_tool().model_dump(mode="json", by_alias=True)
-    schema = tool["inputSchema"]
-    assert set(schema["properties"]) == {"operation", "response_detail"}
-    assert schema["required"] == ["operation"]
-    operation = schema["properties"]["operation"]
-    variants = operation["oneOf"]
-    assert {branch["properties"]["kind"]["const"] for branch in variants} == {"process", "retry", "reprocess"}
-    properties = [{**branch["properties"], **operation.get("properties", {})} for branch in variants]
-    assert all("governed" in fields["path"]["description"].lower() for fields in properties)
-    assert schema["properties"]["response_detail"]["enum"] == ["compact", "full", "legacy"]
-    assert tool["annotations"]["readOnlyHint"] is False
-    assert tools["read_media"].annotations.read_only_hint is True
+    write = tools["manage_memory"].to_mcp_tool().model_dump(mode="json", by_alias=True)
+    read = tools["inspect_memory"].to_mcp_tool().model_dump(mode="json", by_alias=True)
+    assert set(write["inputSchema"]["properties"]) == {"operation", "arguments", "detail"}
+    assert write["inputSchema"]["required"] == ["operation"]
+    assert {"media.process", "media.retry", "media.reprocess"} <= set(
+        write["inputSchema"]["properties"]["operation"]["enum"]
+    )
+    assert "media.status" in read["inputSchema"]["properties"]["operation"]["enum"]
+    assert write["annotations"]["readOnlyHint"] is False
+    assert read["annotations"]["readOnlyHint"] is True
+    # The registered command keeps the path contract and the three response detail levels.
+    process = _hidden(mcp, "process_media")["inputSchema"]["properties"]
+    assert "governed" in process["path"]["description"].lower()
+    assert process["response_detail"]["enum"] == ["compact", "full", "legacy"]
 
     result = asyncio.run(
-        mcp.call_tool("read_media", {"operation": {"kind": "status"}}, run_middleware=True)
+        mcp.call_tool(*public_call("read_media", {"operation": {"kind": "status"}}), run_middleware=True)
     )
     structured = result.structured_content
     assert structured["operation"] == "status"

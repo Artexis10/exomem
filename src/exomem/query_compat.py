@@ -24,9 +24,9 @@ def filter_items_schema() -> dict[str, Any]:
     """The published v1 predicate shape; runtime still accepts the existing dictionaries."""
     return {"type": "array", "items": {
         "type": "object", "properties": {
-            "column": {"type": "string", "description": "Column name or dotted property path."},
+            "column": {"type": "string", "description": "Column or dotted path."},
             "op": {"type": "string", "enum": sorted(OPS), "default": DEFAULT_OP},
-            "value": {"description": "Comparison value; exists and missing need no value."},
+            "value": {},
         }, "required": ["column"], "additionalProperties": True,
     }}
 

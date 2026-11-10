@@ -11,7 +11,7 @@ import hashlib
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -25,12 +25,14 @@ from .semantic_labels import LabelDefinition, LabelRegistry
 from .vocabulary import registry as vocabulary_registry
 
 SCHEMA_VERSION = 1
+# The kinds' entry in `_label_cache`, which the label registries key by their section.
+_KINDS_CACHE_KEY = "kinds"
 _STATUSES = frozenset({"active", "deprecated"})
 _SEPARATORS_RE = re.compile(r"[\s_-]+")
 _DEFINITION_FIELDS = frozenset(
     {"description", "aliases", "status", "replaced_by", "scope"}
 )
-_KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases", "traits"}
+_KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases", "traits", "labels"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,9 +86,13 @@ class KindDefinition:
     replaced_by: str | None = None
     core: bool = False
     traits: frozenset[str] = frozenset()
+    # Each (language tag, label) pair, sorted. A label is a heading alias in that language.
+    labels: tuple[tuple[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         out = _definition_dict(self)
+        if self.labels:
+            out["labels"] = dict(self.labels)
         if self.heading_aliases:
             out["heading_aliases"] = sorted(self.heading_aliases)
         if self.traits:
@@ -210,7 +216,7 @@ def _heading_labels(registry: SemanticLanguageRegistry, kinds: frozenset[str]) -
     for label in (*registry.kinds, *registry.heading_aliases):
         if registry.heading_aliases.get(label, label) in kinds:
             labels.add(label)
-    return labels
+    return labels | registry.kind_heading_labels(kinds)
 
 
 def _category_labels(registry: SemanticLanguageRegistry, categories: frozenset[str]) -> set[str]:
@@ -276,9 +282,13 @@ class SemanticLanguageRegistry:
     # ones, and the vault's as it wrote them.
     core_label_entries: Mapping[str, Mapping[str, LabelDefinition]] = field(default_factory=dict)
     label_entries: Mapping[str, Mapping[str, LabelDefinition]] = field(default_factory=dict)
+    # The labels a vault wrote under a shipped kind's key, which carry nothing else: key to its
+    # (language tag, label) pairs. A vault kind keeps its labels in its own definition.
+    kind_label_entries: Mapping[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
     # Each label registry's effective entries and its folded-spelling index, built on first
     # use. The registry is immutable and one instance serves a whole pass, so a unit row
-    # resolves by one lookup instead of a rebuild.
+    # resolves by one lookup instead of a rebuild. The kinds are one more entry under
+    # `_KINDS_CACHE_KEY`, indexed by heading form.
     _label_cache: dict[str, tuple[dict[str, LabelDefinition], dict[str, str]]] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -293,6 +303,7 @@ class SemanticLanguageRegistry:
             "heading_aliases",
             "core_categories",
             "core_category_aliases",
+            "kind_label_entries",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
         for name in ("core_label_entries", "label_entries"):
@@ -378,6 +389,53 @@ class SemanticLanguageRegistry:
         self._label_cache[registry.section] = (ordered, index)
         return ordered, index
 
+    def kind_label_definitions(self) -> dict[str, LabelDefinition]:
+        """Every kind with the labels it answers to, by key: the shipped kinds, then the vault's.
+
+        A vault entry under a shipped key replaces the shipped label in each language it names,
+        and the vault's own kinds are unavailable while the registry has an error finding.
+        """
+        return dict(self._kind_labels()[0])
+
+    def kind_heading_labels(self, kinds: frozenset[str]) -> set[str]:
+        """The heading forms, in this registry's normalization, whose label names one of `kinds`."""
+        return {label for label, key in self._kind_labels()[1].items() if key in kinds}
+
+    def _kind_labels(self) -> tuple[dict[str, LabelDefinition], dict[str, str]]:
+        cached = self._label_cache.get(_KINDS_CACHE_KEY)
+        if cached is not None:
+            return cached
+        definitions = {
+            key: LabelDefinition(key=key, labels=kind.labels, description=kind.description, core=True)
+            for key, kind in self.core_kinds.items()
+        }
+        if not self._has_error_findings():
+            for key, written in self.kind_label_entries.items():
+                if key in definitions:
+                    merged = {**dict(definitions[key].labels), **dict(written)}
+                    definitions[key] = replace(definitions[key], labels=tuple(sorted(merged.items())))
+            for key, kind in self.kinds.items():
+                definitions[key] = LabelDefinition(
+                    key=key, labels=kind.labels, description=kind.description
+                )
+        index: dict[str, str] = {}
+        for key, definition in definitions.items():
+            for _language, text in definition.labels:
+                index.setdefault(normalize_label(text), key)
+        self._label_cache[_KINDS_CACHE_KEY] = (definitions, index)
+        return definitions, index
+
+    def _label_resolution(self, raw: str, key: str, *, heading: bool) -> LabelResolution | None:
+        """The resolution of a label that a vault gave a shipped kind, else None.
+
+        A compact kind has no heading, so a label never makes a `##` heading one.
+        """
+        kind = self._kind_labels()[1].get(key)
+        definition = self.core_kinds.get(kind) if kind is not None else None
+        if definition is None or (heading and kind in semantic_kinds.compact_kinds()):
+            return None
+        return LabelResolution(str(raw), key, definition.key, "alias", definition)
+
     def as_dict(self) -> dict[str, Any]:
         """Return deterministic semantic content (the byte hash is transport metadata)."""
         return {
@@ -393,6 +451,9 @@ class SemanticLanguageRegistry:
                 key: self.categories[key].as_dict() for key in sorted(self.categories)
             },
             "kinds": {key: self.kinds[key].as_dict() for key in sorted(self.kinds)},
+            "kind_label_entries": {
+                key: dict(labels) for key, labels in sorted(self.kind_label_entries.items())
+            },
             "category_aliases": dict(sorted(self.category_aliases.items())),
             "kind_aliases": dict(sorted(self.kind_aliases.items())),
             "heading_aliases": dict(sorted(self.heading_aliases.items())),
@@ -465,7 +526,10 @@ class SemanticLanguageRegistry:
             return LabelResolution(
                 str(raw), key, None, "registry_invalid", None, findings=self.findings
             )
-        canonical = self.kind_aliases.get(key, key)
+        labelled = self._label_resolution(raw, key, heading=False)
+        if labelled is not None:
+            return labelled
+        canonical = self.kind_aliases.get(key) or self._kind_labels()[1].get(key, key)
         return self._resolve_custom_kind(
             raw, key, canonical, project=project, page_type=page_type
         )
@@ -490,7 +554,10 @@ class SemanticLanguageRegistry:
             return LabelResolution(
                 str(raw), key, None, "registry_invalid", None, findings=self.findings
             )
-        canonical = self.heading_aliases.get(key, key)
+        labelled = self._label_resolution(raw, key, heading=True)
+        if labelled is not None:
+            return labelled
+        canonical = self.heading_aliases.get(key) or self._kind_labels()[1].get(key, key)
         return self._resolve_custom_kind(
             raw, key, canonical, project=project, page_type=page_type
         )
@@ -622,7 +689,8 @@ def registry_path(vault_root: Path) -> Path:
 def core_registry() -> SemanticLanguageRegistry:
     core_kinds: dict[str, KindDefinition] = {
         key: KindDefinition(
-            key=key, description=kind.description, core=True, traits=kind.traits
+            key=key, description=kind.description, core=True, traits=kind.traits,
+            labels=kind.labels,
         )
         for key, kind in sorted(semantic_kinds.pack().items())
     }
@@ -728,16 +796,18 @@ def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
     so a document without that section reads and writes as it always did; an absent section and
     an empty one mean the same.
     """
+    # A labels-only entry under a shipped kind's key sits among the vault's own kinds, as written.
+    kinds = {
+        **{key: _definition_proposal(definition) for key, definition in registry.kinds.items()},
+        **{key: {"labels": dict(labels)} for key, labels in registry.kind_label_entries.items()},
+    }
     proposal: dict[str, Any] = {
         "schema_version": registry.schema_version,
         "categories": {
             key: _definition_proposal(registry.categories[key])
             for key in sorted(registry.categories)
         },
-        "kinds": {
-            key: _definition_proposal(registry.kinds[key])
-            for key in sorted(registry.kinds)
-        },
+        "kinds": dict(sorted(kinds.items())),
     }
     for labels in semantic_labels.REGISTRIES:
         entries = registry.label_entries.get(labels.section, {})
@@ -755,6 +825,10 @@ def _label_proposal(definition: LabelDefinition) -> dict[str, Any]:
         out["labels"] = dict(definition.labels)
     if definition.description:
         out["description"] = definition.description
+    if definition.members:
+        out["members"] = {name: list(values) for name, values in definition.members}
+    if definition.display:
+        out["display"] = list(definition.display)
     return out
 
 
@@ -767,10 +841,14 @@ def dropped_label_findings(
     A page that uses a saved verdict, level, modality or mode stops parsing once a save drops
     it. A save may still add an entry or change a label, so only a lost key is refused. A shipped
     key still resolves without its vault entry, so removing an entry that only labels a shipped
-    key is no loss. Validation and the save both read these findings.
+    key is no loss. No page stores a key of a registry that is not `on_pages`, such as a
+    dimension, so a vault may remove its own entry there; a filter that still names it is refused
+    with the keys that exist. Validation and the save both read these findings.
     """
     findings = []
     for labels in semantic_labels.REGISTRIES:
+        if not labels.on_pages:
+            continue
         section = labels.section
         dropped = sorted(
             set(current.label_entries.get(section, {}))
@@ -899,6 +977,8 @@ def _parse_registry_data(
         findings.append(_finding("invalid_kinds", "kinds", "must be an object"))
         raw_kinds = {}
 
+    kind_label_entries, raw_kinds = _split_kind_labels(raw_kinds, core.core_kinds, findings)
+
     label_entries = {}
     for labels in semantic_labels.REGISTRIES:
         raw_entries = data.get(labels.section, {})
@@ -932,6 +1012,7 @@ def _parse_registry_data(
     heading_aliases = _build_heading_aliases(
         kinds, core_labels=core_labels, kind_aliases=kind_aliases, findings=findings
     )
+    _check_kind_labels(kinds, kind_label_entries, core.core_kinds, findings)
 
     _validate_replacements(
         categories,
@@ -943,6 +1024,11 @@ def _parse_registry_data(
     findings.extend(_replacement_cycle_findings(categories, "categories"))
     findings.extend(_replacement_cycle_findings(kinds, "kinds"))
     _core_category_shadow_findings(categories, findings)
+    _check_dimension_members(
+        label_entries.get(semantic_labels.DIMENSIONS.section, {}),
+        (*core.core_kinds, *kinds),
+        findings,
+    )
     sorted_findings = tuple(
         sorted(findings, key=lambda item: (item["path"], item["code"], item["detail"]))
     )
@@ -960,7 +1046,100 @@ def _parse_registry_data(
         core_category_aliases=core.core_category_aliases,
         core_label_entries=core.core_label_entries,
         label_entries=label_entries,
+        kind_label_entries=kind_label_entries,
     )
+
+
+def _split_kind_labels(
+    raw_kinds: dict[Any, Any],
+    shipped: Mapping[str, KindDefinition],
+    findings: list[RegistryFinding],
+) -> tuple[dict[str, tuple[tuple[str, str], ...]], dict[Any, Any]]:
+    """The labels a vault wrote under a shipped kind's key, and the other kind entries.
+
+    An entry under a shipped key that carries anything but `labels` stays among the others,
+    which report it as a collision with the shipped kind, as they always did.
+    """
+    labelled: dict[str, tuple[tuple[str, str], ...]] = {}
+    others: dict[Any, Any] = {}
+    for raw_key, value in raw_kinds.items():
+        if raw_key in shipped and isinstance(value, dict) and set(value) == {"labels"}:
+            labelled[raw_key] = _read_labels(value["labels"], f"kinds.{raw_key}", findings)
+        else:
+            others[raw_key] = value
+    return labelled, others
+
+
+def _check_kind_labels(
+    kinds: Mapping[str, KindDefinition],
+    written_for_shipped: Mapping[str, tuple[tuple[str, str], ...]],
+    shipped: Mapping[str, KindDefinition],
+    findings: list[RegistryFinding],
+) -> None:
+    """Refuse a vault label that another kind answers to, or that no heading can spell.
+
+    A label is a heading, so it collides with another kind's key, alias, heading alias or label
+    in the form a heading resolves under, and that form needs the shape a heading label has. A label
+    never collides with a category: kinds and categories are separate namespaces, as a heading
+    alias already is. The shipped spellings the vault keeps own their kind first, so a finding
+    always points at something the vault wrote.
+    """
+    owners: dict[str, str] = {}
+    for key, kind in shipped.items():
+        replaced = {language for language, _text in written_for_shipped.get(key, ())}
+        kept = (text for language, text in kind.labels if language not in replaced)
+        for spelling in (key, *kept):
+            owners[normalize_label(spelling)] = key
+    owners.update(_core_heading_aliases())
+    for key, kind in kinds.items():
+        for spelling in (key, *kind.aliases, *kind.heading_aliases):
+            owners.setdefault(spelling, key)
+    written = [
+        (f"kinds.{key}.labels.{language}", key, text)
+        for key, labels in (*written_for_shipped.items(), *((k, d.labels) for k, d in kinds.items()))
+        for language, text in labels
+    ]
+    for where, key, text in sorted(written):
+        form = normalize_label(text)
+        problem = semantic_labels.heading_label_problem(form)
+        if problem is not None:
+            findings.append(_finding("invalid_label", where, f"{text!r} {problem}"))
+            continue
+        owner = owners.setdefault(form, key)
+        if owner != key:
+            findings.append(_finding(
+                "kind_label_collision",
+                where,
+                f"{text!r} on {key!r} is already the key, an alias or a label of {owner!r}",
+            ))
+
+
+def kind_changes_beyond_labels(
+    current: SemanticLanguageRegistry, candidate: SemanticLanguageRegistry
+) -> bool:
+    """Whether `candidate` changes a vault kind in any way but its labels.
+
+    Adding or changing a label, and adding or removing a labels-only entry under a shipped
+    kind's key, are the one change that a reviewed categories save makes to the kinds. Such an
+    entry is no vault kind, so it is not among `kinds` here.
+    """
+    return kinds_without_labels(current) != kinds_without_labels(candidate)
+
+
+def kinds_without_labels(registry: SemanticLanguageRegistry) -> dict[str, dict[str, Any]]:
+    """Each vault kind as the vault wrote it, without its labels, by key."""
+    return {
+        key: {name: value for name, value in _definition_proposal(kind).items() if name != "labels"}
+        for key, kind in sorted(registry.kinds.items())
+    }
+
+
+def written_kind_labels(registry: SemanticLanguageRegistry) -> dict[str, dict[str, str]]:
+    """The kind labels the vault wrote, by kind: on a labels-only entry under a shipped
+    kind's key, and on each vault kind."""
+    written = {key: dict(labels) for key, labels in registry.kind_label_entries.items()}
+    written.update((key, dict(kind.labels)) for key, kind in registry.kinds.items() if kind.labels)
+    return dict(sorted(written.items()))
 
 
 def _parse_label_entries(
@@ -986,37 +1165,33 @@ def _parse_label_entries(
         if not isinstance(value, dict):
             findings.append(_finding("invalid_definition", span, "must be an object"))
             continue
-        for unknown in sorted(set(value) - semantic_labels.ENTRY_FIELDS, key=str):
+        for unknown in sorted(set(value) - labels.entry_fields, key=str):
             findings.append(
                 _finding("unknown_field", f"{span}.{unknown}", "unknown definition field")
             )
-        read = semantic_labels.read_labels(value.get("labels", {}))
-        if read is None:
-            findings.append(
-                _finding(
-                    "invalid_labels",
-                    f"{span}.labels",
-                    "must map a language tag to a label, such as `en: ...`",
-                )
-            )
-            entry_labels: tuple[tuple[str, str], ...] = ()
-        else:
-            entry_labels, problems = read
-            findings.extend(
-                _finding("invalid_label", f"{span}.labels.{language}", problem)
-                for language, problem in problems
-            )
+        entry_labels = _read_labels(value.get("labels", {}), span, findings)
+        members, display = (
+            _parse_members(labels, key, span, value, findings) if labels.has_members else ((), ())
+        )
         if core is not None:
             # Kept as written, so a save preserves the entry; `_effective_label` ignores it.
             raw_description = value.get("description")
             description = "" if raw_description is None else str(raw_description).strip()
-            if description:
+            fixed = [
+                name
+                for name, written in (
+                    ("description", description), ("members", members), ("display", display),
+                )
+                if written
+            ]
+            if fixed:
                 findings.append(
                     _finding(
                         f"core_{labels.noun}_shadowed",
-                        f"{span}.description",
-                        f"{key!r} is a shipped {labels.entry_words} with a fixed description, so "
-                        "this entry is ignored; remove its description to use its labels",
+                        f"{span}.{fixed[0]}",
+                        f"{key!r} is a shipped {labels.entry_words} with a fixed "
+                        f"{', '.join(fixed)}, so this entry is ignored; remove "
+                        f"{'it' if len(fixed) == 1 else 'them'} to use its labels",
                         severity="warning",
                     )
                 )
@@ -1028,11 +1203,141 @@ def _parse_label_entries(
                 )
                 continue
             description = description.strip()
+            if labels.has_members and not members:
+                findings.append(
+                    _finding(
+                        "missing_members",
+                        f"{span}.members",
+                        f"is required: name families, kinds or keys that make a unit belong to "
+                        f"the {labels.entry_words}",
+                    )
+                )
+                continue
         entries[key] = LabelDefinition(
-            key=key, labels=entry_labels, description=description, core=core is not None
+            key=key, labels=entry_labels, description=description, core=core is not None,
+            members=members, display=display,
         )
     _check_label_spellings(labels, shipped, entries, findings)
     return entries
+
+
+def _parse_members(
+    labels: LabelRegistry,
+    key: str,
+    span: str,
+    value: Mapping[Any, Any],
+    findings: list[RegistryFinding],
+) -> tuple[tuple[tuple[str, tuple[str, ...]], ...], tuple[str, ...]]:
+    """The member lists and display behaviours one vault dimension wrote, with a finding for each
+    that is malformed or that the closed display set does not declare.
+
+    A name's existence as a family, kind or key is `_check_dimension_members`, which needs the
+    registries this document sits beside.
+    """
+    members: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    if "members" in value:
+        read = semantic_labels.read_members(value["members"])
+        if read is None:
+            findings.append(
+                _finding(
+                    "invalid_members",
+                    f"{span}.members",
+                    "must map `families`, `kinds` or `keys` to a list of keys",
+                )
+            )
+        else:
+            members = read[0]
+            findings.extend(
+                _finding("invalid_members", f"{span}.members.{name}", problem)
+                for name, problem in read[1]
+            )
+    display: tuple[str, ...] = ()
+    if "display" in value:
+        shown = semantic_labels.read_display(value["display"])
+        if shown is None:
+            findings.append(
+                _finding("invalid_display", f"{span}.display", "must be a list of display behaviours")
+            )
+        else:
+            display = shown[0]
+            findings.extend(
+                _finding(
+                    "undeclared_display_behaviour",
+                    f"{span}.display",
+                    f"{labels.entry_words} {key!r} names the display behaviour {behaviour!r}, "
+                    "which the registry does not declare; use "
+                    + ", ".join(sorted(semantic_labels.DISPLAY_BEHAVIOURS)),
+                )
+                for behaviour in shown[1]
+            )
+    return members, display
+
+
+def _check_dimension_members(
+    entries: Mapping[str, LabelDefinition],
+    kinds: Iterable[str],
+    findings: list[RegistryFinding],
+) -> None:
+    """Refuse a vault dimension member that names no family, kind or governed key, with a finding
+    that names the dimension and the member.
+
+    The families are the relation pack's: a vault extension inherits its parent's family, so no
+    vault adds one. The kinds are the shipped ones and the vault's own in this document.
+    """
+    from . import relation_registry, semantic_blocks
+
+    known = {
+        "families": (relation_registry.core_registry().core_families, "relation family"),
+        "kinds": (frozenset(kinds) | {semantic_labels.ALL_KINDS}, "unit kind"),
+        "keys": (frozenset(semantic_blocks.GOVERNED_UNIT_METADATA_KEYS), "governed unit-metadata key"),
+    }
+    for key, entry in sorted(entries.items()):
+        if entry.core:
+            continue
+        for list_name, values in entry.members:
+            exists, noun = known[list_name]
+            for value in values:
+                if value in exists:
+                    continue
+                findings.append(
+                    _finding(
+                        "unknown_dimension_member",
+                        f"dimensions.{key}.members.{list_name}",
+                        f"dimension {key!r} names the {noun} {value!r}, which does not exist; "
+                        + _member_remedy(list_name, exists),
+                    )
+                )
+
+
+def _member_remedy(list_name: str, exists: Iterable[str]) -> str:
+    """What to write instead: the families and keys that exist, which are few; the kinds by
+    where they live, because a vault may hold many."""
+    if list_name == "kinds":
+        return "name a shipped kind or a kind in this registry's `kinds` section"
+    return "use one of " + ", ".join(sorted(exists))
+
+
+def _read_labels(
+    raw: Any, span: str, findings: list[RegistryFinding]
+) -> tuple[tuple[str, str], ...]:
+    """The valid (language tag, label) pairs of the entry at `span`, and a finding for each
+    invalid one. A vault kind and a label registry's entry read their labels through here."""
+    read = semantic_labels.read_labels(raw)
+    if read is None:
+        findings.append(
+            _finding(
+                "invalid_labels",
+                f"{span}.labels",
+                "must map a language tag to a label, such as `en: ...`",
+            )
+        )
+        return ()
+    labels, problems = read
+    findings.extend(
+        _finding("invalid_label", f"{span}.labels.{language}", problem)
+        for language, problem in problems
+    )
+    return labels
 
 
 def _effective_label(
@@ -1041,12 +1346,12 @@ def _effective_label(
     """The entry a vault entry gives: a new one as written, or a shipped one whose labels the
     vault's replace, language by language.
 
-    An entry that rewrites a shipped entry's description gives None: it is ignored, as a
-    category that shadows a shipped one is, and its warning says so.
+    An entry that rewrites a shipped entry's description, members or display gives None: it is
+    ignored, as a category that shadows a shipped one is, and its warning says so.
     """
     if shipped is None:
         return entry
-    if entry.description:
+    if entry.description or entry.members or entry.display:
         return None
     merged = {**dict(shipped.labels), **dict(entry.labels)}
     return LabelDefinition(
@@ -1054,6 +1359,8 @@ def _effective_label(
         labels=tuple(sorted(merged.items())),
         description=shipped.description,
         core=True,
+        members=shipped.members,
+        display=shipped.display,
     )
 
 
@@ -1242,6 +1549,7 @@ def _parse_definitions(
                 )
             )
             common["traits"] = _kind_traits(value.get("traits", []), span, findings)
+            common["labels"] = _read_labels(value.get("labels", {}), span, findings)
         definitions[key] = definition_type(**common)
     return definitions
 
@@ -1454,6 +1762,8 @@ def _definition_proposal(
     out: dict[str, Any] = {"description": definition.description}
     if definition.aliases:
         out["aliases"] = sorted(definition.aliases)
+    if isinstance(definition, KindDefinition) and definition.labels:
+        out["labels"] = dict(definition.labels)
     if isinstance(definition, KindDefinition) and definition.heading_aliases:
         out["heading_aliases"] = sorted(definition.heading_aliases)
     if isinstance(definition, KindDefinition) and definition.traits:

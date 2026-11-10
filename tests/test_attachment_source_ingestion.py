@@ -1082,6 +1082,19 @@ def test_no_artifact_is_written_to_both_trees(
     assert "Sources" in copies[0].parts
 
 
+def _follow(mcp, route):
+    """Send a route that a reply spelled, to the public tool it names, the way an agent follows it."""
+    import asyncio
+
+    from fastmcp import Client
+
+    async def send():
+        async with Client(mcp) as client:
+            return await client.call_tool(route["tool"], route["args"], raise_on_error=False)
+
+    return asyncio.run(send()).structured_content
+
+
 @pytest.mark.parametrize("mode", ("text", "attachment", "adoption", "pending-media"))
 def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
@@ -1178,11 +1191,12 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     semantic = payload["semantic_compilation"]
     assert semantic["state"] == "unassessed"
     assert semantic["preparation_route"] == {
-        "tool": "prepare_note", "args": {"sources": [page_path]},
+        "tool": "inspect_memory",
+        "args": {"operation": "sources.compile", "arguments": {"sources": [page_path]}},
     }
     assert semantic["full_source_reads"] == [{
-        "tool": "read_memory",
-        "args": {"path": page_path, "include_raw": True},
+        "tool": "read_page",
+        "args": {"page": page_path, "options": {"include_raw": True}},
     }]
     assert "error" not in payload, payload
     assert "outline_markdown" not in str(semantic)
@@ -1203,15 +1217,9 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     if mode == "text":
         guidance = written["semantic_compilation"]
         [read_route] = guidance["full_source_reads"]
-        assert read_route["args"]["path"] == page_path
-        with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
-            readback = asyncio.run(mcp.call_tool(
-                read_route["tool"], read_route["args"], run_middleware=False,
-            )).structured_content
-            prepared = asyncio.run(mcp.call_tool(
-                guidance["preparation_route"]["tool"],
-                guidance["preparation_route"]["args"], run_middleware=False,
-            )).structured_content
+        assert read_route["args"]["page"] == page_path
+        readback = _follow(mcp, read_route)
+        prepared = _follow(mcp, guidance["preparation_route"])
         assert original.decode() in readback["body"], readback
         assert prepared["suggested_sources"] == [page_path.removesuffix(".md")], prepared
     # A plain link connects the page and names no relation, the advisory a write can still earn.
@@ -1220,11 +1228,7 @@ def test_capture_source_and_compiled_write_feedback_through_the_mcp_surface(
     ]
     assert written["semantic_advisory"]["findings"][0]["remediation"]
     next_action = written["semantic_advisory"]["next_action"]
-    with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
-        inspected = asyncio.run(mcp.call_tool(
-            next_action["tool"], next_action["args"], run_middleware=False,
-        ))
-    vocabulary = inspected.structured_content
+    vocabulary = _follow(mcp, next_action)
     assert vocabulary["subject"] == "relations", vocabulary
     assert vocabulary["entries"], vocabulary
     assert all(entry["key"] and entry["description"] for entry in vocabulary["entries"])

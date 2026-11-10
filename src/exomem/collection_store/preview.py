@@ -643,6 +643,10 @@ def dispatch(
                     result, manifest, output_format=args.get("output_format", "json"),
                     agent_history=agent_history(writer, manifest) if include_history else None,
                 )
+                # The ids go on before the projection is sealed: a sealed payload that changes is refused.
+                from .. import collection_refs
+
+                projected = collection_refs.mark_rows(projected, profile="records")
                 projected = writer._operation.query_metadata_evidence(projected, writer, manifest, result)
             if key is not None and projected.get("rows"):
                 projected = {**projected, **writer.row_body(manifest.collection_id, key)}

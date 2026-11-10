@@ -124,11 +124,28 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 )
 
 # Frontmatter keys the schema deliberately excludes (see _scaffold's
-# references/frontmatter.md): numeric confidence scores misrepresent the signal
-# (trust is citations + link count), and knowledge does not expire on a schedule.
-# Governed write paths refuse them so the documented "no confidence floats / no
-# retention decay" stance is actually enforced, not just described.
-EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset({"confidence", "decay_at", "expires_at"})
+# references/frontmatter.md), each with the remedy its refusal states: a claim carries no
+# confidence score (trust is citations + link count, and a degree of belief is its own belief
+# unit), and knowledge does not expire on a schedule. Governed write paths refuse them so the
+# documented "no confidence floats / no retention decay" stance is actually enforced, not just
+# described.
+# nosemgrep: ep-word-set -- field names that the frontmatter reference excludes, not a vocabulary
+_EXCLUDED_FIELD_REMEDIES: Mapping[str, str] = {
+    "confidence": (
+        "A confidence or a degree of belief is never frontmatter: a degree of belief that its "
+        "holder stated is a `## Belief` unit in the page body (see \"Recording a degree of "
+        "belief\" in the skill's page-types reference)."
+    ),
+    "decay_at": (
+        "Exomem decays no material on a schedule; supersede or archive the page explicitly "
+        "when it no longer holds."
+    ),
+    "expires_at": (
+        "Knowledge does not expire on a schedule; supersede or archive the page explicitly "
+        "when it no longer holds."
+    ),
+}
+EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(_EXCLUDED_FIELD_REMEDIES)
 EXCLUDED_FIELD_CODE = "EXCLUDED_FIELD"
 
 # The broader `auto_*` exclusion documented in
@@ -178,14 +195,10 @@ def excluded_field_in_collection_frontmatter(
 
 def excluded_frontmatter_reason(field: str) -> str | None:
     """A refusal reason if `field` is a schema-excluded frontmatter key, else None."""
-    if field.strip().casefold() in EXCLUDED_FRONTMATTER_FIELDS:
-        return (
-            f"`{field}` is a schema-excluded frontmatter field. Exomem does not "
-            "record numeric confidence scores or time-based decay/expiry — trust "
-            "is conveyed by citations and link count, and old material is never "
-            "auto-decayed (see SKILL.md). Omit this field."
-        )
-    return None
+    remedy = _EXCLUDED_FIELD_REMEDIES.get(field.strip().casefold())
+    if remedy is None:
+        return None
+    return f"`{field}` is a schema-excluded frontmatter field. {remedy} Omit this field."
 
 
 def governed_frontmatter_reason(
@@ -5270,7 +5283,7 @@ def folder_split_warnings(vault_root: Path, directory: Path) -> list[str]:
     for part in relative.parts:
         variants = sibling_name_variants(current, part)
         if variants and (current / part).is_dir():
-            audit_call = active_call_text("review_memory", {"mode": "audit", "categories": ["path_variants"]})
+            audit_call = active_call_text("maintain_memory", {"mode": "audit", "categories": ["path_variants"]})
             warnings.append(
                 f"folder '{part}' also exists as {', '.join(repr(v) for v in variants)}; "
                 f"run {audit_call} to see the split"

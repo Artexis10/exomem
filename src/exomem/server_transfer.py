@@ -217,9 +217,9 @@ def _source_session_destination(vault_root: Path, target: dict, *, size: int, sh
     from . import add, schema, temporal, vocabulary_gate
 
     safe_name = add.source_artifact_name(target["filename"])
-    vocabulary_gate.artifact_admission(
-        vault_root, size=size, is_markdown=add.source_artifact_suffix(target["filename"]).endswith(".md"),
-    )
+    # Activated vocabulary refuses every Source artifact here: the commit classifies any stored original,
+    # including a Markdown one kept as `.md.txt`, as an unsupported file change, so admission says so first.
+    vocabulary_gate.artifact_admission(vault_root, size=size)
     prepared = add.prepare_source_metadata(
         vault_root, schema.load_source_schema(vault_root),
         content=add._describe_artifact(safe_name, sha256, size),

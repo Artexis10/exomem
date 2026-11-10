@@ -50,6 +50,7 @@ from .decide import (
     relocation_volume,
     storage_receipt,
 )
+from .deletion_relay import RelayMemory, relay_grants
 from .errors import describe_error as _describe_error
 from .export_layout import (
     PACK,
@@ -314,11 +315,13 @@ class LoopMemory:
     media_metered_for: dict[str, datetime | None] = field(default_factory=dict)
     media_meter_retry_at: dict[str, datetime] = field(default_factory=dict)
     media_meter_failures: dict[str, int] = field(default_factory=dict)
-    # D9: deleted cells whose object-store key cleanup is not yet alerted. The first pass of a
-    # process fills it from every deleted row, so a restart never loses the alert; the receiver
-    # folds a repeat. A deleted row stays in the database, which is why no state is kept elsewhere.
+    # D9: deleted old cells whose clean-up in the old bucket is not yet alerted. The first pass of a
+    # process fills it from every deleted row that kept its key ID, so a restart never loses the alert;
+    # the receiver folds a repeat. A deleted row stays in the database, so no state is kept elsewhere.
     cleanup_pending: set[str] = field(default_factory=set)
     cleanup_seeded: bool = False
+    # automate-cell-storage-deletion D1: what the grant relay learned from its listings.
+    relay: RelayMemory = field(default_factory=RelayMemory)
     # Task 2.8 and D10: each platform alert's state last delivered (absent:
     # nothing yet this process) and when a failed delivery may be tried again,
     # and the stale cells last logged.
@@ -524,6 +527,9 @@ class ClusterConfig:
     # Whether the schema has the media key columns. run_loop observes it on each connect; it is
     # never configured.
     media_key_columns: bool = False
+    # automate-cell-storage-deletion D1: whether the schema has Substrate's `deletion_grant` column. run_loop
+    # observes it on each connect; without it the relay leaves the grants' ConfigMap as it stands.
+    deletion_grant_column: bool = False
     shared_worker: SharedWorkerPolicy | None = None
     storage: StorageConfig = DEFAULT_STORAGE
     # Task 2.8: (namespace, name, key) of the platform's alert-delivery
@@ -674,6 +680,8 @@ class ClusterGateway:
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
+    def read_cell_deletions(self) -> dict[str, str] | None: ...  # pragma: no cover
+    def apply_cell_deletions(self, manifest: dict) -> None: ...  # pragma: no cover
     def media_edge_evidence(self, url: str) -> EdgeEvidence: ...  # pragma: no cover
 
 
@@ -1425,9 +1433,9 @@ async def reconcile_once(
     backup_listing=None,
     media_listing=None,
 ) -> bool:
-    """One pass. `backup_listing` only lists a new cell's locked backups, and `media_listing` only the media
-    bucket's prefixes for the physical meter. Returns whether the next one
-    is due at the fast cadence:
+    """One pass. `backup_listing` lists a new cell's locked backups, and `media_listing` the media bucket's
+    prefixes for the physical meter. Both also list a deleted cell's prefix for its grant's relay. Returns
+    whether the next one is due at the fast cadence:
     True while any cell is in transition or this pass observed a change,
     False once the whole fleet has settled."""
 
@@ -1462,8 +1470,8 @@ async def reconcile_once(
         await db.write_capacity_snapshot(connection, capacities={}, observed_at=now)
     rows = await db.select_all_rows(connection, media_keys=cluster_config.reads_media_keys)
     if not memory.cleanup_seeded:
-        memory.cleanup_pending |= {row.cell_id for row in rows
-                                   if row.desired_state == "deleted" and row.observed_state == "deleted"}
+        memory.cleanup_pending |= {row.cell_id for row in rows if row.desired_state == "deleted"
+                                   and row.observed_state == "deleted" and row.b2_key_id is not None}
         memory.cleanup_seeded = True
     committed = frozenset(row.cell_id for row in rows if not (
         row.desired_state == "deleted" and row.observed_state == "deleted"
@@ -1645,6 +1653,10 @@ async def reconcile_once(
 
     await _cleanup_alerts(cluster, cluster_config, memory, now)
     await _media_physical_meter(cluster, cluster_config, rows, memory, media_listing, now)
+    if cluster_config.deletion_grant_column:
+        stored = await db.select_deletion_grants(connection)
+        await asyncio.to_thread(relay_grants, cluster, stored, now, memory.relay, backup_listing=backup_listing,
+                                media_listing=media_listing, media_bucket=cluster_config.media_edge is not None)
 
     # D4: capacity is published at the end of every pass, whatever the rows
     # did, from Kubernetes CSINode/VolumeAttachment state -- never a Hetzner
@@ -1761,9 +1773,10 @@ async def _deliver_alert(
 async def _cleanup_alerts(
     cluster: ClusterGateway, cluster_config: ClusterConfig, memory: LoopMemory, now: datetime
 ) -> None:
-    """D9: one alert per cell this process deleted, naming only its id. It fires and stays: the
-    key and the cell's backup files (locked for a new cell, in the old bucket for an old one) are the
-    operator's to remove, and cellctl cannot read the provider's key listing to see when that is done."""
+    """D9: one alert per old cell this process deleted, naming only its id. It fires and stays: the key and
+    the backup files in the old bucket are the operator's to remove, and cellctl cannot read that account's
+    listings to see when that is done. A new cell's prefixes are purged on its deletion grant
+    (automate-cell-storage-deletion D6)."""
 
     for cell_id in sorted(memory.cleanup_pending):
         alert = alerts.cleanup_pending_alert(cell_id)
@@ -3311,6 +3324,7 @@ async def run_loop(
     stop: asyncio.Event | None = None,
     heartbeat_path: str = DEFAULT_HEARTBEAT_PATH,
     backup_listing=None,
+    media_listing=None,
 ) -> None:
     """D4: poll, plus LISTEN on a direct session. The poll comes after
     FAST_POLL_INTERVAL_SECONDS while a pass reports a transition and after
@@ -3344,6 +3358,8 @@ async def run_loop(
                     if not await db.try_advisory_lock(connection):
                         raise RuntimeError("cellctl advisory lock is held by another writer")
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
+                    cluster_config = dataclass_replace(
+                        cluster_config, deletion_grant_column=await db.has_deletion_grant_column(connection))
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
                 except MediaKeyColumnsMissing:
                     # A deploy-order fault, not an outage: stop, so the rollout fails where it started.
@@ -3373,6 +3389,7 @@ async def run_loop(
                     config=config,
                     memory=memory,
                     backup_listing=backup_listing,
+                    media_listing=media_listing,
                 )
                 if not fast:
                     interval = IDLE_POLL_INTERVAL_SECONDS

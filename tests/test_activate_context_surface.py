@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import capture_carrier, commands, server, working_set_index, working_set_runtime
@@ -390,7 +391,7 @@ def test_mcp_due_omission_reaches_the_response_and_final_observation(
 
     async def invoke():
         async with Client(mcp) as client:
-            result = await client.call_tool("activate_context", {"turn": TURN, "anchor": page})
+            result = await client.call_tool(*public_call("activate_context", {"turn": TURN, "anchor": page}))
             return result.structured_content
 
     try:

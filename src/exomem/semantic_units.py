@@ -59,6 +59,12 @@ UNIT_ROW_KEYS = (
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def carried_row_keys(unit: Any) -> tuple[str, ...]:
+    """The governed metadata keys whose value `unit` carries, in `GOVERNED_UNIT_METADATA_KEYS`
+    order. A row whose value did not parse is not carried, as `$exists` on its filter field says."""
+    return tuple(key for key in GOVERNED_UNIT_METADATA_KEYS if getattr(unit, key, None) is not None)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceSpan:
     """An authored source slice with 1-based, end-exclusive coordinates."""
@@ -1753,7 +1759,8 @@ def _rich_context(
     return context, None
 
 
-#: Why a number is no verdict, said once for every boundary that refuses one.
+#: Why a number is no verdict, said once for every boundary that refuses one. A degree of belief
+#: is a belief unit (`BELIEF_FORM`); the scaffold's page-types reference states the whole rule.
 NO_CONFIDENCE_RULE = (
     "A verdict is categorical state about how a claim turned out. A confidence, score or "
     "probability is not a verdict, so a number or percentage is never valid here."

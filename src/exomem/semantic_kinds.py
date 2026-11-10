@@ -15,6 +15,7 @@ from functools import lru_cache
 
 import yaml
 
+from . import semantic_labels
 from .vocabulary import registry as vocabulary_registry
 
 #: The closed kind-trait set. Each member is something code does with a unit of that kind, read
@@ -43,8 +44,8 @@ def require_trait(trait: str) -> str:
 
 
 _PACK = "kinds.yaml"
-_PACK_FIELDS = frozenset({"description", "heading_aliases", "traits"})
-_COMPACT_FIELDS = frozenset({"description"})
+_PACK_FIELDS = frozenset({"description", "labels", "heading_aliases", "traits", "teach"})
+_COMPACT_FIELDS = frozenset({"description", "labels"})
 # The shape a pack spelling already has: lower-case letters, digits and underscores.
 _SPELLING_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -55,9 +56,13 @@ class PackKind:
 
     key: str
     description: str
+    # Each (language tag, label) pair, sorted. A label is a heading alias in that language.
+    labels: tuple[tuple[str, str], ...] = ()
     heading_aliases: tuple[str, ...] = ()
     traits: frozenset[str] = frozenset()
     compact: bool = False
+    # The one line bootstrap teaches for this kind; absent for a kind bootstrap does not name.
+    teach: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -90,6 +95,11 @@ def _from_pack(text: str) -> dict[str, PackKind]:
                     f"shipped kinds pack: {key!r} traits {undeclared} are not declared; "
                     f"use {sorted(KIND_TRAITS)}"
                 )
+            read = semantic_labels.read_labels(value.get("labels"))
+            if read is None or read[1] or not read[0]:
+                raise RuntimeError(
+                    f"shipped kinds pack: {key!r} needs labels that map a language tag to a label"
+                )
             aliases = tuple(value.get("heading_aliases", []))
             for spelling in (key, *aliases):
                 if not isinstance(spelling, str) or not _SPELLING_RE.match(spelling):
@@ -103,9 +113,11 @@ def _from_pack(text: str) -> dict[str, PackKind]:
             kinds[key] = PackKind(
                 key=key,
                 description=str(value["description"]),
+                labels=read[0],
                 heading_aliases=aliases,
                 traits=frozenset(raw_traits),
                 compact=compact,
+                teach=vocabulary_registry.pack_teach("kinds", key, value.get("teach")),
             )
     return kinds
 

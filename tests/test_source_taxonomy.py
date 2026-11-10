@@ -904,12 +904,12 @@ def test_the_published_tool_schema_never_carries_a_vaults_own_vocabulary(
         assert vault_added not in serialized
 
     # The schema admits new kinds and domains without publishing the live registry.
-    capture = json.loads(serialized)["capture_source"]
+    capture = json.loads(serialized)["save_source"]
     jsonschema.validate(
         {
             "title": "Notebook entry",
             "content": "Body text for a captured source.",
-            "source_type": "field-notebook",
+            "source_kind": "field-notebook",
             "domain": "agroforestry",
         },
         capture["inputSchema"],

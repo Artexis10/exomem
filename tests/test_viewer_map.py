@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _public_call import public_call
 from starlette.testclient import TestClient
 from test_connector_boundary import SCOPE
 from test_connector_boundary import configured_boundary as configured_boundary
@@ -141,7 +142,7 @@ def test_real_mcp_rest_cli_return_the_admitted_page_map(
     with library_scope():
         expected = commands.op_viewer_map(root, max_nodes=2, max_edges=0)
     mcp_result = asyncio.run(mcp.call_tool(
-        "viewer_map", {"max_nodes": 2, "max_edges": 0}, run_middleware=True,
+        *public_call("viewer_map", {"max_nodes": 2, "max_edges": 0}), run_middleware=True,
     )).structured_content
     if isinstance(mcp_result, dict) and set(mcp_result) == {"result"}:
         mcp_result = mcp_result["result"]

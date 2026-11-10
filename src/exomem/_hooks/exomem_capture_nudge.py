@@ -111,90 +111,45 @@ from pathlib import Path
 
 # The server-name token that marks an Exomem tool; a host fixes it, a vault does not.
 _KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
-# KB write tools — mixed tools include their operation selector so read-only
-# discovery does not suppress the reminder. Legacy names remain recognized.
-# nosemgrep: ep-word-search -- tool and operation names the server registry fixes; the hook cannot import it.
-_KB_WRITE = re.compile(
-    _KB_SERVER
-    + r".*(?:"
-    r"note|add|edit|append|create_file|replace|remember|capture_source|"
-    r"preserve_evidence|preserve_artifacts|manage_memory_file|"
-    r"connect_memory:(?:create-entity|accept-relation)|"
-    r"observe_memory:(?:add|update|remove)|"
-    r"episode_memory:(?:record|prepare|disposition|resume)"
-    r")",
-    re.I,
+# Every Exomem call that lands durable work: a typed write tool by its name, a door write as
+# `manage_memory:<area>.<action>`. Stamped from `exomem.public_surface.write_selectors()`; the hook
+# cannot import the package, and `tests/test_single_purpose_guidance.py` fails when the two drift.
+# A read tool and a read door operation are absent, so discovery leaves the check armed.
+_KB_WRITES = (
+    "add_observation",
+    "add_plan_item",
+    "add_record",
+    "create_note",
+    "decide_review_item",
+    "edit_note",
+    "edit_plan_item",
+    "edit_record",
+    "manage_memory:connections.create_entity",
+    "manage_memory:episodes.disposition",
+    "manage_memory:episodes.input",
+    "manage_memory:episodes.prepare",
+    "manage_memory:episodes.resume",
+    "manage_memory:files.append",
+    "manage_memory:files.create",
+    "manage_memory:files.delete",
+    "manage_memory:files.move",
+    "manage_memory:files.reclassify",
+    "manage_memory:files.recover",
+    "manage_memory:files.revert_reclassification",
+    "manage_memory:plans.create",
+    "manage_memory:plans.rebaseline",
+    "manage_memory:plans.revise",
+    "manage_memory:records.bulk_upsert",
+    "manage_memory:records.create",
+    "manage_memory:records.discard",
+    "manage_memory:records.import",
+    "manage_memory:records.rebaseline",
+    "manage_memory:records.revise",
+    "save_episode",
+    "save_evidence",
+    "save_source",
+    "supersede_note",
 )
-# Structured-collection lifecycle writes, as `tool:operation` for every spelling a host can
-# call: the grouped `record_memory`/`plan_memory` and the `change_*` renderings. A turn that
-# filed the record or moved the plan item did exactly what the capture contract asks for.
-# `read_*` renderings and the read operations are absent, so discovery leaves the check armed.
-# Stamped from `exomem.operation_entries.write_selectors()`; the hook cannot import the package,
-# and `tests/test_single_purpose_guidance.py` fails when this list and the entries drift.
-_COLLECTION_WRITES = (
-    "change_connections:accept-relation",
-    "change_connections:create-entity",
-    "change_files:append",
-    "change_files:create",
-    "change_files:delete",
-    "change_files:move",
-    "change_files:reclassify",
-    "change_files:recover",
-    "change_files:revert-reclassification",
-    "change_observations:add",
-    "change_observations:remove",
-    "change_observations:update",
-    "change_plans:add",
-    "change_plans:create",
-    "change_plans:rebaseline",
-    "change_plans:revise",
-    "change_plans:triage",
-    "change_plans:update",
-    "change_records:append",
-    "change_records:bulk_upsert",
-    "change_records:create",
-    "change_records:discard",
-    "change_records:import",
-    "change_records:rebaseline",
-    "change_records:revise",
-    "change_records:update",
-    "connect_memory:accept-relation",
-    "connect_memory:create-entity",
-    "episode_memory:disposition",
-    "episode_memory:input",
-    "episode_memory:prepare",
-    "episode_memory:record",
-    "episode_memory:resume",
-    "manage_memory_file:delete",
-    "manage_memory_file:move",
-    "manage_memory_file:reclassify",
-    "manage_memory_file:recover",
-    "manage_memory_file:revert-reclassification",
-    "observe_memory:add",
-    "observe_memory:remove",
-    "observe_memory:update",
-    "plan_memory:add",
-    "plan_memory:create",
-    "plan_memory:rebaseline",
-    "plan_memory:revise",
-    "plan_memory:triage",
-    "plan_memory:update",
-    "record_episode:disposition",
-    "record_episode:input",
-    "record_episode:prepare",
-    "record_episode:record",
-    "record_episode:resume",
-    "record_memory:append",
-    "record_memory:bulk_upsert",
-    "record_memory:create",
-    "record_memory:discard",
-    "record_memory:rebaseline",
-    "record_memory:revise",
-    "record_memory:update",
-)
-# Preparation only returns a proposal; standalone deployers copy bytes and cannot import the registry.
-_PREPARATION_TOOL_SUFFIXES = ("compile_source", "prepare_note")
-
 #: The capture check, one short line on every fire. It names the rules that prevent known
 #: incidents and points at the installed skill or portable operating contract.
 #: A connected vault need not contain a readable copy of the shipped references.
@@ -203,13 +158,13 @@ REMINDER_SHORT = (
     "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
     "contradicted conclusion, and now advice the user says failed; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
-    'Rules: Exomem skill or bootstrap with operation.kind="instructions", profile="compact".'
+    'Rules: Exomem skill or read_instructions.'
 )
 
 #: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
     "[Exomem episode check] If live policy permits capture at a durable stop, "
-    'record_episode once: operation.kind="record", episode="{key}", subject, summary, '
+    'save_episode once: episode="{key}", subject, summary, '
     "decided. Compile or dismiss every Decided item before citing it from updated "
     "compiled notes. Otherwise do nothing."
 )
@@ -218,9 +173,9 @@ EPISODE_ASK = (
 COVERAGE_ASK = (
     "[Exomem episode coverage] Episode {key} is not covered through its current "
     "input; its ledger's next step is {next}. A committed note or a Saved marker "
-    'does not cover it. Read read_episode with operation.kind="candidates" and continue: '
+    'does not cover it. Read inspect_memory operation="episodes.candidates" and continue: '
     'decide each candidate, resume the routed ones, or make the final pass '
-    '(read_episode kind="coverage", then record_episode kind="resume" with postcommit=true). Deferred work may '
+    '(inspect_memory operation="episodes.coverage", then manage_memory operation="episodes.resume" with postcommit=true). Deferred work may '
     "stay deferred."
 )
 _WORKFLOW_ACTIONS = frozenset({"prepare", "disposition", "resume"})
@@ -571,42 +526,32 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
 
 
 def _operation_of(arguments: dict) -> str:
-    """The operation a tool call selects, whichever argument form the tool takes.
+    """The operation a door call selects: its `operation` string, such as `episodes.prepare`.
 
-    The mixed tools take `operation` as a string; the grouped Records and Planning
-    commands take `action`; the `read_*`/`change_*` renderings take `operation` as an
-    object whose `kind` names it. Without all three a mutation and a read look alike.
+    A typed tool has none; `edit_note` takes an `action`, which names a change and never a door.
     """
-    operation = arguments.get("operation")
-    if isinstance(operation, dict):
-        operation = operation.get("kind")
-    return str(operation or arguments.get("action") or "")
-
-
-def _is_collection_write(name: str, operation: str) -> bool:
-    """Whether a call to an Exomem tool is a write of a Records or Planning collection."""
-    if not operation or not re.search(_KB_SERVER, name, re.I):
-        return False
-    selector = f"{name}:{operation}".lower()
-    return any(selector.endswith(write) for write in _COLLECTION_WRITES)
+    return str(arguments.get("operation") or arguments.get("action") or "")
 
 
 def _successful_kb_write(tool: dict) -> bool:
     """Whether one observed tool call completed a real KB mutation."""
     if tool.get("failed"):
         return False
-    name = str(tool.get("name") or "")
-    if name.lower().rsplit("__", 1)[-1] in _PREPARATION_TOOL_SUFFIXES:
+    name = str(tool.get("name") or "").lower()
+    if not re.search(_KB_SERVER, name, re.I):
         return False
     tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
     operation = str(tool.get("operation") or "") or _operation_of(tool_input)
-    selector = f"{name}:{operation}" if operation else name
-    if not (_KB_WRITE.search(selector) or _is_collection_write(name, operation)):
+    # A closed set of tool names that the server fixes; the host adds its own prefix, so match the tail.
+    if not any(name.endswith(write) for write in _KB_WRITES if ":" not in write) and not any(
+        f"{name}:{operation}".lower().endswith(write) for write in _KB_WRITES if ":" in write
+    ):
         return False
-    # Hook deployers copy standalone bytes; these closed API spellings need no package or runtime name resource.
-    if name.lower().endswith(("edit_memory", "edit_note")) and tool_input.get("validate_only") is True:
+    # A preview validates the call and writes nothing. A dismissal, snooze or stance records a
+    # decision on a review item; only `accept` saves a relation.
+    if name.endswith("decide_review_item") and tool_input.get("decision") != "accept":
         return False
-    return True
+    return tool_input.get("preview") is not True
 
 
 #: Command words whose success lands durable work. Matched structurally on the
@@ -800,7 +745,7 @@ def _successful_landing(tool: dict) -> bool:
 #: hooks take effect for the CURRENT session, but the MCP server they reference
 #: is not loaded until the client restarts — so on a fresh install the very
 #: first thing the product does is ask for `create_note` / `edit_note` /
-#: `connect_memory`, none of which exist yet, and there is no CLI fallback for
+#: `save_episode`, none of which exist yet, and there is no CLI fallback for
 #: the write side. The nudge's own escape hatch ("no Knowledge Base configured,
 #: do nothing") cannot detect this case.
 PENDING_RESTART_MARKER = "pending-restart"
@@ -822,21 +767,27 @@ def episode_key(client: str, session_id: str) -> str:
     return "ep-" + hashlib.sha256(material).hexdigest()[:32]
 
 
-def _successful_episode_record(tool: dict) -> bool:
-    """A completed `episode_memory` record — the only thing that covers an episode."""
-    if tool.get("failed"):
-        return False
+def _episode_call(tool: dict) -> tuple[str, dict]:
+    """The episode action a tool call performs and its arguments, or an empty pair.
+
+    `save_episode` records; `manage_memory` moves a candidate's workflow as `episodes.<action>`.
+    """
+    name = str(tool.get("name") or "").lower()
     tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
-    return (
-        _episode_writer(tool.get("name"))
-        and _operation_of(tool_input) == "record"
-    )
+    if not re.search(_KB_SERVER, name, re.I):
+        return "", {}
+    if name.endswith("save_episode"):
+        return "record", tool_input
+    area, _, action = _operation_of(tool_input).partition(".")
+    arguments = tool_input.get("arguments")
+    if name.endswith("manage_memory") and area == "episodes" and isinstance(arguments, dict):
+        return action, arguments
+    return "", {}
 
 
-def _episode_writer(name: object) -> bool:
-    """Recognize the legacy and current closed API spellings of the episode writer."""
-    name = str(name or "").lower()
-    return bool(re.search(_KB_SERVER, name, re.I)) and name.endswith(("episode_memory", "record_episode"))
+def _successful_episode_record(tool: dict) -> bool:
+    """A completed episode record — the only thing that covers an episode."""
+    return not tool.get("failed") and _episode_call(tool)[0] == "record"
 
 
 def _workflow_episode(tools: list[dict]) -> str | None:
@@ -845,15 +796,9 @@ def _workflow_episode(tools: list[dict]) -> str | None:
     for tool in tools:
         if tool.get("failed"):
             continue
-        tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
-        payload = tool_input.get("operation") if isinstance(tool_input.get("operation"), dict) else tool_input
-        episode = payload.get("episode")
-        if (
-            _episode_writer(tool.get("name"))
-            and _operation_of(tool_input) in _WORKFLOW_ACTIONS
-            and isinstance(episode, str)
-            and _EPISODE_KEY_RE.fullmatch(episode)
-        ):
+        action, arguments = _episode_call(tool)
+        episode = arguments.get("episode")
+        if action in _WORKFLOW_ACTIONS and isinstance(episode, str) and _EPISODE_KEY_RE.fullmatch(episode):
             return episode
     return None
 
@@ -1249,7 +1194,7 @@ def _log(text: str) -> None:
 
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
-        return "Skip if Exomem is not connected or cannot capture; bootstrap first if no contract.\n" + reason
+        return "Skip if Exomem is not connected or cannot capture; read_instructions first if no contract.\n" + reason
     return reason
 
 

@@ -406,6 +406,66 @@ def test_an_arm_without_a_derived_file_is_accepted(tmp_path: Path) -> None:
     gate.require_derived_ready(tmp_path)
 
 
+def searching_arm(answers: list[dict]) -> tuple[gate.Arm, list[str]]:
+    """An arm whose searches return `answers` in turn, recording each search and each quiet wait."""
+    events: list[str] = []
+
+    class Client:
+        async def call_tool(self, name, arguments, **kwargs):
+            events.append(name)
+            answer = answers.pop(0)
+            return SimpleNamespace(data=answer, is_error=False)
+
+    async def quiesce(*, limit, phase):
+        events.append(phase)
+        return 0.0
+
+    arm = object.__new__(gate.Arm)
+    arm.name, arm.client, arm.quiesce = "head", Client(), quiesce
+    return arm, events
+
+
+# A released worker refuses with the full envelope; the current one with the compact `error` mapping.
+ENVELOPE_WARMING = {"success": False, "error": {"code": "RETRIEVAL_INDEX_WARMING", "message": "warming"}}
+COMPACT_WARMING = {"error": {"code": "RETRIEVAL_INDEX_WARMING", "message": "warming", "retry": {}}}
+
+
+@pytest.mark.parametrize("warming", [ENVELOPE_WARMING, COMPACT_WARMING], ids=["released", "current"])
+def test_a_search_refused_as_warming_is_probed_again_after_the_arm_goes_quiet(warming) -> None:
+    """On 2026-11-09 every search case was refused as warming: the fixture writes left the keyword
+    catalogue stale, and the worker went quiet without repairing it."""
+    arm, events = searching_arm([warming, warming, {"hits": []}])
+    asyncio.run(arm.serve_search(limit=60))
+    assert events == ["search_memory", "search-readiness", "search_memory", "search-readiness", "search_memory"]
+
+
+def test_an_arm_whose_search_stays_warming_is_refused() -> None:
+    arm, _events = searching_arm([ENVELOPE_WARMING])
+    with pytest.raises(MeasurementRefused) as warming:
+        asyncio.run(arm.serve_search(limit=0))
+    assert warming.value.code == "search-index-not-ready"
+
+
+def test_a_search_refused_for_another_reason_fails_the_probe_at_once() -> None:
+    arm, events = searching_arm([{"error": {"code": "INVALID_ARGUMENT", "message": "bad query"}}])
+    with pytest.raises(MeasurementRefused) as failed:
+        asyncio.run(arm.serve_search(limit=60))
+    assert failed.value.code == "search-probe-failed"
+    assert events == ["search_memory"]
+
+
+def test_the_fixture_preparation_waits_for_a_served_search_before_it_returns(monkeypatch) -> None:
+    """Without this wait the arm is timed while every search is still refused."""
+    arm, events = searching_arm([ENVELOPE_WARMING, {"hits": []}])
+
+    async def load_collections(fixture):
+        events.append("fixture")
+
+    arm.load_collections = load_collections
+    asyncio.run(gate.load_and_quiesce(arm, {}))
+    assert events == ["fixture", "fixture", "search_memory", "search-readiness", "search_memory"]
+
+
 # --- Stored documents ----------------------------------------------------------
 
 

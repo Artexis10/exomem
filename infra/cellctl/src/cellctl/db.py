@@ -142,6 +142,21 @@ async def has_media_key_columns(connection: asyncpg.Connection) -> bool:
     return present == len(MEDIA_KEY_COLUMNS)
 
 
+async def has_deletion_grant_column(connection: asyncpg.Connection) -> bool:
+    """Whether Substrate's `deletion_grant` column exists and cellctl may read it (automate-cell-storage-deletion
+    D1). The information schema lists only the columns that the session's role holds a privilege on."""
+    return bool(await connection.fetchval(
+        "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = 'exomem_cloud_cells' AND column_name = 'deletion_grant'"))
+
+
+async def select_deletion_grants(connection: asyncpg.Connection) -> list[str]:
+    """Every deletion grant that Substrate stored. cellctl reads no cell ID from the row: the relay keys each
+    grant by its own claims, because those are what an executor acts on."""
+    return [record["deletion_grant"] for record in await connection.fetch(
+        "SELECT deletion_grant FROM exomem_cloud_cells WHERE deletion_grant IS NOT NULL")]
+
+
 def _rollout_from_record(record: asyncpg.Record) -> RolloutRow:
     return RolloutRow(**{column: record[column] for column in ROLLOUT_COLUMNS})
 

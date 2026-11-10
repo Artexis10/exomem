@@ -22,6 +22,7 @@ from .cloud_artifact_transport import (
     BROKER_PORT,
     FETCH_PATH,
     GRANT_AUDIENCE,
+    GRANT_OPERATIONS,
     MAX_GRANT_CHARS,
     descriptor_digest,
     encode_filename,
@@ -105,7 +106,7 @@ class ArtifactBroker:
                 or len(cell) > 256
                 or cell != claims["sub"]
                 or operation != claims["op"]
-                or operation not in {"capture_source", "preserve_artifacts"}
+                or operation not in GRANT_OPERATIONS.values()
                 or not isinstance(handles, list)
                 or not 1 <= len(handles) <= artifacts.MAX_FILES
                 or any(

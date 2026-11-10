@@ -27,7 +27,7 @@
         "called_any": [
           "recall_context",
           "search_memory",
-          "read_memory"
+          "read_page"
         ],
         "judge": {
           "schema": {

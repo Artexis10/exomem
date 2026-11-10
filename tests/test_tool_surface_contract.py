@@ -10,7 +10,7 @@ from types import MappingProxyType
 
 import pytest
 from conftest import initialize_vault_state_offline
-from fastmcp.exceptions import ValidationError
+from fastmcp import Client
 from starlette.testclient import TestClient
 
 from exomem import commands, semantic_authoring, semantic_index
@@ -68,6 +68,22 @@ def _mcp_tools(mcp) -> dict[str, dict]:
         tool.name: tool.to_mcp_tool().model_dump(mode="json", by_alias=True)
         for tool in asyncio.run(mcp.list_tools())
     }
+
+
+def _hidden(mcp, name: str) -> dict:
+    """The schema of a registered command that no host lists: REST and CLI keep its name."""
+    return asyncio.run(mcp.get_tool(name)).to_mcp_tool().model_dump(mode="json", by_alias=True)
+
+
+def _public(mcp, name: str, arguments: dict) -> dict:
+    """One call to a listed tool through the whole middleware stack, as a host sends it."""
+
+    async def run():
+        async with Client(mcp) as client:
+            result = await client.call_tool(name, arguments, raise_on_error=False)
+            return result.structured_content
+
+    return asyncio.run(run())
 
 
 def _call_bootstrap(mcp) -> dict:
@@ -145,10 +161,7 @@ def test_observe_schema_field_split_renders_one_compact_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
-    tools = _mcp_tools(mcp)
-    content_help = tools["change_observations"]["inputSchema"]["properties"]["operation"]["properties"]["content"][
-        "description"
-    ]
+    content_help = _hidden(mcp, "observe_memory")["inputSchema"]["properties"]["content"]["description"]
     assert "substantive" in content_help
     assert "sibling `category`, `tags`, and `context` fields" in content_help
     assert "- [category] content #tags (context) ^anchor" not in content_help
@@ -210,14 +223,17 @@ def test_mcp_rest_openapi_and_cli_help_inherit_registry_guidance(
     tools = _mcp_tools(mcp)
     compact = "- [category] content #tags (context) ^anchor"
     identity = semantic_authoring.contract_identity()
+    # The listed tools keep to a few lines each; the full contract rides the registered
+    # commands that REST and the CLI name, and `read_instructions` returns it.
     for name in AUTHORING_TOOLS:
-        assert all(identity in tools[public]["description"] for public in listed_names(_command(name), DEFAULT_TOOL_SHAPE))
-    assert compact in tools["create_note"]["description"]
-    assert semantic_authoring.LINK_NAMED_IDENTITIES_GUIDANCE in tools["create_note"][
-        "inputSchema"
-    ]["properties"]["content"]["description"]
-    assert "transitions to live" in tools["edit_note"]["description"]
-    assert "same semantic precommit contract" in tools["change_files"]["description"]
+        assert identity in _hidden(mcp, name)["description"]
+        assert listed_names(_command(name), DEFAULT_TOOL_SHAPE)
+    assert compact in _hidden(mcp, "remember")["description"]
+    content_help = tools["create_note"]["inputSchema"]["properties"]["content"]["description"]
+    assert "## Observations" in content_help
+    assert "[[Title]]" in content_help
+    assert "transitions to live" in _hidden(mcp, "edit_memory")["description"]
+    assert "same semantic precommit contract" in _hidden(mcp, "manage_memory_file")["description"]
 
     client = TestClient(mcp.http_app())
     openapi = client.get(
@@ -250,7 +266,8 @@ def test_govern_memory_is_tier_two_on_mcp_rest_and_cli(
     assert command.cli_writes is True
     assert {"mcp", "rest", "cli"} <= set(command.surfaces)
     assert command.name in commands.DESTRUCTIVE_OPS
-    assert _mcp_tools(mcp)["change_governance"]["annotations"]["destructiveHint"] is True
+    assert _hidden(mcp, "govern_memory")["annotations"]["destructiveHint"] is True
+    assert _mcp_tools(mcp)["manage_memory"]["annotations"]["destructiveHint"] is True
 
     client = TestClient(mcp.http_app())
     response = client.post(
@@ -278,24 +295,20 @@ def test_govern_memory_response_detail_default_is_command_scoped(
     assert remember.response_detail == "compact"
     assert "full (default)" in _param(govern_memory, "response_detail").help
     assert "compact (default)" in _param(remember, "response_detail").help
-    tools = _mcp_tools(mcp)
-    assert tools["change_governance"]["inputSchema"]["properties"]["response_detail"][
-        "default"
-    ] == "full"
-    assert tools["create_note"]["inputSchema"]["properties"]["response_detail"][
-        "default"
-    ] == "compact"
+    assert _hidden(mcp, "govern_memory")["inputSchema"]["properties"]["response_detail"]["default"] == "full"
+    assert _hidden(mcp, "remember")["inputSchema"]["properties"]["response_detail"]["default"] == "compact"
+    # A listed write tool takes the same two detail levels; the grouped default above is what an omitted one gets.
+    assert _mcp_tools(mcp)["create_note"]["inputSchema"]["properties"]["detail"]["enum"] == ["compact", "full"]
 
 
 def test_govern_memory_schema_exposes_closed_session_action_selector(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
-    schema = _mcp_tools(mcp)["manage_authorization_session"]["inputSchema"]
-    variants = schema["properties"]["operation"]["oneOf"]
-    assert {variant["properties"]["kind"]["const"] for variant in variants} == {
-        "open", "status", "rotate", "close",
-    }
+    schema = _mcp_tools(mcp)["manage_memory"]["inputSchema"]
+    assert {"session.open", "session.status", "session.rotate", "session.close"} <= set(
+        schema["properties"]["operation"]["enum"]
+    )
     for caller_identity in (
         "principal",
         "principal_scope",
@@ -440,72 +453,46 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
     assert (tmp_path / "empty-vault" / committed["diagnostics"]["operational"]["path"]).exists()
 
 
-def test_mcp_remember_carries_neighbour_domain_decision(
+def test_mcp_create_note_carries_neighbour_domain_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mcp = _build_server(tmp_path, monkeypatch)
-    decision_schema = _mcp_tools(mcp)["create_note"]["inputSchema"]["properties"][
-        "vocabulary_decision"
-    ]
-    decision_object = decision_schema
+    decision_object = _mcp_tools(mcp)["create_note"]["inputSchema"]["properties"]["vocabulary_decision"]
     assert decision_object["additionalProperties"] is False
-    assert set(decision_object["required"]) == {"evidence_fingerprint", "outcome", "canonical"}
+    assert set(decision_object["required"]) == {"evidence_fingerprint", "outcome"}
     assert decision_object["properties"]["outcome"]["enum"] == ["reuse", "create", "defer"]
     base = {
         "title": "MCP prepared experiment",
         "content": "# MCP prepared experiment\n\n## Hypothesis\n\nA bounded trial.\n",
-        "note_type": "experiment",
-        "domain": "wealth",
-        "started": "2026-05-18",
-        "duration": "one day",
-        "status": "draft",
-        "validate_only": True,
+        "type": "experiment",
+        "fields": {"domain": "wealth", "started": "2026-05-18", "duration": "one day", "status": "draft"},
+        "preview": True,
     }
-    prepared = _call_tool(mcp, "remember", base)
+    prepared = _public(mcp, "create_note", base)
 
     assert prepared["mutated"] is False
     assert "destination" not in prepared
-    decided = _call_tool(
+    fingerprint = prepared["vocabulary_preparation"]["evidence_fingerprint"]
+    decided = _public(
         mcp,
-        "remember",
-        {
-            **base,
-            "vocabulary_decision": {
-                "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
-                "outcome": "create",
-                "canonical": "wealth",
-            },
-        },
+        "create_note",
+        {**base, "vocabulary_decision": {"evidence_fingerprint": fingerprint, "outcome": "create", "canonical": "wealth"}},
     )
 
     assert decided["vocabulary_resolution"]["canonical"] == "wealth"
-    with pytest.raises(ValidationError, match="reuse.*create.*defer"):
-        _call_tool(
-            mcp,
-            "remember",
-            {
-                **base,
-                "vocabulary_decision": {
-                    "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
-                    "outcome": "invalid",
-                    "canonical": "wealth",
-                },
-            },
-        )
-    with pytest.raises(ValidationError, match="extra"):
-        _call_tool(
-            mcp,
-            "remember",
-            {
-                **base,
-                "vocabulary_decision": {
-                    "evidence_fingerprint": prepared["vocabulary_preparation"]["evidence_fingerprint"],
-                    "outcome": "create",
-                    "canonical": "wealth",
-                    "extra": "refuse",
-                },
-            },
-        )
+    invalid = _public(
+        mcp,
+        "create_note",
+        {**base, "vocabulary_decision": {"evidence_fingerprint": fingerprint, "outcome": "invalid", "canonical": "wealth"}},
+    )
+    assert invalid["error"]["code"] == "INVALID_ARGUMENT"
+    assert "reuse" in invalid["error"]["message"] and "defer" in invalid["error"]["message"]
+    extra = _public(
+        mcp,
+        "create_note",
+        {**base, "vocabulary_decision": {"evidence_fingerprint": fingerprint, "outcome": "create", "extra": "refuse"}},
+    )
+    assert extra["error"]["code"] == "INVALID_ARGUMENT"
 
 
 def test_missing_unit_failure_envelope_matches_mcp_rest_and_cli_json(
@@ -687,10 +674,10 @@ def test_the_server_tells_every_client_to_activate_context_first(
 
     assert "recall_context" in instructions
     assert "verbatim" in instructions
-    assert "bootstrap" in instructions and "first" in instructions
+    assert "read_instructions" in instructions and "first" in instructions
     assert "Named tools belong to this server" in instructions
     assert "When recall is warranted" in instructions
     tools = asyncio.run(mcp.list_tools())
-    assert "recall_context" in {tool.name for tool in tools}
+    assert {"recall_context", "read_instructions"} <= {tool.name for tool in tools}
     # Short enough that a client which truncates server instructions keeps it.
     assert len(instructions) <= 900

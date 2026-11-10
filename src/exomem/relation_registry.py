@@ -64,6 +64,20 @@ RELATION_BEHAVIOURS = frozenset(
         "later_than_target",
     )
 )
+
+
+def has_behaviour(behaviours: Container[str], behaviour: str) -> bool:
+    """Whether `behaviours`, what one relation does, holds `behaviour`.
+
+    A name outside `RELATION_BEHAVIOURS` is a defect in the caller, so it raises instead of
+    reading false for every relation. A reader that keeps a relation's behaviours uses this and a
+    reader that holds the registry uses `RelationRegistry.has`; both share this one guard.
+    """
+    if behaviour not in RELATION_BEHAVIOURS:
+        raise ValueError(f"{behaviour!r} is not a relation behaviour")
+    return behaviour in behaviours
+
+
 #: How a frontmatter field relates its page to the relation's other end: `forward` makes the page
 #: the edge's source, `reverse` its target.
 FRONTMATTER_DIRECTIONS = frozenset(  # nosemgrep: ep-word-set -- closed set of the binding schema
@@ -99,7 +113,7 @@ _DEFINITION_FIELDS = {
 _CORE_FIELDS = frozenset(
     {
         "description", "family", "direction", "inverse", "origins", "presentation_role", "generic",
-        "endpoints", "behaviours", "frontmatter_fields",
+        "endpoints", "behaviours", "frontmatter_fields", "teach",
     }
 )
 #: Core-only fields. An extension inherits their meaning through its parent and cannot set them.
@@ -145,6 +159,8 @@ class RelationDefinition:
     behaviours: frozenset[str] = frozenset()
     # Page frontmatter fields that state this relation, as (field, direction) pairs. Core only.
     frontmatter_fields: tuple[tuple[str, str], ...] = ()
+    # The one line bootstrap teaches for this relation. Core only, so it is never in `as_dict`.
+    teach: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -212,6 +228,24 @@ class RelationRegistry:
         return frozenset(item.family for item in (*self.core.values(), *self.extensions.values()))
 
     @cached_property
+    def core_families(self) -> frozenset[str]:
+        """The families of the shipped relations: the only families a vault can name, because an
+        extension inherits its parent's family."""
+        return frozenset(item.family for item in self.core.values())
+
+    def family_of(self, key: str) -> str | None:
+        """The family of the relation `key`: a core key's own, an extension's parent's. Never read
+        through a saved family, so a grandfathered extension whose family differs from its
+        parent's follows the parent, as `behaviours_of` does. An unregistered key has none."""
+        definition = self.definition(key)
+        if definition is None:
+            return None
+        if definition.core:
+            return definition.family
+        parent = self.core.get(definition.parent or "")
+        return parent.family if parent is not None else None
+
+    @cached_property
     def generic_key(self) -> str:
         """The key of the one generic relation; the core pack guarantees exactly one."""
         return next(key for key, definition in self.core.items() if definition.generic)
@@ -260,13 +294,15 @@ class RelationRegistry:
     def has(self, key: str, behaviour: str) -> bool:
         """Whether edges of `key` have `behaviour`. A name outside `RELATION_BEHAVIOURS` is a
         defect in the caller, so it raises instead of reading false for every key."""
-        if behaviour not in RELATION_BEHAVIOURS:
-            raise ValueError(f"{behaviour!r} is not a relation behaviour")
-        return behaviour in self.behaviours_of(key)
+        return has_behaviour(self.behaviours_of(key), behaviour)
 
     def behaviours_of_label(self, label: str) -> frozenset[str]:
         """`behaviours_of` for a relation as an author wrote it: a key, an alias or an extension."""
         return self.behaviours_of(self.resolve(label).canonical or "")
+
+    def has_label(self, label: str, behaviour: str) -> bool:
+        """`has` for a relation as an author wrote it: a key, an alias or an extension."""
+        return has_behaviour(self.behaviours_of_label(label), behaviour)
 
     def keys_with(self, behaviour: str) -> frozenset[str]:
         """Every core key and every extension, whatever its status, that has `behaviour`.
@@ -487,6 +523,7 @@ def _core_from_pack(text: str) -> RelationRegistry:
             core=True,
             behaviours=behaviours,
             frontmatter_fields=frontmatter_fields,
+            teach=vocabulary_registry.pack_teach("relations", key, value.get("teach")),
         )
     generic = sorted(key for key, definition in definitions.items() if definition.generic)
     if len(generic) != 1:

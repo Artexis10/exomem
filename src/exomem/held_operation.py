@@ -17,7 +17,7 @@ from typing import Any
 # `cli_ops` imports the operation entries, which read the names below, so this module takes
 # `OpError` from it only inside the two operations.
 
-#: The tools that carry these two operations. A later rename of either tool is one edit here.
+#: The entries-table tools that carry these two operations. The agent text below names the public doors instead.
 REVIEW_TOOL = "read_review"
 REPAIR_TOOL = "repair_memory"
 LIST_MODE = "held"
@@ -30,7 +30,7 @@ _MAX_LIMIT = 100
 _REQUIRED = {  # nosemgrep: ep-word-set -- the closed argument names of held-resolve
     "path": "Pass the held item's path, as the held list returns it.",
     "choice": "Pass choice keep-mine or keep-store.",
-    "item_version": f"Read the item with {REVIEW_TOOL} kind {LIST_MODE} and pass its item_version.",
+    "item_version": "Read the item with inspect_memory operation review.held and pass its item_version.",
     "why": "Say in `why` what the person or owner asked for.",
 }
 #: The fields of `held-resolve`: each is required, and the operation entries read them from here.
@@ -162,7 +162,7 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
         "total": len(visible),
         "truncated": len(shown) < len(visible),
         "resolve_with": (
-            f"{REPAIR_TOOL} kind {RESOLVE_MODE} with path, one of the item's choices, "
+            "manage_memory operation maintenance.held_resolve with path, one of the item's choices, "
             "the item's item_version and why. "
             f"{held.KEEP_STORE} saves the person's file first, so no bytes are lost."
         ),

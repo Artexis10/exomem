@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
 from starlette.testclient import TestClient
 
 from exomem import commands, find, server
@@ -104,7 +105,7 @@ def test_read_only_action_classification() -> None:
 def test_scoped_count_survives_the_default_mcp_reply(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     mcp = server.build_server(require_auth=False)
-    result = asyncio.run(mcp.call_tool("read_import", {"operation": {"kind": "status", "path": "."}}))
+    result = asyncio.run(mcp.call_tool(*public_call("read_import", {"operation": {"kind": "status", "path": "."}})))
     assert result.structured_content["adopted_files"] == 0
     assert result.structured_content["complete"] is True
 

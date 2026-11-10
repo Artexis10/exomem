@@ -24,8 +24,8 @@ COMPILED_DESTINATIONS = {
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    10,
-    "sha256:6d3a3c179884e0f1ca899363e04286375dcdccf9870c8022db25fee91d1cf955",
+    11,
+    "sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -72,7 +72,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 10
+    assert contract["version"] == 11
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -416,7 +416,7 @@ def test_concise_and_expanded_renderers_are_byte_stable_and_complete() -> None:
         "`empty_rich_unit`",
         "`create_note`",
         "`supersede_note`",
-        "`change_observations`",
+        "`add_observation/edit_note`",
         "Tier 2",
         "independent obligations",
     ):

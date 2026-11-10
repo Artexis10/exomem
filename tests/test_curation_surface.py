@@ -76,11 +76,11 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
     mcp = server.build_server(require_auth=False)
 
     tools = asyncio.run(mcp.list_tools())
-    curation_kinds = {
-        branch["properties"]["kind"]["const"]
-        for tool in tools if tool.name in {"check_memory", "repair_memory"}
-        for branch in tool.to_mcp_tool().input_schema["properties"]["operation"]["oneOf"]
-        if branch["properties"]["kind"]["const"].startswith("curation-")
+    curation_operations = {
+        operation
+        for tool in tools if tool.name in {"inspect_memory", "manage_memory"}
+        for operation in tool.to_mcp_tool().input_schema["properties"]["operation"]["enum"]
+        if operation.startswith("curation.")
     }
     openapi_property = (
         TestClient(mcp.http_app())
@@ -123,7 +123,7 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
         )
 
     # Remote clients get the whole curation workflow, as local ones do.
-    assert curation_kinds == {f"curation-{action}" for action in expected}
+    assert curation_operations == {f"curation.{action.replace('-', '_')}" for action in expected}
     assert enum_values(openapi_property) == expected
     assert parsed.curation_action == "status"
 

@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    capabilities,
     commands,
     lexstore,
+    public_surface,
     relation_registry,
     semantic_units,
     working_set_index,
@@ -360,8 +362,18 @@ def test_an_edit_to_a_claims_prose_keeps_its_asserter_and_modality(tmp_path: Pat
     assert "99.9% uptime" in text
 
 
-def test_observe_memory_refuses_a_new_belief_it_cannot_give_a_holder(tmp_path: Path) -> None:
-    """Catches the writer adding a `## Belief` that names no holder, which reads as nobody's."""
+@pytest.mark.parametrize(
+    ("tool_shape", "edits", "creates"),
+    [("grouped", "edit_memory", "remember"), ("public", "edit_note", "create_note")],
+)
+def test_observe_memory_refuses_a_new_belief_it_cannot_give_a_holder(
+    tmp_path: Path, tool_shape: str, edits: str, creates: str
+) -> None:
+    """Catches the writer adding a `## Belief` that names no holder, which reads as nobody's.
+
+    The refusal sends the agent to the tools its own surface lists, so the public surface
+    reads `edit_note` and `create_note` and no tool it cannot call.
+    """
     page = tmp_path / PATH
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
@@ -372,16 +384,26 @@ def test_observe_memory_refuses_a_new_belief_it_cannot_give_a_holder(tmp_path: P
     )
     before = page.read_bytes()
 
-    with pytest.raises(ValueError, match="UNSUPPORTED_SEMANTIC_KIND") as refused:
+    surface = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, tool_shape=tool_shape,
+        product_commands=public_surface.public_surface().listed_names(commands.PRODUCT_COMMANDS)
+        if tool_shape == "public" else (),
+    )
+    with capabilities.active_surface(surface), pytest.raises(
+        ValueError, match="UNSUPPORTED_SEMANTIC_KIND"
+    ) as refused:
         commands.op_observe_memory(
             tmp_path, path=PATH, operation="add", category="fact", kind="belief",
             content="The release will slip a week.",
             expected_hash=vault_module.content_hash(before.decode("utf-8")),
         )
 
-    remediation = str(refused.value).split("Remediation: ", 1)[1]
-    for named in ("## Belief", "credence_holder", "edit_memory"):
+    message = str(refused.value)
+    remediation = message.split("Remediation: ", 1)[1]
+    for named in ("## Belief", "credence_holder", edits, creates):
         assert named in remediation
+    if tool_shape == "public":
+        assert "observe_memory" not in message
     assert page.read_bytes() == before
 
 

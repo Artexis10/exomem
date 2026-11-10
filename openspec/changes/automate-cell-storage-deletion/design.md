@@ -42,7 +42,7 @@ Provider behaviour in this document marked † is not yet confirmed on the provi
 
 ### D1. Substrate signs a deletion grant
 
-When Substrate writes `desired_state = 'deleted'` for a cell, it signs a deletion grant with its grant key. It stores the grant in a new column, `deletion_grant`, of `exomem_cloud_cells`. The database grants `cellctl`'s role read access to that column and no write access. Substrate's existing grant signer returns nothing while the grant key is absent, so nothing purges before the key exists.
+When Substrate writes `desired_state = 'deleted'` for a cell, it signs a deletion grant with its grant key. The grant key is a dedicated Ed25519 key, `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`, separate from the key that signs operation grants. It stores the grant in a new column, `deletion_grant`, of `exomem_cloud_cells`. The database grants `cellctl`'s role read access to that column and no write access. Substrate's grant signer returns nothing while the grant key is absent, so nothing purges before the key exists.
 
 `contain-cloud-controller-compromise` D9 calls this object a signed deletion record. This change calls it the deletion grant, because `make-cloud-cells-operator-resistant` already uses "deletion record" for the record that states `keys_expire_at`.
 
@@ -53,7 +53,7 @@ The grant is an Ed25519 JWT with exactly these claims:
 - `purge_after`: an integer time, `iat` plus G.
 
 **Rules.**
-- G lives once, in Substrate's configuration. Its value is 7 days.
+- G lives once, in Substrate's code, as the constant `CELL_DELETION_GRACE_SECONDS`. Its value is 7 days. A change to G is a Substrate release.
 - The grant carries no `exp`. A deletion is final, so a grant stays true, and a replayed grant finds nothing left to purge. A grant therefore stays valid until the deletion has finished, through a hold or an executor outage.
 - An executor refuses a grant whose `purge_after` is less than `iat` plus one day, so a bad configuration cannot remove the grace.
 - An executor takes the cell ID only from the verified claims.
@@ -130,7 +130,7 @@ The watcher runs in CI, outside the cluster, with its own list keys and its own 
 
 - **The deletion set.** A new Substrate endpoint returns every cell that Substrate deleted with a grant. For each cell it returns `iat`, `purge_after` and the stop time. The endpoint accepts only the watcher's receiver capability. The watcher never takes the set from `cellctl`.
 - **The stop time.** `cellctl` reports a cell `deleted` only after it removes the namespace and the edge drops the cell (`add-cloud-media-store` D9). Substrate records the first time that it reads that report. Only the early-hide check uses it.
-- **The watch window.** The watcher computes each cell's window from the cell's `purge_after` and the N and R values in its pinned set. The window runs from `iat` to one day after the version bound. Substrate holds no window value, so the rule lives in one place.
+- **The watch window.** The watcher computes each cell's window from the cell's `purge_after` and the N and R values in its pinned set. The window runs from `iat` to one day after the version bound, and stays open while a current file or a key for the prefix remains. Substrate holds no window value, so the rule lives in one place.
 - **A list key on the backup bucket.** Terraform adds a watcher key with only `listFiles` on the backup bucket of the cell-data account. With it and the existing media list key, the watcher lists each watched cell's prefix in both buckets.
 - **Values.** The watcher reads R and N from its pinned set, which already holds the backup bucket's default retention and the media bucket's lifecycle rule.
 
@@ -154,17 +154,19 @@ The watcher runs in CI, outside the cluster, with its own list keys and its own 
 `CELL_DELETION_ANOMALY:<cell_id>` fires while any of these holds:
 - a current file or a key for the prefix remains after `purge_after` plus 1 day;
 - an `upload` or `start` entry remains after the version bound;
+- the cell has no stop time at `purge_after`, so a withheld report from `cellctl` is visible;
 - a hide marker under the prefix carries a time inside the early-hide window.
 
-**The version bound** is `purge_after` plus 1 day, plus max(N, R + 1) days, plus 2 days.
+**The version bound** starts at the later of `purge_after` plus 1 day and the newest hide marker under the prefix. It adds max(N, R + 1) days, plus 2 days.
 - A hide may land up to one day after `purge_after` without an anomaly.
 - The media bucket deletes a hidden version N days after its hide.
 - A hidden backup version's lock ends at most R plus 1 days after its hide (D2).
 - The last 2 days cover the provider's delay.
+- A hold or an edge outage can delay the hides past `purge_after`. The bound then starts at the newest hide, so the delayed purge is watched to its end.
 
-**The early-hide window** opens at the later of `iat` and the stop time, plus the skew margin. It closes the skew margin before `purge_after`. A cell without a stop time has no window yet. The live cell's own hides before its stop fall outside the window, such as a restic prune or a media collection already in flight. So do hides that an executor's clock skew moves across `purge_after`.
+**The early-hide window** opens at the later of `iat` and the stop time, plus the skew margin. It closes the skew margin before `purge_after`. A cell without a stop time has no window yet, and gets ANOMALY at `purge_after`. The live cell's own hides before its stop fall outside the window, such as a restic prune or a media collection already in flight. So do hides that an executor's clock skew moves across `purge_after`.
 
-**Leaving the window.** At the end of a cell's window, the watcher stops listing the cell and sends nothing more for it. A cell that still holds an entry then already has ANOMALY firing, because the version bound passed a day earlier. No resolution arrives, so the receiver keeps that alert until the operator resolves it there.
+**Leaving the window.** At the end of a cell's window, the watcher sends nothing more for the cell. The watcher keeps no state, so it still lists the cell on each run to see whether a current file or a key keeps the window open. A cell that still holds an entry then already has ANOMALY firing, because the version bound passed a day earlier. No resolution arrives, so the receiver keeps that alert until the operator resolves it there.
 
 † An expired key does or does not still appear in the provider's key listing. Either way, the custodian deletes a stale purge key before its next pass (D2).
 
@@ -228,7 +230,7 @@ This path ends when the last such cell migrates (`contain-cloud-controller-compr
 - **A compromised Substrate can delete any cell after the grace, and this change cannot detect it.** Substrate holds the grant key. Every alert also goes to Substrate's own receiver, so Substrate can drop the alerts. `PURGE_KEY_UNEXPECTED` samples hourly a key that lives for seconds, and a cell without media trips no burst alert. This is a stated limit.
 - **A compromised custodian or node in the cell-data account** can already mint any key there (`contain-cloud-controller-compromise` D9). The purge adds no capability.
 - **A compromised edge** can already hide any name in the media bucket (`collect-released-media` D4). The list key adds only names and sizes, which the edge already sees as it writes them.
-- **`cellctl` sets when the early-hide check starts.** A compromised `cellctl` can withhold its report that a cell is deleted, and the check then never opens for that cell. `cellctl` cannot hide a file, and the stall conditions do not use the stop time.
+- **`cellctl` sets when the early-hide check starts.** A compromised `cellctl` can withhold its report that a cell is deleted, and the check then never opens for that cell. The watcher fires ANOMALY for such a cell at `purge_after`. `cellctl` cannot hide a file, and the stall conditions do not use the stop time.
 - **Edge downtime delays the media purge.** With the edge off, no media pass runs. The watcher's anomaly alert reports the stall after `purge_after` plus 1 day. The pass resumes when the edge returns, because the grant stays valid (D1).
 - **The version bound allows 2 days of provider delay.** Task 1 measures that delay. If it is longer, raise the margin before the bound fires falsely.
 - **A deleted cell's backups stay about G plus R plus 1 days, plus the provider's delay.** With G = 7 and R = 30, that is about 38 days plus the delay. The compliance lock requires this.
@@ -242,7 +244,7 @@ This path ends when the last such cell migrates (`contain-cloud-controller-compr
 ## Rollout
 
 1. Run task 1 on a disposable bucket, and record each result in this document.
-2. Confirm that Substrate's grant key is live and the media bucket's lifecycle rule is applied (`collect-released-media` rollout step 5).
+2. Confirm that Substrate's grant key (`EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`) is live and the media bucket's lifecycle rule is applied (`collect-released-media` rollout step 5).
 3. Apply the two Terraform keys from a saved plan.
 4. After its owner agrees, update `KEY_WATCHER_PINNED_SET` by read-modify-write of its live value.
 5. Add the watcher's backup list key and the endpoint address to the watcher workflow's secrets.
@@ -257,13 +259,13 @@ Expected result: the operator receives each alert of the rehearsal cell, and bot
 
 ## Open values
 
-- **Deletion grace G.** 7 days, the value that the current procedure uses. It lives in Substrate's configuration.
+- **Deletion grace G.** 7 days, the value that the current procedure uses. It lives in Substrate's code, as the constant `CELL_DELETION_GRACE_SECONDS`.
 - **Media grace N.** 14 days, decided on 2026-11-09.
 - **Backup retention R.** The production value lives in the deployment's private variables. The default is 30 days.
-- **Skew margin.** Proposed one hour. It covers clock skew between an executor and the provider, and the requests in flight when a cell stops.
+- **Skew margin.** Proposed one hour. The watcher's pinned set holds it. It covers clock skew between an executor and the provider, and the requests in flight when a cell stops.
 - **Purge key validity.** Proposed one hour. It must cover one hide pass of the largest cell, and a rerun replaces an expired key.
 - **Sandbox authority for task 1.** The operator authorizes the disposable bucket and its sandbox credentials.
-- **Substrate's grant key.** Whether it is live (`contain-cloud-controller-compromise` task 3.3). Until it is, nothing purges, and the manual path stays.
+- **Substrate's grant key.** Whether `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY` is live. It is not the operation-grant key of `contain-cloud-controller-compromise` task 3.3. Until it is, nothing purges, and the manual path stays.
 - **Cell counts.** The number of live cells with data in the legacy backup bucket, and the number of deleted cells that await cleanup.
 - **Lock extender.** Whether it is live (`lock-cloud-backups-against-deletion` task 2.3). The version bound assumes that locks end at most R plus 1 days after a hide.
 - **The pinned set.** The read-modify-write of `KEY_WATCHER_PINNED_SET` for the edge list key, the watcher's backup list key, the purge shape and the deletion watch. `contain-cloud-controller-compromise` owns the watcher's pinned set, so its owner agrees first.

@@ -31,8 +31,7 @@ param(
     [string]$PackageVersion = "",
     [ValidateSet("auto", "always", "never")]
     [string]$CudaTorch = "auto",
-    [switch]$ResumeStoppedTransition,
-    [switch]$LegacyMcpCompat
+    [switch]$ResumeStoppedTransition
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,7 +59,6 @@ if (-not $isAdmin) {
     if ($Release) { $relaunchArgs += "-Release" }
     if ($ServiceRoot) { $relaunchArgs += @("-ServiceRoot", "`"$ServiceRoot`"") }
     if ($PackageVersion) { $relaunchArgs += @("-PackageVersion", "`"$PackageVersion`"") }
-    if ($LegacyMcpCompat) { $relaunchArgs += "-LegacyMcpCompat" }
     if ($ResumeStoppedTransition) { $relaunchArgs += "-ResumeStoppedTransition" }
     Start-Process -FilePath $hostExe -Verb RunAs -ArgumentList $relaunchArgs
     exit
@@ -162,9 +160,6 @@ function Read-DotenvMap {
             }
             $map[$name] = $value
         }
-    }
-    if ($LegacyMcpCompat) {
-        $map["EXOMEM_MCP_LEGACY_COMPAT"] = "1"
     }
     return $map
 }
@@ -529,7 +524,7 @@ if (Test-Path $connectorContractPath) {
 if ($connectorPending) {
     Write-Warning "CHATGPT_PLUGIN_REFRESH_REQUIRED: service is running, but connector rollout is incomplete."
     Write-Host "  Confirm /health/ready.mcp_tool_surface_sha256 matches pending_tool_surface_sha256."
-    Write-Host "  Refresh or recreate the ChatGPT Personal Plugin, then invoke bootstrap and ask_memory from a fresh conversation."
+    Write-Host "  Refresh or recreate the ChatGPT Personal Plugin, then invoke read_instructions and search_memory from a fresh conversation."
     Write-Host "  Promote the pending digest to registered_tool_surface_sha256 only after that smoke test passes."
     Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}; connector promotion remains pending."
 } else {

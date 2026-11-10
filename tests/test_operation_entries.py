@@ -15,6 +15,7 @@ import pytest
 from exomem import commands, operation_entries
 from exomem.cli_ops import OpError
 from exomem.command_surface import UnresolvedInvocation, resolve_invocation
+from exomem.public_surface import public_surface
 
 CONVERTED = tuple(command for command in commands.PRODUCT_COMMANDS
                   if command.name in {"record_memory", "plan_memory"})
@@ -28,10 +29,11 @@ VARIANTS = [
 # Either/or rules that a variant's required fields do not state: the leaf checks them.
 _LEAF_EITHER_OR = {
     ("record_memory", "append"): {"item": {}},
-    ("record_memory", "update"): {"changes": {}},
+    ("record_memory", "update"): {"changes": {}, "item_id": "x"},
     ("record_memory", "validate"): {"manifest_path": "Records/x/_collection.md"},
     ("plan_memory", "validate"): {"manifest_path": "Plans/x/_collection.md"},
-    ("plan_memory", "update"): {"changes": {}},
+    ("plan_memory", "update"): {"changes": {}, "item_id": "x"},
+    ("plan_memory", "triage"): {"item_id": "x", "transition": {"status": "done"}},
 }
 
 # Required fields whose published type is not a string, with a value of that type.
@@ -69,22 +71,13 @@ def test_every_variant_resolves_to_its_grouped_command_and_flat_arguments(
 def test_a_spelled_call_resolves_back_to_the_grouped_call_it_spells(
     command, rendering, variant
 ) -> None:
-    """Guidance spells calls with `spell_call` and the server reads them with `resolve_invocation`.
-
-    A write tool's `response_detail` sits beside `operation`, as the server reads it; inside
-    `operation` the server would refuse it as a field of no operation.
-    """
+    """Guidance spells calls with `spell_call`; the public surface reads each spelling back to the same grouped call."""
     grouped = {"action": variant.action, **_fields(command, variant)}
-    if "response_detail" in rendering.tool_arguments:
-        grouped["response_detail"] = "full"
 
-    tool, spelled = operation_entries.spell_call(command.name, grouped, "nested")
-    resolved, flat = resolve_invocation(tool, spelled, commands.PRODUCT_COMMANDS)
+    tool, spelled = operation_entries.spell_call(command.name, grouped, "public")
 
-    assert tool == rendering.name
-    assert (resolved.name, flat) == (command.name, grouped)
-    assert operation_entries.unspell_call(tool, spelled, "nested") == (command.name, grouped)
-    assert "response_detail" not in spelled["operation"]
+    assert tool in public_surface().listed_names(commands.PRODUCT_COMMANDS)
+    assert operation_entries.unspell_call(tool, spelled, "public") == (command.name, grouped)
 
 
 def test_a_grouped_spelling_resolves_to_itself_with_its_arguments_untouched() -> None:
