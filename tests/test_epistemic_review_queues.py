@@ -307,6 +307,9 @@ def test_default_attention_union_is_pinned() -> None:
     `collection_view_corrections` joins last by the move-structured-collections-to-sqlite
     `attention-queue` delta: a held view correction is the owner's own edit waiting
     on the owner, which neither expires nor is inferred.
+
+    `original_fixity` joins after it by the verify-stored-originals contract: a
+    missing or damaged original is what every note citing it rests on.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -322,6 +325,7 @@ def test_default_attention_union_is_pinned() -> None:
         "artifact_role_promotion",
         "transient_state_review",
         "collection_view_corrections",
+        "original_fixity",
     )
 
 

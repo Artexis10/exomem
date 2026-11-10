@@ -42,6 +42,7 @@ from .. import (
 )
 from ..kbdir import kb_dirname
 from ..restore_journal import CONTINUITY_EVIDENCE, MEMBERSHIP_EVIDENCE
+from ..vault_store import targets as store_targets
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -5434,6 +5435,14 @@ def _actual_backfill_value(vault_root: Path, companion_path: str) -> dict[str, A
 
 def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
+    # The companion is `<artifact>.md`, a page, and this commit publishes it to disk after its
+    # journal arms: a refusal after that point would leave the journal open, so it refuses first.
+    store_targets.refuse_in_store_mode(
+        vault_root,
+        "companion_backfill",
+        "it publishes the companion page to disk, and a store-mode vault changes a page only "
+        "through a store commit",
+    )
     proposal_id = str(kwargs.get("proposal_id") or "")
     if not proposal_id:
         raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")

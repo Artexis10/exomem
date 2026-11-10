@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: df1dacf187a57774460841f2c8e4e2b80639b9315b2a9eae1e3754902ed2c5fc
+  skill_contract: ad24cfbf2206f66621e7e56644be18e827bfb21a375c57d7a2126881b0998bbe
   version: "0.32.0"
 ---
 
@@ -331,11 +331,14 @@ Every new, replaced, or activated compiled note needs at least one valid, non-em
 ## Durable references
 
 New governed pages and evidence sidecars carry an immutable `exomem_id`, and
-write responses return both a current `path` and a canonical
-`exomem://memory/<uuid>` reference. In normal user-facing prose, show the note
-title by default and do not expose the raw canonical ref by default. Add the
-current vault-relative path for clarity or disambiguation; if the title is
-missing or unusable, use the path or file name as the visible fallback.
+write responses name the page by its `title` and a short `id`, and search hits
+carry the same `title` and `id` with a canonical `exomem://memory/<uuid>` reference
+(`detail="full"` adds the vault path). Every tool that takes a
+page path also takes a title or that `id`. In normal user-facing prose, show the
+note title by default and do not expose the raw canonical ref by default. Add the
+current vault-relative path (`read_memory` returns it, and `response_detail="full"` shows
+it under `diagnostics`) for clarity or disambiguation; if the title is missing or
+unusable, use the path or file name as the visible fallback.
 
 Keep the canonical ref for tool arguments, durable machine state, and
 machine-readable automation so identity survives moves and renames. Show the

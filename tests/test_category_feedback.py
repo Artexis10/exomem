@@ -521,8 +521,8 @@ def test_alias_feedback_is_identical_across_mcp_rest_and_cli(
         "draft_hash": mcp_result["draft_hash"],
         "draft_token": mcp_result["draft_token"],
     }
-    committed = _mcp_call(mcp, "remember", commit_args)
+    committed = _mcp_call(mcp, "remember", {**commit_args, "response_detail": "full"})
     assert committed["user_summary"].startswith("Saved")
-    written = (vault / committed["path"]).read_text(encoding="utf-8")
+    written = (vault / committed["diagnostics"]["operational"]["path"]).read_text(encoding="utf-8")
     assert "[constraints]" in written
     assert "[constraint]" not in written

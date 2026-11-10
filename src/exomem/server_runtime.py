@@ -156,6 +156,7 @@ class LocalRuntimeActivation:
         self.matrix_warmup: threading.Thread | None = None
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
+        self.original_fixity: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -293,6 +294,7 @@ class LocalRuntimeActivation:
             ("graph drain", self._start_graph_drain),
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
+            ("original fixity", self._start_original_fixity),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -381,6 +383,10 @@ class LocalRuntimeActivation:
             from . import graph_drain
 
             graph_drain.stop(worker=self.graph_drain)
+        if self.original_fixity is not None:
+            from . import original_fixity
+
+            original_fixity.stop(worker=self.original_fixity)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -452,6 +458,14 @@ class LocalRuntimeActivation:
 
     def _start_graph_drain(self, vault_root: Path) -> None:
         self.graph_drain = _start_graph_drain(vault_root)
+
+    def _start_original_fixity(self, vault_root: Path) -> None:
+        """Its own thread, not the media worker's: `EXOMEM_DISABLE_MEDIA_EXTRACTION`
+        removes that worker, and originals still need verifying. `_start_component`
+        logs a failed start and the transport carries on."""
+        from . import original_fixity
+
+        self.original_fixity = original_fixity.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
         """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""

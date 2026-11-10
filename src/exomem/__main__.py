@@ -1674,6 +1674,7 @@ def _status_main(argv: list[str]) -> int:
         print(f"  config: {status['config_path']}")
         print(f"  models: {status['models']}")
         print(f"  media: {status['media']}")
+        print(f"  originals: {status['originals']}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:
@@ -3221,9 +3222,14 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from . import init as init_module
+    from .cli_ops import OpError
 
     vault = Path(args.vault or os.environ.get("EXOMEM_VAULT_PATH") or ".")
-    report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
+    try:
+        report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
+    except OpError as error:
+        print(f"exomem reclaim-schema: {error.message}\n{error.remediation}", file=sys.stderr)
+        return 1
 
     if not report["removed"] and not report["declined"]:
         print(f"Nothing to reclaim: {vault} has no superseded schema copy.")
@@ -3325,12 +3331,16 @@ def _init_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     from . import init as init_module
+    from .cli_ops import OpError
 
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH") or "."
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
         print(f"exomem init: {e}", file=sys.stderr)
+        return 1
+    except OpError as error:
+        print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
     print(f"Initialized {kb_dirname()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")

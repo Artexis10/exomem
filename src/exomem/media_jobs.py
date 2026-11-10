@@ -99,7 +99,8 @@ _RESULT_KINDS = frozenset({"extraction", "failure", "pending"})
 # Typed blocked reasons (the `blocked_reason` column), a closed set this module
 # implements. A row's reason counts only while the row is blocked, and every write
 # that blocks a row sets it.
-#: The engine's software could not load (`extract.ExtractionUnavailable`).
+#: The engine's software could not load (`extract.ExtractionUnavailable`);
+#: `blocked_context` names the top-level module whose import failed, or is empty.
 ENGINE_UNAVAILABLE = "engine_unavailable"
 #: The media waits for an engine the deployment switched off; `blocked_context`
 #: names the engine.
@@ -2875,6 +2876,7 @@ def _read_status_rows(
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     # A retained store from before the column existed has no typed reasons.
     reason = "blocked_reason" if "blocked_reason" in columns else "NULL AS blocked_reason"
+    context = "blocked_context" if "blocked_context" in columns else "NULL AS blocked_context"
     reprocess = "reprocess" if "reprocess" in columns else "0 AS reprocess"
     rows = conn.execute(
         f"SELECT state, count(*) AS n, {reason} FROM jobs{selector} GROUP BY state, blocked_reason",
@@ -2893,7 +2895,7 @@ def _read_status_rows(
     ).fetchall()
     jobs = conn.execute(
         f"SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error, {reason}, "
-        f"{reprocess} FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
+        f"{context}, {reprocess} FROM jobs{selector} ORDER BY updated_at DESC, id DESC LIMIT ?",
         (*parameters, STATUS_JOB_LIMIT),
     ).fetchall()
     reconciliation_required_count = sum(
@@ -3277,6 +3279,8 @@ def _status_job(row: Any) -> dict[str, Any]:
         actions[BLOCKED] = OVER_BUDGET_ACTION
     elif reason == HYDRATION_TOO_LARGE:
         actions[BLOCKED] = _hydration_too_large_action()
+    elif reason == ENGINE_UNAVAILABLE:
+        actions[BLOCKED] = media_engines.unavailable_next_action(row["blocked_context"])
     # A stopped reprocess leaves the completed transcript as it was, and a retry would
     # find that transcript complete, so only a new request runs it again.
     reprocess_stopped = (

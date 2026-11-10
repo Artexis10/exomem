@@ -437,7 +437,7 @@ def test_mcp_only_empty_environment_is_sufficient_to_author(
         },
     )
     assert committed["diagnostics"]["operational"]["mutated"] is True
-    assert (tmp_path / "empty-vault" / committed["path"]).exists()
+    assert (tmp_path / "empty-vault" / committed["diagnostics"]["operational"]["path"]).exists()
 
 
 def test_mcp_remember_carries_neighbour_domain_decision(

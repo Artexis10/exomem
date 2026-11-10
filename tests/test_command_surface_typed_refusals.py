@@ -113,7 +113,12 @@ def test_a_refused_observe_commits_when_its_retry_is_followed_as_written(
     def note(title: str, **extra) -> dict:
         source = call(
             "capture_source",
-            {"title": f"{title} source", "source_kind": "session", "content": f"{title} was discussed."},
+            {
+                "title": f"{title} source",
+                "source_kind": "session",
+                "content": f"{title} was discussed.",
+                "response_detail": "full",
+            },
         )
         return call(
             "create_note",
@@ -121,7 +126,8 @@ def test_a_refused_observe_commits_when_its_retry_is_followed_as_written(
                 "title": title,
                 "note_type": "insight",
                 "content": "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n",
-                "sources": [f"{source['path']}#Capture"],
+                "sources": [f"{source['diagnostics']['operational']['path']}#Capture"],
+                "response_detail": "full",
                 **extra,
             },
         )
@@ -132,7 +138,9 @@ def test_a_refused_observe_commits_when_its_retry_is_followed_as_written(
         relation_disposition="reviewed_none",
         relation_review_reason="Nothing in the vault fits the second page.",
     )
-    operation = {"kind": "add", "path": first["path"], "category": "rule", "content": "Opens at nine."}
+    operation = {
+        "kind": "add", "path": first["id"], "category": "rule", "content": "Opens at nine.",
+    }
 
     refused = call("change_observations", {"operation": operation})["error"]
 
@@ -143,7 +151,8 @@ def test_a_refused_observe_commits_when_its_retry_is_followed_as_written(
     followed["operation"]["relation_review_reason"] = "The page stands alone: no other page covers its opening hours."
     result = call(retry["tool"], followed)
     assert "error" not in result, result
-    assert "Opens at nine." in (tmp_path / "vault" / first["path"]).read_text(encoding="utf-8")
+    written = tmp_path / "vault" / first["diagnostics"]["operational"]["path"]
+    assert "Opens at nine." in written.read_text(encoding="utf-8")
 
 
 def test_a_refused_record_append_names_its_fields_and_resumes_the_held_candidate(

@@ -2071,8 +2071,8 @@ def _resolve_reference_wikilink_from_context(
     matches.update(
         candidate.path for candidate in vault.wikilink_candidates(
             context.resolver_candidates_by_key,
-            context.resolver_titles.get(cleaned.lower(), ()),
-            title_key=cleaned.lower(), visible=visible,
+            context.resolver_titles.get(vault.title_key(cleaned), ()),
+            title_key=vault.title_key(cleaned), visible=visible,
         )
     )
     if len(matches) > 1:

@@ -23,6 +23,7 @@ from exomem import (
     extract,
     file_watcher,
     graph_sync,
+    image_codecs,
     index_sync,
     media_jobs,
     media_processing,
@@ -5582,6 +5583,222 @@ def test_supervisor_start_requeues_work_whose_engine_appeared(
         finally:
             worker.stop()
         assert requeued is engine_present
+
+
+def test_a_camera_raw_parked_for_its_codec_returns_only_once_the_codec_is_installed(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OCR being installed is not enough: a DNG needs rawpy, or every start requeues it to fail again."""
+    import importlib.machinery
+    import importlib.util
+    import sys
+    import types
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    pillow = types.ModuleType("PIL")
+    pillow.Image = types.ModuleType("PIL.Image")
+    pillow.__spec__ = importlib.machinery.ModuleSpec("PIL", None)
+    monkeypatch.setitem(sys.modules, "PIL", pillow)
+    monkeypatch.setitem(sys.modules, "rawpy", None)
+    # Only a real DNG takes the raw decoder that needs rawpy. The stub's bytes are no DNG, and the
+    # Pillow stub has no TIFF reader to check them, so the test declares the file a DNG.
+    monkeypatch.setattr(image_codecs, "_is_dng", lambda _path: True)
+    result = _preserve_media_stub(vault, filename="portrait.dng")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="image",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "rawpy" in status["next_action"]
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
+    real_find_spec = importlib.util.find_spec
+    installed = {"PIL": True, "rawpy": False}
+
+    def find_spec(name, *args, **kwargs):
+        if name in installed:
+            return importlib.machinery.ModuleSpec(name, None) if installed[name] else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+    for codec_present in (False, True):
+        installed["rawpy"] = codec_present
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        worker.start()
+        try:
+            requeued = _wait_until(lambda: store.next_pending() is not None, seconds=2.0)
+        finally:
+            worker.stop()
+        assert requeued is codec_present
+
+
+def test_a_document_parked_for_a_missing_converter_dependency_returns_only_once_that_module_is_found(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MarkItDown is installed but its docx converter needs mammoth; only mammoth's arrival requeues."""
+    import importlib.machinery
+    import importlib.util
+    import sys
+    import types
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setitem(sys.modules, "mammoth", None)
+
+    markitdown = types.ModuleType("markitdown")
+
+    class FileConversionException(Exception):
+        def __init__(self, message=None, attempts=None):
+            super().__init__(message)
+            self.attempts = attempts
+
+    class MissingDependencyException(Exception):
+        pass
+
+    class FailedConversionAttempt:
+        def __init__(self, converter, exc_info):
+            self.converter = converter
+            self.exc_info = exc_info
+
+    class MarkItDown:
+        def __init__(self, enable_plugins=False):
+            self.enable_plugins = enable_plugins
+
+        def convert(self, path):
+            try:
+                try:
+                    raise ImportError("No module named 'lxml'", name="lxml")
+                except ImportError:
+                    raise RuntimeError("html converter failed")  # noqa: B904
+            except RuntimeError:
+                first = FailedConversionAttempt(converter=self, exc_info=sys.exc_info())
+            try:
+                import mammoth  # noqa: F401
+            except ImportError as error:
+                try:
+                    raise MissingDependencyException(
+                        "mammoth is required to read .docx files"
+                    ) from error
+                except MissingDependencyException:
+                    mammoth_attempt = FailedConversionAttempt(
+                        converter=self, exc_info=sys.exc_info()
+                    )
+            raise FileConversionException(attempts=[first, mammoth_attempt])
+
+    markitdown.FileConversionException = FileConversionException
+    markitdown.MissingDependencyException = MissingDependencyException
+    markitdown.FailedConversionAttempt = FailedConversionAttempt
+    markitdown.MarkItDown = MarkItDown
+    markitdown.__spec__ = importlib.machinery.ModuleSpec("markitdown", None)
+    monkeypatch.setitem(sys.modules, "markitdown", markitdown)
+
+    result = _preserve_media_stub(vault, filename="minutes.docx")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type=extract.media_type_for(result.path),
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "mammoth" in status["next_action"]
+    assert "mammoth" in _parsed_frontmatter(vault / result.sidecar_path)["processing_next_action"]
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
+    real_find_spec = importlib.util.find_spec
+    installed = {"markitdown": True, "mammoth": False}
+
+    def find_spec(name, *args, **kwargs):
+        if name in installed:
+            return importlib.machinery.ModuleSpec(name, None) if installed[name] else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+    for converter_present in (False, True):
+        installed["mammoth"] = converter_present
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        worker.start()
+        try:
+            requeued = _wait_until(lambda: store.next_pending() is not None, seconds=2.0)
+        finally:
+            worker.stop()
+        assert requeued is converter_present
+
+
+def test_a_speech_job_parked_with_no_backend_returns_once_the_onnx_backend_is_found(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No speech backend parks without a module: a faster-whisper wait must not outlive onnx-asr."""
+    import importlib.machinery
+    import importlib.util
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.delenv("EXOMEM_ASR_BACKEND", raising=False)
+    monkeypatch.setattr(extract, "_mlx_available", lambda: False)
+
+    def _unavailable(*_args, **_kwargs):
+        try:
+            raise ModuleNotFoundError("No module named 'faster_whisper'", name="faster_whisper")
+        except ModuleNotFoundError as error:
+            raise extract.ExtractionUnavailable(
+                "faster-whisper not installed: No module named 'faster_whisper'"
+            ) from error
+
+    monkeypatch.setattr(extract, "extract_text", _unavailable)
+    real_find_spec = importlib.util.find_spec
+    installed = {"faster_whisper": False, "onnx_asr": False, "av": False}
+
+    def find_spec(name, *args, **kwargs):
+        if name in installed:
+            return importlib.machinery.ModuleSpec(name, None) if installed[name] else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    result = _preserve_media_stub(vault, filename="meeting.m4a")
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert "faster_whisper" not in status["next_action"]
+
+    monkeypatch.setattr(media_worker.MediaWorker, "_launch_child", lambda self: None)
+    requeued = []
+    for backend_ready in ({"onnx_asr": True, "av": False}, {"onnx_asr": True, "av": True}):
+        installed.update(backend_ready)
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        worker.start()
+        try:
+            requeued.append(_wait_until(lambda: store.next_pending() is not None, seconds=2.0))
+        finally:
+            worker.stop()
+    assert requeued == [False, True]
 
 
 def test_supervisor_start_drops_work_whose_engine_is_switched_off(

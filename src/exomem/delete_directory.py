@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
+from .delete_file import planned_trash_path
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
@@ -34,11 +35,11 @@ from .vault import (
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
-    kb_root,
     plan_log_entry,
     resolve_under_vault,
     write_log_entry,
 )
+from .vault_store import targets as store_targets
 
 log = logging.getLogger(__name__)
 
@@ -120,6 +121,15 @@ def _delete_directory_local(
             ),
         )
 
+    # Trashing a folder needs one trash move and one sidecar for each page it holds, and that has no
+    # store form yet: a folder that the store owns refuses before anything changes.
+    store_targets.refuse_unrouted(
+        vault_root,
+        "delete_directory",
+        "trashing a folder needs a trash move and a sidecar for each page it holds, "
+        "and has no store form yet",
+        folders=(path,),
+    )
     try:
         abs_path, rel_path = resolve_under_vault(
             vault_root, path, must_exist=True, must_be_dir=True
@@ -238,12 +248,9 @@ def _delete_directory_local(
     # Move the whole tree into trash.
     now = now or dt.datetime.now()
     today = today or now.date()
-    date_dir = now.strftime("%Y-%m-%d")
-    time_prefix = now.strftime("%H%M%S")
-    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
-    trash_basename = trash_metadata.preserve_floor(rel_path, f"{time_prefix}-{sanitized}")
-    trash_root = kb_root(vault_root) / TRASH_SUBPATH / date_dir
-    trash_abs = trash_root / trash_basename
+    trash_abs = vault_root / planned_trash_path(vault_root, rel_path, now)
+    trash_root = trash_abs.parent
+    trash_basename = trash_abs.name
 
     def trash_destination_exists(candidate: Path) -> bool:
         relative = candidate.relative_to(vault_root).as_posix()
