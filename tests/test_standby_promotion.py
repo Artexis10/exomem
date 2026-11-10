@@ -1229,16 +1229,17 @@ def test_the_request_budget_stops_a_method_unit_build_at_the_production_check_in
 ) -> None:
     """Raising `_BUDGET_CHECK_INSTRUCTIONS` must not disable the stop for small and medium vaults.
 
-    SQLite counts only its own instructions, and this build works through each batch in Python, so
-    it runs few of them per page: past some interval a build is never checked and runs on after
-    its deadline. This build keeps the production interval and holds two batches of pages, so the
-    stop has a second batch's read to land in.
+    SQLite counts only its own instructions, per statement, and this build works through each batch
+    in Python, so its read runs few of them per page: past some interval a build is never checked
+    and runs on after its deadline. This build keeps the production interval and reads 512 pages in
+    batches of 32, so the read left after the budget runs out spans about two intervals.
     """
     import time
 
     from exomem import lexstore, request_budget
 
-    page_count = 2 * lexstore._OCCURRENCE_TRANSPORT_BATCH
+    page_count = 512
+    monkeypatch.setattr(lexstore, "_OCCURRENCE_TRANSPORT_BATCH", 32)
     vault, pages = _method_unit_vault(tmp_path, monkeypatch, page_count)
     budget = request_budget.RequestBudget(seconds=60)
     interpreted_paths: list[str] = []
