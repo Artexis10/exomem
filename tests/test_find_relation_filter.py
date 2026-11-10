@@ -496,6 +496,10 @@ def test_a_declared_purpose_withholds_a_page_from_the_relation_filter_as_it_does
 
     assert declared[0] == declared[1]
     assert _hit_paths(undeclared[0]) != _hit_paths(declared[0])
+    if search != "anchored-on-the-withheld-page":
+        # The visible budget pages answer every search not anchored on the withheld page, so an
+        # empty declared answer would mean the purpose emptied the filter rather than released it.
+        assert _hit_paths(declared[0])
 
 
 @pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
