@@ -230,9 +230,9 @@ jobs:
         env: *core-test-env
         run: scripts/ci-prepare-bytecode.sh ${{ matrix.python-version }}
       - name: Select the pull request's own test modules
-        # tests/conftest.py ignores every other module; the tier and --ignore rules still
-        # apply to these. The appended --splits replaces the shard count with this
-        # selection's group count, and exit 5 means none of them belongs to this job.
+        # The appended --changed-tests makes tests/conftest.py ignore every other module; the
+        # tier and --ignore rules still apply to these. The appended --splits replaces the shard
+        # count with this selection's group count, and exit 5 means none of them belongs to this job.
         if: matrix.selection
         env:
           CHANGED_TESTS: ${{ needs.scope.outputs.changed_tests }}
@@ -267,7 +267,7 @@ jobs:
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ needs.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
-          ${{ matrix.selection && format('--splits={0} || test $? -eq 5', matrix.splits) || '' }}
+          ${{ matrix.selection && format('--splits={0} --changed-tests="$EXOMEM_CHANGED_TESTS" || test $? -eq 5', matrix.splits) || '' }}
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4

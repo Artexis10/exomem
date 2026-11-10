@@ -822,13 +822,14 @@ def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups
 
 
 @pytest.mark.timeout(300)
-def test_changed_tests_selection_keeps_the_tier_and_ignore_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_changed_tests_selection_keeps_the_tier_and_ignore_rules() -> None:
     """Catches the 3.13 jobs running a module that the core tier, the TUI job or a serial job owns."""
     workflow = _workflow()
     core_job = workflow["jobs"]["core-tests"]
     run = _run_step(core_job)["run"]
     tui_directory = workflow["env"]["EXOMEM_TUI_TEST_DIRECTORY"]
     assert '--ignore="$EXOMEM_TUI_TEST_DIRECTORY"' in run
+    assert '--changed-tests="$EXOMEM_CHANGED_TESTS"' in run
     serial_module = core_job["env"]["EXOMEM_SERIAL_CORE_MODULE"]
     harness_module = next(
         line
@@ -837,9 +838,13 @@ def test_changed_tests_selection_keeps_the_tier_and_ignore_rules(monkeypatch: py
     )
     tui_module = next((ROOT / tui_directory).glob("test_*.py")).relative_to(ROOT).as_posix()
     core_module = "tests/test_ci_reliability_contract.py"
-    monkeypatch.setenv("EXOMEM_CHANGED_TESTS", " ".join((core_module, harness_module, serial_module, tui_module)))
+    changed = " ".join((core_module, harness_module, serial_module, tui_module))
 
-    items = _collect_items("changed tests", "core", [f"--ignore={tui_directory}", f"--ignore={serial_module}"])
+    items = _collect_items(
+        "changed tests",
+        "core",
+        [f"--ignore={tui_directory}", f"--ignore={serial_module}", f"--changed-tests={changed}"],
+    )
 
     assert {item.split("::", 1)[0] for item in items} == {core_module}
 
