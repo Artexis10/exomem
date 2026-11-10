@@ -1,16 +1,22 @@
-"""An agent without a shell imports a folder by sending one archive and repeating one call until it is filed.
+"""An agent imports a folder by sending one archive and repeating one call until it is filed.
 
-Every case runs the published tools, the real upload receiver, the real unpacker and a real vault. Only the
-session identity is synthetic, as in `test_agent_upload_handoff.py`; the receiver needs one, and a stdio
-session has none.
+Every case runs the published tools, the real upload receiver, the real unpacker and a real vault. The send
+step is the reply's own `curl` line, parsed and run against the receiver. Only the session identity is
+synthetic, as in `test_agent_upload_handoff.py`; the receiver needs one, and a stdio session has none.
 """
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import io
+import os
+import shlex
+import shutil
 import tarfile
+import types
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -22,10 +28,15 @@ from exomem import (
     adoption_run,
     archive_members,
     auth_sessions,
+    cloud_cell,
     command_surface,
+    held_uploads,
+    import_stage,
+    import_upload,
     server,
     server_auth,
     server_transfer,
+    upload_handoff,
     writer_lease,
 )
 from exomem.governance import principal
@@ -62,16 +73,18 @@ def agent(vault, tmp_path, monkeypatch):
     monkeypatch.setattr(server_transfer, "run_in_threadpool", inline)
     receiver = FastMCP("import-upload-test")
     server_transfer.register_transfer_routes(receiver, vault_root=vault, media_worker=None)
-    yield _Agent(vault, receiver.http_app())
+    yield _Agent(vault, receiver.http_app(), who, tmp_path)
     writer_lease.reset_managers_for_tests()
 
 
 class _Agent:
     """What an agent does: ask for an upload, send bytes to the URL it was given, call `manage_memory`."""
 
-    def __init__(self, vault: Path, receiver) -> None:
+    def __init__(self, vault: Path, receiver, who: principal.RequestPrincipal, scratch: Path) -> None:
         self.vault = vault
         self.receiver = receiver
+        self.who = who
+        self.scratch = scratch
         self.calls = 0
 
     def mcp(self) -> Client:
@@ -85,14 +98,30 @@ class _Agent:
         assert not result.is_error, result
         return result.structured_content
 
-    async def send(self, step: dict, archive: bytes, *, name: str = "folder.bin") -> httpx.Response:
-        """The multipart POST that the reply's `send` step spells out, made through the real receiver."""
-        async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=self.receiver), base_url="https://capture.example") as http:
-            return await http.post(
-                "/upload", headers={"Authorization": "Bearer " + step["token"]},
-                files={"file": (name, archive, "application/octet-stream")},
-                data={"lane": "import", "hold": "1"})
+    async def send(self, step: dict, archive: bytes) -> httpx.Response:
+        """Run the reply's `send` line: its headers, form fields and URL, with `<archive>` replaced by a real file."""
+        path = self.scratch / "archive.bin"
+        path.write_bytes(archive)
+        words = iter(shlex.split(step["next"][0]["shell"].replace("<archive>", str(path))))
+        assert next(words) == "curl"
+        headers: dict[str, str] = {}
+        fields: dict[str, str] = {}
+        files: dict[str, tuple[str, bytes, str]] = {}
+        url = ""
+        for word in words:
+            if word == "-H":
+                name, _, value = next(words).partition(": ")
+                headers[name] = value
+            elif word == "-F":
+                name, _, value = next(words).partition("=")
+                if value.startswith("@"):
+                    files[name] = (path.name, Path(value[1:]).read_bytes(), "application/octet-stream")
+                else:
+                    fields[name] = value
+            elif word != "-sS":
+                url = word
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.receiver)) as http:
+            return await http.post(url, headers=headers, data=fields, files=files)
 
     async def file(self, client: Client, **arguments) -> dict:
         """One `imports.file` call under its own idempotency key; returns the reply, or `{"refused": "CODE: message"}`."""
@@ -130,9 +159,21 @@ class _Agent:
         return sorted(path for path in adoption_run.AdoptionRunStore(self.vault).base.glob("*") if path.is_dir())
 
 
-def _tar(files: dict[str, bytes], *, extra: tuple[tarfile.TarInfo, ...] = ()) -> bytes:
+def _folders(files: dict[str, bytes]) -> list[str]:
+    """Every folder above a member, shallowest first, as `tar` and `zip -r` list them."""
+    return sorted({"/".join(name.split("/")[:depth]) for name in files for depth in range(1, name.count("/") + 1)})
+
+
+def _tar(
+    files: dict[str, bytes], *, extra: tuple[tarfile.TarInfo, ...] = (), mode: str = "w:gz", folders: bool = False,
+) -> bytes:
+    """A tar; gzip unless `mode` says otherwise, with an entry for each folder when `folders` says so."""
     buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+    with tarfile.open(fileobj=buffer, mode=mode) as archive:
+        for folder in _folders(files) if folders else ():
+            info = tarfile.TarInfo(folder + "/")
+            info.type, info.mode = tarfile.DIRTYPE, 0o755
+            archive.addfile(info)
         for name, data in files.items():
             info = tarfile.TarInfo(name)
             info.size = len(data)
@@ -142,9 +183,11 @@ def _tar(files: dict[str, bytes], *, extra: tuple[tarfile.TarInfo, ...] = ()) ->
     return buffer.getvalue()
 
 
-def _zip(files: dict[str, bytes]) -> bytes:
+def _zip(files: dict[str, bytes], *, method: int = zipfile.ZIP_DEFLATED, folders: bool = False) -> bytes:
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+    with zipfile.ZipFile(buffer, "w", method) as archive:
+        for folder in _folders(files) if folders else ():
+            archive.writestr(folder + "/", b"")
         for name, data in files.items():
             archive.writestr(name, data)
     return buffer.getvalue()
@@ -156,16 +199,29 @@ def _link(name: str, kind: bytes, target: str) -> tarfile.TarInfo:
     return info
 
 
+def _with_comment(size: int) -> tarfile.TarInfo:
+    """An empty file whose pax header carries `size` bytes of comment, which compress to a few bytes."""
+    info = tarfile.TarInfo("commented.txt")
+    info.pax_headers = {"comment": "x" * size}
+    return info
+
+
+#: Sixteen components of 255 bytes: each is a legal name and the whole is under 4,096 bytes, but no stage path can hold it.
+_LONG = "/".join("a" * 255 for _ in range(16))
+
+
 @pytest.mark.parametrize("pack", [_tar, _zip], ids=["tar", "zip"])
 def test_an_agent_imports_a_folder_by_sending_one_archive_and_repeating_one_call_until_done(
         agent, duplicate_index, pack):
-    """Catches a route that cannot reach `done` from the descriptor alone, or that files a repeated file twice."""
-    # Seven files, five byte strings: b.pdf repeats a.pdf in another folder, e.pdf repeats d.pdf.
-    folder = {"a.pdf": PDF + b"a", "docs/b.pdf": PDF + b"a", "docs/c.pdf": PDF + b"c", "docs/deep/d.pdf": PDF + b"d",
-              "e.pdf": PDF + b"d", "f.pdf": PDF + b"f", "g.pdf": PDF + b"g"}
+    """Catches a route that cannot reach `done` from the reply alone, or that files a repeated file twice."""
+    # The archive the guide teaches, `tar -czf folder.tgz folder`: the folder under its own name, with an entry for
+    # each folder. Seven files, five byte strings: b.pdf repeats a.pdf in another folder, e.pdf repeats d.pdf.
+    folder = {"folder/a.pdf": PDF + b"a", "folder/docs/b.pdf": PDF + b"a", "folder/docs/c.pdf": PDF + b"c",
+              "folder/docs/deep/d.pdf": PDF + b"d", "folder/e.pdf": PDF + b"d", "folder/f.pdf": PDF + b"f",
+              "folder/g.pdf": PDF + b"g"}
     unique = {hashlib.sha256(data).hexdigest() for data in folder.values()}
     before = agent.sources()
-    archive = pack(folder)
+    archive = pack(folder, folders=True)
 
     async def journey():
         async with agent.mcp() as client:
@@ -247,6 +303,14 @@ def _zeros() -> dict[str, bytes]:
     ("zip traversal", lambda: _zip({"ok.pdf": PDF, "../escape.pdf": PDF}), "ARCHIVE_MEMBER_REFUSED", "../escape.pdf"),
     ("zip expands past the cap", lambda: _zip(_zeros()), "ARCHIVE_TOO_LARGE", None),
     ("not an archive", lambda: b"just some text, sent as if it were a folder", "ARCHIVE_UNREADABLE", None),
+    ("tar bzip2", lambda: _tar({"ok.pdf": PDF}, mode="w:bz2"), "ARCHIVE_UNREADABLE", None),
+    ("tar xz", lambda: _tar({"ok.pdf": PDF}, mode="w:xz"), "ARCHIVE_UNREADABLE", None),
+    ("zip bzip2 member", lambda: _zip({"ok.pdf": PDF}, method=zipfile.ZIP_BZIP2), "ARCHIVE_MEMBER_REFUSED", "ok.pdf"),
+    ("tar case alias", lambda: _tar({"Doc/a.pdf": PDF, "doc/b.pdf": PDF}), "ARCHIVE_MEMBER_REFUSED", "doc/b.pdf"),
+    ("tar header over its limit", lambda: _tar({"ok.pdf": PDF}, extra=(_with_comment(2 * 1024**2),)), "ARCHIVE_TOO_LARGE", None),
+    ("tar headers inflate past the limit", lambda: _tar({"ok.pdf": PDF}, extra=(_with_comment(100_000),)), "ARCHIVE_TOO_LARGE", None),
+    ("tar name too long for the volume", lambda: _tar({_LONG: PDF}), "ARCHIVE_MEMBER_REFUSED", None),
+    ("zip name too long for the volume", lambda: _zip({_LONG: PDF}), "ARCHIVE_MEMBER_REFUSED", None),
 ])
 def test_an_archive_that_breaks_a_limit_is_refused_by_name_and_leaves_no_stage(
         agent, monkeypatch, name, archive, code, member):
@@ -292,3 +356,99 @@ def test_an_archive_that_does_not_fit_stops_the_import_and_unpacks_once_there_is
     assert stopped["filing"] == "stopped" and stopped["stop"]["code"] == "INSUFFICIENT_SPACE"
     assert [item["need"] for item in stopped["person"]] == ["free_space"]
     assert replies[-1]["filing"] == "done" and replies[-1]["progress"]["filed"] == 3
+
+
+
+def _journey_to_done(agent, archive: bytes) -> list[dict]:
+    async def journey():
+        async with agent.mcp() as client:
+            step = await agent.ask(client, archive)
+            assert (await agent.send(step, archive)).status_code == 201
+            return await agent.file_to_done(client, step["token"])
+
+    return asyncio.run(journey())
+
+
+def test_a_plain_tar_that_holds_a_zip_imports_every_member(agent, duplicate_index):
+    """Catches an archive read as the zip near its end: its other files would be dropped and the import still say done."""
+    inner = _zip({"inner.pdf": PDF + b"inner"})
+    archive = _tar({"a.pdf": PDF + b"a", "docs/b.pdf": PDF + b"b", "bundle.zip": inner}, mode="w")
+
+    done = _journey_to_done(agent, archive)[-1]
+
+    assert done["filing"] == "done" and done["progress"]["failed"] == 0
+    assert done["progress"]["filed"] == 3, "the zip is one more file of the folder, not the folder"
+
+
+def test_a_gzip_stream_that_runs_on_after_the_end_block_is_not_read_to_its_end(agent, duplicate_index, monkeypatch):
+    """Catches an unpack that reads past the end block: a few kilobytes of padding would cost minutes of the server."""
+    monkeypatch.setenv("EXOMEM_IMPORT_MAX_EXPANDED_BYTES", "100000")
+    monkeypatch.setattr(archive_members, "MAX_ENTRIES", 3)
+    padded = gzip.compress(_tar({"a.pdf": PDF}, mode="w") + bytes(32 * 1024**2))
+
+    done = _journey_to_done(agent, padded)[-1]
+
+    assert done["filing"] == "done" and done["progress"]["filed"] == 1
+
+
+def test_the_import_lane_is_refused_on_exomem_cloud(agent):
+    """Catches a Cloud cell that hands out an import ticket: no Cloud route redeems it, and its guide is wrong there."""
+    cloud = replace(agent.who, issuer_family=cloud_cell.issuer_family("cell-1"))
+
+    with principal.request_scope(cloud), pytest.raises(ValueError) as refused:
+        upload_handoff.prepare_upload(agent.vault, lane="import", expected_sha256="0" * 64)
+
+    assert "UPLOAD_LANE_UNAVAILABLE" in str(refused.value) and "exomem cloud import" in str(refused.value)
+
+
+@pytest.mark.parametrize("pack", [_tar, _zip], ids=["tar", "zip"])
+def test_the_import_runs_on_a_platform_without_statvfs_or_sync(agent, duplicate_index, monkeypatch, pack):
+    """Catches a Unix-only call on the route, which would fail every import on a Windows host."""
+    monkeypatch.delattr(os, "statvfs")
+    monkeypatch.delattr(os, "sync")
+    # Windows answers `shutil.disk_usage` itself; the POSIX version needs `os.statvfs`.
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: types.SimpleNamespace(total=1 << 40, used=0, free=1 << 40))
+
+    done = _journey_to_done(agent, pack({f"doc{n}.pdf": PDF + bytes([n]) for n in range(3)}))[-1]
+
+    assert done["filing"] == "done" and done["progress"]["filed"] == 3
+
+
+def test_a_stop_for_space_says_the_archive_was_not_kept_when_its_hold_ran_out(agent, monkeypatch):
+    """Catches a reply that tells the agent to repeat a call whose archive is gone."""
+    archive = _tar({"a.pdf": PDF})
+    monkeypatch.setenv("EXOMEM_IMPORT_RESERVE_BYTES", str(1 << 60))
+    skew = {"seconds": 0}
+    now = held_uploads._now
+    monkeypatch.setattr(held_uploads, "_now", lambda: now() + skew["seconds"])
+    unpack = import_upload._unpack
+
+    def outlasting(*args, **kwargs):
+        try:
+            unpack(*args, **kwargs)
+        finally:
+            skew["seconds"] = 2 * 3600  # the unpack outlasted the hold
+
+    monkeypatch.setattr(import_upload, "_unpack", outlasting)
+
+    async def journey():
+        async with agent.mcp() as client:
+            step = await agent.ask(client, archive)
+            assert (await agent.send(step, archive)).status_code == 201
+            return await agent.file(client, upload=step["token"])
+
+    stopped = asyncio.run(journey())
+
+    assert stopped["filing"] == "stopped"
+    assert "was not kept" in stopped["person"][0]["text"] and "still held" not in stopped["person"][0]["text"]
+
+
+def test_a_stage_that_no_record_vouches_for_tells_the_agent_its_copies_are_kept(agent, duplicate_index, monkeypatch):
+    """Catches a done import that leaves staged files behind without saying so."""
+    monkeypatch.setattr(import_stage.state_migration, "migration_status", lambda vault_root: "pending")
+
+    replies = _journey_to_done(agent, _tar({"a.pdf": PDF + b"a", "b.pdf": PDF + b"b"}))
+
+    done = replies[-1]
+    assert [item["need"] for item in done["person"]] == ["discard"] and done["path"] in done["person"][0]["text"]
+    assert sorted(path.name for path in (agent.vault / done["path"]).iterdir()) == ["a.pdf", "b.pdf"]

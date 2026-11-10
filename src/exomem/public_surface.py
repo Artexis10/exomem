@@ -456,12 +456,14 @@ def _door_call(
 
 
 _IMPORT_GUIDE = (
-    "Import a folder from a client without a shell, in three steps. "
-    "1. Pack the folder itself as one tar or zip, such as `tar -C <parent> -cf folder.tar <folder>`, and take the archive's SHA-256. "
+    "Send a folder to a personal server as one archive, in three steps, from a client that can run a shell command or has a networked sandbox. "
+    "A client with neither cannot: give the person `exomem import <folder>`. Exomem Cloud refuses lane `import`; its folders go through `exomem cloud import <folder>`. "
+    "1. From the folder's parent, pack the folder as one archive, such as `tar -czf folder.tgz folder`, and take its SHA-256. "
     "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` to send the archive. "
+    "The token is a secret: never show it to the person. "
     "3. Call manage_memory with operation `imports.file` and arguments `{\"upload\": \"<token>\"}`, using the token of step 2, "
     "and repeat it until `filing` is `done`. A repeat, or a call that was cut short, carries on the same import and unpacks nothing again. "
-    "A refused archive names the member and leaves nothing unpacked. A shell on the server's own machine can run `exomem import <folder>` instead."
+    "A refused archive names the member and leaves nothing unpacked."
 )
 #: Teaching that read_instructions adds to a topic whose use takes more than its arguments show.
 _GUIDES = {"upload_files": _IMPORT_GUIDE, "imports.file": _IMPORT_GUIDE}

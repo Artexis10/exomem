@@ -1,15 +1,20 @@
 """An archive that an agent sent through `upload_files` (lane `import`), unpacked into `_Imports/<id>/`.
 
-An agent without a shell cannot run `exomem import <folder>`. It packs the folder as one tar or zip,
-sends it, and gives `imports.file` the upload's token. The first call redeems the held archive and unpacks
-it into a stage that `file` then files as it files any staged folder. The agent sends bytes, never a path,
-so the rule that no tool argument names a local path holds.
+An agent that cannot run `exomem import <folder>` on the server's machine packs the folder as one tar, gzip
+tar or zip, sends it, and gives `imports.file` the upload's token. The first call redeems the held archive
+and unpacks it into a stage that `file` then files as it files any staged folder. The agent sends bytes,
+never a path, so the rule that no tool argument names a local path holds.
 
 The stage's id derives from the token, so a repeated call finds the stage the first call made and unpacks
 nothing again. The stage appears under its final name only when whole: it is unpacked into a hidden folder
 beside it and renamed. Every unpack runs under one lock, so a retry that overlaps a slow first call waits for
 it. An archive that is refused is released, because the same bytes would be refused again; one that stopped
 for a reason that may pass, such as free space, goes back to its hold.
+
+The format comes from the first bytes: a zip starts with a local file header, a gzip stream with its magic,
+and anything else is read as a plain tar. bzip2, xz and the rest are refused: Python's decompressors for them
+have no output bound, so a few hundred bytes could fill the server's memory. Gzip is inflated here, by a reader
+that stops at a limit, and the tar reader stops a record after its end block, so a padded stream costs nothing.
 """
 
 from __future__ import annotations
@@ -21,9 +26,11 @@ import os
 import shutil
 import uuid
 import zipfile
+import zlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from filelock import FileLock
 
@@ -40,18 +47,29 @@ from . import (
 
 MAX_EXPANDED_ENV = "EXOMEM_IMPORT_MAX_EXPANDED_BYTES"
 # The held archive is at most 100 MiB, which a compressed archive can expand a thousandfold; this bounds that
-# bomb to what one import may stage.
-DEFAULT_MAX_EXPANDED_BYTES = 1024**3
+# bomb to what one import may stage. The unpack runs inside one MCP request (50 s): it took about 10 s per GiB on
+# a fast local volume, so this leaves room for a volume ten times slower.
+DEFAULT_MAX_EXPANDED_BYTES = 512 * 1024**2
 #: The unpacker's own refusal tokens, spelled for the agent that sent the archive; the set is fixed by its checks.
 _MEMBER_REASONS = {
     "link": "it is a link, and links are never unpacked",
     "special": "it is a device, a sparse file or another special entry",
     "absolute": "its path is absolute",
     "parent": "its path climbs out of the folder with `..`",
-    "name": "its name is too long or holds control characters",
-    "duplicate": "the archive lists it twice",
+    "name": "its name is too long, holds control characters or cannot be stored on this volume",
+    "duplicate": "the archive lists it twice, or lists another entry whose name differs only in letter case",
     "not_directory": "a file already sits where this entry needs a folder",
 }
+#: Magic numbers are fixed by the ZIP and gzip specifications; the file's name is the sender's word and decides nothing.
+_ZIP_MAGIC = b"PK\x03\x04"
+_GZIP_MAGIC = b"\x1f\x8b"
+#: The ZIP methods whose decompressors stop at the size a read asks for; `zipfile`'s bzip2 and lzma ones do not.
+_ZIP_METHODS = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+#: One pax or long-name header may hold this much; `tarfile` reads it whole into memory.
+_HEADER_LIMIT = 1024**2
+#: The bytes a member's headers and padding may add to what it holds, for the limit on a gzip stream's output.
+_MEMBER_OVERHEAD = 4096
+_CHUNK = 1024**2
 _STORE = "import-uploads"
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _SPACE = "INSUFFICIENT_SPACE"
@@ -73,6 +91,8 @@ class Staged:
 
     path: str
     stopped: dict | None = None
+    #: The stage has no record that vouches for its files, so adoption keeps them after filing them.
+    unrecorded: bool = False
 
 
 def max_expanded_bytes() -> int:
@@ -107,17 +127,18 @@ def stage(vault_root: Path, upload: str) -> Staged:
     with lock:
         if os.path.lexists(final):
             if final.is_dir() and not final.is_symlink():
-                return Staged(relative)
+                return Staged(relative, unrecorded=_unrecorded(vault_root, import_id))
             raise ImportUploadError("IMPORT_STAGING_UNAVAILABLE", f"{relative} is not a folder")
         if adoption_run.AdoptionRunStore(vault_root).runs_at(relative):
             # Filing removes a finished stage, and a late repeat of the call must still hear that the import is done.
-            return Staged(relative)
+            return Staged(relative, unrecorded=_unrecorded(vault_root, import_id))
+        # Only a call that crashed leaves a hidden folder, and the lock says that none is running now. It goes
+        # before the hold is claimed, so a slow removal never runs while the archive is out of its hold.
+        for leftover in imports.glob(".*.unpack"):
+            shutil.rmtree(leftover, ignore_errors=True)
         held = _redeem(vault_root, upload_handoff.ticket_nonce(upload) or "")
         members: list[dict] = []
         try:
-            # Only a call that crashed leaves a hidden folder, and the lock says that none is running now.
-            for leftover in imports.glob(".*.unpack"):
-                shutil.rmtree(leftover, ignore_errors=True)
             _unpack(held.path, temp, members)
             os.rename(temp, final)
         except ImportUploadError as refused:
@@ -125,10 +146,10 @@ def stage(vault_root: Path, upload: str) -> Staged:
             if not refused.retryable:
                 held.path.unlink(missing_ok=True)
                 raise
-            held_uploads.restore(vault_root, held)
+            kept = held_uploads.restore(vault_root, held)
             if refused.code != _SPACE:
                 raise
-            return Staged(relative, _stopped(imports))
+            return Staged(relative, _stopped(imports, kept))
         except BaseException:
             shutil.rmtree(temp, ignore_errors=True)
             held_uploads.restore(vault_root, held)
@@ -136,7 +157,18 @@ def stage(vault_root: Path, upload: str) -> Staged:
         held.path.unlink(missing_ok=True)
         # Last: the record lets adoption remove staged files, so a crash before it leaves a copy, never a loss.
         import_stage.write_local_record(vault_root, import_id, members)
-    return Staged(relative)
+    return Staged(relative, unrecorded=_unrecorded(vault_root, import_id))
+
+
+def _unrecorded(vault_root: Path, import_id: str) -> bool:
+    return import_stage.read(vault_root, import_id) is None
+
+
+def unrecorded_note(path: str) -> dict:
+    """What only the person can do when the stage has no record: the files filed from it are still in it."""
+    return {"need": "discard", "text": (
+        f"The staged copies in {path} are kept, because this vault cannot yet vouch for them. "
+        "Never delete them yourself; tell the person that they may.")}
 
 
 def _redeem(vault_root: Path, nonce: str) -> held_uploads.Redeemed:
@@ -155,21 +187,20 @@ def _redeem(vault_root: Path, nonce: str) -> held_uploads.Redeemed:
 
 
 def _unpack(archive: Path, staging: Path, members: list[dict]) -> None:
-    """Unpack a tar or zip into the new folder `staging`, listing each file; a refusal leaves nothing behind."""
+    """Unpack a tar, gzip tar or zip into the new folder `staging`, listing each file; a refusal leaves nothing behind."""
     cap, reserve = max_expanded_bytes(), cloud_import.reserve_bytes_from_env()
 
     def listed(path: str, size: int, sha256: str) -> None:
         members.append(import_stage.member(path, size, sha256))
 
-    # The archive format is read from the bytes; the file's name is the sender's word and decides nothing.
     try:
-        if zipfile.is_zipfile(archive):
-            _unpack_zip(archive, staging, cap, reserve, listed)
-        else:
-            with archive.open("rb") as stream:
-                cloud_import.unpack_stream(
-                    stream, staging, max_bytes=cap, max_members=archive_members.MAX_ENTRIES,
-                    reserve_bytes=reserve, on_file=listed)
+        with archive.open("rb") as stream:
+            head = stream.read(len(_ZIP_MAGIC))
+            stream.seek(0)
+            if head == _ZIP_MAGIC:
+                _unpack_zip(stream, staging, cap, reserve, listed)
+            else:
+                _unpack_tar(stream, head.startswith(_GZIP_MAGIC), staging, cap, reserve, listed)
     except cloud_import.ArchiveRefused as refused:
         raise _from_tar(refused, cap) from None
     except archive_members.ArchiveError as refused:
@@ -180,39 +211,108 @@ def _unpack(archive: Path, staging: Path, members: list[dict]) -> None:
         raise ImportUploadError("IMPORT_STAGING_UNAVAILABLE", "the archive cannot be unpacked on this volume", retryable=True) from None
 
 
+class _Inflated:
+    """The bytes of one gzip stream, inflated up to `limit`; past it `overrun` is set and the read fails.
+
+    A tar reader that opens gzip itself has no bound on its output, so a few kilobytes of compressed zeros
+    would be inflated for as long as the stream goes on. Each read here inflates at most the size it asks for.
+    """
+
+    def __init__(self, raw: BinaryIO, limit: int) -> None:
+        self._raw = raw
+        self._limit = limit
+        self._inflater = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+        self._produced = 0
+        self.overrun = False
+
+    def read(self, size: int = -1) -> bytes:
+        size = size if size > 0 else _CHUNK
+        while not self._inflater.eof:
+            # An empty `data` still lets the inflater hand out the output it held back at the previous limit.
+            data = self._inflater.unconsumed_tail or self._raw.read(_CHUNK)
+            out = self._inflater.decompress(data, size)
+            self._produced += len(out)
+            if self._produced > self._limit:
+                self.overrun = True
+                raise ValueError("the stream inflates past its limit")
+            if out:
+                return out
+            if not data:
+                break  # the file ends inside the gzip stream, so the tar reader sees a short archive
+        return b""
+
+
+def _unpack_tar(
+    stream: BinaryIO, gzipped: bool, staging: Path, cap: int, reserve: int, listed: Callable[[str, int, str], None],
+) -> None:
+    """Unpack a plain or gzip tar, reading to its end block and one record of padding and no further."""
+    source: BinaryIO | _Inflated = stream
+    inflated: _Inflated | None = None
+    if gzipped:
+        # What the stream holds is the members, a header and padding for each, and the end block.
+        inflated = source = _Inflated(
+            stream, cap + archive_members.MAX_ENTRIES * _MEMBER_OVERHEAD + cloud_import.END_WINDOW_BYTES)
+    policy = cloud_import.ReadPolicy(
+        mode="r|", stop_after_end=True, portable_paths=True, max_header_bytes=_HEADER_LIMIT)
+    try:
+        cloud_import.unpack_stream(
+            source, staging, max_bytes=cap, max_members=archive_members.MAX_ENTRIES,  # type: ignore[arg-type]
+            reserve_bytes=reserve, on_file=listed, policy=policy)
+    except cloud_import.ArchiveRefused:
+        if inflated is not None and inflated.overrun:
+            raise cloud_import.ArchiveRefused(cloud_import.ARCHIVE_TOO_LARGE, "inflated") from None
+        raise
+
+
 def _unpack_zip(
-    archive: Path, staging: Path, cap: int, reserve: int, listed: Callable[[str, int, str], None],
+    stream: BinaryIO, staging: Path, cap: int, reserve: int, listed: Callable[[str, int, str], None],
 ) -> None:
     """Write each member of a zip into `staging`, counting the bytes that reach the disk against `cap`."""
     os.mkdir(staging, 0o700)
     current: str | None = None
     try:
-        with archive.open("rb") as stream, archive_members.open_zip(stream, max_entries=archive_members.MAX_ENTRIES) as zipped:
+        with archive_members.open_zip(stream, max_entries=archive_members.MAX_ENTRIES) as zipped:
+            # `zipfile` finds the end record in the last 64 KiB, wherever the zip starts; a zip that starts later
+            # is a zip inside something else, and its other bytes would be left unread.
+            if min((info.header_offset for info in zipped.infolist()), default=0) != 0:
+                raise archive_members.ArchiveError(archive_members.INVALID, "the zip has other data in front of it")
             entries = archive_members.central_directory(
                 zipped, max_entries=archive_members.MAX_ENTRIES, portable_paths=True)
+            for entry in entries:
+                current = entry.path
+                if entry.info.compress_type not in _ZIP_METHODS:
+                    raise archive_members.ArchiveError(
+                        archive_members.INVALID, "it is compressed with a method other than deflate, which is the only one read")
+            current = None
             if sum(entry.info.file_size for entry in entries) > cap:
                 raise archive_members.ArchiveError(archive_members.TOO_LARGE, "the members declare more bytes than the cap")
             written = 0
             for entry in entries:
                 current = entry.path
-                target = archive_members.safe_join(staging, entry.path)
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                if entry.info.file_size > cloud_import.free_bytes(staging) - reserve:
-                    raise archive_members.ArchiveError(archive_members.NO_SPACE, "the volume cannot hold this member")
-                digest = hashlib.sha256()
-                with os.fdopen(os.open(target, _FILE_FLAGS, 0o600), "wb") as sink:
-                    for chunk in archive_members.member_chunks(zipped, entry):
-                        written += len(chunk)
-                        if written > cap:
-                            raise archive_members.ArchiveError(archive_members.TOO_LARGE, "the members expand past the cap")
-                        digest.update(chunk)
-                        sink.write(chunk)
+                try:
+                    target = archive_members.safe_join(staging, entry.path)
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    if entry.info.file_size > cloud_import.free_bytes(staging) - reserve:
+                        raise archive_members.ArchiveError(archive_members.NO_SPACE, "the volume cannot hold this member")
+                    digest = hashlib.sha256()
+                    with os.fdopen(os.open(target, _FILE_FLAGS, 0o600), "wb") as sink:
+                        for chunk in archive_members.member_chunks(zipped, entry):
+                            written += len(chunk)
+                            if written > cap:
+                                raise archive_members.ArchiveError(archive_members.TOO_LARGE, "the members expand past the cap")
+                            digest.update(chunk)
+                            sink.write(chunk)
+                except OSError as error:
+                    if error.errno not in cloud_import.NAME_ERRNOS:
+                        raise
+                    raise archive_members.ArchiveError(
+                        archive_members.INVALID, "its name cannot be stored on this volume") from None
                 listed(entry.path, entry.info.file_size, digest.hexdigest())
     except archive_members.ArchiveError as refused:
         refused.member = refused.member or current
         raise
     # The held bytes go once the stage exists, so the stage must be on disk first, as `unpack_stream` leaves a tar's.
-    os.sync()
+    cloud_import.flush_to_disk(staging)
 
 
 def _named(member: str | None) -> str:
@@ -228,13 +328,16 @@ def _from_tar(refused: cloud_import.ArchiveRefused, cap: int) -> ImportUploadErr
     if refused.code == cloud_import.ARCHIVE_TOO_LARGE:
         if refused.reason == "members":
             return ImportUploadError(refused.code, f"the archive holds more than {archive_members.MAX_ENTRIES:,} entries; nothing was unpacked")
+        if refused.reason == "header":
+            return ImportUploadError(refused.code, f"an entry's header holds more than {_HEADER_LIMIT:,} bytes; nothing was unpacked")
+        where = f" at {_named(refused.member)}" if refused.member else ""
         return ImportUploadError(
-            refused.code, f"the archive expands past {cap:,} bytes at {_named(refused.member)} (setting {MAX_EXPANDED_ENV}); nothing was unpacked")
+            refused.code, f"the archive expands past {cap:,} bytes{where} (setting {MAX_EXPANDED_ENV}); nothing was unpacked")
     if refused.code == cloud_import.ARCHIVE_MEMBER_REFUSED:
         why = _MEMBER_REASONS.get(refused.reason, refused.reason)
         return ImportUploadError(refused.code, f"{_named(refused.member)} is refused because {why}; nothing was unpacked")
     return ImportUploadError(
-        refused.code, f"the upload is not a complete tar or zip that this server reads ({refused.reason}); nothing was unpacked")
+        refused.code, f"the upload is not a complete tar, gzip tar or zip that this server reads ({refused.reason}); nothing was unpacked")
 
 
 def _from_zip(refused: archive_members.ArchiveError, cap: int) -> ImportUploadError:
@@ -246,8 +349,11 @@ def _from_zip(refused: archive_members.ArchiveError, cap: int) -> ImportUploadEr
     return ImportUploadError(code, f"{_named(refused.member)}: {refused.reason}{limit}; nothing was unpacked")
 
 
-def _stopped(imports: Path) -> dict:
-    """The reply of a call that stopped for room, worded like the one `file` gives when a chunk does not fit."""
+def _stopped(imports: Path, kept: bool) -> dict:
+    """The reply of a call that stopped for room, worded like the one `file` gives when a chunk does not fit.
+
+    `kept` says whether the archive is back in its hold; when it is not, the person must send it again.
+    """
     reserve = cloud_import.reserve_bytes_from_env()
     free = cloud_import.free_bytes(imports)
     return {
@@ -256,8 +362,10 @@ def _stopped(imports: Path) -> dict:
             "code": _SPACE,
             "reason": f"The archive needs room to unpack and a reserve of {reserve} bytes; {free} bytes are free.",
         },
-        "person": [{"need": "free_space", "text":
-                    "Stop. Free space on the vault's volume and tell the person, then repeat this call with the same "
-                    "upload: it is still held and unpacks from the start."}],
+        "person": [{"need": "free_space", "text": (
+            "Stop. Free space on the vault's volume and tell the person, then repeat this call with the same "
+            "upload: it is still held and unpacks from the start." if kept else
+            "Stop. Free space on the vault's volume and tell the person. The archive was not kept: call upload_files "
+            "with lane import, send it again, then call this with the new token.")}],
         "summary": "Filing is stopped: the archive is not unpacked yet.",
     }

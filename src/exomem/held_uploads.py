@@ -349,16 +349,17 @@ def redeem(
         )
 
 
-def restore(vault_root: Path, redeemed: Redeemed) -> None:
+def restore(vault_root: Path, redeemed: Redeemed) -> bool:
     """Put claimed bytes back as the same hold when their command stored nothing.
 
     The handle, lane, binding and expiry are unchanged, so the holding session
     can retry until the hold expires. Bytes that cannot be put back are removed.
+    Returns whether the hold is back.
     """
     record = redeemed.record
     if not redeemed.key or record is None:
         _remove(redeemed.path)
-        return
+        return False
     try:
         store = _store(vault_root)
         with FileLock(store / ".lock"):
@@ -373,3 +374,5 @@ def restore(vault_root: Path, redeemed: Redeemed) -> None:
                 raise
     except (OSError, ValueError, KeyError, TypeError):
         _remove(redeemed.path)
+        return False
+    return True

@@ -11700,9 +11700,8 @@ def op_adoption_studio(
     Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     file imports a staged folder in one repeatable call: repeat it with the
-    `continuation` it returns until `filing` is not `working`. Without a shell,
-    pack the folder as one tar or zip, send it with upload_files (lane import),
-    and file it with `upload`. Other actions are
+    `continuation` it returns until `filing` is not `working`. An archive sent
+    with upload_files (lane import) is filed with `upload`. Other actions are
     the step path. start scans; select chooses; plan previews; apply copies into
     Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
     reports recall and coverage. Resume plan/apply with `continuation`.
@@ -11822,8 +11821,12 @@ def op_adoption_studio(
                 filed = adoption_run_module.file(
                     vault_root, path=path, collection=collection, continuation=continuation
                 )
-            # An upload's caller has no other way to learn the staged folder, and a later call may name it.
-            return _carrying_batch_advisories(vault_root, {"path": path, **filed} if upload is not None else filed)
+            if upload is not None:
+                # An upload's caller has no other way to learn the staged folder, and a later call may name it.
+                filed = {"path": path, **filed}
+                if staged.unrecorded:
+                    filed["person"] = [*filed.get("person", []), import_upload.unrecorded_note(path)]
+            return _carrying_batch_advisories(vault_root, filed)
         if action == "cancel":
             return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
         if action == "finish":

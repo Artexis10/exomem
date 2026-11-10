@@ -145,6 +145,11 @@ def prepare_upload(
             raise ValueError(f"INVALID_MODE: upload lane must be one of {HANDOFF_LANES}")
         who = replace(principal.effective_principal(), administrative_ingress=False)
         cloud = cloud_cell.is_cloud_issuer_family(who.issuer_family)
+        if cloud and lane == held_uploads.IMPORT_LANE:
+            # A Cloud cell takes an import as an encrypted archive from `exomem cloud import`; this unpacker is not on that path.
+            raise ValueError(
+                "UPLOAD_LANE_UNAVAILABLE: lane import is for a personal server. "
+                "A folder reaches Exomem Cloud with `exomem cloud import <folder>` on the person's computer")
         if who.client_binding is None or who.origin_session is None:
             if cloud:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Exomem Cloud request has no verified gateway origin")
