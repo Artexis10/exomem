@@ -10,9 +10,11 @@ through ``BoundReference``), evaluates the filter in Python, and reports
 reference, the rows the filter excluded only because a reference did not
 resolve, and a bounded list of the values that did not resolve.
 
-The scan reads a target row's fields only where the filter, an order key, a group key or an
-aggregate names a path field. A ``related`` expansion reads its target rows' fields when it
-renders a page row, so a scan over many rows reads no target field it does not use.
+The scan reads a target row's fields where the filter, an order key, a group key or an
+aggregate names a path field. It also reads every field the caller may read from each resolved
+``related`` target, once, and keeps only a hash of them: a continuation binds those fields, so it
+refuses once a value it would show has changed. Only a page row's ``related`` expansion keeps the
+values themselves.
 """
 
 from __future__ import annotations
@@ -83,7 +85,6 @@ class _Execution:
         self.fields = list(ir.fields(query))
         self.related: dict[str, int] = {entry.path: entry.limit for entry in query.related}
         self.chains = _chains(query, bound)
-        self.resolved: dict = {b: {} for _, hops in self.chains for b in hops}
         self.reads: dict = {}  # (bound, Target) -> the path fields read, for the scan
         self.shown: dict = {}  # (bound, Target) -> digest of every readable field, for a related target
         self.expansions: dict = {}  # (bound, Target) -> every readable field, for a rendered page row
@@ -131,8 +132,8 @@ class _Execution:
     def visit_charge(self) -> int:
         """The preview's charge: the admitted rows, plus one lookup per row for each bound reference.
 
-        An estimate, since the values to look up are read only when the query runs: it is an upper
-        bound for a single-valued reference and a floor for a many-valued one.
+        An estimate, since the values to look up are read only when the query runs: a many-valued
+        reference may need more lookups per row than it charges.
         """
         bounds = {bound for _, hops in self.chains for bound in hops}
         return self.admitted.visible_count * (1 + len(bounds))
@@ -340,14 +341,18 @@ class _Execution:
                 seen.append([f"{name}#{position}", entries])
         return cursors._hash(seen)
 
+    def schema_hash(self) -> str:
+        """The schema every collection this query reads has, as the result reports it."""
+        targets = sorted({bound.collection_id: bound for _, hops in self.chains for bound in hops}.items())
+        return cursors._hash([
+            [self.basis.manifest_hash, self.basis.type_name, self.basis.type_version,
+             self.basis.declaration_hash],
+            [[bound.collection_id, bound.manifest.manifest_version.hash] for _, bound in targets]])
+
     def binding(self) -> dict:
         """What a continuation binds: the query, the caller, each collection's schema and what the scan saw."""
         if self._binding is None:
-            targets = sorted({bound.collection_id: bound for _, hops in self.chains for bound in hops}.items())
-            schema = cursors._hash([
-                [self.basis.manifest_hash, self.basis.type_name, self.basis.type_version,
-                 self.basis.declaration_hash],
-                [[bound.collection_id, bound.manifest.manifest_version.hash] for _, bound in targets]])
+            schema = self.schema_hash()
             visible = cursors._hash([
                 cursors.visible_basis(self.session, self.collection_id, uniform=self.uniform,
                                       layout=self.admitted.layout, dependencies=set(self.dependencies())),
@@ -508,7 +513,7 @@ def run(session, query, bound: dict, *, basis, uniform, manifest, as_of=None) ->
     page = execution.page(rows, lambda row: _output_row(execution, admitted, row, query.select.fields))
     result = {**page, "total": execution.count, "as_of": execution.frozen.isoformat(),
               "source": asdict(query.source), "query_version": query.version,
-              "schema_version": manifest.schema.version, "schema_fingerprint": execution.binding()["schema"],
+              "schema_version": manifest.schema.version, "schema_fingerprint": execution.schema_hash(),
               "mode": query.mode, "execution_profile": session.limits.profile,
               "combined": execution.combined()}
     session.check()

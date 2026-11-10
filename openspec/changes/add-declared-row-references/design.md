@@ -93,6 +93,8 @@ A resolved reference between a Records row and a plan item is evidence, never pr
 
 A saved view in the same manifest that uses a declaration blocks its removal. The revise names the view, as revise refuses broken views today and as CQ1 refuses removing a required lookup. A view in another collection that depends on the declaration, such as an inverse view on the target, reports a stale state at read time. Refusing the revise there would reveal a collection the author may not be able to read. Removing a declaration drops its phase 2 index rows. A target that is later deleted, or withheld from the author, does not block revises that leave the declaration unchanged.
 
+A version-1 saved view holds one fixed query object. It takes no typed parameters or defaults; the caller overrides only `page`, never `after`. Save time checks the object's shape, its grammar keys, the collection's own fields and the declared reference each dotted path or `related` entry starts from. A field on a target collection is checked when the view runs, not when it is saved, because it belongs to another collection's schema: the view reads as `SAVED_VIEW_STALE` for a caller whose target no longer offers, or no longer releases, that field. This narrows the parameterised, save-time-validated views of `add-collection-query-engine` design §8.
+
 ## Alternatives
 
 - **Q3 joins as first specified.** The governance design is reusable and this change keeps it. But resolving by `item_key` cannot bind the owner's strings, and it cannot reach many-valued skills or reverse lists.
