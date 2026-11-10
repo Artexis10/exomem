@@ -292,6 +292,16 @@ The attempt's state lives in annotations on the StatefulSet: `exomem.io/hold=upg
 
 Nothing else pins a release: no candidates, locks, fixtures or adoption PRs. A CI job on release tags publishes the image by digest and records it in the release notes.
 
+*Amendment, 2026-11-10.* `automate-cloud-releases` changes this section in five places:
+
+- a workflow sets `cell_image` after each attested release (its D1);
+- after the canary, a cell starts an attempt only inside its own upgrade window, with a per-node limit (its D4);
+- a local cell's restore point becomes a volume snapshot taken after the stop (its D6);
+- a target listed as forward-only pauses the rollout without a restore (its D3);
+- a person still clears a pause; the automation never does.
+
+That change's design and its `cloud-cell` delta hold the new rules.
+
 ### D7. Secrets
 
 - **Backup storage and account authority.** Use the existing business B2 account, with a dedicated private Cloud bucket and a separately named controller credential. Tenant credentials are restricted to that bucket and `cells/<cell_id>/`; the parent key-management credential is mounted only in cellctl, never a tenant runtime or backup Job. B2 `writeKeys` can mint unrestricted credentials and `deleteKeys` can delete other account keys: the controller remains an account-level trusted operator, and a dedicated bucket does not contain a compromise of it. Do not supply the provider/master credential itself to cellctl. Keep existing buckets and keys unchanged. Add Cloud resources under the existing durability Terraform root and its HCP workspace after verifying account and state ownership; do not move state or replace provider credentials. The Cloud bucket has no Object Lock or upload-age expiry that would break restic retention or D10 deletion. Terraform provisioning is opt-in and remains unapplied during preparation.
@@ -506,6 +516,8 @@ A single row: `id int primary key check (id = 1)`, `paused boolean not null defa
 - `GET` returns 405, as hosted does.
 - An upstream connect failure or a non-ready cell returns 503 `CELL_NOT_READY`.
 - A 401 from the cell returns 502 `CELL_AUTH_MISMATCH`, and is never passed to the client.
+
+*Amendment, 2026-11-10.* `automate-cloud-releases` D5 changes C3. The gateway buffers a request body up to a configured cap, and holds the request while its cell refuses connections. It answers `503 CELL_NOT_READY` only after the hold's budget runs out. A cell that sends no headers within the upstream timeout gets `504 CELL_TIMEOUT`. The chart test's pinned environment set grows by the hold and timeout values.
 
 ### C4 Cell bearer derivation
 
