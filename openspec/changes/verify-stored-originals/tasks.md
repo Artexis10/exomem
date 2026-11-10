@@ -37,7 +37,7 @@
 ## 5. Measurement before release (D4)
 
 - [x] 5.1 Measure one full pass and one table rebuild on WSL and on a Cloud cell. Record the original count, the bytes read, the duration and the read rate, with the run file of each. Verify: design.md cites the numbers, and the defaults for the interval, cycle, read cap and walk interval follow from them.
-- [x] 5.2 Rehearse the runbook step on a disposable rehearsal cell. Verify: the step restores one original whose bytes hash to its binding. Evidence: run 42690123576 restored a damaged original, and the next pass and readiness counted no unresolved original. The rehearsal rendered the scratch restore as rehearsal step 11 does, because the operator scratch command does not yet support a new cell; step 5 of the runbook says so.
+- [x] 5.2 Rehearse the runbook step on a disposable rehearsal cell. Verify: the step restores one original whose bytes hash to its binding. Evidence: run 42710274083, with 50 originals at commit e49dcba69, ran the runbook blocks as committed. It restored a damaged original, and the next pass and readiness counted no unresolved original. Run 42690123576 showed the same with 1,000 originals, using the blocks before they required `CELLCTL_PYTHON`. The rehearsal rendered the scratch restore as rehearsal step 11 does, because the operator scratch command does not yet support a new cell; step 5 of the runbook says so.
 
 ## 6. Delivery
 
