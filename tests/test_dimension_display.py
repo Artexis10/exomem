@@ -20,6 +20,7 @@ from exomem import (
     dimension_display,
     epistemic_dimensions,
     epistemic_graph,
+    memory_schema,
     relation_registry,
 )
 from exomem import find as find_module
@@ -484,6 +485,34 @@ def test_a_search_that_asks_for_no_group_returns_no_group_fields(tmp_path: Path)
         for hit in reply["hits"]:
             assert "dimension" not in hit and "display" not in hit, filters
         assert all("display" not in unit for unit in _packed(reply).values()), filters
+
+
+def _report_rows(vault: Path) -> dict[str, dict]:
+    report = memory_schema.infer_category_registry(vault)
+    return {row["key"]: row for row in report["dimensions"]}
+
+
+def test_the_category_report_counts_each_dimensions_marks_or_says_it_cannot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a report row whose `open` or `replaced` count disagrees with what the group marks,
+    or that shows 0 open questions when it could not read the answers."""
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
+    rows = _report_rows(_vault(tmp_path, PAGES, registry=QUESTIONS_ONLY))
+
+    assert (rows["uncertainty"]["unit_count"], rows["uncertainty"]["open"]) == (4, 1)
+    assert (rows["currency"]["unit_count"], rows["currency"]["replaced"]) == (2, 1)
+    assert (rows["questions"]["open"], rows["questions"]["edges"]) == (1, "counted")
+    assert "open" not in rows["provenance"] and "replaced" not in rows["provenance"]
+
+    unread = _report_rows(
+        _vault(tmp_path, PAGES, name="no-graph", registry=QUESTIONS_ONLY, graph=False)
+    )
+    # Kind decides who is a question, so the row still counts them, but not which are open.
+    assert unread["questions"]["unit_count"] == 2
+    assert (unread["questions"]["open"], unread["questions"]["edges"]) == (None, "unavailable")
+    assert unread["questions"]["repair"]["tool"] == "maintain_memory"
+    assert (unread["currency"]["unit_count"], unread["currency"]["replaced"]) == (None, None)
 
 
 # ---------------------------------------------------------------------------
