@@ -530,6 +530,34 @@ class Arm:
                 return now - started
         raise MeasurementRefused("arm-not-quiescent", phase="quiescence")
 
+    async def serve_search(self, *, limit: float) -> float:
+        """Wait until a search is served rather than refused as warming; returns the seconds it took.
+
+        The fixture writes leave the keyword catalogue behind the vault. A managed worker never rebuilds
+        it inline: it starts the repair when a read is refused, and it is idle until then. So the arm can
+        go quiet with every search still refused. One unmeasured probe starts the repair, and the arm
+        must go quiet again before the next probe.
+        """
+        started = time.perf_counter()
+        while True:
+            result = await self.client.call_tool("search_memory", {"query": "latency gate readiness probe"},
+                                                 raise_on_error=False, timeout=120)
+            # Read the refusal as the timed samples do (`recall_canary`): the SDK's parsed `data` carries no
+            # transport wrapper, and a refusal has `success: false` or an `error` mapping.
+            data = result.data if isinstance(result.data, dict) else {}
+            error = data.get("error") if isinstance(data.get("error"), dict) else {}
+            if not result.is_error and data.get("success") is not False and not error:
+                return time.perf_counter() - started
+            code = error.get("code") or data.get("code")
+            if code != "RETRIEVAL_INDEX_WARMING":
+                print(f"{self.name} arm: readiness search failed with {code}", file=sys.stderr)
+                raise MeasurementRefused("search-probe-failed", phase="search-readiness")
+            remaining = limit - (time.perf_counter() - started)
+            if remaining <= 0:
+                raise MeasurementRefused("search-index-not-ready", phase="search-readiness")
+            progress(f"search-warming arm={self.name} elapsed_s={time.perf_counter() - started:.0f}")
+            await self.quiesce(limit=remaining, phase="search-readiness")
+
     def require_timeable(self) -> None:
         """The two refusals that make a started arm timeable."""
         require_warm_state(self.state_before, state_keys(self.state))
@@ -666,8 +694,11 @@ async def load_and_quiesce(arm: Arm, fixture: dict) -> None:
     loaded = time.monotonic()
     progress(f"fixture-loaded arm={arm.name} load_s={loaded - started:.0f}")
     await arm.quiesce(limit=1800, phase="fixture")
+    quiet = time.monotonic()
+    search_s = await arm.serve_search(limit=1800)
     # Fixture preparation is not part of the summary; one stderr line keeps its cost visible to the operator.
-    progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={time.monotonic() - loaded:.0f}")
+    progress(f"fixture-prep arm={arm.name} load_s={loaded - started:.0f} quiesce_s={quiet - loaded:.0f} "
+             f"search_ready_s={search_s:.0f}")
 
 
 async def measure(arms: dict[str, Arm], cases: list, fixture: dict | None, *, repeats: int) -> dict[str, Any]:

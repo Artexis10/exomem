@@ -96,6 +96,13 @@ The runner refuses to time an arm in two cases. Each refusal is a closed code in
 An arm that never goes quiet is refused as `arm-not-quiescent`. This catches a worker that
 re-embeds after startup.
 
+After the fixture loads and the arm goes quiet, the runner searches once, untimed, and waits until
+a search is served. The fixture writes leave the keyword catalogue behind the vault, and a managed
+worker starts its repair only when a read is refused as `RETRIEVAL_INDEX_WARMING`. Until then the
+worker is idle, so quiet alone does not mean a search is served. After each refused search the
+runner waits for quiet again. An arm whose search is still refused after 30 minutes is refused as
+`search-index-not-ready`. Any other error is refused as `search-probe-failed`.
+
 ## Private mode
 
 `private --golden DIR --cases FILE --arm-roots BASE,HEAD (--prepare | --reuse)` times a prepared
