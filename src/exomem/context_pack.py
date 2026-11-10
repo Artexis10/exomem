@@ -894,7 +894,8 @@ def assemble_pack(
 
     `dimension_groups` is the search's list of groups (`dimension_display.group_hits`), whose hits
     come in group order and carry their marks. Each packed unit of a hit then carries the hit's
-    `display`, and the pack lists each group's packed unit refs in display order under `groups`.
+    `display`, and the pack lists each group's unit refs in display order under `groups`, so a
+    member that the caps leave out stays in its group as a ref.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
@@ -1246,17 +1247,11 @@ def assemble_pack(
         **({"correction_context": discovered["status"]} if references else {}),
     }
     if dimension_groups is not None:
-        packed_refs = {
-            packed["unit_ref"]
-            for page in semantic_unit_map.values()
-            for packed in page["units"]
-        }
+        # Every member stays listed: one that the caps left out of `semantic_units` is a ref here.
         result["groups"] = [
             {
                 "dimension": group["dimension"],
-                "units": [
-                    unit["unit_ref"] for unit in group["units"] if unit["unit_ref"] in packed_refs
-                ],
+                "units": [unit["unit_ref"] for unit in group["units"]],
             }
             for group in dimension_groups
         ]
