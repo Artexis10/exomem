@@ -382,23 +382,18 @@ def _decoded_object(item: Any) -> Any:
 EncodedTextEdit = Annotated[TextEdit, BeforeValidator(_decoded_object, json_schema_input_type=TextEdit)]
 
 
-#: The fields each action takes beyond the shared ones, so a field for another action is refused.
-_EDIT_ACTION_FIELDS: dict[str, frozenset[str]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
-    "replace_text": frozenset({"old_text", "new_text", "replace_all", "edits"}),
-    "replace_section": frozenset({"heading", "new_text", "position", "create_missing"}),
-    "replace_body": frozenset({"body", "tags"}),
-    "set_tags": frozenset({"tags"}),
-    "set_fields": frozenset({"fields"}),
-    "fill_row": frozenset({"row", "take", "overwrite"}),
-    "edit_observation": frozenset({"observation", "category", "text", "tags", "context", "links"}),
-    "remove_observation": frozenset({"observation"}),
+#: What each action takes beyond the shared fields, and which of those it requires, so a field for another action is refused.
+_EDIT_ACTION_FIELDS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
+    "replace_text": (frozenset({"old_text", "new_text", "replace_all", "edits"}), ()),
+    "replace_section": (frozenset({"heading", "new_text", "position", "create_missing"}), ("heading", "new_text")),
+    "replace_body": (frozenset({"body", "tags"}), ("body",)),
+    "set_tags": (frozenset({"tags"}), ("tags",)),
+    "set_fields": (frozenset({"fields"}), ("fields",)),
+    "fill_row": (frozenset({"row", "take", "overwrite"}), ("row", "take")),
+    "edit_observation": (frozenset({"observation", "category", "text", "tags", "context", "links"}), ("observation",)),
+    "remove_observation": (frozenset({"observation"}), ("observation",)),
 }
 _EDIT_SHARED = frozenset({"note", "why", "action", "unlinked_reason", "preview", "detail"})
-_EDIT_REQUIRED: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-dict -- the closed wire fields of edit_note's own actions.
-    "replace_text": (), "replace_section": ("heading", "new_text"), "replace_body": ("body",),
-    "set_tags": ("tags",), "set_fields": ("fields",), "fill_row": ("row", "take"),
-    "edit_observation": ("observation",), "remove_observation": ("observation",),
-}
 
 
 class EditNote(Wire):
@@ -431,10 +426,11 @@ class EditNote(Wire):
 def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
     action = wire["action"]
     sent = {key for key, value in wire.items() if value is not None} - _EDIT_SHARED
-    stray = sorted(sent - _EDIT_ACTION_FIELDS[action])
+    taken, required = _EDIT_ACTION_FIELDS[action]
+    stray = sorted(sent - taken)
     if stray:
         raise Refusal("INVALID_ARGUMENT", f"{', '.join(stray)} does not apply to {action}.")
-    missing = [key for key in _EDIT_REQUIRED[action] if wire.get(key) is None]
+    missing = [key for key in required if wire.get(key) is None]
     if missing:
         raise Refusal("MISSING_ARGUMENT", f"{action} needs {', '.join(missing)}.")
     detail = _given({"response_detail": wire.get("detail")})
