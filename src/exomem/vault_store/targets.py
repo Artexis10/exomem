@@ -195,17 +195,24 @@ _NOT_HELD = (
 )
 
 
-def _carries_more(fm: Mapping[str, object]) -> bool:
-    """Whether a page's frontmatter names an original or further parts that move with the page."""
+def _carries_more(body: bytes | None) -> bool:
+    """Whether a page names an original or further parts that move with it.
+
+    A page whose frontmatter does not parse names neither, as file mode reads it.
+    """
     from .. import extraction_parts
 
+    try:
+        fm = {} if body is None else vault.parse_frontmatter(body.decode("utf-8"))[0]
+    except (UnicodeDecodeError, vault.FrontmatterError):
+        fm = {}
     return "stored_object" in fm or extraction_parts.count_of(fm) > 1
 
 
 def page_only_form_gap(
     vault_root: Path,
     rel: str,
-    fm: dict,
+    body: bytes | None,
     *,
     paired: bool = False,
     destination: str | None = None,
@@ -214,8 +221,9 @@ def page_only_form_gap(
 
     The store form of a delete, a move or a recovery moves pages and nothing else. Each case below
     has a file-mode step that moves something the store has no form for, so the writer refuses
-    before it changes anything. ``paired`` says that the writer found an original that moves with
-    the page; ``destination`` is where a move puts it.
+    before it changes anything. ``body`` is the page's exact bytes, or None for a file the store
+    holds no page for. ``paired`` says that the writer found an original that moves with the page;
+    ``destination`` is where a move puts it.
     """
     from .. import extraction_parts
     from ..governance import lifecycle
@@ -229,7 +237,7 @@ def page_only_form_gap(
     parts_folder = extraction_parts.folder_for(Path(rel)).as_posix()
     if (
         paired
-        or _carries_more(fm)
+        or _carries_more(body)
         or (Path(vault_root) / parts_folder).is_dir()
         or read.holds_folder(vault_root, parts_folder)
     ):
@@ -238,11 +246,11 @@ def page_only_form_gap(
 
 
 def folder_form_gap(
-    vault_root: Path, folder: str, pages: Mapping[str, Mapping[str, object]]
+    vault_root: Path, folder: str, pages: Mapping[str, bytes]
 ) -> str | None:
     """Why a store-mode vault cannot move this folder of pages yet, or None when it has a store form.
 
-    ``pages`` maps every page that the store holds below ``folder`` to its frontmatter. The folder's
+    ``pages`` maps every page that the store holds below ``folder`` to its exact bytes. The folder's
     store form moves those pages and nothing else, so a folder that also holds a file whose bytes
     stay on disk, or a page that carries its original or its part pages, refuses before anything
     changes. The disk is listed by name once, and only names are read: a Markdown file there is a
@@ -272,8 +280,8 @@ def folder_form_gap(
     # A raw-marked page's parts are pages in a sibling folder, which is then one of these folders.
     held = {parent.as_posix() for rel in pages for parent in Path(rel).parents}
     if any(
-        _carries_more(fm) or extraction_parts.folder_for(Path(rel)).as_posix() in held
-        for rel, fm in pages.items()
+        _carries_more(body) or extraction_parts.folder_for(Path(rel)).as_posix() in held
+        for rel, body in pages.items()
     ):
         return _CARRIES_MORE
     return None

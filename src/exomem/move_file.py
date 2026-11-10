@@ -675,12 +675,8 @@ def _move_file_local(
     if store_writer is not None and not recovering_from_trash:
         # Recovery judges its own gaps. A move refuses before it reads more than the source.
         stored_bytes = store_read.owned_bytes(vault_root, old_rel)
-        try:
-            fm = {} if stored_bytes is None else parse_frontmatter(stored_bytes.decode("utf-8"))[0]
-        except (UnicodeDecodeError, FrontmatterError):
-            fm = {}
         refusal = store_targets.page_only_form_gap(
-            vault_root, old_rel, fm, paired=pair is not None, destination=new_rel
+            vault_root, old_rel, stored_bytes, paired=pair is not None, destination=new_rel
         )
         if refusal is not None:
             raise store_availability.unrouted("move_file", refusal)

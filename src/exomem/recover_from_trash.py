@@ -38,7 +38,6 @@ from .trash_metadata import original_path as trash_original_path
 from .vault import (
     DIRECTORY_TRANSITION_LIMIT,
     DirectoryCensusGuard,
-    FrontmatterError,
     PathGuard,
     PathGuardError,
     VaultPathError,
@@ -1046,17 +1045,11 @@ def _recover_in_store(
         if _restore_taken(root, trash_kind, restore_rel):
             raise _destination_exists(restore_rel)
 
-        frontmatter: dict[str, dict] = {}
-        for source, body in stored.items():
-            try:
-                frontmatter[source] = parse_frontmatter(body.decode("utf-8"))[0]
-            except (UnicodeDecodeError, FrontmatterError):
-                frontmatter[source] = {}
         refusal = (
-            store_targets.folder_form_gap(root, trash_rel, frontmatter)
+            store_targets.folder_form_gap(root, trash_rel, stored)
             if trash_kind == "directory"
             else store_targets.page_only_form_gap(
-                root, trash_rel, frontmatter.get(trash_rel, {}), destination=restore_rel
+                root, trash_rel, stored.get(trash_rel), destination=restore_rel
             )
         )
         if refusal is not None:

@@ -33,14 +33,12 @@ from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import (
     DIRECTORY_TRANSITION_LIMIT,
-    FrontmatterError,
     VaultPathError,
     batch_atomic_write,
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
     missing_path_reason,
-    parse_frontmatter,
     plan_log_entry,
     resolve_under_vault,
     write_log_entry,
@@ -760,13 +758,7 @@ def _delete_in_store(
             )
         with store_read.snapshot(root) as view:
             stored = view.bodies(pages)
-        frontmatter: dict[str, dict] = {}
-        for page, body in stored.items():
-            try:
-                frontmatter[page] = parse_frontmatter(body.decode("utf-8"))[0]
-            except (UnicodeDecodeError, FrontmatterError):
-                frontmatter[page] = {}
-        refusal = store_targets.folder_form_gap(root, rel_path, frontmatter)
+        refusal = store_targets.folder_form_gap(root, rel_path, stored)
         if refusal is not None:
             raise store_availability.unrouted("delete_directory", refusal)
         from .collection_store import authority as collection_authority

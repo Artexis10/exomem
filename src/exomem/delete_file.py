@@ -257,9 +257,11 @@ def _delete_file_local(
     catalog_before_hash: str | None = None
     # The page as it stood, so the Sources it cited are re-judged once it is gone.
     prior_markdown: str | None = None
+    page_bytes: bytes | None = None
     if rel_path.lower().endswith(".md"):
         try:
             snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+            page_bytes = snapshot.data
             catalog_before_hash = hashlib.sha256(snapshot.data).hexdigest()
             text = snapshot.data.decode("utf-8")
             prior_markdown = text
@@ -303,7 +305,7 @@ def _delete_file_local(
             pass
 
     if store_writer is not None:
-        refusal = store_targets.page_only_form_gap(vault_root, rel_path, fm)
+        refusal = store_targets.page_only_form_gap(vault_root, rel_path, page_bytes)
         if refusal is not None:
             raise store_availability.unrouted("delete_file", refusal)
         # Before validation returns, so a plan that validates is a plan that commits.
