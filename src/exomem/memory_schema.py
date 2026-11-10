@@ -14,17 +14,20 @@ from typing import Any
 import yaml
 
 from . import (
+    epistemic_dimensions,
     epistemic_graph,
     relation_registry,
     relation_vocabulary,
     semantic_labels,
     semantic_language_registry,
     semantic_units,
+    structured_filters,
     traversal_profiles,
     vault,
 )
 from . import find as find_module
 from .kbdir import kb_dirname
+from .vocabulary.registry import PUBLIC_INSTANCE
 
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
@@ -1108,6 +1111,7 @@ def infer_category_registry(
         page_type=page_type,
         registry=registry,
     )
+    dimension_counts = _dimension_counts(vault_root, registry, observations)
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in observations:
         grouped.setdefault(str(item["category_key"]), []).append(item)
@@ -1192,6 +1196,18 @@ def infer_category_registry(
                     "labels": dict(definition.labels),
                     "description": definition.description,
                     "shipped": definition.core,
+                    # A dimension also lists what makes a unit belong to it, how context shows it
+                    # and how many units of this scan belong to it.
+                    **{
+                        field: value
+                        for field, value in definition.as_dict().items()
+                        if field in semantic_labels.MEMBER_FIELDS
+                    },
+                    **(
+                        dimension_counts[definition.key]
+                        if labels is semantic_labels.DIMENSIONS
+                        else {}
+                    ),
                 }
                 for definition in registry.label_definitions(labels).values()
             ]
@@ -1201,6 +1217,82 @@ def infer_category_registry(
         "content_hash": registry.content_hash,
         "registry_findings": [item.as_dict() for item in registry.findings],
     }
+
+
+def _dimension_counts(
+    vault_root: Path,
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    observations: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """How many scanned units, and on how many pages, belong to each dimension of `registry`.
+
+    Membership is the `unit.dimension` filter's, from one graph read for the whole vault in the
+    caller's view, so an edge to a page withheld from the caller counts no unit. `edges`
+    says how a row was counted: "not_needed" for a dimension no edge decides, "counted" when the
+    graph answered, and "unavailable" when it could not. An unavailable row has no counts,
+    because a count without the edges would present a part as the whole. When the graph is
+    missing or stale, a rebuild is scheduled, as the filter does, and the row names the
+    operation that runs it now.
+    """
+    relations = relation_registry.load_registry(vault_root)
+    lookups = epistemic_dimensions.membership(registry, relations)
+    edges = epistemic_dimensions.read_edges(
+        vault_root, lookups, admission=find_module.caller_admission(vault_root)
+    )
+    if edges.status == "warming":
+        epistemic_graph.schedule_background_rebuild(
+            vault_root,
+            mutation_coordinator=epistemic_graph.EpistemicGraphIndex(
+                vault_root
+            )._canonical_mutation_coordinator(),
+        )
+    answer = epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges)
+    units: Counter[str] = Counter()
+    pages: dict[str, set[str]] = {}
+    for item in observations:
+        belongs = answer(
+            {"path": item["path"]},
+            {
+                "kind": item["kind"],
+                "form": item["form"],
+                "row_keys": item["row_keys"],
+                "occurrence": item["occurrence"],
+            },
+            # The report's registry is the public instance's, as a filter plan's is, so another
+            # instance's kind joins no dimension here either.
+            own_kind=not structured_filters.foreign_entry(
+                "unit.kind", item["kind"], item, PUBLIC_INSTANCE
+            ),
+        )
+        for key in belongs:
+            units[key] += 1
+            pages.setdefault(key, set()).add(item["path"])
+    edge_dimensions = frozenset().union(*lookups.by_family.values())
+    counts: dict[str, dict[str, Any]] = {}
+    for key in registry.label_definitions(semantic_labels.DIMENSIONS):
+        if key not in edge_dimensions:
+            status = "not_needed"
+        else:
+            status = "counted" if edges.status == "available" else "unavailable"
+        counted = status != "unavailable"
+        counts[key] = {
+            "unit_count": units[key] if counted else None,
+            "page_count": len(pages.get(key, ())) if counted else None,
+            "edges": status,
+        }
+        if not counted and edges.status == "warming":
+            counts[key]["repair"] = _GRAPH_REBUILD
+    return counts
+
+
+#: The operation that refreshes the graph a dimension row could not read its edges from. A plain
+#: reconcile refreshes a missing or stale graph; `rebuild_graph` is only for a broken lineage.
+_GRAPH_REBUILD: dict[str, Any] = {
+    "tool": "maintain_memory",
+    "args": {"mode": "reconcile"},
+    "reason": "The graph that records typed edges is missing or stale; a rebuild has been "
+    "scheduled, and this operation runs it now.",
+}
 
 
 def category_observations(
@@ -1231,6 +1323,7 @@ def _scan_category_observations(
     observations: list[dict[str, Any]] = []
     for page in pages:
         projects = tuple(sorted(_page_projects(page.frontmatter)))
+        instance = _page_instance(vault_root, page)
         document = semantic_units.parse_semantic_units(
             page.body,
             path=page.rel_path,
@@ -1271,6 +1364,13 @@ def _scan_category_observations(
                     "excerpt_truncated": truncated,
                     "page_type": page.page_type,
                     "projects": projects,
+                    # What the dimension count reads: the instance the page selected, the
+                    # governed rows the unit carries and where the graph holds it.
+                    "instance": instance,
+                    "row_keys": semantic_units.carried_row_keys(unit),
+                    "occurrence": semantic_units.occurrence_key(
+                        unit.form, unit.span, unit.source_hash
+                    ),
                     # A rich unit that omits ``- category:`` defaults its category
                     # to the governed kind; that is not an authored category
                     # choice and never seeds a registration candidate.
@@ -2514,6 +2614,20 @@ def _page_projects(frontmatter: dict[str, Any]) -> set[str]:
     elif projects:
         out.add(str(projects))
     return out
+
+
+def _page_instance(vault_root: Path, page) -> str | None:
+    """The vocabulary instance a page selected, or None when it is unavailable, as the filter's
+    unit view reads it: then only core kinds are the unit's own."""
+    from .vocabulary import instances
+
+    try:
+        return (
+            instances.page_scope(vault_root, page.rel_path, dict(page.frontmatter))
+            or PUBLIC_INSTANCE
+        )
+    except (ValueError, OSError):
+        return None
 
 
 def _page_relations(

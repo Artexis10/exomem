@@ -4559,12 +4559,16 @@ def _authored_relations(
     return registry
 
 
-def page_relation_behaviours(
-    page: SemanticPageState, corpus: SemanticCorpusContext, canonical_relation: str | None
-) -> frozenset[str]:
-    """What code does with a relation authored on `page`, read in the registry that judged it."""
+def page_relation_has(
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+    canonical_relation: str | None,
+    behaviour: str,
+) -> bool:
+    """Whether a relation authored on `page` does `behaviour`, read in the registry that judged
+    it. A name outside the closed behaviour set raises."""
     registry = _authored_relations(page, corpus.registry)
-    return registry.behaviours_of(canonical_relation or "")
+    return registry.has(canonical_relation or "", behaviour)
 
 
 def _derive_relation_facts(
