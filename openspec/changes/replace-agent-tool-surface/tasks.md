@@ -6,7 +6,7 @@
 ## 2. Guards
 - [x] 2.1 Add unit ids to the observation leaf, with the version compared after admission.
 - [x] 2.2 Add row ids to the records and plans leaves, and fill the container hash under the writer lease.
-- [x] 2.3 Derive the vocabulary item for `accept`, the draft lookup and the `unlinked_reason` binding.
+- [x] 2.3 Bind the `unlinked_reason` decision to the committed content. `decide_review_item` keeps `vocabulary_ref` and `vocabulary_fingerprint`, and the public note tools carry no draft id.
 
 ## 3. Leaves
 - [x] 3.1 Let the download leaf take a list of pages.
@@ -31,3 +31,4 @@
 ## 7. Delivery
 - [x] 7.1 Run the proof, the full corpus, the privacy gate and `openspec validate --all --strict`.
 - [ ] 7.2 After release, refresh the ChatGPT draft and rescan the directory listing.
+- [ ] 7.3 Before any Cloud cell ships this surface, make the Cloud gateway intercept and sign `save_source` and `save_evidence`, and check that no runbook or command still passes `--legacy-mcp-compat`.

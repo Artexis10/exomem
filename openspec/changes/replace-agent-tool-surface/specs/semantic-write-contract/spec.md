@@ -35,17 +35,25 @@ A note write over MCP SHALL accept one `unlinked_reason`. The server SHALL bind 
 
 ### Requirement: A Row Query Returns The Id That A Row Write Takes
 
-A row that query_records or query_plan_items returns SHALL carry its short id as `id`. Where the collection declares a field named `id`, the row SHALL keep that field and carry the short id as `row_id`. edit_record and edit_plan_item SHALL accept the short id under either name. A query that names its columns SHALL return the named columns and still carry the id on every row.
+A row that query_records or query_plan_items returns SHALL carry its short id as `id`. Where the collection declares a field named `id`, the row SHALL keep that field and carry the short id as `row_id`. A stored field SHALL never be overwritten: a row that declares both `id` and `row_id` carries no short id. edit_record and edit_plan_item SHALL accept the short id under either name. A query that names its columns SHALL return the named columns and still carry the id on every row.
 
 #### Scenario: A collection with its own id field keeps it
 - **WHEN** a collection declares an `id` column and a client queries its rows
 - **THEN** each row keeps its own `id` value and carries the short id as `row_id`
 - **AND** edit_record accepts that `row_id` as `record`
 
+#### Scenario: A collection that declares both names keeps both
+- **WHEN** a collection declares an `id` column and a `row_id` column
+- **THEN** each row keeps both stored values and carries no short id
+
 ### Requirement: A Review Item And An Advisory Carry The Id That Decides Them
 
-Each item that list_review_items returns, and each advisory that a write returns for a reviewable signal, SHALL carry a short `id`. decide_review_item SHALL accept that id as `review_item` and SHALL compare its version at the leaf, as for any other guarded id.
+Each item that list_review_items returns, and each advisory that a write returns for a reviewable signal, SHALL carry a short `id`. decide_review_item SHALL accept that id as `review_item`. For a queue item it SHALL compare the id's version at the leaf, as for any other guarded id. For an advisory it SHALL decide the item at the fingerprint that the advisory last surfaced with. An upkeep item that a recall packet or session start carries SHALL carry the same `id`, and its `dispose` route SHALL name decide_review_item with that id on the public surface.
 
 #### Scenario: An advisory id decides its item
 - **WHEN** a write returns an advisory with an id
 - **THEN** decide_review_item with that id as `review_item` dismisses the item
+
+#### Scenario: An upkeep item names a decision the surface lists
+- **WHEN** a recall packet carries an upkeep item on the public surface
+- **THEN** its `dispose` route names decide_review_item with the item's id as `review_item`

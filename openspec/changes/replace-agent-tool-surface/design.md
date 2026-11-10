@@ -31,8 +31,8 @@ A grouped command (`remember`, `edit_memory`, `record_memory` and so on) is the 
 | `unit_ref`, `expected_fingerprint`, `target_fingerprints` | `observation` (unit id) | The unit id resolves in the observation leaf after the visibility filter. A stale id refuses with the current id. |
 | Records and plan `item_key`, `expected_item_version` | `record` or `plan_item` (row id) | The row id resolves in the records leaf; a stale id refuses with the current id. |
 | `expected_container_hash`, `expected_manifest_hash` | nothing | The leaf fills the container hash under the writer lease. |
-| `vocabulary_ref`, `vocabulary_fingerprint` on accept | `relation` (optional) | The one decided relation-type item for the relation. When several match, the refusal lists them as candidates. |
-| `draft_id`, `draft_hash`, `draft_token` | `draft` (the id from the preview reply) | Draft lookup. |
+| `vocabulary_ref`, `vocabulary_fingerprint` on accept | the same two fields, optional | Nothing. `decide_review_item` passes them to the accept unchanged. A later change may derive the one decided relation-type item. |
+| `draft_id`, `draft_hash`, `draft_token` | nothing | Nothing. The public note tools carry no draft: a `preview` call reports, and the commit repeats the call without `preview`. REST and CLI keep the draft fields. |
 | Relation review hash and reason | `unlinked_reason` | Server-side binding of the reviewed-none decision to the committed content. |
 | `validate_only`, `response_detail` | `preview`, `detail` | One rename at the seam. |
 
