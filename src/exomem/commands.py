@@ -2582,14 +2582,15 @@ _Tool = TypeVar("_Tool", bound=Callable[..., Any])
 def _reads_one_store_snapshot(operation: _Tool) -> _Tool:
     """Run a recall tool in one store snapshot: its search and its release decisions then read one
     revision, and open one snapshot for the call instead of one per page. A vault that is not in
-    store mode binds nothing."""
+    store mode binds nothing. The call starts on a fresh frame-stack chunk (see `frame_stack`)."""
 
     @wraps(operation)
     def run(vault_root: Path, *arguments: Any, **keywords: Any) -> Any:
+        from .frame_stack import call_on_fresh_frame_stack
         from .vault_store import read as store_read
 
         with store_read.request_snapshot(Path(vault_root)):
-            return operation(vault_root, *arguments, **keywords)
+            return call_on_fresh_frame_stack(lambda: operation(vault_root, *arguments, **keywords))
 
     return cast(_Tool, run)
 

@@ -9,7 +9,8 @@ import pytest
 
 from exomem import state_migration, state_paths
 from exomem.collection_store import connection, schema
-from exomem.vault_store.mode import store_mode_active
+from exomem.vault_store import mode, read
+from exomem.vault_store.mode import store_mode_active, store_mode_for_reads
 
 AT = "2026-11-08T00:00:00Z"
 
@@ -94,6 +95,20 @@ def test_the_answer_follows_each_change_of_either_record_without_a_cache(vault):
         assert store_mode_active(vault) is True
         _record_id(vault, active=False)
         assert store_mode_active(vault) is False
+
+
+def test_a_request_checks_the_mode_records_once_however_many_reads_it_makes(vault, monkeypatch):
+    """Defect: each page that a file-mode request reads stats the manifest again, a cost that grows
+    with the pages and that the recall latency gate meets only as a few percent."""
+    checks = []
+    real = mode._manifest_signature
+    monkeypatch.setattr(mode, "_manifest_signature", lambda path: checks.append(path) or real(path))
+
+    with read.request_snapshot(vault):
+        answers = {store_mode_for_reads(vault) for _ in range(50)}
+
+    assert answers == {False}
+    assert len(checks) <= 1
 
 
 def test_a_store_that_cannot_be_read_raises_instead_of_reading_as_file_mode(vault):
