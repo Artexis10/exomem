@@ -740,9 +740,13 @@ def test_a_clean_sweep_counts_every_path_it_examined_as_unchanged(stored, import
     """A report whose `unchanged` counts only some of the paths that were read, so that a sweep of
     a whole vault reads as if it had looked at a handful."""
     owned = sum(1 for _ in ownership.iter_owned(stored))
+    # A raw Records item has an identity row and no lexical row; the sweep reads it too.
     unowned = [
         path
-        for (path,) in rows(stored, "SELECT path FROM pages WHERE content_hash IS NOT NULL")
+        for (path,) in rows(
+            stored,
+            "SELECT path FROM pages WHERE content_hash IS NOT NULL UNION SELECT path FROM identities",
+        )
         if not importing.takes(path) and ownership.is_markdown(path)
     ]
     assert owned > 1 and unowned, "the generated vault has owned files and an unowned page"
