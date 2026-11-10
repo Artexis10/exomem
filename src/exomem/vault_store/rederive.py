@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import access, vault
+from .. import access, registry_history, vault
 from ..kbdir import kb_dirname
 from . import derive, mode
 
@@ -69,11 +69,13 @@ def is_overlay_source(root: Path, rel: str) -> bool:
 
     The schema overlay is the one folder that ownership gives to the store as pages, and the access
     policy is one file beside it; both come from the loaders' own paths, so a new registry file
-    needs no entry here.
+    needs no entry here. The kept versions under the history folder are not inputs: the loaders read
+    the live overlay files, and only the registry tools read a kept version, at request time.
     """
     schema_folder = f"{kb_dirname()}/{vault.SCHEMA_OVERLAY_DIRNAME}/"
+    history = f"{registry_history.history_dir(root, '').relative_to(root).as_posix()}/"
     policy = access.access_config_path(root).relative_to(root).as_posix()
-    return rel.startswith(schema_folder) or rel == policy
+    return (rel.startswith(schema_folder) and not rel.startswith(history)) or rel == policy
 
 
 def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revision: int) -> None:
@@ -169,6 +171,9 @@ def settle(root: Path, writer) -> str:
         ]
         if paths:
             derive.rederive_pages(tx, root, paths)
+        # A batch changes derived rows, and the last one the registry state, with no page commit.
+        # Moving the store revision makes every cache keyed on it see that change (task 3.3).
+        tx.execute("UPDATE store_mode SET revision = revision + 1 WHERE id = 1")
         if len(paths) < BATCH_PAGES:
             _set(tx, REGISTRY_REVISION, str(target))
             overlay = tx.execute(

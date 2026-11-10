@@ -193,6 +193,34 @@ def test_a_page_outside_the_overlay_leaves_the_registry_state_current(stored, wr
     assert rederive.settle(stored, writer) == rederive.IDLE
 
 
+def test_a_kept_registry_version_is_no_overlay_change(stored, writer):  # noqa: F811
+    """A whole-vault pass for each registry save, which keeps the prior version in the history
+    folder that no loader reads."""
+    kept = "Knowledge Base/_Schema/history/traversal-profiles/20261110T120000Z-0a1b2c3d.yaml"
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED, "kept", puts=(write.PagePut(kept, b"profiles: {}\n"),)
+        ),
+    )
+    assert mode.status(stored)["registry"] == rederive.CURRENT
+    assert rederive.settle(stored, writer) == rederive.IDLE
+
+
+def test_each_batch_of_a_pass_moves_the_store_revision(stored, writer):  # noqa: F811
+    """A reader cache keyed on the store revision that keeps serving the rows a pass has since
+    changed."""
+    commit_policy(writer, stored, READ_ONLY_NOTES)
+    project(writer, stored)
+    before = revision(stored)
+
+    outcomes = settle_to_the_end(stored, writer)
+
+    assert outcomes[-1] == rederive.DONE
+    assert revision(stored) == before + len(outcomes)
+    assert mode.status(stored)["registry"] == rederive.CURRENT
+
+
 def test_the_job_waits_until_the_projector_has_put_the_overlay_file_on_disk(
     stored, writer  # noqa: F811
 ):
@@ -268,11 +296,12 @@ def test_a_second_overlay_commit_during_a_pass_restarts_it_at_the_new_target(
     project(writer, stored)
     assert rederive.settle(stored, writer) == rederive.ADVANCED
     commit_policy(writer, stored, "readonly:\n  - Notes/\n  - Sources/\n")
+    second_overlay = revision(stored)
     project(writer, stored)
 
     settle_to_the_end(stored, writer, limit=200)
 
-    assert mode.status(stored)["registry_revision"] == revision(stored)
+    assert mode.status(stored)["registry_revision"] == second_overlay
     assert_cold_derivation(stored, tmp_path)
 
 
