@@ -4807,6 +4807,8 @@ def _resolve_relation_filter(
         epistemic_graph.schedule_background_rebuild(
             vault_root, mutation_coordinator=graph_index._canonical_mutation_coordinator()
         )
+        # Debt (make-epistemic-language-dynamic design): the outcome advises a retry, though after a
+        # direct file edit only a reconcile ends this state.
         raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return result.paths, dict(result.provenance), plan.findings
 
@@ -4868,6 +4870,8 @@ def _dimension_source(
                 vault_root
             )._canonical_mutation_coordinator(),
         )
+        # Debt (make-epistemic-language-dynamic design): the outcome advises a retry, though after a
+        # direct file edit only a reconcile ends this state.
         raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return epistemic_dimensions.UnitDimensions.from_edges(lookups, edges.edges)
 
