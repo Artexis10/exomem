@@ -268,10 +268,11 @@ def _value(value: Any, field: Field, at: str) -> Any:
 
 
 class _Binder:
-    def __init__(self, source: Source, declarations: Mapping, references=None):
+    def __init__(self, source: Source, declarations: Mapping, references=None, inverses=None):
         self.source = source
         self.declarations = declarations
         self.references = references
+        self.inverses = inverses
         self.used_references = False
         self.aliases: dict[str, Source] = {}
         self.reduction_fields: dict[str, Field] | None = None
@@ -288,6 +289,23 @@ class _Binder:
             _fail(error.code, at, error.message, (), repair)
         self.used_references = True
         return info
+
+    def inverse(self, source_id: str, dotted: str, at: str) -> None:
+        """Bind one inverse entry on the queried collection; every refusal is target-side.
+
+        A view that lives on the target sees a missing or unbindable inverse source as
+        SAVED_VIEW_STALE, never COLLECTION_NOT_FOUND (D9).
+        """
+        if self.inverses is None:
+            _fail("QUERY_UNSUPPORTED", at, "a facade that binds declared references")
+        try:
+            self.inverses(source_id, dotted)
+        except QueryError as error:
+            repair = ("Remove the reference from the query; describe the collection for its fields."
+                      if error.code == "COLLECTION_NOT_FOUND"
+                      else "Describe the admitted collection fields.")
+            _fail(error.code, at, error.message, (), repair, target_side=True)
+        self.used_references = True
 
     def _finish(self, source: Source, alias: str | None, path: str, fields: Mapping, at: str,
                 *, evaluated: bool, implicit: bool) -> Field:
@@ -642,6 +660,7 @@ def normalize_query(
     legacy_arguments: Mapping | None = None,
     capabilities: frozenset[str] = frozenset(),
     references=None,
+    inverses=None,
 ) -> ValidationResult:
     """Bind trusted, already-disclosable declarations, never stored rows.
 
@@ -689,7 +708,7 @@ def normalize_query(
         source = Source(domain, ref, declaration["type"])
         mode = _choice(raw.get("mode", "execute"), "mode", MODES)
         profile = _choice(raw.get("execution_profile", "interactive"), "execution_profile", PROFILES)
-        binder = _Binder(source, declarations, references)
+        binder = _Binder(source, declarations, references, inverses=inverses)
         joins = binder.joins(raw.get("joins", []))
         related = []
         seen_related = set()
@@ -700,6 +719,22 @@ def normalize_query(
             limit = 10
             if isinstance(entry, str):
                 dotted = entry
+            elif isinstance(entry, Mapping) and "inverse" in entry:
+                raw_entry = _object(entry, at, {"inverse", "limit"}, {"inverse"})
+                inverse_raw = _object(raw_entry["inverse"], f"{at}.inverse",
+                                      {"collection", "field"}, {"collection", "field"})
+                source_id, dotted = inverse_raw["collection"], inverse_raw["field"]
+                if not isinstance(source_id, str) or not isinstance(dotted, str) or not dotted:
+                    _fail("QUERY_VALUE_INVALID", f"{at}.inverse", "a source collection and declared reference name")
+                if "limit" in raw_entry:
+                    limit = _integer(raw_entry["limit"], f"{at}.limit", 1, 50)
+                key = f"inverse:{source_id}:{dotted}"
+                if key in seen_related:
+                    _fail("QUERY_VALUE_INVALID", at, "unique reference entries")
+                seen_related.add(key)
+                binder.inverse(source_id, dotted, at)
+                related.append(Related(key, limit, inverse=(source_id, dotted)))
+                continue
             else:
                 raw_entry = _object(entry, at, {"field", "limit"}, {"field"})
                 dotted = raw_entry["field"]

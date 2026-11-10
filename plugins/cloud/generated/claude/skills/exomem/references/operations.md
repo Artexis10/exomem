@@ -132,6 +132,19 @@ canonical files. Datasets are query-only in this delivery. A migration between
 shapes is explicit and provenance-preserving; a derived view never becomes
 canonical merely because it was generated.
 
+### Retiring a hand-kept back-link field
+
+A collection that kept a manual list of "which rows link to me" can retire it
+once a declared forward reference answers the same question:
+
+1. Declare the forward `references:` entry on the source collection and revise it.
+2. Call `read_records(operation={"kind": "inspect", "collection": <target>})` and confirm the bounded `inbound.declarations` list names the declaration with `state: ready`; when the report truncates, `truncated` and `total` say so.
+3. Query the target with `related: [{inverse: {collection: <source id>, field: <dotted name>}}]` and compare its `items` against the back-link field's contents.
+4. Remove the field from the target manifest with a `revise` under current guards.
+
+Expected result: the back-link field is gone; inverse expansion answers the same
+question and stays current as source rows change.
+
 Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
 The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
 their normal **Templates → Insert template** workflow. Exomem does not require

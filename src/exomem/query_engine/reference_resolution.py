@@ -187,3 +187,101 @@ class BoundReference:
         except (ValueError, TypeError, collections.CollectionError):
             # A row whose basis cannot be built is not released, and reads like a withheld one.
             return False
+
+
+def bind_inverse(session, source_id: str, dotted: str, queried_id: str) -> BoundInverse:
+    """Bind one inverse expansion: a source declaration that names the queried collection.
+
+    The checks run in refusal order so that no later check reveals something an earlier
+    one withholds: a missing or withheld source reads COLLECTION_NOT_FOUND exactly like a
+    forward target; an undeclared, withheld or other-target declaration and a withheld
+    natural key on the queried collection all read QUERY_FIELD_UNAVAILABLE.
+    """
+    source = session.admit_lookup(source_id)
+    declaration = next((found for found in collections.declared_references(source.manifest.schema)
+                        if found.dotted == dotted), None)
+    if (declaration is None or declaration.collection != queried_id
+            or not source.plan.admits_member_path(declaration.path)):
+        raise QueryError("QUERY_FIELD_UNAVAILABLE", "this field is not available to resolve")
+    if session._field_plans[queried_id].natural_key_withheld:
+        raise QueryError("QUERY_FIELD_UNAVAILABLE", "this field is not available to resolve")
+    return BoundInverse(session, source, declaration)
+
+
+class BoundInverse:
+    """One inverse expansion, ready to list the source rows that name each returned row.
+
+    ``manifest`` and ``plan`` describe the source as the caller may see it; candidate
+    source rows are filtered by the same release decision a forward target applies.
+    """
+
+    def __init__(self, session, lookup, declaration: collections.ReferenceDeclaration):
+        self.session = session
+        self._source = lookup
+        self.declaration = declaration
+
+    @property
+    def collection_id(self) -> str:
+        return self._source.collection_id
+
+    @property
+    def basis(self):
+        return self._source.basis
+
+    @property
+    def manifest(self) -> collections.CollectionManifest:
+        return self._source.manifest
+
+    @property
+    def dotted(self) -> str:
+        return self.declaration.dotted
+
+    def ready(self, conn) -> bool:
+        """Whether the source declaration's index is built, from its state row."""
+        row = conn.execute(
+            "SELECT ready FROM item_reference_state WHERE collection_id=? AND field_path=?",
+            (self.collection_id, self.dotted)).fetchone()
+        return row is not None and bool(row[0])
+
+    def candidates(self, conn, natural_key, item_key) -> list[tuple[int, str]]:
+        """The distinct (source row id, item key) pairs whose match names this target row."""
+        keys = [key for key in (natural_key, f"ref:{item_key}") if key is not None]
+        if not keys:
+            return []
+        return [(row_id, key) for row_id, key in conn.execute(
+            "SELECT DISTINCT r.row_id, i.item_key FROM item_references r"
+            " JOIN items i ON i.row_id = r.row_id WHERE r.collection_id=? AND r.field_path=?"
+            f" AND r.match IN ({','.join('?' * len(keys))})",
+            (self.collection_id, self.dotted, *keys)).fetchall()]
+
+    def released(self, item_key: str) -> bool:
+        """Whether the caller may read this source row, decided as `admit` decides it."""
+        if self._source.uniform:
+            return True
+        operation = self.session._authorization
+        self.session.check()
+        from contextlib import closing
+
+        from ..collection_store import governance
+        try:
+            with closing(governance.iter_subjects(self.session.connection, self.collection_id,
+                                                  operation.logical_vault_id, row_key=item_key,
+                                                  include_held=False)) as subjects:
+                subject = next(subjects, None)
+            return subject is not None and operation.decision(subject).level >= 6
+        except (ValueError, TypeError, collections.CollectionError):
+            return False
+
+    def read(self, row_id: int) -> dict:
+        """The source row's released fields, under the source field plan."""
+        from ..record_governance import _LinkProjector
+
+        fields = sorted(self._source.plan.whole_fields)
+        values = self.session.lookup_values(self.collection_id, row_id, fields)
+        schema = self.manifest.schema.fields
+        if any(name in schema and _LinkProjector.carries_links(schema[name]) for name in values):
+            operation = self.session._authorization
+            links = _LinkProjector.create(self.session._root, self.manifest, policy=operation.policy,
+                                          authorize_path=operation.allows_file)
+            values = links(values)
+        return values
