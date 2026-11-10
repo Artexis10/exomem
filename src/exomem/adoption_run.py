@@ -1751,15 +1751,8 @@ def plan(
         stage = adoption_consume.recorded(root, run) if run.get("consume", True) else None
         index = adoption_plan.read_import_index(root)
         notes = adoption_plan.NoteIndex(root)
-        destinations = adoption_plan.Destinations(root)
+        destinations = adoption_plan.Destinations.frozen_by(root, draft["items"])
         seen = adoption_plan.seen_in_plan(draft["items"])
-        for planned in draft["items"]:
-            frozen_paths = [(planned.get("note") or {}).get("target_path")]
-            if planned["action"] == "copy-as-source":
-                frozen_paths += [planned["target_path"], planned.get("artifact_path")]
-            for frozen in frozen_paths:
-                if frozen:
-                    destinations.reserve(frozen)
 
         budget = _call_budget()
         handled = 0
@@ -2023,17 +2016,6 @@ def _record_stored(
         reads.index.append(
             adoption_plan.earlier_import_of(held, collection=label, captured=run["plan"]["date"])
         )
-
-
-def _free_destinations(root: Path, plan: dict) -> adoption_plan.Destinations:
-    """Destinations that know the paths the plan froze for its writes, so a new one never takes a later item's."""
-    destinations = adoption_plan.Destinations(root)
-    for item in plan["items"]:
-        if item["action"] == "copy-as-source":
-            destinations.reserve(item["target_path"])
-            if item.get("artifact_path"):
-                destinations.reserve(item["artifact_path"])
-    return destinations
 
 
 def _own_copy(planned: dict, page: str, artifact: str | None) -> dict:
@@ -2610,7 +2592,7 @@ def _apply_chunk(
                 )
                 continue
             # The Source that the plan named for these bytes has gone or changed: this item stores its own.
-            destinations = destinations or _free_destinations(root, plan)
+            destinations = destinations or adoption_plan.Destinations.frozen_by(root, plan["items"])
             planned, failure = _store_own_copy(root, planned, destinations, date_iso=plan["date"])
             if failure is not None:
                 outcomes[path] = failure
@@ -2643,7 +2625,7 @@ def _apply_chunk(
             _record_stored(root, run, reads, planned, stored, settled=settled)
             continue
         # The Source that the plan named for these bytes did not get written or no longer holds them.
-        destinations = destinations or _free_destinations(root, plan)
+        destinations = destinations or adoption_plan.Destinations.frozen_by(root, plan["items"])
         own, failure = _store_own_copy(root, planned, destinations, date_iso=plan["date"])
         if failure is not None:
             outcomes[planned["original_path"]] = failure

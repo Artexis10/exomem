@@ -156,9 +156,10 @@ def _content_finding(
                 break
     steps = []
     if why is None:
+        # The bytes' hash keeps step ids unique across groups, so a batch can carry the steps of several findings.
         steps = [
             duplicate_fold.suggested_step(
-                f"fold-{number}",
+                f"fold-{sha256[:12]}-{number}",
                 canonical=(canonical.path, vault.content_hash(canonical.payload.text)),
                 copy=(copy.path, vault.content_hash(copy.payload.text)),
                 why=(
