@@ -126,11 +126,12 @@ Do this once. Agree each live change with its owner first, as the rollout of `au
 
 1. Pin the deletion watch, as "Pin the deletion watch" in [Cloud key custody](cloud-key-custody.md) says.
 2. If the platform has the media edge, create its list-key Secret, as [Cloud media edge](cloud-media-edge.md) step 7 of "Create the Secrets" says.
-3. Set `cellDeletion.grantPublicKeys` in the private values file to a list with the public half of Substrate's `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`, in PEM. Do not use the operation-grant key.
-   To get the public half, pipe the private key from the secret store into `openssl pkey -pubout`. Never write the private key to a file.
-4. Keep `cellDeletion.holdCells` empty.
-5. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
-6. If the platform has the media edge, read its log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge | grep "purge pass is off"`
+3. Print the PEM public half of Substrate's `EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY`. The private key goes only through a pipe, never into a file:
+   `bwsx-run EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY -- sh -c 'printf "%s\n" "$EXOMEM_CLOUD_DELETION_GRANT_SIGNING_KEY"' | openssl pkey -pubout`
+4. Set `cellDeletion.grantPublicKeys` in the private values file to a list with that public half. Do not use the operation-grant key.
+5. Keep `cellDeletion.holdCells` empty.
+6. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
+7. If the platform has the media edge, read its log: `kubectl -n exomem-cloud logs deployment/exomem-media-edge | grep "purge pass is off"`
    Expect no output.
 
 Expected result: the next deleted cell raises `CELL_DELETION_PENDING:<cell_id>`, and then
@@ -259,13 +260,14 @@ Each executor accepts a grant that any key in `cellDeletion.grantPublicKeys` ver
 at most two keys. A grant has no expiry and stays relayed until its purge ends. So pin the next key
 before Substrate signs with it, and remove the old key only when no relayed grant needs it.
 
-1. Add the next public key, in PEM, as the second entry of `cellDeletion.grantPublicKeys`. Get it as step 3 of "Turn on the purge" says.
-2. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
-3. Count the grant keys in both namespaces, as step 5 of "Triage an anomaly" says. Expect 2.
-4. Switch Substrate's signer to the next key. Write down the switch time as Unix seconds.
-5. Count the relayed grants that Substrate signed before the switch:
+1. Print the PEM public half of the next private key, as step 3 of "Turn on the purge" does for the current key.
+2. Add that public half as the second entry of `cellDeletion.grantPublicKeys`.
+3. Run the Helm upgrade in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release).
+4. Count the grant keys in both namespaces, as step 5 of "Triage an anomaly" says. Expect 2.
+5. Switch Substrate's signer to the next key. Write down the switch time as Unix seconds.
+6. Count the relayed grants that Substrate signed before the switch:
    `kubectl -n exomem-cloud get configmap exomem-cell-deletions -o jsonpath='{.data.grants\.json}' | jq '[.[] | split(".")[1] | gsub("-";"+") | gsub("_";"/") | @base64d | fromjson | select(.iat < <switch time>)] | length'`
-6. If the count is above 0, wait and repeat step 5. A held cell keeps its grant, so release or resolve it first.
-7. Remove the old key from `cellDeletion.grantPublicKeys`, and run the Helm upgrade again.
+7. If the count is above 0, wait and repeat step 6. A held cell keeps its grant, so release or resolve it first.
+8. Remove the old key from `cellDeletion.grantPublicKeys`, and run the Helm upgrade again.
 
-Expected result: a repeat of step 3 shows 1 key in both namespaces, and the watcher raises no anomaly.
+Expected result: a repeat of step 4 shows 1 key in both namespaces, and the watcher raises no anomaly.
