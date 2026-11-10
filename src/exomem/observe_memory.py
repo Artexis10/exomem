@@ -271,8 +271,8 @@ def observe_memory(
             ):
                 raise ObserveMemoryError(
                     "UNIT_NOT_FOUND",
-                    "the unit's heading is a vault kind or a vault label, which observe_memory "
-                    "cannot address yet",
+                    "the unit's heading is a vault kind or a vault label, which "
+                    f"{capabilities.active_tools_text('observe_memory')} cannot address yet",
                     "Edit the unit in the page body with "
                     f"{capabilities.active_tools_text('edit_memory')}.",
                 )
@@ -477,11 +477,12 @@ def observe_memory(
         # cannot act on this one the way it can act on schema history: the
         # tier itself forbids the write, whatever the page's compiled type,
         # so no `resolution` is offered here.
+        tools = capabilities.active_tools_text("observe_memory")
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
-            "observe_memory only mutates writable compiled pages",
+            f"{tools} only mutates writable compiled pages",
             f"This page's access tier is {access_tier!r}, which is "
-            "policy-protected; observe_memory has no override for it, "
+            f"policy-protected; {tools} has no override for it, "
             "regardless of the page's compiled type.",
         )
     # The authored type is looked up as written; a withheld definition refuses.
@@ -490,7 +491,8 @@ def observe_memory(
         resolution = _legacy_edit_resolution(editable.rel_path)
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
-            "observe_memory only mutates writable compiled pages",
+            f"{capabilities.active_tools_text('observe_memory')} only mutates "
+            "writable compiled pages",
             # `role` is a closed attribute the note-type registry schema declares,
             # not an entry key.
             _entity_observation_remediation(editable.rel_path)
