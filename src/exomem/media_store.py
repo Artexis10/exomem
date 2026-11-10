@@ -455,6 +455,12 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
                 yield snapshot
         except (UnicodeError, ValueError):
             continue
+        except reserved_paths.ReservedPathLeafError as error:
+            # A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is
+            # not a binding to trust. These are the leaf boundary's structural refusal codes; any other one,
+            # such as a transient I/O refusal, reaches the caller, which must not miss a binding.
+            if error.code not in ("UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"):
+                raise
 
 
 def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:

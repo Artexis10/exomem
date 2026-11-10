@@ -655,6 +655,7 @@ def test_carried_corpus_reproves_reference_owners_after_watcher_seed(
         watcher._vault_root = tmp_path
         watcher._kb_root = tmp_path / "Knowledge Base"
         watcher._stop = threading.Event()
+        watcher._importer = None  # a file-mode watcher has no store-mode importer
         assert watcher._reconcile_once(seed=True)
         if catch_up:
             other.write_text("# Other\n\nObserved edit.\n", encoding="utf-8")

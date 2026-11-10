@@ -43,7 +43,7 @@ import weakref
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     freshness,
@@ -55,6 +55,9 @@ from . import (
     state_paths,
 )
 from .kbdir import kb_dirname, kb_prefix
+
+if TYPE_CHECKING:
+    from .vault_store.importer import Importer, ImportReport
 
 log = logging.getLogger(__name__)
 
@@ -1109,9 +1112,20 @@ def _background_graph_caller(method: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class FileWatcher:
-    """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced."""
+    """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced.
 
-    def __init__(self, vault_root: Path, *, debounce_seconds: float | None = None) -> None:
+    With an ``importer`` (a store-mode vault) the watcher keeps its observer, debounce, reconcile
+    interval and census notes, and hands every path that the store owns to the importer instead of
+    the file-mode freshness, graph and index machinery, which reads files the store no longer owns.
+    """
+
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        debounce_seconds: float | None = None,
+        importer: Importer | None = None,
+    ) -> None:
         from .writer_lease import active_manager
 
         self._vault_root = vault_root
@@ -1128,6 +1142,10 @@ class FileWatcher:
         self._pending_publication_intents: dict[Path, _PublicationIntent] = {}
         self._pending_external_epoch = 0
         self._pending_access_policy = False
+        self._importer = importer
+        #: Store-mode paths that an event named, and the renames that move events paired.
+        self._pending_import: set[str] = set()
+        self._pending_moves: dict[str, str] = {}
         self._last_change = 0.0
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -1272,11 +1290,45 @@ class FileWatcher:
         rels = [rel for rel in (self._rel(Path(os.fsdecode(path))) for path in paths) if rel]
         artifact_census.note_touched(self._vault_root, rels)
 
+    def _import_target(self, path: Path) -> str | None:
+        """The vault path that the importer settles for this event, or None.
+
+        In store mode that is each path the store owns, and each Markdown file that it does not own,
+        whose lexical rows the importer keeps current. File mode has no importer.
+        """
+        if self._importer is None:
+            return None
+        from .vault_store import ownership
+
+        rel = self._rel(path)
+        if rel is None:
+            return None
+        if self._importer.takes(rel) or ownership.is_markdown(rel):
+            return rel
+        return None
+
+    def _pend_import(self, rel: str) -> None:
+        with self._lock:
+            self._pending_import.add(rel)
+            self._last_change = time.monotonic()
+        self._wake.set()
+
+    def _note_move(self, source: Path, destination: Path) -> None:
+        """Remember that a move event renamed ``source`` to ``destination`` for the importer."""
+        if self._importer is None:
+            return
+        old, new = self._rel(source), self._rel(destination)
+        if old is None or new is None:
+            return
+        with self._lock:
+            self._pending_moves[new] = old
+
     def _record(self, path: Path, *, deleted: bool, notify_views: bool = True) -> None:
         """Record a Markdown or supported-media change, coalesced by path."""
         from .vault import in_excluded_scan_dir
 
-        if path.suffix.lower() != ".md" and self._is_kb(path):
+        owned_rel = self._import_target(path)
+        if self._importer is None and path.suffix.lower() != ".md" and self._is_kb(path):
             from . import media_store
 
             disposition = media_store.managed_event(self._vault_root, path)
@@ -1301,6 +1353,8 @@ class FileWatcher:
                 artifact_census.note_touched(self._vault_root, [rel])
             else:
                 artifact_census.note_created(self._vault_root, [rel])
+        if owned_rel is not None:
+            self._pend_import(owned_rel)
         if rel == f"{kb_prefix()}_access.yaml":
             # Access policy changes are a publication boundary despite not
             # being Markdown.  Do this before the generic non-Markdown return
@@ -1320,6 +1374,8 @@ class FileWatcher:
             from .vocabulary import invalidate as invalidate_vocabulary
 
             invalidate_vocabulary(self._vault_root, path=rel)
+        if self._importer is not None:
+            return  # the importer settles it from the store's records, not the file-mode machinery
         if rel is not None and in_excluded_scan_dir(rel):
             # _trash/_archive/_Schema/…: every full walk skips these, so the
             # event path must too — else a delete's move-to-trash re-embeds
@@ -1390,6 +1446,8 @@ class FileWatcher:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         self._resolve_held_publication_intents()
+        if self._importer is not None:
+            self._import_pending()
         with self._lock:
             managed = self._managed_media_events
             self._managed_media_events = {}
@@ -1424,6 +1482,42 @@ class FileWatcher:
             cap=False,
             pending_epoch=pending_epoch,
         )
+
+    def _import_pending(self) -> None:
+        """Hand the importer the paths that events named since the last batch."""
+        importer = self._importer
+        assert importer is not None
+        with self._lock:
+            rels, self._pending_import = self._pending_import, set()
+            moves, self._pending_moves = self._pending_moves, {}
+        if not rels:
+            return
+        try:
+            report = importer.import_paths(rels, moves)
+        except Exception:  # noqa: BLE001 - the next sweep settles these paths from their hashes
+            log.exception("file watcher: importing %d outside change(s) failed", len(rels))
+            return
+        self._after_import(report)
+
+    def _after_import(self, report: ImportReport) -> None:
+        """Tell the caches that read a changed path that the store now holds new bytes there."""
+        from .vault_store.importer import MEDIA_WAITS
+        from .vocabulary import invalidate as invalidate_vocabulary
+
+        for rel in (*report.imported, *report.moved, *report.moved.values()):
+            invalidate_vocabulary(self._vault_root, path=rel)
+        if report.settled or report.unjudged:
+            log.info(
+                "file watcher: imported %d, renamed %d, held %d, removed %d, cleared %d, "
+                "refreshed %d, left %d outside change(s)",
+                len(report.imported), len(report.moved), len(report.held), len(report.removed),
+                len(report.cleared), len(report.refreshed), len(report.unjudged),
+            )
+        if report.media_waiting:
+            log.info(
+                "file watcher: %d imported media file(s): %s",
+                len(report.media_waiting), MEDIA_WAITS,
+            )
 
     def _reconcile_access_policy(self, pending_epoch: int) -> None:
         """Reproject one observed `_access.yaml` edit before clearing its barrier."""
@@ -1514,6 +1608,8 @@ class FileWatcher:
         the short dispatch window pays at most today's rebuild cost, never
         worse. Seed is NOT drift: the boot pass dispatches nothing (it must not
         re-embed the whole vault)."""
+        if self._importer is not None:
+            return self._sweep_store()
         changed_union: dict[str, None] = {}  # insertion-ordered dedupe across scopes
         deleted_union: dict[str, None] = {}
         drifted = False
@@ -1626,6 +1722,22 @@ class FileWatcher:
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: reconcile bm25 warm failed (scope=%s)", scope)
         return baselines_current
+
+    def _sweep_store(self) -> bool:
+        """Store mode's reconcile pass: hash every owned file against the store, then the census.
+
+        The first pass also settles what changed while the service was down (git, a restore). True
+        means that the sweep ran to its end; a failed sweep is retried at the next interval.
+        """
+        importer = self._importer
+        assert importer is not None
+        try:
+            self._after_import(importer.sweep())
+        except Exception:  # noqa: BLE001 - a failed sweep is retried at the next interval
+            log.exception("file watcher: the store sweep failed")
+            return False
+        self._publish_census_if_needed()
+        return True
 
     def arm_optional_recovery(self) -> None:
         """Permit optional metadata work only after runtime workers have started."""
@@ -2102,6 +2214,7 @@ class FileWatcher:
 
         kb_ups = [p for p in ups if self._is_kb(p)]
         semantic_kb_ups: list[Path] = []
+        admission_failed = False
         if kb_ups:
             try:
                 from . import recall_policy
@@ -2117,7 +2230,22 @@ class FileWatcher:
                     or recall_policy.is_recall_candidate(self._vault_root, path)
                 ]
             except Exception:  # noqa: BLE001 — fail closed for expensive work
+                admission_failed = True
                 log.exception("file watcher: semantic admission evaluation failed")
+        # Whether this batch can change a graph row. The graph derives rows only
+        # from recall candidates (the same test its purge uses), so a batch of
+        # existing KB files that recall policy rejects -- the Records views a
+        # collection write republishes -- cannot leave an edge stale.
+        # Withdrawing availability for one raised a barrier no repair would lift,
+        # and the drain answered it with a whole-vault rebuild of a current
+        # graph. Deletions, files outside KB (the resolver is vault-wide) and an
+        # unreadable admission all keep the withdrawal.
+        graph_input = (
+            bool(del_rels)
+            or admission_failed
+            or bool(semantic_kb_ups)
+            or len(kb_ups) < len(ups)
+        )
 
         # Inbound + resolver: the whole vault (both index sibling folders). The
         # resolver patch also restamps its freshness triple, so the next graph
@@ -2152,7 +2280,10 @@ class FileWatcher:
         # compare-and-ack: a same-metadata edit can leave its projection
         # identity unchanged, so pending must not disappear while stale edges
         # are still publicly readable. The following fan-out republishes the
-        # marker from the exact checkpoint (or rebuilds).
+        # marker from the exact checkpoint (or rebuilds). A batch with no graph
+        # input skips the withdrawal only while every outstanding mark is its
+        # own: the ack below retires all marks through the epoch, and an earlier
+        # batch's unrepaired mark still needs the barrier.
         from . import epistemic_graph
 
         guarded_graph: epistemic_graph.EpistemicGraphIndex | None = None
@@ -2162,7 +2293,9 @@ class FileWatcher:
             and inbound_current
             and resolver_current
         )
-        if ack_ready:
+        if ack_ready and (
+            graph_input or not freshness.external_pending_only_for(self._vault_root, ups)
+        ):
             candidate = epistemic_graph.EpistemicGraphIndex(self._vault_root)
             if candidate.path.exists():
                 try:
@@ -2413,6 +2546,10 @@ class FileWatcher:
             return False
         return self._seed_succeeded
 
+    def _runs_reconcile(self) -> bool:
+        # A store-mode sweep protects the store's pages, so it runs where event indexing is off.
+        return self._importer is not None or freshness.event_indexes_enabled()
+
     def _start_reconcile_thread(self) -> None:
         if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
             return
@@ -2450,7 +2587,7 @@ class FileWatcher:
             Observer, FileSystemEventHandler = _import_watchdog()
             from watchdog import events as watchdog_events
         except Exception as e:  # noqa: BLE001 — optional dep
-            if freshness.event_indexes_enabled():
+            if self._runs_reconcile():
                 log.info(
                     "file watcher: watchdog not available (%s); using reconcile-only polling",
                     e,
@@ -2505,10 +2642,12 @@ class FileWatcher:
                 if event.is_directory:
                     watcher._note_directories(event.src_path, event.dest_path)
                 if not event.is_directory:
+                    watcher._note_move(Path(event.src_path), Path(event.dest_path))
                     watcher._record(Path(event.src_path), deleted=True, notify_views=False)
                     watcher._record(Path(event.dest_path), deleted=False, notify_views=False)
 
-        self._dispatch_waits_for_seed = freshness.event_indexes_enabled()
+        # A store-mode vault has no freshness seed to hold events back for.
+        self._dispatch_waits_for_seed = self._importer is None and freshness.event_indexes_enabled()
         self._thread = threading.Thread(
             target=self._run_dispatch, name="kb-file-watcher", daemon=True
         )
@@ -2531,14 +2670,14 @@ class FileWatcher:
             self._wake.set()
             self._thread.join(timeout=2)
             self._thread = None
-            if freshness.event_indexes_enabled():
+            if self._runs_reconcile():
                 self._dispatch_waits_for_seed = False
                 self._stop.clear()
                 self._wake.clear()
                 self._start_reconcile_thread()
                 return True
             return False
-        if freshness.event_indexes_enabled():
+        if self._runs_reconcile():
             self._start_reconcile_thread()
         log.info("file watcher started on %s", self._vault_root)
         return True

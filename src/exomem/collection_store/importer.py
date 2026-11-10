@@ -232,10 +232,11 @@ def contract() -> dict[str, Any]:
         },
         "run_window": (
             "a job runs until it finishes while the login that started it stays valid, and status shows "
-            "no expires_at for it. Only a job whose login the service cannot recheck without a live request "
-            f"(stdio, CLI, library or a Cloud cell) stops after {JOB_WINDOW_SECONDS} seconds with time_cap. "
-            "A governance authorization session's expiry, at most one hour, stops its job the same way, "
-            "and status shows it as expires_at. A continuation resumes a job paused by time_cap"
+            "no expires_at for it. Two limits end a job early with time_cap, and status shows each as "
+            "expires_at: a job whose login the service cannot recheck without a live request (stdio, CLI, "
+            f"library or a Cloud cell) stops after {JOB_WINDOW_SECONDS} seconds, and a job bound to a "
+            "governance authorization session stops at that session's expiry, at most one hour. A "
+            "continuation resumes a job paused by time_cap"
         ),
     }
 
@@ -2185,6 +2186,8 @@ def _message(state: str, reason: str | None, deadline: tuple[int, str] | None) -
             "The login or access that started this import ended. A continuation from a current login "
             "resumes it from the same row."
         )
+    if reason == "store_unavailable":
+        return "The store could not be reached just now. The import resumes on its own once it can."
     if reason == "time_cap":
         what = (
             "The authorization session that started this import expired."
@@ -2254,7 +2257,14 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
     if "members" in bound:
         exported["members"] = {"selected": len(bound["members"]["sha256"]), **progress["members"]}
     message = _message(state, reason, deadline)
+    if deadline:
+        limit = {"expires_at": _iso(deadline[0])}
+    elif state == "running":
+        limit = {"runs_while": "login_active"}
+    else:
+        limit = {}
     return {
+        **({"message": message} if message is not None else {}),
         "mode": mode,
         **extra,
         **checked,
@@ -2262,7 +2272,6 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "continuation": _JOB_PREFIX + job.id,
         "state": state,
         "reason": reason,
-        **({"message": message} if message is not None else {}),
         "collection_id": job.collection_id,
         "source_ref": job.binding["source"]["ref"],
         "rows": {
@@ -2281,7 +2290,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "batches": progress["batches"],
         "window": {
             "started_at": _iso(job.window_started),
-            **({"expires_at": _iso(deadline[0])} if deadline else {"runs_while": "login_active"}),
+            **limit,
         },
         "next_position": position,
         "last_receipt": progress["last_receipt"],
@@ -3273,6 +3282,9 @@ def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exceptio
             failures = writer.handle.import_retry.get(job_id, (0.0, 0))[1] + 1
             delay = min(UNREADABLE_RETRY_SECONDS * 2 ** (failures - 1), UNREADABLE_RETRY_MAX_SECONDS)
             writer.handle.import_retry[job_id] = (time.monotonic() + delay, failures)
+        else:
+            # The session store answered, so its backoff restarts from the first delay (design D2).
+            writer.handle.import_retry.pop(job_id, None)
         return
     if not isinstance(code, str) or not isinstance(
         error, (collections.CollectionError, connection.CollectionStoreError)

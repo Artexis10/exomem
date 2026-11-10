@@ -1,5 +1,5 @@
-"""How cellctl reaches a cell's readiness answer, and its verdict for the
-cell-recall-lagging alert.
+"""How cellctl reaches a cell's readiness answer, and its verdicts for the
+cell-recall-lagging and cell-originals-damaged alerts.
 
 The listener, its port setting and the answer are exomem's protocol, which
 cellctl cannot import. This module therefore imports only the standard
@@ -23,6 +23,8 @@ CELL_READINESS_PATH = "/health/ready"
 # `retrieval.state` values of that answer, a closed protocol set; any other value is unread.
 RECALL_READY = "ready"
 RECALL_LAGGING = "lagging"
+# `originals.state` value of that answer when a fixity pass has counted; any other value is unknown.
+ORIGINALS_MEASURED = "measured"
 
 
 def recall_lag_verdict(body: bytes, *, after: timedelta) -> bool | None:
@@ -58,3 +60,25 @@ def recall_lag_verdict(body: bytes, *, after: timedelta) -> bool | None:
     if isinstance(age, float) and not math.isfinite(age):
         return None
     return True if age >= after.total_seconds() else None
+
+
+def originals_verdict(body: bytes) -> bool | None:
+    """Whether one cell's readiness answer counts a missing or damaged stored
+    original. Only `originals.state` and `originals.unresolved` are read, and the
+    body is never logged.
+
+    False only when the cell's last fixity pass counted none. Before the first
+    pass, with fixity off, or for an answer that cannot be read, it is unknown (None)."""
+
+    try:
+        payload = json.loads(body)
+    # RecursionError: a cell's answer is not trusted, and deep nesting must not take the pass down.
+    except (ValueError, RecursionError):
+        return None
+    originals = payload.get("originals") if isinstance(payload, dict) else None
+    if not isinstance(originals, dict) or originals.get("state") != ORIGINALS_MEASURED:
+        return None
+    unresolved = originals.get("unresolved")
+    if isinstance(unresolved, bool) or not isinstance(unresolved, int) or unresolved < 0:
+        return None
+    return unresolved > 0
