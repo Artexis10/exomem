@@ -65,13 +65,19 @@ The system SHALL preserve caller-supplied idempotency keys and mismatch rejectio
 
 ### Requirement: Interrupted import applies reconcile under their original identity
 
-The service SHALL admit reconciliation only for an exact interrupted import apply identity. It SHALL preserve vault, verified-client and principal isolation, reject changed command arguments and serialize recovery under the normal writer guard. A complete terminal SHALL replay normally. Partial import custody SHALL NOT become a whole-call commit receipt. Unknown outcomes for other mutations SHALL remain blocked.
+The service SHALL admit reconciliation only for an exact interrupted import apply identity, or for the identity of a `file` call whose attempt held an apply invocation. It SHALL preserve vault, verified-client and principal isolation, reject changed command arguments and serialize recovery under the normal writer guard. A complete terminal SHALL replay normally. Partial import custody SHALL NOT become a whole-call commit receipt. A reconciling `file` call SHALL repeat only the apply that its identity stored, or run no apply when the attempt stored none. That repeated apply MAY finish its own remaining chunks, because each source it files is filed once; the call SHALL run no other apply. Unknown outcomes for other mutations SHALL remain blocked.
 
 #### Scenario: An exact import retry meets a retained unknown outcome
 
 - **WHEN** a proven-abandoned import apply has a retained unknown outcome and the same caller repeats the exact mutation
 - **THEN** one owned attempt reconciles its durable import checkpoint and returns truthful progress or an explicit unresolved boundary
 - **AND** concurrent retries cannot import the same item twice
+
+#### Scenario: An exact file retry meets a retained unknown outcome
+
+- **WHEN** a `file` call is cut after its apply committed a chunk and the same caller repeats the exact call
+- **THEN** one owned attempt repeats that apply, which may finish that apply's remaining chunks, files each source once and reports the committed work
+- **AND** the call runs no other apply
 
 #### Scenario: A caller changes the command under an explicit key
 
