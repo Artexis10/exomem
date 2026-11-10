@@ -524,7 +524,7 @@ if (Test-Path $connectorContractPath) {
 if ($connectorPending) {
     Write-Warning "CHATGPT_PLUGIN_REFRESH_REQUIRED: service is running, but connector rollout is incomplete."
     Write-Host "  Confirm /health/ready.mcp_tool_surface_sha256 matches pending_tool_surface_sha256."
-    Write-Host "  Refresh or recreate the ChatGPT Personal Plugin, then invoke bootstrap and ask_memory from a fresh conversation."
+    Write-Host "  Refresh or recreate the ChatGPT Personal Plugin, then invoke read_instructions and search_memory from a fresh conversation."
     Write-Host "  Promote the pending digest to registered_tool_surface_sha256 only after that smoke test passes."
     Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}; connector promotion remains pending."
 } else {

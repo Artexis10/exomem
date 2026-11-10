@@ -85,7 +85,7 @@ jobs:
         run: docker run --rm --network=none --read-only --entrypoint restic exomem:cloud-smoke version
       - name: The Exomem CLI identifies itself in Cloud mode
         run: docker run --rm --network=none --read-only -e EXOMEM_CLOUD_CELL=1 exomem:cloud-smoke --version
-      # Cell init, then remember and ask_memory over MCP HTTP with the cell
+      # Cell init, then create_note and search_memory over MCP HTTP with the cell
       # bearer, under a read-only root, UID 10001 and no capabilities. The test
       # skips itself without its opt-in, and a skip must fail this step.
       - name: A cell saves a note and finds it
