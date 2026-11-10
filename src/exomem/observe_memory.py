@@ -22,6 +22,7 @@ from . import (
     semantic_authoring,
     semantic_contract,
     semantic_index,
+    semantic_kinds,
     semantic_labels,
     semantic_language_registry,
     semantic_units,
@@ -314,7 +315,7 @@ def observe_memory(
             # unit had. A list the caller sent, even an empty one, is its stated intent.
             dropped_relations = tuple((item.kind, item.target) for item in base_unit.relations)
             dropped_outcome = _dropped_relations_outcome(
-                dropped_relations, compact=selected_kind == _COMPACT_KIND
+                dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
             )
         normalized_verdict = _resolve_verdict(
             verdict,
