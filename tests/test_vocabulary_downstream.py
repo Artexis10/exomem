@@ -734,6 +734,92 @@ def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_com
     assert replay == {**resumed, "replayed": True}
 
 
+def test_an_mcp_curation_resume_without_a_key_completes_its_vocabulary_application(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _hydration(tmp_path, identity="cobalt workshop")
+    report = commands.op_review_memory(
+        tmp_path, categories=["entity_recurrence"], limit=3
+    )
+    route = report["items"][0]["vocabulary"]
+    item = VocabularyState(tmp_path).get(route["ref"])
+    decision = payload(item, "enrich") | {"choice": {"canonical": target}}
+    with library_scope():
+        from exomem import vocabulary_review as review
+
+        review.decide(tmp_path, ref=item["ref"], decision=decision)
+    current = VocabularyState(tmp_path).get(item["ref"])
+    binding = commands.op_maintain_memory(
+        tmp_path,
+        mode="curation",
+        curation_action="work-item",
+        review_ref=current["logical_identity"],
+    )["entity_candidate"]
+    steps = []
+    for ordinal, context in enumerate(binding["first_disconnected_context_batch"][:2]):
+        path = context["path"]
+        before = (tmp_path / path).read_text(encoding="utf-8")
+        steps.append(
+            {
+                "step_id": f"connect-{ordinal}",
+                "kind": "edit",
+                "args": {
+                    "path": path,
+                    "why": "Connect one exact reviewed hydration context.",
+                    "operation": {
+                        "kind": "replace_string",
+                        "old_string": binding["identity"],
+                        "new_string": f"[[{target.removesuffix('.md')}|{binding['identity']}]]",
+                        "expected_hash": content_hash(before),
+                    },
+                },
+            }
+        )
+    proposed = commands.op_maintain_memory(
+        tmp_path,
+        mode="curation",
+        curation_action="propose",
+        plan={
+            "version": 1,
+            "title": "Connect two reviewed hydration contexts",
+            "entity_candidate": binding,
+            "steps": steps,
+        },
+    )
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: _manager(tmp_path))
+    vocabulary = {
+        "vocabulary_ref": current["ref"],
+        "vocabulary_fingerprint": current["fingerprint"],
+    }
+    # An MCP client without key metadata sends only the implicit scope of its session.
+    with library_scope():
+        writer_lease.invoke_command(
+            _command("maintain_memory"),
+            tmp_path,
+            implicit_idempotency_scope="session:test",
+            mode="curation",
+            curation_action="apply",
+            run_id=proposed["run_id"],
+            plan_id=proposed["plan_id"],
+            expected_plan_fingerprint=proposed["plan_fingerprint"],
+            why="Apply the first exact reviewed hydration step.",
+            **vocabulary,
+        )
+        resumed = writer_lease.invoke_command(
+            _command("maintain_memory"),
+            tmp_path,
+            implicit_idempotency_scope="session:test",
+            mode="curation",
+            curation_action="resume",
+            run_id=proposed["run_id"],
+            plan_id=proposed["plan_id"],
+            **vocabulary,
+        )
+
+    assert resumed["phase"] == "completed"
+    assert VocabularyState(tmp_path).get(current["ref"])["state"] == "applied"
+
+
 def test_public_terminal_publishes_warming_then_current_vocabulary_work(
     tmp_path: Path,
 ) -> None:

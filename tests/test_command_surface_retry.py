@@ -1045,6 +1045,35 @@ def test_explicit_mcp_keys_are_isolated_by_verified_principal_and_vault(tmp_path
     assert len(calls) == 3
 
 
+def test_an_identical_curation_resume_advances_the_run_instead_of_replaying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    steps = iter(["step-1", "step-2"])
+
+    def leaf(vault: Path, **kwargs) -> dict:  # noqa: ANN003, ARG001
+        return {"committed_step": next(steps)}
+
+    command = SimpleNamespace(name="maintain_memory", leaf=leaf, read_only=False, executor="cell")
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    resume = {
+        "mode": "curation",
+        "curation_action": "resume",
+        "run_id": "cur-example",
+        "plan_id": "plan-example",
+    }
+
+    first = writer_lease.invoke_command(
+        command, tmp_path / "vault", implicit_idempotency_scope="session:test", **resume
+    )
+    second = writer_lease.invoke_command(
+        command, tmp_path / "vault", implicit_idempotency_scope="session:test", **resume
+    )
+
+    assert (first["committed_step"], second["committed_step"]) == ("step-1", "step-2")
+
+
 def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     from exomem.commands import invocation_is_read_only, product_commands_for
 
