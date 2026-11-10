@@ -272,7 +272,7 @@ prints `0`.
 4. Do steps 1 and 3 of "Upgrade the release" in the same runbook. Step 3 has no `--atomic`.
 5. If the upgrade fails, do "If the upgrade fails" in the same runbook.
 6. After a rollback, stop. Do not run release B.
-7. After a rollback, find the cause of the failure and start again at step 1.
+7. After a rollback, start again at step 1 once you know the cause of the failure.
 8. Wait until `cellctl` is Ready. Its liveness probe restarts the pod when its heartbeat file is older than 120 seconds.
    `kubectl --namespace exomem-cloud get pods --selector app.kubernetes.io/name=cellctl`
 9. Wait until each cell pod is replaced once. Allow up to 10 minutes for each cell.

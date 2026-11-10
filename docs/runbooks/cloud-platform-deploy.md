@@ -448,14 +448,16 @@ A cell with local storage backs up each hour. Another cell backs up once a day, 
 
    cellctl unwraps the backup key before it makes the backup Job. A failed unwrap makes no Job, only this log line.
 6. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Stop here.
-7. After a stop at step 6, fix forward from the copy.
+7. After a stop at step 6, fix forward from the copy, then do this section again from step 1.
 8. For any other cause that you found, record it for that cell.
-9. If a cell has no backup and no found cause, keep the copy. After its next backup window, repeat step 3.
-10. When each cell has a backup or a recorded cause, delete the temporary copy of the key columns.
+9. If a cell has no backup and no found cause, keep the copy.
+10. After that cell's next backup window, repeat step 3.
+11. After three windows with no backup and no log line, record "no backup, no unwrap failure" as its cause.
+12. When each cell has a backup or a recorded cause, delete the temporary copy of the key columns.
 
-   ```bash
-   rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
-   ```
+    ```bash
+    rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+    ```
 
 Expected result: `cell-keys-before.csv` is gone. Each listed cell has a backup that is newer than the rollout end,
 or a recorded cause that is not the backup key.
