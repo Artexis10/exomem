@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import itertools
-import logging
 import multiprocessing
 import os
 import queue
