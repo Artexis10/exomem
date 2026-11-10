@@ -11,6 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+
 from exomem import (
     commands,
     context_refs,
@@ -21,6 +24,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import semantic_language_registry as language_registry
+from exomem.governance import egress, principal
 
 NOTES = "Knowledge Base/Notes"
 PAGE = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
@@ -60,17 +64,29 @@ def _write(vault: Path, rel: str, body: str) -> None:
     path.write_text(body, encoding="utf-8")
 
 
-def _display_vault(tmp_path: Path) -> Path:
+def _vault(
+    tmp_path: Path, pages: dict[str, str], *, name: str = "vault", registry: str | None = None,
+    graph: bool = True,
+) -> Path:
+    """A vault of `pages` by title under the notes folder, with an optional vault registry of
+    the semantic language, and its graph built unless `graph` is false."""
     from conftest import initialize_vault_state_offline
 
-    vault = tmp_path / "vault"
-    vault.mkdir()
+    vault = tmp_path / name
+    vault.mkdir(parents=True)
     initialize_vault_state_offline(vault, source="dimension display fixture")
-    for title, body in PAGES.items():
-        _write(vault, f"{NOTES}/{title}.md", PAGE.format(title=title, body=body))
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    for title, body in pages.items():
+        _write(vault, f"{NOTES}/{title}.md", PAGE.format(title=title.rsplit("/", 1)[-1], body=body))
+    if registry is not None:
+        _write(vault, language_registry.registry_path(vault).relative_to(vault).as_posix(), registry)
+    if graph:
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     find_module.clear_cache()
     return vault
+
+
+def _display_vault(tmp_path: Path) -> Path:
+    return _vault(tmp_path, PAGES)
 
 
 def _search(vault: Path, filters: dict | None, **kwargs) -> dict:
@@ -85,6 +101,24 @@ def _search(vault: Path, filters: dict | None, **kwargs) -> dict:
 
 def _view(reply: dict) -> list[tuple[str, str]]:
     return [(hit["parent_title"], hit["excerpt"]) for hit in reply["hits"]]
+
+
+def _marks(reply: dict) -> dict[str, dict | None]:
+    """Each hit's marks, by the hit's excerpt."""
+    return {hit["excerpt"]: hit.get("display") for hit in reply["hits"]}
+
+
+def _packed(reply: dict) -> dict[str, dict]:
+    """Each unit of a deep search's pack, by its unit ref."""
+    return {
+        unit["unit_ref"]: unit
+        for page in reply["pack"]["semantic_units"].values()
+        for unit in page["units"]
+    }
+
+
+def _ref(title: str, anchor: str) -> str:
+    return f"{context_refs.vault_ref(f'{NOTES}/{title}.md')}#{anchor}"
 
 
 # The fields every unit hit of these searches carries, besides `verdict` and `display`.
@@ -164,6 +198,292 @@ def test_a_search_by_dimension_returns_the_dimensions_view(tmp_path: Path) -> No
             assert hit["dimension"] == dimension
             own = sorted(set(hit) - {"verdict", "display"})
             assert own == UNIT_FIELDS, (dimension, hit["excerpt"])
+
+
+# ---------------------------------------------------------------------------
+# Groups at the request boundary: the search tool and its deep pack
+# ---------------------------------------------------------------------------
+
+ORDER_PAGES = {
+    # By date alone the announcement comes first and the undated freeze last.
+    "Launch plan": (
+        "## Timeline event\n- id: ship\n- occurred_at: 2026-03-01\n\nThe product ships.\n\n"
+        "## Timeline event\n- id: freeze\n- relations: precedes: [[#ship]]\n\n"
+        "The code freezes.\n\n"
+        "## Timeline event\n- id: announce\n- occurred_at: 2026-02-01\n"
+        "- relations: follows: [[#ship]]\n\nThe launch is announced."
+    ),
+}
+
+
+def test_a_precedes_and_a_follows_edge_order_a_group_in_search_and_pack(tmp_path: Path) -> None:
+    """The spec's "Stated order survives compilation" and "A follows edge orders the same way".
+    Catches a group that orders by date alone, so the freeze that precedes the release comes last
+    and the announcement that follows it comes first."""
+    vault = _vault(tmp_path, ORDER_PAGES)
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "order"}}, deep=True)
+
+    order = [_ref("Launch plan", anchor) for anchor in ("freeze", "ship", "announce")]
+    assert [hit["unit_ref"] for hit in reply["hits"]] == order
+    assert reply["pack"]["groups"] == [{"dimension": "order", "units": order}]
+    assert "order_conflict" not in reply["dimension_groups"][0]
+
+
+def test_leading_with_the_current_view_hides_nothing_in_search_or_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spec's "Leading with the current view hides nothing". Catches a replaced decision that
+    a group drops, or that the pack loses from its group when its cap leaves no room for it."""
+    vault = _display_vault(tmp_path)
+    current, earlier = _ref("Decision log", "after"), _ref("Decision log", "before")
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "currency"}}, deep=True)
+
+    assert [hit["unit_ref"] for hit in reply["hits"]] == [current, earlier]
+    assert _packed(reply)[earlier]["display"] == {"replaced": {"by": current}}
+    assert "display" not in _packed(reply)[current]
+    assert reply["pack"]["groups"] == [{"dimension": "currency", "units": [current, earlier]}]
+
+    # With room for one unit, the earlier decision stays in its group as a ref.
+    monkeypatch.setenv("EXOMEM_PACK_MAX_UNITS", "1")
+    short = _search(vault, {"unit.dimension": {"$eq": "currency"}}, deep=True)
+    assert list(_packed(short)) == [current]
+    assert short["pack"]["groups"] == [{"dimension": "currency", "units": [current, earlier]}]
+
+
+REGULATION = (
+    "schema_version: 1\ndimensions:\n"
+    "  regulation:\n    labels: {en: Regulation}\n"
+    "    description: What the rules require\n    members: {kinds: [constraint, requirement]}\n"
+    "    display: [show_origin]\n"
+)
+
+
+def test_an_added_dimension_borrows_a_display_behaviour(tmp_path: Path) -> None:
+    """The spec's "An added dimension borrows a display behaviour". Catches a display that reads
+    only shipped dimensions, so a vault dimension that names `show_origin` shows no origin."""
+    vault = _vault(
+        tmp_path,
+        {
+            "Release rules": (
+                "## Constraint\n- asserted_by: Security team\n"
+                f"- relations: derived_from: [[{NOTES}/Audit]]\n\nNo deploys on Friday.\n\n"
+                "## Requirement\n\nTwo reviewers approve each change."
+            ),
+            "Audit": "## Finding\n\nFriday deploys caused two outages.",
+        },
+        registry=REGULATION,
+    )
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "Regulation"}}, deep=True)
+
+    origin = {"by": "Security team", "from": [context_refs.vault_ref(f"{NOTES}/Audit.md")]}
+    assert _marks(reply) == {
+        "No deploys on Friday.": {"origin": origin},
+        "Two reviewers approve each change.": None,
+    }
+    assert reply["user_summary"] == "2 units in 'Regulation'."
+    assert [unit.get("display") for unit in _packed(reply).values()] == [{"origin": origin}, None]
+
+
+def test_an_open_question_is_open_only_until_another_page_answers_it(tmp_path: Path) -> None:
+    """Catches `open` that ignores an inbound `answers` edge from another page, or that marks a
+    question open whatever its edges say."""
+    answered = _display_vault(tmp_path / "answered")
+    unanswered = _vault(
+        tmp_path / "unanswered", {key: body for key, body in PAGES.items() if key != "Answers"}
+    )
+    beta = "Does the launch need a beta?"
+
+    for vault, is_open in ((answered, False), (unanswered, True)):
+        reply = _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
+        assert (_marks(reply)[beta] == {"open": True}) is is_open
+        assert (_packed(reply)[_ref("Questions", "beta")].get("display") == {"open": True}) is is_open
+        assert reply["dimension_groups"][0]["open"] == (1 if not is_open else 2)
+
+
+WITHHELD_ANSWER = "Patterns/Answers"
+
+
+def _answer_twin(tmp_path: Path, *, withheld: bool) -> Path:
+    """The display vault with its answering page in a folder that an egress rule withholds from
+    an external caller, or as if it never had that page."""
+    pages = {key: body for key, body in PAGES.items() if key != "Answers"}
+    if withheld:
+        pages[WITHHELD_ANSWER] = PAGES["Answers"]
+    vault = _vault(tmp_path, pages, name="with-page" if withheld else "without-page", graph=False)
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    _reset_caches()
+    return vault
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_caller_who_may_not_see_the_answer_gets_the_reply_of_a_vault_without_it(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches a mark read from an edge the caller may not see: the question would lose `open`
+    and tell the caller that a withheld page answers it."""
+    replies = []
+    for withheld in (True, False):
+        vault = _answer_twin(tmp_path, withheld=withheld)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        with principal.request_scope(_external()):
+            replies.append(_search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True))
+    with_page, without_page = replies
+
+    assert with_page == without_page
+    assert _marks(with_page)["Does the launch need a beta?"] == {"open": True}
+
+
+def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the_next(
+    tmp_path: Path,
+) -> None:
+    """Catches a unit repeated in full in a second group, or missing from it."""
+    vault = _display_vault(tmp_path)
+    analysis = next(
+        hit["unit_ref"]
+        for hit in _search(vault, {"unit.dimension": {"$eq": "attribution"}})["hits"]
+    )
+
+    reply = _search(vault, {"unit.dimension": {"$in": ["provenance", "attribution"]}}, deep=True)
+
+    assert [hit["unit_ref"] for hit in reply["hits"]].count(analysis) == 1
+    assert next(h for h in reply["hits"] if h["unit_ref"] == analysis)["dimension"] == "provenance"
+    provenance, attribution = reply["dimension_groups"]
+    assert {"unit_ref": analysis} in provenance["units"]
+    assert attribution["units"] == [{"unit_ref": analysis, "shown_in": "provenance"}]
+    assert reply["user_summary"] == "2 units in 'Provenance'. 1 unit in 'Attribution'."
+    assert [group["units"] for group in reply["pack"]["groups"]][1] == [analysis]
+    assert list(_packed(reply)).count(analysis) == 1
+
+
+def test_a_cycle_of_precedes_edges_keeps_the_date_order_and_names_the_conflict(
+    tmp_path: Path,
+) -> None:
+    """Catches a cycle that loops, drops its events, or reorders them with no word to the caller."""
+    vault = _vault(
+        tmp_path,
+        {
+            "Cycle": (
+                "## Timeline event\n- id: a\n- occurred_at: 2026-03-01\n"
+                "- relations: precedes: [[#b]]\n\nEvent A.\n\n"
+                "## Timeline event\n- id: b\n- occurred_at: 2026-02-01\n"
+                "- relations: precedes: [[#c]]\n\nEvent B.\n\n"
+                "## Timeline event\n- id: c\n- occurred_at: 2026-01-01\n"
+                "- relations: precedes: [[#a]]\n\nEvent C."
+            ),
+        },
+    )
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "order"}}, deep=True)
+
+    by_date = [_ref("Cycle", anchor) for anchor in ("c", "b", "a")]
+    assert [hit["unit_ref"] for hit in reply["hits"]] == by_date
+    assert sorted(reply["dimension_groups"][0]["order_conflict"]) == sorted(by_date)
+    assert reply["user_summary"] == "3 units in 'Order'; 3 have conflicting order links."
+    assert reply["pack"]["groups"] == [{"dimension": "order", "units": by_date}]
+
+
+QUESTIONS_ONLY = (
+    "schema_version: 1\ndimensions:\n"
+    "  questions:\n    labels: {en: Questions}\n"
+    "    description: What is still asked\n    members: {kinds: [open_question]}\n"
+    "    display: [flag_open]\n"
+)
+
+
+def test_an_unreadable_graph_marks_nothing_open_and_says_the_links_are_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a reader that takes a graph it has not built as one with no answers, so every
+    question reads as open. Membership by kind needs no graph, so the search still answers."""
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
+    vault = _vault(tmp_path, PAGES, registry=QUESTIONS_ONLY, graph=False)
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "questions"}}, deep=True)
+
+    assert len(reply["hits"]) == 2
+    assert not any(_marks(reply).values())
+    [group] = reply["dimension_groups"]
+    assert group["edges"] == "unknown"
+    assert "open" not in group
+    assert reply["user_summary"] == (
+        "2 units in 'Questions'; its links could not be read yet, so its marks may be incomplete."
+    )
+
+
+SERVED_GROUPS = {
+    "currency": {"unit.dimension": {"$eq": "currency"}},
+    "uncertainty": {"unit.dimension": {"$eq": "uncertainty"}},
+    "order": {"unit.dimension": {"$eq": "order"}},
+    "two groups": {"unit.dimension": {"$in": ["provenance", "attribution"]}},
+    "questions": {"unit.dimension": {"$eq": "questions"}},
+}
+
+
+def _groups(reply: dict) -> tuple:
+    return (
+        [(hit["unit_ref"], hit["dimension"], hit.get("display")) for hit in reply["hits"]],
+        reply["dimension_groups"],
+    )
+
+
+def test_a_served_search_returns_the_scans_groups_with_one_graph_read_and_no_scan(
+    tmp_path: Path, warm_managed_cell, walk_sentinel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a served reader that reads the corpus to group its hits, reads the graph again for
+    the display, or groups the same hits differently from the scan."""
+    from exomem.vault import kb_dirname
+
+    vault = _vault(tmp_path, PAGES, registry=QUESTIONS_ONLY)
+    offline = {name: _groups(_search(vault, filters)) for name, filters in SERVED_GROUPS.items()}
+    find_module.clear_cache()
+    warm_managed_cell(vault)
+
+    def no_scan(*_args, **_kwargs):
+        raise AssertionError("the served reader answered a filter by reading every page")
+
+    monkeypatch.setattr(find_module, "_eligible_filter_paths", no_scan)
+    sentinel = walk_sentinel(vault, vault / kb_dirname())
+    reads: list[object] = []
+    real = epistemic_graph.EpistemicGraphIndex.unit_edges
+
+    def counted(self, *args, **kwargs):
+        reads.append(kwargs.get("pages"))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "unit_edges", counted)
+
+    for name, filters in SERVED_GROUPS.items():
+        sentinel.reset()
+        reads.clear()
+        assert _groups(_search(vault, filters)) == offline[name], name
+        assert sentinel.count == 0, f"{name}: {sentinel.report()}"
+        assert len(reads) == 1, name
+
+
+def test_a_search_that_asks_for_no_group_returns_no_group_fields(tmp_path: Path) -> None:
+    """Catches group fields, marks or a group order leaking into a search that names no
+    dimension, or that excludes one with `$ne`: those replies must stay as they were."""
+    vault = _display_vault(tmp_path)
+
+    for filters in (
+        None,
+        {"unit.kind": {"$eq": "decision"}},
+        {"unit.dimension": {"$ne": "currency"}},
+        {"$or": [{"unit.dimension": {"$eq": "currency"}}, {"unit.kind": {"$eq": "claim"}}]},
+    ):
+        reply = _search(vault, filters, deep=True)
+        assert sorted(reply) == ["hits", "pack", "user_summary"], filters
+        assert reply["user_summary"] == f"Found {len(reply['hits'])} matches.", filters
+        assert "groups" not in reply["pack"], filters
+        for hit in reply["hits"]:
+            assert "dimension" not in hit and "display" not in hit, filters
+        assert all("display" not in unit for unit in _packed(reply).values()), filters
 
 
 # ---------------------------------------------------------------------------
