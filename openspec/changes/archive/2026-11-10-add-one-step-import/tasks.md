@@ -24,7 +24,7 @@
 
 ## 4. Proof and delivery
 
-- [x] 4.1 Run one Cloud rehearsal with `file`. **Evidence:** Cloud rehearsal run 42730436616 in large-import smoke mode (6,000 files, 0.6 GB) at `e6bc3aa86`: every page filed with `file` calls, consumed 5,000 + 873 notes and 57 media, verdict `smoke_only` with 0 findings. The full-scale run is not part of this change.
+- [x] 4.1 Run one Cloud rehearsal with `file`. **Evidence:** Cloud rehearsal run 42730436616 in large-import smoke mode at `e6bc3aa86`: every page filed with `file` calls, consumed 5,000 + 873 notes and 57 media, verdict `smoke_only` with 0 findings. It asked for 6,000 files and 0.6 GB; the sizing floor raised the data to 0.78 GiB and 0.71 GiB for the two folders. The full-scale run is not part of this change.
 - [x] 4.2 Run the real-model import-guidance probe (cost stated first). **Evidence:** four headless agent runs on subscription models with only the Exomem MCP server and the shipped `exomem-ingest` guidance, each on a fresh temporary vault with a staged folder: a plain import request and an import that asks to delete the leftovers (Sonnet), the plain request (Haiku), and the delete request with one ineligible empty file left over (Sonnet). Every run filed with `import_memory` kind `file` calls only, carried the continuation, reported the whole import and made no discard call; the last named the leftover file and did not delete it.
 - [x] 4.3 Independent review of the finished change, with each finding fixed or withdrawn. **Evidence:** the APPROVE verdicts recorded on the change's PR, with a scoped recheck of each correction.
 - [x] 4.4 Merge, release, and archive this change. **Evidence:** merged as `dbf5dd9f0`, released in v0.170.0; archived by this closure.
