@@ -54,6 +54,17 @@ def render_answer_view(prompt: str, reference: str, answer: str) -> str:
     return f"PERSON: {prompt}\n\nREFERENCE (what actually happened):\n{reference}\n\nAGENT ANSWER TO THE PERSON:\n{answer}"
 
 
+def criterion_problem(criterion: object) -> str | None:
+    """Why a judged criterion cannot be asked, or None: it needs a non-empty string `id` and `text` and a boolean
+    `expect`, the value of the judge's answer that counts as a pass."""
+    if not isinstance(criterion, dict):
+        return f"criterion {criterion!r} must be an object"
+    named = all(isinstance(criterion.get(key), str) and criterion[key].strip() for key in ("id", "text"))
+    if not named or not isinstance(criterion.get("expect"), bool):
+        return f"criterion {criterion.get('id')} needs id, text and a boolean expect"
+    return None
+
+
 def answer_schema(criteria: tuple[dict, ...]) -> dict:
     properties: dict = {}
     for criterion in criteria:

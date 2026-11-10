@@ -64,7 +64,7 @@ def build(runs: Sequence[Path], *, baseline: str, candidate: str, judged: Path |
         "Each cell reads baseline / candidate. `vault writes` counts the seeded pages the session changed plus the pages it "
         "created; `wall seconds` sums the stream's result events. A run that ended in an error shows `unknown`.",
         "",
-        "| case | model | repeat | " + " | ".join(COLUMNS) + " | reply judged (M1 and M2) |",
+        "| case | model | repeat | " + " | ".join(COLUMNS) + " | reply judged (every criterion) |",
         "|---|---|---|" + "---|" * (len(COLUMNS) + 1),
     ]
     for (case, model, repeat, mode), by_arm in sorted(pairs.items(), key=lambda item: item[0][:3]):

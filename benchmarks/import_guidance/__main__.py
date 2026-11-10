@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
     replay.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files of the replay suite")
     replay.add_argument("--judged", type=Path, help="judged.json from judge-import; without it every judged criterion is unknown")
     replay.add_argument("--case-sets", type=Path, required=True, help="case-sets.json from write-scenarios")
-    replay.add_argument("--criteria", nargs="+", help="the judged criteria that must hold; default is the replay rubric")
+    replay.add_argument("--criteria", nargs="+", help="the judged criteria that must hold; default is every criterion of each judgment, the case folder's rubric")
     replay.add_argument("--baseline", required=True, help="the baseline arm's label")
     replay.add_argument("--candidate", required=True, help="the candidate arm's label")
     replay.add_argument("--out", type=Path, help="write the report here instead of printing it")
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command in ("replay-report", "session-table"):
         if args.command == "replay-report":
-            text = replay_report.build(args.runs, judged=args.judged, case_sets=args.case_sets, baseline=args.baseline, candidate=args.candidate, criteria=args.criteria or replay_report.DEFAULT_CRITERIA)
+            text = replay_report.build(args.runs, judged=args.judged, case_sets=args.case_sets, baseline=args.baseline, candidate=args.candidate, criteria=args.criteria)
         else:
             text = session_table.build(args.runs, baseline=args.baseline, candidate=args.candidate, judged=args.judged)
         if args.out:

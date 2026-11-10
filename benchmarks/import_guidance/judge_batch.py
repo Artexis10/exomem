@@ -93,7 +93,9 @@ def import_judgments(judgments: Path, *, out: Path) -> dict:
     rate = agreed / usable if usable else None
     incomplete = rate is None or rate < AGREEMENT_FLOOR
     summary = {"doubled_items": len(doubled), "usable_pairs": usable, "agreeing_pairs": agreed, "agreement": rate, "incomplete": incomplete}
-    (out / "judged.json").write_text(json.dumps({"seed": mapping.get("seed"), "agreement": summary, "rows": rows}, indent=1) + "\n", encoding="utf-8")
+    asked = list(dict.fromkeys(criterion["id"] for entry in items.values() for criterion in entry["criteria"]))
+    judged = {"seed": mapping.get("seed"), "criteria": asked, "agreement": summary, "rows": rows}
+    (out / "judged.json").write_text(json.dumps(judged, indent=1) + "\n", encoding="utf-8")
     return summary
 
 

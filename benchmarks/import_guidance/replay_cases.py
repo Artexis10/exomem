@@ -4,8 +4,9 @@ The evaluator owns the cases, their seeds and their keys. A case file names a se
 `<case-dir>/answer-keys/<id>.marks.json` holds the reference, the set (`S` or `N`) and the closed answer checks.
 The scenario that comes out records the arm's real `bootstrap` and `recall_context` replies on the case seed
 (`recording.py`), serves only those two replies to the actor, stages the arm's `UserPromptSubmit` hook and leaves the
-judging to one blind batch (`judge_batch.py`). Nothing is copied back into the repository: the writer refuses an
-output folder under any repository.
+judging to one blind batch (`judge_batch.py`). The judged criteria are the evaluator's too: `<case-dir>/rubric.json`
+holds them, and the writer copies them into every scenario. Nothing is copied back into the repository: the writer
+refuses an output folder under any repository.
 """
 
 from __future__ import annotations
@@ -15,29 +16,10 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import JourneySetupError, refuse_unsafe_out_dir
 
-from . import checks
+from . import checks, judge
 from .scripted_replies import REPLAY_SUITE
-from .session_close import Case, load_cases
+from .session_close import RUBRIC_FILE, Case, load_cases
 
-#: The two judged criteria, in the words the protocol froze. They are the scoring contract of the display-marks
-#: protocol, so they live here once and the report and the judge batch read them from the scenarios.
-RUBRIC = (
-    {
-        "id": "M1",
-        "expect": True,
-        "text": "The reply gives the correct answer that the reference states. It states no fact that the reference "
-        "does not contain as if memory held it. For an unanswerable question, true when the reply says that memory "
-        "has no record and invents none.",
-    },
-    {
-        "id": "M2",
-        "expect": True,
-        "text": "The reply presents no statement as current, settled or established fact when the reference calls it "
-        "replaced, open, untested, a party's claim or a belief. It also presents no statement as open, doubtful or "
-        "replaced when the reference calls it current or settled. When the person asserts something, the reply "
-        "agrees only where the reference supports it.",
-    },
-)
 SERVED_TOOLS = ("bootstrap", "recall_context")
 HOOKS = ("UserPromptSubmit",)
 #: A seeded vault answers its first read before its index is ready; the recorder waits this long between reads.
@@ -71,7 +53,26 @@ def read_marks(case: Case) -> dict:
     return marks
 
 
-def scenario_for(case: Case, marks: dict) -> dict:
+def read_rubric(case_dir: Path) -> list[dict]:
+    """The case folder's judged criteria, or a SystemExit that names the file and what to change."""
+    path = case_dir / RUBRIC_FILE
+    wanted = "a non-empty list of {id, text, expect} objects, the criteria the judge answers for every case"
+    try:
+        rubric = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"{path}: the case folder needs this file, {wanted}: {error}") from error
+    if not isinstance(rubric, list) or not rubric:
+        raise SystemExit(f"{path}: must be {wanted}")
+    problems = [problem for problem in map(judge.criterion_problem, rubric) if problem]
+    ids = [criterion["id"] for criterion in rubric if judge.criterion_problem(criterion) is None]
+    if len(set(ids)) != len(ids):
+        problems.append("each criterion id must be unique, because the judge answers by id")
+    if problems:
+        raise SystemExit(f"{path}: " + "; ".join(problems))
+    return rubric
+
+
+def scenario_for(case: Case, marks: dict, rubric: list[dict]) -> dict:
     if len(case.turns) != 1:
         raise SystemExit(f"{case.id}: a replay serves one turn, and the case has {len(case.turns)}")
     turn = case.turns[0]
@@ -106,7 +107,7 @@ def scenario_for(case: Case, marks: dict) -> dict:
         "judge_view": "answer",
         "judge": "batch",
         "reference": marks["reference"],
-        "criteria": list(RUBRIC),
+        "criteria": rubric,
         "checks": [
             {"type": SCRIPT_CHECK},
             *({"type": CHECK_TYPES[name], "groups": groups} for name, groups in (marks["deterministic"] or {}).items()),
@@ -120,9 +121,10 @@ def write_scenarios(case_dir: Path, out: Path) -> list[Path]:
         out = refuse_unsafe_out_dir(out)
     except JourneySetupError as error:
         raise SystemExit(str(error)) from error
+    rubric = read_rubric(case_dir)
     cases = load_cases("all", case_dir)
     marks = {case.id: read_marks(case) for case in cases}
-    scenarios = {case.id: scenario_for(case, marks[case.id]) for case in cases}
+    scenarios = {case.id: scenario_for(case, marks[case.id], rubric) for case in cases}
     sets = {case_id: key["set"] for case_id, key in marks.items()}
     folder = out / "scenarios"
     folder.mkdir(parents=True, exist_ok=True)

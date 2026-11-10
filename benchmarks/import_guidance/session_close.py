@@ -142,8 +142,13 @@ def load_case(path: Path) -> Case:
     )
 
 
+#: A case folder's judged criteria for the context-replay suite (`replay_cases.py`). The name is part of the case-folder
+#: format, so the file is never read as a case.
+RUBRIC_FILE = "rubric.json"
+
+
 def load_cases(selector: str, case_dir: Path | None = None) -> list[Case]:
-    cases = [load_case(p) for p in sorted((case_dir or suite_dir()).glob("*.json"))]
+    cases = [load_case(p) for p in sorted((case_dir or suite_dir()).glob("*.json")) if p.name != RUBRIC_FILE]
     chosen = cases if selector == "all" else [c for c in cases if c.id == selector or c.id.startswith(selector)]
     if not chosen:
         raise SystemExit(f"no case matches {selector!r}: {[c.id for c in cases]}")

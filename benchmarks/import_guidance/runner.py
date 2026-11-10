@@ -581,11 +581,7 @@ def dry_run(scenario: Scenario, scratch: Path, arm: Arm | None = None) -> list[s
     for spec in scenario.checks:
         if spec.get("type") not in checks.CHECKS:
             problems.append(f"unknown check type {spec.get('type')}")
-    for criterion in scenario.criteria:
-        if not {"id", "text", "expect"} <= set(criterion) or not isinstance(
-            criterion["expect"], bool
-        ):
-            problems.append(f"criterion {criterion.get('id')} needs id, text and a boolean expect")
+    problems.extend(problem for problem in map(judge.criterion_problem, scenario.criteria) if problem)
     if scenario.judge not in JUDGE_MODES:
         problems.append(f"judge must be one of {JUDGE_MODES}, not {scenario.judge!r}")
     if scenario.hooks:

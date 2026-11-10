@@ -255,6 +255,11 @@ def test_a_recording_made_before_the_graph_was_built_is_not_reused_for_a_scenari
 # Case folders, scenarios and the answer checks.
 
 TURN_ONE = "When does the first ferry sail on weekdays?"
+#: An invented rubric: the harness holds none of its own and copies a case folder's into every scenario.
+RUBRIC = [
+    {"id": "K1", "expect": True, "text": "The reply gives the sailing time that the reference gives."},
+    {"id": "K2", "expect": True, "text": "The reply adds no sailing that the reference does not name."},
+]
 
 
 def case_folder(root: Path, cases: dict[str, dict]) -> Path:
@@ -262,6 +267,7 @@ def case_folder(root: Path, cases: dict[str, dict]) -> Path:
     `deterministic` block and set."""
     folder = root / "cases"
     (folder / "answer-keys").mkdir(parents=True)
+    (folder / "rubric.json").write_text(json.dumps(RUBRIC), encoding="utf-8")
     (folder / "seeds" / "ferry-seed" / "Notes").mkdir(parents=True)
     (folder / "seeds" / "ferry-seed" / "Notes" / "page.md").write_text("# Page\n", encoding="utf-8")
     for case_id, marks in cases.items():
@@ -311,8 +317,20 @@ def test_a_written_scenario_loads_by_folder_path_with_its_checks_set_and_judging
     assert [spec["type"] for spec in scenarios["c2"].checks] == ["only_scripted_tools"]
     assert first.prompt == TURN_ONE and first.reference == "Reference of c1." and first.judge == "batch"
     assert first.hooks == ("UserPromptSubmit",) and first.served_tools == ("bootstrap", "recall_context")
-    assert first.record["ready_graph"] is True
+    assert first.record["ready_graph"] is True and list(first.criteria) == RUBRIC
     assert json.loads((tmp_path / "out" / "case-sets.json").read_text()) == {"c1": "N", "c2": "S"}
+
+
+def test_the_scenario_writer_refuses_a_case_folder_without_a_usable_rubric_and_names_the_file(tmp_path: Path) -> None:
+    """Catches scenarios written with no judged criteria: every answer would then pass on its closed checks alone."""
+    folder = case_folder(tmp_path, {"c1": {}})
+    (folder / "rubric.json").unlink()
+    with pytest.raises(SystemExit, match="rubric.json"):
+        replay_cases.write_scenarios(folder, tmp_path / "out")
+    (folder / "rubric.json").write_text(json.dumps([{"id": "K1", "text": "A criterion with no expected value."}]), encoding="utf-8")
+    with pytest.raises(SystemExit, match="rubric.json.*boolean expect"):
+        replay_cases.write_scenarios(folder, tmp_path / "out")
+    assert not (tmp_path / "out" / "scenarios").exists()
 
 
 def test_a_marks_key_with_an_unknown_check_type_is_refused_by_name(tmp_path: Path) -> None:
@@ -346,7 +364,7 @@ def test_in_order_fails_a_missing_group_and_a_wrong_order_and_malformed_groups_a
 def invented_scenario(case_id: str) -> Scenario:
     return Scenario(
         id=case_id, title="t", prompt=TURN_ONE, served_tools=("recall_context",), builtin_tools=(), replies={}, default_reply={},
-        checks=(), criteria=tuple(replay_cases.RUBRIC), reference=f"Reference of {case_id}.", judge="batch",
+        checks=(), criteria=tuple(RUBRIC), reference=f"Reference of {case_id}.", judge="batch",
     )
 
 
@@ -369,7 +387,8 @@ def judge_batch_as(out: Path, holds: Callable[[dict], bool]) -> Path:
     for raw in (out / "judge-views.jsonl").read_text().splitlines():
         item_id = json.loads(raw)["id"]
         held = holds(mapping[item_id]["run"])
-        lines.append(json.dumps({"id": item_id, "structured_output": {"M1": held, "M1_reason": "r", "M2": held, "M2_reason": "r"}}))
+        answer = {key: value for c in RUBRIC for key, value in ((c["id"], held), (f"{c['id']}_reason", "r"))}
+        lines.append(json.dumps({"id": item_id, "structured_output": answer}))
     path = out / "judgments.jsonl"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -399,7 +418,7 @@ def test_a_seeded_fifth_of_the_items_appears_twice_and_low_agreement_reads_incom
     lines = [json.loads(line) for line in judgments.read_text().splitlines()]
     for line in lines:
         if line["id"] == flipped:
-            line["structured_output"]["M1"] = False
+            line["structured_output"]["K1"] = False
     judgments.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
     noisy = judge_batch.import_judgments(judgments, out=out)
     assert noisy["agreement"] == 0.5 and noisy["incomplete"]
@@ -422,7 +441,7 @@ def test_a_missing_judgment_is_unknown_and_never_a_disagreement_or_a_pass(tmp_pa
 
 
 def test_a_judge_item_shows_no_arm_model_or_stage_and_both_stages_share_one_shuffled_file(tmp_path: Path) -> None:
-    """Catches an item that lets the judge tell the arm, the model or the stage, which would bias M1 and M2."""
+    """Catches an item that lets the judge tell the arm, the model or the stage, which would bias every judged criterion."""
     stage_b = write_rows(tmp_path / "b.jsonl", [stage_b_row("c0", "arm-zeta", "Sails at 07:15.", model="model-quokka")])
     stage_c = write_rows(
         tmp_path / "c.jsonl",

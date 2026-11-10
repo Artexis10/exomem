@@ -120,6 +120,7 @@ A case folder holds:
 - `<id>.json`: the session-close case format with one turn.
 - `answer-keys/<id>.marks.json`: the `reference` for the judge, the `set` of the case, and `deterministic`. `deterministic` is null, or an object with `all_of` and `in_order`, each a list of groups of spellings.
 - `seeds/<seed>/`: the seed folder that the case file names.
+- `rubric.json`: the judged criteria, a list of objects with `id`, `text` and `expect` (the boolean answer that counts as a pass). The writer copies them into every scenario and refuses a case folder without this file. The replay suite holds no criteria of its own.
 
 Run these steps from the repository root:
 
@@ -140,8 +141,8 @@ What the suite does:
 - The first read of a seeded vault is cold: the index is not ready, and the reply holds no context. The `recall_context` step therefore has a `warm` key. The recorder discards the first read, waits, and reads twice. It records the second read only when the two agree apart from the listed fields.
 - The runner writes the arm's `UserPromptSubmit` hook declaration into the agent's settings. It sets `EXOMEM_RETRIEVE_INJECT=mcp`, the case's engagement and a hook home inside the run folder. Session-close uses the same code (`plugin_hooks` and `hook_env`). The row records `hook_invocations` for information only.
 - `answer_has_all_of` needs one spelling from each group in the answer. `answer_in_order` needs the first matches of the groups in the listed order. Both match case-insensitively on the whole text.
-- An answer passes when every named judged criterion holds and every deterministic check of the case passes. A run error, a missing judgment and a missing arm are `unknown`. Every written scenario also carries `only_scripted_tools`: a run in which the agent used a tool outside the script did not measure the replayed context, so the report counts it as `unknown` (its own line, "Runs where the agent used a tool outside the script") and leaves it out of the paired difference, the reply length and the disagreement list.
-- A judge item holds the turn, the reference, the reply and the criteria M1 and M2, and nothing that names the arm, the model or the stage. Items of both stages are shuffled under opaque ids. The prepare step doubles a seeded 20% of them.
+- An answer passes when every judged criterion holds and every deterministic check of the case passes. `replay-report --criteria` can name a subset of the criteria. A run error, a missing judgment and a missing arm are `unknown`. Every written scenario also carries `only_scripted_tools`: a run in which the agent used a tool outside the script did not measure the replayed context, so the report counts it as `unknown` (its own line, "Runs where the agent used a tool outside the script") and leaves it out of the paired difference, the reply length and the disagreement list.
+- A judge item holds the turn, the reference, the reply and the criteria of the rubric, and nothing that names the arm, the model or the stage. Items of both stages are shuffled under opaque ids. The prepare step doubles a seeded 20% of them.
 - `replay-report` gives each case one value: it takes each model's mean over its known repeats, then the mean over the models. A model with an extra repeat therefore weighs no more than a model with one. The reply-length ratio takes the same mean. The report gives, for each set, the paired difference with a 95% percentile bootstrap over cases, the pass counts, the unknown counts, and the log ratio of reply length with its interval. A case with no known pair is listed as unknown.
 
 Limits:
