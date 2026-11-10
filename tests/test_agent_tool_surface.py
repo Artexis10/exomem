@@ -463,7 +463,7 @@ def test_every_route_a_public_reply_carries_names_a_listed_tool_and_arguments_it
         audit_fix = capabilities.active_call_route("triage_memory", {"action": "competing", "item_id": "<id>"})
 
     async def scenario(client):
-        schemas = {tool.name: tool.inputSchema for tool in await client.list_tools()}
+        schemas = {tool.name: tool.input_schema for tool in await client.list_tools()}
         replies = [
             await _call(client, "read_instructions", {"profile": "full"}),
             await _call(client, "create_note", {
