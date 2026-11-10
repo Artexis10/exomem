@@ -4972,6 +4972,7 @@ def _dimension_edges(
     )
     if edges.status == "temporarily_unavailable" and lookups.needs_edges:
         raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
+    # nosemgrep: ep-word-set -- the closed statuses of an edge read; any other one needs a rebuild
     if edges.status not in ("available", "temporarily_unavailable"):
         epistemic_graph.schedule_background_rebuild(
             vault_root,
