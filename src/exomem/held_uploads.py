@@ -46,8 +46,12 @@ from .governance import principal
 HELD_SCHEME = "exomem-held:"
 #: How long a hold waits for its command.
 HOLD_TTL_SECONDS = 3600
+#: The lane of an archive that `imports.file` unpacks into a stage; no bearer-token route offers it.
+IMPORT_LANE = "import"
 #: Lanes a hold can be committed through, and the command that commits each.
-LANE_COMMANDS = {"evidence": "preserve_artifacts", "source": "capture_source"}
+LANE_COMMANDS = {
+    "evidence": "preserve_artifacts", "source": "capture_source", IMPORT_LANE: "manage_memory imports.file",
+}
 STORE_DIRNAME = "held-uploads"
 #: Live holds one local session may keep: two full file-handle batches.
 HOLD_MAX_COUNT = 16
@@ -186,8 +190,12 @@ def hold(
     content_type: str | None,
     max_bytes: int,
     expected_sha256: str | None = None,
+    secret: str | None = None,
 ) -> dict:
-    """Hold one upload for the verified session and return its file handle."""
+    """Hold one upload for the verified session and return its file handle.
+
+    A caller that can name the hold again without the reply passes its own `secret`; otherwise one is drawn.
+    """
     binding = _binding()
     if binding is None:
         raise HeldUploadError(
@@ -211,7 +219,9 @@ def hold(
         stream.seek(start)
         if length > shutil.disk_usage(store).free:
             raise HeldUploadError("HELD_UPLOAD_NO_SPACE", "not enough free disk space to hold this upload")
-        secret = secrets.token_urlsafe(32)
+        secret = secret if secret is not None else secrets.token_urlsafe(32)
+        if _SECRET.fullmatch(secret) is None:
+            raise HeldUploadError("INVALID_UPLOAD", "a hold secret is 43 URL-safe characters")
         key = _key(secret)
         fd, raw = tempfile.mkstemp(prefix=f"{key}.", suffix=".part", dir=store)
         part = Path(raw)

@@ -745,7 +745,7 @@ def upload_refusal(
     rechecks the allowance before publication. The declared size counts as a new version, because nothing
     shows a duplicate of a stored version before the bytes arrive.
     """
-    from . import source_inspection
+    from . import held_uploads, source_inspection
 
     vault = Path(vault).resolve()
     try:
@@ -753,9 +753,10 @@ def upload_refusal(
         if config is None or config.get("enabled") is not True:
             return None
         bounds = media_capacity.bounds_for(config, vault)
-        # `evidence` is the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
-        stays = lane == "evidence" and (
-            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))
+        # An import archive is unpacked into a stage and released, so it is never an offloaded original. `evidence` is
+        # the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
+        stays = lane == held_uploads.IMPORT_LANE or (lane == "evidence" and (
+            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename)))
         largest = declared_bytes if most_bytes is None else most_bytes
         # A larger size never classifies back to offloadable, so the largest possible size decides for the range.
         if stays or (bounds is not None and bounds.classify(largest) != media_capacity.OFFLOADABLE):

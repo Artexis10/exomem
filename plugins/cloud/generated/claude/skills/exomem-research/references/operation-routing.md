@@ -110,6 +110,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     the local token that sent it, so the MCP connection must use that same local
     token. `--lane source` holds it for `save_source`; `--scope S --category C`
     preserves straight to Evidence.
+  - **A folder to import (any client that can send one HTTP request):** pack it as one tar
+    or zip and call `upload_files(lane="import", expected_sha256="<digest>")`. Its reply
+    names the request to send, and `manage_memory` `imports.file` with the returned `token`
+    as `upload` files it. The flow is in [importing](importing.md).
   - **Sandbox clients (claude.ai, Claude desktop chat, Cowork; no file handle, no
     local token):** only with the user's opt-in (code execution on, the Exomem host
     allowed for network access, a fresh conversation), hold the bytes with the

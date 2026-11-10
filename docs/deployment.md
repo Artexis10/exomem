@@ -1815,6 +1815,16 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with
   `HELD_UPLOAD_NO_SPACE`.
+- A client with no shell imports a folder by sending it as one tar or zip:
+  `upload_files(lane="import")` returns a one-use upload, and
+  `manage_memory` `imports.file` with its `upload` token unpacks it into
+  `_Imports/<id>/` and files it. The unpack streams, refuses links, devices,
+  absolute and `..` paths, encrypted entries and more than 65,536 entries, and
+  leaves nothing behind when it refuses. `EXOMEM_IMPORT_MAX_EXPANDED_BYTES`
+  (default 1 GiB) caps the bytes that one archive may unpack to, and
+  `EXOMEM_IMPORT_RESERVE_BYTES` (default 256 MiB) is the free space that an
+  unpack keeps back. The archive is held for at most an hour and released once
+  it is unpacked or refused.
 - A file over 64 MiB, a file that the listener refuses as too large, or any
   file with `--resumable` goes through a resumable upload session. The
   listener's cap is in the service's environment, so `exomem attach` does not

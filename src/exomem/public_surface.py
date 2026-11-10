@@ -455,6 +455,18 @@ def _door_call(
 # --- Help -------------------------------------------------------------------------------------
 
 
+_IMPORT_GUIDE = (
+    "Import a folder from a client without a shell, in three steps. "
+    "1. Pack the folder itself as one tar or zip, such as `tar -C <parent> -cf folder.tar <folder>`, and take the archive's SHA-256. "
+    "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` to send the archive. "
+    "3. Call manage_memory with operation `imports.file` and arguments `{\"upload\": \"<token>\"}`, using the token of step 2, "
+    "and repeat it until `filing` is `done`. A repeat, or a call that was cut short, carries on the same import and unpacks nothing again. "
+    "A refused archive names the member and leaves nothing unpacked. A shell on the server's own machine can run `exomem import <folder>` instead."
+)
+#: Teaching that read_instructions adds to a topic whose use takes more than its arguments show.
+_GUIDES = {"upload_files": _IMPORT_GUIDE, "imports.file": _IMPORT_GUIDE}
+
+
 def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
     """The arguments and one example of a tool, a door or one door operation, from the tables that route it."""
     from .cli_ops import OpError
@@ -469,7 +481,8 @@ def help_for(topic: str | None, commands: Sequence[Any]) -> dict[str, Any]:
     if topic in surface.tools and topic in listed:
         tool = surface.tools[topic]
         return {"tool": topic, "arguments": tool_schema(tool)["properties"],
-                **({"example": dict(tool.example)} if tool.example else {})}
+                **({"example": dict(tool.example)} if tool.example else {}),
+                **({"guide": _GUIDES[topic]} if topic in _GUIDES else {})}
     if topic in DOORS.values() and topic in listed:
         ops = surface.door_operations(topic, commands)
         areas: dict[str, list[str]] = {}
@@ -514,6 +527,8 @@ def _door_help(surface: PublicSurface, op: DoorOp, commands: Sequence[Any]) -> d
             required = result["alternatives"][0].get("required", [])
             result.setdefault("note", "Send the fields of one alternative as `arguments`.")
     result["example"] = {"operation": op.name, "arguments": {key: f"<{key}>" for key in required}}
+    if op.name in _GUIDES:
+        result["guide"] = _GUIDES[op.name]
     return result
 
 

@@ -1513,10 +1513,11 @@
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Where the bytes go: source (original material) or evidence (proof).",
+          "description": "Where the bytes go: source (original), evidence (proof) or import (a folder as tar or zip).",
           "enum": [
             "source",
-            "evidence"
+            "evidence",
+            "import"
           ],
           "type": "string"
         },

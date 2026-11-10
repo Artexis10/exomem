@@ -640,15 +640,18 @@ def _save_episode(wire: dict[str, Any], ctx: Context) -> Translated:
 
 
 class UploadFiles(Wire):
-    lane: Literal["source", "evidence"] = Field(description="Where the bytes go: source (original material) or evidence (proof).")
+    lane: Literal["source", "evidence", "import"] = Field(
+        description="Where the bytes go: source (original), evidence (proof) or import (a folder as tar or zip).")
     expected_sha256: str | None = Field(default=None, description="SHA-256 of the file you intend to send.")
     hold: bool | None = Field(default=None, description="Keep the upload for this session; needs expected_sha256.")
     detail: Detail | None = _DETAIL
 
 
 def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
+    # An import archive is only ever held for `imports.file`, so that lane implies the hold.
+    held = True if wire["lane"] == "import" else wire.get("hold")
     return "transfer_artifact", {"operation": "upload", **_given({
-        "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": wire.get("hold"),
+        "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": held,
         "response_detail": wire.get("detail")})}
 
 
@@ -978,7 +981,8 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("upload_files", "Upload files",
           "Get a one-use upload for bytes on this machine. The reply gives the step that moves them; then pass the handle to save_source or save_evidence.",
           UploadFiles, "write", _upload_files,
-          [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})]),
+          [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})],
+          example={"lane": "import", "expected_sha256": "<sha256 of the tar or zip>"}),
     _tool("download_files", "Download files",
           "Get the original files of pages back out of memory. The reply gives a link or a command that saves each.",
           DownloadFiles, "write", _download_files,

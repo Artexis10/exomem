@@ -90,6 +90,8 @@ class ArchiveRefused(Exception):
         self.reason = reason
         self.member_index = member_index
         self.retry = retry
+        # The name of the member that was refused. Only a local caller reads it; `as_dict` never prints it.
+        self.member: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -162,10 +164,12 @@ def unpack_stream(
             os.chmod(staging, 0o700)
         except OSError:
             raise ArchiveRefused(IMPORT_STAGING_UNAVAILABLE, "staging") from None
+    header = _end_tracking_header()
     try:
         result = _unpack_into(
             stream,
             staging,
+            header,
             max_bytes=max_bytes,
             max_members=max_members,
             reserve_bytes=reserve_bytes,
@@ -181,7 +185,9 @@ def unpack_stream(
             # ciphertext, so the files must be on disk before success.
             os.sync()
         return result
-    except BaseException:
+    except BaseException as error:
+        if isinstance(error, ArchiveRefused):
+            error.member = header.member
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -194,6 +200,7 @@ def _blocks(size: int) -> int:
 def _unpack_into(
     stream: BinaryIO,
     staging: Path | None,
+    header: type[tarfile.TarInfo],
     *,
     max_bytes: int,
     max_members: int,
@@ -205,13 +212,13 @@ def _unpack_into(
     directory_times: list[tuple[tuple[str, ...], float]] = []
     total = files = members = 0
     expected_offset = 0
-    header = _end_tracking_header()
     try:
         archive = tarfile.open(fileobj=stream, mode="r|*", tarinfo=header)
     except Exception:  # noqa: BLE001 -- any parser failure is an unreadable archive
         raise ArchiveRefused(ARCHIVE_UNREADABLE, "format", 0) from None
     with archive:
         while True:
+            header.member = None
             try:
                 member = archive.next()
             except Exception:  # noqa: BLE001 -- the message may quote archive content
@@ -219,6 +226,7 @@ def _unpack_into(
             if member is None:
                 break
             members += 1
+            header.member = member.name
             if members > max_members:
                 raise ArchiveRefused(ARCHIVE_TOO_LARGE, "members", members)
             # A member that does not start where the previous one ended means
@@ -299,6 +307,7 @@ def _end_tracking_header() -> type[tarfile.TarInfo]:
     class _Header(tarfile.TarInfo):
         end_seen = False
         end_offset = -1
+        member: str | None = None  # the name of the member being checked; None between members
 
         @classmethod
         def fromtarfile(cls, source: tarfile.TarFile) -> tarfile.TarInfo:

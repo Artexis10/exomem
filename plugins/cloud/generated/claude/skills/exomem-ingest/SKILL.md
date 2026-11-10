@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 0745e8a70957dd69109eb3348fe261c9c86a4e9f4cf7d2c3ecc60d977fd37411
+  skill_contract: 3aaebf3331c5321d8ce5c9de253d8e05138935d9ae105d22a5a8c34932a406a2
   version: "0.1.0"
 ---
 
@@ -79,9 +79,13 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
    vocabularies, so name the label that fits even if it is unfamiliar. A kind is
    required, and there is no catch-all.
    For a whole folder or collection of existing files, use `manage_memory` instead of
-   capturing one by one. A folder outside the vault is staged first: run
-   `exomem import <folder>` and start on the path it prints, because `start` refuses an
-   absolute path. For Cloud, follow [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then call `manage_memory` with `operation` `imports.file`
+   capturing one by one. A folder outside the vault is staged first. With no shell on the
+   server's machine, pack the folder itself as one tar or zip, send it with `upload_files`
+   (`lane` `import`, `expected_sha256` of the archive) and run the `shell` line of the
+   reply's `next`; then call `manage_memory` with `operation` `imports.file` and
+   `arguments` `{"upload": "<token>"}`. With a shell, run `exomem import <folder>` and
+   use the path it prints, because `start` refuses an absolute path. For Cloud, follow
+   [importing](references/importing.md): get the CLI command from `observe_transfer` and check its prerequisites. Then call `manage_memory` with `operation` `imports.file`
    and the staged `path`, with a `collection` name where the person gives one. Repeat the same
    call with the returned `continuation` until `filing` is not `working`. Report the whole
    import from `summary` and the `progress` counts, including the failed files, then the
