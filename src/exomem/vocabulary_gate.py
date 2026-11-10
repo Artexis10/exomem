@@ -241,7 +241,7 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
     from . import curation, episode_store, vocabulary_auxiliaries
 
     # Curation runs and episode journals are operational JSON, no knowledge or index input; their
-    # stores' own guards still apply.
+    # stores' own guards still apply. Both stores write only `.json`, so any other file there is classified.
     operational = tuple(
         f"{store.relative_to(root).as_posix()}/"
         for store in (curation.CurationStore(root).root, episode_store.EpisodeStore(root).root)
@@ -271,7 +271,7 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
                 raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
             unmatched.discard(relative)
             continue
-        if relative.startswith(operational):
+        if relative.startswith(operational) and relative.endswith(".json"):
             continue
         candidates.append((relative, artifact, snapshot))
     if unmatched:
