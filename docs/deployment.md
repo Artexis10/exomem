@@ -1419,11 +1419,12 @@ to make it stop looking for more context sooner. When the limit arrives while
 the call looks for task leads, the packet serves what the call already found:
 the map, and any leads that the call reached. The `task_context` block is
 `partial` with `budget` as the reason, and the packet has a `request_budget`
-block that names what the call left out. If the limit arrives earlier, before
-the map is built or during the heat ranking or the conversation carry, the call
-returns its budget abstention instead. On a host that is short of CPU, a short
-limit can therefore turn calls that would have served late into abstentions,
-which is why the variable is unset by default. A call that finishes within the
+block that names what the call left out. If the limit arrives earlier, during
+the turn slice (the heat ranking, resolution or the conversation carry), the
+packet serves the map alone, without the turn slice or task leads. If it arrives
+before the map is built, the call returns its budget abstention. On a host that
+is short of CPU, a short limit can therefore cost many calls their slice and
+leads, which is why the variable is unset by default. A call that finishes within the
 limit returns the packet it always returned.
 
 To change the limit, set the variable to a positive number of seconds in the

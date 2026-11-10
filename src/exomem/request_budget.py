@@ -89,8 +89,8 @@ TASK_PROJECTION_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 4.0
 #: steady-state method search (0.4-0.7 s for two queries on the same vault) still runs there.
 TASK_PROJECTION_RESERVE_SHARE = 0.25
 #: What an activation may spend inside its request's deadline when the operator sets one with the variable.
-#: Unset, an activation runs on its request's deadline: a nearer one would make the conversation carry, which
-#: cannot yet serve part of its work, abstain where the request's own deadline lets the call serve late.
+#: Unset, an activation runs on its request's deadline: a nearer one stops the turn slice's compile (mostly in
+#: the conversation carry) where the request's own deadline lets the call serve its slice and leads late.
 ACTIVATION_BUDGET_SECONDS: float | None = None
 ACTIVATION_BUDGET_ENV_VAR = "EXOMEM_ACTIVATION_BUDGET_SECONDS"
 
@@ -150,10 +150,10 @@ def _setting_seconds(name: str, default: float | None, env: Mapping[str, str] | 
                 resolved = candidate
             else:
                 _log.warning(
-                    "%s=%r is not a positive number of seconds; falling back to the default (%s)",
+                    "%s=%r is not a positive number of seconds; %s",
                     name,
                     raw,
-                    "none" if default is None else f"{default:.1f}s",
+                    "binding no budget" if default is None else f"falling back to the {default:.1f}s default",
                 )
         _RESOLVED[name] = (raw, resolved)
         return resolved
