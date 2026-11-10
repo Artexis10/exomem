@@ -135,8 +135,10 @@ def traffic_history(body: bytes) -> tuple[int, datetime, tuple[int, ...], tuple[
         return None
     try:
         first = datetime.fromisoformat(first_raw.replace("Z", "+00:00"))
-    except ValueError:
+        if first.tzinfo is None:
+            return None
+        first = first.astimezone(UTC)
+    # OverflowError: an offset that moves the last calendar hour past year 9999.
+    except (ValueError, OverflowError):
         return None
-    if first.tzinfo is None:
-        return None
-    return retention, first.astimezone(UTC), tuple(requests), tuple(seconds)
+    return retention, first, tuple(requests), tuple(seconds)

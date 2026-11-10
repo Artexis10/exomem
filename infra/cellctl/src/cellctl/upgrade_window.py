@@ -120,15 +120,23 @@ def compute_window(cell_id: str, history: TrafficHistory | None, now: datetime, 
     start = end - timedelta(hours=lookback_hours)
     requests = [0] * 24
     seconds = [0] * 24
+    # Whole hours from the lookback's start to the first bucket. Integer offsets, not
+    # datetime sums: the history is a cell's answer, and a first hour near the end of
+    # the calendar must read as out of range, not overflow.
+    first_offset = (history.first_hour - start) // timedelta(hours=1)
     for index, (count, observed) in enumerate(zip(history.requests, history.observed_seconds, strict=True)):
-        hour = history.first_hour + timedelta(hours=index)
-        if start <= hour < end and observed > 0:
-            requests[hour.hour] += count
-            seconds[hour.hour] += observed
+        offset = first_offset + index
+        if 0 <= offset < lookback_hours and observed > 0:
+            hour = (start.hour + offset) % 24
+            requests[hour] += count
+            seconds[hour] += observed
     if Fraction(sum(seconds), lookback_hours * HOUR_SECONDS) < Fraction(config.min_coverage):
         return fallback
     # Exact rates, so a tie is a tie and not a rounding accident.
     rates = {hour: Fraction(requests[hour], seconds[hour]) for hour in range(24) if seconds[hour] > 0}
+    # minCoverage 0 lets a history with no observed hour through.
+    if not rates:
+        return fallback
     lowest = min(rates.values())
     tied = sorted(hour for hour, rate in rates.items() if rate == lowest)
     return Window(tied[_digest(cell_id) % len(tied)], HISTORY)

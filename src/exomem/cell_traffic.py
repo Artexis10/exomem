@@ -108,7 +108,10 @@ class CellTraffic:
             self._advance(hour)
             index = hour - self._first_hour
             if index >= 0:
-                self._seconds[index] = min(HOUR_SECONDS, self._seconds[index] + round(end - start))
+                # Whole seconds crossed, not a rounded segment: requests less than a
+                # second apart still add up, and hour boundaries are whole seconds.
+                crossed = int(end) - int(start)
+                self._seconds[index] = min(HOUR_SECONDS, self._seconds[index] + crossed)
             start = end
         self._run_mark = max(self._run_mark, now)
         self._advance(int(now // HOUR_SECONDS))

@@ -94,3 +94,19 @@ def test_a_full_history_stays_below_the_controllers_read_cap(tmp_path: Path) -> 
     assert len(history["requests"]) == RETENTION_HOURS
     assert len(body) < 64 * 1024
     assert cell_readiness.traffic_history(body) is not None
+
+
+def test_an_hour_of_requests_less_than_a_second_apart_reads_as_observed(tmp_path: Path) -> None:
+    # Catches seconds lost to rounding: the busiest hour must not look like a down hour.
+    clock = Clock(T0)
+    traffic = CellTraffic(tmp_path / "cell-traffic.json", clock=clock)
+    for step in range(1, 9000):
+        clock.now = T0 + step * 0.4
+        traffic.request_started()
+        traffic.request_finished()
+    clock.now = T0 + HOUR
+
+    requests, seconds = _bucket(traffic.history(), T0)
+
+    assert requests == 8999
+    assert seconds == HOUR

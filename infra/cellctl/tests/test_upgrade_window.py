@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import replace as dataclass_replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -72,6 +73,23 @@ def test_coverage_below_the_minimum_gives_the_default_hour() -> None:
 
 def test_no_history_gives_the_default_hour() -> None:
     assert compute_window("cell-a", None, NOW, CONFIG) == Window(default_hour("cell-a", CONFIG), DEFAULT)
+
+
+def test_a_new_cell_with_zero_minimum_coverage_gets_the_default_hour() -> None:
+    # Catches a crash on an empty rate set: minCoverage 0 passes a history whose only
+    # bucket is the current hour, which the lookback excludes.
+    config = dataclass_replace(CONFIG, min_coverage=0.0)
+    history = TrafficHistory(retention_hours=672, first_hour=NOW, requests=(4,), observed_seconds=(60,))
+
+    assert compute_window("cell-a", history, NOW, config) == Window(default_hour("cell-a", config), DEFAULT)
+
+
+def test_a_first_hour_at_the_end_of_the_calendar_reads_as_no_history() -> None:
+    # Catches an overflow on a cell's far-future answer, which failed the whole pass.
+    first = datetime(9999, 12, 31, 23, tzinfo=UTC)
+    history = TrafficHistory(retention_hours=672, first_hour=first, requests=(1, 2), observed_seconds=(3600, 3600))
+
+    assert compute_window("cell-a", history, NOW, CONFIG) == Window(default_hour("cell-a", CONFIG), DEFAULT)
 
 
 def test_unmeasured_cells_spread_across_the_default_range_and_avoid_the_backup_window() -> None:
