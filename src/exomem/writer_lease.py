@@ -2397,6 +2397,21 @@ def _redacted_coordinator_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
+# Writer-authority refusals that a later attempt outlives with the same request:
+# the coordinator, its contract, the lease or the mutation lock is briefly out of
+# reach. Background work (import batches) waits on these instead of failing.
+TRANSIENT_WRITER_CODES = frozenset(
+    {
+        "MUTATION_BUSY",
+        "MUTATION_LOCK_UNAVAILABLE",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        "WRITER_COORDINATOR_CONTRACT_ABSENT",
+        "WRITER_FENCED",
+        "WRITER_LEASE_REQUIRED",
+    }
+)
+
+
 def _coordinator_unavailable_error(exc: BaseException) -> OpError:
     return OpError(
         "WRITER_COORDINATOR_UNAVAILABLE",
