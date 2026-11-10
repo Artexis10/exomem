@@ -605,37 +605,42 @@ class Arm:
             or isinstance(data.get("error"), dict)
         ):
             # The product's error code goes to the log only; the summary keeps the runner's closed code.
-            error = data.get("error", {}) if isinstance(data, dict) else {}
-            print(f"{self.name} arm: {name} {arguments['operation']['kind']} failed with "
-                  f"{error.get('code')}: {error.get('message')}", file=sys.stderr)
+            # A refusal before the product answers (an unlisted tool) has no structured error, only its text.
+            error = data.get("error") if isinstance(data, dict) else None
+            error = error if isinstance(error, dict) else {}
+            reason = (f"{error.get('code')}: {error.get('message')}" if error
+                      else " ".join(getattr(block, "text", "") for block in result.content)[:300])
+            print(f"{self.name} arm: {name} {arguments.get('operation', '')} failed with {reason}", file=sys.stderr)
             raise MeasurementRefused("collection-load-failed", phase="fixture-load")
         return data
 
     async def load_collections(self, fixture: dict) -> None:
-        """Create every collection and load its rows through this arm's own write tools.
+        """Create every collection and load its rows through this arm's own tools.
 
-        Records rows go in as chained bulk upserts, because one guarded append per row costs
-        about a second of worker time. Planning has no bulk action, so it adds row by row.
+        A collection is created through the write door. Records rows go in as chained bulk
+        upserts, because one guarded append per row costs about a second of worker time.
+        Planning has no bulk action, so it adds row by row with `add_plan_item`.
         Each collection is read back and must hold exactly the rows the generator authored.
         """
         from exomem.records import BULK_UPSERT_MAX_ROWS
         from exomem.structured_collections import plan_ref
 
         why = "latency gate fixture"
-        for kind, read_tool, write_tool in (("records", "read_records", "change_records"),
-                                            ("planning", "read_plans", "change_plans")):
+        for kind, area, query_tool in (("records", "records", "query_records"),
+                                       ("planning", "plans", "query_plan_items")):
             for collection in fixture[kind]:
                 path = collection["manifest_path"]
-                created = await self.tool(write_tool, {"operation": {
-                    "kind": "create", "manifest_path": path, "manifest_text": collection["manifest_text"], "why": why}})
+                created = await self.tool("manage_memory", {"operation": f"{area}.create", "arguments": {
+                    "manifest_path": path, "manifest_text": collection["manifest_text"], "why": why}})
                 if kind == "records":
                     guard = created["after_container_hash"]
                     for start in range(0, len(collection["items"]), BULK_UPSERT_MAX_ROWS):
                         rows = [{"item": item} for item in collection["items"][start:start + BULK_UPSERT_MAX_ROWS]]
-                        await self.tool(write_tool, {"operation": {
-                            "kind": "bulk_upsert", "collection": path, "rows": rows, "expected_container_hash": guard,
+                        await self.tool("manage_memory", {"operation": "records.bulk_upsert", "arguments": {
+                            "collection": path, "rows": rows, "expected_container_hash": guard,
                             "source": fixture["source_page"]["path"], "why": why}})
-                        guard = (await self.tool(read_tool, {"operation": {"kind": "inspect", "collection": path}}))["snapshot"]
+                        guard = (await self.tool("inspect_memory", {"operation": "records.inspect", "arguments": {
+                            "collection": path}}))["snapshot"]
                 else:
                     # The product assigns each item key, so a child's `parent` reference is built from its
                     # parent's add response; the generator orders parents before children.
@@ -643,10 +648,9 @@ class Arm:
                     for item, parent in zip(collection["items"], collection["parents"], strict=True):
                         if parent is not None:
                             item = {**item, "parent": plan_ref(collection["id"], keys[parent])}
-                        added = await self.tool(write_tool, {"operation": {
-                            "kind": "add", "collection": path, "item": item, "why": why}})
+                        added = await self.tool("add_plan_item", {"collection": path, "item": item, "why": why})
                         keys.append(added["plan_id"])
-                held = await self.tool(read_tool, {"operation": {"kind": "query", "collection": path, "limit": 1}})
+                held = await self.tool(query_tool, {"collection": path, "limit": 1})
                 if held["total_matched"] != len(collection["items"]):
                     raise MeasurementRefused("collection-load-incomplete", phase="fixture-load")
 

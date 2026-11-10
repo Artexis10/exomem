@@ -15,7 +15,7 @@ from exomem.request_latency_contract import load_contract
 def _canary_case(**expected):
     return {
         "id": "case-01",
-        "tool": "ask_memory",
+        "tool": "search_memory",
         "arguments": {"query": "private-question"},
         "expected": {
             "state_path": ["ok"],
@@ -57,7 +57,7 @@ def test_mcp_canary_proves_material_over_parsed_public_calls(tmp_path):
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     report = _run_canary(tmp_path, server, [_canary_case()])
@@ -77,14 +77,14 @@ def test_mcp_canary_proves_material_over_parsed_public_calls(tmp_path):
         assert secret not in rendered
 
 
-def test_mcp_canary_accepts_a_positive_read_memory_case(tmp_path):
+def test_mcp_canary_accepts_a_positive_read_page_case(tmp_path):
     from fastmcp import FastMCP
 
     server = FastMCP("test")
 
     @server.tool
-    def read_memory(path: str) -> dict:
-        return {"ok": True, "path": path, "body": "page material"}
+    def read_page(page: str) -> dict:
+        return {"ok": True, "path": page, "body": "page material"}
 
     case = _canary_case(
         state_path=["ok"],
@@ -92,12 +92,12 @@ def test_mcp_canary_accepts_a_positive_read_memory_case(tmp_path):
         references=[{"path": ["path"], "value": "private-page"}],
         material_paths=[["body"]],
     )
-    case.update(tool="read_memory", arguments={"path": "private-page"})
+    case.update(tool="read_page", arguments={"page": "private-page"})
 
     report = _run_canary(tmp_path, server, [case])
 
     assert report["availability"] == "passed"
-    assert report["positive_coverage"]["read_memory"]["successful_cases"] == 1
+    assert report["positive_coverage"]["read_page"]["successful_cases"] == 1
     assert report["verdict"] == "passed"
     assert "private-page" not in json.dumps(report)
 
@@ -119,42 +119,50 @@ def test_mcp_canary_calls_canonical_recall_tools(tmp_path, tool):
     assert report["cases"][0]["tool"] == tool
 
 
-@pytest.mark.parametrize("tool", ["read_records", "read_plans"])
-@pytest.mark.parametrize("kind", ["inspect", "query"])
-def test_mcp_canary_reads_nested_collection_operations(tmp_path, tool, kind):
+@pytest.mark.parametrize(
+    "tool,arguments",
+    [
+        ("query_records", {"collection": "example"}),
+        ("query_records", {}),
+        ("query_plan_items", {"collection": "example", "limit": 1}),
+        ("inspect_memory", {"operation": "records.inspect", "arguments": {"collection": "example"}}),
+        ("inspect_memory", {"operation": "plans.inspect", "arguments": {"collection": "example"}}),
+    ],
+)
+def test_mcp_canary_reads_collections_through_the_typed_reads_and_the_read_door(tmp_path, tool, arguments):
     from fastmcp import FastMCP
 
     server = FastMCP("test")
-    calls = []
+    received = []
 
     @server.tool(name=tool)
-    def collection_read(operation: dict) -> dict:
-        calls.append(operation)
+    def collection_read(collection: str | None = None, limit: int | None = None,
+                        operation: str | None = None, arguments: dict | None = None) -> dict:
+        given = {"collection": collection, "limit": limit, "operation": operation, "arguments": arguments}
+        received.append({key: value for key, value in given.items() if value is not None})
         return {"ok": True, "hits": [{"ref": "private-reference", "text": "material"}]}
 
-    operation = {"kind": kind, "collection": "example"}
     case = _canary_case()
-    case.update(tool=tool, arguments={"operation": operation})
+    case.update(tool=tool, arguments=arguments)
     report = _run_canary(tmp_path, server, [case], samples=1, warm_up=False, check="availability")
     assert report["check_verdict"] == "passed"
-    assert calls == [operation]
+    assert received == [arguments]
     assert report["cases"][0]["observed_terminals"] == 1
 
 
-@pytest.mark.parametrize("tool", ["read_records", "read_plans"])
 @pytest.mark.parametrize(
-    "arguments",
+    "tool,arguments",
     [
-        {"operation": {"kind": "import", "import_request": {"mode": "preview"}}},
-        {"operation": {"kind": "append", "collection": "example", "item": {}}},
-        {"kind": "inspect"},
-        {"operation": {"kind": ["inspect"]}},
-        {"operation": {"kind": "query"}},
-        {"operation": {"kind": "inspect", "collection": 42}},
-        {"operation": {"kind": "inspect", "item": {}}},
+        # Reads that the door carries and that are not an inspect or query of a collection.
+        ("inspect_memory", {"operation": "records.describe"}),
+        ("inspect_memory", {"operation": "files.list"}),
+        # A call that the server would refuse: unknown operation, wrong type, retired shape.
+        ("inspect_memory", {"operation": "records.erase", "arguments": {"collection": "example"}}),
+        ("query_records", {"collection": 42}),
+        ("query_records", {"operation": {"kind": "inspect", "collection": "example"}}),
     ],
 )
-def test_mcp_collection_mutations_and_malformed_operations_fail_before_connection(
+def test_mcp_collection_cases_that_are_not_an_inspect_or_query_fail_before_connection(
     tmp_path, tool, arguments
 ):
     class NoConnection:
@@ -178,17 +186,23 @@ def test_mcp_deep_recall_is_measured_against_the_deep_population(tmp_path):
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str, deep: bool) -> dict:
+    def search_memory(query: str, deep: bool) -> dict:
         assert deep
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
-    case = {**_canary_case(), "bar_id": "watch-deep"}
+    # The packaged deep bars name the grouped command that the ledger records, so this bar names the tool.
+    contract = load_contract().model_dump(mode="json")
+    deep = next(bar for bar in contract["bars"] if bar["id"] == "watch-deep")
+    contract["bars"].append({**deep, "id": "deep-search", "operations": ["search_memory"], "observe": False})
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(contract))
+    case = {**_canary_case(), "bar_id": "deep-search"}
     case["arguments"]["deep"] = True
-    report = _run_canary(tmp_path, server, [case])
+    report = _run_canary(tmp_path, server, [case], contract_file=path)
     assert report["availability"] == "passed"
     [row] = report["cases"][0]["latency"]
     assert (row["bar_id"], row["deep"], row["verdict"]) == (
-        "watch-deep",
+        "deep-search",
         True,
         "observed-within-bar",
     )
@@ -197,31 +211,28 @@ def test_mcp_deep_recall_is_measured_against_the_deep_population(tmp_path):
 def test_mcp_typed_tools_get_a_latency_verdict_under_an_explicit_bar(tmp_path):
     from fastmcp import FastMCP
 
-    tools = ["search_memory", "recall_context", "read_records", "read_plans"]
+    arguments = {
+        "search_memory": {"query": "private-question"},
+        "recall_context": {"query": "private-question"},
+        "read_page": {"page": "example"},
+        "query_records": {"collection": "example"},
+        "inspect_memory": {"operation": "records.inspect", "arguments": {"collection": "example"}},
+    }
     server = FastMCP("test")
-    cases = []
-    for tool in tools:
-        if tool in ("read_records", "read_plans"):
-            arguments = {"operation": {"kind": "inspect", "collection": "example"}}
+    for tool in arguments:
 
-            @server.tool(name=tool)
-            def collection_read(operation: dict) -> dict:
-                return {"ok": True, "hits": [{"ref": "private-reference", "text": "material"}]}
+        @server.tool(name=tool)
+        def read(query: str | None = None, page: str | None = None, collection: str | None = None,
+                 operation: str | None = None, arguments: dict | None = None) -> dict:
+            return {"ok": True, "hits": [{"ref": "private-reference", "text": "material"}]}
 
-        else:
-            arguments = {"query": "private-question"}
-
-            @server.tool(name=tool)
-            def recall(query: str) -> dict:
-                return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
-
-        cases.append(
-            {**_canary_case(), "id": f"case-{tool}", "tool": tool, "arguments": arguments,
-             "bar_id": "typed-tools"}
-        )
+    cases = [
+        {**_canary_case(), "id": f"case-{tool}", "tool": tool, "arguments": call, "bar_id": "typed-tools"}
+        for tool, call in arguments.items()
+    ]
     contract = load_contract().model_dump(mode="json")
     base = next(bar for bar in contract["bars"] if bar["id"] == "programme-public-warm")
-    contract["bars"].append({**base, "id": "typed-tools", "operations": tools})
+    contract["bars"].append({**base, "id": "typed-tools", "operations": list(arguments)})
     path = tmp_path / "contract.json"
     path.write_text(json.dumps(contract))
     report = _run_canary(tmp_path, server, cases, contract_file=path)
@@ -229,7 +240,7 @@ def test_mcp_typed_tools_get_a_latency_verdict_under_an_explicit_bar(tmp_path):
         (series["tool"], row["tool"], row["bar_id"], row["verdict"])
         for series in report["cases"]
         for row in series["latency"]
-    ] == [(tool, tool, "typed-tools", "observed-within-bar") for tool in tools]
+    ] == [(tool, tool, "typed-tools", "observed-within-bar") for tool in arguments]
     assert report["verdict"] == "passed"
 
 
@@ -241,7 +252,7 @@ def test_mcp_canary_accepts_material_from_published_recall_shapes(tmp_path, enve
 
     server = FastMCP("test")
 
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         hits = [
             {
                 "path": "notes/example.md",
@@ -262,10 +273,10 @@ def test_mcp_canary_accepts_material_from_published_recall_shapes(tmp_path, enve
             else hits
         )
 
-    ask_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
+    search_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
         "return"
     ]
-    server.tool(ask_memory)
+    server.tool(search_memory)
     hit_path = ["hits", 0] if enveloped else [0]
     report = _run_canary(
         tmp_path,
@@ -297,13 +308,13 @@ def test_mcp_fast_typed_refusal_fails_and_stops_the_series(tmp_path, caplog):
 
     server = FastMCP("test")
 
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return envelope(False, error={"code": "RETRIEVAL_INDEX_WARMING"})
 
-    ask_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
+    search_memory.__annotations__["return"] = get_type_hints(op_ask_memory, include_extras=True)[
         "return"
     ]
-    server.tool(ask_memory)
+    server.tool(search_memory)
     report = _run_canary(tmp_path, server, [_canary_case()])
     assert report["verdict"] == "failed"
     assert report["availability"] == "failed"
@@ -335,7 +346,7 @@ def test_mcp_positive_cases_require_source_truth_and_material(tmp_path, response
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return response
 
     report = _run_canary(tmp_path, server, [_canary_case()])
@@ -355,10 +366,10 @@ def test_mcp_schema_binds_material_to_the_target_at_any_rank(tmp_path, enveloped
         {"ref": "source-target", "text": target_material},
     ]
 
-    def ask_memory(query: str) -> dict | list[dict]:
+    def search_memory(query: str) -> dict | list[dict]:
         return {"hits": hits} if enveloped else hits
 
-    server.tool(ask_memory)
+    server.tool(search_memory)
     # The pattern checks nonblank string shape; it does not interpret the material.
     target = {
         "type": "object",
@@ -393,7 +404,7 @@ def test_mcp_schema_can_require_the_target_at_an_exact_rank(tmp_path):
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> list[dict]:
+    def search_memory(query: str) -> list[dict]:
         return [
             {"ref": "source-other", "text": "other material"},
             {"ref": "source-target", "text": "target material"},
@@ -426,7 +437,7 @@ def test_schema_mismatch_retains_a_fingerprint_without_private_fields_or_values(
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"private-slot": [{"private-key": "actual-private"}]}
 
     case = _canary_case()
@@ -496,7 +507,7 @@ def test_mcp_schema_dialect_markers_in_constant_and_default_data_are_not_schemas
     data = {"$schema": "http://json-schema.org/draft-07/schema#", "value": "schema-data"}
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return data
 
     case = _canary_case()
@@ -524,7 +535,7 @@ def test_mcp_unresolved_schema_refs_are_observer_errors_without_retrieval_or_lea
     retrievals = []
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         calls.append(query)
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
@@ -592,11 +603,11 @@ def test_mcp_schema_preserves_abstention_and_checks_outcome_before_the_schema(tm
     server = FastMCP("test")
 
     @server.tool
-    def activate_context(query: str) -> dict:
+    def recall_context(query: str) -> dict:
         return {"abstained": True, "abstention": {"reason": "unresolved"}}
 
     case = _canary_case()
-    case["tool"] = "activate_context"
+    case["tool"] = "recall_context"
     case["expected"] = {
         "outcome": "abstained",
         "response_schema": {
@@ -621,7 +632,7 @@ def test_mcp_declared_abstention_must_match_its_state(tmp_path):
     server = FastMCP("test")
 
     @server.tool
-    def activate_context(query: str) -> dict:
+    def recall_context(query: str) -> dict:
         return {"abstained": True, "abstention": {"reason": "unresolved"}}
 
     case = _canary_case(
@@ -631,12 +642,12 @@ def test_mcp_declared_abstention_must_match_its_state(tmp_path):
         references=[],
         material_paths=[],
     )
-    case["tool"] = "activate_context"
+    case["tool"] = "recall_context"
     report = _run_canary(tmp_path, server, [case])
     assert report["availability"] == "incomplete"
     assert report["cases"][0]["attempts"][0]["outcome"] == "abstained"
     assert report["verdict"] == "incomplete"
-    assert report["positive_coverage"]["activate_context"]["successful_cases"] == 0
+    assert report["positive_coverage"]["recall_context"]["successful_cases"] == 0
     case["expected"]["state"] = "ambiguous"
     assert _run_canary(tmp_path, server, [case])["availability"] == "failed"
 
@@ -647,13 +658,13 @@ def test_mcp_expected_abstention_needs_positive_coverage_for_its_tool(tmp_path):
     server = FastMCP("test")
 
     @server.tool
-    def activate_context(query: str) -> dict:
+    def recall_context(query: str) -> dict:
         if query == "negative":
             return {"abstained": True, "abstention": {"reason": "unresolved"}}
         return {"abstained": False, "hits": [{"ref": "private-reference", "text": query}]}
 
     positive = _canary_case(state_path=["abstained"], state=False)
-    positive["tool"] = "activate_context"
+    positive["tool"] = "recall_context"
     negative = _canary_case(
         state_path=["abstention", "reason"],
         state="unresolved",
@@ -661,10 +672,10 @@ def test_mcp_expected_abstention_needs_positive_coverage_for_its_tool(tmp_path):
         references=[],
         material_paths=[],
     )
-    negative.update(id="case-02", tool="activate_context", arguments={"query": "negative"})
+    negative.update(id="case-02", tool="recall_context", arguments={"query": "negative"})
     report = _run_canary(tmp_path, server, [positive, negative])
     assert report["verdict"] == "passed"
-    assert report["positive_coverage"]["activate_context"]["successful_cases"] == 1
+    assert report["positive_coverage"]["recall_context"]["successful_cases"] == 1
     assert report["cases"][1]["availability"] == "passed"
     assert report["cases"][1]["latency"][0]["abstentions"] == 30
 
@@ -677,7 +688,7 @@ def test_mcp_invalid_cases_do_not_call_tools(tmp_path, damage):
     calls = []
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         calls.append(query)
         return {"ok": True}
 
@@ -710,7 +721,7 @@ def test_mcp_missing_reference_conditions_prevent_acceptance(tmp_path, missing):
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     report = _run_canary(tmp_path, server, [_canary_case()], **missing)
@@ -747,7 +758,7 @@ def test_mcp_measured_failure_retains_all_outcomes_and_unattempted_cases(tmp_pat
     completed = 0
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         nonlocal completed
         completed += 1
         if completed == 3:
@@ -783,7 +794,7 @@ def test_mcp_terminal_failures_have_elapsed_time_without_response_content(tmp_pa
     server = FastMCP("test")
 
     @server.tool
-    async def ask_memory(query: str):
+    async def search_memory(query: str):
         if terminal == "timeout":
             await asyncio.sleep(1)
         return CallToolResult(
@@ -829,7 +840,7 @@ def test_mcp_controller_contract_uses_its_own_revision_and_sample_count(tmp_path
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     contract = load_contract().model_dump(mode="json")
@@ -854,7 +865,7 @@ def test_mcp_case_bars_keep_their_thresholds_and_minimums(tmp_path, samples):
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     contract = load_contract().model_dump(mode="json")
@@ -866,7 +877,7 @@ def test_mcp_case_bars_keep_their_thresholds_and_minimums(tmp_path, samples):
                 "id": "broad-budget",
                 "threshold_ms": 60000,
                 "min_samples": 1,
-                "operations": ["ask_memory"],
+                "operations": ["search_memory"],
             },
             {**base, "id": "narrow-budget", "threshold_ms": 0, "min_samples": 3},
         ]
@@ -902,7 +913,7 @@ def test_mcp_invalid_case_bar_cannot_fall_back_or_connect(tmp_path, damage):
     if damage == "wrong-surface":
         selected["surface"] = "cli"
     elif damage == "wrong-operation":
-        selected["operations"] = ["read_memory"]
+        selected["operations"] = ["read_page"]
     elif damage == "ordinary-case-deep-bar":
         selected["deep"] = True
     if damage != "unknown":
@@ -933,10 +944,10 @@ def test_a_runner_times_a_grouped_case_through_the_observer_itself():
     server = FastMCP("test")
 
     @server.tool
-    def read_memory(path: str) -> dict:
-        return {"ok": True, "hits": [{"ref": "private-reference", "text": path}]}
+    def read_page(page: str) -> dict:
+        return {"ok": True, "hits": [{"ref": "private-reference", "text": page}]}
 
-    case = {**_canary_case(), "tool": "read_memory", "arguments": {"path": "p"}, "group": "note-read"}
+    case = {**_canary_case(), "tool": "read_page", "arguments": {"page": "p"}, "group": "note-read"}
     [loaded] = gate.load_cases(json.dumps([case]).encode())
 
     async def measure():
@@ -964,7 +975,7 @@ def test_mcp_terminal_timing_excludes_costly_observer_assertions(tmp_path, monke
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     assertion_seconds = 3600
@@ -997,7 +1008,7 @@ def test_mcp_cli_emits_only_content_free_json_and_structured_warning(tmp_path, m
     server = fastmcp.FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": ""}]}
 
     real_client = fastmcp.Client
@@ -1185,7 +1196,7 @@ def test_one_successful_sample_proves_availability_without_accepting_latency(tmp
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     report = _run_canary(
@@ -1210,7 +1221,7 @@ def test_availability_keeps_a_latency_breach_visible_without_failing_the_check(t
     server = FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     contract = load_contract().model_dump(mode="json")
@@ -1233,7 +1244,7 @@ def test_cli_atomically_keeps_an_owner_only_latest_report(tmp_path, monkeypatch,
     server = fastmcp.FastMCP("test")
 
     @server.tool
-    def ask_memory(query: str) -> dict:
+    def search_memory(query: str) -> dict:
         return {"ok": True, "hits": [{"ref": "private-reference", "text": query}]}
 
     real_client = fastmcp.Client

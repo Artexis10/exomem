@@ -28,7 +28,7 @@ def configuration(tmp_path):
             [
                 {
                     "id": "case-01",
-                    "tool": "ask_memory",
+                    "tool": "search_memory",
                     "arguments": {},
                     "expected": {
                         "state_path": ["ok"],

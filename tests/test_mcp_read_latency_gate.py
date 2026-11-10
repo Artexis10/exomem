@@ -233,7 +233,7 @@ def absolute_cases():
     from exomem.recall_canary import load_cases
 
     return load_cases(json.dumps([
-        {"id": name, "group": "source_read", "tool": "read_memory", "arguments": {"path": name},
+        {"id": name, "group": "source_read", "tool": "read_page", "arguments": {"page": name},
          "expected": {"response_schema": {"type": "object", "required": ["content"]}}}
         for name in ("first", "second")
     ]).encode())
@@ -266,8 +266,8 @@ def test_absolute_lifecycle_warms_every_case_before_timing_and_never_pauses(monk
 
     async def call_tool(tool, arguments, **_):
         nonlocal busy
-        events.append(arguments["path"])
-        busy = arguments["path"] == "second"
+        events.append(arguments["page"])
+        busy = arguments["page"] == "second"
         await asyncio.sleep(0.012)
         busy = False
         return SimpleNamespace(is_error=False, data={"content": "neutral"})
@@ -523,3 +523,77 @@ def test_every_planning_item_is_valid_and_sits_under_a_parent_the_registry_allow
                 assert collection["items"][parent]["kind"] in allowed
             else:
                 assert parent is None
+
+
+# --- Tool surface --------------------------------------------------------------
+
+
+def product_tool_check():
+    """Return a check that a call names a tool the product lists and passes the product's own argument rules."""
+    from exomem import commands
+    from exomem.public_surface import PASSTHROUGH_COMMANDS, public_surface
+
+    surface = public_surface()
+    available = commands.product_commands_for("mcp")
+    listed = set(surface.listed_names(available))
+
+    def check(name: str, arguments: dict) -> None:
+        assert name in listed, f"{name} is not a tool the product lists"
+        if name not in PASSTHROUGH_COMMANDS.values():  # those keep the command's own arguments
+            surface.resolve(name, arguments, available, strict=True, passthrough=frozenset())
+
+    return check
+
+
+def test_the_fixture_loader_calls_only_tools_the_product_lists_with_arguments_it_accepts() -> None:
+    """A retired tool name fails the paired run only after the release archive is built; this fails first."""
+    check = product_tool_check()
+    profile = json.loads((ROOT / "benchmarks" / "mcp-read-latency" / "profile.json").read_text())
+    fixture = gen_collection_fixture(profile)
+    held: dict[str, int] = {}
+    calls: list[str] = []
+
+    async def tool(name: str, arguments: dict) -> dict:
+        check(name, arguments)
+        calls.append(name)
+        if name == "manage_memory" and arguments["operation"].endswith(".create"):
+            held[arguments["arguments"]["manifest_path"]] = 0
+            return {"after_container_hash": "created"}
+        if name == "manage_memory":
+            held[arguments["arguments"]["collection"]] += len(arguments["arguments"]["rows"])
+            return {}
+        if name == "add_plan_item":
+            held[arguments["collection"]] += 1
+            return {"plan_id": f"plan-{held[arguments['collection']]}"}
+        if name == "inspect_memory":
+            return {"snapshot": "snapshot"}
+        return {"total_matched": held[arguments["collection"]]}
+
+    asyncio.run(gate.Arm.load_collections(SimpleNamespace(tool=tool), fixture))
+
+    assert set(calls) == {"manage_memory", "inspect_memory", "add_plan_item", "query_records", "query_plan_items"}
+    assert sum(held.values()) == sum(len(c["items"]) for kind in ("records", "planning") for c in fixture[kind])
+
+
+def test_every_generated_case_names_a_tool_the_product_lists_with_arguments_it_accepts(tmp_path: Path) -> None:
+    from synth_vault import gen_collection_cases, gen_note_cases
+
+    from exomem.recall_canary import load_cases
+
+    check = product_tool_check()
+    profile = json.loads((ROOT / "benchmarks" / "mcp-read-latency" / "profile.json").read_text())
+    fixture = gen_collection_fixture(profile)
+    pages = [f"Knowledge Base/page-{number:03d}.md" for number in range(profile["cases"]["per_group"] * 3)]
+    for number, page in enumerate(pages):
+        (tmp_path / page).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / page).write_text(f"---\ntitle: Page {number}\n---\n\nParagraph {number} of the page.\n")
+    cases = gen_collection_cases(fixture, profile) + gen_note_cases(tmp_path, pages, profile, fixture)
+
+    loaded = load_cases(json.dumps(cases).encode())
+
+    assert {case["group"] for case in cases} == {
+        "records-query", "records-read", "records-list", "planning-query", "planning-read", "planning-list",
+        "note-read", "search", "recall",
+    }
+    for case in loaded:
+        check(case.tool, case.arguments)
