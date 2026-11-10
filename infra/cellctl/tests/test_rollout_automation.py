@@ -640,6 +640,13 @@ async def test_a_newer_target_keeps_the_stall_clock_and_the_stalled_alert_fires(
         since = _annotations(fleet.cluster, TENANT)["exomem.io/candidate-since"]
         assert datetime.fromisoformat(since) == NOON
         assert _states(delivered, alerts.ROLLOUT_STALLED_ALERT)[-1] is True
+
+        # The tenant runs its target: the clock ends and the alert resolves.
+        fleet.cluster.observations[TENANT] = _observed_from_applied(fleet.cluster, TENANT, statefulset_image=image,
+                                                                    ready_pod_image=image)
+        await fleet.run(NOON + timedelta(hours=100), cluster_config=ALERTING)
+        assert "exomem.io/candidate-since" not in _annotations(fleet.cluster, TENANT)
+        assert _states(delivered, alerts.ROLLOUT_STALLED_ALERT)[-1] is False
     finally:
         await fleet.close()
 
