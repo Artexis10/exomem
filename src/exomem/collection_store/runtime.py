@@ -1746,8 +1746,13 @@ class StoreServer:
                 # It does not stop for a waiting request, as the views slice does: under steady demand
                 # that would leave one batch per tick. A request waits at most the budget and one batch.
                 done = importer.run_jobs(self.root, deadline=time.monotonic() + derived_rows.STEP_SECONDS)
-        except Exception:  # noqa: BLE001 - a refused tick leaves its jobs for a later one
-            logger.warning("import jobs could not advance; retrying later", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - a refused tick leaves its jobs for a later one
+            code = getattr(error, "code", None)
+            # A store refusal a later tick outlives is expected while it lasts; only a defect needs its traceback.
+            if code in importer.STORE_STATE:
+                logger.warning("import jobs could not advance (%s); retrying later", code)
+            else:
+                logger.warning("import jobs could not advance; retrying later", exc_info=True)
             return IMPORT_RETRY_SECONDS
         return 0.0 if done["batches"] else IMPORT_RETRY_SECONDS
 

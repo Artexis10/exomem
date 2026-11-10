@@ -108,7 +108,7 @@ _START = {"row": 0, "byte": 0, "state": {}}
 _RESUMABLE = ("authority_lost", "time_cap")
 _SESSION_STORE = "IMPORT_SESSION_STORE_UNAVAILABLE"
 # Fixed writer/store protocol refusals a later tick outlives; other batch errors fail the job.
-_STORE_STATE = writer_lease.TRANSIENT_WRITER_CODES | frozenset(
+STORE_STATE = writer_lease.TRANSIENT_WRITER_CODES | frozenset(
     {takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
 )
 
@@ -3295,7 +3295,7 @@ def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exceptio
     if job is None or job.state != "running" or job.checkpoint["batch"] != sequence:
         return
     code = getattr(error, "code", None)
-    if code in _STORE_STATE:
+    if code in STORE_STATE:
         writer.handle.import_blocked[job_id] = code
         if code == _SESSION_STORE:
             failures = writer.handle.import_retry.get(job_id, (0.0, 0))[1] + 1
@@ -3376,7 +3376,11 @@ def _drive(root: Path, writer, max_batches: int | None, deadline: float | None) 
             try:
                 outcome = _step(root, writer, job_id)
             except Exception as error:  # noqa: BLE001 - settled by _after_error
-                log.warning("import batch raised; settling the job", exc_info=True)
+                code = getattr(error, "code", None)
+                if code in STORE_STATE:
+                    log.warning("import batch refused by the store (%s); the job waits for a later tick", code)
+                else:
+                    log.warning("import batch raised; settling the job", exc_info=True)
                 summary["errors"] += 1
                 try:
                     _after_error(root, writer, job_id, sequence, error)
