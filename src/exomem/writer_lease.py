@@ -8825,6 +8825,14 @@ def invoke_command(
         # stored handle for 600 s after a cancel would hand back a dead job.
         implicit_idempotency_scope = None
         dispatch_command = replace(command, leaf=maintenance_jobs.start_leaf(command, injected, kwargs))
+    if (
+        command.name == "maintain_memory"
+        and kwargs.get("mode") == "curation"
+        and kwargs.get("curation_action") == "resume"
+    ):
+        # Resume advances a run by one step and every call carries the same arguments, while
+        # the run store keys each step's commit itself: a replayed reply stalls the run 600 s.
+        implicit_idempotency_scope = None
     if selector_error is not None:
 
         def reject_uncovered_selector(*_args: Any, **_kwargs: Any) -> Any:
