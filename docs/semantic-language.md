@@ -185,14 +185,16 @@ A unit search asks for dimension groups through the same filter, with no other
 argument. When `unit.dimension` sits at the top level, alone or under a top-level
 `$and`, `$eq` returns one group and `$in` returns one group for each named
 dimension, in the order given. `$ne` asks for no group. The limit counts
-distinct units. Each unit hit in a group carries `dimension`, the key of its
+distinct units, and it cuts the hits by rank before the groups order them. Each
+unit hit in a group carries `dimension`, the key of its
 group, and `display` when the unit has a mark. The reply's `dimension_groups`
 lists each group with its `dimension`, `label`, `count`, mark counts and `units`
 in display order. A unit that belongs to two requested dimensions is in full in
 the first group, and a later group lists only its ref, with `shown_in` naming
 the first group and `display` holding the later group's marks. A deep search's pack carries the same `display` on its units
 and a `groups` list with each group's unit refs. The reply's `user_summary`
-names each group by its label and gives its counts, for example
+names each group by its `en` label, else by its first label in language-tag
+order, and gives its counts, for example
 "4 units in 'Uncertainty'; 1 is open."
 
 The display behaviours that a dimension names set its group's order and marks.
