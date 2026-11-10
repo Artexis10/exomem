@@ -57,11 +57,11 @@ def ship_relations_pack() -> Iterator[Callable[[Callable[[str], str]], None]]:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_order_pair_and_assesses_are_typed_edges_that_carry_no_behaviour() -> None:
-    """The parity module reads each other behaviour through its reader; these three have none."""
+def test_the_order_pair_and_assesses_are_typed_edges_with_one_behaviour_each() -> None:
+    """The parity module reads each other behaviour through its reader; these three have one each."""
     core = relation_registry.core_registry()
 
-    assert core.behaviours_of("assesses") == frozenset()
+    assert core.behaviours_of("assesses") == frozenset({"names_assessed_claim"})
     assert core.behaviours_of("precedes") == frozenset({"earlier_than_target"})
     assert core.behaviours_of("follows") == frozenset({"later_than_target"})
     assert core.core["precedes"].inverse == "follows"

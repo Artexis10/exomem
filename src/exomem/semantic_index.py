@@ -26,7 +26,9 @@ from .vocabulary import instances
 
 # Matching source bytes must not reuse an older parser's interpretation.
 # v7 reserves typed validity rows and projects their calendar dates.
-PARSER_VERSION = 7
+# v8 parses the belief kind, reserves the belief, attribution, modality, event-time, quantity
+# and inference rows, and projects their values.
+PARSER_VERSION = 8
 _GENERATION_SCHEMA = "exomem.semantic-unit.parent-generation.v5"
 _ACTIVE_PARENT_STATES: ContextVar[Mapping[str, SemanticParentIndexState] | None] = ContextVar(
     "exomem_semantic_parent_states", default=None

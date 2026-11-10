@@ -59,6 +59,7 @@ RELATION_BEHAVIOURS = frozenset(
         "plain_link",
         "opposes",
         "names_subject",
+        "names_assessed_claim",
         "earlier_than_target",
         "later_than_target",
     )

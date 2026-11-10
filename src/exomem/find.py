@@ -43,6 +43,7 @@ from . import (
     recall_space,
     request_budget,
     runtime_resources,
+    semantic_units,
     structured_filters,
     view_lag,
 )
@@ -2991,6 +2992,9 @@ class _UnitCandidate:
     mixed_units_truncated: int = 0
 
     def __getattr__(self, name: str) -> Any:
+        # A unit's governed rows are read from its selected interpretation, as `as_of` is.
+        if name in semantic_units.UNIT_ROW_KEYS:
+            return getattr(object.__getattribute__(self, "selected_unit"), name, None)
         # Delegate only stored occurrence facts, never a canonical page or span.
         return getattr(object.__getattribute__(self, "row"), name)
 
@@ -3542,6 +3546,7 @@ def _semantic_unit_hit(
         check_by=getattr(unit, "check_by", None),
         as_of=getattr(unit, "as_of", None),
         until=getattr(unit, "until", None),
+        **{key: getattr(unit, key, None) for key in semantic_units.UNIT_ROW_KEYS},
         relations=[relation.to_dict() for relation in unit.relations],
         source_anchor=unit.anchor,
         source_span=_unit_span(unit),

@@ -22,6 +22,7 @@ from . import (
     semantic_authoring,
     semantic_contract,
     semantic_index,
+    semantic_labels,
     semantic_language_registry,
     semantic_units,
     semantic_writes,
@@ -40,6 +41,12 @@ _UPDATED_RE = re.compile(r"^updated:.*$", re.MULTILINE)
 _TAG_RE = re.compile(r"^[^\s#]{1,64}$")
 _ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
 
+#: The governed unit-metadata keys this command takes as arguments. The language's other
+#: governed rows, such as a belief unit's credence, are written by hand and carried through
+#: an edit as written, so this command never writes a belief on a holder's behalf.
+# nosemgrep: ep-word-set -- this command's own argument names, fixed by its tool schema
+_GOVERNED_ARGUMENT_KEYS = ("verdict", "check_by", "as_of", "until")
+
 #: Metadata rows this module renders from its own arguments. Every *other*
 #: authored row is carried through a reconstruction with its value intact.
 #:
@@ -57,7 +64,7 @@ _ANCHOR_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?$")
 #: delete bytes it does not understand.
 _OWNED_METADATA_KEYS: frozenset[str] = frozenset(
     {"category", "id", "tags", "context", "relations"}
-) | frozenset(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
+) | frozenset(_GOVERNED_ARGUMENT_KEYS)
 
 
 @dataclass(slots=True)
@@ -626,10 +633,10 @@ def _select_kind(
         raw = current_unit.kind
     if raw is None or semantic_language_registry.normalize_label(raw) == _COMPACT_KIND:
         return _COMPACT_KIND
-    registry = semantic_language_registry.load_registry(vault_root)
-    resolution = semantic_language_registry.for_attached_projects(
-        registry, projects
-    ).resolve_kind(raw, page_type=page_type)
+    registry = semantic_language_registry.for_attached_projects(
+        semantic_language_registry.load_registry(vault_root), projects
+    )
+    resolution = registry.resolve_kind(raw, page_type=page_type)
     if resolution.resolved is None or resolution.status in {
         "unregistered",
         "registry_invalid",
@@ -643,7 +650,29 @@ def _select_kind(
         )
     if resolution.resolved == _COMPACT_KIND:
         return _COMPACT_KIND
+    keeps_its_kind = (
+        current_unit is not None
+        and current_unit.form == "rich"
+        and current_unit.kind == resolution.resolved
+    )
+    if registry.has(resolution.resolved, "credence") and not keeps_its_kind:
+        # This tool takes no holder or credence, so a new belief from it would be nobody's.
+        raise ObserveMemoryError(
+            "UNSUPPORTED_SEMANTIC_KIND",
+            f"kind {raw!r} records one holder's credence, and observe_memory takes no holder "
+            "or credence",
+            _belief_remediation(),
+        )
     return resolution.resolved
+
+
+def _belief_remediation() -> str:
+    """Where a belief is written instead: the page body, in the belief-unit form."""
+    return (
+        f"{semantic_units.BELIEF_FORM} Write that unit into the page body with "
+        f"{capabilities.active_tools_text('edit_memory')}, or with "
+        f"{capabilities.active_tools_text('create_memory')} for a new page."
+    )
 
 
 def _page_projects(frontmatter: dict[Any, Any]) -> tuple[str, ...]:
@@ -775,9 +804,9 @@ def _resolve_governed_value(
 def _canonical_verdict(
     value: str, language: semantic_language_registry.SemanticLanguageRegistry
 ) -> str:
-    verdict = language.resolve_verdict(value)
+    verdict = language.resolve_label(semantic_labels.VERDICTS, value)
     if verdict is None:
-        keys = language.verdict_keys()
+        keys = language.label_keys(semantic_labels.VERDICTS)
         raise ObserveMemoryError(
             "INVALID_SEMANTIC_VERDICT",
             f"verdict must be exactly one of {', '.join(keys)}, as the key or its label",

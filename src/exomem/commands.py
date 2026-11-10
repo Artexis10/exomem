@@ -141,10 +141,10 @@ from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
+from . import semantic_labels as semantic_labels_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
-from . import semantic_verdicts as semantic_verdicts_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
@@ -1570,9 +1570,9 @@ def op_bootstrap(
                 "recorded afterwards proves nothing."
             ),
             "judge_categorically": (
-                "Close a claim with one word from the outcome vocabulary below. This "
-                "substrate keeps no numeric confidence, credence, or probability: a "
-                "verdict is lifecycle state, never a score."
+                "Close a claim with one outcome word below, never a score. A claim has no "
+                "confidence score: put a degree of belief in a belief unit with its holder, "
+                "and a basis for a probability."
             ),
             "keep_the_negative_result": (
                 "Refuted is not superseded. A refuted claim keeps active standing and "
@@ -1584,7 +1584,7 @@ def op_bootstrap(
         "vocabulary": {
             # The shipped verdicts only. A vault's own live in its registry and in the schema read
             # named by `vault_verdicts`; teaching them here would hand every vault the same list.
-            "outcomes": list(semantic_verdicts_module.pack()),
+            "outcomes": list(semantic_labels_module.pack(semantic_labels_module.VERDICTS)),
             "governed_unit_metadata": list(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS),
             "verdict": (
                 "The judgment: exactly one verdict, shared with an experiment "
@@ -1606,15 +1606,18 @@ def op_bootstrap(
                 "Last current date (YYYY-MM-DD); activation marks it expired afterward "
                 "and omits it from stance."
             ),
+            # Names the list above rather than repeating it, so the rule costs no bytes per key.
             "metadata_form": (
-                f"{', '.join(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS)} use "
-                "`- key: value` rows in rich `## Heading` units. Compact `- [category] ...` "
-                "units have no metadata. Governed rows survive an edit to unit text."
+                "Each governed_unit_metadata key is a `- key: value` row in a rich `## Heading` "
+                "unit. Compact `- [category] ...` units have no metadata. Governed rows survive "
+                "an edit to unit text."
             ),
+            # The bootstrap spec names these four kinds; task 6.2 reads their teaching from the pack.
             "kinds": {
                 "open_question": "a question this store has not answered yet",
                 "hypothesis": "a proposed explanation still under test",
                 "prediction": "a checkable claim about a future observation",
+                "belief": "one holder's level, or sourced probability, for a claim",
             },
             "relations": {
                 "contradicts": "edge to material conflicting with this claim",
@@ -12473,11 +12476,13 @@ def op_schema_memory(
                 registry_file_exists = instances.select(
                     vault_root, semantic_language_registry_module.CATEGORY_SPEC
                 ).overlay(vault_root).exists()
-                dropped = semantic_language_registry_module.dropped_verdicts_finding(
+                for labels, dropped in semantic_language_registry_module.dropped_label_findings(
                     current, candidate
-                )
-                if dropped is not None:
-                    raise ValueError(f"CATEGORY_SAVE_VERDICT_DROPPED: {dropped['detail']}")
+                ):
+                    # The code names the registry, such as CATEGORY_SAVE_VERDICT_DROPPED.
+                    raise ValueError(
+                        f"CATEGORY_SAVE_{labels.noun.upper()}_DROPPED: {dropped['detail']}"
+                    )
                 # Debt: this kinds leg refuses every kind change, an addition too, and validation
                 # does not report it; it predates the verdict leg above, which refuses a loss only.
                 reviewed = semantic_language_registry_module.registry_proposal

@@ -29,6 +29,8 @@ KIND_TRAITS = frozenset(
         "procedure",
         "outcome",
         "question",
+        "credence",
+        "dated_event",
     )
 )
 
