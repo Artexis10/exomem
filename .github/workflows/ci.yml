@@ -39,6 +39,7 @@ jobs:
       release: ${{ steps.scope.outputs.release }}
       docs_only: ${{ steps.docs-scope.outputs.docs_only }}
       pytest_args: ${{ steps.docs-scope.outputs.pytest_args }}
+      changed_tests: ${{ steps.docs-scope.outputs.changed_tests }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,7 +146,7 @@ jobs:
   # replacement because scheduler recovery previously stalled after a crash.
   core-tests:
     needs: scope
-    name: core tests (py${{ matrix.python-version }}, shard ${{ matrix.shard }}/24)
+    name: core tests (py${{ matrix.python-version }}, ${{ matrix.selection || format('shard {0}/24', matrix.shard) }})
     env: *serial-core-selections
     # The release PR runs no test job: `release-evidence` requires a green
     # full run at its base revision and refuses a release PR that changes
@@ -164,6 +165,10 @@ jobs:
         # without doubling every feedback run. Release evidence is the
         # documented full run on main (docs/release.md).
         python-version: *test-python-versions
+        # One more job runs a pull request's own test modules on 3.13, so a
+        # 3.13-only failure in a new test stops the PR instead of the release
+        # evidence. Full runs already cover 3.13 and must keep their shard 1.
+        include: ${{ needs.scope.outputs.full != 'true' && needs.scope.outputs.changed_tests != '' && fromJSON('[{"python-version":"3.13","shard":1,"selection":"changed tests"}]') || fromJSON('[]') }}
         # Separate runners keep process, port, filesystem, and mutation-lock
         # state isolated while cutting the serial critical path.
         # Shorter batches limit the tail when a full run queues core work behind other jobs.
@@ -221,6 +226,11 @@ jobs:
         timeout-minutes: 5
         env: *core-test-env
         run: scripts/ci-prepare-bytecode.sh ${{ matrix.python-version }}
+      - name: Select the pull request's own test modules
+        if: matrix.selection
+        env:
+          CHANGED_TESTS: ${{ needs.scope.outputs.changed_tests }}
+        run: echo "EXOMEM_CHANGED_TESTS=$CHANGED_TESTS" >> "$GITHUB_ENV"
       - name: Run tests (core tier — BM25/keyword, server media extraction off)
         env: *core-test-env
         # Full runs replace the scratch snapshot with measured cases and upload it.
@@ -251,6 +261,7 @@ jobs:
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ needs.scope.outputs.pytest_args }}
           ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
+          ${{ matrix.selection && '--splits=1 --group=1 $EXOMEM_CHANGED_TESTS || test $? -eq 5' || '' }}
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4

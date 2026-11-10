@@ -149,10 +149,18 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["requires-python"] == ">=3.11", "the PR leg is the supported floor"
 
-    assert job["name"] == (
-        f"{tier} tests (py${{{{ matrix.python-version }}}}, "
-        f"shard ${{{{ matrix.shard }}}}/{shards})"
+    shard_label = (
+        "${{ matrix.selection || format('shard {0}/24', matrix.shard) }}"
+        if job_id == "core-tests"
+        else f"shard ${{{{ matrix.shard }}}}/{shards}"
     )
+    assert job["name"] == f"{tier} tests (py${{{{ matrix.python-version }}}}, {shard_label})"
+    if job_id == "core-tests":
+        # A pull request's own test modules add one 3.13 job; a full run's 3.13 shard 1
+        # must stay a full shard, so the extra job never joins a full run.
+        include = " ".join(str(matrix["include"]).split())
+        assert "needs.scope.outputs.full != 'true'" in include
+        assert "needs.scope.outputs.changed_tests != ''" in include
 
     command = _run_step(job)["run"]
     assert f"--splits={shards}" in command
@@ -755,12 +763,40 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
         assert decision == {
             "docs_only": "true",
             "pytest_args": "-m reads_repository_docs --splits=1 --group=1",
+            "changed_tests": "",
         }
         assert "shard 1 each run all their marked tests" in summary
         assert "Docs-only change: the example check did not run" in summary
     else:
-        assert decision == {"docs_only": "false", "pytest_args": ""}
+        assert decision == {"docs_only": "false", "pytest_args": "", "changed_tests": ""}
         assert not summary
+
+
+def test_change_scope_names_the_pull_requests_own_test_modules_for_python_3_13(tmp_path: Path) -> None:
+    """Catches a deleted module or a crafted file name reaching the 3.13 job's pytest command line."""
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _scope_fixture_git(repository, "init", "-b", "main")
+    for relative in ("tests/test_changed.py", "tests/test_deleted.py", "src/runtime.py"):
+        (repository / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repository / relative).write_text("initial\n")
+    _scope_fixture_git(repository, "add", ".")
+    _scope_fixture_git(repository, "commit", "-m", "initial")
+    _scope_fixture_git(repository, "checkout", "-b", "topic")
+    (repository / "tests/test_changed.py").write_text("changed\n")
+    (repository / "tests/test_deleted.py").unlink()
+    for added in ("tests/store/test_added.py", "tests/helpers.py", "tests/test_$(touch pwned).py"):
+        (repository / added).parent.mkdir(parents=True, exist_ok=True)
+        (repository / added).write_text("added\n")
+    _scope_fixture_git(repository, "add", "-A")
+    _scope_fixture_git(repository, "commit", "-m", "test changes")
+    _scope_fixture_git(repository, "checkout", "main")
+    _scope_fixture_git(repository, "merge", "--no-ff", "--no-edit", "topic")
+
+    decision, _ = _change_scope(repository, "pull_request")
+
+    assert decision["changed_tests"] == "tests/store/test_added.py tests/test_changed.py"
+    assert not (repository / "pwned").exists()
 
 
 @pytest.mark.parametrize(
@@ -784,7 +820,7 @@ def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
 
     decision, summary = _change_scope(repository, event)
 
-    assert decision == {"docs_only": "false", "pytest_args": ""}
+    assert decision == {"docs_only": "false", "pytest_args": "", "changed_tests": ""}
     assert not summary
 
 
