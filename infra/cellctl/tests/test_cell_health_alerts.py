@@ -1,5 +1,5 @@
-"""The cell-unavailable, cell-disk-low and cell-recall-lagging alerts
-(cloud-platform-operations, "Monitoring spans independent failure domains").
+"""The cell-unavailable, cell-disk-low, cell-recall-lagging and cell-originals-damaged
+alerts (cloud-platform-operations, "Monitoring spans independent failure domains").
 
 On 2026-10-16 a cell's volume filled and the cell answered 503 for hours with
 nobody told. These tests run whole passes against the disposable Postgres and a
@@ -452,6 +452,82 @@ async def test_a_restart_of_the_cell_or_of_cellctl_during_a_stall_never_sends_a_
         await connection.close()
 
     assert _states(delivered, alerts.RECALL_LAG_ALERT) == [True, True]
+
+
+def _counted(originals: dict[str, object]) -> bytes:
+    """A cell's readiness answer whose fixity block is `originals`."""
+    return json.dumps({
+        "status": "ready", "service": "exomem", "reasons": [],
+        "retrieval": {"state": "ready", "admitted": True}, "originals": originals,
+    }).encode()
+
+
+async def test_a_cell_that_counts_a_damaged_original_fires_and_a_clean_count_clears_it(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]]
+) -> None:
+    await _seed_cell(cell_db, CELL, "tenant-a")
+    connection = await _connect(cell_db)
+    cluster, memory = Cluster(), LoopMemory()
+    cluster.observations[CELL] = _served(CELL, ready_pod_ip=POD_IP)
+    try:
+        cluster.readiness[POD_IP] = _counted({"state": "measured", "unresolved": 1})
+        await _pass(connection, cluster, memory, NOW)
+        assert _states(delivered, alerts.ORIGINALS_DAMAGED_ALERT) == [True]
+
+        cluster.readiness[POD_IP] = _counted({"state": "measured", "unresolved": 0})
+        await _pass(connection, cluster, memory, NOW + timedelta(minutes=1))
+    finally:
+        await connection.close()
+
+    assert _states(delivered, alerts.ORIGINALS_DAMAGED_ALERT) == [True, False]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # Any state but measured: before the first pass, after a stale pass, or with fixity off.
+        _counted({"state": "unknown", "last_pass_at": "2026-11-01T06:00:00+00:00"}),
+        _counted({"state": "measured", "unresolved": True}),  # a hostile cell sends a boolean
+        None,  # the pod does not answer
+    ],
+    ids=["not-measured", "hostile-count", "no-answer"],
+)
+async def test_an_uncounted_answer_never_resolves_a_firing_originals_alert(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], answer: bytes | None
+) -> None:
+    await _seed_cell(cell_db, CELL, "tenant-a")
+    connection = await _connect(cell_db)
+    cluster, memory = Cluster(), LoopMemory()
+    cluster.observations[CELL] = _served(CELL, ready_pod_ip=POD_IP)
+    try:
+        cluster.readiness[POD_IP] = _counted({"state": "measured", "unresolved": 2})
+        await _pass(connection, cluster, memory, NOW)
+        if answer is None:
+            del cluster.readiness[POD_IP]
+        else:
+            cluster.readiness[POD_IP] = answer
+        await _pass(connection, cluster, memory, NOW + timedelta(minutes=1))
+    finally:
+        await connection.close()
+
+    assert _states(delivered, alerts.ORIGINALS_DAMAGED_ALERT) == [True]
+
+
+async def test_a_cell_before_its_first_fixity_pass_sends_no_originals_alert(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]]
+) -> None:
+    # Unknown is not clean: a resolution now would tell the operator a cell is checked when it is not.
+    await _seed_cell(cell_db, CELL, "tenant-a")
+    connection = await _connect(cell_db)
+    cluster, memory = Cluster(), LoopMemory()
+    cluster.observations[CELL] = _served(CELL, ready_pod_ip=POD_IP)
+    cluster.readiness[POD_IP] = _counted({"state": "unknown"})
+    try:
+        await _pass(connection, cluster, memory, NOW)
+    finally:
+        await connection.close()
+
+    assert _states(delivered, alerts.ORIGINALS_DAMAGED_ALERT) == []
 
 
 def test_the_readiness_read_asks_the_health_port_for_readiness_and_drops_a_not_ready_answer(

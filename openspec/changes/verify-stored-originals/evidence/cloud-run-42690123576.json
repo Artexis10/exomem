@@ -1,0 +1,176 @@
+{
+ "source": "GitHub Actions run 42690123576, artifact cloud-rehearsal-report, stages.original_fixity",
+ "stage": {
+  "status": "passed",
+  "evidence": {
+   "state": "PASS",
+   "phase": "pass",
+   "cell_id": "t3f6ffzil3nbbkmv",
+   "plan": {
+    "originals": 1000,
+    "mean_bytes": 524288,
+    "notes": 2000
+   },
+   "checks": {
+    "every_original_seeded": true,
+    "table_rebuild_found_every_original": true,
+    "full_pass_verified_every_original": true,
+    "backup_snapshot_is_64_hex": true,
+    "an_intact_candidate": true,
+    "damage_kept_size_and_changed_bytes": true,
+    "pass_counted_the_damage": true,
+    "readiness_counted_one_unresolved": true,
+    "runbook_hash_matches_the_binding": true,
+    "runbook_original_restored": true,
+    "runbook_exit_zero": true,
+    "restored_bytes_hash_to_the_binding": true,
+    "damaged_bytes_kept_in_stage": true,
+    "no_staged_copy_left": true,
+    "pass_found_nothing_unresolved": true,
+    "readiness_counts_zero_unresolved": true
+   },
+   "runbook_deviations": [
+    "the scratch restore renders cellctl's manifests as rehearsal step 11 does, not with `cloud_restore_manifests.py scratch`, because that command reads object-store keys a new cell's credentials Secret does not hold",
+    "the break-glass identity is the disposable cluster's admin kubeconfig with its context renamed `break-glass`, run with the runner's kubectl",
+    "the blocks run from the checkout root with this interpreter first on PATH, so `python3` imports cellctl",
+    "the rehearsal stops between the blocks unless the first exits 0, as the operator stops without `hash matches the binding`",
+    "the rehearsal runs a fixity pass in the pod instead of waiting up to an hour for the cell's next one",
+    "`$STAGE` stays in the cell until the cluster is torn down"
+   ],
+   "cell_resources": {
+    "limits": {
+     "cpu": "2",
+     "memory": "3Gi"
+    },
+    "requests": {
+     "cpu": "125m",
+     "memory": "512Mi"
+    }
+   },
+   "fixture": {
+    "originals": 1000,
+    "bytes": 513979718,
+    "notes": 2000,
+    "seed_seconds": 3218.4
+   },
+   "measurement": {
+    "settings": {
+     "read_mib_per_second": 32.0,
+     "pass_seconds": 3600.0,
+     "cycle_days": 30.0,
+     "walk_seconds": 86400.0,
+     "budget_floor_bytes": 67108864
+    },
+    "table_rebuild": {
+     "originals": 1000,
+     "seconds": 7.708,
+     "cpu_seconds": 6.901
+    },
+    "full_pass_under_read_cap": {
+     "seconds": 19.818,
+     "cpu_seconds": 3.529,
+     "bytes_read": 513979718,
+     "budget_bytes": 513979718,
+     "mib_per_second": 24.73,
+     "outcomes": {
+      "verified": 1000
+     },
+     "unreadable": 0,
+     "rescheduled": 0,
+     "unverified_after": 0
+    },
+    "default_pass": {
+     "seconds": 2.59,
+     "cpu_seconds": 0.47,
+     "bytes_read": 66606064,
+     "budget_bytes": 67108864,
+     "mib_per_second": 24.53,
+     "outcomes": {
+      "verified": 135
+     },
+     "unreadable": 0,
+     "rescheduled": 0,
+     "unverified_after": 0
+    },
+    "status": {
+     "state": "measured",
+     "coverage": "complete",
+     "counts": {
+      "unverified": 0,
+      "verified": 1000,
+      "restored": 0,
+      "missing": 0,
+      "corrupt_no_copy": 0,
+      "evicted": 0,
+      "unmatched": 0
+     }
+    }
+   },
+   "scratch_namespace": "exo-scratch-t3f6ffzil3nbbkmv-9822603e",
+   "status_after_restart": {
+    "state": "measured",
+    "coverage": "complete",
+    "counts": {
+     "unverified": 0,
+     "verified": 1000,
+     "restored": 0,
+     "missing": 0,
+     "corrupt_no_copy": 0,
+     "evicted": 0,
+     "unmatched": 0
+    },
+    "last_pass_at": "2026-11-09T21:40:08.439871+00:00",
+    "last_pass_unreadable": 0,
+    "last_pass_rescheduled": 0,
+    "last_walk_at": "2026-11-09T21:40:04.906687+00:00",
+    "last_walk_error": null,
+    "oldest_verification_at": "2026-11-09T21:38:00.358148+00:00"
+   },
+   "original": {
+    "path": "Knowledge Base/Evidence/rehearsal/fixity-000/original-00000.bin",
+    "kind": "file",
+    "expected_sha256": "a773009508c7ae0ce05823d3c70ffe1c878a28dcb92ca3d1668a8691087f1947",
+    "size": 524288,
+    "state": "local",
+    "store_copy": false
+   },
+   "damaged_sha256": "029c2de34eaf71389a4dd1cbd4fc066dd32b5e22e97fcd28445c31c9bc0c2952",
+   "pass_after_damage": {
+    "outcomes": {
+     "corrupt_no_copy": 1,
+     "verified": 138
+    },
+    "unreadable": 0,
+    "rescheduled": 0,
+    "unresolved_outcomes": 1,
+    "unresolved_rows": 1
+   },
+   "readiness_after_damage": {
+    "state": "measured",
+    "unresolved": 1
+   },
+   "runbook": {
+    "kubectl_client": "v1.37.2",
+    "kubernetes_server": "v1.35.6+k3s1",
+    "exit_code": 0,
+    "hash_matches_printed": true,
+    "original_restored_printed": true,
+    "stderr_last_line": ""
+   },
+   "pass_after_restore": {
+    "outcomes": {
+     "verified": 120
+    },
+    "unreadable": 0,
+    "rescheduled": 0,
+    "unresolved_outcomes": 0,
+    "unresolved_rows": 0
+   },
+   "readiness_after_restore": {
+    "state": "measured",
+    "unresolved": 0
+   }
+  },
+  "seconds": 3476.8
+ }
+}

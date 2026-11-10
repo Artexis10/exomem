@@ -72,6 +72,11 @@ _ZIP_FLAG_ENCRYPTED = 0x1
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")  # the format of a member's name in the pool
 
 
+def blob_writer(sink: BinaryIO) -> gzip.GzipFile:
+    """The one member-pool blob encoding: gzip with no name and no time, so equal members give equal blobs."""
+    return gzip.GzipFile(filename="", mode="wb", fileobj=sink, compresslevel=_GZIP_LEVEL, mtime=0)
+
+
 def member_blob(sha256: str) -> str:
     """A member's blob path relative to its Evidence family: the one member-pool layout.
 
@@ -262,8 +267,7 @@ def _write_blob(zip_file: zipfile.ZipFile, entry: Entry, blob: Path, sha256: str
     try:
         digest = hashlib.sha256()
         with os.fdopen(descriptor, "wb") as sink:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=sink,
-                               compresslevel=_GZIP_LEVEL, mtime=0) as packed:
+            with blob_writer(sink) as packed:
                 for chunk in member_chunks(zip_file, entry):
                     digest.update(chunk)
                     packed.write(chunk)

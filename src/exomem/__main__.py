@@ -1674,6 +1674,7 @@ def _status_main(argv: list[str]) -> int:
         print(f"  config: {status['config_path']}")
         print(f"  models: {status['models']}")
         print(f"  media: {status['media']}")
+        print(f"  originals: {status['originals']}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:

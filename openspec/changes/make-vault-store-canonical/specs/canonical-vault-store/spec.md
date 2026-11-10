@@ -53,7 +53,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 - **THEN** status reports the number of queued files and the age of the oldest one
 
 ### Requirement: Outside edits return through a base-revision check
-In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete SHALL become a held deletion, never a silent delete of canonical content.
+In store mode, a file the store owns whose hash differs from the projection manifest, or a new text file of a kind the store owns, SHALL be treated as an outside edit. When the store revision of that file equals the manifest revision and no projection intent is queued for it, Exomem SHALL import the file as a governed write with outside-editor provenance. Otherwise Exomem SHALL keep the outside bytes as a held correction for review and SHALL NOT overwrite either version. An outside delete of a page SHALL become a held deletion, never a silent delete of canonical content. A binary file is canonical on disk and the store records only its hash and size, so an outside change, delete or rename of a binary SHALL import as an audited record change; Exomem SHALL hold a binary only when an Exomem delete of it is queued and the file differs.
 
 #### Scenario: A clean outside edit imports
 - **WHEN** a person edits a projected page in Obsidian and no Exomem write to that page is pending
@@ -68,6 +68,15 @@ In store mode, a file the store owns whose hash differs from the projection mani
 #### Scenario: An outside delete is held
 - **WHEN** a projected page disappears from disk without an Exomem delete
 - **THEN** the store keeps the page and records a held deletion for review
+
+#### Scenario: A held deletion clears when the page returns
+- **WHEN** a person restores the file of a held deletion with the bytes that Exomem last projected
+- **THEN** the held deletion is removed and nothing is imported
+
+#### Scenario: An outside delete of a binary imports
+- **WHEN** a binary file disappears from disk without an Exomem delete
+- **THEN** the store removes the binary's record in an audited import, and holds nothing
+- **AND** a binary renamed outside Exomem keeps its record under the new path, paired by its hash
 
 ### Requirement: A held item is resolved by an explicit choice
 In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL need the same write authority as a governed write of the bytes it commits, and SHALL refuse with `WRITE_REFUSED`, before it saves or commits anything, when the caller lacks it. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that in one order. The owner with unrestricted access sees every held item. Any other caller is judged on the stored page's bytes, not on the person's file or the path alone. When the store holds no page, the person's file is judged the same way. When neither exists, and for a binary, the path alone decides. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.

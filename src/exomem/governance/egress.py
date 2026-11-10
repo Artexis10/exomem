@@ -3006,6 +3006,12 @@ def annotate_hits(
             # have been permitted, so it is withheld rather than released.
             withheld.add(rel_path)
             continue
+        if getattr(hit, "dataset_value", False) and decision.level < LEVEL_FULL:
+            # A dataset value is raw content, read by `query_dataset` only at the full level.
+            # Below it the hit is dropped, never an excerpt and never a notice: a notice would
+            # tell a reader who may not read the rows that a value matched.
+            withheld.add(rel_path)
+            continue
         if decision.level >= RELEASE_FLOOR:
             hit.decision = decision
             permitted.append(hit)
