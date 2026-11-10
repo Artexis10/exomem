@@ -1,10 +1,10 @@
 """The replay report: for each set of cases, the paired difference between two arms on stage-B answers.
 
 An answer passes when every named judged criterion holds in the blind batch (`judge_batch.py`) and every deterministic
-check of the case passes. A run error, a missing judgment, an unreadable one and a missing arm are `unknown`: they are
-counted and listed, and never read as a failure or as zero. For each case the known (model, repeat) pairs are averaged;
-the interval is a 95% percentile bootstrap over cases (`store_report.paired_interval`). Reply length is the characters of
-the final answer, compared as a per-case log ratio.
+check of the case passes. A run error, a missing judgment, an unreadable one, a missing arm and a run in which the agent
+used a tool outside the script are `unknown`: they are counted and listed, and never read as a failure or as zero. For
+each case the known (model, repeat) pairs are averaged; the interval is a 95% percentile bootstrap over cases
+(`store_report.paired_interval`). Reply length is the characters of the final answer, compared as a per-case log ratio.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import checks
 from .judge_batch import agreement_line
-from .replay_cases import RUBRIC
+from .replay_cases import RUBRIC, SCRIPT_CHECK
 from .report import BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, read_rows
 from .store_report import paired_interval
 
@@ -29,9 +29,15 @@ def run_key(row: dict) -> tuple:
     return row["scenario"], row["arm"], row["model"], row["repeat"]
 
 
+def used_outside_script(row: dict) -> bool:
+    """Whether the agent used a tool that the scenario did not serve or allow. Such a run did not measure the replayed
+    context, so no difference between the arms may rest on it."""
+    return any(o["check"] == SCRIPT_CHECK and o["verdict"] == checks.FAIL for o in row["checks"])
+
+
 def verdict_of(row: dict, judged: dict | None, criteria: Sequence[str]) -> str:
     """Pass, fail or unknown for one run, from its deterministic checks and the named criteria of its judgment."""
-    if row["error"] is not None:
+    if row["error"] is not None or used_outside_script(row):
         return checks.UNKNOWN
     found = {o["check"]: o for o in (judged or {}).get("criteria", [])}
     judged_outcomes = [
@@ -115,7 +121,8 @@ def build(
         return {checks.PASS: 1.0, checks.FAIL: 0.0}.get(verdicts[run_key(row)])
 
     def length(row: dict) -> float | None:
-        return math.log(len(row["final_text"])) if row["error"] is None and row.get("final_text") else None
+        measured = row["error"] is None and not used_outside_script(row)
+        return math.log(len(row["final_text"])) if measured and row.get("final_text") else None
 
     shas = {r["arm"]: r.get("product_sha") for r in rows}
     models = sorted({r["model"] for r in rows})
@@ -125,6 +132,10 @@ def build(
         f"Baseline `{baseline}` at `{shas.get(baseline)}`. Candidate `{candidate}` at `{shas.get(candidate)}`.",
         f"Stage-B runs read: {len(rows)}, of which {sum(r['error'] is not None for r in rows)} ended in an error (unknown). "
         f"Counting criteria: {', '.join(criteria)} and every deterministic check of the case. Models: {', '.join(models)}.",
+        "Runs where the agent used a tool outside the script (unknown for every difference below): "
+        + f"{sum(map(used_outside_script, rows))} of {len(rows)} ("
+        + ", ".join(f"{arm} {sum(used_outside_script(r) for r in rows if r['arm'] == arm)}" for arm in (baseline, candidate))
+        + ").",
         (agreement_line(agreement) if agreement else "No judge batch was given: every judged criterion is unknown.")
         + ("" if agreement and not agreement["incomplete"] else " The result below is incomplete."),
         "Runs whose stream shows a hook response (information only, not a gate): "
@@ -174,6 +185,7 @@ def build(
         r
         for r in rows
         if r["error"] is None
+        and not used_outside_script(r)
         and {s for s in (check_verdict(r), judge_verdict(judged_rows.get(run_key(r)), criteria)) if s} == {checks.PASS, checks.FAIL}
     ]
     out += ["", "## Deterministic checks and the judge disagree", ""]
@@ -181,7 +193,8 @@ def build(
     unusable = [r for r in rows if verdicts[run_key(r)] == checks.UNKNOWN]
     out += ["", "## Runs without a usable result", ""]
     out += [
-        f"- {r['arm']} {r['model']} {r['scenario']}#{r['repeat']}: {(r['error'] or 'a judgment or a check is missing')[:160]}"
+        f"- {r['arm']} {r['model']} {r['scenario']}#{r['repeat']}: "
+        + (r["error"] or ("the agent used a tool outside the script" if used_outside_script(r) else "a judgment or a check is missing"))[:160]
         for r in unusable
     ] or ["None."]
     return "\n".join(out) + "\n"

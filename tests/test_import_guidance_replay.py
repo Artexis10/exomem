@@ -307,8 +307,8 @@ def test_a_written_scenario_loads_by_folder_path_with_its_checks_set_and_judging
     replay_cases.write_scenarios(folder, tmp_path / "out")
     scenarios = {s.id: s for s in runner.load_scenarios("all", str(tmp_path / "out" / "scenarios"))}
     first = scenarios["c1"]
-    assert [spec["type"] for spec in first.checks] == ["answer_has_all_of", "answer_in_order"]
-    assert scenarios["c2"].checks == ()
+    assert [spec["type"] for spec in first.checks] == ["only_scripted_tools", "answer_has_all_of", "answer_in_order"]
+    assert [spec["type"] for spec in scenarios["c2"].checks] == ["only_scripted_tools"]
     assert first.prompt == TURN_ONE and first.reference == "Reference of c1." and first.judge == "batch"
     assert first.hooks == ("UserPromptSubmit",) and first.served_tools == ("bootstrap", "recall_context")
     assert first.record["ready_graph"] is True
@@ -458,6 +458,40 @@ def test_a_case_with_no_known_pair_is_unknown_and_counted_never_a_failure(tmp_pa
     line = next(line for line in text.splitlines() if line.startswith("- Set S, all models: difference"))
     assert "over 1 paired case(s) of 3" in line and "unknown cases (2): c1, c2" in line
     assert "TimeoutExpired" in text.split("## Runs without a usable result")[1]
+
+
+def test_a_run_that_used_a_tool_outside_the_script_is_counted_apart_and_is_neither_a_pass_nor_a_fail(tmp_path: Path) -> None:
+    """Catches an agent that reached a built-in tool when the script allowed none: its answer did not rest on the replayed
+    context, so scoring it would credit or blame the arm for something the replay never showed."""
+    folder = case_folder(tmp_path, {"c0": {"deterministic": {"all_of": [["07:15"]]}}, "c1": {"deterministic": {"all_of": [["07:15"]]}}})
+    replay_cases.write_scenarios(folder, tmp_path / "out")
+    scenario = {s.id: s for s in runner.load_scenarios("all", str(tmp_path / "out" / "scenarios"))}["c0"]
+    answer_text = "The first ferry sails at 07:15."
+
+    def row_of(case: str, arm: str, tools: tuple[str, ...]) -> dict:
+        evidence = checks.Evidence((), tools, {}, answer=answer_text)
+        outcomes = checks.run_checks(scenario.checks, evidence, scenario.served_tools, scenario.builtin_tools)
+        return {**stage_b_row(case, arm, answer_text), "checks": [vars(o) for o in outcomes]}
+
+    scripted = ("mcp__exomem__recall_context",)
+    rows = [
+        row_of("c0", "base", scripted),
+        row_of("c0", "cand", (*scripted, "Bash")),
+        row_of("c1", "base", scripted),
+        row_of("c1", "cand", scripted),
+    ]
+    runs = write_rows(tmp_path / "b.jsonl", rows)
+    out = tmp_path / "batch"
+    judge_batch.prepare([runs], [], [invented_scenario("c0"), invented_scenario("c1")], out=out)
+    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out)
+    sets = tmp_path / "case-sets.json"
+    sets.write_text(json.dumps({"c0": "S", "c1": "S"}), encoding="utf-8")
+    text = replay_report.build([runs], judged=out / "judged.json", case_sets=sets, baseline="base", candidate="cand")
+    assert "outside the script (unknown for every difference below): 1 of 4 (base 0, cand 1)" in text
+    line = next(line for line in text.splitlines() if line.startswith("- Set S, all models: difference"))
+    assert "over 1 paired case(s) of 2" in line and "unknown cases (1): c0" in line
+    assert "- cand model-a c0#0: the agent used a tool outside the script" in text.split("## Runs without a usable result")[1]
+    assert "c0" not in text.split("## Deterministic checks and the judge disagree")[1].split("## Runs without")[0]
 
 
 def test_a_session_whose_run_failed_shows_unknown_cells_and_not_zero(tmp_path: Path) -> None:

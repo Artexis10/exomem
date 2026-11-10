@@ -15,6 +15,7 @@ from pathlib import Path
 
 from epistemic.journeys.f27_replay import JourneySetupError, refuse_unsafe_out_dir
 
+from . import checks
 from .scripted_replies import REPLAY_SUITE
 from .session_close import Case, load_cases
 
@@ -43,6 +44,9 @@ HOOKS = ("UserPromptSubmit",)
 WARM_SECONDS = 5
 #: Key `deterministic` entries that the protocol fixes, and the answer check that each one selects.
 CHECK_TYPES = {"all_of": "answer_has_all_of", "in_order": "answer_in_order"}
+#: Every replay scenario carries this check: an agent that used a tool outside the script (a built-in tool, where the
+#: scenario allows none) did not answer from the replayed context, and the report counts such a run as unknown.
+SCRIPT_CHECK = checks.only_scripted_tools.__name__
 
 
 def read_marks(case: Case) -> dict:
@@ -104,7 +108,8 @@ def scenario_for(case: Case, marks: dict) -> dict:
         "reference": marks["reference"],
         "criteria": list(RUBRIC),
         "checks": [
-            {"type": CHECK_TYPES[name], "groups": groups} for name, groups in (marks["deterministic"] or {}).items()
+            {"type": SCRIPT_CHECK},
+            *({"type": CHECK_TYPES[name], "groups": groups} for name, groups in (marks["deterministic"] or {}).items()),
         ],
     }
 
