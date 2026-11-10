@@ -14,7 +14,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from sqlite3 import Connection
 from typing import TypeVar
@@ -85,6 +85,8 @@ class StoreSnapshot:
 
     revision: int
     connection: Connection
+    #: What a reader works out once per snapshot (``readiness``), shared by every read that joins it.
+    memo: dict = field(default_factory=dict, compare=False, repr=False)
 
     def page(self, rel: str) -> StoredPage | None:
         """One page's exact bytes with its metadata, or None when the store holds no such page."""
@@ -236,6 +238,179 @@ def walk_member(rel: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class StoreReadiness:
+    """How current the derived rows of one snapshot are: what a store reader serves and shows.
+
+    The snapshot's revision proves the rows current for the pages: every commit derives its pages'
+    rows in its own transaction. The registries are the one input that can lag them (``rederive``):
+    ``registry`` is that module's closed state, ``current``, ``rebuilding`` or ``unknown``.
+    """
+
+    revision: int
+    registry: str
+    registry_revision: int | None
+    registry_target: int | None
+    #: Overlay paths that still wait to reach the disk, which the registry pass waits for.
+    waiting_on_paths: int
+    #: When the importer last finished a sweep of the files that the store does not own, whose
+    #: rows are as fresh as that sweep; None when no sweep is recorded.
+    unowned_rows_as_of: str | None
+
+
+def readiness(vault_root: Path) -> StoreReadiness:
+    """The readiness of the snapshot that this request reads, worked out once per snapshot."""
+    from . import rederive
+
+    root = _as_path(vault_root)
+    with snapshot(root) as view:
+        found = view.memo.get("readiness")
+        if found is None:
+            registry = rederive.read(view.connection)
+            waiting = 0 if registry.state == rederive.CURRENT else rederive.waiting_on(
+                view.connection, root
+            )
+            found = view.memo["readiness"] = StoreReadiness(
+                view.revision,
+                registry.state,
+                registry.revision,
+                registry.target,
+                waiting,
+                unowned_sweep(view.connection).get("at"),
+            )
+        return found
+
+
+#: The ``store_meta`` key of the importer's last full sweep of the files that the store does not
+#: own: ``{"revision", "at", "corpus_files"}``. It is no derived row, so writing it moves no revision.
+UNOWNED_SWEEP = "vault_store_unowned_sweep"
+
+
+def unowned_sweep(conn: Connection) -> dict:
+    """The importer's record of its last full sweep of the unowned files, or {} when none is kept."""
+    import json
+
+    row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (UNOWNED_SWEEP,)).fetchone()
+    try:
+        found = json.loads(row[0]) if row is not None else {}
+    except ValueError:
+        return {}  # an unreadable record says no sweep is known, which status shows as such
+    return found if isinstance(found, dict) else {}
+
+
+#: The one sentence for each registry state that every store reader (search, graph or links)
+#: attaches unchanged while the pass runs or its state is unknown: an agent can repeat it as is,
+#: and the figures go in ``lag``. It names every derived row that the pass rewrites, so no reader
+#: needs a sentence of its own.
+_REBUILDING_NOTICE = (
+    "A schema change is still being applied to the stored pages, so some search, graph and link "
+    "rows may follow the previous schema until it finishes."
+)
+_UNKNOWN_NOTICE = (
+    "Exomem has not yet confirmed that the search, graph and link rows of every stored page "
+    "follow the current schema; a background pass is checking them."
+)
+
+
+def registry_notice(state: StoreReadiness) -> dict | None:
+    """The notice and lag figures for a reader to attach, or None when the registry is current.
+
+    A reader serves the rows of its snapshot in every state: a pass re-derives pages in path order
+    and never drops one, so only the labels of the pages after its cursor can lag, and the notice
+    names them instead of refusing recall for the length of the pass.
+    """
+    from . import rederive
+
+    if state.registry == rederive.CURRENT:
+        return None
+    return {
+        "notice": _REBUILDING_NOTICE if state.registry == rederive.REBUILDING else _UNKNOWN_NOTICE,
+        "lag": {
+            "registry": state.registry,
+            "revision": state.registry_revision,
+            "target": state.registry_target,
+            "waiting_on_paths": state.waiting_on_paths,
+        },
+    }
+
+
+def request_registry_notice(vault_root: Path) -> dict | None:
+    """``registry_notice`` at this request's snapshot, or None when the vault is not in store mode."""
+    root = _as_path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return None
+    try:
+        return registry_notice(readiness(root))
+    except connection.CollectionStoreError as error:
+        if error.code != NOT_ACTIVE:
+            raise
+        return None  # the records stopped saying store mode: the request read files
+
+
+def scope_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
+    """A freshness triple for ``scope`` ("kb" or "vault") at this request's snapshot.
+
+    It stands where file mode's triple over the files stands, as a cache key, so the key never
+    needs a walk. The revision moves with every commit. A registry batch derives rows without a
+    commit, and the catalogue's own triggers rotate its ``frequency_revision`` on every row write,
+    so the key names both. The count is the derived page rows in the scope, read through the
+    scope's index.
+    """
+    statement = _VAULT_PAGES if scope == "vault" else _KB_PAGES
+    with snapshot(_as_path(vault_root)) as view:
+        found = view.memo.get(statement)
+        if found is None:
+            count, rows = view.connection.execute(statement).fetchone()
+            found = view.memo[statement] = (count, view.revision, f"store:{view.revision}:{rows}")
+        return found
+
+
+#: The page rows of each scope, counted through the scope's own index (``pages_kb``,
+#: ``pages_vault``), with the revision that the catalogue's triggers give its rows.
+_KB_PAGES = (
+    "SELECT COUNT(*), (SELECT value FROM meta WHERE key = 'frequency_revision') "
+    "FROM pages WHERE in_kb = 1"
+)
+_VAULT_PAGES = (
+    "SELECT COUNT(*), (SELECT value FROM meta WHERE key = 'frequency_revision') "
+    "FROM pages WHERE in_vault = 1"
+)
+
+
+def recall_checkpoint(vault_root: Path, scope: str):
+    """The recall checkpoint of ``scope`` at this request's snapshot.
+
+    The store's derived page rows are the recall projection, so the checkpoint names the store and
+    its revision where file mode names a freshness generation, with the live policy identity.
+    """
+    from .. import freshness, recall_policy
+
+    root = _as_path(vault_root)
+    triple = scope_triple(root, scope)
+    policy_version, access_fingerprint = recall_policy.recall_policy_identity(root)
+    return freshness.RecallFreshnessCheckpoint(
+        STORE_CHECKPOINT, triple[1], triple, policy_version, access_fingerprint
+    )
+
+
+#: The ``instance_id`` of a store checkpoint: no freshness registry instance issued it.
+STORE_CHECKPOINT = "store"
+
+
+def checkpoint_is_current(vault_root: Path, scope: str, expected) -> bool:
+    """Whether a store checkpoint still names the store's projection: same revision and policy.
+
+    Inside a request it reads the request's own snapshot, so a proof that the request took stays
+    current for the request, as one freshness generation does in file mode.
+    """
+    try:
+        return recall_checkpoint(vault_root, scope) == expected
+    except connection.CollectionStoreError as error:
+        if error.code != NOT_ACTIVE:
+            raise
+        return False  # the vault left store mode, so no store checkpoint names it any more
+
+
+@dataclass(frozen=True, slots=True)
 class _RequestScope:
     """The snapshot that one request holds open, and the thread and vault it belongs to."""
 
@@ -258,24 +433,26 @@ def request_snapshot(vault_root: Path) -> Iterator[None]:
 
     A reader that opens its own snapshot per page pays a connection, a transaction and a mode query
     for each page, and the pages of one request may then belong to different revisions. Here the
-    request reads one revision. A vault that is not in store mode binds nothing, so a file-mode
-    request pays one read of the mode records; the scope nests, and an inner one joins the outer.
+    request reads one revision. A vault that is not in store mode binds only its mode answer
+    (``mode.read_mode_scope``), so a file-mode request pays one read of the mode records and no stat
+    at each chokepoint; the scope nests, and an inner one joins the outer.
     """
     root = Path(vault_root)
-    if _REQUEST.get() is None and mode.store_mode_for_reads(root):
-        with ExitStack() as scope:
-            try:
-                view = scope.enter_context(snapshot(root))
-            except connection.CollectionStoreError as error:
-                if error.code != NOT_ACTIVE:
-                    raise
-                # The records stopped saying store mode: the request reads files.
-            else:
-                token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view))
-                scope.callback(_REQUEST.reset, token)
-                yield
-                return
-    yield
+    with mode.read_mode_scope(root) as stored:
+        if _REQUEST.get() is None and stored:
+            with ExitStack() as scope:
+                try:
+                    view = scope.enter_context(snapshot(root))
+                except connection.CollectionStoreError as error:
+                    if error.code != NOT_ACTIVE:
+                        raise
+                    # The records stopped saying store mode: the request reads files.
+                else:
+                    token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view))
+                    scope.callback(_REQUEST.reset, token)
+                    yield
+                    return
+        yield
 
 
 @contextmanager

@@ -381,9 +381,9 @@ def _page_version(page: str) -> tuple[tuple[int, int], tuple[int, int, int], os.
 
 def _remembered_unclaimed(root: Path, path: str) -> bool:
     # Only a file-mode read fills this memo: a stored page's read carries no generation, so
-    # `_remember_unclaimed` never keeps it. Migration to the store runs offline, so a process that
-    # serves a store-mode vault starts empty and never stats a stored page's file here. No product
-    # path clears it on a migration; a long-lived reader open across one keeps stale answers.
+    # `_remember_unclaimed` never keeps it. A process that filled it before the vault moved to the
+    # store keeps its entries, so `parent_binding_for_path` asks the store first and never consults
+    # the memo for a page that the store serves.
     key = (root, path)
     with _UNCLAIMED_LOCK:
         entry = _UNCLAIMED.get(key)
@@ -444,8 +444,16 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     # Only an ORDINARY spelling outside a payload tree is ever remembered. Its classification depends on the
     # spelling and the process's fixed knowledge-base directory, so a hit needs none of the normalization below.
     # A hit proves only that this file version makes no claim; the read that serves the page re-proves path
-    # safety. Supplied or staged bytes decide instead.
-    if content is None and not _OVERLAY.get() and _remembered_unclaimed(root, path):
+    # safety. Supplied or staged bytes decide instead. A page that the store serves is decided by its
+    # stored bytes: a memo that a file-mode read filled before the vault moved to the store is stale.
+    from .vault_store import read as vault_store_read
+
+    if (
+        content is None
+        and not _OVERLAY.get()
+        and not vault_store_read.serves(root, path if path.lower().endswith(".md") else path + ".md")
+        and _remembered_unclaimed(root, path)
+    ):
         return None
     # Supplied bytes for a page spelling are the bytes parsed below, never the disk, so the same path with
     # the same bytes always answers the same and no file version or racy window is involved. The digest is
@@ -482,8 +490,6 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
         memoable = content is None and not _OVERLAY.get() and not in_subtree and vault.STAT_GENERATION_TRUSTED
         # A page that the store serves has no file to probe: the store says whether it exists, so no
         # projection (absent, damaged or linked elsewhere) can clear or change its claim.
-        from .vault_store import read as vault_store_read
-
         stored = vault_store_read.serves(root, page_path)
         # A cold inventory cannot classify an absent ordinary companion.
         if not stored and not in_subtree and not reserved_paths.identity_catalogue_ready(root):

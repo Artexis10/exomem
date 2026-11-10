@@ -3312,9 +3312,15 @@ def op_find(
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
     from .collection_store import preview as store_preview
+    from .vault_store import read as store_read
 
     if store_preview.pages_unavailable(vault_root):
         degraded.append(find_module._STORE_UNAVAILABLE_COMPONENT)
+    # A store-mode vault serves its rows while a registry pass re-derives them, and says so.
+    registry_lag = store_read.request_registry_notice(vault_root)
+    if registry_lag is not None and restricted:
+        # The revisions count the vault's writes, which a restricted caller is not shown.
+        registry_lag = {"notice": registry_lag["notice"]}
     if restricted:
         # These internal status tokens disclose pending writes before RAW admission.
         hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
@@ -3361,6 +3367,7 @@ def op_find(
         and budget_block is None
         and dimension_block is None
         and group_blocks is None
+        and registry_lag is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -3393,6 +3400,8 @@ def op_find(
         out["dimension_check"] = dimension_block
     if group_blocks is not None:
         out["dimension_groups"] = group_blocks
+    if registry_lag is not None:
+        out.update(registry_lag)
     return out
 
 
@@ -7002,9 +7011,12 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
         else hit
         for hit in envelope.pop("hits", ())
     ]
-    notice = _search_notice(envelope)
+    # A store-mode vault's registry notice (``op_find``) says another thing: both sentences stay.
+    notice = " ".join(
+        sentence for sentence in (_search_notice(envelope), envelope.pop("notice", None)) if sentence
+    ) or None
     dimension_check = envelope.get("dimension_check")
-    for internal in ("warming", "degraded", "budget", "dimension_check"):
+    for internal in ("warming", "degraded", "budget", "dimension_check", "lag"):
         if internals:
             continue
         envelope.pop(internal, None)
@@ -7153,6 +7165,7 @@ def op_activate_context(
     # all. `session` has one other reader, the upkeep carrier below, where it
     # names the caller whose session start may carry one upkeep item.
     from . import read_next_action
+    from .vault_store import read as store_read_module
 
     requested_chars = working_set_module.clamp_budget(max_chars)
     started = time.perf_counter()
@@ -7195,6 +7208,8 @@ def op_activate_context(
                         working_set_runtime_module.defer_index_refreshes(),
                         # Holds the pages this request proves withheld (`pin_lexical_checkpoint`).
                         egress_module.proven_withheld_scope(),
+                        # A store-mode vault's lanes read one store revision on this thread.
+                        store_read_module.request_snapshot(Path(vault_root)),
                     ):
                         if readiness_module.runtime_managed() and request_budget_module.current() is None:
                             bound_token = request_budget_module.set_current(
@@ -7254,6 +7269,11 @@ def op_activate_context(
                         # Vocabulary added since this conversation was last told, once per admitted
                         # digest change and counted inside the packet's own `limit_chars`.
                         vocabulary_delta_module.for_packet(vault_root, packet, session=session)
+                        # A store-mode vault serves its rows while a registry pass re-derives them:
+                        # the diagnostics name the pass, and the lanes serve.
+                        registry_lag = store_read_module.request_registry_notice(vault_root)
+                        if registry_lag is not None and isinstance(packet.get("generation"), dict):
+                            packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
                     _carry_thread_through_abstention(packet, continuity)
                     # Last among the paths that set the token: the token names the policy its holder holds.
                     capture_carrier_module.stamp(packet, capture_policy)

@@ -188,33 +188,43 @@ def admitted_catalog_scope(vault_root: Path):
 
 
 #: Set while one request reads a vault whose pages the store holds.
-_CATALOGUE_RETIRED: ContextVar[bool] = ContextVar("catalogue_retired_for_store", default=False)
+_STORE_CATALOGUE: ContextVar[bool] = ContextVar("store_catalogue_request", default=False)
 
 
 @contextlib.contextmanager
-def catalogue_retired_scope(vault_root: Path):
-    """Retire the catalogue for one request that reads a store-mode vault.
+def store_catalogue_scope(vault_root: Path):
+    """Mark one request that reads a store-mode vault: its catalogue is the store's own rows.
 
-    The catalogue is built from files, so it never covers pages that only the store holds, and a
-    repair of it never converges. Inside this scope ``backend()`` answers ``python``, the documented
-    rung that reads the corpus and not the catalogue, and the corpus of a store-mode vault is the
-    store's. A vault that is not in store mode changes nothing.
+    The rows are derived in each page's commit, so the store's snapshot proves them current and no
+    warm-up, admission contract or repair of the file-built catalogue applies to the request
+    (``find._managed_reader``). A vault that is not in store mode changes nothing.
     """
     from . import find_corpus
 
     if not find_corpus.store_serves(vault_root):
         yield
         return
-    token = _CATALOGUE_RETIRED.set(True)
+    token = _STORE_CATALOGUE.set(True)
     try:
         yield
     finally:
-        _CATALOGUE_RETIRED.reset(token)
+        _STORE_CATALOGUE.reset(token)
 
 
-def catalogue_retired() -> bool:
-    """Whether the request in this context reads a store-mode vault, so no catalogue serves it."""
-    return _CATALOGUE_RETIRED.get()
+def store_catalogue() -> bool:
+    """Whether this request reads a store-mode vault (``store_catalogue_scope``)."""
+    return _STORE_CATALOGUE.get()
+
+
+def store_rows_serve(vault_root: Path) -> bool:
+    """Whether the store's own derived rows answer this vault's catalogue reads: it is in store mode.
+
+    A commit derives each page's rows in its own transaction, so the store's snapshot is the whole
+    readiness proof. The ``python`` kill switch keeps its rung over the store corpus in both modes.
+    """
+    from . import find_corpus
+
+    return backend() != "python" and find_corpus.store_serves(vault_root)
 
 
 def bind_admitted_catalog(vault_root: Path, checkpoints: Mapping[str, object]) -> None:
@@ -1667,12 +1677,7 @@ def backend() -> str:
 
     Unrecognized values fall back to `auto` — a typo must not silently disable
     the in-process escape hatch someone reached for, nor hard-fail search.
-
-    A request that reads a store-mode vault gets ``python`` whatever the variable says
-    (``catalogue_retired_scope``).
     """
-    if _CATALOGUE_RETIRED.get():
-        return "python"
     raw = (os.environ.get("EXOMEM_LEXICAL_BACKEND") or "").strip().lower()
     return raw if raw in ("fts5", "python") else "auto"
 
@@ -3153,9 +3158,9 @@ def _catalog_usable() -> bool:
     The catalog (pages + semantic_units metadata) lives in ordinary SQLite
     tables and needs neither FTS5 nor the trigram tokenizer, so — unlike the
     content-ranking lanes gated by ``_usable`` — only the explicit ``python``
-    kill switch, or a request that reads a store-mode vault (``backend()`` then
-    answers ``python``), retires it. Exact category/kind metadata therefore
-    survives an FTS5-less SQLite build.
+    kill switch retires it. Exact category/kind metadata therefore survives an
+    FTS5-less SQLite build. A store-mode vault's catalogue is the store's own
+    rows (``LexicalStore._reads_store``).
     """
     return backend() != "python"
 
@@ -5579,9 +5584,81 @@ class LexicalStore:
         )
         return CatalogReadiness("available" if valid else "stale", bool(valid), backend())
 
+    def _reads_store(self) -> bool:
+        """Whether this vault's catalogue is the store's own rows (``store_rows_serve``)."""
+        return store_rows_serve(self.vault_root)
+
+    def _sidecar_unreadable(self) -> bool:
+        """Whether a reader must decline: the file-built sidecar failed or is absent.
+
+        A store-mode vault reads the store, so the sidecar's state does not decide its reads.
+        """
+        return not self._reads_store() and (self._failed or not self.path.exists())
+
+    @contextlib.contextmanager
+    def _store_connection(self):
+        """The request's store snapshot connection, or None when the records stopped saying store
+        mode between the mode check and the open (the reader then takes the file branch)."""
+        from .collection_store import connection
+        from .vault_store import read
+
+        scope = contextlib.ExitStack()
+        try:
+            view = scope.enter_context(read.snapshot(self.vault_root))
+        except connection.CollectionStoreError as error:
+            if error.code != read.NOT_ACTIVE:
+                raise
+            yield None
+            return
+        with scope:
+            yield view.connection
+
+    def _serve_store_catalog(
+        self, query_fn: Callable[[sqlite3.Connection], _CatalogValue], failure_message: str
+    ) -> CatalogQueryResult[_CatalogValue] | None:
+        """``_serve_ready_catalog`` for a store-mode vault: ``query_fn`` on the request's snapshot.
+
+        The snapshot pins one revision, at which every page's derived rows are current, so there is
+        no checkpoint, identity or schema proof and nothing to repair. A registry pass in flight is
+        served and shown by the tool (``vault_store.read.registry_notice``). None means the vault
+        left store mode: the file branch decides.
+        """
+        from .collection_store import connection
+        from .vocabulary.registry import RegistryError
+
+        readiness = CatalogReadiness("available", True, backend())
+        try:
+            with self._store_connection() as conn:
+                if conn is None:
+                    return None
+                return self._query_within_budget(conn, query_fn, readiness)
+        except RegistryError:
+            return CatalogQueryResult(
+                None, CatalogReadiness("definitions_unavailable", False, readiness.backend)
+            )
+        except (sqlite3.Error, connection.CollectionStoreError) as error:
+            # The store is the vault: a failed read degrades this call and repairs nothing.
+            verdict = (
+                self._catalog_readiness_error(error, readiness.backend, schedule_repair=False)
+                if isinstance(error, sqlite3.Error)
+                else CatalogReadiness("transient_failure", False, readiness.backend)
+            )
+            (log.info if verdict.status == "transient_failure" else log.warning)(
+                failure_message, error
+            )
+            return CatalogQueryResult(None, verdict)
+
     @contextlib.contextmanager
     def _query_connection(self):
-        """Borrow only an active selection handle; ordinary opens stay owned."""
+        """Borrow only an active selection handle; ordinary opens stay owned.
+
+        A store-mode vault reads the request's store snapshot, which the caller never closes.
+        """
+        if self._reads_store():
+            with self._store_connection() as conn:
+                if conn is not None:
+                    yield conn
+                    return
         view = _admitted_catalog_view(self.vault_root)
         if view is not None and view.store is self:
             yield view.connection
@@ -6806,7 +6883,14 @@ class LexicalStore:
 
         This is deliberately weaker than `catalog_readiness`: it answers "what
         projection is published here", not "is that projection current".
+
+        A store-mode vault publishes its rows at each commit: the checkpoint names
+        the request's snapshot revision.
         """
+        if self._reads_store():
+            from .vault_store import read
+
+            return read.recall_checkpoint(self.vault_root, "kb" if scope == "kb-only" else scope)
         if backend() == "python" or self._failed or not self.path.exists():
             return None
         conn: sqlite3.Connection | None = None
@@ -10153,7 +10237,9 @@ class LexicalStore:
         so a generic error must never set the sticky ``_failed`` flag.
         """
         if classify_sqlite_error(error) == "fatal":
-            self._failed = True
+            # A store-mode read failed on the store, not on this sidecar: nothing here retires.
+            if not self._reads_store():
+                self._failed = True
             log.warning(message, error)
         else:
             log.info(message, error)
@@ -10183,6 +10269,11 @@ class LexicalStore:
         """
         from .vault import VaultLockError
 
+        if self._reads_store():
+            with self._store_connection() as conn:
+                if conn is not None:
+                    # The store's rows are current at its snapshot: nothing to reconcile.
+                    return query_fn(conn)
         view = _admitted_catalog_view(self.vault_root)
         if view is not None and view.store is self:
             ready = self._view_readiness(view, scope)
@@ -10222,10 +10313,10 @@ class LexicalStore:
         *,
         admitted_paths: set[str] | None = None,
     ) -> list[tuple[str, float]] | None:
-        if self._failed:
-            return None
-        if not repair and not self.path.exists():
-            _schedule_repair(self.vault_root)
+        if self._sidecar_unreadable() and (self._failed or not repair):
+            # A store-mode vault never gets here: its rows answer at the store's snapshot.
+            if not self._failed:
+                _schedule_repair(self.vault_root)
             return None
         try:
             return self._serve_synced_live_catalog(
@@ -11414,7 +11505,7 @@ class LexicalStore:
         filter column such as ``status``, which no text column shows.
         """
         answers = dict.fromkeys(expected, False)
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return answers
         from . import find_corpus
 
@@ -11502,7 +11593,7 @@ class LexicalStore:
         instead of trusting one hash to stand for all sixteen values.
         """
         answers: dict[str, tuple[str | None, ...] | None] = dict.fromkeys(rel_paths, None)
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return answers
         columns = ", ".join((*_ELIGIBILITY_COLUMNS, "content_hash"))
         try:
@@ -11529,9 +11620,11 @@ class LexicalStore:
         A catalogue that fails any of these is one that `ensure_fresh` rebuilds whole, so a caller that must not
         wait for that (the duplicate lookup) treats it as absent.
         """
+        if self._reads_store():
+            return True  # the store derives each page's rows in its commit
         from .vocabulary.registry import RegistryError
 
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return False
         try:
             with self._query_connection() as conn:
@@ -11550,7 +11643,7 @@ class LexicalStore:
         Read-only and non-walking: one indexed lookup, never a parse. `sql` is one of this module's two
         constants above, so no caller text reaches the statement.
         """
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return None
         try:
             with self._query_connection() as conn:
@@ -11566,7 +11659,7 @@ class LexicalStore:
 
         Read-only and non-walking. `sql` is one of the two constants above, so no caller text reaches the statement.
         """
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return None
         try:
             with self._query_connection() as conn:
@@ -11646,7 +11739,7 @@ class LexicalStore:
 
         wanted = sorted({str(path) for path in paths if str(path)})
         filed = None if categories is None else {str(c) for c in categories if str(c)}
-        if not wanted or self._failed or not self.path.exists():
+        if not wanted or self._sidecar_unreadable():
             return None
         try:
             with self._query_connection() as conn:
@@ -11679,7 +11772,7 @@ class LexicalStore:
         when the catalogue is absent or stale, so a caller fails open instead
         of treating an unbuilt sidecar as an empty vocabulary.
         """
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return None
         try:
             conn = self._connect()
@@ -11790,7 +11883,7 @@ class LexicalStore:
         as `-`, as the tag writers do. None when the catalogue is absent or
         stale, so a caller fails open.
         """
-        if self._failed or not self.path.exists():
+        if self._sidecar_unreadable():
             return None
         names = sorted({f"/{name.lower()}/" for name in excluded_dirs})
         owned = " OR ".join("instr(lower('/' || path), ?) > 0" for _ in names) or "0"
@@ -11834,7 +11927,12 @@ class LexicalStore:
         Runs on every request, never cached: schema, stored checkpoint state,
         the live recall policy and access identity, and the catalogue's
         semantic identity must all agree. The caller owns the read snapshot.
+
+        A store-mode vault's snapshot is the proof: its rows are current at its revision, and the
+        checkpoint a store reader holds names that revision (``vault_store.read.recall_checkpoint``).
         """
+        if self._reads_store():
+            return True
         view = _admitted_catalog_view(self.vault_root)
         if (
             checkpoint is not None and view is not None
@@ -11912,7 +12010,7 @@ class LexicalStore:
         if identity is None:
             return None
         backend_name = backend()
-        if backend_name == "python" or self._failed or not self.path.exists():
+        if backend_name == "python" or self._sidecar_unreadable():
             return None
         try:
             with self._query_connection() as conn:
@@ -11950,7 +12048,7 @@ class LexicalStore:
         backend_name = backend()
         if (
             identity is None or not paths or backend_name == "python"
-            or self._failed or not self.path.exists()
+            or self._sidecar_unreadable()
         ):
             return frozenset()
         try:
@@ -12100,7 +12198,15 @@ class LexicalStore:
             total -= len(dropped.allowed)
 
     def _page_unchanged_since(self, path: str, signature: tuple) -> bool:
-        """Whether the file still carries the `mtime_ns` its catalogue row was built from."""
+        """Whether the file still carries the `mtime_ns` its catalogue row was built from.
+
+        A page that the store serves has no file to ask: its commit derived its row, so the row is
+        the page's at the snapshot that the plan read.
+        """
+        from .vault_store import read as store_read
+
+        if store_read.serves(self.vault_root, path):
+            return True
         try:
             return os.stat(self.vault_root / path).st_mtime_ns == signature[1]
         except OSError:
@@ -12121,7 +12227,7 @@ class LexicalStore:
         same key wait for that fill instead of each selecting every admitted row.
         """
         backend_name = backend()
-        if backend_name == "python" or self._failed or not self.path.exists():
+        if backend_name == "python" or self._sidecar_unreadable():
             return None
         try:
             with self._query_connection() as conn:
@@ -12233,6 +12339,10 @@ class LexicalStore:
         from . import freshness as freshness_module
         from .vocabulary.registry import RegistryError
 
+        if self._reads_store():
+            served = self._serve_store_catalog(query_fn, failure_message)
+            if served is not None:
+                return served
         view = _admitted_catalog_view(self.vault_root)
         if view is not None:
             try:
@@ -12409,10 +12519,10 @@ class LexicalStore:
                 registry_scope=registry_scope,
             )
             return result.value if result.readiness.complete else None
-        if self._failed:
-            return None
-        if not repair and not self.path.exists():
-            _schedule_repair(self.vault_root)
+        if self._sidecar_unreadable() and (self._failed or not repair):
+            # A store-mode vault never gets here: its rows answer at the store's snapshot.
+            if not self._failed:
+                _schedule_repair(self.vault_root)
             return None
         try:
             return self._serve_synced_live_catalog(
@@ -12913,10 +13023,10 @@ class LexicalStore:
         k: int | None = None,
         allowed_paths: set[str] | None = None,
     ) -> list[str] | None:
-        if self._failed:
-            return None
-        if not repair and not self.path.exists():
-            _schedule_repair(self.vault_root)
+        if self._sidecar_unreadable() and (self._failed or not repair):
+            # A store-mode vault never gets here: its rows answer at the store's snapshot.
+            if not self._failed:
+                _schedule_repair(self.vault_root)
             return None
         try:
             return self._serve_synced_live_catalog(
