@@ -740,9 +740,14 @@ def test_the_report_counts_no_kind_of_another_instance_as_the_filter_does(
 WITHHELD = "Knowledge Base/Notes/Patterns/Old roadmap.md"
 
 
-def _withheld_twin(tmp_path: Path, *, withheld: bool) -> Path:
+# A rule that withholds the page only from a caller that declares the `marketing` purpose.
+_MARKETING_ONLY = "purpose: marketing\npurpose_condition: matches\n"
+
+
+def _withheld_twin(tmp_path: Path, *, withheld: bool, rule_extra: str = "") -> Path:
     """A vault whose egress rule withholds `Notes/Patterns/**` from an external caller, with the
-    withheld page or as if it never had it. The roadmap's relations section supersedes the whole
+    withheld page or as if it never had it. `rule_extra` narrows the rule, for one that applies
+    only to a declared purpose. The roadmap's relations section supersedes the whole
     withheld page, and a review claim supports one of its units by anchor. A visible
     supersession between two budget pages gives `currency` members in both vaults."""
     from conftest import initialize_vault_state_offline
@@ -789,7 +794,7 @@ def _withheld_twin(tmp_path: Path, *, withheld: bool) -> Path:
             PAGE.format(title="Old roadmap", body="## Claim\n- id: plan\n\nShip in January."),
         )
     write_scope(vault)
-    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    write_rule(vault, ceiling=egress.LEVEL_NONE, extra=rule_extra)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     _reset_caches()
     return vault
@@ -838,6 +843,27 @@ def test_a_restricted_caller_gets_the_reply_of_a_vault_that_never_had_the_withhe
     ]
     if served:
         assert with_page["narrow"]["dimension_check"] == {"checked": 2, "kept": 0}
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_declared_purpose_withholds_a_page_from_membership_as_it_does_from_the_hits(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches membership that reads edges without the purpose the search declares: a rule that
+    withholds the page only for `marketing` leaves the roadmap in `currency` when the withheld
+    page exists, so a caller that declares the purpose learns that the page exists. Undeclared,
+    the rule withholds nothing, so the same vault shows the roadmap."""
+    declared, undeclared = [], []
+    for withheld in (True, False):
+        vault = _withheld_twin(tmp_path, withheld=withheld, rule_extra=_MARKETING_ONLY)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        declared.append(_ask_as_external(vault, "currency", purpose="marketing"))
+        undeclared.append(_ask_as_external(vault, "currency"))
+
+    assert declared[0] == declared[1]
+    assert sorted(hit["parent_title"] for hit in declared[0]["hits"]) == ["Budget", "Old budget"]
+    assert "Roadmap" in {hit["parent_title"] for hit in undeclared[0]["hits"]}
 
 
 def test_a_restricted_callers_report_row_is_the_row_of_a_vault_that_never_had_the_page(

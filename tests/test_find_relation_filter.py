@@ -356,9 +356,14 @@ FINDINGS = f"{NOTES}/Findings.md"
 OLD_ROADMAP = f"{PATTERNS}/Old roadmap.md"
 
 
-def _release_twin(tmp_path: Path, *, withheld: bool) -> Path:
+# A rule that withholds the page only from a caller that declares the `marketing` purpose.
+_MARKETING_ONLY = "purpose: marketing\npurpose_condition: matches\n"
+
+
+def _release_twin(tmp_path: Path, *, withheld: bool, rule_extra: str = "") -> Path:
     """A vault whose egress rule withholds `Notes/Patterns/**` from an external caller, with the
-    withheld page or as if it never had it. The roadmap supersedes the withheld page, and the
+    withheld page or as if it never had it. `rule_extra` narrows the rule, for one that applies
+    only to a declared purpose. The roadmap supersedes the withheld page, and the
     withheld page supports the review. A visible supersession between two budget pages, and a
     visible support between two others, give both vaults the same non-empty answers."""
     from conftest import initialize_vault_state_offline
@@ -401,7 +406,7 @@ def _release_twin(tmp_path: Path, *, withheld: bool) -> Path:
             ),
         )
     write_scope(vault)
-    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    write_rule(vault, ceiling=egress.LEVEL_NONE, extra=rule_extra)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     _reset_caches()
     return vault
@@ -460,6 +465,37 @@ def test_a_restricted_caller_gets_the_reply_of_a_vault_that_never_had_the_withhe
 
     assert replies[0] == replies[1]
     assert _hit_paths(replies[0])
+
+
+# The anchor is the page the rule withholds, so the answer is the pages around it.
+_PURPOSE_SEARCHES = {
+    **_PAGE_LEVEL_SEARCHES,
+    "anchored-on-the-withheld-page": {"relation_of": OLD_ROADMAP},
+}
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+@pytest.mark.parametrize("ask", [False, True], ids=["op_find", "op_ask_memory"])
+@pytest.mark.parametrize("search", list(_PURPOSE_SEARCHES))
+def test_a_declared_purpose_withholds_a_page_from_the_relation_filter_as_it_does_from_the_hits(
+    tmp_path: Path, request: pytest.FixtureRequest, search: str, ask: bool, served: bool
+) -> None:
+    """Catches a relation filter that reads edges, or checks its anchor, without the purpose the
+    search declares: a rule that withholds the page only for `marketing` leaves the roadmap, or
+    the review, in the answer when the withheld page exists, so a caller that declares the
+    purpose learns that the page exists. Undeclared, the rule withholds nothing, so the same
+    vault answers differently, which shows the declared answer is not empty by accident."""
+    declared, undeclared = [], []
+    for withheld in (True, False):
+        vault = _release_twin(tmp_path, withheld=withheld, rule_extra=_MARKETING_ONLY)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        marketing = {**_PURPOSE_SEARCHES[search], "purpose": "marketing"}
+        declared.append(_search_as("external", vault, marketing, ask=ask))
+        undeclared.append(_search_as("external", vault, _PURPOSE_SEARCHES[search], ask=ask))
+
+    assert declared[0] == declared[1]
+    assert _hit_paths(undeclared[0]) != _hit_paths(declared[0])
 
 
 @pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
