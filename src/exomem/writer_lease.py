@@ -2397,6 +2397,26 @@ def _redacted_coordinator_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
+# Writer-authority refusals that background work (import batches, media jobs)
+# waits out instead of failing: the mutation lock is busy, the coordinator does
+# not answer, or another replica holds or fenced the lease. Each clears without
+# any change to the request.
+TRANSIENT_WRITER_CODES = frozenset(
+    {
+        "MUTATION_BUSY",
+        "MUTATION_LOCK_UNAVAILABLE",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+        # Deliberately transient too. A misconfigured coordinator URL is not
+        # fixed by asking again, but it IS fixed by an operator without
+        # restarting anything -- so the caller waits rather than crashing. What
+        # changes is only how often it asks.
+        "WRITER_COORDINATOR_CONTRACT_ABSENT",
+        "WRITER_FENCED",
+        "WRITER_LEASE_REQUIRED",
+    }
+)
+
+
 def _coordinator_unavailable_error(exc: BaseException) -> OpError:
     return OpError(
         "WRITER_COORDINATOR_UNAVAILABLE",

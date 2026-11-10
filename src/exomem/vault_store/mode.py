@@ -154,23 +154,26 @@ def status(vault_root: Path) -> dict:
     toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
     ``registry_waiting_on_paths`` counts the overlay paths that the projector has not put on disk or
     that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
-    ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start on
-    another state root refuse. A store that cannot be read gives "unknown", for the mode or for each
-    figure, with the error's name in ``unreadable``: an unreadable store never reports zeros. A
-    damaged state manifest raises instead, so that the command refuses and names it.
+    ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
+    on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
+    root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and
+    ``vault_claim`` says whether this root ``holds`` the claim, is ``displaced`` from it or is
+    refused because another root holds it (``elsewhere``). A store that cannot be read gives
+    "unknown", for the mode or for each figure, with the error's name in ``unreadable``: an
+    unreadable store never reports zeros. A damaged state manifest raises instead, so that the
+    command refuses and names it.
     """
     from . import marker
 
     report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
     # A damaged manifest raises here, so the command refuses and names it.
     recorded = state_migration.vault_store_recorded(vault_root)
-    report.update(marker.report(vault_root))
-    if not recorded:
-        return {**report, "mode": FILE_MODE}
     try:
-        current = state(vault_root)
+        current = state(vault_root) if recorded else FILE_MODE
     except Exception as error:  # noqa: BLE001 - an unreadable store is unknown, never a mode
-        return {**report, "mode": UNKNOWN, "unreadable": _reason(error)}
+        unknown = {"mode": UNKNOWN, "unreadable": _reason(error)}
+        return {**report, **marker.report(vault_root), **unknown}
+    report.update(marker.report(vault_root, in_store_mode=current == STORE_MODE))
     if current != STORE_MODE:
         return {**report, "mode": current}
     try:
