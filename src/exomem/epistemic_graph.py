@@ -98,6 +98,8 @@ def _sqlite_connect_owned(
 SCHEMA_VERSION = 15
 _DEPENDENCY_FORMAT = 2
 UNIT_SEED_MAX_BATCHES = 4
+#: Page cache for a private whole-vault rebuild connection, in KiB (see `_connect_retained`).
+_REBUILD_CACHE_KIB = 64 * 1024
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
 REBUILD_STABILIZATION_ATTEMPTS = 2
@@ -1773,7 +1775,14 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
     directory = live.parent
     # Re-scan under the claim: the pre-check ran without it.
     groups = _unregistered_temporary_groups(live)
-    if len(groups) <= max(0, keep):
+    # A private rebuild runs in rollback-journal mode, so a group that still has
+    # its `-journal` was stopped inside its transaction: SQLite rolls it back on
+    # open, and it is not the complete build preservation exists to keep.
+    interrupted = [
+        base for base, paths in groups.items() if any(p.name.endswith("-journal") for p in paths)
+    ]
+    complete = [base for base in groups if base not in interrupted]
+    if not interrupted and len(complete) <= max(0, keep):
         return []
 
     def _recency(base: str) -> float:
@@ -1785,9 +1794,9 @@ def _reap_unowned_temporaries(live: Path, *, vault_root: Path, keep: int) -> lis
                 continue
         return newest
 
-    ordered = sorted(groups, key=_recency, reverse=True)
+    ordered = sorted(complete, key=_recency, reverse=True)
     removed: list[Path] = []
-    for base in ordered[max(0, keep) :]:
+    for base in [*interrupted, *ordered[max(0, keep) :]]:
         for path in groups[base]:
             try:
                 _remove_graph_rebuild_artifact(
@@ -2603,6 +2612,14 @@ class EpistemicGraphIndex:
             # Keeping private rebuilds in rollback-journal mode prevents
             # authoritative rows from remaining in a detached WAL companion.
             conn.execute("PRAGMA journal_mode=DELETE")
+            # A whole-vault pass writes about 100k rows in a few transactions.
+            # With SQLite's defaults its temporary data goes to temp files and
+            # dirty pages spill from a 2 MiB cache: a measured pass of a 60 MB
+            # graph passed 2.56 GB to write(), 43x the file. In-memory
+            # temporary data and a 64 MiB cache brought it to 180 MB, for 64 MiB more
+            # peak memory; one private rebuild runs at a time.
+            conn.execute(f"PRAGMA cache_size=-{_REBUILD_CACHE_KIB}")
+            conn.execute("PRAGMA temp_store=MEMORY")
         try:
             return self._initialize_graph_schema(conn)
         except BaseException:

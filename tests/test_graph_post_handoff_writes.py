@@ -33,6 +33,7 @@ from exomem import (
     epistemic_graph,
     file_watcher,
     freshness,
+    graph_drain,
     graph_sync,
     index_sync,
     mode,
@@ -1393,6 +1394,30 @@ def test_a_fan_out_whose_repair_is_owned_marks_nothing(
     assert not EpistemicGraphIndex(root).available(), "the fan-out converged; nothing to own"
     assert deferred_index.list_graph_paths(root), "the batch's repair is not queued"
     assert not freshness.external_pending(root), "an owned repair was marked as unknown"
+
+
+def test_a_records_view_rewrite_leaves_a_current_graph_readable_and_queues_no_rebuild(
+    live_handoff_vault: Path,
+) -> None:
+    """A collection write republishes its Records views; the graph has no rows for them.
+
+    The watcher sees the view as an outside edit. Withdrawing graph availability
+    for it raised a barrier nothing would lift, the fan-out then marked the path
+    external, and the drain answered with a whole-vault rebuild of a current graph.
+    """
+    root = live_handoff_vault
+    view = root / "Knowledge Base/Records/Health/Example/Items/_summary.md"
+    view.parent.mkdir(parents=True, exist_ok=True)
+    view.write_text("# Summary\n\n- refreshed row\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
+
+    watcher._record(view, deleted=False)
+    watcher._flush()
+    graph_drain._work_once(root)
+
+    assert EpistemicGraphIndex(root).available(), "a view rewrite withdrew the graph"
+    assert not freshness.external_pending(root), "a view rewrite left an external mark"
+    assert deferred_index.graph_full_rebuild_pending(root) is None, "a rebuild was queued"
 
 
 def test_an_unrelated_external_edit_does_not_fence_a_write(

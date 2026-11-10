@@ -2102,6 +2102,7 @@ class FileWatcher:
 
         kb_ups = [p for p in ups if self._is_kb(p)]
         semantic_kb_ups: list[Path] = []
+        admission_failed = False
         if kb_ups:
             try:
                 from . import recall_policy
@@ -2117,7 +2118,23 @@ class FileWatcher:
                     or recall_policy.is_recall_candidate(self._vault_root, path)
                 ]
             except Exception:  # noqa: BLE001 — fail closed for expensive work
+                admission_failed = True
                 log.exception("file watcher: semantic admission evaluation failed")
+        # Whether this batch can change a graph row. The graph derives rows only
+        # from recall candidates (the same test its purge uses), so a batch of
+        # existing KB Markdown files that recall policy rejects -- the Records
+        # views a collection write republishes -- cannot leave an edge stale.
+        # Withdrawing availability for one raised a barrier no repair would lift,
+        # and the drain answered it with a whole-vault rebuild of a current
+        # graph. Deletions, files outside KB (the resolver is vault-wide), other
+        # file types and an unreadable admission all keep the withdrawal.
+        graph_input = (
+            bool(del_rels)
+            or admission_failed
+            or bool(semantic_kb_ups)
+            or len(kb_ups) < len(ups)
+            or any(path.suffix.lower() != ".md" for path in kb_ups)
+        )
 
         # Inbound + resolver: the whole vault (both index sibling folders). The
         # resolver patch also restamps its freshness triple, so the next graph
@@ -2152,7 +2169,8 @@ class FileWatcher:
         # compare-and-ack: a same-metadata edit can leave its projection
         # identity unchanged, so pending must not disappear while stale edges
         # are still publicly readable. The following fan-out republishes the
-        # marker from the exact checkpoint (or rebuilds).
+        # marker from the exact checkpoint (or rebuilds). A batch with no graph
+        # input has no edges to go stale, so it acks without the withdrawal.
         from . import epistemic_graph
 
         guarded_graph: epistemic_graph.EpistemicGraphIndex | None = None
@@ -2162,7 +2180,7 @@ class FileWatcher:
             and inbound_current
             and resolver_current
         )
-        if ack_ready:
+        if ack_ready and graph_input:
             candidate = epistemic_graph.EpistemicGraphIndex(self._vault_root)
             if candidate.path.exists():
                 try:

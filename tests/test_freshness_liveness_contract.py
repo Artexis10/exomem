@@ -1465,6 +1465,31 @@ def test_reaper_leaves_everything_alone_while_another_owner_is_building(
     assert orphan_newer.exists()
 
 
+def test_reaper_never_preserves_a_build_stopped_inside_its_transaction(
+    contract_vault: Path,
+) -> None:
+    """A worker stopped mid-rebuild leaves a hot `-journal` beside its file.
+
+    That build is rolled back on open, so it is not the recoverable build the
+    reaper preserves. Kept as the newest group, it held 277 MB until the next
+    refused publication, and pushed out the complete build that was worth keeping.
+    """
+    root = contract_vault
+    live = epistemic_graph.sidecar_path(root)
+    complete = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(1))
+    complete.write_bytes(b"sqlite artifact")
+    time.sleep(0.02)
+    interrupted = graph_sync.temporary_sidecar_path(live, _contract_checkpoint(2))
+    interrupted.write_bytes(b"sqlite artifact")
+    interrupted_journal = interrupted.with_name(interrupted.name + "-journal")
+    interrupted_journal.write_bytes(b"journal")
+
+    removed = epistemic_graph._reap_preserved_temporaries(live, root)
+
+    assert set(removed) == {interrupted, interrupted_journal}
+    assert complete.exists(), "the complete build is the one to preserve"
+
+
 def test_publication_hold_is_platform_gated(contract_vault: Path) -> None:
     """Linux keeps the plain `os.replace` fast path: no hold, no drain."""
     root = contract_vault
