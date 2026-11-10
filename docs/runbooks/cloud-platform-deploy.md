@@ -418,30 +418,32 @@ Both scheduler CronJobs must print `suspend=false` while Cloud is enabled.
 
 ## After the backup key conversion
 
-Do this section after "Upgrade the release" and "Verify". If a follow-up release is planned, do it after that
-release too. A key custody cutover is one example.
+Do this section once, after "Upgrade the release" and "Verify". When a follow-up release is planned, such as the
+second release of a key custody cutover, do it after that release instead.
 
 The temporary copy must not outlive the upgrade. cellctl erases a deleted cell's wrapped keys on its first pass.
 A copy would keep the key of a cell after its deletion, and defeat the key expiry that the platform promises.
 
-A cell with local storage backs up each hour. Another cell backs up once a day, between 02:00 and 05:00 UTC.
+A cell with local storage backs up each hour. Another cell backs up once a day, in the window that
+`cells.backupWindow` sets. Its default is 02:00 to 05:00 UTC.
 
-1. Note the time when each cell pod was replaced once after the upgrade, in UTC. Call it the rollout end.
+1. Note the time when the last cell pod is Ready after the upgrade, in UTC. Call it the rollout end.
 2. Note the time of the temporary copy from "Before the upgrade", in UTC. Call it the copy time.
-3. Put the copy time in this query. Run it until each row shows a `last_backup_at` later than the rollout end.
+3. Put the copy time in this query. Run it until each `last_backup_at` is after the rollout end.
 
    ```bash
-   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, last_backup_at FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL AND created_at < '<copy time>' AND desired_state IN ('running','read_only') ORDER BY cell_id"
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, last_backup_at FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL AND created_at < '<copy time>+00' AND desired_state IN ('running','read_only') ORDER BY cell_id"
    ```
 
    The query leaves out a cell created after the copy, because the copy does not hold it.
-4. If a row still has no such backup 26 hours after the rollout end, read the last backup Job of that cell.
+4. After 26 hours, read the recent cellctl log for each cell that still has no such backup.
 
    ```bash
-   kubectl --namespace <cell namespace> get jobs --sort-by=.metadata.creationTimestamp
+   kubectl --namespace exomem-cloud logs deployment/cellctl --since=2h | grep -F '<cell id>'
    ```
 
-5. If that Job failed because it could not unwrap the backup key, keep the copy and fix forward from it. Stop here.
+   cellctl unwraps the backup key before it makes the backup Job. A failed unwrap makes no Job, only this log line.
+5. If a `reconcile failed for cell` line names `unwrap_secret` or `_resolve_secret_material`, keep the copy. Fix forward from it.
 6. For any other cause, record it for that cell and continue.
 7. Delete the temporary copy of the key columns.
 
