@@ -30,6 +30,8 @@ KIND_TRAITS = frozenset(
         "procedure",
         "outcome",
         "question",
+        # `flag_open` marks a unit of such a kind open while nothing settles it.
+        "closable",
         "credence",
         "dated_event",
     )

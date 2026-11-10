@@ -2,7 +2,8 @@
 # Its members are relation families, unit kinds and governed unit-metadata keys, and a word may
 # belong to several dimensions. A unit belongs to a dimension when its kind is a member, when it
 # carries a member key, or when it is an endpoint of an edge whose relation family is a member.
-# Retrieval filters by `unit.dimension`, and a per-dimension row in the schema read counts units.
+# Retrieval filters and groups by `unit.dimension`, and a per-dimension row in the schema read
+# counts units and the marks that the dimension's display behaviours produce.
 # A vault adds dimensions or labels in the `dimensions` section of
 # `_Schema/semantic-language-registry.yaml`. `labels` maps a language tag to the label in that
 # language. Parsing accepts the key or any label, after NFKC normalisation and casefolding.
