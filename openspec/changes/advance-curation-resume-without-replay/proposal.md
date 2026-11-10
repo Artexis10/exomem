@@ -6,7 +6,8 @@ A maintenance job start has the same shape and is already exempt in code, but th
 
 ## What Changes
 
-- A curation `resume` runs its next step each time it is called. It is not answered from the implicit retry window. The run store already commits each step exactly once, so a lost reply costs nothing: the next `resume` reports every committed step.
+- Each curation `resume` call gets its own implicit identity: the session scope plus the call's request id. A new `resume` call runs the run's next step. A retry that carries the same request id still gets the stored reply. A transport retry with a new request id runs the next step; the plan's approval covers every step, and the reply lists every committed step.
+- The per-call identity keeps what an identity gives a call: the wait on a busy or warming writer, and the canonical identity that a vocabulary-bound `resume` needs.
 - The implicit retry requirement names its two exemptions: a curation `resume` and a maintenance job start.
 
 ## Impact

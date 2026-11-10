@@ -2,7 +2,7 @@
 
 ### Requirement: Implicit Acknowledgement Recovery Retains Results For 600 Seconds
 
-An identical mutation from the same stable authenticated principal, operation, vault identity, and canonical payload SHALL resolve the original per-replica completed receipt for 600 seconds without rerunning the leaf. Explicit idempotency keys retain their separate 24-hour contract. Pending and committed-uncertain receipts remain fail-closed. Two calls whose reply reports live progress SHALL run every time instead: a curation `resume`, whose run store commits each step once, and a maintenance job start, whose handle a later poll reads.
+An identical mutation from the same stable authenticated principal, operation, vault identity, and canonical payload SHALL resolve the original per-replica completed receipt for 600 seconds without rerunning the leaf. Explicit idempotency keys retain their separate 24-hour contract. Pending and committed-uncertain receipts remain fail-closed. Two calls whose reply reports live progress are exempt. A curation `resume` SHALL replay only a retry that carries its own request id, so each new `resume` call runs the run's next step; its run store commits each step once. A maintenance job start SHALL run every time, because a later poll reads its handle.
 
 #### Scenario: Human retries after investigating an abandoned request
 - **WHEN** the same principal repeats a byte-identical mutation within 600 seconds of its completed receipt
