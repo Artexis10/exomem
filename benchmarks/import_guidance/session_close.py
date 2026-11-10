@@ -47,6 +47,7 @@ from exomem import memory_refs, note_types, prominence, source_closure
 from . import checks
 from .recording import Arm, checkout_sha, worker_env
 from .scripted_replies import SCENARIO_DIR
+from .session_seed import READY_SECONDS
 
 SUITE = "session-close"
 # Client modes are a closed harness protocol, not vault vocabulary.
@@ -170,17 +171,21 @@ def pinned_env(arm: Arm, work: Path, case: Case) -> dict[str, str]:
     }
 
 
-def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str]) -> None:
+def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str], ready_graph: bool = False) -> dict | None:
+    """Lay the arm's scaffold and the case's pages in the vault. With `ready_graph`, also build the arm's relation graph
+    (`session_seed.py` says how) and return what it saw, `{"graph": state, "seconds": n}`; otherwise return None."""
     done = subprocess.run(  # noqa: S603
-        [sys.executable, str(SEED_WORKER), str(case.seed), str(work / "vault"), str(arm.root)],
+        [sys.executable, str(SEED_WORKER), str(case.seed), str(work / "vault"), str(arm.root)]
+        + (["--ready-graph"] if ready_graph else []),
         cwd=work,
         env=env,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=120 + (2 * READY_SECONDS if ready_graph else 0),
     )
     if done.returncode != 0:
         raise RuntimeError(f"seeding failed: {(done.stderr or done.stdout).strip()[-400:]}")
+    return json.loads(done.stdout.strip().splitlines()[-1]) if ready_graph else None
 
 
 def knowledge_base(vault: Path) -> Path:
@@ -679,6 +684,7 @@ def run_session(
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
     credits: CreditsRun | None = None,
+    ready_graph: bool = False,
 ) -> dict:
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
@@ -707,12 +713,14 @@ def run_session(
         "hooked": hooked,
         "stream": str(work / "stream.jsonl"),
         "recall_enabled": case.recall_turn is not None,
+        #: The graph state the seeding saw; None when the run did not ask for the graph to be built.
+        "ready": None,
         "fresh": None,
         "error": None,
         **{k: v for k, v in stamp.items() if k != "product_shas"},
     }
     try:
-        seed_vault(case, arm, work, env)
+        row["ready"] = seed_vault(case, arm, work, env, ready_graph)
         before = snapshot(work / "vault")
         done = drive_session(
             argv,
@@ -766,6 +774,7 @@ def run_all(
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
     credits: CreditsRun | None = None,
+    ready_graph: bool = False,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
     if hooked and client_mode == "tool-only":
@@ -801,6 +810,7 @@ def run_all(
                         hooked=hooked,
                         client_mode=client_mode,
                         credits=credits,
+                        ready_graph=ready_graph,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
@@ -816,7 +826,14 @@ def run_all(
     return rows
 
 
-def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False, client_mode: str = DEFAULT_CLIENT_MODE) -> list[str]:
+def dry_run(
+    case: Case,
+    arm: Arm,
+    scratch: Path,
+    hooked: bool = False,
+    client_mode: str = DEFAULT_CLIENT_MODE,
+    ready_graph: bool = False,
+) -> list[str]:
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
     problems found."""
@@ -829,7 +846,7 @@ def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False, client_mo
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case)
     try:
-        seed_vault(case, arm, work, env)
+        seed_vault(case, arm, work, env, ready_graph)
         stage_agent_files(arm, work, env, client_mode)
         if hooked:
             hook_ask(arm, "dry-run")

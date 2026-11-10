@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from import_guidance import (
     replay_report,
     runner,
     session_close,
+    session_seed,
     session_table,
 )
 from import_guidance.recording import Arm
@@ -51,7 +53,7 @@ def ferry_seed(root: Path) -> Path:
     return root / "seed"
 
 
-def replay_scenario(folder: Path, *, seed: str, steps: list[dict] | None = None) -> Path:
+def replay_scenario(folder: Path, *, seed: str, steps: list[dict] | None = None, ready_graph: bool = False) -> Path:
     path = folder / "ferry.json"
     path.write_text(
         json.dumps(
@@ -65,6 +67,7 @@ def replay_scenario(folder: Path, *, seed: str, steps: list[dict] | None = None)
                 "default_reply": {"error": "unscripted"},
                 "record": {
                     "seed": seed,
+                    **({"ready_graph": True} if ready_graph else {}),
                     "steps": steps
                     or [
                         {
@@ -107,6 +110,146 @@ def test_a_seed_that_is_not_a_folder_fails_the_recording_by_name(tmp_path: Path)
     scenario = load_scenario(replay_scenario(tmp_path, seed="no-such-seed"))
     problems = recording.record(scenario, Arm("test", ROOT), tmp_path / "shapes.json", tmp_path / "scratch")
     assert problems and "no-such-seed" in problems[0]
+
+
+# The relation graph of a seeded vault.
+
+OLD_RULE = """---
+exomem_id: 3b1d7a40-6c2e-5f10-8a47-2d9e5c1b7f01
+type: research-note
+project: tool-shelf
+status: active
+created: 2026-01-10
+updated: 2026-01-10
+sources: []
+tags: [shelf]
+---
+
+# Old shelf rule
+
+## Claim
+- id: closes-17
+
+The tool shelf closes at 17:00.
+"""
+NEW_RULE = """---
+exomem_id: 9e4c2b18-0d3a-5b77-a1c6-7f8e2d4a6c02
+type: research-note
+project: tool-shelf
+status: active
+created: 2026-02-10
+updated: 2026-02-10
+sources: []
+tags: [shelf]
+---
+
+# New shelf rule
+
+## Claim
+- id: closes-18
+- relations: supersedes: [[Notes/Research/tool-shelf/old#closes-17]]
+
+The tool shelf closes at 18:00.
+"""
+
+
+def shelf_seed(root: Path) -> Path:
+    """An invented seed of two pages, one of which supersedes a claim of the other."""
+    folder = root / "shelf-seed" / "Notes" / "Research" / "tool-shelf"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "old.md").write_text(OLD_RULE, encoding="utf-8")
+    (folder / "new.md").write_text(NEW_RULE, encoding="utf-8")
+    return root / "shelf-seed"
+
+
+def seed_a_vault(root: Path, name: str, *, ready_graph: bool) -> tuple[Path, dict | None]:
+    """The vault that a session-close run seeds, from the shelf seed, and what its seeding reported."""
+    case = session_close.Case("shelf", "t", shelf_seed(root), "balanced", ("Which shelf rule holds now?",), root / "case.json", None)
+    arm = Arm("test", ROOT)
+    work = root / name
+    for folder in ("hook-home", "logs", "scratch"):
+        (work / folder).mkdir(parents=True)
+    ready = session_close.seed_vault(case, arm, work, session_close.pinned_env(arm, work, case), ready_graph)
+    return work / "vault", ready
+
+
+def pages_and_seed_bytes(vault: Path, seed: Path) -> tuple[set[str], bool]:
+    """Every markdown page of the vault, and whether each seed file is in the vault byte for byte."""
+    from exomem.kbdir import kb_dirname
+
+    pages = {path.relative_to(vault).as_posix() for path in vault.rglob("*.md")}
+    same = all((vault / kb_dirname() / path.relative_to(seed)).read_bytes() == path.read_bytes() for path in seed.rglob("*") if path.is_file())
+    return pages, same
+
+
+def test_a_seeded_session_vault_is_readied_without_writing_a_page_or_touching_the_seed(tmp_path: Path) -> None:
+    """Catches a graph build that writes a page (the actor could be served it) or rewrites a seed file, and a seeded
+    vault that reaches the actor with its graph still warming, where the product marks nothing from relations."""
+    seeded, nothing = seed_a_vault(tmp_path, "plain", ready_graph=False)
+    readied, ready = seed_a_vault(tmp_path, "readied", ready_graph=True)
+    seed = tmp_path / "shelf-seed"
+    assert nothing is None and ready["graph"] == "available"
+    seeded_pages, _ = pages_and_seed_bytes(seeded, seed)
+    readied_pages, seed_unchanged = pages_and_seed_bytes(readied, seed)
+    assert readied_pages == seeded_pages and seed_unchanged
+
+
+def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_beyond_the_seed(tmp_path: Path) -> None:
+    """Catches a recorder that serves the graph warming for a seeded vault: both arms would then serve no relation
+    mark, and the comparison would measure nothing."""
+    seed = shelf_seed(tmp_path)
+    baseline, _ = seed_a_vault(tmp_path, "baseline", ready_graph=False)
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "ready_graph": True,
+                "steps": [{"as": "context", "tool": "recall_context", "arguments": {"turn": "When does the tool shelf close?"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    scratch = tmp_path / "record"
+    scratch.mkdir()
+    done = subprocess.run(  # noqa: S603
+        [sys.executable, str(recording.WORKER), str(plan), str(ROOT), str(tmp_path / "out.json"), str(seed)],
+        cwd=scratch, env=recording.worker_env(Arm("test", ROOT), scratch), capture_output=True, text=True, timeout=300,
+    )
+    assert done.returncode == 0, done.stderr[-400:]
+    recorded = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    assert recorded["ready"]["graph"] == "available"
+    assert recorded["shapes"]["context"]["map"]["membership_graph"] == "available"
+    vault = next(scratch.glob("ig-record-*/vault"))
+    pages, seed_unchanged = pages_and_seed_bytes(vault, seed)
+    baseline_pages, _ = pages_and_seed_bytes(baseline, seed)
+    assert pages == baseline_pages and seed_unchanged
+
+
+def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes() -> None:
+    """Catches a vault that is never ready being recorded anyway, or failing with a message that hides the state."""
+    seen = []
+
+    def stays_warming(tool: str, arguments: dict) -> dict:
+        seen.append(tool)
+        return {"error": {"code": "COLD"}} if len(seen) == 1 else {"map": {"membership_graph": "warming"}}
+
+    with pytest.raises(SystemExit, match="warming"):
+        session_seed.wait_for_graph(stays_warming, seconds=0.05, interval=0.02)
+    steps = iter([{"map": {"membership_graph": "warming"}}, {"map": {"membership_graph": "available"}}])
+    assert session_seed.wait_for_graph(lambda tool, arguments: next(steps), seconds=5, interval=0.01) == "available"
+
+
+def test_a_recording_made_before_the_graph_was_built_is_not_reused_for_a_scenario_that_asks_for_it(tmp_path: Path) -> None:
+    """Catches an old recording, with the graph warming, being served again after the scenario began to ask for the
+    graph: its replies carry no relation mark, whatever the arm."""
+    ferry_seed(tmp_path)
+    old = tmp_path / "shapes.json"
+    old.write_text(json.dumps({"shapes": {"context": {"map": {"membership_graph": "warming"}}}}), encoding="utf-8")
+    asking = load_scenario(replay_scenario(tmp_path, seed="seed", ready_graph=True))
+    problems = recording.record(asking, Arm("test", ROOT), old, tmp_path / "scratch")
+    assert problems and "without building the graph" in problems[0]
+    plain = load_scenario(replay_scenario(tmp_path, seed="seed"))
+    assert recording.record(plain, Arm("test", ROOT), old, tmp_path / "scratch") == []
 
 
 # Case folders, scenarios and the answer checks.
@@ -168,6 +311,7 @@ def test_a_written_scenario_loads_by_folder_path_with_its_checks_set_and_judging
     assert scenarios["c2"].checks == ()
     assert first.prompt == TURN_ONE and first.reference == "Reference of c1." and first.judge == "batch"
     assert first.hooks == ("UserPromptSubmit",) and first.served_tools == ("bootstrap", "recall_context")
+    assert first.record["ready_graph"] is True
     assert json.loads((tmp_path / "out" / "case-sets.json").read_text()) == {"c1": "N", "c2": "S"}
 
 

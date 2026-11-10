@@ -21,7 +21,12 @@ from import_guidance import (  # noqa: E402
     session_table,
     store_report,
 )
-from import_guidance.recording import parse_arm, served_sizes  # noqa: E402
+from import_guidance.recording import (  # noqa: E402
+    graph_states,
+    load_recording,
+    parse_arm,
+    served_sizes,
+)
 from import_guidance.scripted_replies import DEFAULT_SUITE  # noqa: E402
 
 
@@ -45,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--case-dir", type=Path, help="session-close case inputs; a seed in <case-dir>/seeds wins over a shipped seed of the same name")
     run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill")
+    run.add_argument(
+        "--ready-graph",
+        action="store_true",
+        help="session-close only: build each seeded vault's relation graph before the session, as a live vault has it "
+        "(the arm's own reconcile, then wait until its recall_context reports the graph available)",
+    )
     run.add_argument("--credits-account", help="session-close only: select the maintained credits launcher account")
     run.add_argument("--credits-budget-usd", type=float, help="maximum requested for each capture or fresh process; requires account and reason")
     run.add_argument("--credits-reason", help="the maintained credits launcher's reason; requires account and budget")
@@ -202,6 +213,8 @@ def main(argv: list[str] | None = None) -> int:
     args.client_mode = args.client_mode or session_close.DEFAULT_CLIENT_MODE
     if args.case_dir is not None and args.suite != session_close.SUITE:
         raise SystemExit("--case-dir applies to the session-close suite only")
+    if args.ready_graph and args.suite != session_close.SUITE:
+        raise SystemExit("--ready-graph applies to the session-close suite only; a replay scenario carries its own")
     if args.hook_turn and args.client_mode == "tool-only":
         raise SystemExit("--hook-turn requires --client-mode plugin")
     if args.hook_turn and args.suite != session_close.SUITE:
@@ -222,7 +235,14 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if not problems and arm and scenario.record:
                         sizes = served_sizes(Path(scratch) / f"{scenario.id}.{arm.label}.shapes.json")
-                        print("  recorded:", ", ".join(f"{name} {size} chars" for name, size in sizes.items()))
+                        shapes = Path(scratch) / f"{scenario.id}.{arm.label}.shapes.json"
+                        built = load_recording(shapes).get("ready")
+                        print(
+                            "  recorded:",
+                            ", ".join(f"{name} {size} chars" for name, size in sizes.items()),
+                            *(f"| graph {name}: {state}" for name, state in graph_states(shapes).items()),
+                            *([f"| graph built in {built['seconds']}s"] if built else []),
+                        )
                     if not problems:
                         argv_preview = runner.agent_argv(
                             Path("claude"),
@@ -259,7 +279,14 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         with tempfile.TemporaryDirectory(prefix="ig-dry-") as scratch:
             for case in cases:
                 for arm in arms:
-                    problems = session_close.dry_run(case, arm, Path(scratch), hooked=args.hook_turn, client_mode=args.client_mode)
+                    problems = session_close.dry_run(
+                        case,
+                        arm,
+                        Path(scratch),
+                        hooked=args.hook_turn,
+                        client_mode=args.client_mode,
+                        ready_graph=args.ready_graph,
+                    )
                     print(f"{arm.label}: {case.id}: {'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}")
                     failed += bool(problems)
         return 1 if failed else 0
@@ -273,6 +300,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         hooked=args.hook_turn,
         client_mode=args.client_mode,
         credits=args.credits,
+        ready_graph=args.ready_graph,
     )
     return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 

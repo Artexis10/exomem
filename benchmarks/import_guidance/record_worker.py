@@ -15,6 +15,10 @@ With a seed folder the vault is not the fixture vault: it holds the arm's own sc
 it (`session_seed.py`, the same code a session-close run seeds with), and the recording writes nothing to it. A
 `settle_graph` step is refused there, because a throwaway page is one that `recall_context` could then serve.
 `"engagement"` in the plan pins `EXOMEM_PROMINENCE`, as a session-close run does for its case.
+`"ready_graph": true` in the plan builds the relation graph of a seeded vault first, as a live vault has it from its
+writes (`session_seed.py` says how, and writes no page): the arm's own reconcile runs before the server is built, and the
+arm's own `recall_context` is read, with a bound, until its map reports the graph available. The recording then
+holds `ready` with the graph state that was seen. The two-read `warm` check below still runs after it.
 
 A read step may carry `"warm": {"seconds": N, "ignore": [field, ...]}`. On a seeded vault the first read starts a
 background index pass and comes back cold (an empty slice, no leads), so the worker discards that read, waits N
@@ -31,7 +35,6 @@ after this process exits: a graph rebuild still running at exit would race a rem
 
 from __future__ import annotations
 
-import asyncio
 import itertools
 import json
 import os
@@ -104,6 +107,8 @@ def main(plan_path: Path, product_root: Path, out_path: Path, seed: Path | None 
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     if seed is not None and any(step.get("settle_graph") for step in plan["steps"]):
         raise SystemExit("settle_graph writes throwaway pages, which a seeded recording must not hold")
+    if plan.get("ready_graph") and seed is None:
+        raise SystemExit("ready_graph builds the graph of a seeded vault, and this recording has no seed")
     scratch = Path(tempfile.mkdtemp(prefix="ig-record-"))
     state, vault = scratch / "state", scratch / "vault"
     state.mkdir()
@@ -128,31 +133,27 @@ def main(plan_path: Path, product_root: Path, out_path: Path, seed: Path | None 
             }
         )
     # Imported here: the environment above must be set before the product reads it.
+    import session_seed
+
     import exomem
     from exomem import server as server_module
     from exomem import state_migration, workflow_skills
-    from exomem.governance import principal as principal_module
 
     if not Path(exomem.__file__).resolve().is_relative_to(product_root / "src"):
         raise SystemExit(f"imported exomem from {exomem.__file__}, not from {product_root}/src")
+    ready_started = time.monotonic()
     if seed is not None:
         # `init_vault` has initialized this vault's state, as it does for a session-close run, so no migration follows.
-        import session_seed
-
         session_seed.main(seed, vault, product_root)
+        if plan.get("ready_graph"):
+            session_seed.reconcile()
     else:
         authority = state_migration.assert_offline_migration_authority(source="write-narration")
         state_migration.migrate_vault_state_offline(vault, authority=authority)
-    state_migration.reset_state_resolution_cache_for_tests()
-    state_migration.require_vault_state_ready(vault)
-    server_module.load_dotenv = lambda *args, **kwargs: None
-    # The server is built before the first write: a write before it fails on the graph rebuild's lifetime.
-    mcp = server_module.build_server(require_auth=False)
-
-    def call(tool: str, arguments: dict) -> dict:
-        with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
-            result = asyncio.run(mcp.call_tool(tool, arguments, run_middleware=True))
-        return json.loads(result.content[0].text)
+    call = session_seed.open_server(vault)
+    ready = None
+    if plan.get("ready_graph"):
+        ready = {"graph": session_seed.wait_for_graph(call), "seconds": round(time.monotonic() - ready_started, 1)}
 
     # The digest that a session-profile bootstrap needs, from this arm's skill files.
     product = {"skill_contract": workflow_skills.skill_contract()}
@@ -186,7 +187,9 @@ def main(plan_path: Path, product_root: Path, out_path: Path, seed: Path | None 
             arguments_of[step["as"]] = arguments
     out_path.write_text(
         json.dumps(
-            {"instructions": server_module.SERVER_INSTRUCTIONS, "shapes": replies}, indent=1
+            {"instructions": server_module.SERVER_INSTRUCTIONS, "shapes": replies}
+            | ({"ready": ready} if ready else {}),
+            indent=1,
         ),
         encoding="utf-8",
     )

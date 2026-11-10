@@ -71,6 +71,9 @@ def seed_folder(scenario: Scenario) -> Path | None:
 def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[str]:
     """Write the arm's recording of one scenario to `target` unless it exists. Returns the problems found."""
     if target.exists():
+        if scenario.record.get("ready_graph") and "ready" not in load_recording(target):
+            # A recording made before the graph was built holds the graph warming, so it would measure nothing.
+            return [f"{scenario.id}: {target} was recorded without building the graph; delete it to record again"]
         return []
     if not scenario.record.get("steps"):
         return [f"{scenario.id} has no record steps"]
@@ -119,3 +122,13 @@ def load_recording(target: Path) -> dict:
 def served_sizes(target: Path) -> dict[str, int]:
     """The characters of each recorded reply as the scripted server serves it: the reply as indented JSON."""
     return {name: len(json.dumps(shape, indent=2)) for name, shape in load_recording(target).get("shapes", {}).items()}
+
+
+def graph_states(target: Path) -> dict[str, str]:
+    """What the relation graph is reported as in each recorded reply that has a map block, by shape name."""
+    shapes = load_recording(target).get("shapes", {})
+    return {
+        name: str(shape["map"].get("membership_graph", "not reported"))
+        for name, shape in shapes.items()
+        if isinstance(shape, dict) and isinstance(shape.get("map"), dict)
+    }

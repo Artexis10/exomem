@@ -82,6 +82,7 @@ def scenario_for(case: Case, marks: dict) -> dict:
         "builtin_tools": [],
         "record": {
             "seed": str(case.seed.resolve()),
+            "ready_graph": True,
             "steps": [
                 {
                     "as": "bootstrap",
