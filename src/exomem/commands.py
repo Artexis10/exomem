@@ -12534,12 +12534,16 @@ def op_schema_memory(
                         "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "
                         "the reviewed custom-kind namespace"
                     )
+                # Validation leads with the same sentences, read before the save changes the store.
+                outcome = memory_schema_module.kind_label_outcome(vault_root, current, candidate)
                 result["saved"] = semantic_language_registry_module.save_registry(
                     vault_root,
                     proposal,
                     expected_hash=expected_hash,
                     why=why,
                 )
+                if outcome:
+                    result = {"outcome": outcome, **result}
             return result
         if save:
             raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")

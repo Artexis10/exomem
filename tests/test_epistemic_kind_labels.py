@@ -379,7 +379,117 @@ def test_the_schema_read_lists_each_kinds_labels_and_its_diff_reports_a_label_ch
     assert kinds["claim"]["shipped"] is True
     assert kinds["protocol"]["labels"] == {"fi": "Pöytäkirja"}
     assert kinds["protocol"]["shipped"] is False
-    assert diff["kinds_changed"] is True
-    assert diff["changes"]["kinds"]["modified"]["claim"]["after"] == {
-        "labels": {"fi": "Väite", "sv": "Påstående"}
+    assert diff["kind_labels_changed"] is True
+    assert diff["changes"]["kind_labels"] == {
+        "added": {"claim": {"sv": "Påstående"}}, "removed": {},
     }
+    assert diff["kinds_changed"] is False
+
+
+def test_the_diff_reports_a_removed_labels_only_entry_as_removed_labels_not_a_removed_kind(
+    tmp_path: Path,
+) -> None:
+    vault, _hash = _saved_vault(tmp_path, CLAIM_IN_FINNISH["kinds"])
+
+    diff = commands.op_schema_memory(
+        vault, operation="diff", subject="categories",
+        proposal={"schema_version": 1, "categories": {}, "kinds": {}},
+    )
+
+    assert diff["changes"]["kinds"]["removed"] == []
+    assert diff["kinds_changed"] is False
+    assert diff["changes"]["kind_labels"] == {"added": {}, "removed": {"claim": {"fi": "Väite"}}}
+
+
+# ---------------------------------------------------------------------------
+# What a label save does to the stored headings, said before and at the save
+# ---------------------------------------------------------------------------
+
+NOTES_AS_CLAIM = {
+    "schema_version": 1, "categories": {}, "kinds": {"claim": {"labels": {"fi": "Huomiot"}}},
+}
+
+
+def _pages_with_a_notes_heading(vault: Path, *, kinds: dict, indexed: bool) -> str:
+    """Two pages with a `## Huomiot` heading, two compact observations under one of them, and a
+    saved registry with `kinds`; the registry's hash."""
+    from exomem import freshness, lexstore
+
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    (notes / "julkaisu.md").write_text(
+        "---\ntype: insight\n---\n\n# Julkaisu\n\n## Huomiot\n\n"
+        "- [fact] The release ships on Friday.\n- [fact] The tests pass.\n",
+        encoding="utf-8",
+    )
+    (notes / "testit.md").write_text(
+        "---\ntype: insight\n---\n\n# Testit\n\n## Huomiot\n\nThe suite runs nightly.\n",
+        encoding="utf-8",
+    )
+    created = semantic_language_registry.save_registry(
+        vault, {"schema_version": 1, "categories": {}, "kinds": kinds}
+    )
+    if indexed:
+        entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
+        freshness.seed(vault, "kb", entries)
+        freshness.seed(vault, "vault", entries)
+        lexstore.ensure_fresh(vault)
+    return created["content_hash"]
+
+
+@library_scope()
+def test_a_label_save_leads_with_the_headings_it_makes_units_as_its_validation_does(
+    vault: Path,
+) -> None:
+    expected_hash = _pages_with_a_notes_heading(vault, kinds={}, indexed=True)
+
+    validated = commands.op_schema_memory(
+        vault, operation="validate", subject="categories", proposal=NOTES_AS_CLAIM,
+    )
+    saved = commands.op_schema_memory(
+        vault, operation="infer", subject="categories", save=True, proposal=NOTES_AS_CLAIM,
+        expected_hash=expected_hash,
+    )
+
+    assert next(iter(saved)) == "outcome"
+    assert saved["outcome"] == (
+        "Adding the fi label 'Huomiot' to claim: 2 stored headings 'Huomiot' on 2 pages start "
+        "being claim units. The 2 compact observations under them join those units."
+    )
+    assert validated["outcome"] == saved["outcome"]
+
+
+@library_scope()
+def test_a_label_removal_leads_with_the_headings_that_stop_being_units(vault: Path) -> None:
+    expected_hash = _pages_with_a_notes_heading(
+        vault, kinds=NOTES_AS_CLAIM["kinds"], indexed=True
+    )
+
+    saved = commands.op_schema_memory(
+        vault, operation="infer", subject="categories", save=True,
+        proposal={"schema_version": 1, "categories": {}, "kinds": {}},
+        expected_hash=expected_hash,
+    )
+
+    assert saved["outcome"] == (
+        "Removing the fi label 'Huomiot' from claim: 2 stored headings 'Huomiot' on 2 pages stop "
+        "being claim units. The 2 compact observations under them become observations of their "
+        "own again."
+    )
+
+
+@library_scope()
+def test_a_label_save_says_the_count_is_unknown_when_the_store_is_not_current(
+    vault: Path,
+) -> None:
+    expected_hash = _pages_with_a_notes_heading(vault, kinds={}, indexed=False)
+
+    saved = commands.op_schema_memory(
+        vault, operation="infer", subject="categories", save=True, proposal=NOTES_AS_CLAIM,
+        expected_hash=expected_hash,
+    )
+
+    assert saved["outcome"] == (
+        "Adding the fi label 'Huomiot' to claim: the stored headings 'Huomiot' start being claim "
+        "units; how many is unknown, because the lexical store is not current."
+    )

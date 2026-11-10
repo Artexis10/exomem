@@ -1123,14 +1123,23 @@ def kind_changes_beyond_labels(
     kind's key, are the one change that a reviewed categories save makes to the kinds. Such an
     entry is no vault kind, so it is not among `kinds` here.
     """
+    return kinds_without_labels(current) != kinds_without_labels(candidate)
 
-    def without_labels(registry: SemanticLanguageRegistry) -> dict[str, dict[str, Any]]:
-        return {
-            key: {name: value for name, value in _definition_proposal(kind).items() if name != "labels"}
-            for key, kind in registry.kinds.items()
-        }
 
-    return without_labels(current) != without_labels(candidate)
+def kinds_without_labels(registry: SemanticLanguageRegistry) -> dict[str, dict[str, Any]]:
+    """Each vault kind as the vault wrote it, without its labels, by key."""
+    return {
+        key: {name: value for name, value in _definition_proposal(kind).items() if name != "labels"}
+        for key, kind in sorted(registry.kinds.items())
+    }
+
+
+def written_kind_labels(registry: SemanticLanguageRegistry) -> dict[str, dict[str, str]]:
+    """The kind labels the vault wrote, by kind: on a labels-only entry under a shipped
+    kind's key, and on each vault kind."""
+    written = {key: dict(labels) for key, labels in registry.kind_label_entries.items()}
+    written.update((key, dict(kind.labels)) for key, kind in registry.kinds.items() if kind.labels)
+    return dict(sorted(written.items()))
 
 
 def _parse_label_entries(

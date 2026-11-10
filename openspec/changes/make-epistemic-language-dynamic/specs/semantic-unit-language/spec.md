@@ -71,6 +71,12 @@ Every entry of the kind, verdict, modality, belief-level, inference-mode and dim
 - **WHEN** the kind `claim` carries the label `Väite` for Finnish, and a page contains `## Väite`
 - **THEN** the unit parses as kind `claim`
 
+#### Scenario: A kind-label save says which headings it changes
+- **WHEN** a categories validation or save adds or removes a kind label
+- **THEN** its result leads with one sentence for each such label, which gives the number of stored headings, and of pages, that start or stop being units of that kind
+- **AND** the sentence says that the count is unknown, never zero, when the lexical store is not current
+- **AND** the diff reports a removed labels-only entry as removed labels of that kind, never as a removed kind
+
 ## MODIFIED Requirements
 
 ### Requirement: Prediction Is A Governed Core Semantic Kind
