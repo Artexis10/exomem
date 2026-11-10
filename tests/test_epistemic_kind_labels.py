@@ -438,8 +438,10 @@ def test_a_label_save_leads_with_the_headings_it_makes_units_as_its_validation_d
 
     assert next(iter(saved)) == "outcome"
     assert saved["outcome"] == (
-        "Adding the fi label 'Huomiot' to claim: 2 stored headings 'Huomiot' on 2 pages start "
-        "being claim units. The 2 compact observations under them join those units."
+        "Adding the fi label 'Huomiot' to claim: up to 2 stored headings 'Huomiot' on up to 2 "
+        "pages start being claim units. Each count is an upper bound: a heading nested in "
+        "another unit, or on a page outside the kind's scope, is no unit of its own. Up to 2 "
+        "compact observations under those headings join the new units."
     )
     assert validated["outcome"] == saved["outcome"]
 
@@ -457,9 +459,10 @@ def test_a_label_removal_leads_with_the_headings_that_stop_being_units(vault: Pa
     )
 
     assert saved["outcome"] == (
-        "Removing the fi label 'Huomiot' from claim: 2 stored headings 'Huomiot' on 2 pages stop "
-        "being claim units. The 2 compact observations under them become observations of their "
-        "own again."
+        "Removing the fi label 'Huomiot' from claim: up to 2 stored headings 'Huomiot' on up to "
+        "2 pages stop being claim units. Each count is an upper bound: a heading nested in "
+        "another unit, or on a page outside the kind's scope, is no unit of its own. Up to 2 "
+        "compact observations under those headings become observations again."
     )
 
 
@@ -478,3 +481,67 @@ def test_a_label_save_says_the_count_is_unknown_when_the_store_is_not_current(
         "Adding the fi label 'Huomiot' to claim: the stored headings 'Huomiot' start being claim "
         "units; how many is unknown, because the lexical store is not current."
     )
+
+
+@library_scope()
+def test_the_count_sentence_is_an_upper_bound_on_the_units_a_label_save_makes(
+    vault: Path,
+) -> None:
+    """A nested heading folds into its outer unit, and a scoped kind names no heading outside
+    its scope, so the store counts more headings than become units."""
+    from exomem import freshness, lexstore, memory_schema
+
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    pages = {
+        "väitteet.md": "---\ntype: insight\n---\n\n# Väitteet\n\n## Väite\n\n"
+        "- [fact] The release ships on Friday.\n- [fact] The tests pass.\n\n## Väite\n",
+        "sisäkkäin.md": "---\ntype: insight\n---\n\n# Sisäkkäin\n\n## Väite\n\nThe suite runs.\n\n"
+        "### Väite\n\n- [fact] It runs nightly.\n- [fact] It runs on push.\n",
+        "beta.md": "---\ntype: insight\nprojects: [beta]\n---\n\n# Beta\n\n## Pöytäkirja\n\nStep one.\n",
+        "alpha.md": "---\ntype: insight\nprojects: [alpha]\n---\n\n# Alpha\n\n## Pöytäkirja\n\n"
+        "Step one.\n",
+    }
+    for name, text in pages.items():
+        (notes / name).write_text(text, encoding="utf-8")
+    protocol = {"description": "A repeatable protocol", "scope": {"projects": ["alpha"]}}
+    created = semantic_language_registry.save_registry(
+        vault, {"schema_version": 1, "categories": {}, "kinds": {"protocol": protocol}}
+    )
+    entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
+    labelled = {
+        "schema_version": 1, "categories": {}, "kinds": {
+            "claim": {"labels": {"fi": "Väite"}},
+            "protocol": {**protocol, "labels": {"fi": "Pöytäkirja"}},
+        },
+    }
+
+    def parsed(registry) -> list[tuple[str, str]]:
+        return [
+            (item["form"], item["kind"])
+            for item in memory_schema.category_observations(vault, registry=registry)
+            if item["path"].removeprefix("Knowledge Base/Notes/") in pages
+        ]
+
+    before = parsed(semantic_language_registry.load_registry(vault))
+    saved = commands.op_schema_memory(
+        vault, operation="infer", subject="categories", save=True, proposal=labelled,
+        expected_hash=created["content_hash"],
+    )
+    after = parsed(semantic_language_registry.load_registry(vault))
+
+    assert saved["outcome"] == (
+        "Adding the fi label 'Väite' to claim: up to 3 stored headings 'Väite' on up to 2 pages "
+        "start being claim units. Each count is an upper bound: a heading nested in another "
+        "unit, or on a page outside the kind's scope, is no unit of its own. Up to 6 compact "
+        "observations under those headings join the new units. "
+        "Adding the fi label 'Pöytäkirja' to protocol: up to 2 stored headings 'Pöytäkirja' on "
+        "up to 2 pages start being protocol units. Each count is an upper bound: a heading "
+        "nested in another unit, or on a page outside the kind's scope, is no unit of its own."
+    )
+    absorbed = before.count(("compact", "observation")) - after.count(("compact", "observation"))
+    assert (after.count(("rich", "claim")), absorbed) == (2, 4)  # within the bounds 3 and 6
+    assert after.count(("rich", "protocol")) == 1  # within the bound 2

@@ -1555,8 +1555,9 @@ def kind_label_outcome(
     """One sentence for each kind label that `candidate` adds or removes against `current`.
 
     A label names a `##` heading, so each sentence says how many stored headings, on how many
-    pages, start or stop being units of a kind, as the lexical store counts them. A count the
-    store cannot give is unknown, never zero. None when no label changes, or when `candidate`
+    pages, start or stop being units of a kind, as the lexical store counts them. The store
+    keeps every heading in that spelling, so each count is an upper bound. A count the store
+    cannot give is unknown, never zero. None when no label changes, or when `candidate`
     has an error finding: its vault labels then name no heading, and the save refuses it.
     """
     if any(finding.severity == "error" for finding in candidate.findings):
@@ -1636,13 +1637,17 @@ def _kind_label_sentence(
     headings, pages, inside = counts.get(form, (0, 0, 0))
     if not headings:
         return f"{head}: no stored heading spells {text!r}, so no unit changes."
-    stored = f"{_count(headings, 'stored heading')} {text!r} on {_count(pages, 'page')}"
-    sentence = f"{head}: {stored} {effect}."
+    # The store keeps every heading in its spelling, so each count is an upper bound.
+    stored = f"{_count(headings, 'stored heading')} {text!r} on up to {_count(pages, 'page')}"
+    sentence = (
+        f"{head}: up to {stored} {effect}. Each count is an upper bound: a heading nested in "
+        "another unit, or on a page outside the kind's scope, is no unit of its own."
+    )
     observations = _count(inside, "compact observation")
     if inside and before is None:
-        sentence += f" The {observations} under them join those units."
+        sentence += f" Up to {observations} under those headings join the new units."
     elif inside and after is None:
-        sentence += f" The {observations} under them become observations of their own again."
+        sentence += f" Up to {observations} under those headings become observations again."
     return sentence
 
 

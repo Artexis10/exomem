@@ -73,7 +73,8 @@ Every entry of the kind, verdict, modality, belief-level, inference-mode and dim
 
 #### Scenario: A kind-label save says which headings it changes
 - **WHEN** a categories validation or save adds or removes a kind label
-- **THEN** its result leads with one sentence for each such label, which gives the number of stored headings, and of pages, that start or stop being units of that kind
+- **THEN** its result leads with one sentence for each such label, which gives up to how many stored headings, on up to how many pages, start or stop being units of that kind
+- **AND** the sentence says that each count is an upper bound, because a heading nested in another unit, or on a page outside the kind's scope, is no unit of its own
 - **AND** the sentence says that the count is unknown, never zero, when the lexical store is not current
 - **AND** the diff reports a removed labels-only entry as removed labels of that kind, never as a removed kind
 
