@@ -222,12 +222,11 @@ These rules are non-negotiable.
     move on. This rule forbids *omitting a link you know about*, never *failing to
     find one*. Manufacturing an edge to look connected is worse than no edge.
 
-6. **No `confidence` floats.** A claim carries no confidence score, and a number
-   is never a frontmatter field. Trust is conveyed through citations and link
-   counts. A degree of belief is its own `## Belief` unit with the unit rows
-   `credence_holder` and `credence` and an `assesses` relation to the claim. It
-   records what its holder stated, so never write one on a holder's behalf, and
-   never invent a number. See `page-types.md`.
+6. **No `confidence` floats.** A claim carries no confidence score, and a
+   confidence or a degree of belief is never a frontmatter field. Trust is
+   conveyed through citations and link counts. A degree of belief that its holder
+   stated is a `## Belief` unit: see "Recording a degree of belief" in
+   `page-types.md`.
 
 7. **Supersession over deletion.** When information is replaced, mark the old page
    `superseded`, link to the new one, and never delete. See
@@ -542,9 +541,6 @@ stay. `verdict` is a categorical epistemic outcome, a judgment in words and neve
 a confidence score; `read_schema(operation={'kind': 'infer', 'subject':
 'categories'})` lists the accepted verdicts under `verdicts`. A belief unit's
 `relations` are replace-on-omit too: an update that omits `assesses` drops the claim
-the belief assesses, so resend it. A degree of belief stays a `## Belief` unit with
-`credence_holder`, `credence` and `assesses`; `credence` is a belief level or a
-probability from 0 to 1 (a probability needs `credence_basis`), never a frontmatter
-field and never invented, and the belief records what its holder stated. `update` and
-`remove` need `expected_fingerprint` and `expected_hash`; `after_hash` from the
-result is the next call's `expected_hash`.
+the belief assesses, so resend it; "Recording a degree of belief" in `page-types.md`
+gives the unit's form. `update` and `remove` need `expected_fingerprint` and
+`expected_hash`; `after_hash` from the result is the next call's `expected_hash`.

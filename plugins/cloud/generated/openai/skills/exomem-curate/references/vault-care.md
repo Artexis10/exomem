@@ -136,13 +136,9 @@ is in **`audit-checks.md`**.
   context or detail from a note (see *Comprehensive coverage, minimal expression*
   under Proactive engagement).
 - Score a claim. A claim carries no confidence score, and its verdict is a
-  judgment in words, never a number. Record a degree of belief as its own
-  `## Belief` unit: the belief in prose, the unit rows `credence_holder` and
-  `credence`, and an `assesses` relation to the claim. `credence` is a unit row,
-  never a frontmatter field. It is a belief level or a probability from 0 to 1, a
-  probability needs `credence_basis`, and you never invent a number. A belief
-  records what its holder stated: never write one on a holder's behalf. Use
-  citation count and recency as the trust signal for the claim itself.
+  judgment in words, never a number. A degree of belief that its holder stated
+  is a `## Belief` unit: see "Recording a degree of belief" in `page-types.md`.
+  Use citation count and recency as the trust signal for the claim itself.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
   mark it; if irrelevant, archive into an `_archive/` subfolder. (`read_review/triage_memory`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
