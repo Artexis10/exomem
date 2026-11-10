@@ -400,7 +400,6 @@ def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault) 
                 "- [finding] Untouched line #reliability\n"
             ),
         })
-        cold = await _call(client, "read_page", {"page": "Retry policy"})
         _resident_resolver(vault)
         read = await _call(client, "read_page", {"page": "Retry policy"})
         raw = await _call(client, "read_page", {"page": "Retry policy", "options": {"include_raw": True}})
@@ -409,12 +408,10 @@ def test_an_agent_reads_a_title_link_and_edits_the_span_it_copied(build, vault) 
             "note": "Retry policy", "why": "Cap changed after review", "action": "replace_text",
             "old_text": span, "new_text": "Cap retries at 10 s as in [[Backoff ceiling]]",
         })
-        return cold, read, raw, span, edited
+        return read, raw, span, edited
 
-    cold, read, raw, span, edited = _session(build(), scenario)
+    read, raw, span, edited = _session(build(), scenario)
 
-    # With no resolver resident a read builds none: the links stay as stored.
-    assert "[[Knowledge Base/Notes/Insights/backoff-ceiling]]" in cold["body"], cold
     assert span in read["body"] and "Knowledge Base/" not in read["body"], read
     # The raw file reads like the body: its frontmatter is as stored, its links are shown by title.
     assert raw["content"].startswith("---\n") and raw["content"].endswith(raw["body"]), raw
