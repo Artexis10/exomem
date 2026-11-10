@@ -7,7 +7,7 @@ Protocols, never on the concrete client.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -24,6 +24,14 @@ CELL_KEY_CAPABILITIES: tuple[str, ...] = (
     "writeFiles",
     "deleteFiles",
 )
+
+# automate-cell-storage-deletion D2: the key custodian's short-lived purge key may list and hide in one cell's
+# prefix of the locked backup bucket, and nothing else. The key watcher pins the same set as the purge shape.
+PURGE_KEY_CAPABILITIES: tuple[str, ...] = ("listFiles", "writeFiles")
+# B2's documented file-version actions that this code reads: a protocol's closed set, not data.
+UPLOAD_ACTION = "upload"
+START_ACTION = "start"
+HIDE_ACTION = "hide"
 
 
 def cell_object_prefix(cell_id: str) -> str:
@@ -47,6 +55,28 @@ class ObjectVersion:
     version_id: str
     size: int | None = None
     action: str | None = None
+
+
+def current_names(versions: Iterable[ObjectVersion]) -> list[str]:
+    """The names whose newest entry, apart from `start` entries, is an `upload` (D4). `versions` is in the
+    provider's order: by name, and newest first within a name."""
+
+    current: list[str] = []
+    decided: str | None = None
+    for version in versions:
+        if version.key == decided or version.action == START_ACTION:
+            continue
+        decided = version.key
+        if version.action == UPLOAD_ACTION:
+            current.append(version.key)
+    return current
+
+
+def holds_stored_entry(versions: Iterable[ObjectVersion]) -> bool:
+    """Whether a listing shows any entry but a hide marker, such as an `upload` or a `start` (D1). An entry
+    whose action is unknown counts too: only a listing of hide markers alone proves the data is gone."""
+
+    return any(version.action != HIDE_ACTION for version in versions)
 
 
 class ObjectStorage(Protocol):
@@ -85,7 +115,20 @@ class PrefixKeyStore(Protocol):
         on the backup bucket. The only source of an ID to delete."""
         ...
 
+    def create_purge_key(self, cell_id: str, valid_seconds: int) -> ObjectStorageKey:
+        """A key restricted to the locked backup bucket and `cells/<cell_id>/`, with exactly
+        `PURGE_KEY_CAPABILITIES`, that expires after `valid_seconds` (automate-cell-storage-deletion D2)."""
+        ...
+
     def delete_key(self, key_id: str) -> None: ...
+
+
+class PrefixHider(Protocol):
+    """What the custodian does with a purge key: list one prefix's versions and hide a name."""
+
+    def iter_object_versions(self, prefix: str) -> Iterator[ObjectVersion]: ...
+
+    def hide_file(self, name: str) -> None: ...
 
 
 @dataclass(frozen=True)

@@ -73,6 +73,14 @@ def operation_grant_test_sql(fixtures: Path) -> str:
     return (fixtures / "exomem_cloud_operation_grants.sql").read_text(encoding="utf-8")
 
 
+def deletion_grant_test_sql(fixtures: Path) -> str:
+    """Substrate's deletion grant column (automate-cell-storage-deletion D1), run after the pinned grants.
+
+    It mirrors the Substrate migration of task 2.1 until the pin reaches a commit with it.
+    """
+    return (fixtures / "exomem_cloud_deletion_grants.sql").read_text(encoding="utf-8")
+
+
 def access_record_test_sql(fixtures: Path) -> str:
     """The canonical access migration and additive grants, after the existing grant fixtures."""
     return _committed_sql(fixtures, "access_migration") + "\n" + _committed_sql(fixtures, "access_grants")
@@ -93,4 +101,5 @@ def control_database_sql(fixtures: Path) -> list[str]:
         media_key_test_sql(fixtures),
         operation_grant_test_sql(fixtures),
         access_record_test_sql(fixtures),
+        deletion_grant_test_sql(fixtures),
     ]

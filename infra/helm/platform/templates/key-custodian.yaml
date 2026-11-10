@@ -12,6 +12,11 @@ key by that route; D3 removes the route.
 It runs the cellctl image with another command, in its own namespace, service account and
 credential. A separate image would add a publish and attestation pipeline without reducing
 what the process can do.
+
+automate-cell-storage-deletion D2: it also purges a deleted cell's backups, on a deletion grant
+that cellctl relays in the ConfigMap exomem-cell-deletions and that verifies against a key in
+cellDeletion.grantPublicKeys. It reads a cell's namespace directly to see that it is gone, and it
+records each finished purge in its own ConfigMap exomem-key-custodian-purges.
 */ -}}
 {{- include "exomem.requirePrivateRangesDenied" (dict "root" . "feature" "keyCustodian") }}
 {{- $custodian := .Values.keyCustodian }}
@@ -20,6 +25,8 @@ what the process can do.
 {{- $apiServerCidrs := .Values.edge.apiServerCidrs }}
 {{- /* The custodian touches this file every sweep, watch event and namespace attempt; the liveness probe reads its age. */ -}}
 {{- $heartbeat := "/tmp/key-custodian-heartbeat" }}
+{{- /* The chart-owned grant public keys and hold list (cell-deletion-policy.yaml), read on each sweep. */ -}}
+{{- $policyDir := "/run/exomem/cell-deletion" }}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -53,10 +60,11 @@ metadata:
   namespace: {{ $custodian.namespace }}
 automountServiceAccountToken: true
 ---
-# The custodian lists and watches namespaces to find the cells it serves. It reads the one Secret
-# name it writes, to see whether a cell already has its key, and it creates Secrets. The admission
-# policy below confines that create to cell-object-store-key in cell namespaces. No other verb or
-# resource is granted.
+# The custodian lists and watches namespaces to find the cells it serves, and gets one namespace
+# directly before it purges a cell, because a cache could still show a namespace that is gone or miss one
+# that came back. It reads the one Secret name it writes, to see whether a cell already has its key, and
+# it creates Secrets. The admission policy below confines that create to cell-object-store-key in cell
+# namespaces. No other verb or resource is granted cluster-wide.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -64,7 +72,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["cell-object-store-key"]
@@ -85,6 +93,65 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ $custodian.namespace }}
+---
+# automate-cell-storage-deletion D2: the custodian's record of finished purges, one ConfigMap in its own
+# namespace. A create request carries no resource name, so admission confines it to that name and its one key.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-purges
+  namespace: {{ $custodian.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["exomem-key-custodian-purges"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-purges
+  namespace: {{ $custodian.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-purges
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $custodian.namespace }}
+{{- /* Only cellctl relays the grants, and its namespace exists only while cellctl is on. */ -}}
+{{- if .Values.cellctl.enabled }}
+---
+# The custodian reads the deletion grants that cellctl relays, and nothing else in cellctl's namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-cell-deletions
+  namespace: {{ .Values.cellctl.namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["exomem-cell-deletions"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-cell-deletions
+  namespace: {{ .Values.cellctl.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-cell-deletions
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $custodian.namespace }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -144,6 +211,14 @@ spec:
                 secretKeyRef:
                   name: {{ $custodian.secretName }}
                   key: applicationKey
+            - name: KEY_CUSTODIAN_GRANT_PUBLIC_KEYS_FILE
+              value: {{ printf "%s/grant-public-keys.json" $policyDir | quote }}
+            - name: KEY_CUSTODIAN_HOLD_LIST_FILE
+              value: {{ printf "%s/hold-cells.json" $policyDir | quote }}
+            - name: KEY_CUSTODIAN_DELETIONS_NAMESPACE
+              value: {{ .Values.cellctl.namespace | quote }}
+            - name: KEY_CUSTODIAN_NAMESPACE
+              value: {{ $custodian.namespace | quote }}
           # The process touches the heartbeat at each sweep, watch event and namespace attempt, failed
           # ones included, so a provider or API outage that fails every namespace in turn is retried
           # and never restarted. A heartbeat older than three minutes means a call hung past its timeout.
@@ -168,10 +243,16 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: cell-deletion-policy
+              mountPath: {{ $policyDir }}
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: 16Mi
+        - name: cell-deletion-policy
+          configMap:
+            name: exomem-cell-deletion-policy
 ---
 # No ingress. Egress reaches only cluster DNS, the API server at its own address on 6443 (kube-router
 # evaluates egress after DNAT, so the Service IP does not match), and public HTTPS for the
@@ -217,10 +298,11 @@ spec:
         - protocol: TCP
           port: 53
 ---
-# What RBAC grants the custodian, admission narrows to the one object it exists to write: a
+# What RBAC grants the custodian, admission narrows to the two objects it exists to write: a
 # create of the Secret cell-object-store-key, Opaque and holding only keyId and applicationKey,
-# in a cell namespace. Everything else the custodian's identity attempts is denied, including
-# a widened RBAC rule.
+# in a cell namespace; and a create or update of its ConfigMap exomem-key-custodian-purges, holding
+# only done.json, in its own namespace. Everything else the custodian's identity attempts is denied,
+# including a widened RBAC rule and a write of the chart's grant keys or hold list beside its ConfigMap.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -243,18 +325,27 @@ spec:
   validations:
     - expression: >-
         {{- /* The API server omits subResource and namespace when empty, so read them as optional. */}}
-        request.operation == 'CREATE' && request.resource.group == '' &&
-        request.resource.resource == 'secrets' && request.?subResource.orValue('') == ''
-      message: the key custodian may only create a Secret.
+        request.resource.group == '' && request.?subResource.orValue('') == '' &&
+        ((request.operation == 'CREATE' && request.resource.resource == 'secrets') ||
+         (request.operation in ['CREATE', 'UPDATE'] && request.resource.resource == 'configmaps'))
+      message: the key custodian may only create a Secret, or create or update a ConfigMap.
     - expression: >-
-        request.?namespace.orValue('').matches('{{ include "exomem.cellNamespacePattern" . }}') &&
-        object.metadata.name == 'cell-object-store-key'
+        request.resource.resource != 'secrets' ||
+        (request.?namespace.orValue('').matches('{{ include "exomem.cellNamespacePattern" . }}') &&
+         object.metadata.name == 'cell-object-store-key')
       message: the key custodian may create only the Secret cell-object-store-key, in a cell namespace.
     - expression: >-
-        (!has(object.type) || object.type == 'Opaque') && !has(object.stringData) &&
-        has(object.data) && object.data.size() == 2 &&
-        'keyId' in object.data && 'applicationKey' in object.data
+        request.resource.resource != 'secrets' ||
+        ((!has(object.type) || object.type == 'Opaque') && !has(object.stringData) &&
+         has(object.data) && object.data.size() == 2 &&
+         'keyId' in object.data && 'applicationKey' in object.data)
       message: the Secret cell-object-store-key is Opaque and holds exactly keyId and applicationKey.
+    - expression: >-
+        request.resource.resource != 'configmaps' ||
+        (request.?namespace.orValue('') == '{{ $custodian.namespace }}' &&
+         object.metadata.name == 'exomem-key-custodian-purges' && !has(object.binaryData) &&
+         has(object.data) && object.data.size() == 1 && 'done.json' in object.data)
+      message: the key custodian may write only its ConfigMap exomem-key-custodian-purges, with the key done.json, in its own namespace.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

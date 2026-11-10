@@ -147,3 +147,18 @@ run "cellctl_backup_key_can_only_list_the_backup_bucket" {
     error_message = "The cellctl backup key must be limited to the backup bucket and hold only listBuckets and listFiles."
   }
 }
+
+run "key_watcher_backup_key_can_only_list_the_backup_bucket" {
+  command = plan
+
+  assert {
+    condition = (
+      b2_application_key.key_watcher_backup_list.key_name == "exomem-cell-data-key-watcher-backup-list" &&
+      b2_application_key.key_watcher_backup_list.bucket_id == null &&
+      b2_application_key.key_watcher_backup_list.bucket_ids == toset(["mock-backup-bucket"]) &&
+      b2_application_key.key_watcher_backup_list.name_prefix == null &&
+      toset(b2_application_key.key_watcher_backup_list.capabilities) == toset(["listFiles"])
+    )
+    error_message = "The key watcher's backup key must only list the backup bucket's file versions."
+  }
+}

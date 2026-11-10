@@ -65,10 +65,10 @@ RECALL_LAG_ALERT = "cell-recall-lagging"
 # verify-stored-originals D9: a serving cell whose readiness answer counts a missing or
 # damaged stored original. The answer carries the count only; the owner's surfaces name the files.
 ORIGINALS_DAMAGED_ALERT = "cell-originals-damaged"
-# contain-cloud-controller-compromise D9: a deleted cell's object-store key and backup files are
-# removed by the operator, never by cellctl. The alert name carries the cell
-# id because the receiver's transition has no other field for it; the alert never resolves
-# itself, since cellctl cannot see the provider's key listing.
+# contain-cloud-controller-compromise D9, narrowed by automate-cell-storage-deletion D6: an old cell's
+# object-store key and backup files in the old founder bucket are removed by the operator, never by
+# cellctl. The alert name carries the cell id because the receiver's transition has no other field for
+# it; the alert never resolves itself, since cellctl cannot see the provider's key listing.
 CLEANUP_PENDING_ALERT = "cell-storage-cleanup-pending"
 # add-cloud-media-store D10: a media prefix holds more bytes than the cell's allowance times the configured
 # headroom, or a physical figure that several tries in a row could not read. The names carry the cell id as

@@ -1723,7 +1723,7 @@ def test_an_old_cell_deletion_completes_once_its_staging_is_empty_and_leaves_its
         config=CONFIG,
     )
     assert decision.row_updates["observed_state"] == "deleted"
-    assert decision.row_updates["b2_key_id"] is None
+    assert decision.row_updates["b2_key_wrapped"] is None
     assert decision.row_updates["backup_key_wrapped"] is None
     assert decision.row_updates["observed_generation"] == 3
     assert decision.storage_cleanup_pending is True

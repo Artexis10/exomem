@@ -329,7 +329,7 @@ The media edge, the gateway and the provider SHALL NOT receive the bundle.
 
 ### Requirement: A media edge is the only path between cells and the media bucket
 
-A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else, until `collect-released-media` adds `condemn` for a collector credential. It SHALL NOT send a list or delete request, and SHALL send a hide only for `condemn`, although its key's write capability permits any hide.
+A media edge service SHALL move ciphertext between cells and the media bucket. It SHALL run as its own Deployment behind a Service with a literal ClusterIP and a Recreate rollout. It SHALL hold the only credential that can write to the media bucket, and that credential SHALL NOT be able to delete file versions. It SHALL also hold a second key that can only list the media bucket, for the purge of a deleted cell (`automate-cell-storage-deletion`). cellctl SHALL hold a key that can only list the media bucket. No running service SHALL hold `deleteFiles` on the media bucket. The edge SHALL accept multipart upload with a declared size up to a per-object bound, ranged read of a named version, and head, and nothing else, until `collect-released-media` adds `condemn` for a collector credential. It SHALL NOT send a delete request. It SHALL send a list request only with its list-only key, for that purge. It SHALL send a hide only for `condemn` and for the purge of a cell that a valid deletion grant names, after the grant's `purge_after`, although its key's write capability permits any hide.
 
 The edge SHALL authenticate a caller by a per-cell credential that cellctl signs, binding audience, cell ID and version, and SHALL verify the signature with cellctl's public key only. It SHALL accept a credential only while that cell ID and version are in the active set that cellctl publishes, and SHALL report a set generation only after it has loaded that set and every request it accepted under an earlier generation has finished. It SHALL report its loaded generation, the SHA-256 of the loaded set's validated bytes and its bucket name beside the settled generation. It SHALL derive the object prefix from the credential's cell ID and MUST NOT accept a prefix or cell from the request.
 
@@ -349,6 +349,11 @@ A cell selected for the media store SHALL gain one egress edge, to the media edg
 
 - **WHEN** a request presents a valid credential for one cell and names an object of another cell
 - **THEN** the edge resolves the name under the credential's own prefix and the other cell's object is never read
+
+#### Scenario: The edge purges a deleted cell
+
+- **WHEN** a valid deletion grant names a cell that the loaded active set omits, and the grant's `purge_after` has passed
+- **THEN** the edge lists that cell's prefix with its list-only key and hides each current name there, and lists or hides nothing under another cell's prefix
 
 #### Scenario: A credential outlives its cell
 
@@ -523,25 +528,26 @@ Cleanup MAY retain only the non-content credentials it needs.
 cellctl SHALL keep a deleted cell's observed state at `deleting` while the cell has a `media_store` record in its custody observation that holds no revoked generation, until the edge's exact-set evidence shows a set that omits the cell.
 The database statement that retires a deleted cell's media key bundle SHALL also record the revocation request time in that `media_store` record, because the same pass publishes a set that no longer lists the cell. A cell receives an edge credential only after its bundle exists, so the record exists for every cell that the edge may admit, even when the rest of that pass fails. When the evidence matches, cellctl SHALL persist the revoked generation, the set digest and the observation time in the same record. The record SHALL survive a restart.
 A cell that never held a media key bundle or a `media_store` record SHALL NOT wait.
-Then cellctl SHALL report the cell `deleted` and the existing cleanup alert SHALL fire.
+Then cellctl SHALL report the cell `deleted`. The cleanup alert SHALL fire only for a cell with data in the legacy backup bucket (`automate-cell-storage-deletion`).
 cellctl SHALL hold no `deleteFiles` on the media bucket and SHALL NOT delete media objects.
 An unreadable, older or different edge set MUST NOT count as observed.
 
-The operator's cleanup script SHALL have a media mode for the founder bucket.
-It SHALL delete nothing until seven days have passed since the operator's own first dry run for that cell.
-After that, `--apply` SHALL cancel every unfinished large file under `cells/<cell>/` and delete every file version there, and SHALL report unfinished files apart from versions.
-A dry run that finds no version and no unfinished file SHALL be the proof of absence.
+After the cell's deletion grant reaches its `purge_after`, the media edge SHALL hide every current name under `cells/<cell>/`.
+The bucket's lifecycle rule SHALL delete each hidden version when the media grace ends, and SHALL cancel each unfinished large file.
+The operator's cleanup script SHALL have no mode that hides or deletes a version in the media bucket.
+Its media mode SHALL count versions, hide markers and unfinished files under `cells/<cell>/`, and its `--rescue` SHALL delete only hide markers there.
+A listing that shows no `upload` and no `start` entry under the prefix SHALL be the proof of absence.
 
 #### Scenario: The provider is unreachable during deletion
 
 - **WHEN** a deleted cell's media provider is unreachable
-- **THEN** content-key retirement proceeds independently and the cleanup alert is not suppressed
+- **THEN** content-key retirement proceeds independently
 - **AND** cellctl claims no destruction date
 
 #### Scenario: A tenant deletes their account
 
 - **WHEN** a cell row is set to `deleted`
-- **THEN** the cell stays `deleting` until the edge reports an exact set that omits it, and then cellctl reports it `deleted` with the cleanup alert
+- **THEN** the cell stays `deleting` until the edge reports an exact set that omits it, and then cellctl reports it `deleted`
 - **AND** the edge refuses the cell's credential from that observation on
 
 #### Scenario: The edge is unreadable during deletion
@@ -559,15 +565,15 @@ A dry run that finds no version and no unfinished file SHALL be the proof of abs
 - **WHEN** cellctl restarts after it recorded the revocation of a cell
 - **THEN** the record is still in the cell's custody observation and the cell does not wait again
 
-#### Scenario: The operator cleans up before the grace has passed
+#### Scenario: A deleted cell's media waits for the grant's purge_after
 
-- **WHEN** the operator applies the media cleanup for a cell before seven days have passed since the first dry run
-- **THEN** the script deletes nothing and reports the remaining time
+- **WHEN** a deleted cell's deletion grant has not reached its `purge_after`
+- **THEN** the edge hides no name under the cell's prefix
 
-#### Scenario: The operator cleans up after the grace
+#### Scenario: The operator rescues a wrongly deleted cell's media
 
-- **WHEN** the operator applies the media cleanup after the grace
-- **THEN** the script cancels unfinished large files, deletes every version under the cell's prefix, and a final dry run reports zero
+- **WHEN** the operator runs the cleanup script's `--rescue` for a deleted cell within the media grace
+- **THEN** the script deletes every hide marker under the cell's prefix and no `upload` or `start` entry, and each hidden version becomes current again
 
 ### Requirement: The media store is off by default and drains on disable
 

@@ -1390,20 +1390,24 @@ def _decide_deletion(row: CellRow, observation: ClusterObservation) -> Decision:
     # staging key empties. Deleting a cell removes all of its data, so this comes first (D9).
     if not observation.staging_objects_absent_confirmed:
         return Decision(delete_staging_objects=True, row_updates={**hold_clear, "observed_state": "deleting"})
-    # The edge must first be shown to serve a set without the cell, so no upload lands after the operator
-    # starts the media clean-up. This only orders the alert; the clean-up's own grace authorizes the delete.
+    # The edge must first be shown to serve a set without the cell, so no upload lands once the cell reads
+    # deleted. The edge's purge pass checks its own loaded set again before each hide, and the grant's
+    # grace authorizes the hide (automate-cell-storage-deletion D3).
     if observation.media_revocation_pending:
         return Decision(row_updates={**hold_clear, "observed_state": "deleting"})
-    # No backup object is deleted here, and no key: a new cell's bucket is locked, and the operator's
-    # clean-up empties an old cell's prefix in the old bucket and deletes its key (D9).
+    # No backup object is deleted here, and no key. The key custodian and the media edge purge a new cell's
+    # prefixes on its deletion grant (automate-cell-storage-deletion). Only an old cell's prefix in the old
+    # bucket stays the operator's to empty, with its key, so only an old cell raises the clean-up alert (D6).
+    # Its key ID stays on the row as the mark of an old cell, so a restarted cellctl raises the alert again;
+    # the ID is no secret, and the wrapped key goes.
     return Decision(
-        storage_cleanup_pending=True,
+        storage_cleanup_pending=row.has_stored_object_store_key,
         row_updates={
             **hold_clear,
             "observed_state": "deleted",
             "ready": False,
             "observed_generation": row.generation,
-            "b2_key_id": None,
+            "b2_key_id": row.b2_key_id if row.has_stored_object_store_key else None,
             "b2_key_wrapped": None,
             "b2_key_version": None,
             "backup_key_wrapped": None,

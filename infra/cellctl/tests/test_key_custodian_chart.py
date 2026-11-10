@@ -57,7 +57,7 @@ def test_only_the_custodian_can_write_or_read_the_object_store_key_secret() -> N
 
     custodian_role = _find(documents, "ClusterRole", "key-custodian")
     assert custodian_role["rules"] == [
-        {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["list", "watch"]},
+        {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["get", "list", "watch"]},
         {"apiGroups": [""], "resources": ["secrets"], "resourceNames": [OBJECT_STORE_KEY_SECRET], "verbs": ["get"]},
         {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]},
     ]

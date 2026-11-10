@@ -21,6 +21,9 @@ run "media_storage_is_absent_until_selected" {
     condition = (
       length(b2_bucket.cloud_media) == 0 &&
       length(b2_application_key.cloud_media_edge) == 0 &&
+      length(b2_application_key.cloud_media_edge_list) == 0 &&
+      output.cloud_media_edge_list_application_key_id == null &&
+      output.cloud_media_edge_list_application_key == null &&
       output.cloud_media_bucket_name == null &&
       output.cloud_media_bucket_id == null &&
       output.cloud_media_edge_application_key_id == null &&
@@ -79,6 +82,18 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
 
   assert {
     condition = (
+      length(b2_application_key.cloud_media_edge_list) == 1 &&
+      b2_application_key.cloud_media_edge_list[0].key_name == "exomem-private-alpha-media-edge-list" &&
+      b2_application_key.cloud_media_edge_list[0].bucket_id == null &&
+      b2_application_key.cloud_media_edge_list[0].bucket_ids == toset(["mock-media-bucket"]) &&
+      b2_application_key.cloud_media_edge_list[0].name_prefix == null &&
+      toset(b2_application_key.cloud_media_edge_list[0].capabilities) == toset(["listFiles"])
+    )
+    error_message = "The edge's purge key must only list the media bucket's file versions: no read, write, hide or delete."
+  }
+
+  assert {
+    condition = (
       length(b2_application_key.cellctl_media_list) == 1 &&
       b2_application_key.cellctl_media_list[0].bucket_id == null &&
       b2_application_key.cellctl_media_list[0].bucket_ids == toset(["mock-media-bucket"]) &&
@@ -101,6 +116,7 @@ run "media_storage_preserves_versions_and_isolates_the_edge" {
     condition = (
       !contains(flatten([
         b2_application_key.cloud_media_edge[0].capabilities,
+        b2_application_key.cloud_media_edge_list[0].capabilities,
         b2_application_key.cellctl_media_list[0].capabilities,
         b2_application_key.key_watcher_media_list[0].capabilities,
       ]), "deleteFiles")

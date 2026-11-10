@@ -47,3 +47,13 @@ output "cellctl_backup_list_application_key" {
   value     = b2_application_key.cellctl_backup_list.application_key
   sensitive = true
 }
+
+output "key_watcher_backup_list_application_key_id" {
+  value     = b2_application_key.key_watcher_backup_list.application_key_id
+  sensitive = true
+}
+
+output "key_watcher_backup_list_application_key" {
+  value     = b2_application_key.key_watcher_backup_list.application_key
+  sensitive = true
+}

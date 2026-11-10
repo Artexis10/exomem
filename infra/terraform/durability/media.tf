@@ -34,9 +34,19 @@ resource "b2_application_key" "cloud_media_edge" {
   capabilities = ["readFiles", "writeFiles"]
 }
 
+# The edge's purge pass lists a deleted cell's prefix with this key (automate-cell-storage-deletion D3). The
+# provider changes no key in place, so the edge holds a second key instead of a wider edge key.
+resource "b2_application_key" "cloud_media_edge_list" {
+  count      = var.cloud_media_enabled ? 1 : 0
+  key_name   = "${var.bucket_prefix}-media-edge-list"
+  bucket_ids = [b2_bucket.cloud_media[0].bucket_id]
+  # B2 capability names are protocol tokens: listFiles lists versions, start entries and hide markers.
+  capabilities = ["listFiles"]
+}
+
 # cellctl's physical meter lists the media prefixes with this key (add-cloud-media-store D10). It
 # cannot read, write or delete a file, and no service holds deleteFiles on this bucket: the operator
-# deletes with a short-lived key (docs/runbooks/cloud-key-custody.md).
+# deletes only hide markers, for a rescue, with a short-lived key (docs/runbooks/cloud-cell-deletion.md).
 resource "b2_application_key" "cellctl_media_list" {
   count      = var.cloud_media_enabled ? 1 : 0
   key_name   = "${var.bucket_prefix}-cellctl-media-list"
