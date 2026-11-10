@@ -1291,6 +1291,36 @@ def test_a_store_refusal_pauses_the_job_until_the_store_accepts_writes(store, mo
     assert result["rows"]["imported"] == count(store.connection) == len(valid(iter_exercises()))
 
 
+def test_a_writer_coordinator_timeout_pauses_the_job_instead_of_failing_it(store, monkeypatch):
+    """A coordinator that times out once for a few seconds ends an hour-long import that cannot continue."""
+    from exomem.cli_ops import OpError
+    from exomem.collection_store.writer import CollectionWriter
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    committed = count(store.connection)
+
+    def unreachable(self, *args, **kwargs):
+        raise OpError("WRITER_COORDINATOR_UNAVAILABLE", "writer coordinator could not confirm authority: timed out")
+
+    with monkeypatch.context() as outage:
+        outage.setattr(CollectionWriter, "_write_item", unreachable)
+        assert run(store)["errors"] == 1
+    paused = status(store, job)
+    assert (paused["state"], paused["reason"], paused["error"]["code"]) == (
+        "partial",
+        "store_unavailable",
+        "WRITER_COORDINATOR_UNAVAILABLE",
+    )
+    assert count(store.connection) == paused["rows"]["imported"] == committed
+    run(store)
+    result = status(store, job)
+    assert (result["state"], result["error"]) == ("complete", None)
+    assert result["rows"]["imported"] == count(store.connection) == len(valid(iter_exercises()))
+
+
 def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(store, monkeypatch):
     """Batch boundaries decide which duplicate wins, and whether a stop-policy job fails."""
     rows = [{"id": f"r{i}", "kind": "first"} for i in range(12)]

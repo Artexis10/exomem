@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Never
 
-from .. import __version__, archive_members, auth_sessions, item_keys, records, vault
+from .. import __version__, archive_members, auth_sessions, item_keys, records, vault, writer_lease
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
@@ -108,8 +108,8 @@ _START = {"row": 0, "byte": 0, "state": {}}
 _RESUMABLE = ("authority_lost", "time_cap")
 _SESSION_STORE = "IMPORT_SESSION_STORE_UNAVAILABLE"
 # Fixed writer/store protocol refusals a later tick outlives; other batch errors fail the job.
-_STORE_STATE = frozenset(
-    {"MUTATION_BUSY", takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
+_STORE_STATE = writer_lease.TRANSIENT_WRITER_CODES | frozenset(
+    {takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
 )
 
 
@@ -3286,8 +3286,9 @@ def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exceptio
     """Classify a batch error once its transaction is gone.
 
     If the checkpoint moved, the batch committed and only its acknowledgement
-    failed. A store refusal (busy, sync pending, diverged, custody) blocks the
-    job on this host until a later tick finds the store writable. Anything
+    failed. A store refusal (busy, sync pending, diverged, custody, or the writer
+    coordinator or lease briefly out of reach) blocks the job on this host until
+    a later tick finds the store writable. Anything
     else fails the job with a typed code.
     """
     job = _load(writer.connection, job_id)
