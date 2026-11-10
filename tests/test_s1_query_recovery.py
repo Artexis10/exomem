@@ -48,10 +48,10 @@ def test_continuation_recovers_once_without_changing_cursor_or_reference_rows(jo
     assert rows == [{"id": "first"}, {"id": "second"}]
     assert len(client.requests) == 3
     assert client.requests[1] == client.requests[2]
-    assert client.requests[1][1] == {
-        "action": "query", "collection": "collection",
-        "query": {**query, "page": {"after": "opaque-continuation"}},
-    }
+    assert client.requests[1] == ("query_records", {
+        "collection": "collection",
+        "options": {"query": {**query, "page": {"after": "opaque-continuation"}}},
+    })
     output = capsys.readouterr().out
     assert "attempt=1 refused=QUERY_TIMEOUT retryable=true" in output
     assert "attempts=2 outcome=complete total_roundtrip_ms=" in output
