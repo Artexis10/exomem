@@ -25,6 +25,7 @@ from exomem import (
     epistemic_graph,
     lexstore,
     working_set_index,
+    working_set_marks,
     working_set_runtime,
 )
 from exomem import find as find_module
@@ -55,23 +56,36 @@ ANSWER_PAGE = (
     "## Finding\n- relations: answers: [[Orchard launch#beta]]\n\n"
     "The orchard launch needs a two week beta.\n"
 )
+#: An answer the packet does not serve: the page answers the question in its relations section,
+#: so it holds no unit that a lane could select.
+UNSERVED_ANSWER_PAGE = (
+    "---\ntype: insight\n---\n# Beta review\n\nThe review agreed on a beta.\n\n"
+    "## Relations\n\n- answers [[Orchard launch#beta]]\n"
+)
 TURN = "Remind me about the orchard launch: what changed since kickoff, and what about exports?"
 
 
-def _vault(tmp_path: Path, *, answer: str | None = f"{NOTES}/Orchard answers.md") -> Path:
-    """The fixture vault, with its answering page at `answer`, or without it when `answer` is
-    None, and every index the packet reads built."""
+def _vault(
+    tmp_path: Path,
+    *,
+    answer: str | None = f"{NOTES}/Orchard answers.md",
+    answer_page: str = ANSWER_PAGE,
+    hub_page: str = HUB_PAGE,
+    name: str = "vault",
+) -> Path:
+    """The fixture vault, with `hub_page` as its hub and `answer_page` at `answer`, or without
+    an answering page when `answer` is None, and every index the packet reads built."""
     from conftest import initialize_vault_state_offline
 
-    vault = tmp_path / "vault"
+    vault = tmp_path / name
     vault.mkdir(parents=True)
     initialize_vault_state_offline(vault, source="display marks fixture")
-    pages = {HUB: HUB_PAGE, **{
+    pages = {HUB: hub_page, **{
         f"{NOTES}/{source}.md": f"---\ntype: insight\n---\n# {source}\n\n## Claim\n\n{source} were read in May.\n"
         for source in SOURCES
     }}
     if answer is not None:
-        pages[answer] = ANSWER_PAGE
+        pages[answer] = answer_page
     for rel, body in pages.items():
         (vault / rel).parent.mkdir(parents=True, exist_ok=True)
         (vault / rel).write_text(body, encoding="utf-8")
@@ -107,8 +121,8 @@ def test_the_packet_this_vault_serves(tmp_path: Path) -> None:
         "The orchard launch ships in January.",
         "The orchard launch brings the cider app to stores.",
         "Orchard launch exports come first on the roadmap.",
-        "The kickoff retrospective is held.",
-        "The kickoff meeting opens the work.",
+        "The kickoff meeting opens the work.",  # FLIPS marks: was the retrospective
+        "The kickoff retrospective is held.",  # FLIPS marks: was the kickoff meeting
         "Does the orchard launch need a beta?",
         "Who owns orchard launch support?",
     ]
@@ -124,20 +138,206 @@ def test_the_packet_this_vault_serves(tmp_path: Path) -> None:
             "lifecycle", "provenance", "ref", "role", "text", "updated"],
         "The orchard launch needs a two week beta.": [
             "lifecycle", "provenance", "ref", "role", "text", "updated"],
-        "The orchard launch ships in January.": [
-            "history", "lifecycle", "provenance", "ref", "role", "text", "updated"],
+        "The orchard launch ships in January.": [  # FLIPS marks: was without "display"
+            "display", "history", "lifecycle", "provenance", "ref", "role", "text", "updated"],
         "The orchard launch brings the cider app to stores.": [
             "lifecycle", "provenance", "ref", "role", "text", "updated"],
-        "Orchard launch exports come first on the roadmap.": [
-            "lifecycle", "provenance", "ref", "role", "text", "updated"],
+        "Orchard launch exports come first on the roadmap.": [  # FLIPS marks: was without "display"
+            "display", "lifecycle", "provenance", "ref", "role", "text", "updated"],
         "The kickoff retrospective is held.": [
             "lifecycle", "provenance", "ref", "role", "text", "updated"],
         "The kickoff meeting opens the work.": [
             "lifecycle", "provenance", "ref", "role", "text", "updated"],
         "Does the orchard launch need a beta?": [
             "lifecycle", "provenance", "ref", "role", "text", "updated"],
-        "Who owns orchard launch support?": [
-            "lifecycle", "provenance", "ref", "role", "text", "updated"],
+        "Who owns orchard launch support?": [  # FLIPS marks: was without "display"
+            "display", "lifecycle", "provenance", "ref", "role", "text", "updated"],
     }
     assert [pointer["ref"] for pointer in packet["pointers"]] == [f"{HUB_REF}#before"]
     assert "display_edges" not in packet["generation"]
+
+
+def _unmarked(vault: Path, monkeypatch: pytest.MonkeyPatch, **kwargs) -> dict:
+    """The packet `vault` serves with the marks switched off: the packet before the marks."""
+    with monkeypatch.context() as patch:
+        patch.setattr(working_set_marks, "compile", lambda *args, **kw: None)
+        working_set_runtime.reset_caches_for_tests()
+        return _recall(vault, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("answer", "answer_page"),
+    [
+        (f"{NOTES}/Orchard answers.md", ANSWER_PAGE),
+        (f"{NOTES}/Beta review.md", UNSERVED_ANSWER_PAGE),
+    ],
+    ids=["served-answer", "unserved-answer"],
+)
+def test_a_question_is_open_until_a_page_the_caller_sees_answers_it(
+    tmp_path: Path, answer: str, answer_page: str
+) -> None:
+    """Catches `open` read from the served units alone: a question that a page the packet does
+    not serve has answered would tell the agent it is still open."""
+    packet = _recall(_vault(tmp_path, answer=answer, answer_page=answer_page))
+
+    units = _units(packet)
+    served = answer_page == ANSWER_PAGE
+    assert ("The orchard launch needs a two week beta." in units) is served
+    assert "display" not in units["Does the orchard launch need a beta?"]
+    assert units["Who owns orchard launch support?"]["display"] == {"open": True}
+
+
+def _withheld_answer_twin(tmp_path: Path, *, withheld: bool) -> Path:
+    """The fixture vault with its answering page in a folder that an egress rule withholds from
+    an external caller, or as if it never had that page."""
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem.governance import egress
+
+    vault = _vault(
+        tmp_path,
+        answer=f"{NOTES}/Patterns/Orchard answers.md" if withheld else None,
+        name="with-page" if withheld else "without-page",
+    )
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    _reset_caches()
+    working_set_runtime.reset_caches_for_tests()
+    return vault
+
+
+def test_a_caller_who_may_not_see_the_answer_gets_the_packet_of_a_vault_without_it(
+    tmp_path: Path,
+) -> None:
+    """Catches a mark read from an edge the caller may not see: the question would lose `open`
+    and tell the caller that a withheld page answers it."""
+    from test_governance_egress import _external
+
+    from exomem.governance import principal
+
+    replies = []
+    for withheld in (True, False):
+        vault = _withheld_answer_twin(tmp_path, withheld=withheld)
+        with principal.request_scope(_external()):
+            packet = _recall(vault)
+        # These describe the request and the index instance, not released content.
+        packet.pop("timings", None)
+        packet.pop("continuity", None)
+        packet["generation"].pop("freshness_key", None)
+        replies.append(packet)
+    with_page, without_page = replies
+
+    assert with_page == without_page
+    units = _units(with_page)
+    assert units["Does the orchard launch need a beta?"]["display"] == {"open": True}
+    assert units["Who owns orchard launch support?"]["display"] == {"open": True}
+
+
+def test_a_replaced_unit_follows_its_replacement_and_names_it(tmp_path: Path) -> None:
+    """Catches a replaced decision served as if it were current: ahead of the decision that
+    replaced it, or with nothing that names the replacement."""
+    packet = _recall(_vault(tmp_path))
+
+    texts = [unit["text"] for unit in packet["units"]]
+    units = _units(packet)
+    assert texts.index("The orchard launch ships in March.") < texts.index(
+        "The orchard launch ships in January."
+    )
+    assert units["The orchard launch ships in January."]["display"] == {
+        "replaced": {"by": f"{HUB_REF}#after"}
+    }
+    assert "display" not in units["The orchard launch ships in March."]
+    # The working set's own lifecycle reading stays as it was.
+    assert units["The orchard launch ships in January."]["lifecycle"] == "superseded"
+
+
+def test_dated_events_are_served_earliest_first_and_other_units_keep_their_places(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches events served in the order the page lists them, which tells the agent the
+    retrospective came before the kickoff, and a time order that moves units it does not
+    cover."""
+    vault = _vault(tmp_path)
+    before = [unit["text"] for unit in _unmarked(vault, monkeypatch)["units"]]
+    working_set_runtime.reset_caches_for_tests()
+
+    after = [unit["text"] for unit in _recall(vault)["units"]]
+
+    events = ("The kickoff meeting opens the work.", "The kickoff retrospective is held.")
+    assert [text for text in after if text in events] == list(events)
+    assert sorted(before.index(text) for text in events) == sorted(after.index(text) for text in events)
+    assert [text for text in after if text not in events] == [
+        text for text in before if text not in events
+    ]
+    assert {after.index(text) for text in after if text not in events} == {
+        before.index(text) for text in before if text not in events
+    }
+
+
+def test_a_sourced_claim_names_its_holder_and_at_most_three_sources(tmp_path: Path) -> None:
+    """Catches a claim served with no word of whose it is or where it came from, and an origin
+    that lists every source and crowds the packet."""
+    packet = _recall(_vault(tmp_path))
+
+    origin = _units(packet)["Orchard launch exports come first on the roadmap."]["display"]["origin"]
+    source_refs = {
+        f"exomem://vault/{NOTES.replace(' ', '%20')}/{source.replace(' ', '%20')}.md"
+        for source in SOURCES
+    }
+    assert origin["by"] == "Research team"
+    assert len(origin["from"]) == 3
+    assert set(origin["from"]) < source_refs
+    assert origin["more"] == 1
+
+
+def test_the_marks_are_charged_to_the_packet_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches marks that reach the agent without counting toward the packet's character
+    budget, so a packet can carry more than the ceiling its caller asked for."""
+    vault = _vault(tmp_path)
+    unmarked = _unmarked(vault, monkeypatch)
+    working_set_runtime.reset_caches_for_tests()
+
+    marked = _recall(vault)
+
+    marks = [unit["display"] for unit in marked["units"] if "display" in unit]
+    assert marks
+    assert [unit["ref"] for unit in marked["units"]] != [unit["ref"] for unit in unmarked["units"]]
+    assert {unit["ref"] for unit in marked["units"]} == {unit["ref"] for unit in unmarked["units"]}
+    assert marked["budget"]["used_chars"] == unmarked["budget"]["used_chars"] + sum(
+        working_set_marks.chars(mark) for mark in marks
+    )
+    assert marked["budget"]["used_chars"] <= marked["budget"]["limit_chars"]
+
+
+#: A hub whose units no displaying dimension holds: decisions and a claim with no replacement,
+#: source, holder, question or date.
+PLAIN_HUB_PAGE = (
+    "---\ntype: insight\nstatus: active\ntags: [hub]\n"
+    "exomem_id: 22222222-2222-4222-8222-222222222222\n---\n# Orchard launch\n\n"
+    "The orchard launch brings the cider app to stores.\n\n"
+    "## Decision\n- id: march\n\nThe orchard launch ships in March.\n\n"
+    "## Claim\n- id: exports\n\nOrchard launch exports come first on the roadmap.\n"
+)
+
+
+def test_a_packet_with_nothing_to_mark_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a packet that the marks change when it has nothing to mark: an empty `display`,
+    a reordered unit, a charged character or a diagnostics key."""
+    vault = _vault(tmp_path, answer=None, hub_page=PLAIN_HUB_PAGE)
+    unmarked = _unmarked(vault, monkeypatch)
+    working_set_runtime.reset_caches_for_tests()
+
+    marked = _recall(vault)
+
+    assert marked["units"]
+    for packet in (unmarked, marked):
+        # These describe the request, not the packet: each call mints its own thread.
+        packet.pop("timings", None)
+        packet.pop("continuity", None)
+    assert marked == unmarked

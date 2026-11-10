@@ -59,6 +59,7 @@ from .governance import policy as governance_policy
 from .runtime_resources import SEMANTIC_PREPARATION_BYTES as TASK_CORPUS_MAX_BYTES
 
 if TYPE_CHECKING:
+    from . import working_set_marks
     from .find import UnitParentReads
 
 log = logging.getLogger(__name__)
@@ -363,6 +364,8 @@ class LaneItem:
     task_order: int = UNIT_LANE_LIMIT
     #: Sidecar evidence stays private until the packet selects this unit.
     unit_candidate: Any = field(default=None, compare=False, repr=False)
+    #: The selected unit hit that the packet's display marks read (`working_set_marks`).
+    unit_hit: Any = field(default=None, compare=False, repr=False)
 
 
 class LaneResult(NamedTuple):
@@ -497,10 +500,13 @@ def _without_lede_repeats(
 
 def served_chars(section: str, entry: Mapping[str, Any]) -> int:
     """What one served `units`, `pointers` or `current_state` entry costs the
-    budget outside conversation inference: its prose, nothing else. The egress
-    guard refunds exactly this for an entry it removes."""
+    budget outside conversation inference: its prose and a unit's display
+    marks, nothing else. The egress guard refunds exactly this for an entry it
+    removes."""
     if section == "units":
-        return len(str(entry.get("text") or ""))
+        from . import working_set_marks
+
+        return len(str(entry.get("text") or "")) + working_set_marks.chars(entry.get("display"))
     if section == "pointers":
         return len(str(entry.get("title") or "")) + len(str(entry.get("why") or ""))
     if section == "current_state":
@@ -524,8 +530,13 @@ def build_packet(
     promoted_paths: frozenset[str] = frozenset(),
     status_basis: lifecycle_statuses.Basis | None = None,
     visible: Callable[[str], bool] | None = None,
+    display_edges: working_set_marks.EdgeView | None = None,
 ) -> dict[str, Any]:
-    """Order, cap and budget the lane output into the packet the caller sees."""
+    """Order, cap and budget the lane output into the packet the caller sees.
+
+    With `display_edges`, each served unit carries the display marks its dimensions give it
+    (`working_set_marks`), and each dimension's display order fills its members' positions.
+    """
     status_basis = status_basis or lifecycle_statuses.Basis(None)
     correction_status = None
     parent_reads = None
@@ -665,6 +676,22 @@ def build_packet(
         _deduplicated(sorted(current_items, key=_sort_key)),
         qualified_sources=frozenset((key[0], key[1]) for key in outgoing_pointers),
     )
+    packet_marks = None
+    if display_edges is not None:
+        from . import working_set_marks
+
+        packet_marks = working_set_marks.compile(
+            [item for item in ordered if not _redundant_superseded(item, present_paths)],
+            display_edges,
+            status_basis=status_basis,
+        )
+
+    def _unit_of(item: LaneItem) -> dict[str, Any]:
+        unit = _served_unit(item)
+        if packet_marks is not None and item.ref in packet_marks.marks:
+            unit["display"] = dict(packet_marks.marks[item.ref])
+        return unit
+
     units: list[dict[str, Any]] = []
     deferred: list[tuple[LaneItem, str]] = []
     per_role: dict[str, int] = {}
@@ -767,7 +794,7 @@ def build_packet(
             return _charge("pointers", _pointer(item, "unit_too_long"))
         if not text:
             return _charge("pointers", _pointer(item, "budget"))
-        return _charge("units", _served_unit(item))
+        return _charge("units", _unit_of(item))
 
     def _defer(item: LaneItem, reason: str) -> None:
         if item.role in material_roles:
@@ -845,7 +872,7 @@ def build_packet(
             if len(text) > (MAX_UNIT_CHARS if standing else MAX_UNIT_HARD_CHARS):
                 _defer(item, "unit_too_long")
                 continue
-            unit = _served_unit(item)
+            unit = _unit_of(item)
             cost = _charge("units", unit)
             role_count = per_role.get(item.role, 0)
             # No class is exempt: a standing unit takes one of its role's slots.
@@ -915,6 +942,10 @@ def build_packet(
             {"role": item.role, "reason": "lane_failed"}
             for item in served_sources.values() if item.ref in stale
         ]
+    if packet_marks is not None:
+        units = packet_marks.ordered(units)
+        if not packet_marks.edges_known:
+            generation = {**generation, working_set_marks.GENERATION_KEY: working_set_marks.UNKNOWN}
 
     packet: dict[str, Any] = {
         "recent_context": recent_entries,
@@ -2169,6 +2200,7 @@ def _unit_items(
     role: context_roles.ContextRole | None, hits: Sequence[Any], *, parent_reads: Any = None,
 ) -> tuple[LaneItem, ...]:
     from .find import _UnitCandidate
+    from .find_types import SemanticUnitHit
 
     out: list[LaneItem] = []
     for hit in hits:
@@ -2214,6 +2246,7 @@ def _unit_items(
                 why=(role.description or f"{role.id} lane") if role is not None else "",
                 relations=tuple(getattr(hit, "relations", ()) or ()),
                 unit_candidate=hit if isinstance(hit, _UnitCandidate) else None,
+                unit_hit=hit if isinstance(hit, (_UnitCandidate, SemanticUnitHit)) else None,
             )
         )
     return tuple(out)
@@ -3848,6 +3881,7 @@ def _carried_packet(
                 recent_context=recent_context,
                 status_basis=status_basis,
                 visible=visible,
+                display_edges=_display_edges(vault_root, visible, purpose, freshness_snapshot),
             )
 
         packet = build()
@@ -4405,6 +4439,7 @@ def _follow_up_packet(
                     recent_context=recent_context,
                     status_basis=status_basis,
                     visible=visible,
+                    display_edges=_display_edges(vault_root, visible, purpose, freshness_snapshot),
                 )
     if packet is not None:
         return packet
@@ -4417,6 +4452,16 @@ def _follow_up_packet(
         conversation_inferred=carried_by == "conversation",
         status_basis=status_basis,
     )
+
+
+def _display_edges(
+    root: Path | str, visible: Callable[[str], bool] | None, purpose: str | None, snapshot: Any
+) -> working_set_marks.EdgeView:
+    """Where a compiled packet reads its units' edges for their display marks: the reader view
+    and declared purpose that admitted its units."""
+    from . import working_set_marks
+
+    return working_set_marks.EdgeView(Path(root), visible, purpose, snapshot)
 
 
 def _reader_view(root: Path, purpose: str | None):
@@ -5603,6 +5648,7 @@ def _compile_packet(
             promoted_paths=promoted_paths,
             status_basis=status_basis,
             visible=visible,
+            display_edges=_display_edges(root, visible, purpose, freshness_snapshot),
         )
     return packet
 
