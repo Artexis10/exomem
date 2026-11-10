@@ -115,7 +115,9 @@ def heading_label_problem(form: str) -> str | None:
     The heading form is NFKC-normalised and casefolded, with separators folded to `_`. A
     character is valid when its Unicode general category is a letter, a mark or a number, when
     it is that `_`, or when it is a joiner between two letters, marks or numbers. The first
-    character is a letter or a number. The rule reads Unicode categories, never a script list.
+    character is a letter or a number, and at least one character is a letter, so a label never
+    turns every numbered heading into a unit. The rule reads Unicode categories, never a script
+    list.
     """
     if not form:
         return "has no letter or number, so no heading can spell it"
@@ -131,6 +133,11 @@ def heading_label_problem(form: str) -> str | None:
         return (
             f"holds U+{ord(char):04X}; a heading label holds only letters, marks, numbers and "
             "separators, and starts with a letter or a number"
+        )
+    if not any(unicodedata.category(char)[0] == "L" for char in form):
+        return (
+            f"holds no letter, so every heading '## {form}' would become a unit; give the label "
+            "at least one letter"
         )
     return None
 

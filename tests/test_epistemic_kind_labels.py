@@ -185,11 +185,12 @@ def test_a_label_in_a_script_with_marks_or_joiners_parses_as_its_kind(
         ({"fi": "Väite?"}, "invalid_label", "U+003F"),
         ({"hi": "\u200dदावा"}, "invalid_label", "U+200D"),
         ({"fi": "---"}, "invalid_label", None),
+        ({"fi": "1"}, "invalid_label", "holds no letter"),
         ("Väite", "invalid_labels", None),
     ],
     ids=[
         "yaml-boolean-tag", "not-a-language-tag", "not-a-heading", "joiner-at-the-start",
-        "empty-heading", "not-a-map",
+        "empty-heading", "digits-only", "not-a-map",
     ],
 )
 def test_a_label_that_cannot_be_a_heading_is_refused(
@@ -201,7 +202,8 @@ def test_a_label_that_cannot_be_a_heading_is_refused(
 
     assert [finding["code"] for finding in registry.findings] == [code]
     if named is not None:
-        # The refusal names the first character no heading label takes, by its code point.
+        # The refusal names the first character no heading label takes, by its code point, or
+        # says that the label holds no letter.
         assert named in registry.findings[0]["detail"]
     # A refused registry names no vault kind, as for every other error finding.
     assert registry.resolve_heading("Väite").resolved is None
