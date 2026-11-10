@@ -11,8 +11,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import commands, epistemic_graph
+from exomem import (
+    commands,
+    context_refs,
+    dimension_display,
+    epistemic_dimensions,
+    epistemic_graph,
+    relation_registry,
+)
 from exomem import find as find_module
+from exomem import semantic_language_registry as language_registry
 
 NOTES = "Knowledge Base/Notes"
 PAGE = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
@@ -134,3 +142,122 @@ def test_a_search_by_dimension_before_groups_returns_rank_order_and_no_marks(
     assert [hit.get("verdict") for hit in replies["uncertainty"]["hits"]] == [
         None, None, "confirmed", None,
     ]
+
+
+# ---------------------------------------------------------------------------
+# The display function, on its inputs: units, a group's behaviours and the request's edges
+# ---------------------------------------------------------------------------
+
+Q = "Knowledge Base/Notes/Questions.md"
+A = "Knowledge Base/Notes/Answers.md"
+F = "Knowledge Base/Notes/Forecast.md"
+D = "Knowledge Base/Notes/Decision log.md"
+UnitEdge = epistemic_graph.UnitEdge
+
+
+def _unit(path: str, node: str | None, kind: str | None, **facts) -> dimension_display.DisplayUnit:
+    return dimension_display.DisplayUnit(
+        ref=f"{context_refs.vault_ref(path)}#{node}", path=path, node=node, kind=kind, **facts
+    )
+
+
+def _show(units, behaviours, edges, status: str = "available", **kwargs):
+    return dimension_display.display(
+        units,
+        behaviours,
+        language=language_registry.core_registry(),
+        relations=relation_registry.core_registry(),
+        edges=epistemic_dimensions.DimensionEdges(status, tuple(edges)),
+        **kwargs,
+    )
+
+
+QUESTIONS = (
+    _unit(Q, "answered", "open_question"),
+    _unit(Q, "unanswered", "open_question"),
+    _unit(Q, "judged", "hypothesis", verdict="confirmed"),
+    _unit(Q, "claimed", "claim"),
+    _unit(F, "forecast", "prediction"),
+)
+# An anchored answer to one question, and an answer to a whole page through a vault extension of
+# `answers` that this registry does not hold, so it answers through its parent.
+ANSWERS = (
+    UnitEdge(A, "finding", Q, "answered", "answers"),
+    UnitEdge(A, None, F, None, "x.replies", parent="answers"),
+)
+
+
+def test_flag_open_marks_only_a_closable_unit_that_nothing_settles() -> None:
+    """Catches `open` read from a kind list instead of the `closable` trait, on a unit with a
+    verdict, or past an answer that ends at the unit's page or comes through an extension."""
+    view = _show(QUESTIONS, ["flag_open"], ANSWERS)
+
+    assert [QUESTIONS[i].node for i, mark in enumerate(view.marks) if mark.get("open")] == [
+        "unanswered"
+    ]
+    assert view.counts == {"open": 1}
+    assert view.order == (0, 1, 2, 3, 4)
+
+
+def test_unknown_edges_mark_nothing_open_and_say_so() -> None:
+    """Catches a reader that takes a graph it could not read as one with no answers, so every
+    question reads as open."""
+    view = _show(QUESTIONS, ["flag_open"], (), status="warming")
+
+    assert not any(view.marks)
+    assert view.edges_known is False
+    assert "open" not in view.counts
+
+
+def test_lead_with_current_puts_replaced_units_last_and_names_each_successor() -> None:
+    """The spec's "Leading with the current view hides nothing". Catches a replaced unit dropped
+    from its group, or marked without the successor that its edge names."""
+    units = (
+        _unit(D, "before", "decision"),
+        _unit(D, "after", "decision"),
+        _unit("Knowledge Base/Notes/Archive.md", "old", "decision", historical=True),
+        _unit(D, "hiring", "decision"),
+        _unit("Knowledge Base/Notes/Old plan.md", "plan", "decision"),
+    )
+    edges = (
+        UnitEdge(D, "after", D, "before", "supersedes"),
+        UnitEdge("Knowledge Base/Notes/New plan.md", None, "Knowledge Base/Notes/Old plan.md", None,
+                 "supersedes"),
+    )
+
+    view = _show(units, ["lead_with_current"], edges)
+
+    assert [units[i].node for i in view.order] == ["after", "hiring", "before", "old", "plan"]
+    assert view.marks[0] == {"replaced": {"by": units[1].ref}}
+    assert view.marks[2] == {"replaced": True}
+    assert view.marks[4] == {
+        "replaced": {"by": context_refs.vault_ref("Knowledge Base/Notes/New plan.md")}
+    }
+    assert view.counts == {"replaced": 3}
+
+
+def test_show_origin_names_the_holder_and_at_most_three_sources() -> None:
+    """Catches an origin that misses its page's own source edges, names a result unit by its page,
+    or lists every source of a unit cited from dozens of pages."""
+    analysis = "Knowledge Base/Notes/Analysis.md"
+    claim = _unit(analysis, "claim", "claim", holder="Research team")
+    survey = _unit("Knowledge Base/Notes/Survey.md", "row", "claim")
+    edges = (
+        UnitEdge(analysis, "claim", survey.path, "row", "derived_from"),
+        UnitEdge(analysis, None, "Knowledge Base/Notes/Interviews.md", None, "evidenced_by"),
+        *(
+            UnitEdge(analysis, "claim", f"Knowledge Base/Sources/Paper {n}.md", None, "cites")
+            for n in range(3)
+        ),
+    )
+
+    view = _show([claim], ["show_origin"], edges, named={(survey.path, survey.node): survey.ref})
+
+    origin = view.marks[0]["origin"]
+    assert origin["by"] == "Research team"
+    assert origin["more"] == 2
+    assert len(origin["from"]) == 3
+    every = sorted([survey.ref, context_refs.vault_ref("Knowledge Base/Notes/Interviews.md"), *(
+        context_refs.vault_ref(f"Knowledge Base/Sources/Paper {n}.md") for n in range(3)
+    )])
+    assert origin["from"] == every[:3]
