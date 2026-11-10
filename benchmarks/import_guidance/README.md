@@ -62,7 +62,7 @@ Capture and fresh evidence record `transport`, the requested `credits_account`, 
 
 The key writer supplies the references and recall questions independently. Generation's `Case` object contains no key. The actor receives neither reference text nor scorer files. Cases c01, c02, c03, c07, c08, c09, c10 and c11 have fixed input recall probes. Case c11 combines a compiled-note update and an entity update in one session.
 
-For external cases, pass the same `--case-dir` to `run --suite session-close` and each `session-score` invocation. Cases keep the existing format and resolve seed identifiers against the shipped seeds. Scoring reads `<case-dir>/answer-keys/<id>.json`; actor staging receives neither the case directory nor its keys. Omit the option to use shipped cases.
+For external cases, pass the same `--case-dir` to `run --suite session-close` and each `session-score` invocation. Cases keep the existing format. A seed in `<case-dir>/seeds/<seed>` wins over a shipped seed of the same name. Scoring reads `<case-dir>/answer-keys/<id>.json`; actor staging receives neither the case directory nor its keys. Omit the option to use shipped cases.
 
 1. Select both checkouts with `--product-root`, the actor with `--model`, and the number of repeats with `--repeats`.
 2. Run the existing `run` command with `--suite session-close` and an output directory outside every repository to capture raw runs.
@@ -110,3 +110,42 @@ Limits:
 - The harness stages the engagement reference in the system prompt, where an ordinary actor may read it on demand.
 - The shell-free actor cannot trigger the landing-based Stop check. `--hook-turn` measures an explicit close prompt instead.
 - Real-model runs covered session-close cases on the plugin client with its hook turn, one run per case. The closure of task 4.1 in the archived `add-session-close-compilation` OpenSpec change reports which cases ran, their results and what did not run.
+
+## Context-replay suite
+
+This suite tests what a real agent does with the context that `recall_context` returns, on cases that live outside the repository. It compares two checkouts, called arms. For each case and arm, no model records the arm's real `bootstrap` and `recall_context` replies on a vault seeded from the case's seed. A real agent then runs with the arm's skill, tool text and `UserPromptSubmit` hook. It can call only those two tools, and the scripted server returns the recorded replies whatever the agent sends. Closed checks and one blind judge batch score the final answer.
+
+A case folder holds:
+
+- `<id>.json`: the session-close case format with one turn.
+- `answer-keys/<id>.marks.json`: the `reference` for the judge, the `set` of the case, and `deterministic`. `deterministic` is null, or an object with `all_of` and `in_order`, each a list of groups of spellings.
+- `seeds/<seed>/`: the seed folder that the case file names.
+
+Run these steps from the repository root:
+
+1. Run `PYTHONPATH=benchmarks python -m import_guidance write-scenarios --case-dir <cases> --out <dir outside every repository>`. It writes `<out>/scenarios/<id>.json` and `<out>/case-sets.json`, and it refuses an output folder under a repository.
+2. Run `python -m import_guidance run --suite <out>/scenarios --product-root baseline=<checkout> --product-root candidate=<checkout> --model <m> --out <run dir> --dry-run`. The dry run records each arm on each seed, prints the size of every recorded reply, and starts no agent.
+3. Remove `--dry-run` to run the agents. Run it again with another `--model` and the same `--out` to add a model. The runner starts no judge for these scenarios.
+4. For the stage-C smoke, run `run --suite session-close --case-dir <cases> --client-mode plugin` with the same arms. Full sessions then run on the same seeds.
+5. Run `python -m import_guidance judge-prepare --stage-b <run dir>/runs.jsonl --stage-c <session runs>/runs.jsonl --suite <out>/scenarios --out <judge dir>`. Leave out `--stage-c` when you ran no sessions.
+6. Give only `<judge dir>/judge-views.jsonl` to the judge, and keep `<judge dir>/private/judge-map.json` from it. The judge returns JSONL objects with the item `id` and a `structured_output` that matches the item's `answer_schema`.
+7. Run `python -m import_guidance judge-import --judgments <file> --out <judge dir>`. It writes `judged.json` and prints the judge agreement. The line starts with `incomplete:` when fewer than 90% of the doubled items agree on pass or fail.
+8. Run `python -m import_guidance replay-report <run dir>/runs.jsonl --judged <judge dir>/judged.json --case-sets <out>/case-sets.json --baseline baseline --candidate candidate --out <report.md>`.
+9. Run `python -m import_guidance session-table <session runs>/runs.jsonl --judged <judge dir>/judged.json --baseline baseline --candidate candidate`. Each line is one pair of sessions.
+
+What the suite does:
+
+- The recorder lays the arm's scaffold, copies the seed over it with `session_seed.py`, and makes the scenario's calls. It never runs `settle_graph` on a seeded vault, because that step writes throwaway pages that `recall_context` could serve.
+- The first read of a seeded vault is cold: the index is not ready, and the reply holds no context. The `recall_context` step therefore has a `warm` key. The recorder discards the first read, waits, and reads twice. It records the second read only when the two agree apart from the listed fields.
+- The runner writes the arm's `UserPromptSubmit` hook declaration into the agent's settings. It sets `EXOMEM_RETRIEVE_INJECT=mcp`, the case's engagement and a hook home inside the run folder. Session-close uses the same code (`plugin_hooks` and `hook_env`). The row records `hook_invocations` for information only.
+- `answer_has_all_of` needs one spelling from each group in the answer. `answer_in_order` needs the first matches of the groups in the listed order. Both match case-insensitively on the whole text.
+- An answer passes when every named judged criterion holds and every deterministic check of the case passes. A run error, a missing judgment and a missing arm are `unknown`.
+- A judge item holds the turn, the reference, the reply and the criteria M1 and M2, and nothing that names the arm, the model or the stage. Items of both stages are shuffled under opaque ids. The prepare step doubles a seeded 20% of them.
+- `replay-report` averages the known (model, repeat) pairs within each case. It gives, for each set, the paired difference with a 95% percentile bootstrap over cases, the pass counts, the unknown counts, and the log ratio of reply length with its interval. A case with no known pair is listed as unknown.
+
+Limits:
+
+- The recorder switches off more product features than the session-close server does (`OFFLINE_ENV` in `record_worker.py` against `pinned_env` in `session_close.py`). The replay's replies and a full session's replies can therefore differ. Both arms are recorded the same way, so the paired difference still compares like with like.
+- The membership graph of a seeded vault stays warming, because the graph is built only by a write or a relation query.
+- Whether `-p` mode emits hook responses under `--include-hook-events` is unverified. The report counts runs with and without them and does not gate on the count.
+- The judge model is in the same family as the agents.
