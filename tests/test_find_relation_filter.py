@@ -339,3 +339,169 @@ def test_a_visible_relation_anchor_keeps_warming_and_recall_for_owner_and_non_ow
         epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     with context():
         assert _paths(vault, relations=["supports"], relation_of=anchor) == {B}
+
+
+# ---------------------------------------------------------------------------
+# A restricted caller: an edge to a page that an egress rule withholds reads as absent
+# ---------------------------------------------------------------------------
+
+NOTES = "Knowledge Base/Notes"
+PATTERNS = f"{NOTES}/Patterns"
+ROADMAP = f"{NOTES}/Roadmap.md"
+REVIEW = f"{NOTES}/Review.md"
+BUDGET = f"{NOTES}/Budget.md"
+OLD_BUDGET = f"{NOTES}/Old budget.md"
+OLD_ROADMAP = f"{PATTERNS}/Old roadmap.md"
+
+
+def _release_twin(tmp_path: Path, *, withheld: bool) -> Path:
+    """A vault whose egress rule withholds `Notes/Patterns/**` from an external caller, with the
+    withheld page or as if it never had it. The roadmap supersedes the withheld page, and the
+    withheld page supports the review. A visible supersession between two budget pages gives
+    both vaults the same non-empty answer."""
+    from conftest import initialize_vault_state_offline
+    from test_governance_egress import _reset_caches, write_rule, write_scope
+
+    from exomem.governance import egress
+
+    vault = tmp_path / ("with-page" if withheld else "without-page")
+    vault.mkdir()
+    initialize_vault_state_offline(vault, source="relation filter twin fixture")
+    page = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
+    _write(
+        vault,
+        ROADMAP,
+        page.format(
+            title="Roadmap",
+            body=f"## Relations\n\n- supersedes [[{PATTERNS}/Old roadmap]]",
+        ),
+    )
+    _write(vault, REVIEW, page.format(title="Review", body="Two hires fit the budget."))
+    _write(
+        vault,
+        BUDGET,
+        page.format(title="Budget", body=f"## Relations\n\n- supersedes [[{OLD_BUDGET[:-3]}]]"),
+    )
+    _write(vault, OLD_BUDGET, page.format(title="Old budget", body="The budget is fixed."))
+    if withheld:
+        _write(
+            vault,
+            OLD_ROADMAP,
+            page.format(
+                title="Old roadmap",
+                body=f"## Relations\n\n- supports [[{REVIEW[:-3]}]]",
+            ),
+        )
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    _reset_caches()
+    return vault
+
+
+_PAGE_LEVEL_SEARCHES = {
+    # The withheld page is the target of the roadmap's edge.
+    "withheld-target": {"relations": ["supersedes"]},
+    # The withheld page is the source of the edge that ends at the review.
+    "withheld-source": {"relations": ["supports"]},
+}
+# An anchor on a visible page reads every edge that touches it, so its answer is the other end.
+_ANCHORED_SEARCHES = {
+    "anchored-on-the-roadmap": {"relation_of": ROADMAP},
+    "anchored-on-the-review": {"relation_of": REVIEW},
+}
+_RELATION_SEARCHES = {**_PAGE_LEVEL_SEARCHES, **_ANCHORED_SEARCHES}
+_SHARE_AN_EDGE_WITH_THE_WITHHELD_PAGE = {ROADMAP, REVIEW, OLD_ROADMAP}
+
+
+def _search_as(audience: str, vault: Path, search: dict, *, ask: bool = False) -> dict | list:
+    from test_governance_egress import _external
+
+    from exomem import commands
+    from exomem.governance import principal
+
+    caller = _external() if audience == "external" else principal.owner_principal(surface="library")
+    operation = commands.op_ask_memory if ask else commands.op_find
+    with principal.request_scope(caller):
+        return operation(vault, query="", mode="keyword", scope="kb-only", limit=15, **search)
+
+
+def _hit_paths(reply: dict | list) -> set[str]:
+    """The pages of a reply: `op_find` answers with its hits, `op_ask_memory` with an envelope."""
+    return {hit["path"] for hit in (reply["hits"] if isinstance(reply, dict) else reply)}
+
+
+@pytest.mark.parametrize("ask", [False, True], ids=["op_find", "op_ask_memory"])
+@pytest.mark.parametrize("search", list(_PAGE_LEVEL_SEARCHES))
+def test_a_restricted_caller_gets_the_reply_of_a_vault_that_never_had_the_withheld_page(
+    tmp_path: Path, search: str, ask: bool
+) -> None:
+    """Catches a relation filter that resolves its participants over the request's content
+    admission alone: the roadmap, or the review, is returned only when the withheld page it
+    shares an edge with exists, so the caller learns that the page exists."""
+    replies = [
+        _search_as(
+            "external",
+            _release_twin(tmp_path, withheld=withheld),
+            _RELATION_SEARCHES[search],
+            ask=ask,
+        )
+        for withheld in (True, False)
+    ]
+
+    assert replies[0] == replies[1]
+
+
+@pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
+def test_a_restricted_callers_relation_hits_never_name_the_withheld_page(
+    tmp_path: Path, search: str
+) -> None:
+    """Catches the participant set itself: `find` is the layer under the release gate, and over
+    the content admission alone it returns the withheld page, with its path in `relation_match`,
+    where a vault that never had the page returns nothing."""
+    from test_governance_egress import _external
+
+    from exomem.governance import principal
+
+    hits = []
+    for withheld in (True, False):
+        vault = _release_twin(tmp_path, withheld=withheld)
+        with principal.request_scope(_external()):
+            found = find_module.find(vault, query="", limit=15, **_RELATION_SEARCHES[search])
+        hits.append([hit.as_dict() for hit in found])
+
+    assert hits[0] == hits[1]
+
+
+@pytest.mark.parametrize("search", list(_RELATION_SEARCHES))
+def test_the_owner_reads_the_edges_that_the_restricted_caller_reads_as_absent(
+    tmp_path: Path, search: str
+) -> None:
+    """Catches a twin that passes by returning nothing: the owner of the same vault is returned
+    the pages that share an edge with the withheld page, and the restricted caller none."""
+    vault = _release_twin(tmp_path, withheld=True)
+    expected = {
+        # The anchor is not its own answer, so an anchored search returns the other end.
+        "anchored-on-the-roadmap": {OLD_ROADMAP},
+        "anchored-on-the-review": {OLD_ROADMAP},
+        "withheld-target": {ROADMAP, OLD_ROADMAP},
+        "withheld-source": {REVIEW, OLD_ROADMAP},
+    }[search]
+
+    owner = _hit_paths(_search_as("owner", vault, _RELATION_SEARCHES[search]))
+    external = _hit_paths(_search_as("external", vault, _RELATION_SEARCHES[search]))
+
+    assert expected <= owner
+    assert not external & _SHARE_AN_EDGE_WITH_THE_WITHHELD_PAGE
+
+
+def test_a_restricted_caller_still_filters_by_the_edges_between_visible_pages(
+    tmp_path: Path,
+) -> None:
+    """Catches a fix that withholds every edge from a restricted caller: the budget pair still
+    answers `supersedes`, as it does in a vault without the withheld page."""
+    vault = _release_twin(tmp_path, withheld=True)
+
+    reply = _search_as("external", vault, {"relations": ["supersedes"]})
+
+    assert _hit_paths(reply) == {BUDGET, OLD_BUDGET}

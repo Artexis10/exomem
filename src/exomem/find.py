@@ -25,7 +25,7 @@ from datetime import date
 from functools import partial, wraps
 from inspect import signature as inspect_signature
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     call_spans,
@@ -57,6 +57,9 @@ from .find_types import (
 )
 from .governance import policy as governance_policy
 from .kbdir import kb_dirname, kb_prefix
+
+if TYPE_CHECKING:
+    from .vault import WikilinkResolver
 
 log = logging.getLogger(__name__)
 
@@ -1972,6 +1975,19 @@ def find(
         updated_after = updated_before = None
         recency_days = None
 
+    # One freshness snapshot + one parsed-page memo per request: every
+    # consumer below (relation filter, hot cache, BM25, resolver, auto-widen, boost passes)
+    # shares them instead of re-walking / re-stat'ing. The snapshot is built first because a
+    # restricted caller's relation filter binds its link resolver to it.
+    snapshot = FreshnessSnapshot(
+        vault_root,
+        require_live_recall=require_live_recall,
+        timings=timings,
+        expected_recall_checkpoints=catalog_proof,
+        stale_recall_scopes=stale_recall_scopes,
+        pending=pending,
+    )
+
     # Resolve the relation filter before any caching so a warming/disabled sidecar
     # raises the typed outcome instead of being masked by a stale cache hit, and an
     # unknown relation key is rejected up front. `relation_paths` is None when no
@@ -1986,19 +2002,9 @@ def find(
         relation_of=relation_of,
         relation_direction=relation_direction,
         keep=admit_path,
+        snapshot=snapshot,
     )
 
-    # One freshness snapshot + one parsed-page memo per request: every
-    # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
-    # shares them instead of re-walking / re-stat'ing.
-    snapshot = FreshnessSnapshot(
-        vault_root,
-        require_live_recall=require_live_recall,
-        timings=timings,
-        expected_recall_checkpoints=catalog_proof,
-        stale_recall_scopes=stale_recall_scopes,
-        pending=pending,
-    )
     page_memo: dict[str, ParsedPage | None] = {}
     unit_reads = UnitParentReads()
 
@@ -4751,11 +4757,15 @@ def _resolve_relation_filter(
     relations: list[str] | None,
     relation_of: str | None,
     relation_direction: str,
+    snapshot: FreshnessSnapshot,
     keep: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
-    plus per-path provenance and advisory findings. `keep` is a restricted
-    caller's admission (`None` for the owner): its edges resolve in that view.
+    plus per-path provenance and advisory findings. `keep` is the request's content
+    admission (`None` for the owner); the edges resolve in the view that adds the
+    release plane to it (`egress.edge_view`), as a vault without the withheld pages
+    would hold them. A caller with such a view re-derives the links that resolve
+    differently for it, with the resolver of the request's `snapshot`.
     A withheld anchor yields an authoritative empty before registry selection.
 
     Each requested relation is canonicalized through the registry; an unknown key
@@ -4795,8 +4805,13 @@ def _resolve_relation_filter(
                 details={"relation": raw, "suggestions": suggestions, "candidates": suggestions},
             )
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
+    view = egress.edge_view(vault_root, keep)
     result = graph_index.relation_participants(
-        relations or (), anchor=relation_of, direction=relation_direction, keep=keep
+        relations or (),
+        anchor=relation_of,
+        direction=relation_direction,
+        keep=view,
+        resolver=_request_resolver(vault_root, snapshot)() if view is not None else None,
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
@@ -4811,6 +4826,22 @@ def _resolve_relation_filter(
         # direct file edit only a reconcile ends this state.
         raise RetrievalIndexWarming(site="relation_graph_rebuilding", status="warming")
     return result.paths, dict(result.provenance), plan.findings
+
+
+def _request_resolver(
+    vault_root: Path, snapshot: FreshnessSnapshot
+) -> Callable[[], WikilinkResolver]:
+    """The request's link resolver, built on call, for a graph read that re-derives links.
+
+    A restricted caller's graph read re-derives the links that resolve differently for it. Inside
+    an admitted catalogue view only the request's own checkpoint opens a resolver, so it comes
+    from `snapshot`, as the graph lane's does. The owner never calls it.
+    """
+    return lambda: recall_resolver_snapshot(
+        vault_root,
+        allow_fallback=not snapshot.requires_live_recall,
+        expected_checkpoint=snapshot.recall_checkpoint("vault"),
+    )
 
 
 def _dimension_lookups(
@@ -4855,11 +4886,7 @@ def _dimension_source(
         lookups,
         pages=pages,
         admission=keep,
-        resolver=lambda: recall_resolver_snapshot(
-            vault_root,
-            allow_fallback=not snapshot.requires_live_recall,
-            expected_checkpoint=snapshot.recall_checkpoint("vault"),
-        ),
+        resolver=_request_resolver(vault_root, snapshot),
     )
     if edges.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
