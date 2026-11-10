@@ -369,8 +369,9 @@ def test_backfill_due_lists_projection_rollup_and_reference_index(world):
     assert DIARY in due
     projection, rollup, reference = due[DIARY]
     assert reference is True
-    # The same row reports whichever other kinds are due on this store.
-    assert due == {cid: flags for cid, flags in due.items() if any(flags)}
+    # The diary's projection is built and it declares no rollup: it is due on the
+    # reference flag alone, so a row that drops that kind stops listing it.
+    assert due[DIARY] == (False, False, True)
 
 
 # --- 10. bulk writes maintain the index -------------------------------------------------
@@ -423,21 +424,18 @@ def test_a_hidden_source_write_keeps_the_inverse_cursor_valid(world):
     assert second["returned"] == 1
 
 
-def test_dropping_the_source_declaration_stales_the_inverse_cursor(world):
-    """A bound declaration that disappears must stale the continuation, not answer it."""
+def test_a_source_manifest_change_stales_the_inverse_cursor(world):
+    """A bound source manifest that changes must stale the continuation, not answer it."""
     ready(world)
+    row(world, SKILLS, K5, {"slug": "grinding"})
     query = {"related": [INVERSE], "select": ["slug"],
-             "order_by": [{"field": "slug"}], "page": {"limit": 1},
-             "where": {"field": "slug", "op": "eq", "value": "welding"}}
+             "order_by": [{"field": "slug"}], "page": {"limit": 1}}
     first = run(world, query)
-    assert first["has_more"] or first["next_cursor"] or True
-    revise(world, DIARY, diary_text(FIELDS).replace(
-        f"skill_id: {{type: string, references: {{collection: {SKILLS}}}}}",
-        "skill_id: {type: string}"))
+    assert first["has_more"] and first["next_cursor"]
+    revise(world, DIARY, diary_text(FIELDS + "    note: {type: string}\n"))
     with pytest.raises(runtime.QueryError) as error:
         run(world, {**query, "page": {"limit": 1, "after": first["next_cursor"]}})
-    assert error.value.code in {"QUERY_CURSOR_STALE", "QUERY_FIELD_UNAVAILABLE",
-                                "QUERY_FIELD_UNKNOWN", "COLLECTION_NOT_FOUND"}
+    assert error.value.code == "QUERY_CURSOR_STALE"
 
 
 # --- 12. withheld candidates cost nothing ------------------------------------------------
@@ -468,6 +466,27 @@ def test_withheld_candidates_charge_no_visit(world, monkeypatch):
     monkeypatch.setitem(runtime.PROFILES["interactive"], "max_row_visits", 3)
     assert run(world, query, who=_external())["rows"][0]["related"][
         f"inverse:{DIARY}:skills.skill_id"]["count"] == 1
+
+
+def test_the_preview_charge_hides_how_many_referrers_are_withheld(world):
+    """The preview's estimate counts no index rows: withheld referrers read as absent ones."""
+    ready(world)
+    query = {"related": [INVERSE],
+             "where": {"field": "slug", "op": "eq", "value": "welding"}}
+    charge_without = run(world, {**query, "mode": "preview"}, who=_external())["visit_charge"]
+    write_scope(world.root, paths="Unrelated/**")
+    hidden = []
+    for i in range(1, 8):
+        key = f"00000000-0000-4000-8000-0000000000f{i}"
+        with request_scope(owner_principal()):
+            row(world, DIARY, key, {"title": f"hidden {i}", "skills": [{"skill_id": "welding"}]})
+        hidden.append(collections.record_ref(DIARY, key))
+    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text()
+                     + "refs: [" + ", ".join(f'"{ref}"' for ref in hidden) + "]\n")
+    write_rule(world.root, ceiling=0)
+    charge_with = run(world, {**query, "mode": "preview"}, who=_external())["visit_charge"]
+    assert charge_with == charge_without
 
 
 # --- 13. seed_missing restores warming state -------------------------------------------
@@ -519,6 +538,23 @@ def test_inbound_lists_at_most_64_declarations_with_total(world):
     shaped = inspection_inbound({"declarations": entries[:64], "truncated": True, "total": 65})
     assert shaped == {"declarations": entries[:64], "truncated": True, "total": 65}
     assert inspection_inbound({"declarations": entries, "truncated": True, "total": 65}) is None
+
+    # The same bound applies inside inbound(): a source declaring 65 references lists 64.
+    many_fields = "".join(f"    ref{i}: {{type: string, references: {{collection: {SKILLS}}}}}\n"
+                          for i in range(65))
+    create(world, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+           collection_text("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                           "Many", "title", "    title: {type: string, required: true}\n"
+                           + many_fields), "Many")
+    while _pending(world, "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"):
+        world.backfill_derived("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+    from test_collection_store_importer import preview_store
+    with request_scope(owner_principal()):
+        with preview_store(world.root, world.handle) as writer, writer._authorization(mutation=False):
+            _, manifest, _ = writer._collection(SKILLS)
+            inbound = reference_index.inbound(writer._operation, writer.connection, manifest)
+    assert len(inbound["declarations"]) == 64
+    assert inbound["truncated"] and inbound["total"] == 66  # the diary's skills.skill_id is the 66th
 
 
 # --- 16. inbound aligns with the query ----------------------------------------------------

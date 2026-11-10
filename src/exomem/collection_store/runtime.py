@@ -1763,7 +1763,7 @@ class StoreServer:
         collection whose batch is refused waits the retry interval; the others keep advancing.
         """
         from ..governance import principal
-        from . import capability, index_migrations
+        from . import capability, index_migrations, reference_index
         from .preview import _mutate, preview_store
 
         if self.runtime is None or self._idle_released() or not capability.records_summary_enabled(self.root):
@@ -1771,10 +1771,16 @@ class StoreServer:
         if self._references_seeded is not self.runtime._handle:
             # A restored or assembled store may hold declarations with no build state; once per
             # writer handle, seed them so the reference index warms and builds like any other.
+            # A plain read finds them first, so a store with nothing to seed takes no checkout.
             try:
-                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                    _mutate(self.root, writer.seed_references)
-                    self._references_seeded = writer.handle
+                handle = self.runtime._handle
+                with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
+                    unseeded = reference_index.unseeded(reader)
+                if unseeded:
+                    with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
+                        _mutate(self.root, writer.seed_references)
+                        handle = writer.handle
+                self._references_seeded = handle
             except Exception:  # noqa: BLE001 - a store that cannot seed now is retried next tick
                 logger.warning("reference index seeding could not run; retrying later", exc_info=True)
                 return IMPORT_RETRY_SECONDS

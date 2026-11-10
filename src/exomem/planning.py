@@ -1468,6 +1468,10 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
         result["references"] = record_governance.inspection_references(value["references"])
         if result["references"] is None:
             return None
+    if "inbound" in value:
+        result["inbound"] = record_governance.inspection_inbound(value["inbound"])
+        if result["inbound"] is None:
+            return None
     return result
 
 

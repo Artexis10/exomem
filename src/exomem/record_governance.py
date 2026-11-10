@@ -468,12 +468,15 @@ def inspection_references(value: Any) -> list[dict[str, Any]] | None:
 
 
 def inspection_inbound(value: Any) -> dict[str, Any] | None:
-    """The bounded inbound report: up to 64 declarations, plus truncation and total."""
+    """The bounded inbound report: up to INBOUND_LIMIT declarations, plus truncation and total."""
+    from .collection_store.reference_index import INBOUND_LIMIT
+
     if not isinstance(value, Mapping) or set(value) != {"declarations", "truncated", "total"}:
         return None
     items, truncated, total = value["declarations"], value["truncated"], value["total"]
-    if (not isinstance(items, list) or len(items) > 64 or type(truncated) is not bool
-            or type(total) is not int or total < len(items) or truncated != (total > 64)):
+    if (not isinstance(items, list) or len(items) > INBOUND_LIMIT or type(truncated) is not bool
+            or type(total) is not int or total < len(items)
+            or truncated != (total > INBOUND_LIMIT)):
         return None
     out: list[dict[str, Any]] = []
     for item in items:

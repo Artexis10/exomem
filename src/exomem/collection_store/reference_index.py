@@ -18,6 +18,9 @@ from .. import structured_collections as collections
 from ..planning_values import PlanningValues
 from . import typed_storage
 
+# The bounded inbound report's declaration cap; the egress validator shares it.
+INBOUND_LIMIT = 64
+
 
 def _present(conn) -> bool:
     """Whether the store carries schema 17's tables; an older store skips index maintenance."""
@@ -227,14 +230,14 @@ def backfill(conn, manifest, *, limit: int = 128) -> bool:
     return not more
 
 
-def seed_missing(conn) -> None:
-    """Seed a ``ready=0`` state row for every declaration of every current manifest that has none.
+def unseeded(conn) -> list[tuple[str, str, str]]:
+    """``(collection_id, field_path, target_id)`` of each current declaration with no state row.
 
-    A store assembled without the canonical create path — a restore, an import — runs
-    this once per writer handle so its declarations always warm and build.
+    A plain read, so the serving loop checks out a writer only when there is something to seed.
     """
     if not _present(conn):
-        return
+        return []
+    found = []
     for collection_id, text, schema_json in conn.execute(
             "SELECT m.collection_id, m.manifest_text, m.schema_json FROM collection_manifests m "
             "JOIN collections c ON c.collection_id=m.collection_id "
@@ -244,10 +247,22 @@ def seed_missing(conn) -> None:
             continue
         item_schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
         for declaration in collections.declared_references(item_schema):
-            conn.execute(
-                "INSERT OR IGNORE INTO item_reference_state(collection_id, field_path, target_id,"
-                " built_through, ready) VALUES(?,?,?,0,0)",
-                (collection_id, declaration.dotted, declaration.collection))
+            if _state(conn, collection_id, declaration.dotted) is None:
+                found.append((collection_id, declaration.dotted, declaration.collection))
+    return found
+
+
+def seed_missing(conn) -> None:
+    """Seed a ``ready=0`` state row for every declaration of every current manifest that has none.
+
+    A store assembled without the canonical create path — a restore, an import — gets
+    its missing state rows here, so its declarations always warm and build.
+    """
+    for collection_id, field_path, target_id in unseeded(conn):
+        conn.execute(
+            "INSERT OR IGNORE INTO item_reference_state(collection_id, field_path, target_id,"
+            " built_through, ready) VALUES(?,?,?,0,0)",
+            (collection_id, field_path, target_id))
 
 
 def _vault():
@@ -307,6 +322,6 @@ def inbound(operation, conn, manifest) -> list[dict]:
             entries.append({"collection": source_id, "field": declaration.dotted,
                             "state": "ready" if state is not None and state[0] else "warming"})
     entries.sort(key=lambda entry: (entry["collection"], entry["field"]))
-    return {"declarations": entries[:64],
-            "truncated": len(entries) > 64,
+    return {"declarations": entries[:INBOUND_LIMIT],
+            "truncated": len(entries) > INBOUND_LIMIT,
             "total": len(entries)}

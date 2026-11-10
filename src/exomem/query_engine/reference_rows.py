@@ -138,21 +138,16 @@ class _Execution:
         return [name for name, _ in self.chains] + [name for name in self.inverses]
 
     def visit_charge(self) -> int:
-        """The preview's charge: the admitted rows, plus one lookup per row for each bound reference
-        and each inverse's bounded index rows.
+        """The preview's charge: an estimate of the admitted rows plus one lookup per row for each
+        bound reference.
 
-        An upper bound, since the values to look up are read only when the query runs: a
-        many-valued reference may need more lookups per row than it charges.
+        The values to look up are read only when the query runs, so a many-valued reference may
+        need more lookups per row than it charges. The estimate excludes inverse candidates: a
+        withheld source row exists in the index, but the caller cannot learn of it until the
+        query's release filter runs, so inverse candidates are charged when the query runs.
         """
         bounds = {bound for _, hops in self.chains for bound in hops}
-        charge = self.admitted.visible_count * (1 + len(bounds))
-        for _, (_, bound) in self.inverses.items():
-            charge += self.session.connection.execute(
-                "SELECT count(*) FROM (SELECT 1 FROM item_references "
-                "WHERE collection_id=? AND field_path=? LIMIT ?)",
-                (bound.collection_id, bound.dotted,
-                 self.session.limits.max_row_visits + 1)).fetchone()[0]
-        return charge
+        return self.admitted.visible_count * (1 + len(bounds))
 
     def _read_target(self, bound, target) -> None:
         """Read the scan's fields of one resolved target, once.

@@ -279,8 +279,7 @@ def chapter(name: str | None) -> dict:
                      "explain": "release, access path, declared index or rollup, bounds",
                      "preview": "explain plus what the plan reads: visit_charge for rows (admission's charge "
                                 "against bounds.max_row_visits, plus an estimated lookup per row for each reference "
-                                "named, plus each inverse entry's bounded index rows — an upper bound), "
-                                "admitted_rows or rollup_buckets for groups",
+                                "named), admitted_rows or rollup_buckets for groups",
                      "dry_run": "admission and preparation without result rows",
                      "execute": "the default; one page of rows or groups"},
             "execution_profile": {name: {**bounds, **({"concurrent_per_store": runtime.MAX_ANALYTICS_SESSIONS}

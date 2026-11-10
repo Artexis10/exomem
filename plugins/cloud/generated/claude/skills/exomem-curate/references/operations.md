@@ -138,7 +138,7 @@ A collection that kept a manual list of "which rows link to me" can retire it
 once a declared forward reference answers the same question:
 
 1. Declare the forward `references:` entry on the source collection and revise it.
-2. Call `read_records(operation={"kind": "inspect", "collection": <target>})` and confirm `inbound` lists the declaration with `state: ready`.
+2. Call `read_records(operation={"kind": "inspect", "collection": <target>})` and confirm the bounded `inbound.declarations` list names the declaration with `state: ready`; when the report truncates, `truncated` and `total` say so.
 3. Query the target with `related: [{inverse: {collection: <source id>, field: <dotted name>}}]` and compare its `items` against the back-link field's contents.
 4. Remove the field from the target manifest with a `revise` under current guards.
 
