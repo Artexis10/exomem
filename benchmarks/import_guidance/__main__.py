@@ -277,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
                             mcp=Path("mcp.json"),
                             skill=Path("skill.md"),
                             model=args.model,
+                            # The real run stages the arm's hooks in a settings file whenever the scenario names any.
+                            settings=Path("settings.json") if scenario.hooks else None,
                         )
                         print(
                             "  would run:",
