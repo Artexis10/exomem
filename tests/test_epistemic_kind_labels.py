@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from exomem import commands, semantic_language_registry, semantic_units
+from exomem import vault as vault_module
 from exomem.governance.principal import library_scope
 
 FINNISH = {
@@ -290,6 +291,44 @@ def test_a_finnish_heading_is_a_claim_in_a_search_hit(vault: Path) -> None:
 
     assert hits("claim") == [("claim", "Väite")]
     assert hits("decision") == []
+
+
+@library_scope()
+def test_an_update_to_a_unit_under_a_vault_label_says_to_edit_the_page_body(vault: Path) -> None:
+    """observe_memory parses with the shipped kinds (task 6.3), so it cannot find this unit."""
+    from exomem import find as find_module
+    from exomem import freshness, lexstore
+
+    page = vault / "Knowledge Base" / "Notes" / "julkaisu.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: insight\n---\n\n# Julkaisu\n\n## Väite\n\nThe release ships on Friday.\n",
+        encoding="utf-8",
+    )
+    semantic_language_registry.save_registry(vault, CLAIM_IN_FINNISH)
+    entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
+    freshness.seed(vault, "kb", entries)
+    freshness.seed(vault, "vault", entries)
+    lexstore.ensure_fresh(vault)
+    hit = next(
+        hit for hit in find_module.find(
+            vault, query="release ships", scope="kb-only", result_level="unit", limit=10,
+        )
+        if hit.parent_path == "Knowledge Base/Notes/julkaisu.md"
+    )
+
+    with pytest.raises(ValueError, match="^UNIT_NOT_FOUND") as refused:
+        commands.op_observe_memory(
+            vault, path="Knowledge Base/Notes/julkaisu.md", operation="update",
+            category="claim", content="The release ships on Monday.", unit_ref=hit.unit_ref,
+            expected_fingerprint=_parse(
+                page.read_text(encoding="utf-8"), semantic_language_registry.load_registry(vault)
+            ).units[0].fingerprint,
+            expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
+        )
+
+    assert "vault kind or a vault label" in str(refused.value)
+    assert "Edit the unit in the page body with edit_memory" in str(refused.value)
 
 
 # ---------------------------------------------------------------------------

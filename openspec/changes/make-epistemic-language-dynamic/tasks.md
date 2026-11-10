@@ -39,8 +39,9 @@
 
 ## 6. Language and teaching
 
-- [x] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases. Kinds take labels in slice 6; verdicts, belief levels, modalities and inference modes took them in slices 3 and 4. Slice 5 delivers the dimension labels.
+- [ ] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases. Verdicts, belief levels, modalities and inference modes took them in slices 3 and 4. Slice 6 delivers the kind labels, and slice 5a delivers the dimension labels. The slice that merges second ticks this task.
 - [x] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, the verdict-set comment and the `observe_memory` verdict docstring, and say that `credence` is a unit row, never frontmatter.
+- [ ] 6.3 Make `observe_memory`, the parent index and the lexical store's vault-neutral parse read the page's registry, so that a unit of a vault kind or under a vault label can be addressed and updated.
 
 ## 7. Proof and delivery
 

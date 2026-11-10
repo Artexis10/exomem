@@ -249,6 +249,19 @@ def observe_memory(
                 "ambiguous": "AMBIGUOUS_UNIT_REFERENCE",
                 "missing": "UNIT_NOT_FOUND",
             }.get(resolution.status, "UNIT_NOT_FOUND")
+            # A ref this parse cannot find reads as missing, or as stale when it names a
+            # fingerprint; the page's own registry tells which of those is a vault heading.
+            if resolution.status in {"missing", "stale"} and _a_vault_heading_holds(
+                vault_root, editable.rel_path, editable.original_text, unit_ref,
+                expected_fingerprint,
+            ):
+                raise ObserveMemoryError(
+                    "UNIT_NOT_FOUND",
+                    "the unit's heading is a vault kind or a vault label, which observe_memory "
+                    "cannot address yet",
+                    "Edit the unit in the page body with "
+                    f"{capabilities.active_tools_text('edit_memory')}.",
+                )
             raise ObserveMemoryError(
                 code,
                 f"unit reference is {resolution.status}; re-read the parent and retry",
@@ -677,6 +690,25 @@ def _select_kind(
             _belief_remediation(),
         )
     return resolution.resolved
+
+
+def _a_vault_heading_holds(
+    vault_root: Path, rel_path: str, source: str, unit_ref: str, fingerprint: str | None
+) -> bool:
+    """Whether `unit_ref` names a current unit that only the page's own registry reads.
+
+    This tool parses a page with the shipped kinds, so a unit under a vault kind's heading or a
+    vault label is missing to it. The page's registry parses the page once, on the refusal path
+    only, so the refusal can say what is true.
+    """
+    frontmatter, _body, _ = vault.parse_frontmatter(source)
+    language = semantic_language_registry.load_for_page(vault_root, rel_path, frontmatter)
+    if language is semantic_language_registry.core_registry():
+        return False
+    state = semantic_contract._parse_page_state(
+        vault_root, rel_path, source, language_registry=language
+    )
+    return state.document.resolve_unit(unit_ref, expected_fingerprint=fingerprint).status == "found"
 
 
 def _belief_remediation() -> str:
