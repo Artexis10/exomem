@@ -68,9 +68,9 @@ them to local ports and trusts only that CA.
 1. **Invite.**
 2. **Provision** a paid tenant (A): invite redemption, checkout, then a `subscription.activated` webhook. Timed until cellctl observes the cell running and ready. The target is under 3 minutes.
 3. **OAuth MCP `tools/list`.** The stock MCP Python SDK OAuth client runs gateway 401, discovery, PKCE with `resource` (verifiers from the full RFC 7636 grammar), consent, a `127.0.0.1` loopback redirect and token. Warm `initialize` and `tools/list` are timed.
-4. **Capture** (`capture_source`).
-5. **Paraphrased cited recall** (`ask_memory`).
-6. **Governed write (`remember`) after a pod kill.** Owner-only modes are checked.
+4. **Capture** (`save_source`).
+5. **Paraphrased cited recall** (`search_memory`).
+6. **Governed write (`create_note`) after a pod kill.** Owner-only modes are checked.
 7. **Upgrade and recall.** Uses the owner's release route. The time includes the pre-upgrade backup.
 8. **Forced canary failure.** The rollout pauses with `UPGRADE_READINESS_TIMEOUT` and the pre-upgrade snapshot is restored onto the previous image. The step then checks that a write made before the attempt survives.
 9. **Read-only mode** through `subscription.past_due`, then recovery.
@@ -118,7 +118,7 @@ A person's agent brings a large, realistic folder into a Cloud cell, then a seco
 For each folder the run does what an agent does:
 1. Run `exomem cloud import <folder>` in the CLI container, as in the native import above.
 2. Poll `observe_transfer` until the import is `done`.
-3. File with `import_memory`: repeat `file` with the continuation of each reply until `filing` is `done` or `stopped`. The first folder starts with one `start` that bootstraps the Knowledge Base of the fresh cell; `file` carries on that run. Every call keeps the default, compact reply, and the run reads its control fields from it. The compact reply omits the inventory, the recorded stage and the filed count, so the run reads `read_import` status for each page when `file` is done. If the compact `done` reply drops the residual that the run holds, the `compact_reply` criterion fails.
+3. File with the `manage_memory` operation `imports.file`: repeat `file` with the continuation of each reply until `filing` is `done` or `stopped`. The first folder starts with one `start` that bootstraps the Knowledge Base of the fresh cell; `file` carries on that run. Every call keeps the default, compact reply, and the run reads its control fields from it. The compact reply omits the inventory, the recorded stage and the filed count, so the run reads `read_import` status for each page when `file` is done. If the compact `done` reply drops the residual that the run holds, the `compact_reply` criterion fails.
 4. Read the residual, then call `transfer_memory` with `import_discard` and `confirm=true`.
 5. Wait for the index queues to empty, then read the Sources back.
 

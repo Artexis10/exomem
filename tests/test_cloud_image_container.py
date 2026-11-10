@@ -60,8 +60,8 @@ CELL_ID = f"lanea-r2-cell-{RUN_ID}"
 TOKEN = secrets.token_urlsafe(32)  # noqa: S105 - disposable test bearer, well past the 32-char floor
 LEGACY_PROTOCOL_VERSION = "2025-11-25"
 
-# Distinctive phrases (task 2.8 step 9): one carried by a `remember` title,
-# one by an `ask_memory` query. Neither may appear in any log or journal the
+# Distinctive phrases (task 2.8 step 9): one carried by a `create_note` title,
+# one by a `search_memory` query. Neither may appear in any log or journal the
 # cell writes (see `_assert_no_phrase_leak`).
 PHRASE_REMEMBER = f"lanea-r2-distinctive-remember-phrase-{RUN_ID}"
 PHRASE_ASK = f"lanea-r2-distinctive-ask-phrase-{RUN_ID}"
@@ -268,7 +268,7 @@ def _mcp_call_tool(
 def _governed_write(
     client: httpx.Client, *, arguments: dict, request_id: int, timeout: float = 60.0
 ) -> dict:
-    """A `remember` call, retried through `MUTATION_WARMING`.
+    """A `create_note` call for a note that links nothing, retried through `MUTATION_WARMING`.
 
     `/health/ready` gates retrieval admission (task 2.8 step 8), not the
     separate graph-handoff warm-up a governed write can still hit just after
@@ -286,7 +286,10 @@ def _governed_write(
     last: dict = {}
     while time.monotonic() < deadline:
         result = _mcp_call_tool(
-            client, name="remember", arguments=arguments, request_id=request_id
+            client,
+            name="create_note",
+            arguments={"unlinked_reason": "A container test note that links nothing.", **arguments},
+            request_id=request_id,
         )
         structured = result["structuredContent"]
         error = structured.get("error")
@@ -463,9 +466,9 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
             _governed_write(
                 client,
                 arguments={
-                    "content": f"container test note body naming {PHRASE_REMEMBER}",
+                    "content": f"container test note body naming {PHRASE_REMEMBER}\n\n"
+                    f"## Observations\n\n- [container-test] naming {PHRASE_REMEMBER} #container-test\n",
                     "title": PHRASE_REMEMBER,
-                    "status": "draft",
                 },
                 request_id=2,
             )
@@ -497,7 +500,7 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
 
             # ---- step 6: exact and paraphrased recall of the write ----
             exact = _mcp_call_tool(
-                client, name="ask_memory", arguments={"query": PHRASE_REMEMBER}, request_id=2
+                client, name="search_memory", arguments={"query": PHRASE_REMEMBER}, request_id=2
             )
             assert PHRASE_REMEMBER in json.dumps(exact["structuredContent"]), exact
 
@@ -507,16 +510,18 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
             while True:
                 paraphrase = _mcp_call_tool(
                     client,
-                    name="ask_memory",
+                    name="search_memory",
                     # Timings keep the raw warming block beside the hits, so the loop can wait
                     # for exactly the embeddings component.
                     arguments={
                         "query": "what does the container test note say happened here",
-                        "include_timings": True,
+                        "options": {"include_timings": True},
                     },
                     request_id=3,
                 )
-                recall_result = paraphrase["structuredContent"]["result"]
+                # search_memory answers an object; a wrapped reply keeps it under `result`.
+                body = paraphrase["structuredContent"]
+                recall_result = body["result"] if isinstance(body.get("result"), dict) else body
                 components = recall_result.get("warming", {}).get("components", [])
                 if "embeddings" not in components:
                     break
@@ -528,16 +533,16 @@ def test_cloud_image_end_to_end_under_production_shaped_constraints() -> None:
             _governed_write(
                 client,
                 arguments={
-                    "content": f"second container test note naming {PHRASE_ASK}",
+                    "content": f"second container test note naming {PHRASE_ASK}\n\n"
+                    f"## Observations\n\n- [container-test] naming {PHRASE_ASK} #container-test\n",
                     "title": f"second-write-{PHRASE_ASK}",
-                    "status": "draft",
                 },
                 request_id=4,
             )
 
-            # step 9 setup: an ask_memory call that carries the second phrase.
+            # step 9 setup: a search_memory call that carries the second phrase.
             _mcp_call_tool(
-                client, name="ask_memory", arguments={"query": PHRASE_ASK}, request_id=5
+                client, name="search_memory", arguments={"query": PHRASE_ASK}, request_id=5
             )
 
         # ---- step 9: zero phrase hits outside /data/vault, none in logs ----

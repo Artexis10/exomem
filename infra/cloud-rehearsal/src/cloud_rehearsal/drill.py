@@ -147,14 +147,14 @@ async def main(mode, marker):
         async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
             if mode == "recall":
-                result = structured(await session.call_tool("ask_memory", {"query": marker}))
+                result = structured(await session.call_tool("search_memory", {"query": marker}))
                 print(json.dumps({"recall": json.dumps(result)}))
                 return
             body = marker + "\n\n## Observations\n\n- [drill] " + marker + " #drill\n"
             deadline = time.monotonic() + 120
             while True:
                 result = structured(await session.call_tool(
-                    "remember", {"title": "Drill " + marker, "content": body, "status": "draft"}))
+                    "create_note", {"title": "Drill " + marker, "content": body, "unlinked_reason": "A drill note that links nothing."}))
                 error = result.get("error")
                 if not (isinstance(error, dict) and error.get("code") == "MUTATION_WARMING") or time.monotonic() > deadline:
                     print(json.dumps({"error": error}))

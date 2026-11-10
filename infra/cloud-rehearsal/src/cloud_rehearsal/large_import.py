@@ -368,7 +368,9 @@ class Agent:
         raise StepFailure(f"{label} kept failing after {TRANSIENT_ATTEMPTS} attempts; last: {last}")
 
     async def import_op(self, kind: str, **fields: Any) -> tuple[dict, float]:
-        return await self.call("import_memory", {"operation": {"kind": kind, **fields}}, kind=kind)
+        return await self.call(
+            "manage_memory", {"operation": f"imports.{kind.replace('-', '_')}", "arguments": fields}, kind=kind
+        )
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -592,13 +594,15 @@ async def prove_stage(ctx: Context, agent: Agent, folder: Folder, row: Mapping[s
 
 
 async def read_run(agent: Agent, run_id: str) -> dict[str, Any]:
-    """The run as `read_import` status reports it, with what the compact `import_memory` replies leave out.
+    """The run as `imports.status` reports it, with what the compact `imports.*` replies leave out.
 
     The flow reads its control fields from the compact replies, as an agent does. The measurements also need
     the inventory, the recorded stage and the finish count. A read changes nothing and keeps those replies
-    compact, where `response_detail: "full"` would wrap each reply in the terminal envelope and add a payload per call.
+    compact, where `detail: "full"` would wrap each reply in the terminal envelope and add a payload per call.
     """
-    body, _ = await agent.call("read_import", {"operation": {"kind": "status", "run_id": run_id}}, kind="status")
+    body, _ = await agent.call(
+        "inspect_memory", {"operation": "imports.status", "arguments": {"run_id": run_id}}, kind="status"
+    )
     return body
 
 
@@ -801,7 +805,7 @@ async def check_sources(ctx: Context, agent: Agent, folder: Folder) -> list[str]
         "what": "adoption_plan.read_import_index over the vault, run in the cell's pod after the index queues "
                 "drained; one lap per listed number, each a full walk of the Sources folder",
     }
-    body, seconds = await agent.call("ask_memory", {"query": folder.sentinel})
+    body, seconds = await agent.call("search_memory", {"query": folder.sentinel, "detail": "full"})
     folder.report["recall"] = {"seconds": seconds, "answers_with_the_original_path": folder.marked_path in json.dumps(body)}
     return problems
 
