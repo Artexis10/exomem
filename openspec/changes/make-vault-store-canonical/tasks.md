@@ -36,7 +36,9 @@
   - Budget: cold at most 2 ms a page for `find` and 2.5 ms a page for `ask_memory`, warm at most 0.5 ms a page for `find` and 0.8 ms a page for `ask_memory`, and a snapshot count that does not grow with the page count. The budget is linear because the scan rung reads every page. By the 2000-page run, a 10,000-page vault would take 8 to 14 s cold for `find` (an unverified projection), which no interactive request can accept. The SQL repoint in 3.1 must land before the gate opens.
   - Left: the graph and reference readers and the inbound-link index keep their freshness witnesses and sync-on-first-use repair in store mode until 3.1 repoints them.
   - Left: the policy files under `_Governance` stay disk-resident (a reserved family that the store does not own), so loading the policy still reads files.
-- [ ] 3.3 Before a reader serves from the store, key each cache that D2 keys on the store revision on the registry revision too, or bump the store revision at the end of a re-derivation pass: a pass changes derived rows without a page commit.
+- [x] 3.3 Before a reader serves from the store, key each cache that D2 keys on the store revision on the registry revision too, or bump the store revision at the end of a re-derivation pass: a pass changes derived rows without a page commit.
+  - Done: each batch of the registry pass moves the store revision by one in its own transaction, the last batch included, so every cache keyed on the store revision sees the rows and the registry state that the pass changed. No reader cache needed a second key: the `find` parse cache and the store corpus depend only on page bytes and paths, and the vector drain follows the audit trail.
+  - Done: a kept registry version under `_Schema/history/` is no overlay source, so saving a registry no longer starts a second whole-vault pass. The loaders read the live overlay files; only the registry tools read a kept version, at request time.
 
 ## 4. Projection and outside edits
 

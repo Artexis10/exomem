@@ -311,7 +311,8 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
 
 
 def current_revision(vault_root: Path) -> int:
-    """The store revision now: it moves by one for each committed change."""
+    """The store revision now: it moves by one for each committed change and for each batch of the
+    registry pass (``rederive.settle``), which changes derived rows without a page commit."""
     with snapshot(vault_root) as view:
         return view.revision
 
