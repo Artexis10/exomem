@@ -274,8 +274,8 @@ control database. The safe undo is to fix forward: correct the cause and run the
 A deleted cell does not convert. On its first pass, cellctl 0.147.0 or later erases the wrapped keys of each
 deleted cell (`retire_content_keys` in `infra/cellctl/src/cellctl/db.py`). A stopped cell converts when it next starts.
 
-If the upgrade crosses 0.147.0, do "Before the upgrade" and then "After the upgrade".
-Do "If the upgrade fails" only after a failure.
+If the upgrade crosses 0.147.0, do "Before the upgrade", then "Upgrade the release" and "Verify", then
+"After the backup key conversion". Do "If the upgrade fails" only after a failure.
 
 #### Before the upgrade
 
@@ -295,7 +295,7 @@ Do "If the upgrade fails" only after a failure.
 
    Expect one row for each cell that is not deleted, with `cell_root_key_wrapped` empty on every row.
    The copy holds wrapped keys: keep it private, and never print, commit or send it.
-   It is evidence for a repair, not an undo. "After the upgrade" deletes it.
+   It is evidence for a repair, not an undo. "After the backup key conversion" deletes it.
 3. Note the number of the current revision. It is the rollback target.
 
    ```bash
@@ -303,7 +303,8 @@ Do "If the upgrade fails" only after a failure.
    ```
 
    Expect one row, with the status `deployed`.
-4. Use the command without `--atomic` in "Upgrade the release". A failed wait then leaves the new cellctl running.
+4. Note the time of the copy in UTC. "After the backup key conversion" uses it.
+5. Use the command without `--atomic` in "Upgrade the release". A failed wait then leaves the new cellctl running.
 
 #### If the upgrade fails
 
@@ -341,35 +342,23 @@ The upgrade can fail at its apply or at its wait. Either way, the new cellctl ca
    rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
    ```
 
-7. After the rollback, list the cellctl Deployment. If it shows 0 replicas, scale it to 1.
+7. After the rollback, list the cellctl Deployment.
 
    ```bash
    kubectl --namespace exomem-cloud get deployment/cellctl
    ```
 
+   If it shows 0 replicas, scale it to 1.
+
+   ```bash
+   kubectl --namespace exomem-cloud scale deployment/cellctl --replicas=1
+   ```
+
 8. If a count is above 0, fix forward and never roll back. Correct the cause, then run the upgrade again without `--atomic`.
 
-Expected result: after a rollback, the count is 0, the copy is gone and the old cellctl runs.
+Expected result: after a rollback, the count is 0, the copy is gone and the old cellctl runs. Stop the
+change there, find the cause and start again from "Before the upgrade".
 After a fix forward, the upgrade ends without an error.
-
-#### After the upgrade
-
-The temporary copy must not outlive the upgrade. cellctl erases a deleted cell's wrapped keys on its first pass.
-A copy would keep the key of a cell after its deletion, and defeat the key expiry that the platform promises.
-
-1. Run this query until each row shows a `last_backup_at` after the end of the upgrade.
-
-   ```bash
-   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, last_backup_at FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL ORDER BY cell_id"
-   ```
-
-2. Delete the temporary copy of the key columns as soon as step 1 holds.
-
-   ```bash
-   rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
-   ```
-
-Expected result: `cell-keys-before.csv` is gone, and each converted cell has a backup that is newer than the upgrade.
 
 ### Upgrade the release
 
@@ -426,3 +415,39 @@ kubectl get storageclass exomem-cloud-encrypted
 ```
 
 Both scheduler CronJobs must print `suspend=false` while Cloud is enabled.
+
+## After the backup key conversion
+
+Do this section after "Upgrade the release" and "Verify". If a follow-up release is planned, do it after that
+release too. A key custody cutover is one example.
+
+The temporary copy must not outlive the upgrade. cellctl erases a deleted cell's wrapped keys on its first pass.
+A copy would keep the key of a cell after its deletion, and defeat the key expiry that the platform promises.
+
+A cell with local storage backs up each hour. Another cell backs up once a day, between 02:00 and 05:00 UTC.
+
+1. Note the time when each cell pod was replaced once after the upgrade, in UTC. Call it the rollout end.
+2. Note the time of the temporary copy from "Before the upgrade", in UTC. Call it the copy time.
+3. Put the copy time in this query. Run it until each row shows a `last_backup_at` later than the rollout end.
+
+   ```bash
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, last_backup_at FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL AND created_at < '<copy time>' AND desired_state IN ('running','read_only') ORDER BY cell_id"
+   ```
+
+   The query leaves out a cell created after the copy, because the copy does not hold it.
+4. If a row still has no such backup 26 hours after the rollout end, read the last backup Job of that cell.
+
+   ```bash
+   kubectl --namespace <cell namespace> get jobs --sort-by=.metadata.creationTimestamp
+   ```
+
+5. If that Job failed because it could not unwrap the backup key, keep the copy and fix forward from it. Stop here.
+6. For any other cause, record it for that cell and continue.
+7. Delete the temporary copy of the key columns.
+
+   ```bash
+   rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+   ```
+
+Expected result: `cell-keys-before.csv` is gone. Each listed cell has a backup that is newer than the rollout end,
+or a recorded cause that is not the backup key.

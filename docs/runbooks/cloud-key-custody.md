@@ -192,7 +192,7 @@ An export or import object left in the old bucket is orphaned.
 The key custodian is in release 0.157.0 and later. The cell-deletion purge is in release 0.171.0 and later.
 Take the `cellctl.image` digest from the cellctl attestation asset of the release that you choose.
 The asset is named `exomem-image-cellctl-<commit>-<digest>-<run>-<attempt>.sigstore.json`. Check the digest with
-`gh attestation verify oci://ghcr.io/artexis10/exomem-cellctl@sha256:<digest> --owner artexis10`.
+`gh attestation verify oci://ghcr.io/artexis10/exomem-cellctl@sha256:<digest> --owner artexis10 --source-ref refs/tags/v<version>`.
 Use that one digest in both releases, because the key custodian runs the `cellctl` image.
 
 | Release | Content | `keyCustodian.enabled` |
@@ -255,27 +255,28 @@ prints `0`.
 1. Do "Review the release" in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release). Expect no error, and no object of the key custodian in the diff.
 2. Do "Before the upgrade" under "Cross the backup key conversion" in the same runbook.
 3. Run the queries of steps 2 and 3 of "Prepare release A" again. Expect no rows.
-4. Run the upgrade without `--atomic`, as step 3 of "Upgrade the release" in the same runbook says.
+4. Do steps 1 and 3 of "Upgrade the release" in the same runbook. Step 3 has no `--atomic`.
 5. If the upgrade fails, do "If the upgrade fails" under "Cross the backup key conversion" in the same runbook.
+   If you rolled back, stop here and do not run release B. Find the cause, then start again at "Prepare release A".
 6. Wait until `cellctl` is Ready. Its liveness probe restarts the pod when its heartbeat file is older than 120 seconds.
    `kubectl --namespace exomem-cloud get pods --selector app.kubernetes.io/name=cellctl`
 7. Wait until each cell pod is replaced once, one cell at a time. Allow up to 10 minutes for each cell.
    `kubectl get pods --all-namespaces --selector app.kubernetes.io/name=exomem-cell`
-8. Read the `cellctl` pod again. If `RESTARTS` is above 0, find the cause before release B.
+   Note the time when the last cell pod is Ready, in UTC. It is the rollout end of "After the backup key conversion".
+8. Do "Verify" in the same runbook. Then read the `cellctl` pod again. If `RESTARTS` is above 0, find the cause before release B.
 9. Compare the converted cells with all cells, for each desired state.
    `psql "$EXOMEM_CELLCTL_DSN" --command "SELECT desired_state, count(*) AS cells, count(cell_root_key_wrapped) AS converted FROM exomem_cloud_cells GROUP BY desired_state ORDER BY desired_state"`
-10. Do "After the upgrade" under "Cross the backup key conversion" in the same runbook, before release B.
 
 Expected result: the `cellctl` pod is Ready and has 0 restarts. Every cell pod is Ready and was replaced once.
 In the query of step 9, `converted` equals `cells` for each `running` and `read_only` row, and it is 0 for `deleted`.
-A `stopped` cell converts when it next starts. The temporary copy of the key columns is deleted.
+A `stopped` cell converts when it next starts. The temporary copy of the key columns stays until release B ends.
 
 ### Run release B
 
 1. If you turn on the purge, do steps 1 to 5 of "Turn on the purge" in [Cloud cell deletion](cloud-cell-deletion.md#turn-on-the-purge). Skip its step 6: step 4 below is that upgrade.
 2. Set `keyCustodian.enabled` to `true` in the private values file.
 3. Do "Review the release" in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release). Expect the diff to add only objects of the key custodian. If it changes `cellctl`, stop.
-4. Run step 2 of "Upgrade the release" in the same runbook, with `--atomic`. Expect `Release "exomem-platform" has been upgraded.`
+4. Do steps 1 and 2 of "Upgrade the release" in the same runbook. Step 2 has `--atomic`. Then do "Verify".
 5. If the purge is on and the platform has the media edge, do step 7 of "Turn on the purge".
 6. List the pod of the key custodian. Expect `key-custodian` Ready on the control-plane node.
    `kubectl --namespace exomem-key-custody get pods --output wide`
@@ -288,8 +289,10 @@ A `stopped` cell converts when it next starts. The temporary copy of the key col
 10. Compare the two counts. Expect them equal. A deleting cell, or a cell that a deletion grant names, has no key.
 11. Run the key watcher once. Expect `0 active` for both accounts.
     `gh workflow run b2-key-watcher.yml`
+12. Do "After the backup key conversion" in [Cloud platform deploy](cloud-platform-deploy.md#after-the-backup-key-conversion). Use the rollout end of release A.
 
 Expected result: the key custodian runs, and each live cell has the Secret `cell-object-store-key`.
+The temporary copy of the key columns is deleted.
 
 The key custodian also makes a key for each cell that was created before the switch. Such a cell ignores that key
 and keeps its stored key until it migrates. The key watcher counts each such key as a per-cell key.
