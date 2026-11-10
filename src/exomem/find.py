@@ -5137,16 +5137,15 @@ def _group_request(
         )
         units[hit.unit_ref] = (unit, dimensions({"path": path}, view, own_kind=own_kind) & wanted)
     definitions = language.label_definitions(semantic_labels.DIMENSIONS)
+
+    def label(key: str) -> str:
+        labels = definitions[key].labels
+        # The outcome sentence is English, so it takes the `en` label, else the first by tag.
+        return dict(labels).get("en") or (labels[0][1] if labels else key)
+
     return dimension_display.GroupRequest(
         groups=tuple(
-            dimension_display.Group(
-                key,
-                # The registry fixes no default language, so a reply names a group by its first
-                # label in tag order, or by its key when it has none.
-                definitions[key].labels[0][1] if definitions[key].labels else key,
-                lookups.display.get(key, ()),
-            )
-            for key in groups
+            dimension_display.Group(key, label(key), lookups.display.get(key, ())) for key in groups
         ),
         units=units,
         edges=edges,

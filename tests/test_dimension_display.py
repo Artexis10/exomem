@@ -296,6 +296,21 @@ def test_an_added_dimension_borrows_a_display_behaviour(tmp_path: Path) -> None:
     assert [unit.get("display") for unit in _packed(reply).values()] == [{"origin": origin}, None]
 
 
+def test_an_english_outcome_names_a_group_by_its_english_label(tmp_path: Path) -> None:
+    """Catches an English outcome sentence that names a group by whichever label sorts first, so a
+    dimension labelled in German and English reads as 'Regelwerk'."""
+    vault = _vault(
+        tmp_path,
+        {"Release rules": "## Constraint\n\nNo deploys on Friday."},
+        registry=REGULATION.replace("{en: Regulation}", "{de: Regelwerk, en: Regulation}"),
+    )
+
+    reply = _search(vault, {"unit.dimension": {"$eq": "regulation"}})
+
+    assert reply["dimension_groups"][0]["label"] == "Regulation"
+    assert reply["user_summary"] == "1 unit in 'Regulation'."
+
+
 def test_an_open_question_is_open_only_until_another_page_answers_it(tmp_path: Path) -> None:
     """Catches `open` that ignores an inbound `answers` edge from another page, or that marks a
     question open whatever its edges say."""
