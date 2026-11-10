@@ -561,7 +561,8 @@ def _neighborhood(
     max_neighbors: int,
     *,
     under_strip: Callable[[str], bool],
-    purpose: str | None = None,
+    # Required: a view built without the request's declared purpose admits what a purpose rule withholds.
+    purpose: str | None,
 ) -> tuple[list[dict], int, list[str]]:
     """1-hop inbound+outbound wikilink neighbours of the packed notes, packed notes
     excluded, ranked by co-citation (distinct packed notes linked), capped.

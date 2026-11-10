@@ -107,7 +107,7 @@ def _pack_truncation(vault: Path, *, restricted: bool) -> tuple[list[str], list[
     assert page is not None
     with _caller(restricted):
         neighbours, _dropped, incomplete = context_pack._neighborhood(
-            vault, [page], 10, under_strip=lambda _path: False
+            vault, [page], 10, under_strip=lambda _path: False, purpose=None
         )
     return sorted(item["path"] for item in neighbours), sorted(incomplete)
 

@@ -723,3 +723,45 @@ def test_a_small_ceiling_still_renders_a_recent_line(carried_by: str) -> None:
         assert "recent" in kinds, (ceiling, block)
     wide = hook._format_working_set_block(packet, 600)
     assert any(line.startswith("- unit:") for line in wide.splitlines()), wide
+
+
+def test_a_declared_purpose_names_an_anchor_by_title_without_the_withheld_namesake(
+    carry_vault: Path,
+) -> None:
+    """Catches an anchor title resolved before the declared purpose applies: a page that the rule
+    withholds only for `marketing` shares the carried page's title, so the title reads as ambiguous
+    and the anchor is refused, where the vault without that page carries it. The refusal itself
+    then tells the caller that a withheld page bears the title."""
+    title = "Quillon vantry window"
+    namesake = carry_vault / "Knowledge Base" / "Notes" / "Patterns" / "quillon-namesake.md"
+    write_scope(carry_vault, paths="Knowledge Base/Notes/Patterns/*", name="Patterns")
+    write_rule(carry_vault, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+
+    def carried(*, purpose: str | None) -> tuple[str, list[str]] | str:
+        _reset_caches()
+        working_set_runtime.reset_caches_for_tests()
+        lexstore.ensure_fresh(carry_vault)
+        working_set_index.WorkingSetIndex(carry_vault).rebuild()
+        try:
+            with request_scope(_external()):
+                packet = commands.op_activate_context(
+                    carry_vault, turn=NONSENSE_TURN, anchor=title, purpose=purpose
+                )
+        except ValueError as refusal:
+            return str(refusal)
+        return _anchor(packet)["ref"], sorted(unit["ref"] for unit in packet["units"])
+
+    without_namesake = carried(purpose="marketing")
+    _write(
+        namesake,
+        "---\ntype: research-note\nstatus: active\nupdated: 2026-09-11\n---\n\n"
+        "# Quillon vantry window\n\n## Summary\n\nAn older draft of the window decision.\n",
+    )
+    with_namesake = carried(purpose="marketing")
+    undeclared = carried(purpose=None)
+
+    assert without_namesake[0] == CARRY_PAGE
+    assert with_namesake == without_namesake
+    # Undeclared, the rule withholds nothing, so the namesake makes the title ambiguous: the
+    # declared answer depends on the purpose, not on a title that never collided.
+    assert isinstance(undeclared, str)
