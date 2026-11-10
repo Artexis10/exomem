@@ -194,38 +194,159 @@ one day later. It cancels an unfinished upload after 2 days. The deletion does n
 
 ## Cut over from the old object-store account
 
-Do this once, before you deploy the chart that uses the cell-data account. After the deploy,
-`cellctl` presigns, reads and removes export and import objects only in the staging bucket. An export or
-import object left in the old bucket is orphaned.
+Do this once. It moves object-store key creation from `cellctl` to the key custodian. It takes two Helm
+releases, then one later step that cannot be undone: "Destroy the old controller key".
 
-1. Run this read-only query for exports on the control database. Expect no rows.
+After release A, `cellctl` presigns, reads and removes export and import objects only in the staging bucket.
+An export or import object left in the old bucket is orphaned.
+
+### Choose the releases
+
+The key custodian is in release 0.157.0 and later. The cell-deletion purge is in release 0.171.0 and later.
+Take the `cellctl.image` digest from the cellctl attestation asset of the release that you choose.
+The asset is named `exomem-image-cellctl-<commit>-<digest>-<run>-<attempt>.sigstore.json`. Check the digest with
+`gh attestation verify oci://ghcr.io/artexis10/exomem-cellctl@sha256:<digest> --owner artexis10 --source-ref refs/tags/v<version>`.
+Use that one digest in both releases, because the key custodian runs the `cellctl` image.
+
+| Release | Content | `keyCustodian.enabled` |
+| --- | --- | --- |
+| A | The chart at the chosen release, the new `cellctl.image` digest, `cellData` and the cell-data Secrets | `false` |
+| B | Release A, plus the key custodian and, to turn on the purge, `cellDeletion.grantPublicKeys` | `true` |
+
+Release A starts the backup key conversion: see "Cross the backup key conversion" in
+[Cloud platform deploy](cloud-platform-deploy.md#cross-the-backup-key-conversion). A failed wait in one combined release
+would roll `cellctl` back after the conversion. In release B, only key custodian objects can roll back.
+The chart keeps the key custodian namespace.
+
+A cell that is created between the two releases has no object-store key, so its backup Jobs cannot start until
+the key custodian's first sweep. This repository has no switch that pauses sign-ups, because Substrate admits
+each new cell. Run release B right after release A.
+
+### Prepare release A
+
+1. Set `EXOMEM_PLATFORM_VALUES` and `EXOMEM_UPGRADE_DIR`, as "Review the release" in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release) says.
+2. Run this read-only query for exports on the control database. Expect no rows.
    `SELECT export_id, cell_id, observed_state FROM exomem_cloud_exports WHERE observed_state IS NULL OR observed_state IN ('packing','ready') OR upload_id IS NOT NULL OR archive_version_id IS NOT NULL;`
-2. Run this read-only query for imports. Expect no rows.
+3. Run this read-only query for imports. Expect no rows.
    `SELECT import_id, cell_id, observed_state FROM exomem_cloud_imports WHERE observed_state IS NULL OR observed_state NOT IN ('done','failed','expired','discarded');`
-3. If a query returns rows, wait until `cellctl` ends them on their deadlines, or end them through the product. Run both queries again.
-4. When both queries return no rows, create the custodian's namespace with Helm ownership, so that the
-   secret apply can write into it and the release adopts it.
+4. If a query returns rows, wait until `cellctl` ends them on their deadlines, or end them through the product. Run both queries again.
+5. Run the key watcher once. Expect `0 active` for both accounts. If it reports a key, resolve that first.
+   `gh workflow run b2-key-watcher.yml`
+6. Create the key custodian's namespace, so that the secret apply can write into it and release B adopts it.
    `kubectl create namespace exomem-key-custody`
+7. Label the namespace as owned by Helm.
    `kubectl label namespace exomem-key-custody app.kubernetes.io/managed-by=Helm`
+8. Annotate the namespace with the release name and the release namespace.
    `kubectl annotate namespace exomem-key-custody meta.helm.sh/release-name=exomem-platform meta.helm.sh/release-namespace=exomem-platform`
-5. Set `EXOMEM_ACTIVE_SECRET_REGISTRY` and `EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY` to the
-   `cloud-production-v2` pair under `infra/contracts/active-secret-registries/`. It adds the three
-   cell-data credentials and drops `exomem-cloud-b2-key-management`. Dropping a destination does not delete
-   its Secret, so the running `cellctl` keeps its key until step 12.
-6. Run the secret apply in `docs/runbooks/cloud-platform-deploy.md`. Expect 17 verified destinations.
-7. Set the chart values from the `infra/terraform/cell-data` outputs: `cellData.backupBucketName`,
-   `cellData.backupBucketId`, `cellData.stagingBucketName`, and `cellData.endpoint`, the account's S3
-   endpoint (`s3ApiUrl` from `b2_authorize_account`). Set `keyCustodian.enabled=true`.
-8. Run the Helm upgrade in `docs/runbooks/cloud-platform-deploy.md`. Expect the key custodian pod to be
-   ready on the control-plane node, and each new cell to receive the Secret `cell-object-store-key`.
-9. Wait until the new `cellctl` is healthy: its heartbeat is fresh and its pod does not restart.
-10. Plan the durability root with `infra/scripts/plan.sh durability <plan>`. Expect exactly one destroy,
-    `b2_application_key.cloud_controller[0]`. The bucket's CORS header casing can show as an in-place update.
-11. With the operator's approval, apply that plan. This deletes the old account-wide key at the provider.
-    `infra/scripts/apply_saved_plan.sh durability <plan> --allow-destructive 'b2_application_key.cloud_controller[0]'`
-12. Delete the old controller Secret.
-    `kubectl delete secret exomem-cloud-b2-key-management --namespace exomem-cloud`
-13. Record its absence proof in the [retirement disposal](cloud-hosted-retirement.md) row for
-    `k3s.cloud.exomem-cloud-b2-key-management.active`. Its SOPS artifact is already gone from the tree.
-14. Remove the deleted key's ID from the founder account in the key watcher's pinned set, then run the watcher
-    once. Expect `0 active` for both accounts. No key that can create keys is now reachable from the cluster.
+9. Set `EXOMEM_ACTIVE_SECRET_REGISTRY` and `EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY` to the
+   `cloud-production-v2` pair under `infra/contracts/active-secret-registries/`.
+   The pair adds the three cell-data credentials and drops `exomem-cloud-b2-key-management`.
+   Dropping a destination does not delete its Secret. The old controller Secret stays until "Destroy the old controller key".
+10. Run the secret apply in [Cloud platform deploy](cloud-platform-deploy.md). Expect 17 verified destinations.
+11. List the two Secrets of `cellctl`. A missing Secret keeps `cellctl` down until the wait times out.
+    `kubectl --namespace exomem-cloud get secret exomem-cloud-cell-data-staging exomem-cloud-cell-data-backup-list`
+12. List the Secret of the key custodian. Release B needs it.
+    `kubectl --namespace exomem-key-custody get secret exomem-key-custodian-b2`
+13. Save the live values of the release as a reference. They are private: keep them out of tickets and chat.
+    `helm get values exomem-platform --namespace exomem-platform > "$EXOMEM_UPGRADE_DIR/live-values.yaml"`
+14. Remove `cellctl.b2AccountId` and `cellctl.b2KeyManagementSecretName` from the private values file. The chart schema refuses both keys.
+15. Set `cellData.backupBucketName`, `cellData.backupBucketId` and `cellData.stagingBucketName` from the `infra/terraform/cell-data` outputs.
+    The staging bucket must differ from the backup bucket.
+16. Set `cellData.endpoint` to the account's S3 endpoint, the value `s3ApiUrl` in the `b2_authorize_account` response.
+17. Set `cellctl.image` to `ghcr.io/artexis10/exomem-cellctl@sha256:<digest>`, the digest from "Choose the releases". The schema refuses a tag while `cellctl` is on.
+18. Keep `cellctl.b2BucketName`, `cellctl.b2BucketId` and `cellctl.b2Endpoint`. A cell made before the switch still backs up to the old bucket with its stored key.
+19. If the file sets `cellStorage.local.maxCellGib`, set a whole number, never `null`. Helm deletes a `null` key, and the schema then refuses the render.
+    If `cellStorage.maxCellGib` is also set, use the same number, or the render fails with `must agree`.
+20. Set `keyCustodian.enabled` to `false`.
+
+Expected result: the private values file holds the keys above. Its render has no `key-custod` object.
+`helm template exomem-platform infra/helm/platform --namespace exomem-platform --no-hooks --values "$EXOMEM_PLATFORM_VALUES" | grep -c key-custod`
+prints `0`.
+
+### Run release A
+
+1. Do "Review the release" in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release). Expect no error, and no object of the key custodian in the diff.
+2. Do "Before the upgrade" under "Cross the backup key conversion" in the same runbook.
+3. Run the queries of steps 2 and 3 of "Prepare release A" again. Expect no rows.
+4. Do steps 1 and 3 of "Upgrade the release" in the same runbook. Step 3 has no `--atomic`.
+5. If the upgrade fails, do "If the upgrade fails" in the same runbook.
+6. After a rollback, stop. Do not run release B.
+7. After a rollback, find the cause of the failure. Then start again at step 1.
+8. Wait until `cellctl` is Ready. Its liveness probe restarts the pod when its heartbeat file is older than 120 seconds.
+   `kubectl --namespace exomem-cloud get pods --selector app.kubernetes.io/name=cellctl`
+9. Wait until each cell pod is replaced once. Allow up to 10 minutes for each cell.
+   `kubectl get pods --all-namespaces --selector app.kubernetes.io/name=exomem-cell`
+10. Note the time when the last cell pod is Ready, as `date -u +%FT%TZ` prints it. It is the rollout end.
+11. Do "Verify" in the same runbook.
+12. Read the `cellctl` pod again. If `RESTARTS` is above 0, find the cause before release B.
+13. Compare the converted cells with all cells, for each desired state.
+   `psql "$EXOMEM_CELLCTL_DSN" --command "SELECT desired_state, count(*) AS cells, count(cell_root_key_wrapped) AS converted FROM exomem_cloud_cells GROUP BY desired_state ORDER BY desired_state"`
+
+Expected result: the `cellctl` pod is Ready and has 0 restarts. Every cell pod is Ready and was replaced once.
+In the query of step 13, `converted` equals `cells` for each `running` and `read_only` row, and it is 0 for `deleted`.
+A `stopped` cell converts when it next starts. The temporary copy of the key columns stays until release B ends.
+
+### Run release B
+
+1. If you turn on the purge, do steps 1 to 5 of "Turn on the purge" in [Cloud cell deletion](cloud-cell-deletion.md#turn-on-the-purge). Skip its step 6: step 4 below is that upgrade.
+2. Set `keyCustodian.enabled` to `true` in the private values file.
+3. Do "Review the release" in [Cloud platform deploy](cloud-platform-deploy.md#render-and-upgrade-the-release). Expect the diff to add only objects of the key custodian. If it changes `cellctl`, stop.
+4. Do steps 1 and 2 of "Upgrade the release" in the same runbook. Step 2 has `--atomic`. Then do "Verify".
+5. If the purge is on and the platform has the media edge, do step 7 of "Turn on the purge".
+6. List the pod of the key custodian. Expect `key-custodian` Ready on the control-plane node.
+   `kubectl --namespace exomem-key-custody get pods --output wide`
+7. Read its log. Expect `key custodian:` lines, and no line with `not served`, `not read`, `cannot be read` or `sweep failed`.
+   `kubectl --namespace exomem-key-custody logs deployment/key-custodian`
+8. Count the cell namespaces.
+   `kubectl get namespaces --output name | grep -c '^namespace/exo-cell-'`
+9. Count the cell key Secrets.
+   `kubectl get secrets --all-namespaces --field-selector metadata.name=cell-object-store-key --output name | wc -l`
+10. Compare the two counts. Expect them equal. A deleting cell, or a cell that a deletion grant names, has no key.
+11. Run the key watcher once. Expect `0 active` for both accounts.
+    `gh workflow run b2-key-watcher.yml`
+12. Do "After the backup key conversion" in [Cloud platform deploy](cloud-platform-deploy.md#after-the-backup-key-conversion). Use the rollout end of release A.
+
+Expected result: the key custodian runs, and each live cell has the Secret `cell-object-store-key`.
+The temporary copy of the key columns is deleted.
+
+The key custodian also makes a key for each cell that was created before the switch. Such a cell ignores that key
+and keeps its stored key until it migrates. The key watcher counts each such key as a per-cell key.
+
+If the wait of release B fails, `--atomic` rolls the release back to release A. It removes the key custodian objects
+and keeps the key custodian namespace. `cellctl` does not change.
+
+## Destroy the old controller key
+
+**Warning:** this section destroys the old account-wide controller key at the provider. The provider restores no
+deleted key. The Terraform source of that key, `cloud_controller`, is no longer in `infra/terraform`, so no apply
+can create it again. A `cellctl` from before release A reads that key as the non-optional `keyId` and
+`applicationKey` of the old controller Secret. After step 3, that `cellctl` does not start, so a rollback to a
+release before release A fails. Fix forward only.
+
+Do this section only when all of these are true:
+
+- Release B runs and the key custodian is Ready.
+- The `cellctl` pod has 0 restarts over a soak that the operator chose.
+- The key watcher reports `0 active` for both accounts.
+- The operator approves the destroy.
+
+1. Plan the durability root. Expect exactly one destroy, `b2_application_key.cloud_controller[0]`. If the plan holds another destroy, stop.
+   `infra/scripts/plan.sh durability <plan>`
+   The bucket's CORS header casing can show as an in-place update.
+2. Apply that plan. This deletes the old account-wide key at the provider. Expect the apply to end without an error.
+   `infra/scripts/apply_saved_plan.sh durability <plan> --allow-destructive 'b2_application_key.cloud_controller[0]'`
+3. Delete the old controller Secret.
+   `kubectl delete secret exomem-cloud-b2-key-management --namespace exomem-cloud`
+4. Record its absence proof in the [retirement disposal](cloud-hosted-retirement.md) row for
+   `k3s.cloud.exomem-cloud-b2-key-management.active`. Its SOPS artifact is already gone from the tree.
+5. Open your copy of the current pinned set. Never write it from a template: it is live state.
+6. In the `founder` account, remove the deleted key's ID from `pinned_key_ids`.
+7. Write the pinned set back.
+   `gh secret set KEY_WATCHER_PINNED_SET --env key-watcher < <your file>`
+8. Run the key watcher once. Expect `0 active` for both accounts.
+   `gh workflow run b2-key-watcher.yml`
+
+Until step 7, the watcher reports the pinned key as missing. The alert is expected for that window.
+
+Expected result: the key watcher reports `0 active` for both accounts. Only the key custodian holds a credential that can
+create keys: see "Credentials".
