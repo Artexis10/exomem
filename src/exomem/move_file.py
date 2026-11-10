@@ -1516,8 +1516,11 @@ def _move_file_local(
             index=(
                 {
                     "operation": "move",
+                    # A changed self-link puts the source in `files_touched`; it lives at new_rel.
                     "upsert_reports": [
-                        store_batch.row_report("upsert", [new_rel, *files_touched]).as_dict()
+                        store_batch.row_report(
+                            "upsert", [new_rel, *(rel for rel in files_touched if rel != old_rel)]
+                        ).as_dict()
                     ],
                     "delete_report": store_batch.row_report("delete", [old_rel]).as_dict(),
                     "reconcile_required": False,
