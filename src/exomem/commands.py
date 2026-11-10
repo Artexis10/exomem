@@ -3052,45 +3052,56 @@ def op_find(
             _release_policy, _release_active = egress_module.gate_state(vault_root)
             retrieval_limit = egress_module.pool_limit(limit) if _release_active else limit
         catalog_proof: dict[str, Any] = {}
-        hits = find_module.find(
-            vault_root,
-            query=query,
-            types=types,
-            projects=projects,
-            tags=tags,
-            speakers=speakers,
-            file_types=file_types,
-            exclude_file_types=exclude_file_types,
-            categories=categories,
-            kinds=kinds,
-            source_kinds=source_kinds,
-            domains=domains,
-            relations=relations,
-            relation_of=relation_of,
-            relation_direction=relation_direction,
-            filters=filters,
-            result_level=result_level,
-            limit=retrieval_limit,
-            scope=scope,
-            mode=mode,
-            graph=graph,
-            rerank=rerank,
-            rerank_max_candidates=rerank_max_candidates,
-            # rerank=None uses the mode/device-gated auto policy. Explicit
-            # true/false from the caller always wins over auto.
-            auto_rerank=auto_rerank,
-            prefer_compiled=prefer_compiled,
-            prefer_active=prefer_active,
-            prefer_used=prefer_used,
-            widen_outside_kb=widen_outside_kb,
-            timings=timings,
-            degraded_out=degraded,
-            failed_out=failed,
-            retrieval_trace=retrieval_trace,
-            catalog_proof_out=catalog_proof,
-            admit_path=admit_path,
-            dimension_check_out=dimension_check,
-        )
+        # `purpose` is a per-call leaf parameter, not a surface property: layer it onto the bound
+        # principal so the edge view a relation filter or `unit.dimension` reads decides under the
+        # purpose the release gate below decides under, or a purpose-conditioned rule withholds a
+        # page from the hits and not from the filter that names it. Undeclared, nothing is rebound.
+        with (
+            principal_module.request_scope(
+                principal_module.effective_principal().with_purpose(purpose)
+            )
+            if purpose is not None
+            else nullcontext()
+        ):
+            hits = find_module.find(
+                vault_root,
+                query=query,
+                types=types,
+                projects=projects,
+                tags=tags,
+                speakers=speakers,
+                file_types=file_types,
+                exclude_file_types=exclude_file_types,
+                categories=categories,
+                kinds=kinds,
+                source_kinds=source_kinds,
+                domains=domains,
+                relations=relations,
+                relation_of=relation_of,
+                relation_direction=relation_direction,
+                filters=filters,
+                result_level=result_level,
+                limit=retrieval_limit,
+                scope=scope,
+                mode=mode,
+                graph=graph,
+                rerank=rerank,
+                rerank_max_candidates=rerank_max_candidates,
+                # rerank=None uses the mode/device-gated auto policy. Explicit
+                # true/false from the caller always wins over auto.
+                auto_rerank=auto_rerank,
+                prefer_compiled=prefer_compiled,
+                prefer_active=prefer_active,
+                prefer_used=prefer_used,
+                widen_outside_kb=widen_outside_kb,
+                timings=timings,
+                degraded_out=degraded,
+                failed_out=failed,
+                retrieval_trace=retrieval_trace,
+                catalog_proof_out=catalog_proof,
+                admit_path=admit_path,
+                dimension_check_out=dimension_check,
+            )
         # Values of small datasets are a separate lane that `find` does not run. It answers an
         # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
         if (

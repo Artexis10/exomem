@@ -176,23 +176,24 @@ def read_edges(
     shipped keys of each family find a vault extension's edges too, because an extension rolls
     up to its parent's key.
 
-    An edge counts only when the caller may see both of its pages (`_edge_view`), so membership
-    reads as if every page withheld from the caller were absent. `admission` is the request's
-    content admission, or None when it has none. `resolver` builds the request's link resolver;
-    the read calls it only for a restricted caller, to re-derive a link that resolves differently
-    for that caller. The read never scans the corpus and never reports an unreadable graph as an
-    empty one.
+    An edge counts only when the caller may see both of its pages (`egress.edge_view`), so
+    membership reads as if every page withheld from the caller were absent. `admission` is the
+    request's content admission, or None when it has none. `resolver` builds the request's link
+    resolver; the read calls it only for a restricted caller, to re-derive a link that resolves
+    differently for that caller. The read never scans the corpus and never reports an unreadable
+    graph as an empty one.
     """
     if not lookups.needs_edges:
         return DimensionEdges("available")
     from . import epistemic_graph
+    from .governance import egress
 
     keys = sorted(
         key
         for key, entry in lookups.relations.core.items()
         if entry.family in lookups.by_family
     )
-    keep = _edge_view(vault_root, admission)
+    keep = egress.edge_view(vault_root, admission)
     result = epistemic_graph.EpistemicGraphIndex(vault_root).unit_edges(
         keys,
         pages=pages,
@@ -200,24 +201,6 @@ def read_edges(
         resolver=resolver() if keep is not None and resolver is not None else None,
     )
     return DimensionEdges(result.status, result.edges if result.status == "available" else ())
-
-
-def _edge_view(
-    vault_root: Path, admission: Callable[[str], bool] | None
-) -> Callable[[str], bool] | None:
-    """The pages whose edges count for this caller, or None when nothing is withheld from it.
-
-    A page counts when the request's content admission admits it and the release plane shows it
-    to the caller (`egress.visible_page_filter`, the rule every derived structure reads through).
-    The unit lane drops a withheld page's units by the same release decision, so an edge never
-    reveals a page that the caller's hits cannot show.
-    """
-    from .governance import egress
-
-    visible = egress.visible_page_filter(vault_root)
-    if visible is None or admission is None:
-        return admission if visible is None else visible
-    return lambda path: admission(path) and visible(path)
 
 
 @dataclass(frozen=True, slots=True)

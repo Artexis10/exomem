@@ -8036,6 +8036,23 @@ def page_filter_over(
     return AdmittedPredicate(Admission(offered.identity, decide))
 
 
+def edge_view(
+    vault_root: Path, admission: Callable[[str], bool] | None
+) -> Callable[[str], bool] | None:
+    """The pages whose edges count for this caller, or None when nothing is withheld from it.
+
+    A page counts when the request's content `admission` (None when it has none) admits it and the
+    release plane shows it to the caller (`visible_page_filter`, the rule every derived structure
+    reads through). A reader of graph edges passes this view as its `keep`, so an edge never
+    reveals a page that the caller's own hits cannot show, and a vault with the withheld page
+    answers as a vault without it.
+    """
+    visible = visible_page_filter(vault_root)
+    if visible is None or admission is None:
+        return admission if visible is None else visible
+    return lambda path: admission(path) and visible(path)
+
+
 class ReaderViewUnavailable(RuntimeError):
     """`ReaderView.units` could not decide a unit for this reader.
 
