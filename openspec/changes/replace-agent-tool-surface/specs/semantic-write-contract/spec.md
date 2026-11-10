@@ -48,11 +48,15 @@ A row that query_records or query_plan_items returns SHALL carry its short id as
 
 ### Requirement: A Review Item And An Advisory Carry The Id That Decides Them
 
-Each item that list_review_items returns, and each advisory that a write returns for a reviewable signal, SHALL carry a short `id`. decide_review_item SHALL accept that id as `review_item`. For a queue item it SHALL compare the id's version at the leaf, as for any other guarded id. For an advisory it SHALL decide the item at the fingerprint that the advisory last surfaced with. An upkeep item that a recall packet or session start carries SHALL carry the same `id`, and its `dispose` route SHALL name decide_review_item with that id on the public surface.
+Each item that list_review_items returns SHALL carry a short `id`. Each advisory that a write returns for a reviewable signal SHALL name its item by a short `id` or, where the advisory has none, by the write-advisory ref in its `review` field. decide_review_item SHALL accept the id or the ref as `review_item`. For a queue item it SHALL compare the id's version at the leaf, as for any other guarded id. For an advisory it SHALL decide the item at the fingerprint that the advisory last surfaced with. An upkeep item that a recall packet or session start carries SHALL carry the same `id`, and its `dispose` route SHALL name decide_review_item with that id on the public surface.
 
 #### Scenario: An advisory id decides its item
 - **WHEN** a write returns an advisory with an id
 - **THEN** decide_review_item with that id as `review_item` dismisses the item
+
+#### Scenario: An advisory ref decides its item
+- **WHEN** a write returns an advisory that carries a write-advisory ref in `review` and no `id`
+- **THEN** decide_review_item with that ref as `review_item` dismisses the item
 
 #### Scenario: An upkeep item names a decision the surface lists
 - **WHEN** a recall packet carries an upkeep item on the public surface
