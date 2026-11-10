@@ -225,10 +225,10 @@ umask 077
 
    Expect one archive in `infra/helm/platform/charts/` for each dependency in `Chart.yaml`.
    A missing archive stops every render, even for a dependency that is off.
-2. Render the new release without the cluster.
+2. Render the new release without the cluster. `--no-hooks` leaves out the hook objects, which `helm get manifest` never holds.
 
    ```bash
-   helm template exomem-platform infra/helm/platform --namespace exomem-platform \
+   helm template exomem-platform infra/helm/platform --namespace exomem-platform --no-hooks \
      --values "$EXOMEM_PLATFORM_VALUES" > "$EXOMEM_UPGRADE_DIR/new.yaml"
    ```
 
@@ -247,56 +247,129 @@ umask 077
 
    Expect only changes that the release should make. `helm template` cannot read the cluster, so its render can add
    the scheduler's state ConfigMaps that the live release omits. Accept only those extra objects.
-5. Run a server-side dry run of the upgrade.
+5. Run a server-side dry run of the upgrade. It prints the whole render, so write the output to the private directory.
 
    ```bash
    helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
-     --values "$EXOMEM_PLATFORM_VALUES" --dry-run=server
+     --values "$EXOMEM_PLATFORM_VALUES" --dry-run=server > "$EXOMEM_UPGRADE_DIR/dry-run.yaml"
    ```
 
-   Expect the rendered release, with nothing changed. A refusal by an admission policy or a `lookup` check names the object.
+   Expect no error. A `lookup` check or an ownership conflict names the object.
 
-### Cross the per-cell root key change
+Expected result: the render has no error, the diff holds only the changes that the release should make,
+and the dry run ends without an error.
 
-**Warning:** an upgrade that moves cellctl from before 0.147.0 to 0.147.0 or later converts each cell's backup key
-once. Neither `helm rollback` nor `--atomic` undoes the conversion.
+### Cross the backup key conversion
 
-On a cell's first manifest apply, cellctl makes a per-cell root key and wraps it under the backup master key.
-It then wraps the cell's backup password under that root and sets `backup_key_version` to 1. The code is
-`_resolve_secret_material` in `infra/cellctl/src/cellctl/reconcile.py`. The password does not change, so the backup
-repositories stay readable. A cellctl before 0.147.0 unwraps `backup_key_wrapped` with the backup master key, so it
-cannot unwrap a converted cell. A rollback restores that older cellctl but not the control database.
-The safe undo is to fix forward: correct the cause and run the upgrade again.
+**Warning:** an upgrade that moves cellctl from before 0.147.0 to 0.147.0 or later starts the conversion of each
+cell's backup key. Neither `helm rollback` nor `--atomic` undoes a converted cell.
 
-If the upgrade crosses 0.147.0, do these steps first.
+The conversion runs on a cell's first manifest apply after the upgrade. cellctl makes a per-cell root key and wraps
+it under the backup master key. It then wraps the cell's backup key under that root and sets `backup_key_version`
+to 1. The code is `_resolve_secret_material` in `infra/cellctl/src/cellctl/reconcile.py`. The backup key does not
+change, so the backup repositories stay readable. A cellctl before 0.147.0 unwraps `backup_key_wrapped` with the
+backup master key, so it cannot unwrap a converted cell. A rollback restores that older cellctl but not the
+control database. The safe undo is to fix forward: correct the cause and run the upgrade again.
+
+A deleted cell does not convert. On its first pass, cellctl 0.147.0 or later erases the wrapped keys of each
+deleted cell (`retire_content_keys` in `infra/cellctl/src/cellctl/db.py`). A stopped cell converts when it next starts.
+
+If the upgrade crosses 0.147.0, do "Before the upgrade" and then "After the upgrade".
+Do "If the upgrade fails" only after a failure.
+
+#### Before the upgrade
 
 1. Run this read-only query as the cellctl database role.
 
    ```bash
-   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT column_name FROM information_schema.columns WHERE table_name = 'exomem_cloud_cells' ORDER BY column_name"
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'exomem_cloud_cells' ORDER BY column_name"
    ```
 
    Expect every name in `CELL_COLUMNS` in `infra/cellctl/src/cellctl/db.py`. The information schema lists only the columns
    that the role can read. A missing name means that a Substrate migration is pending: stop.
-2. Save the key columns of every cell as a read-only dump.
+2. Save a temporary copy of the backup key columns of each cell that is not deleted.
 
    ```bash
-   psql "$EXOMEM_CELLCTL_DSN" --csv --command "SELECT cell_id, backup_key_wrapped, backup_key_version, cell_root_key_wrapped, cell_root_key_version FROM exomem_cloud_cells ORDER BY cell_id" > "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+   psql "$EXOMEM_CELLCTL_DSN" --csv --command "SELECT cell_id, backup_key_wrapped, backup_key_version, cell_root_key_wrapped, cell_root_key_version FROM exomem_cloud_cells WHERE desired_state <> 'deleted' ORDER BY cell_id" > "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
    ```
 
-   Expect one row for each cell, with `cell_root_key_wrapped` empty on every row. The file holds wrapped keys: never print or commit it.
-   It is evidence for a repair, not an undo.
-3. Omit `--atomic` from the upgrade command below. A failed wait then leaves the new cellctl running.
-4. If the wait fails, count the converted cells before you act.
+   Expect one row for each cell that is not deleted, with `cell_root_key_wrapped` empty on every row.
+   The copy holds wrapped keys: keep it private, and never print, commit or send it.
+   It is evidence for a repair, not an undo. "After the upgrade" deletes it.
+3. Note the number of the current revision. It is the rollback target.
+
+   ```bash
+   helm history exomem-platform --namespace exomem-platform --max 1
+   ```
+
+   Expect one row, with the status `deployed`.
+4. Use the command without `--atomic` in "Upgrade the release". A failed wait then leaves the new cellctl running.
+
+#### If the upgrade fails
+
+The upgrade can fail at its apply or at its wait. Either way, the new cellctl can still run and convert cells.
+
+1. Stop cellctl, so that no cell converts during the count.
+
+   ```bash
+   kubectl --namespace exomem-cloud scale deployment/cellctl --replicas=0
+   ```
+
+2. List the cellctl pods. Expect `No resources found`. If a pod remains, run this step again.
+
+   ```bash
+   kubectl --namespace exomem-cloud get pods --selector app.kubernetes.io/name=cellctl
+   ```
+
+3. Count the converted cells.
 
    ```bash
    psql "$EXOMEM_CELLCTL_DSN" --command "SELECT count(*) FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL"
    ```
 
-   If the count is 0, run `helm rollback exomem-platform`, then count again. If the count is above 0, fix forward and never roll back.
+4. If the count is 0, roll back to the revision that you noted in step 3 of "Before the upgrade".
 
-Expected result: after the upgrade, `cell_root_key_wrapped` holds a value and `backup_key_version` is 1 for every cell that
-cellctl has re-rendered.
+   ```bash
+   helm rollback exomem-platform <revision> --namespace exomem-platform
+   ```
+
+   Expect `Rollback was a success!`
+5. After the rollback, run the count of step 3 again. Expect 0. If it is above 0, do step 8.
+6. If the count is 0, delete the temporary copy. Nothing converted, so the copy has no use.
+
+   ```bash
+   rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+   ```
+
+7. After the rollback, list the cellctl Deployment. If it shows 0 replicas, scale it to 1.
+
+   ```bash
+   kubectl --namespace exomem-cloud get deployment/cellctl
+   ```
+
+8. If a count is above 0, fix forward and never roll back. Correct the cause, then run the upgrade again without `--atomic`.
+
+Expected result: after a rollback, the count is 0, the copy is gone and the old cellctl runs.
+After a fix forward, the upgrade ends without an error.
+
+#### After the upgrade
+
+The temporary copy must not outlive the upgrade. cellctl erases a deleted cell's wrapped keys on its first pass.
+A copy would keep the key of a cell after its deletion, and defeat the key expiry that the platform promises.
+
+1. Run this query until each row shows a `last_backup_at` after the end of the upgrade.
+
+   ```bash
+   psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, last_backup_at FROM exomem_cloud_cells WHERE cell_root_key_wrapped IS NOT NULL ORDER BY cell_id"
+   ```
+
+2. Delete the temporary copy of the key columns as soon as step 1 holds.
+
+   ```bash
+   rm "$EXOMEM_UPGRADE_DIR/cell-keys-before.csv"
+   ```
+
+Expected result: `cell-keys-before.csv` is gone, and each converted cell has a backup that is newer than the upgrade.
 
 ### Upgrade the release
 
@@ -307,7 +380,7 @@ cellctl has re-rendered.
      --values "$EXOMEM_PLATFORM_VALUES" --show-only templates/namespaces.yaml | kubectl apply -f -
    ```
 
-2. Upgrade the release. Omit `--atomic` only as "Cross the per-cell root key change" says.
+2. If the upgrade does not cross the conversion, upgrade the release.
 
    ```bash
    helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
@@ -315,7 +388,15 @@ cellctl has re-rendered.
      --atomic --wait --timeout 10m
    ```
 
-   Expect `Release "exomem-platform" has been upgraded.` Then run "Verify" below.
+3. If the upgrade crosses the conversion, run this command instead. It has no `--atomic`.
+
+   ```bash
+   helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
+     --values "$EXOMEM_PLATFORM_VALUES" \
+     --wait --timeout 10m
+   ```
+
+Expected result: Helm prints `Release "exomem-platform" has been upgraded.` Then run "Verify" below.
 
 Do not run this upgrade while a cell restore runs
 ([cloud-operator-restore.md](cloud-operator-restore.md)).

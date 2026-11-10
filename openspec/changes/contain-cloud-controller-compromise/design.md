@@ -338,7 +338,14 @@ It cannot shorten or remove an existing compliance lock, and it cannot switch Ob
 - Until phase 1 ships, `cellctl`'s key reaches everything listed above.
 - Until D3 is in force, a compromised `cellctl` can render a Job in a cell namespace that reads `cell-object-store-key` through a Secret reference and leaks it. This adds nothing to today, when `cellctl` unwraps every per-cell key; D3 removes the route.
 - After phase 1, a compromised custodian or node can still create any key in the cell-data account. Such a key can extend locks without bound or remove the default retention. The split does not shrink this, because there is no subset rule. The watcher reports such a key, but it cannot undo an extension.
-- On a platform with one node, the custodian shares that node with every cell. A compromised cell that escapes its container is then a compromised node, as the previous bullet describes: it can reach the custodian's pod network and its service-account token, because the pod sets `automountServiceAccountToken: true`, and the cells set no runtime class. The operator accepted this on 2026-11-02. It closes when the cells run on a server that does not run the custodian, or in a sandbox runtime.
+- On a platform with one node, the custodian shares that node with every cell. The operator accepted this on 2026-11-02.
+  - A compromised cell that escapes its container is then a compromised node, as the previous bullet describes.
+  - It can reach the custodian's service-account token, which the pod mounts (`automountServiceAccountToken: true`).
+  - It can also reach the custodian's own B2 key, in the Secret `exomem-key-custodian-b2`. That key creates keys in the cell-data account.
+  - The cells set no runtime class today.
+  - The residual closes only when the chart enforces one of two things, so that a reschedule cannot reopen it:
+    - a placement that keeps every cell off the custodian's node, such as a taint that no cell tolerates, or anti-affinity;
+    - a sandbox runtime, where every cell sets a `runtimeClassName`.
 - Keys created ahead of time outside the cluster would remove key creation from the cluster. That option stays open (Open Questions).
 
 ## Early check evidence
