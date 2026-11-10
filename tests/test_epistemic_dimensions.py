@@ -11,8 +11,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from test_connector_boundary import SCOPE
+from test_connector_boundary import configured_boundary as configured_boundary
+from test_governance_egress import _external, _reset_caches, write_rule, write_scope
+from test_private_vocabulary_instances import private_instances as private_instances
 
 from exomem import (
+    commands,
     epistemic_dimensions,
     epistemic_graph,
     memory_schema,
@@ -22,6 +27,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import semantic_language_registry as language_registry
+from exomem.governance import egress, principal
 
 PATH = "Knowledge Base/Notes/Release outlook.md"
 
@@ -690,3 +696,201 @@ def test_a_dimension_that_needs_edges_reports_unknown_and_its_repair_when_the_gr
     regulation = _report_row(vault, "regulation")
     assert regulation["unit_count"] == 2
     assert "repair" not in regulation
+
+
+def test_the_report_counts_no_kind_of_another_instance_as_the_filter_does(
+    private_instances, vault: Path
+) -> None:
+    """Catches a report row that counts a unit by a kind key that its page's vocabulary instance
+    defines, while the filter treats that kind as the other instance's own entry: the row says 2
+    where the filter returns 1."""
+    from exomem.vocabulary import instances
+
+    overlay = instances.select(vault, language_registry.CATEGORY_SPEC).overlay(vault)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(
+        "schema_version: 1\nkinds:\n  policy:\n    description: A rule the vault sets\n"
+        "dimensions:\n  regulation:\n    labels: {en: Regulation}\n"
+        "    description: What the rules require\n    members: {kinds: [policy]}\n",
+        encoding="utf-8",
+    )
+    _write(vault, RULES, PAGE.format(title="Release rules", body="## Policy\n\nTwo reviewers."))
+    _write(
+        vault,
+        "Knowledge Base/Notes/Partner rules.md",
+        f"---\ntype: insight\nprojects: [private-project]\nregistry_scope: {SCOPE}\n---\n"
+        "# Partner rules\n\n## Policy\n\nNo deploys on Friday.\n",
+    )
+    language_registry.clear_cache()
+    find_module.clear_cache()
+
+    with principal.request_scope(private_instances("full")):
+        row = _report_row(vault, "regulation")
+        hits = _recall_units(vault, {"unit.dimension": {"$eq": "regulation"}})
+
+    assert hits == [("Release rules", "policy")]
+    assert (row["unit_count"], row["page_count"]) == (1, 1)
+
+
+# ---------------------------------------------------------------------------
+# A restricted caller: membership reads as if a withheld page were absent
+# ---------------------------------------------------------------------------
+
+WITHHELD = "Knowledge Base/Notes/Patterns/Old roadmap.md"
+
+
+def _withheld_twin(tmp_path: Path, *, withheld: bool) -> Path:
+    """A vault whose egress rule withholds `Notes/Patterns/**` from an external caller, with the
+    withheld page or as if it never had it. The roadmap's relations section supersedes the whole
+    withheld page, and a review claim supports one of its units by anchor. A visible
+    supersession between two budget pages gives `currency` members in both vaults."""
+    from conftest import initialize_vault_state_offline
+
+    vault = tmp_path / ("with-page" if withheld else "without-page")
+    vault.mkdir()
+    initialize_vault_state_offline(vault, source="dimension twin fixture")
+    _write(
+        vault,
+        "Knowledge Base/Notes/Roadmap.md",
+        PAGE.format(
+            title="Roadmap",
+            body="## Claim\n\nShip in March.\n\n## Claim\n\nShip the beta first.\n\n"
+            "## Relations\n\n- supersedes [[Knowledge Base/Notes/Patterns/Old roadmap]]",
+        ),
+    )
+    _write(
+        vault,
+        REVIEW,
+        PAGE.format(
+            title="Review",
+            body="## Claim\n- relations: supports: [[Knowledge Base/Notes/Patterns/Old roadmap#plan]]"
+            "\n\nTwo hires fit the budget.",
+        ),
+    )
+    _write(
+        vault,
+        "Knowledge Base/Notes/Budget.md",
+        PAGE.format(
+            title="Budget",
+            body="## Claim\n- relations: supersedes: [[Knowledge Base/Notes/Old budget]]\n\n"
+            "The budget grows.",
+        ),
+    )
+    _write(
+        vault,
+        "Knowledge Base/Notes/Old budget.md",
+        PAGE.format(title="Old budget", body="## Claim\n\nThe budget is fixed."),
+    )
+    if withheld:
+        _write(
+            vault,
+            WITHHELD,
+            PAGE.format(title="Old roadmap", body="## Claim\n- id: plan\n\nShip in January."),
+        )
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    _reset_caches()
+    return vault
+
+
+def _ask_as_external(vault: Path, dimension: str, **kwargs) -> dict:
+    with principal.request_scope(_external()):
+        return commands.op_ask_memory(
+            vault,
+            mode="keyword",
+            scope="kb-only",
+            result_level="unit",
+            filters={"unit.dimension": {"$eq": dimension}},
+            **{"query": "", "limit": 10, **kwargs},
+        )
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_restricted_caller_gets_the_reply_of_a_vault_that_never_had_the_withheld_page(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches membership that reads an edge to a page an egress rule withholds: the roadmap
+    joins `currency` through a page-level edge and the review joins `argument` through an
+    anchored one, so the caller learns that the withheld page exists. The narrow search fills
+    the served reader's check pool, so its outcome, notice and `dimension_check` count too."""
+    replies = []
+    for withheld in (True, False):
+        vault = _withheld_twin(tmp_path, withheld=withheld)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        replies.append(
+            {
+                "currency": _ask_as_external(vault, "currency"),
+                "argument": _ask_as_external(vault, "argument"),
+                "narrow": _ask_as_external(
+                    vault, "currency", query="ship", limit=1, explain=True
+                ),
+            }
+        )
+    with_page, without_page = replies
+
+    assert with_page == without_page
+    assert sorted(hit["parent_title"] for hit in with_page["currency"]["hits"]) == [
+        "Budget",
+        "Old budget",
+    ]
+    if served:
+        assert with_page["narrow"]["dimension_check"] == {"checked": 2, "kept": 0}
+
+
+def test_a_restricted_callers_report_row_is_the_row_of_a_vault_that_never_had_the_page(
+    tmp_path: Path,
+) -> None:
+    """Catches a report that scans only the caller's pages but reads every edge: a guest's
+    `currency` and `argument` rows count the units whose edges end on a RAW original the guest
+    may not read. A governed policy refuses this report to every caller but the owner, so RAW
+    protection on an ungoverned vault withholds the page here."""
+    from conftest import initialize_vault_state_offline
+
+    target = "Knowledge Base/Notes/__exomem_raw_v1__old-roadmap"
+    guest = principal.RequestPrincipal(
+        "principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic"
+    )
+    vaults = []
+    for withheld in (True, False):
+        vault = tmp_path / ("with-page" if withheld else "without-page")
+        vault.mkdir()
+        initialize_vault_state_offline(vault, source="dimension twin fixture")
+        _write(
+            vault,
+            "Knowledge Base/Notes/Roadmap.md",
+            PAGE.format(
+                title="Roadmap",
+                body=f"## Claim\n\nShip in March.\n\n## Relations\n\n- supersedes [[{target}]]",
+            ),
+        )
+        _write(
+            vault,
+            REVIEW,
+            PAGE.format(
+                title="Review",
+                body=f"## Claim\n- relations: supports: [[{target}#plan]]\n\nTwo hires fit.",
+            ),
+        )
+        if withheld:
+            _write(
+                vault,
+                f"{target}.md",
+                PAGE.format(title="Old roadmap", body="## Claim\n- id: plan\n\nShip in January."),
+            )
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        vaults.append(vault)
+    find_module.clear_cache()
+
+    with principal.request_scope(guest):
+        with_page, without_page = (
+            commands.op_schema_memory(vault, operation="infer", subject="categories")
+            for vault in vaults
+        )
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        owner = _report_row(vaults[0], "currency")
+
+    assert with_page == without_page
+    # The owner may read the original, so its row counts through the edge the guest's must not.
+    assert owner["unit_count"] == 2

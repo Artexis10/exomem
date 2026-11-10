@@ -21,11 +21,13 @@ from . import (
     semantic_labels,
     semantic_language_registry,
     semantic_units,
+    structured_filters,
     traversal_profiles,
     vault,
 )
 from . import find as find_module
 from .kbdir import kb_dirname
+from .vocabulary.registry import PUBLIC_INSTANCE
 
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
@@ -1224,7 +1226,8 @@ def _dimension_counts(
 ) -> dict[str, dict[str, Any]]:
     """How many scanned units, and on how many pages, belong to each dimension of `registry`.
 
-    Membership is the `unit.dimension` filter's, from one graph read for the whole vault. `edges`
+    Membership is the `unit.dimension` filter's, from one graph read for the whole vault in the
+    caller's view, so an edge to a page withheld from the caller counts no unit. `edges`
     says how a row was counted: "not_needed" for a dimension no edge decides, "counted" when the
     graph answered, and "unavailable" when it could not. An unavailable row has no counts,
     because a count without the edges would present a part as the whole. When the graph is
@@ -1233,7 +1236,9 @@ def _dimension_counts(
     """
     relations = relation_registry.load_registry(vault_root)
     lookups = epistemic_dimensions.membership(registry, relations)
-    edges = epistemic_dimensions.read_edges(vault_root, lookups)
+    edges = epistemic_dimensions.read_edges(
+        vault_root, lookups, admission=find_module.caller_admission(vault_root)
+    )
     if edges.status == "warming":
         epistemic_graph.schedule_background_rebuild(
             vault_root,
@@ -1253,6 +1258,11 @@ def _dimension_counts(
                 "row_keys": item["row_keys"],
                 "occurrence": item["occurrence"],
             },
+            # The report's registry is the public instance's, as a filter plan's is, so another
+            # instance's kind joins no dimension here either.
+            own_kind=not structured_filters.foreign_entry(
+                "unit.kind", item["kind"], item, PUBLIC_INSTANCE
+            ),
         )
         for key in belongs:
             units[key] += 1
@@ -1313,6 +1323,7 @@ def _scan_category_observations(
     observations: list[dict[str, Any]] = []
     for page in pages:
         projects = tuple(sorted(_page_projects(page.frontmatter)))
+        instance = _page_instance(vault_root, page)
         document = semantic_units.parse_semantic_units(
             page.body,
             path=page.rel_path,
@@ -1353,8 +1364,9 @@ def _scan_category_observations(
                     "excerpt_truncated": truncated,
                     "page_type": page.page_type,
                     "projects": projects,
-                    # What the dimension count reads: the governed rows the unit carries and
-                    # where the graph holds it.
+                    # What the dimension count reads: the instance the page selected, the
+                    # governed rows the unit carries and where the graph holds it.
+                    "instance": instance,
                     "row_keys": semantic_units.carried_row_keys(unit),
                     "occurrence": semantic_units.occurrence_key(
                         unit.form, unit.span, unit.source_hash
@@ -2602,6 +2614,20 @@ def _page_projects(frontmatter: dict[str, Any]) -> set[str]:
     elif projects:
         out.add(str(projects))
     return out
+
+
+def _page_instance(vault_root: Path, page) -> str | None:
+    """The vocabulary instance a page selected, or None when it is unavailable, as the filter's
+    unit view reads it: then only core kinds are the unit's own."""
+    from .vocabulary import instances
+
+    try:
+        return (
+            instances.page_scope(vault_root, page.rel_path, dict(page.frontmatter))
+            or PUBLIC_INSTANCE
+        )
+    except (ValueError, OSError):
+        return None
 
 
 def _page_relations(

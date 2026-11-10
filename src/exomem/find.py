@@ -4837,27 +4837,27 @@ def _dimension_source(
     """What answers `unit.dimension` for one candidate set, with one graph read for the set.
 
     `pages` is the candidate set's pages, or None when the set is every unit a scan reads. `keep`
-    is the caller's admission, so an edge to a page the caller cannot see gives no membership. A
-    missing or stale sidecar raises the typed warming outcome and schedules a rebuild, as the
-    relation filter does; an empty set from a current one is real.
+    is the request's content admission; the read adds the release plane to it, so an edge to a
+    page the caller cannot see gives no membership. A missing or stale sidecar raises the typed
+    warming outcome and schedules a rebuild, as the relation filter does; an empty set from a
+    current one is real.
 
-    A caller with an admission re-derives the links that resolve differently for it, which needs
-    a resolver. Inside an admitted catalogue view only the request's own checkpoint opens one, so
+    A restricted caller re-derives the links that resolve differently for it, which needs a
+    resolver. Inside an admitted catalogue view only the request's own checkpoint opens one, so
     the resolver comes from `snapshot`, as the graph lane's does.
     """
     from . import epistemic_graph
 
-    resolver = (
-        recall_resolver_snapshot(
+    edges = epistemic_dimensions.read_edges(
+        vault_root,
+        lookups,
+        pages=pages,
+        admission=keep,
+        resolver=lambda: recall_resolver_snapshot(
             vault_root,
             allow_fallback=not snapshot.requires_live_recall,
             expected_checkpoint=snapshot.recall_checkpoint("vault"),
-        )
-        if keep is not None and lookups.needs_edges
-        else None
-    )
-    edges = epistemic_dimensions.read_edges(
-        vault_root, lookups, pages=pages, keep=keep, resolver=resolver
+        ),
     )
     if edges.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")

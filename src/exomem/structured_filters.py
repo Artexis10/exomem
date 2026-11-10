@@ -2239,16 +2239,16 @@ def _resolve_runtime_field(
                 )
             kind = unit.get("kind", MISSING)
             return dimensions(
-                page, unit, own_kind=not _foreign_entry("unit.kind", kind, unit, instance)
+                page, unit, own_kind=not foreign_entry("unit.kind", kind, unit, instance)
             )
         value = unit.get(field.name.removeprefix("unit."), MISSING)
-        if field.name in ENTRY_AXES and _foreign_entry(field.name, value, unit, instance):
+        if field.name in ENTRY_AXES and foreign_entry(field.name, value, unit, instance):
             return FOREIGN_ENTRY
         return value
     return page.get(field.name.removeprefix("page."), MISSING)
 
 
-def _foreign_entry(field: str, value: Any, unit: Mapping[str, Any], instance: str) -> bool:
+def foreign_entry(field: str, value: Any, unit: Mapping[str, Any], instance: str) -> bool:
     """Whether a unit's category or kind is another vocabulary instance's entry: a value that is
     not core, on a unit whose page selected an instance other than the plan's."""
     if value is MISSING or unit.get("instance") == instance:
