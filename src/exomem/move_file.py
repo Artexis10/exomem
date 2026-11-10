@@ -65,6 +65,9 @@ from .vault import (
     walk_vault_md,
     write_log_entry,
 )
+from .vault_store import availability as store_availability
+from .vault_store import batch as store_batch
+from .vault_store import read as store_read
 from .vault_store import targets as store_targets
 
 log = logging.getLogger(__name__)
@@ -445,42 +448,41 @@ def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: 
     originals_context.enter_context(local_originals(vault_root, (rel,)))
 
 
-def _move_file_local(
-    vault_root: Path,
-    *,
-    old_path: str,
-    new_path: str,
-    update_wikilinks: bool = True,
-    allow_curated: bool = False,
-    today: dt.date | None = None,
-    promotion_reason: str | None = None,
-    content_transform: Callable[[str], str] | None = None,
-    extra_writes: tuple[PlannedWrite, ...] = (),
-    validate_only: bool = False,
-    _validate_prepared_bindings: Callable[[], None] | None = None,
-    originals_context: ExitStack,
-    mutation_context: ExitStack,
-) -> MoveFileResult | MoveFileValidation:
-    """Relocate a file, optionally rewriting wikilinks that point at it.
+def _refuse_taken_destination(vault_root: Path, new_rel: str) -> None:
+    """Refuse a file-mode destination that a file or folder holds, or that is reserved."""
+    try:
+        reserved_paths.inspect_generic_path(vault_root, new_rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "MISSING":
+            pass
+        elif error.code in {
+            "CAPABILITY_UNAVAILABLE",
+            "IDENTITY_CHANGED",
+            "RESERVED_PATH",
+            "UNSAFE_PATH",
+        }:
+            raise MoveFileError(
+                "RESERVED_PATH",
+                "destination is reserved for its owning subsystem",
+            ) from None
+        else:
+            raise MoveFileError(
+                "MOVE_FAILED", "held destination acquisition was refused"
+            ) from None
+    else:
+        raise MoveFileError(
+            code="DEST_EXISTS",
+            reason=(
+                f"destination already exists: {new_rel}. "
+                f"This op refuses to overwrite — pick a different name."
+            ),
+        )
 
-    `content_transform` lets a caller that owns a *declared* content change —
-    today only source reclassification — supply the moved file's new bytes. It
-    runs after the self-wikilink pass, so the append-only refusal that pass
-    raises still fires first: the guard exists to stop an incidental link
-    rewrite mutating append-only bytes, not to stop a caller that has already
-    justified the change. `extra_writes` joins the same atomic batch so a
-    caller's own registry updates commit with the move or not at all.
-    A caller's binding witness is checked before rename and batch publication.
-    """
-    # The semantic preflight below judges a move against the pages on disk, and a store-mode vault
-    # holds a page there only once its projector writes it; the store move waits for that.
-    store_targets.refuse_unrouted(
-        vault_root,
-        "move_file",
-        "its semantic contract check reads pages from disk, where a store-mode vault holds a page "
-        "only after its projector writes it",
-        files=(old_path, new_path),
-    )
+
+def _resolve_source_on_files(
+    vault_root: Path, old_path: str
+) -> tuple[Path, str, originals.OriginalSnapshot | None]:
+    """The file a file-mode move renames: its path, spelling and evicted original, if any."""
     stored_original = None
     try:
         old_abs, old_rel = resolve_under_vault(
@@ -568,6 +570,62 @@ def _move_file_local(
                 "path is reserved for its owning subsystem",
             ) from None
         raise MoveFileError("MOVE_FAILED", "held file acquisition was refused") from None
+    return old_abs, old_rel, stored_original
+
+
+def _move_file_local(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    update_wikilinks: bool = True,
+    allow_curated: bool = False,
+    today: dt.date | None = None,
+    promotion_reason: str | None = None,
+    content_transform: Callable[[str], str] | None = None,
+    extra_writes: tuple[PlannedWrite, ...] = (),
+    validate_only: bool = False,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
+    originals_context: ExitStack,
+    mutation_context: ExitStack,
+) -> MoveFileResult | MoveFileValidation:
+    """Relocate a file, optionally rewriting wikilinks that point at it.
+
+    `content_transform` lets a caller that owns a *declared* content change —
+    today only source reclassification — supply the moved file's new bytes. It
+    runs after the self-wikilink pass, so the append-only refusal that pass
+    raises still fires first: the guard exists to stop an incidental link
+    rewrite mutating append-only bytes, not to stop a caller that has already
+    justified the change. `extra_writes` joins the same atomic batch so a
+    caller's own registry updates commit with the move or not at all.
+    A caller's binding witness is checked before rename and batch publication.
+    """
+    # None in file mode, and for a move between two paths that the store does not own. A store-mode
+    # move of a page is one store transaction, planned against one snapshot of the store.
+    store_writer = None
+    if store_targets.owns_any(vault_root, files=(old_path, new_path)):
+        if not (
+            store_targets.owns_any(vault_root, files=(old_path,))
+            and store_targets.owns_any(vault_root, files=(new_path,))
+        ):
+            raise store_availability.unrouted(
+                "move_file",
+                "a move between a path that the store holds and one it does not has no store form",
+            )
+        store_writer = store_availability.page_writer(vault_root)
+    # The read phase sees one revision; it ends before the commit, which rechecks what it read.
+    reading = mutation_context.enter_context(ExitStack())
+    if store_writer is not None:
+        reading.enter_context(store_read.request_snapshot(vault_root))
+    if store_writer is None:
+        old_abs, old_rel, stored_original = _resolve_source_on_files(vault_root, old_path)
+    else:
+        # A store key is an exact path: the store answers NOT_FOUND and withheld as a read does.
+        stored_original = None
+        try:
+            old_abs, old_rel = store_targets.resolve_existing(vault_root, old_path)
+        except VaultPathError as e:
+            raise MoveFileError(code=e.code, reason=e.reason) from e
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
@@ -617,6 +675,29 @@ def _move_file_local(
     recovering_from_trash = trash_metadata.is_trash_path(old_rel) and not trash_metadata.is_trash_path(new_rel)
     # Recovery owns retirement of a Trash reference companion; it is not a page relocation.
     pair = None if recovering_from_trash else _paired_artifact(vault_root, old_rel)
+    if store_writer is not None and not recovering_from_trash:
+        # Recovery judges its own gaps. A move refuses before it reads more than the source.
+        stored_bytes = store_read.owned_bytes(vault_root, old_rel)
+        try:
+            fm = {} if stored_bytes is None else parse_frontmatter(stored_bytes.decode("utf-8"))[0]
+        except (UnicodeDecodeError, FrontmatterError):
+            fm = {}
+        refusal = store_targets.page_only_form_gap(
+            vault_root, old_rel, fm, paired=pair is not None, destination=new_rel
+        )
+        if refusal is not None:
+            raise store_availability.unrouted("move_file", refusal)
+        assert stored_bytes is not None  # resolve_existing found the page in this snapshot
+        store_targets.active_catalog_gap(
+            vault_root,
+            "move_file",
+            error_class=MoveFileError,
+            removals=(
+                catalog_publication.CatalogRemoval(
+                    old_rel, hashlib.sha256(stored_bytes).hexdigest()
+                ),
+            ),
+        )
     if pair is not None:
         page_rel, binary_rel = pair
         if old_rel == binary_rel:
@@ -670,33 +751,22 @@ def _move_file_local(
                 )
             content_transform = _compose_transforms(content_transform, _repoint_parts(new_rel))
 
-    try:
-        reserved_paths.inspect_generic_path(vault_root, new_rel)
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "MISSING":
-            pass
-        elif error.code in {
-            "CAPABILITY_UNAVAILABLE",
-            "IDENTITY_CHANGED",
-            "RESERVED_PATH",
-            "UNSAFE_PATH",
-        }:
+    if store_writer is not None:
+        # The store decides a page's destination: a file left there by a queued delete is no page.
+        if reserved_paths.classify_logical(new_rel).blocked:
             raise MoveFileError(
-                "RESERVED_PATH",
-                "destination is reserved for its owning subsystem",
-            ) from None
-        else:
+                "RESERVED_PATH", "destination is reserved for its owning subsystem"
+            )
+        if store_targets.holds(vault_root, new_rel):
             raise MoveFileError(
-                "MOVE_FAILED", "held destination acquisition was refused"
-            ) from None
+                code="DEST_EXISTS",
+                reason=(
+                    f"destination already exists: {new_rel}. "
+                    f"This op refuses to overwrite — pick a different name."
+                ),
+            )
     else:
-        raise MoveFileError(
-            code="DEST_EXISTS",
-            reason=(
-                f"destination already exists: {new_rel}. "
-                f"This op refuses to overwrite — pick a different name."
-            ),
-        )
+        _refuse_taken_destination(vault_root, new_rel)
 
     # Append-only guards. Rule 2 protects content *immutability*, not file
     # *location*: a move that stays WITHIN the same append-only tree
@@ -781,8 +851,15 @@ def _move_file_local(
         from . import recover_from_trash as recovery
 
         _admit_publication(
-            vault_root, new_rel, old_abs.read_bytes() if new_rel.lower().endswith(".md") else None
+            vault_root,
+            new_rel,
+            (
+                (store_read.owned_bytes(vault_root, old_rel) if store_writer else old_abs.read_bytes())
+                if new_rel.lower().endswith(".md")
+                else None
+            ),
         )
+        reading.close()
 
         try:
             recovered = recovery.recover_from_trash(
@@ -816,15 +893,28 @@ def _move_file_local(
         vault_root, effective_principal()
     )
     # Scan inbound links BEFORE the move, while the old path still exists.
-    inbound = (
-        find_inbound_wikilinks(vault_root, old_rel, visible=visible if limited_mover else None)
-        if update_wikilinks
-        else []
-    )
+    stored_check: store_targets.InboundCheck | None = None
+    if store_writer is not None and update_wikilinks:
+        # The store's links and the disk's, each once; the commit binds the store's linking pages.
+        stored_check = store_targets.inbound_links(vault_root, [old_rel])[old_rel]
+        inbound = list(stored_check.links)
+    else:
+        inbound = (
+            find_inbound_wikilinks(vault_root, old_rel, visible=visible if limited_mover else None)
+            if update_wikilinks
+            else []
+        )
     if limited_mover:
         inbound = [hit for hit in inbound if visible(hit.path)]
 
     warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
+    if stored_check is not None and stored_check.unimported and visible is None:
+        # A file that nothing imported has no store page to rewrite; it keeps its link. Only the
+        # owner hears of it: no policy covers such a file yet.
+        warnings.append(
+            f"{len({link.path for link in stored_check.unimported})} file(s) that the store has "
+            "not imported yet keep their link to the old path"
+        )
     files_touched: list[str] = []
     wikilinks_updated = 0
     # For any other mover, every linking page is rewritten, including pages the
@@ -989,8 +1079,10 @@ def _move_file_local(
                 moved_source = content_transform(moved_source)
             _admit_publication(vault_root, new_rel, moved_source.encode("utf-8"))
             log_rel_no_ext, log_body, log_plan = plan_activity_log()
-            destination_guard = PathGuard.capture(
-                vault_root, new_rel, leaf_policy="absent"
+            destination_guard = (
+                PathGuard.capture(vault_root, new_rel, leaf_policy="absent")
+                if store_writer is None
+                else PathGuard.capture_store(vault_root, new_rel)
             )
             def run_preflight() -> semantic_writes.MovePreflight:
                 call_spans.measure(call_spans.MOVE_PREFLIGHTS)
@@ -1227,15 +1319,82 @@ def _move_file_local(
                         if not visible(item.after.path) and item.after.path not in rewritten
                     ),
                 )
+            def mutate_in_store(
+                lifecycle_writes: tuple[PlannedWrite, ...],
+                required_guards,
+                bound_destination: PathGuard,
+            ) -> None:
+                """Move the page and rewrite its linkers in one store transaction.
+
+                The projector renames the file afterwards. A changed source, a link gained since
+                the scan, or a taken destination refuses the whole commit with nothing changed.
+                """
+                from .vault_store.write import Expect, PageMove, StoreConflict
+
+                bound_destination.recheck(vault_root)
+                moved = store_batch.Lifecycle(
+                    moves=(
+                        PageMove(
+                            old_rel,
+                            new_rel,
+                            body=None if moved_source == source else moved_source.encode("utf-8"),
+                        ),
+                    ),
+                    expect={
+                        old_rel: Expect(
+                            sha256=source_guard.expected_content_hash,
+                            linked_from=None if stored_check is None else stored_check.bound,
+                        ),
+                        new_rel: Expect(absent=True),
+                    },
+                )
+                try:
+                    # The moved page is the move's one piece of work; its link rewrites earn nothing.
+                    with working_set_heat.primary_paths((new_rel,)):
+                        store_batch.commit_batch(
+                            store_writer,
+                            [*lifecycle_writes, *writes, *extra_writes],
+                            vault_root=vault_root,
+                            required_guards=required_guards,
+                            validate_prepared_bindings=_validate_prepared_bindings,
+                            lifecycle=moved,
+                        )
+                except StoreConflict as conflict:
+                    if conflict.path == old_rel:
+                        raise MoveFileError(
+                            code="SOURCE_CHANGED",
+                            reason=(
+                                "the source changed before publication; read it again and retry "
+                                f"({conflict.reason})."
+                            ),
+                        ) from conflict
+                    if conflict.path == new_rel:
+                        raise MoveFileError(
+                            code="DEST_EXISTS",
+                            reason=(
+                                f"destination already exists: {new_rel}. "
+                                f"This op refuses to overwrite — pick a different name."
+                            ),
+                        ) from conflict
+                    raise MoveFileError("MOVE_FAILED", "move could not be published") from conflict
+
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
+            reading.close()
             committed = semantic_writes.commit_move(
-                vault_root, preflight=preflight, mutate=mutate
+                vault_root,
+                preflight=preflight,
+                mutate=mutate if store_writer is None else mutate_in_store,
             )
             for observed in heat_moved:
                 working_set_heat.persist_commit(observed)
             semantic = committed.as_dict()
             if visible is not None:
-                semantic = _visible_semantic(semantic, preflight.evaluations, visible)
+                with ExitStack() as judging:
+                    if store_writer is not None:
+                        # The filter reads each page's container: one snapshot of the committed
+                        # revision serves them all.
+                        judging.enter_context(store_read.request_snapshot(vault_root))
+                    semantic = _visible_semantic(semantic, preflight.evaluations, visible)
         except semantic_writes.SemanticWriteError as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
         except PathGuardError as error:
@@ -1335,6 +1494,42 @@ def _move_file_local(
             if move_epoch is not None:
                 graph_sync.restore_deletion_epoch(move_epoch)
             raise
+
+    if store_writer is not None:
+        # The store transaction holds the move, its rows and its link rewrites; there is no file
+        # fan-out, and the projector moves the files.
+        log_warning = write_log_entry(
+            vault_root,
+            date_iso=today.isoformat(),
+            op="move_file",
+            rel_path_no_ext=log_rel_no_ext,
+            body=log_body,
+        )
+        if log_warning:
+            warnings.append(log_warning)
+        return MoveFileResult(
+            old_path=old_rel,
+            new_path=new_rel,
+            wikilinks_updated=reported_updated,
+            files_touched=reported_touched,
+            warnings=warnings,
+            semantic=semantic,
+            # A bound store filters every caller, so the caller decides who reads the row report,
+            # as file mode decides it: the paths it names may include pages withheld from others.
+            index=(
+                {
+                    "operation": "move",
+                    "upsert_reports": [
+                        store_batch.row_report("upsert", [new_rel, *files_touched]).as_dict()
+                    ],
+                    "delete_report": store_batch.row_report("delete", [old_rel]).as_dict(),
+                    "reconcile_required": False,
+                    "reconcile_guidance": None,
+                }
+                if egress.file_mode_restricted_caller(vault_root, None) is None
+                else None
+            ),
+        )
 
     # The filesystem transaction succeeded. Only now notify watcher/sidecars;
     # no derived index observes a move that was subsequently rolled back.

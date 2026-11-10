@@ -150,20 +150,25 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
 
 
 def page_only_form_gap(
-    vault_root: Path, rel: str, fm: dict, *, paired: bool = False
+    vault_root: Path,
+    rel: str,
+    fm: dict,
+    *,
+    paired: bool = False,
+    destination: str | None = None,
 ) -> str | None:
     """Why a store-mode vault cannot move this file yet, or None when it has a store form.
 
     The store form of a delete, a move or a recovery moves pages and nothing else. Each case below
     has a file-mode step that moves something the store has no form for, so the writer refuses
     before it changes anything. ``paired`` says that the writer found an original that moves with
-    the page.
+    the page; ``destination`` is where a move puts it.
     """
     from .. import extraction_parts
     from ..governance import lifecycle
 
     # `.md` fixes the page format; any other file is a binary whose bytes stay on disk.
-    if not rel.lower().endswith(".md"):
+    if not all(path.lower().endswith(".md") for path in (rel, destination or rel)):
         return "only a Markdown page is held by the store, and a file's bytes stay on disk"
     if lifecycle.policy_governs_anything(vault_root):
         return "a governance policy is declared, and its tombstones and receipts go to files"
