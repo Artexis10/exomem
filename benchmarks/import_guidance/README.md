@@ -124,9 +124,9 @@ A case folder holds:
 Run these steps from the repository root:
 
 1. Run `PYTHONPATH=benchmarks python -m import_guidance write-scenarios --case-dir <cases> --out <dir outside every repository>`. It writes `<out>/scenarios/<id>.json` and `<out>/case-sets.json`, and it refuses an output folder under a repository.
-2. Run `python -m import_guidance run --suite <out>/scenarios --product-root baseline=<checkout> --product-root candidate=<checkout> --model <m> --out <run dir> --dry-run`. The dry run records each arm on each seed, prints the size of every recorded reply, and starts no agent.
+2. Run `python -m import_guidance run --suite <out>/scenarios --product-root baseline=<checkout> --product-root candidate=<checkout> --model <m> --out <run dir> --dry-run`. The dry run records each arm on each seed, builds the relation graph first, prints the size and the graph state of every recorded reply, and starts no agent. A recording takes about 30 seconds on one case and arm. The graph build takes 10 to 16 seconds of that.
 3. Remove `--dry-run` to run the agents. Run it again with another `--model` and the same `--out` to add a model. The runner starts no judge for these scenarios.
-4. For the stage-C smoke, run `run --suite session-close --case-dir <cases> --client-mode plugin` with the same arms. Full sessions then run on the same seeds.
+4. For the stage-C smoke, run `run --suite session-close --case-dir <cases> --client-mode plugin --ready-graph` with the same arms. Full sessions then run on the same seeds. Without `--ready-graph`, each session starts on a vault whose relation graph is not built, and the row has `ready: null`.
 5. Run `python -m import_guidance judge-prepare --stage-b <run dir>/runs.jsonl --stage-c <session runs>/runs.jsonl --suite <out>/scenarios --out <judge dir>`. Leave out `--stage-c` when you ran no sessions.
 6. Give only `<judge dir>/judge-views.jsonl` to the judge, and keep `<judge dir>/private/judge-map.json` from it. The judge returns JSONL objects with the item `id` and a `structured_output` that matches the item's `answer_schema`.
 7. Run `python -m import_guidance judge-import --judgments <file> --out <judge dir>`. It writes `judged.json` and prints the judge agreement. The line starts with `incomplete:` when fewer than 90% of the doubled items agree on pass or fail.
@@ -136,6 +136,7 @@ Run these steps from the repository root:
 What the suite does:
 
 - The recorder lays the arm's scaffold, copies the seed over it with `session_seed.py`, and makes the scenario's calls. It never runs `settle_graph` on a seeded vault, because that step writes throwaway pages that `recall_context` could serve.
+- A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown. A live vault has one, because its writes build it. The scenario property `ready_graph` (the writer sets it) and the session-close flag `--ready-graph` both run `session_seed.reconcile` and `session_seed.wait_for_graph`. The first runs the arm's own `exomem maintain --reconcile` before any server of the run starts. It writes no page of the seed. It rewrites the count rows of the three `index.md` files. The second reads the arm's own `recall_context` until `map.membership_graph` is `available`. After 120 seconds it stops and names the state that it saw. The recording keeps `ready` with the state and the seconds, and a session row keeps the same in `ready`. The runner refuses an old recording of such a scenario that has no `ready`: delete it and record again.
 - The first read of a seeded vault is cold: the index is not ready, and the reply holds no context. The `recall_context` step therefore has a `warm` key. The recorder discards the first read, waits, and reads twice. It records the second read only when the two agree apart from the listed fields.
 - The runner writes the arm's `UserPromptSubmit` hook declaration into the agent's settings. It sets `EXOMEM_RETRIEVE_INJECT=mcp`, the case's engagement and a hook home inside the run folder. Session-close uses the same code (`plugin_hooks` and `hook_env`). The row records `hook_invocations` for information only.
 - `answer_has_all_of` needs one spelling from each group in the answer. `answer_in_order` needs the first matches of the groups in the listed order. Both match case-insensitively on the whole text.
@@ -146,6 +147,6 @@ What the suite does:
 Limits:
 
 - The recorder switches off more product features than the session-close server does (`OFFLINE_ENV` in `record_worker.py` against `pinned_env` in `session_close.py`). The replay's replies and a full session's replies can therefore differ. Both arms are recorded the same way, so the paired difference still compares like with like.
-- The membership graph of a seeded vault stays warming, because the graph is built only by a write or a relation query.
+- The graph state is read from the `map` block of the reply. A reply without a `map` block, or an arm that does not report the state, stops the recording with a message that names what it saw.
 - Whether `-p` mode emits hook responses under `--include-hook-events` is unverified. The report counts runs with and without them and does not gate on the count.
 - The judge model is in the same family as the agents.
