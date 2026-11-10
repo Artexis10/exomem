@@ -47,6 +47,7 @@ from exomem import memory_refs, note_types, prominence, source_closure
 from . import checks
 from .recording import Arm, checkout_sha, worker_env
 from .scripted_replies import SCENARIO_DIR
+from .session_seed import READY_SECONDS
 
 SUITE = "session-close"
 # Client modes are a closed harness protocol, not vault vocabulary.
@@ -124,7 +125,9 @@ def load_case(path: Path) -> Case:
     turns = base.get("turns")
     if not (isinstance(turns, list) and turns and all(isinstance(t, str) and t.strip() for t in turns)):
         problems.append("turns must be a non-empty list of strings")
-    seed = suite_dir() / "seeds" / str(base.get("seed"))
+    # The case folder's own `seeds/` comes first: a seed of that name there is the case's data, not a shipped seed.
+    candidates = (path.parent / "seeds" / str(base.get("seed")), suite_dir() / "seeds" / str(base.get("seed")))
+    seed = next((folder for folder in candidates if folder.is_dir()), candidates[-1])
     if not seed.is_dir():
         problems.append(f"seed {base.get('seed')!r} is not a folder under seeds/")
     if "answer_key" in raw or "answer_key" in base:
@@ -139,8 +142,13 @@ def load_case(path: Path) -> Case:
     )
 
 
+#: A case folder's judged criteria for the context-replay suite (`replay_cases.py`). The name is part of the case-folder
+#: format, so the file is never read as a case.
+RUBRIC_FILE = "rubric.json"
+
+
 def load_cases(selector: str, case_dir: Path | None = None) -> list[Case]:
-    cases = [load_case(p) for p in sorted((case_dir or suite_dir()).glob("*.json"))]
+    cases = [load_case(p) for p in sorted((case_dir or suite_dir()).glob("*.json")) if p.name != RUBRIC_FILE]
     chosen = cases if selector == "all" else [c for c in cases if c.id == selector or c.id.startswith(selector)]
     if not chosen:
         raise SystemExit(f"no case matches {selector!r}: {[c.id for c in cases]}")
@@ -168,17 +176,21 @@ def pinned_env(arm: Arm, work: Path, case: Case) -> dict[str, str]:
     }
 
 
-def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str]) -> None:
+def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str], ready_graph: bool = False) -> dict | None:
+    """Lay the arm's scaffold and the case's pages in the vault. With `ready_graph`, also build the arm's relation graph
+    (`session_seed.py` says how) and return what it saw, `{"graph": state, "seconds": n}`; otherwise return None."""
     done = subprocess.run(  # noqa: S603
-        [sys.executable, str(SEED_WORKER), str(case.seed), str(work / "vault"), str(arm.root)],
+        [sys.executable, str(SEED_WORKER), str(case.seed), str(work / "vault"), str(arm.root)]
+        + (["--ready-graph"] if ready_graph else []),
         cwd=work,
         env=env,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=120 + (2 * READY_SECONDS if ready_graph else 0),
     )
     if done.returncode != 0:
         raise RuntimeError(f"seeding failed: {(done.stderr or done.stdout).strip()[-400:]}")
+    return json.loads(done.stdout.strip().splitlines()[-1]) if ready_graph else None
 
 
 def knowledge_base(vault: Path) -> Path:
@@ -301,6 +313,26 @@ def write_order(changed: dict, recaps: dict, after: dict[str, dict]) -> str:
 # --------------------------------------------------------------------------
 
 
+def plugin_hooks(root: Path, events: tuple[str, ...] = HOOK_EVENTS) -> dict:
+    """The checkout's own declarations of `events` from its plugin's `hooks.json`, with the plugin root filled in:
+    the hook entries a user's Claude Code would run. Shared by the session-close and the replay runners."""
+    plugin = root / "plugins" / "claude-code"
+    declared = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+    return json.loads(json.dumps({e: declared[e] for e in events}).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)))
+
+
+def hook_env(work: Path, engagement: str) -> dict[str, str]:
+    """The pins the hooks read: native MCP activation, the case's engagement, and state under `work`, so a hook
+    never reaches a real vault or service."""
+    return {
+        "EXOMEM_PROMINENCE": engagement,
+        "EXOMEM_HOOK_HOME": str(work / "hook-home"),
+        "EXOMEM_HOOK_CLIENT": "claude",
+        "EXOMEM_RETRIEVE_INJECT": "mcp",
+        "EXOMEM_CONFIG_PATH": str(work / "exomem-config.json"),
+    }
+
+
 def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict[str, Path]:
     """Stage the same real MCP server, with plugin guidance or an explicit request to disable hooks."""
     mcp = work / "mcp.json"
@@ -313,9 +345,7 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
         schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
         files["skill"] = work / "skill.md"
         files["skill"].write_text("\n\n".join((schema / name).read_text(encoding="utf-8") for name in SKILL_FILES), encoding="utf-8")
-        plugin = arm.root / "plugins" / "claude-code"
-        declared = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-        settings = {"hooks": json.loads(json.dumps({e: declared[e] for e in HOOK_EVENTS}).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)))}
+        settings = {"hooks": plugin_hooks(arm.root)}
     files["settings"].write_text(json.dumps(settings), encoding="utf-8")
     return files
 
@@ -351,13 +381,7 @@ def agent_env(work: Path, case: Case) -> dict[str, str]:
     keep their state under `work` and never reach a real vault or service."""
     floor, _removed = environment_floor(os.environ)
     floor = {k: v for k, v in floor.items() if not k.startswith("EXOMEM_")}
-    return floor | {
-        "EXOMEM_PROMINENCE": case.engagement,
-        "EXOMEM_HOOK_HOME": str(work / "hook-home"),
-        "EXOMEM_HOOK_CLIENT": "claude",
-        "EXOMEM_RETRIEVE_INJECT": "mcp",
-        "EXOMEM_CONFIG_PATH": str(work / "exomem-config.json"),
-    }
+    return floor | hook_env(work, case.engagement)
 
 
 def user_message(text: str) -> str:
@@ -665,6 +689,7 @@ def run_session(
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
     credits: CreditsRun | None = None,
+    ready_graph: bool = False,
 ) -> dict:
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
@@ -693,12 +718,14 @@ def run_session(
         "hooked": hooked,
         "stream": str(work / "stream.jsonl"),
         "recall_enabled": case.recall_turn is not None,
+        #: The graph state the seeding saw; None when the run did not ask for the graph to be built.
+        "ready": None,
         "fresh": None,
         "error": None,
         **{k: v for k, v in stamp.items() if k != "product_shas"},
     }
     try:
-        seed_vault(case, arm, work, env)
+        row["ready"] = seed_vault(case, arm, work, env, ready_graph)
         before = snapshot(work / "vault")
         done = drive_session(
             argv,
@@ -752,6 +779,7 @@ def run_all(
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
     credits: CreditsRun | None = None,
+    ready_graph: bool = False,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
     if hooked and client_mode == "tool-only":
@@ -787,6 +815,7 @@ def run_all(
                         hooked=hooked,
                         client_mode=client_mode,
                         credits=credits,
+                        ready_graph=ready_graph,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
@@ -802,7 +831,14 @@ def run_all(
     return rows
 
 
-def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False, client_mode: str = DEFAULT_CLIENT_MODE) -> list[str]:
+def dry_run(
+    case: Case,
+    arm: Arm,
+    scratch: Path,
+    hooked: bool = False,
+    client_mode: str = DEFAULT_CLIENT_MODE,
+    ready_graph: bool = False,
+) -> list[str]:
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
     problems found."""
@@ -815,7 +851,7 @@ def dry_run(case: Case, arm: Arm, scratch: Path, hooked: bool = False, client_mo
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case)
     try:
-        seed_vault(case, arm, work, env)
+        seed_vault(case, arm, work, env, ready_graph)
         stage_agent_files(arm, work, env, client_mode)
         if hooked:
             hook_ask(arm, "dry-run")

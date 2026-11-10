@@ -141,6 +141,7 @@ from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
+from . import semantic_kinds as semantic_kinds_module
 from . import semantic_labels as semantic_labels_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
@@ -1612,16 +1613,17 @@ def op_bootstrap(
                 "unit. Compact `- [category] ...` units have no metadata. Governed rows survive "
                 "an edit to unit text."
             ),
-            # The bootstrap spec names these four kinds; task 6.2 reads their teaching from the pack.
+            # The shipped entries that carry a `teach` line. A vault's own kinds and relations
+            # never appear here: the pack states the line, and a vault entry may not set one.
             "kinds": {
-                "open_question": "a question this store has not answered yet",
-                "hypothesis": "a proposed explanation still under test",
-                "prediction": "a checkable claim about a future observation",
-                "belief": "one holder's level, or sourced probability, for a claim",
+                key: kind.teach
+                for key, kind in semantic_kinds_module.pack().items()
+                if kind.teach
             },
             "relations": {
-                "contradicts": "edge to material conflicting with this claim",
-                "supersedes": "edge to the page whose current view this replaces",
+                key: definition.teach
+                for key, definition in relation_registry_module.core_registry().core.items()
+                if definition.teach
             },
         },
         "capture_nudge": (
@@ -8710,7 +8712,7 @@ def op_observe_memory(
         tags: Replaces on update.
         context: Replaces on update.
         relations: {kind, target} objects. Replaces on update.
-        verdict: Rich: abandoned, confirmed, inconclusive, qualified, refuted; '' clears.
+        verdict: Rich verdict in words, never a number; `read_schema` lists them. '' clears.
         check_by: Rich ISO revisit date; '' clears.
         as_of: Rich ISO start date; '' clears.
         until: Rich ISO last valid date; '' clears.
@@ -12538,24 +12540,29 @@ def op_schema_memory(
                     raise ValueError(
                         f"CATEGORY_SAVE_{labels.noun.upper()}_DROPPED: {dropped['detail']}"
                     )
-                # Debt: this kinds leg refuses every kind change, an addition too, and validation
-                # does not report it; it predates the verdict leg above, which refuses a loss only.
-                reviewed = semantic_language_registry_module.registry_proposal
+                # Debt: this leg refuses every kind change but a label, an added kind too, and
+                # validation does not report it; it predates the verdict leg above.
                 if (
                     registry_file_exists
                     and not candidate.findings
-                    and reviewed(current)["kinds"] != reviewed(candidate)["kinds"]
+                    and semantic_language_registry_module.kind_changes_beyond_labels(
+                        current, candidate
+                    )
                 ):
                     raise ValueError(
                         "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "
                         "the reviewed custom-kind namespace"
                     )
+                # Validation leads with the same sentences, read before the save changes the store.
+                outcome = memory_schema_module.kind_label_outcome(vault_root, current, candidate)
                 result["saved"] = semantic_language_registry_module.save_registry(
                     vault_root,
                     proposal,
                     expected_hash=expected_hash,
                     why=why,
                 )
+                if outcome:
+                    result = {"outcome": outcome, **result}
             return result
         if save:
             raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")

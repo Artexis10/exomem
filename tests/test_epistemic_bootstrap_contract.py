@@ -26,7 +26,8 @@ import pytest
 
 from exomem import (
     commands,
-    semantic_blocks,
+    relation_registry,
+    semantic_kinds,
     semantic_labels,
     semantic_language_registry,
     semantic_units,
@@ -330,13 +331,48 @@ def test_check_by_is_taught_as_a_due_date_not_an_expiry(vault: Path) -> None:
     assert "nothing is removed" in check_by
 
 
-def test_taught_kinds_are_governed_block_types(vault: Path) -> None:
-    kinds = _contract(vault)["vocabulary"]["kinds"]
+def test_taught_kinds_and_relations_are_the_pack_teach_lines(vault: Path) -> None:
+    vocabulary = _contract(vault)["vocabulary"]
 
-    assert set(kinds) == {"open_question", "hypothesis", "prediction", "belief"}
-    for kind, description in kinds.items():
-        assert kind in semantic_blocks.BLOCK_TYPES, kind
-        assert description
+    pack_kinds = {key: kind.teach for key, kind in semantic_kinds.pack().items() if kind.teach}
+    pack_relations = {
+        key: definition.teach
+        for key, definition in relation_registry.core_registry().core.items()
+        if definition.teach
+    }
+    assert vocabulary["kinds"] == pack_kinds
+    assert vocabulary["relations"] == pack_relations
+    # A taught kind is one a `##` heading can name, so the teaching never names an inert key.
+    assert set(vocabulary["kinds"]) <= semantic_kinds.block_kinds()
+    assert set(vocabulary["kinds"]) and set(vocabulary["relations"])
+
+
+def test_a_vault_kind_and_relation_are_never_taught_and_cannot_carry_teach(vault: Path) -> None:
+    schema = vault / "Knowledge Base/_Schema"
+    schema.mkdir(parents=True, exist_ok=True)
+    (schema / "semantic-language-registry.yaml").write_text(
+        "schema_version: 1\ncategories: {}\n"
+        "kinds:\n  protocol:\n    description: A repeatable protocol\n    teach: Say this.\n",
+        encoding="utf-8",
+    )
+
+    vocabulary = _contract(vault)["vocabulary"]
+    registry = semantic_language_registry.load_registry(vault)
+
+    assert "protocol" not in vocabulary["kinds"]
+    assert "Say this." not in json.dumps(vocabulary)
+    assert [f["code"] for f in registry.findings] == ["unknown_field"]
+    refused = relation_registry.validate_proposal(
+        {
+            "schema_version": 1,
+            "extensions": {
+                "vault.applies_to": {
+                    "parent": "relates_to", "description": "A policy applies.", "teach": "Say this.",
+                }
+            },
+        }
+    )
+    assert [(f["code"], f["severity"]) for f in refused] == [("unknown_field", "error")]
 
 
 def test_metadata_form_rule_names_its_referent(vault: Path) -> None:

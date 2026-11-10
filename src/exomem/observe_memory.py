@@ -22,6 +22,7 @@ from . import (
     semantic_authoring,
     semantic_contract,
     semantic_index,
+    semantic_kinds,
     semantic_labels,
     semantic_language_registry,
     semantic_units,
@@ -249,6 +250,19 @@ def observe_memory(
                 "ambiguous": "AMBIGUOUS_UNIT_REFERENCE",
                 "missing": "UNIT_NOT_FOUND",
             }.get(resolution.status, "UNIT_NOT_FOUND")
+            # A ref this parse cannot find reads as missing, or as stale when it names a
+            # fingerprint; the page's own registry tells which of those is a vault heading.
+            if resolution.status in {"missing", "stale"} and _a_vault_heading_holds(
+                vault_root, editable.rel_path, editable.original_text, unit_ref,
+                expected_fingerprint,
+            ):
+                raise ObserveMemoryError(
+                    "UNIT_NOT_FOUND",
+                    "the unit's heading is a vault kind or a vault label, which observe_memory "
+                    "cannot address yet",
+                    "Edit the unit in the page body with "
+                    f"{capabilities.active_tools_text('edit_memory')}.",
+                )
             raise ObserveMemoryError(
                 code,
                 f"unit reference is {resolution.status}; re-read the parent and retry",
@@ -258,6 +272,8 @@ def observe_memory(
     frontmatter, body, _ = vault.parse_frontmatter(editable.original_text)
     target_anchor: str | None = None
     removed_unit = None
+    dropped_relations: tuple[tuple[str, str], ...] = ()
+    dropped_outcome: str | None = None
     if proposal_mode == "remove":
         assert current_unit is not None
         after_body = _remove_unit(
@@ -294,6 +310,13 @@ def observe_memory(
                 "or author a canonical note-level relation.",
             )
         base_unit = current_unit if proposal_mode == "update" else None
+        if base_unit is not None and relations is None and base_unit.relations:
+            # `relations` replaces on update, so a call that omits it removes every relation the
+            # unit had. A list the caller sent, even an empty one, is its stated intent.
+            dropped_relations = tuple((item.kind, item.target) for item in base_unit.relations)
+            dropped_outcome = _dropped_relations_outcome(
+                dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
+            )
         normalized_verdict = _resolve_verdict(
             verdict,
             base_unit,
@@ -529,6 +552,8 @@ def observe_memory(
             unit=proposed_unit,
             removed_unit=removed_unit,
             semantic=preflight.as_dict(),
+            dropped_relations=dropped_relations,
+            dropped_outcome=dropped_outcome,
         )
 
     try:
@@ -587,6 +612,8 @@ def observe_memory(
         unit=final_unit,
         removed_unit=removed_unit,
         semantic=committed.as_dict(),
+        dropped_relations=dropped_relations,
+        dropped_outcome=dropped_outcome,
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
@@ -664,6 +691,25 @@ def _select_kind(
             _belief_remediation(),
         )
     return resolution.resolved
+
+
+def _a_vault_heading_holds(
+    vault_root: Path, rel_path: str, source: str, unit_ref: str, fingerprint: str | None
+) -> bool:
+    """Whether `unit_ref` names a current unit that only the page's own registry reads.
+
+    This tool parses a page with the shipped kinds, so a unit under a vault kind's heading or a
+    vault label is missing to it. The page's registry parses the page once, on the refusal path
+    only, so the refusal can say what is true.
+    """
+    frontmatter, _body, _ = vault.parse_frontmatter(source)
+    language = semantic_language_registry.load_for_page(vault_root, rel_path, frontmatter)
+    if language is semantic_language_registry.core_registry():
+        return False
+    state = semantic_contract._parse_page_state(
+        vault_root, rel_path, source, language_registry=language
+    )
+    return state.document.resolve_unit(unit_ref, expected_fingerprint=fingerprint).status == "found"
 
 
 def _belief_remediation() -> str:
@@ -1125,6 +1171,33 @@ def _assert_round_trip(
         )
 
 
+#: How many dropped relations the outcome sentence names before it counts the rest.
+_DROPPED_RELATIONS_NAMED = 5
+
+
+def _dropped_relations_outcome(dropped: tuple[tuple[str, str], ...], *, compact: bool) -> str:
+    """The sentence for an update that omits `relations` while its unit had some.
+
+    A prose-only update of a belief drops its `assesses` relation, so the belief then warns that
+    it names no claim; this names the relations that went. A rich unit keeps them when the call
+    sends them again; a compact observation carries none, so no call can keep them there.
+    """
+    named = "; ".join(f"{kind}: {target}" for kind, target in dropped[:_DROPPED_RELATIONS_NAMED])
+    more = len(dropped) - _DROPPED_RELATIONS_NAMED
+    if more > 0:
+        named += f"; and {more} more"
+    count = f"{len(dropped)} relation{'s' if len(dropped) > 1 else ''}"
+    if compact:
+        return (
+            f"This update makes the unit a compact observation, which carries no relations, so "
+            f"it loses {count} ({named})."
+        )
+    return (
+        f"This update drops {count} the unit had ({named}). An update replaces a unit's "
+        "relations: to keep them, send them again in `relations`, with the unit's `kind`."
+    )
+
+
 def _result(
     *,
     operation: str,
@@ -1135,6 +1208,8 @@ def _result(
     unit: Any | None,
     removed_unit: Any | None,
     semantic: dict[str, Any],
+    dropped_relations: tuple[tuple[str, str], ...] = (),
+    dropped_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
@@ -1145,6 +1220,11 @@ def _result(
         "after_hash": after_hash,
         "semantic": semantic,
     }
+    if dropped_relations:
+        value["relations_dropped"] = [
+            {"kind": kind, "target": target} for kind, target in dropped_relations
+        ]
+        value["outcome"] = dropped_outcome
     if timings is not None:
         value["timings"] = timings
     if unit is not None:

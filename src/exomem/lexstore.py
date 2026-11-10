@@ -11734,6 +11734,48 @@ class LexicalStore:
         )
         return result.value if result.readiness.complete else None
 
+    def heading_unit_counts(self, forms: Iterable[str]) -> dict[str, tuple[int, int, int]] | None:
+        """Stored rich headings per heading form among `forms`, across the vault.
+
+        Each value is (headings, pages, compact observations inside those headings). The
+        `kind` column of a rich row holds its heading in the language registry's normal form
+        whatever the heading names, so a form counts every heading in that spelling. Each count
+        is an upper bound on the units a label in that form makes: a heading nested in another
+        unit, or on a page outside a scoped kind's scope, stays no unit of its own, and an
+        observation under a nested heading counts once for each heading around it. A form no
+        stored heading spells is absent. None when the vault catalogue is absent or stale, so
+        a caller reports the count unknown, never zero.
+        """
+        wanted = sorted({str(form) for form in forms if str(form)})
+        if not wanted:
+            return {}
+        from . import freshness as freshness_module
+
+        checkpoint = freshness_module.live_recall_checkpoint(self.vault_root, "vault")
+        if checkpoint is None:
+            return None
+
+        def read(conn: sqlite3.Connection) -> dict[str, tuple[int, int, int]]:
+            rows = conn.execute(
+                "SELECT r.kind, COUNT(*), COUNT(DISTINCT r.parent_path), "
+                "COALESCE(SUM((SELECT COUNT(*) FROM semantic_units c "
+                "WHERE c.parent_path = r.parent_path AND c.form = 'compact' AND c.in_vault = 1 "
+                "AND c.line > r.line AND c.line <= r.end_line)), 0) "
+                "FROM semantic_units r WHERE r.form = 'rich' AND r.in_vault = 1 "
+                "AND r.kind IN (SELECT value FROM json_each(?)) GROUP BY r.kind",
+                (json.dumps(wanted, ensure_ascii=False),),
+            ).fetchall()
+            return {
+                str(form): (int(headings), int(pages), int(inside))
+                for form, headings, pages, inside in rows
+            }
+
+        result = self._serve_from_ready_catalog_result(
+            "vault", checkpoint.triple, read, "lexical heading-count probe declined (%s)",
+            recall_checkpoint=checkpoint, allow_delta=False,
+        )
+        return result.value if result.readiness.complete else None
+
     def tag_usage_aggregate(
         self, excluded_dirs: Iterable[str], whitespace: str
     ) -> tuple[dict[str, int], dict[str, int]] | None:
