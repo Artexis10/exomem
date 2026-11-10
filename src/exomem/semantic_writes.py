@@ -48,8 +48,8 @@ from . import (
     find as find_module,
 )
 from .kbdir import kb_prefix
-from .vault_store import read
 from .mutation_timings import MutationTimings, mutation_timing_span
+from .vault_store import read
 
 log = logging.getLogger(__name__)
 
@@ -4404,15 +4404,18 @@ def commit_recovery(
     root = Path(vault_root)
     try:
         with vault.vault_creation_lock(root, "semantic-creation"):
-            for census_guard in preflight.trash_census_guards:
-                census_guard.recheck(root)
-            if preflight.recovery_sidecar_guard is not None:
-                preflight.recovery_sidecar_guard.recheck(root)
-            for item in preflight.entries:
-                item.source_guard.recheck(root)
-                if item.sidecar_guard is not None:
-                    item.sidecar_guard.recheck(root)
-                item.destination_guard.recheck(root)
+            # In store mode each round of rechecks reads one snapshot, not one per guard; a file-mode
+            # vault binds nothing here.
+            with read.request_snapshot(root):
+                for census_guard in preflight.trash_census_guards:
+                    census_guard.recheck(root)
+                if preflight.recovery_sidecar_guard is not None:
+                    preflight.recovery_sidecar_guard.recheck(root)
+                for item in preflight.entries:
+                    item.source_guard.recheck(root)
+                    if item.sidecar_guard is not None:
+                        item.sidecar_guard.recheck(root)
+                    item.destination_guard.recheck(root)
             lifecycle_writes, required_guards, lifecycle_states = _plan_recovery_lifecycle(
                 root, preflight
             )
@@ -4427,24 +4430,28 @@ def commit_recovery(
                     ),
                 )
             destination_root_guard = preflight.destination_root_guard.prepare_and_bind_parents(root)
-            destination_root_guard.recheck(root)
-            destination_guards = tuple(
-                # A restore path that the store serves is free when the store holds no page there.
-                vault.PathGuard.capture_store(root, item.restore_path)
-                if read.serves(root, item.restore_path)
-                else vault.PathGuard.capture(root, item.restore_path, leaf_policy="absent")
-                for item in preflight.entries
-            )
-            destination_root_guard.recheck(root)
-            for item, destination_guard in zip(preflight.entries, destination_guards, strict=True):
-                item.source_guard.recheck(root)
-                destination_guard.recheck(root)
-                if item.sidecar_guard is not None:
-                    item.sidecar_guard.recheck(root)
-            for census_guard in preflight.trash_census_guards:
-                census_guard.recheck(root)
-            if preflight.recovery_sidecar_guard is not None:
-                preflight.recovery_sidecar_guard.recheck(root)
+            with read.request_snapshot(root):
+                destination_root_guard.recheck(root)
+                destination_guards = tuple(
+                    # A restore path that the store serves is free when the store holds no page
+                    # there.
+                    vault.PathGuard.capture_store(root, item.restore_path)
+                    if read.serves(root, item.restore_path)
+                    else vault.PathGuard.capture(root, item.restore_path, leaf_policy="absent")
+                    for item in preflight.entries
+                )
+                destination_root_guard.recheck(root)
+                for item, destination_guard in zip(
+                    preflight.entries, destination_guards, strict=True
+                ):
+                    item.source_guard.recheck(root)
+                    destination_guard.recheck(root)
+                    if item.sidecar_guard is not None:
+                        item.sidecar_guard.recheck(root)
+                for census_guard in preflight.trash_census_guards:
+                    census_guard.recheck(root)
+                if preflight.recovery_sidecar_guard is not None:
+                    preflight.recovery_sidecar_guard.recheck(root)
             from . import extraction_parts
             from .governance import catalog_publication, graph_producer
 
@@ -4503,9 +4510,10 @@ def commit_recovery(
                     required_guards=(*required_guards, destination_root_guard),
                     semantic_states=batch_semantic_states,
                 )
-            destination_root_guard.recheck(root)
-            for destination_guard in destination_guards:
-                destination_guard.recheck(root)
+            with read.request_snapshot(root):
+                destination_root_guard.recheck(root)
+                for destination_guard in destination_guards:
+                    destination_guard.recheck(root)
             mutate()
             if catalog_target is not None:
                 if preflight.catalog_auxiliary_writes:
