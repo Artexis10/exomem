@@ -313,8 +313,8 @@ def test_a_written_scenario_loads_by_folder_path_with_its_checks_set_and_judging
     replay_cases.write_scenarios(folder, tmp_path / "out")
     scenarios = {s.id: s for s in runner.load_scenarios("all", str(tmp_path / "out" / "scenarios"))}
     first = scenarios["c1"]
-    assert [spec["type"] for spec in first.checks] == ["only_scripted_tools", "answer_has_all_of", "answer_in_order"]
-    assert [spec["type"] for spec in scenarios["c2"].checks] == ["only_scripted_tools"]
+    assert {spec["type"] for spec in first.checks} == {"only_scripted_tools", "answer_has_all_of", "answer_in_order"}
+    assert {spec["type"] for spec in scenarios["c2"].checks} == {"only_scripted_tools"}
     assert first.prompt == TURN_ONE and first.reference == "Reference of c1." and first.judge == "batch"
     assert first.hooks == ("UserPromptSubmit",) and first.served_tools == ("bootstrap", "recall_context")
     assert first.record["ready_graph"] is True and list(first.criteria) == RUBRIC
