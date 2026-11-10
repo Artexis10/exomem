@@ -328,6 +328,22 @@ def test_a_session_whose_run_failed_shows_unknown_cells_and_not_zero(tmp_path: P
     assert "| 2 / unknown |" in row and "| 1 / unknown |" in row and "| 12.5 / unknown |" in row
 
 
+def test_the_judged_verdict_of_a_stage_c_reply_reaches_the_session_table(tmp_path: Path) -> None:
+    """Catches a stage-C reply that the judge scored but the table could not join to its session."""
+    rows = [
+        {"scenario": "c0", "arm": arm, "model": "m", "repeat": 0, "client_mode": "plugin", "error": None, "calls": [],
+         "observed": {"changed": {}, "created": {}}, "replies": [text], "stream": None}
+        for arm, text in (("base", "Sails at 07:15."), ("cand", "Sails at 06:00."))
+    ]
+    runs = write_rows(tmp_path / "c.jsonl", rows)
+    out = tmp_path / "batch"
+    judge_batch.prepare([], [runs], [invented_scenario("c0")], out=out)
+    judgments = judge_batch_as(out, lambda run: run["arm"] == "base")
+    judge_batch.import_judgments(judgments, out=out)
+    row = next(r for r in session_table.build([runs], baseline="base", candidate="cand", judged=out / "judged.json").splitlines() if r.startswith("| c0"))
+    assert row.rstrip().endswith("| pass / fail |")
+
+
 class StreamClaude:
     """Stands in for `claude -p` on the replay: records how it was launched and prints a stream with one hook response."""
 

@@ -55,7 +55,7 @@ def build(runs: Sequence[Path], *, baseline: str, candidate: str, judged: Path |
     verdicts: dict[tuple, str] = {}
     if judged is not None:
         data = json.loads(judged.read_text(encoding="utf-8"))
-        verdicts = {(r["scenario"], r["arm"], r["model"], r["repeat"]): r["verdict"] for r in data["rows"] if r["stage"] == "C"}
+        verdicts = {(r["scenario"], r["arm"], r["model"], r["repeat"], r["client_mode"]): r["verdict"] for r in data["rows"] if r["stage"] == "C"}
     pairs: dict[tuple, dict[str, dict]] = defaultdict(dict)
     for row in rows:
         pairs[(row["scenario"], row["model"], row["repeat"], row.get("client_mode"))][row["arm"]] = row
@@ -67,9 +67,9 @@ def build(runs: Sequence[Path], *, baseline: str, candidate: str, judged: Path |
         "| case | model | repeat | " + " | ".join(COLUMNS) + " | reply judged (M1 and M2) |",
         "|---|---|---|" + "---|" * (len(COLUMNS) + 1),
     ]
-    for (case, model, repeat, _mode), by_arm in sorted(pairs.items(), key=lambda item: item[0][:3]):
+    for (case, model, repeat, mode), by_arm in sorted(pairs.items(), key=lambda item: item[0][:3]):
         measured = [measures(by_arm[arm]) if arm in by_arm else (None,) * len(COLUMNS) for arm in (baseline, candidate)]
-        judged_cells = [verdicts.get((case, arm, model, repeat), checks.UNKNOWN) for arm in (baseline, candidate)]
+        judged_cells = [verdicts.get((case, arm, model, repeat, mode), checks.UNKNOWN) for arm in (baseline, candidate)]
         out.append(
             f"| {case} | {model} | {repeat} | "
             + " | ".join(cell((measured[0][i], measured[1][i])) for i in range(len(COLUMNS)))
