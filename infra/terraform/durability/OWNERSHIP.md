@@ -11,4 +11,6 @@ Kubernetes objects, or tenant application records. Production changes use the
 The optional Cloud media bucket keeps all completed versions without Object Lock.
 Its edge key can read and write that bucket, but cannot destroy versions or reach backup buckets.
 The edge must filter operations because B2's `writeFiles` capability also permits hiding an object.
+The edge also holds a second key with only `listFiles` on that bucket. Its purge pass lists a deleted
+cell's prefix with it. That key cannot read, write, hide or delete a file.
 Enabling this Terraform option creates storage only; the separate media canary and fleet switches control offload.

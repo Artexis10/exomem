@@ -353,8 +353,12 @@ def decide(*, marker, raw_marker, recorded, local, local_relation, staged, token
     return "adopt", "the vault replica carries the recorded head"
 
 
-def _restamp(conn, staged, token):
-    """Write a new tenure: its instance, lineage entry and the replica bytes it continues from."""
+def _restamp(conn, staged, token, local_meta):
+    """Write a new tenure: its instance, lineage entry and the replica bytes it continues from.
+
+    ``local_meta`` is the store-mode marker of the live store that this tenure continues or
+    replaces.
+    """
     meta = staged.metadata
     instance = str(uuid.uuid4())
     lineage = [*staged.lineage, {
@@ -375,23 +379,30 @@ def _restamp(conn, staged, token):
         conn.execute("DELETE FROM store_meta WHERE key=?", (key,))
     from ..vault_store import marker
 
-    # A takeover never decides the store-mode marker: the tenure publishes the replica's.
-    marker.carry(conn, meta)
+    # A takeover decides no store-mode marker: the tenure publishes the newest decision that either
+    # the replica or the live store holds.
+    marker.carry(conn, meta, local_meta)
     return meta[schema.META_STORE_ID], instance
 
 
 def continue_in_place(writer, staged, token):
     """Equal heads: record this tenure in the live store instead of re-adopting identical commits."""
+    from ..vault_store import marker
+
     with writer.handle.transaction() as conn:
-        return _restamp(conn, staged, token)
+        return _restamp(conn, staged, token, marker.read_meta(conn))
 
 
 def install(session, staged, token, check):
     """Make the validated copy this host's live store under a new lineage instance."""
+    from ..vault_store import marker
+
+    # The live store is read before it is replaced: its store-mode decision may be the newer one.
+    local_meta = marker.read_store_meta(session.path) or {}
     with closing(sqlite3.connect(session.path.parent / staged.leaf, isolation_level=None)) as conn:
         check()
         conn.execute("BEGIN IMMEDIATE")
-        identity = _restamp(conn, staged, token)
+        identity = _restamp(conn, staged, token, local_meta)
         conn.execute("COMMIT")
     replace_live(session, staged.leaf, check)
     return identity

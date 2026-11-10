@@ -146,6 +146,16 @@ output "cloud_media_edge_application_key" {
   sensitive = true
 }
 
+output "cloud_media_edge_list_application_key_id" {
+  value     = one(b2_application_key.cloud_media_edge_list[*].application_key_id)
+  sensitive = true
+}
+
+output "cloud_media_edge_list_application_key" {
+  value     = one(b2_application_key.cloud_media_edge_list[*].application_key)
+  sensitive = true
+}
+
 output "cloud_media_list_application_key_id" {
   value     = one(b2_application_key.cellctl_media_list[*].application_key_id)
   sensitive = true

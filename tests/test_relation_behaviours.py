@@ -57,11 +57,11 @@ def ship_relations_pack() -> Iterator[Callable[[Callable[[str], str]], None]]:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_order_pair_and_assesses_are_typed_edges_that_carry_no_behaviour() -> None:
-    """The parity module reads each other behaviour through its reader; these three have none."""
+def test_the_order_pair_and_assesses_are_typed_edges_with_one_behaviour_each() -> None:
+    """The parity module reads each other behaviour through its reader; these three have one each."""
     core = relation_registry.core_registry()
 
-    assert core.behaviours_of("assesses") == frozenset()
+    assert core.behaviours_of("assesses") == frozenset({"names_assessed_claim"})
     assert core.behaviours_of("precedes") == frozenset({"earlier_than_target"})
     assert core.behaviours_of("follows") == frozenset({"later_than_target"})
     assert core.core["precedes"].inverse == "follows"
@@ -113,6 +113,23 @@ def test_has_reads_a_behaviour_and_refuses_one_the_schema_does_not_declare(
     assert registry.has("x.unregistered", "settles") is False
     with pytest.raises(ValueError, match="not a relation behaviour"):
         registry.has("answers", "settle")
+
+
+def test_a_reader_that_holds_a_label_or_a_stored_set_refuses_a_misspelt_behaviour(
+    tmp_path: Path,
+) -> None:
+    """Catches the reads that took a label or a census row's stored behaviours and so read false
+    for a mistyped name, where `has` raises."""
+    registry = _registry(tmp_path)
+
+    assert registry.has_label("answers", "settles") is True
+    assert registry.has_label("links_to", "settles") is False
+    stored = registry.behaviours_of("answers")
+    assert relation_registry.has_behaviour(stored, "settles") is True
+    with pytest.raises(ValueError, match="not a relation behaviour"):
+        registry.has_label("answers", "settle")
+    with pytest.raises(ValueError, match="not a relation behaviour"):
+        relation_registry.has_behaviour(stored, "settle")
 
 
 def test_the_pack_binds_seven_frontmatter_fields_and_each_bound_relation_accepts_the_origin() -> (

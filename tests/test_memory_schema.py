@@ -12,6 +12,7 @@ from exomem import (
     epistemic_graph,
     memory_schema,
     relation_registry,
+    semantic_labels,
     semantic_language_registry,
     state_paths,
 )
@@ -1421,6 +1422,10 @@ def test_the_categories_read_lists_each_accepted_verdict_and_a_save_keeps_the_va
         "abandoned", "confirmed", "inconclusive", "qualified", "refuted",
     ]
     assert all(item["shipped"] for item in shipped["verdicts"])
+    # The other label registries are listed the same way, so an agent can read every accepted
+    # belief level, modality and inference mode from one schema read.
+    assert [item["key"] for item in shipped["modalities"]] == ["is", "may", "must", "should"]
+    assert {"belief_levels", "inference_modes"} <= set(shipped)
 
     current = {
         "schema_version": 1,
@@ -1500,8 +1505,8 @@ def test_a_categories_save_adds_and_relabels_verdicts_in_a_saved_registry(tmp_pa
 
     assert validated["valid"] is True
     loaded = semantic_language_registry.load_registry(vault)
-    assert loaded.resolve_verdict("retracted") == "retracted"
-    assert loaded.resolve_verdict("Kumottu") == "refuted"
+    assert loaded.resolve_label(semantic_labels.VERDICTS, "retracted") == "retracted"
+    assert loaded.resolve_label(semantic_labels.VERDICTS, "Kumottu") == "refuted"
     assert "runtime_setting" in loaded.categories
 
 

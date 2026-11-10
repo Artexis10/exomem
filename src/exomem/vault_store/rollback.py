@@ -153,7 +153,7 @@ def _rollback(
     migrate.remove_stale_staging(root)
     row = conn.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
     if row is None or row[0] != mode.STORE_MODE:
-        return _rerun(root, conn, authority_check, committed=row is not None)
+        return _rerun(root, writer, authority_check, committed=row is not None)
     timings: dict[str, float] = {}
     started = time.perf_counter()
     found = inspect(root, conn)
@@ -175,22 +175,27 @@ def _rollback(
     timings["export_s"] = time.perf_counter() - started
     started = time.perf_counter()
     with writer.handle.transaction() as tx:
-        _drop_store_mode(tx, revision=row[1] + 1, why=why)
+        _drop_store_mode(tx, root, revision=row[1] + 1, why=why)
     timings["drop_s"] = time.perf_counter() - started
     result = _finish(root, conn, authority_check, timings)
     return {"status": "rolled-back", "revision": row[1] + 1, "export": exported, **result}
 
 
-def _rerun(root: Path, conn: sqlite3.Connection, authority_check, *, committed: bool) -> dict:
+def _rerun(root: Path, writer, authority_check, *, committed: bool) -> dict:
     """Finish what an earlier run left: the id alone, or a committed rollback that stopped before its last steps.
 
     ``committed`` says the store's mode row exists, so a rollback committed and only the id, the vacuum or the
     sidecar rebuild remain. Without a row, an activation died before its commit, the store holds nothing of
     store mode, and only the id remains. Without the id either, the vault is plainly in file mode.
+    An activation that died after it claimed the store, but before its commit, leaves the claim:
+    this run decides file over it, so the next hand-back publishes that and the other roots start.
     """
+    conn = writer.connection
     recorded = state_migration.recorded_descriptor_ids(root) or ()
     if state_migration.VAULT_STORE_COMPATIBILITY_ID not in recorded:
         raise _not_active()
+    with writer.handle.transaction() as tx:
+        marker.clear(tx, root)
     if committed:
         return {"status": "rolled-back", **_finish(root, conn, authority_check, {})}
     _drop_id(root, authority_check)
@@ -293,7 +298,7 @@ def _export(
     }
 
 
-def _drop_store_mode(tx: sqlite3.Connection, *, revision: int, why: str) -> None:
+def _drop_store_mode(tx: sqlite3.Connection, root: Path, *, revision: int, why: str) -> None:
     objects = tx.execute("SELECT name, type FROM store_mode_objects").fetchall()
     # Triggers go first, then indexes, then tables; dropping a virtual table drops its shadow tables with it.
     for kind, statement in (
@@ -317,7 +322,7 @@ def _drop_store_mode(tx: sqlite3.Connection, *, revision: int, why: str) -> None
         "UPDATE store_mode SET mode = ?, revision = ?, changed_at = ? WHERE id = 1",
         (mode.FILE_MODE, revision, now),
     )
-    marker.clear(tx)
+    marker.clear(tx, root)
     rederive.clear(tx)
 
 

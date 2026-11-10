@@ -2106,15 +2106,18 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
         assert finish.wait(5)
         return titles(service.root, CID)
 
+    # The read waits 0.8 s in the queue and then has until 1.6 s, its budget counted from entry; a
+    # deadline reset at acceptance would end at 2.4 s or later. The queue timeout, 1.5 s, leaves the
+    # store thread 0.7 s to take the read after the release, which a busy runner needs.
     with monkeypatch.context() as queue_timeout, ThreadPoolExecutor(max_workers=1) as executor:
-        queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 0.7)
+        queue_timeout.setattr(service.manager, "_mutation_timeout_seconds", 1.5)
         occupied = executor.submit(server.call, occupy)
         assert entered.wait(2)
-        timer = threading.Timer(0.5, release.set)
+        timer = threading.Timer(0.8, release.set)
         timer.start()
         entry = time.monotonic()
         token = request_budget.set_current(request_budget.RequestBudget(
-            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.8, entry=entry))
+            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 1.6, entry=entry))
         try:
             with pytest.raises(OpError) as refused:
                 server.call(read, read_only=True)
@@ -2123,7 +2126,7 @@ def test_queue_time_consumes_the_fixed_read_completion_budget(service, monkeypat
             assert refused.value.as_public_dict()["status"] == "retryable"
             assert refused.value.as_public_dict()["committed"] is False
             assert refused.value.details["store_thread"]["alive"] is True
-            assert 0.75 <= time.monotonic() - entry < 1.15
+            assert 1.55 <= time.monotonic() - entry < 2.2
         finally:
             request_budget.reset_current(token)
             release.set()

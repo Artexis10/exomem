@@ -67,6 +67,8 @@ class FakeClusterGateway:
         self.admission_missing: set[str] = set()
         self.admission_checks: list[tuple[str, str, str | None]] = []
         self.events: list[tuple] = []
+        # The relayed grants' ConfigMap data; None until cellctl first writes it.
+        self.cell_deletions: dict[str, str] | None = None
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
         return self.observations.get(cell_id, ClusterObservation())
@@ -148,6 +150,12 @@ class FakeClusterGateway:
 
     def read_secret_value(self, namespace: str, name: str, key: str) -> str:
         return "https://receiver.example/alerts/token"
+
+    def read_cell_deletions(self) -> dict[str, str] | None:
+        return None if self.cell_deletions is None else dict(self.cell_deletions)
+
+    def apply_cell_deletions(self, manifest: dict) -> None:
+        self.cell_deletions = dict(manifest["data"])
 
 
 def _secrets_config() -> reconcile.SecretsConfig:
@@ -391,7 +399,7 @@ def staging(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
 
 
 @pytest.mark.parametrize("old_cell", [True, False], ids=["old cell", "new cell"])
-async def test_a_cells_deletion_empties_its_staged_exports_and_imports_then_reports_the_pending_cleanup(
+async def test_a_cells_deletion_empties_its_staged_exports_and_imports_then_reports_an_old_cells_pending_cleanup(
     cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3, monkeypatch: pytest.MonkeyPatch,
     old_cell: bool,
 ) -> None:
@@ -426,18 +434,22 @@ async def test_a_cells_deletion_empties_its_staged_exports_and_imports_then_repo
         assert (staging.uploads, list(staging.versions)) == ({}, ["cells/bbbbbbbbbbbbbbbb/exports/archive"])
         assert delivered == []
 
-        await passes()  # nothing stands between the cell and its deletion; the clean-up is the operator's
+        await passes()  # nothing stands between the cell and its deletion
         row = (await db.select_all_rows(connection))[0]
-        assert (row.observed_state, row.b2_key_id, row.backup_key_wrapped) == ("deleted", None, None)
-        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
+        # Only an old cell's old bucket is the operator's to clean; the executors purge a new cell's prefixes.
+        # The old cell keeps its key ID as its mark, never its wrapped key.
+        assert (row.observed_state, row.b2_key_id, row.b2_key_wrapped, row.backup_key_wrapped) == (
+            "deleted", "old-key-id" if old_cell else None, None, None)
+        assert delivered == ([("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)] if old_cell else [])
         # The locked bucket holds none of an old cell's backups, so counting its versions says nothing for one.
         assert listed == ([] if old_cell else ["cells/aaaaaaaaaaaaaaaa/"])
     finally:
         await connection.close()
 
 
-async def test_a_restarted_cellctl_raises_the_cleanup_alert_again_for_a_cell_deleted_before_the_restart(
-    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3,
+@pytest.mark.parametrize("old_cell", [True, False], ids=["old cell", "new cell"])
+async def test_a_restarted_cellctl_raises_the_cleanup_alert_again_only_for_an_old_cell_deleted_before_the_restart(
+    cell_db: CellDatabase, delivered: list[tuple[str, bool]], staging: FakeS3, old_cell: bool,
 ) -> None:
     await _seed_cell(cell_db, "aaaaaaaaaaaaaaaa", "tenant-a")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
@@ -451,16 +463,19 @@ async def test_a_restarted_cellctl_raises_the_cleanup_alert_again_for_a_cell_del
 
     try:
         cluster.observations["aaaaaaaaaaaaaaaa"] = _served()
+        if old_cell:
+            await _give_an_old_cells_key(connection)
         await passes(memory)
         await _delete_through_its_namespace(connection, cell_db, cluster, memory, now)
         await passes(memory)
         await passes(memory)
-        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
+        alerted = [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)] if old_cell else []
+        assert delivered == alerted
         delivered.clear()
 
         await passes(reconcile.LoopMemory())  # the restart: nothing but the database row remembers the cell
 
-        assert delivered == [("cell-storage-cleanup-pending-aaaaaaaaaaaaaaaa", True)]
+        assert delivered == alerted
     finally:
         await connection.close()
 

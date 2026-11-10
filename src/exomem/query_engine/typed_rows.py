@@ -6,7 +6,13 @@ import json
 from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 
-from ..collection_store import derived_rows, index_migrations, native_identity, native_operands
+from ..collection_store import (
+    derived_rows,
+    index_migrations,
+    native_identity,
+    native_operands,
+    typed_storage,
+)
 from ..collection_store.native_projections import NativeProjectionPlan
 from ..collection_store.query_indexes import ProjectionPlan
 from . import ir, typed_sql, validation
@@ -65,6 +71,18 @@ def logical_item_key(admitted, value):
     if type(value) is not str:
         raise QueryError("QUERY_UNAVAILABLE")
     return value
+
+
+def decode_item_key(layout, raw):
+    """The logical item key of a stored row: a typed-v2 key decodes, a canonical TEXT key stands."""
+    if layout is not None and layout.encoding == typed_storage.TYPED_V2 and type(raw) is bytes:
+        try:
+            return native_identity.decode(raw, layout.identity)
+        except (ValueError, UnicodeError) as error:
+            raise QueryError("QUERY_UNAVAILABLE") from error
+    if type(raw) is not str:
+        raise QueryError("QUERY_UNAVAILABLE")
+    return raw
 
 
 def indexed_relation(admitted, *, hinted=True):

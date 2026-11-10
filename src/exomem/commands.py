@@ -141,10 +141,10 @@ from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import semantic_authoring as semantic_authoring_module
+from . import semantic_labels as semantic_labels_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
-from . import semantic_verdicts as semantic_verdicts_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
@@ -1570,9 +1570,9 @@ def op_bootstrap(
                 "recorded afterwards proves nothing."
             ),
             "judge_categorically": (
-                "Close a claim with one word from the outcome vocabulary below. This "
-                "substrate keeps no numeric confidence, credence, or probability: a "
-                "verdict is lifecycle state, never a score."
+                "Close a claim with one outcome word below, never a score. A claim has no "
+                "confidence score: put a degree of belief in a belief unit with its holder, "
+                "and a basis for a probability."
             ),
             "keep_the_negative_result": (
                 "Refuted is not superseded. A refuted claim keeps active standing and "
@@ -1584,7 +1584,7 @@ def op_bootstrap(
         "vocabulary": {
             # The shipped verdicts only. A vault's own live in its registry and in the schema read
             # named by `vault_verdicts`; teaching them here would hand every vault the same list.
-            "outcomes": list(semantic_verdicts_module.pack()),
+            "outcomes": list(semantic_labels_module.pack(semantic_labels_module.VERDICTS)),
             "governed_unit_metadata": list(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS),
             "verdict": (
                 "The judgment: exactly one verdict, shared with an experiment "
@@ -1606,15 +1606,18 @@ def op_bootstrap(
                 "Last current date (YYYY-MM-DD); activation marks it expired afterward "
                 "and omits it from stance."
             ),
+            # Names the list above rather than repeating it, so the rule costs no bytes per key.
             "metadata_form": (
-                f"{', '.join(semantic_units_module.GOVERNED_UNIT_METADATA_KEYS)} use "
-                "`- key: value` rows in rich `## Heading` units. Compact `- [category] ...` "
-                "units have no metadata. Governed rows survive an edit to unit text."
+                "Each governed_unit_metadata key is a `- key: value` row in a rich `## Heading` "
+                "unit. Compact `- [category] ...` units have no metadata. Governed rows survive "
+                "an edit to unit text."
             ),
+            # The bootstrap spec names these four kinds; task 6.2 reads their teaching from the pack.
             "kinds": {
                 "open_question": "a question this store has not answered yet",
                 "hypothesis": "a proposed explanation still under test",
                 "prediction": "a checkable claim about a future observation",
+                "belief": "one holder's level, or sourced probability, for a claim",
             },
             "relations": {
                 "contradicts": "edge to material conflicting with this claim",
@@ -2954,6 +2957,7 @@ def op_find(
         )
     degraded: list[str] = []
     failed: list[str] = []
+    dimension_check: dict[str, int] = {}
     projected_continuation: str | None = None
     if projection_runtime is not None:
         who = principal_module.effective_principal()
@@ -3031,6 +3035,7 @@ def op_find(
             retrieval_trace=retrieval_trace,
             catalog_proof_out=catalog_proof,
             admit_path=admit_path,
+            dimension_check_out=dimension_check,
         )
         # Values of small datasets are a separate lane that `find` does not run. It answers an
         # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
@@ -3244,6 +3249,16 @@ def op_find(
     budget_block = (
         active_budget.as_response_block() if active_budget is not None else None
     )
+    # A managed runtime checks a `unit.dimension` predicate on the best `limit` units, after the
+    # limit. When the check dropped some of a full ranking, more units in the dimension may rank
+    # below it, and the caller is told so; a ranking shorter than the limit was checked whole.
+    dimension_block = (
+        dimension_check
+        if dimension_check
+        and dimension_check["kept"] < dimension_check["checked"]
+        and dimension_check["checked"] >= retrieval_limit
+        else None
+    )
     if (
         timings_dict is None
         and timings_suppressed is None
@@ -3252,6 +3267,7 @@ def op_find(
         and retrieval_trace is None
         and projected_continuation is None
         and budget_block is None
+        and dimension_block is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -3280,6 +3296,8 @@ def op_find(
         out["referents"] = referents
     if budget_block is not None:
         out["budget"] = budget_block
+    if dimension_block is not None:
+        out["dimension_check"] = dimension_block
     return out
 
 
@@ -6840,6 +6858,9 @@ _SEARCH_NOTICE_DEGRADED = "One search method failed, so these results may miss r
 _SEARCH_NOTICE_BUDGET = (
     "Part of this search was skipped to stay within its time limit, so results may be incomplete."
 )
+_SEARCH_NOTICE_DIMENSION = (
+    "The dimension filter ran on the best matches only, so more matches in it may exist."
+)
 #: Hit fields that label how the index stores a hit or repeat its unit's parent. A hit keeps `ref`
 #: and `unit_ref`: `record_episode` takes only refs in `about`. The MCP door names the page by `id`
 #: and `title`, and keeps `path` only for `detail="full"`.
@@ -6864,14 +6885,18 @@ def _search_notice(envelope: Mapping[str, Any]) -> str | None:
         return _SEARCH_NOTICE_DEGRADED
     if envelope.get("budget"):
         return _SEARCH_NOTICE_BUDGET
+    if envelope.get("dimension_check"):
+        return _SEARCH_NOTICE_DIMENSION
     return None
 
 
 def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
     """Shape a search result for the agent: a summary, the hits, and one notice when partial.
 
-    Index, warming and budget state become a `notice` sentence. A caller that asked for timings or
-    an explanation asked to see retrieval internals, so those raw blocks stay beside them.
+    Index, warming, budget and dimension-check state become a `notice` sentence; a dimension check
+    that dropped hits after the limit also leads the summary with its count. A caller that asked
+    for timings or an explanation asked to see retrieval internals, so those raw blocks stay
+    beside them.
     """
     envelope = {"hits": result} if isinstance(result, list) else dict(result)
     hits = [
@@ -6881,14 +6906,25 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
         for hit in envelope.pop("hits", ())
     ]
     notice = _search_notice(envelope)
-    for internal in ("warming", "degraded", "budget"):
+    dimension_check = envelope.get("dimension_check")
+    for internal in ("warming", "degraded", "budget", "dimension_check"):
         if internals:
             continue
         envelope.pop(internal, None)
+    if dimension_check:
+        # The limit applied before the dimension check. `checked` is the pool the server fetched,
+        # which can exceed the caller's limit, so the sentence names only what the check kept.
+        kept = dimension_check["kept"]
+        summary = (
+            "The dimension filter ran only on the best matches and kept "
+            f"{kept} {'match' if kept == 1 else 'matches'}; more may exist."
+        )
+    elif hits:
+        summary = f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."
+    else:
+        summary = "Found no matches."
     reply: dict[str, Any] = {
-        "user_summary": f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."
-        if hits
-        else "Found no matches.",
+        "user_summary": summary,
         "hits": hits,
         **envelope,
     }
@@ -7070,13 +7106,10 @@ def op_activate_context(
                             request_budget_module.current() is not None
                             # The anchors rollback keeps its abstention for an exhausted budget; only maps serves what it found.
                             and working_set_runtime_module.activation_packet_mode() == "maps"
+                            and (activation_seconds := request_budget_module.activation_budget_seconds()) is not None
                         ):
-                            # A request that carries a deadline gives the activation its own, nearer one.
-                            activation_scope.enter_context(
-                                request_budget_module.capped(
-                                    request_budget_module.activation_budget_seconds()
-                                )
-                            )
+                            # A request that carries a deadline gives the activation the nearer one its operator set.
+                            activation_scope.enter_context(request_budget_module.capped(activation_seconds))
                         # Owed before the body runs, so its characters come out of the map's budget
                         # and a full map cannot starve it.
                         capture_policy = capture_carrier_module.current(
@@ -7803,6 +7836,7 @@ def _op_activate_context_body(
             reader_view = None if caller.visible is None else egress_module.page_filter_over(vault_root, caller.visible)
             visible_rows = anchor_rows if reader_view is None else tuple(row for row in anchor_rows if reader_view(row.path))
             # Cooperative stage checks leave time for the map's mandatory guard; a synchronous stage can overrun.
+            # Task discovery leaves its own reserve around this call when it runs after the slice.
             with request_budget_module.leaving(request_budget_module.ACTIVATION_STAGE_RESERVE_SECONDS):
                 compiled = _compile_guarded_activation(
                     vault_root,
@@ -12497,11 +12531,13 @@ def op_schema_memory(
                 registry_file_exists = instances.select(
                     vault_root, semantic_language_registry_module.CATEGORY_SPEC
                 ).overlay(vault_root).exists()
-                dropped = semantic_language_registry_module.dropped_verdicts_finding(
+                for labels, dropped in semantic_language_registry_module.dropped_label_findings(
                     current, candidate
-                )
-                if dropped is not None:
-                    raise ValueError(f"CATEGORY_SAVE_VERDICT_DROPPED: {dropped['detail']}")
+                ):
+                    # The code names the registry, such as CATEGORY_SAVE_VERDICT_DROPPED.
+                    raise ValueError(
+                        f"CATEGORY_SAVE_{labels.noun.upper()}_DROPPED: {dropped['detail']}"
+                    )
                 # Debt: this kinds leg refuses every kind change, an addition too, and validation
                 # does not report it; it predates the verdict leg above, which refuses a loss only.
                 reviewed = semantic_language_registry_module.registry_proposal

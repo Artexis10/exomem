@@ -7,6 +7,7 @@ no other API version, so a watcher that reverts to v3 fails every test that list
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import http.client
@@ -16,7 +17,7 @@ import json
 import re
 import sys
 import urllib.error
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -72,7 +73,8 @@ class _Response:
 
 
 class FakeTransport:
-    """Answers by endpoint. An outcome is a JSON body, an HTTP status or an exception.
+    """Answers by endpoint. An outcome is a JSON body, an HTTP status or an exception, or a
+    function that maps the request to one of these.
 
     The outcomes of one endpoint are used in order; the last one repeats.
     """
@@ -86,6 +88,8 @@ class FakeTransport:
         url = request.full_url
         if url.startswith("https://alerts.example.test/"):
             endpoint = "alert"
+        elif url.startswith("https://deletions.example.test/"):
+            endpoint = "deletions"
         elif url == "https://api.backblazeb2.com/b2api/v4/b2_authorize_account":
             endpoint = "authorize"
         elif url.startswith("https://api001.backblazeb2.com/b2api/v4/"):
@@ -96,6 +100,8 @@ class FakeTransport:
         self.sent.append((endpoint, headers, request.data or b""))
         queue = self._outcomes[endpoint]
         outcome = queue.pop(0) if len(queue) > 1 else queue[0]
+        if callable(outcome):
+            outcome = outcome(request)
         if isinstance(outcome, Exception):
             raise outcome
         if isinstance(outcome, int):
@@ -857,3 +863,368 @@ def test_a_blind_media_watch_alerts_and_clears_no_burst(blind: str) -> None:
     assert fake.alerts()["fixture:MEDIA_LISTING_FAILURE"] is True
     assert "fixture:MEDIA_HIDE_BURST" not in fake.alerts()
     assert "account fixture: unknown media hides in the window" in out
+
+
+# --- automate-cell-storage-deletion D4: the deletion watch ------------------------
+
+DELETED = "abcdefghijklmnop"
+LIVE = "qrstuvwxyz234567"
+DELETIONS_URL = f"https://deletions.example.test/deletions/{CAPABILITY}"
+BACKUP_LIST_KEY_ID_ENV, BACKUP_LIST_KEY_ENV = "WATCHER_FIXTURE_BACKUP_KEY_ID", "WATCHER_FIXTURE_BACKUP_KEY"
+BACKUP_LIST_KEY_ID, BACKUP_LIST_KEY = "0050000000000fixturebackup1", "K005fixturebackupsecret"
+PURGE_CAPABILITIES = ["listFiles", "writeFiles"]
+IAT = datetime(2026, 10, 1, tzinfo=UTC)
+STOPPED = IAT + timedelta(minutes=30)
+PURGE_AFTER = IAT + timedelta(days=7)
+# The pinned retention is 30 days and the media grace 14, so the version bound is purge_after plus
+# one day, plus max(14, 30 + 1) days, plus two days.
+BOUND = PURGE_AFTER + timedelta(days=34)
+
+
+def _seconds(at: datetime | None) -> int | None:
+    return None if at is None else int(at.timestamp())
+
+
+class Platform:
+    """One account that holds the per-cell keys, the backup bucket, the media bucket and its media
+    watch, with the deletion watch pinned over it, and Substrate's deletion set holding DELETED."""
+
+    def __init__(self) -> None:
+        media_settings = unlocked_settings()
+        media_settings["lifecycleRules"][0]["daysFromHidingToDeleting"] = 14
+        self.buckets = {BACKUP_BUCKET_ID: locked_settings(), MEDIA_BUCKET_ID: media_settings}
+        watched = account(per_cell=True, buckets=self.buckets)
+        watched["media"] = {"bucket_id": MEDIA_BUCKET_ID, "key_id_env": MEDIA_KEY_ID_ENV,
+                            "key_env": MEDIA_KEY_ENV, "hide_budget": 20, "window_hours": 24}
+        self.pinned = {"schema_version": 1, "accounts": [watched], "deletions": {
+            "account": "fixture", "media_account": "fixture",
+            "backup_key_id_env": BACKUP_LIST_KEY_ID_ENV, "backup_key_env": BACKUP_LIST_KEY_ENV,
+            "purge_capabilities": PURGE_CAPABILITIES, "skew_margin_minutes": 60,
+        }}
+        self.env = {
+            "KEY_WATCHER_ALERT_URL": ALERT_URL, "KEY_WATCHER_DELETIONS_URL": DELETIONS_URL,
+            KEY_ID_ENV: WATCHER_KEY_ID, KEY_ENV: WATCHER_KEY, MEDIA_KEY_ID_ENV: MEDIA_KEY_ID,
+            MEDIA_KEY_ENV: MEDIA_KEY, BACKUP_LIST_KEY_ID_ENV: BACKUP_LIST_KEY_ID,
+            BACKUP_LIST_KEY_ENV: BACKUP_LIST_KEY,
+        }
+        self.keys = [custodian_key()]
+        self.key_listing: Any = None
+        self.files: dict[str, list[dict[str, Any]]] = {BACKUP_BUCKET_ID: [], MEDIA_BUCKET_ID: []}
+        self.listing: dict[str, Any] = {}
+        self.refused_key_ids: set[str] = set()
+        self.deletions: Any = [self.deletion(DELETED)]
+
+    @staticmethod
+    def deletion(cell: str, *, stopped: datetime | None = STOPPED) -> dict[str, Any]:
+        return {"cell_id": cell, "iat": _seconds(IAT), "purge_after": _seconds(PURGE_AFTER),
+                "stopped_at": _seconds(stopped)}
+
+    def put(self, bucket: str, name: str, action: str, at: datetime, cell: str = DELETED) -> None:
+        self.files[bucket].append({
+            "accountId": ACCOUNT_ID, "action": action, "bucketId": bucket,
+            "contentLength": 0 if action == "hide" else 512,
+            "fileId": f"fixture-file-{len(self.files[bucket])}", "fileName": f"cells/{cell}/{name}",
+            "uploadTimestamp": int(at.timestamp() * 1000),
+        })
+
+    def provider_deletes_versions(self) -> None:
+        """The lifecycle rules delete every upload and start entry; the hide markers stay."""
+        for bucket, files in self.files.items():
+            self.files[bucket] = [entry for entry in files if entry["action"] == "hide"]
+
+    def _authorize(self, request: Any) -> Any:
+        basic = dict(request.header_items())["Authorization"].split(" ", 1)[1]
+        return 401 if base64.b64decode(basic).decode().split(":")[0] in self.refused_key_ids else authorized()
+
+    def _list_versions(self, request: Any) -> Any:
+        body = json.loads(request.data)
+        if body["bucketId"] in self.listing:
+            return self.listing[body["bucketId"]]
+        files = [entry for entry in self.files[body["bucketId"]]
+                 if entry["fileName"].startswith(body.get("prefix", ""))]
+        return {"files": files, "nextFileName": None, "nextFileId": None}
+
+    def run(self, now: datetime) -> tuple[FakeTransport, int, str]:
+        fake = FakeTransport({
+            "authorize": [self._authorize],
+            "b2_list_keys": [self.key_listing or {"keys": self.keys, "nextApplicationKeyId": None}],
+            "b2_list_buckets": [{"buckets": [listed_bucket(bucket, settings)
+                                             for bucket, settings in self.buckets.items()]}],
+            "b2_list_file_versions": [self._list_versions],
+            "deletions": [lambda _request: self.deletions if isinstance(self.deletions, int)
+                          else {"schema_version": 1, "cells": self.deletions}],
+            "alert": [{"ok": True}],
+        })
+        env = {**self.env, "KEY_WATCHER_PINNED_SET": json.dumps(self.pinned)}
+        code, out, err = run(env, fake, now)
+        return fake, code, out + err
+
+
+def cell_alerts(fake: FakeTransport, cell: str = DELETED) -> dict[str, bool]:
+    """The per-cell alerts sent for the cell, by token."""
+    return {name.split(":")[0]: active for name, active in fake.alerts().items() if name.endswith(f":{cell}")}
+
+
+def account_alerts(fake: FakeTransport) -> set[str]:
+    return {name for name in active_alerts(fake) if not name.startswith("CELL_DELETION_")}
+
+
+def test_a_deletion_runs_from_pending_through_hidden_to_confirmed() -> None:
+    """Defect: the operator never sees a deletion advance, or its alerts never resolve, so a deletion
+    that finished looks stalled."""
+    platform = Platform()
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "upload", IAT - timedelta(days=3))
+    platform.put(MEDIA_BUCKET_ID, "media/1", "upload", IAT - timedelta(days=2))
+
+    fake, code, _ = platform.run(IAT + timedelta(days=1))
+    assert (code, cell_alerts(fake)) == (0, {"CELL_DELETION_PENDING": True, "CELL_DELETION_HIDDEN": False,
+                                             "CELL_DELETION_ANOMALY": False})
+
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "hide", PURGE_AFTER + timedelta(minutes=10))
+    platform.put(MEDIA_BUCKET_ID, "media/1", "hide", PURGE_AFTER + timedelta(minutes=20))
+    fake, code, _ = platform.run(PURGE_AFTER + timedelta(hours=2))
+    assert (code, cell_alerts(fake)) == (0, {"CELL_DELETION_PENDING": False, "CELL_DELETION_HIDDEN": True,
+                                             "CELL_DELETION_ANOMALY": False})
+
+    platform.provider_deletes_versions()
+    fake, code, _ = platform.run(PURGE_AFTER + timedelta(days=20))
+    assert (code, cell_alerts(fake)) == (0, {"CELL_DELETION_PENDING": False, "CELL_DELETION_HIDDEN": False,
+                                             "CELL_DELETION_ANOMALY": False})
+
+
+def test_a_cell_that_stored_nothing_is_pending_through_its_grace() -> None:
+    """Defect: the deletion of a cell with no file and no key reads as finished at once, so the operator
+    gets no alert during the grace, when a hold could still stop a wrong deletion."""
+    platform = Platform()
+
+    fake, code, _ = platform.run(IAT + timedelta(hours=1))
+
+    assert (code, cell_alerts(fake)) == (0, {"CELL_DELETION_PENDING": True, "CELL_DELETION_HIDDEN": False,
+                                             "CELL_DELETION_ANOMALY": False})
+
+
+def test_a_done_cell_with_no_key_and_no_current_file_is_hidden_and_raises_nothing_else() -> None:
+    """Defect: the custodian deleted its purge key, and that absence, or another cell's key, reads as a
+    key that remains for this cell, so a finished purge raises a pending or an anomaly alert."""
+    platform = Platform()
+    platform.keys.append(cell_key(prefix=f"cells/{LIVE}/"))
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "upload", IAT - timedelta(days=3))
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "hide", PURGE_AFTER + timedelta(minutes=10))
+
+    fake, code, _ = platform.run(PURGE_AFTER + timedelta(days=3))
+
+    assert (code, cell_alerts(fake)) == (0, {"CELL_DELETION_PENDING": False, "CELL_DELETION_HIDDEN": True,
+                                             "CELL_DELETION_ANOMALY": False})
+
+
+def _current_file(platform: Platform) -> None:
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "upload", IAT - timedelta(days=3))
+
+
+def _cell_key(platform: Platform) -> None:
+    platform.keys.append(cell_key(prefix=f"cells/{DELETED}/"))
+
+
+def _hidden_upload(platform: Platform) -> None:
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "upload", IAT - timedelta(days=3))
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "hide", PURGE_AFTER + timedelta(minutes=10))
+
+
+def _unfinished_large_file(platform: Platform) -> None:
+    platform.put(MEDIA_BUCKET_ID, "media/large", "start", IAT - timedelta(hours=5))
+
+
+def _early_hide(platform: Platform) -> None:
+    platform.put(MEDIA_BUCKET_ID, "media/1", "upload", IAT - timedelta(days=2))
+    platform.put(MEDIA_BUCKET_ID, "media/1", "hide", STOPPED + timedelta(hours=2))
+
+
+def _no_stop_time(platform: Platform) -> None:
+    platform.deletions = [Platform.deletion(DELETED, stopped=None)]
+
+
+@pytest.mark.parametrize(("arrange", "now"), [
+    (_current_file, PURGE_AFTER + timedelta(days=1, minutes=1)),
+    (_cell_key, PURGE_AFTER + timedelta(days=1, minutes=1)),
+    (_hidden_upload, BOUND + timedelta(minutes=1)),
+    (_unfinished_large_file, BOUND + timedelta(minutes=1)),
+    (_early_hide, IAT + timedelta(days=2)),
+    (_no_stop_time, PURGE_AFTER),
+], ids=["a current file a day after purge_after", "a key a day after purge_after",
+        "an upload entry after the version bound", "a start entry after the version bound",
+        "a hide inside the early-hide window", "no stop time at purge_after"])
+def test_each_anomaly_condition_fires(arrange: Any, now: datetime) -> None:
+    """Defect: an executor stalls, the provider never deletes a version, an executor hides before the
+    grace ends, or cellctl withholds its report that the cell stopped, and the operator is not told."""
+    platform = Platform()
+    arrange(platform)
+
+    fake, code, _ = platform.run(now)
+
+    assert code == 1
+    assert cell_alerts(fake)["CELL_DELETION_ANOMALY"] is True
+
+
+@pytest.mark.parametrize("hidden_at", [STOPPED + timedelta(minutes=59), PURGE_AFTER - timedelta(minutes=30)],
+                         ids=["before the stop time plus the margin", "within the margin before purge_after"])
+def test_a_hide_by_the_live_cell_or_inside_the_skew_margin_raises_no_anomaly(hidden_at: datetime) -> None:
+    """Defect: the live cell's own prune, or an executor whose clock runs a little fast, pages the
+    operator about an early deletion that did not happen."""
+    platform = Platform()
+    platform.put(MEDIA_BUCKET_ID, "media/1", "upload", IAT - timedelta(days=2))
+    platform.put(MEDIA_BUCKET_ID, "media/1", "hide", hidden_at)
+
+    fake, code, _ = platform.run(PURGE_AFTER + timedelta(hours=2))
+
+    assert (code, cell_alerts(fake)["CELL_DELETION_ANOMALY"]) == (0, False)
+
+
+def _backup_listing_fails(platform: Platform) -> None:
+    platform.listing[BACKUP_BUCKET_ID] = 503
+
+
+def _media_listing_reaches_the_page_cap(platform: Platform) -> None:
+    platform.listing[MEDIA_BUCKET_ID] = {"files": [], "nextFileName": "cells/x", "nextFileId": "fixture-cursor"}
+
+
+def _backup_list_key_refused(platform: Platform) -> None:
+    platform.refused_key_ids.add(BACKUP_LIST_KEY_ID)
+
+
+def _key_listing_fails(platform: Platform) -> None:
+    platform.key_listing = 503
+
+
+@pytest.mark.parametrize("fail", [_backup_listing_fails, _media_listing_reaches_the_page_cap,
+                                  _backup_list_key_refused, _key_listing_fails],
+                         ids=["backup listing fails", "media listing reaches the page cap",
+                              "backup list key refused", "key listing fails"])
+def test_a_run_that_could_not_read_everything_changes_no_cell(fail: Any) -> None:
+    """Defect: a partial read looks like an empty bucket or a missing key, and the watcher resolves the
+    anomaly alert of a cell whose purge stalled."""
+    platform = Platform()
+    _current_file(platform)
+    fail(platform)
+
+    fake, code, _ = platform.run(PURGE_AFTER + timedelta(days=2))
+
+    assert code == 1
+    assert cell_alerts(fake) == {}
+    assert fake.alerts()["DELETION_LISTING_FAILURE"] is True
+
+
+def test_a_cell_past_its_window_gets_no_transition_so_its_anomaly_alert_stays() -> None:
+    """Defect: the watcher keeps a stalled cell for ever and resolves its alert by mistake, or it sends
+    a resolution when the cell leaves its window."""
+    platform = Platform()
+    _hidden_upload(platform)
+
+    fake, code, _ = platform.run(BOUND + timedelta(days=1, minutes=1))
+
+    assert (code, cell_alerts(fake)) == (0, {})
+
+
+def test_a_purge_that_a_hold_delays_past_the_window_is_still_watched_to_its_end() -> None:
+    """Defect: a hold or an edge outage outlasts the window from purge_after, and the purge that follows
+    its release runs unwitnessed, or its fresh hides read as versions overdue for deletion."""
+    platform = Platform()
+    _current_file(platform)
+    released = BOUND + timedelta(days=10)
+
+    fake, _, _ = platform.run(released)
+    assert cell_alerts(fake) == {"CELL_DELETION_PENDING": True, "CELL_DELETION_HIDDEN": False,
+                                 "CELL_DELETION_ANOMALY": True}
+
+    platform.put(BACKUP_BUCKET_ID, "restic/data/1", "hide", released + timedelta(minutes=5))
+    fake, code, _ = platform.run(released + timedelta(hours=2))
+    assert (code, cell_alerts(fake)) == (0, {"CELL_DELETION_PENDING": False, "CELL_DELETION_HIDDEN": True,
+                                             "CELL_DELETION_ANOMALY": False})
+
+
+def test_the_hide_budget_skips_a_deleted_cells_hides_and_still_counts_a_live_cells() -> None:
+    """Defect: every purge pages the operator with a hide burst; or a burst on a live cell hides
+    behind a deletion."""
+    platform = Platform()
+    for number in range(25):
+        platform.put(MEDIA_BUCKET_ID, f"media/{number}", "hide", PURGE_AFTER + timedelta(minutes=number))
+    for number in range(3):
+        platform.put(MEDIA_BUCKET_ID, f"media/{number}", "hide", PURGE_AFTER, cell=LIVE)
+
+    fake, _, out = platform.run(PURGE_AFTER + timedelta(hours=2))
+
+    assert fake.alerts()["fixture:MEDIA_HIDE_BURST"] is False
+    assert "account fixture: 3 media hides in the window" in out
+
+
+@pytest.mark.parametrize(("cell", "expected"), [(DELETED, set()), (LIVE, {"fixture:PURGE_KEY_UNEXPECTED"})],
+                         ids=["deleted cell", "live cell"])
+def test_a_purge_key_is_accepted_only_for_a_cell_in_the_deletion_set(cell: str, expected: set[str]) -> None:
+    """Defect: a key that can hide a live cell's backups passes unreported, or every purge pages the
+    operator as key drift."""
+    platform = Platform()
+    platform.keys.append(cell_key(prefix=f"cells/{cell}/", capabilities=PURGE_CAPABILITIES))
+
+    fake, _, _ = platform.run(PURGE_AFTER + timedelta(hours=2))
+
+    assert account_alerts(fake) == expected
+
+
+def _endpoint_fails(platform: Platform) -> None:
+    platform.deletions = 503
+
+
+def _entry_malformed(platform: Platform) -> None:
+    platform.deletions = [{**Platform.deletion(DELETED), "purge_after": "soon"}]
+
+
+def _url_missing(platform: Platform) -> None:
+    del platform.env["KEY_WATCHER_DELETIONS_URL"]
+
+
+@pytest.mark.parametrize("unreadable", [_endpoint_fails, _entry_malformed, _url_missing],
+                         ids=["endpoint fails", "entry malformed", "URL secret missing"])
+def test_an_unreadable_deletion_set_counts_every_hide_and_reports_every_purge_key(unreadable: Any) -> None:
+    """Defect: without the set, the watcher trusts that a purge is a deletion, so a compromised executor
+    could hide a live cell's files unseen; or it resolves a cell's alerts it cannot judge."""
+    platform = Platform()
+    platform.keys.append(cell_key(prefix=f"cells/{DELETED}/", capabilities=PURGE_CAPABILITIES))
+    for number in range(25):
+        platform.put(MEDIA_BUCKET_ID, f"media/{number}", "hide", PURGE_AFTER + timedelta(minutes=number))
+    unreadable(platform)
+
+    fake, code, _ = platform.run(PURGE_AFTER + timedelta(hours=2))
+
+    assert code == 1
+    assert account_alerts(fake) == {"DELETIONS_UNKNOWN", "fixture:MEDIA_HIDE_BURST", "fixture:PURGE_KEY_UNEXPECTED"}
+    assert cell_alerts(fake) == {}
+
+
+def test_the_public_log_shows_counts_and_no_cell_id() -> None:
+    """Defect: the public CI log tells anyone which cells were deleted and when."""
+    platform = Platform()
+    platform.deletions = [Platform.deletion(DELETED), Platform.deletion(LIVE, stopped=None)]
+    _current_file(platform)
+
+    fake, _, out = platform.run(PURGE_AFTER + timedelta(days=2))
+
+    assert "deletions: 2 in the set, 2 watched: 1 pending, 0 hidden, 1 confirmed, 2 anomalous" in out
+    assert [cell for cell in (DELETED, LIVE) if cell in out] == []
+    assert cell_alerts(fake, DELETED) and cell_alerts(fake, LIVE)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda pinned: pinned["accounts"][0].update(per_cell=None),
+    lambda pinned: pinned["accounts"][0].pop("media"),
+    lambda pinned: pinned["accounts"][0]["buckets"][MEDIA_BUCKET_ID].update(lifecycleRules=[]),
+], ids=["account has no per-cell shape", "media account has no media watch",
+        "media bucket deletes no hidden version"])
+def test_a_deletion_watch_that_cannot_compute_its_window_fails_loudly(mutate: Any) -> None:
+    """Defect: a pinned set that names no backup bucket or no media grace starts a watcher that
+    computes every window wrongly, instead of failing the run."""
+    platform = Platform()
+    mutate(platform.pinned)
+
+    fake, code, _ = platform.run(PURGE_AFTER)
+
+    assert (code, fake.sent) == (2, [])
+

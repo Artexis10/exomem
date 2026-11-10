@@ -185,13 +185,19 @@ The key watcher SHALL take the set of deleted cells only from a Substrate endpoi
 
 ### Requirement: The key watcher computes each cell's watch window
 
-The key watcher SHALL compute each cell's watch window from the cell's `purge_after` and the media grace and backup retention in its pinned set. The version bound SHALL be `purge_after` plus 3 days, plus the larger of the media grace and one day more than the backup retention. The window SHALL end one day after the version bound. At the window's end, the watcher SHALL stop sending transitions for the cell, so that a firing anomaly alert stays until the operator resolves it.
+The key watcher SHALL compute each cell's watch window from the cell's `purge_after`, the newest hide marker under its prefix, and the media grace and backup retention in its pinned set. The version bound SHALL start at the later of `purge_after` plus one day and the newest hide marker. It SHALL add 2 days, plus the larger of the media grace and one day more than the backup retention. The window SHALL end one day after the version bound, but not while a current file or a key for the prefix remains. At the window's end, the watcher SHALL stop sending transitions for the cell, so that a firing anomaly alert stays until the operator resolves it.
 
 #### Scenario: A stalled deletion leaves the window
 
 - **WHEN** a cell's window ends while an `upload` entry remains under its prefix
 - **THEN** its anomaly alert stays firing at the receiver
 - **AND** the watcher sends no resolution for it
+
+#### Scenario: A hold outlasts the window
+
+- **WHEN** a hold keeps a deleted cell's files current until after the window that `purge_after` alone gives
+- **THEN** the watcher keeps sending the cell's transitions
+- **AND** after the release, it reports the cell as hidden, and its version bound starts at the new hide markers
 
 ### Requirement: The key watcher reports each deletion's state
 
@@ -218,7 +224,7 @@ The key watcher SHALL derive per-cell states only from a run that read the delet
 
 ### Requirement: The key watcher raises an anomaly alert for a stalled or early deletion
 
-The key watcher SHALL fire `CELL_DELETION_ANOMALY:<cell_id>` while any of three conditions holds. A current file or a key for the prefix remains after `purge_after` plus one day. An `upload` or `start` entry remains after the version bound. A hide marker under the prefix carries a time inside the early-hide window. That window SHALL open at the later of `iat` and the stop time, plus a skew margin, and SHALL close the skew margin before `purge_after`.
+The key watcher SHALL fire `CELL_DELETION_ANOMALY:<cell_id>` while any of four conditions holds. A current file or a key for the prefix remains after `purge_after` plus one day. An `upload` or `start` entry remains after the version bound. A hide marker under the prefix carries a time inside the early-hide window. The cell has no stop time at `purge_after`. The early-hide window SHALL open at the later of `iat` and the stop time, plus a skew margin, and SHALL close the skew margin before `purge_after`.
 
 #### Scenario: An executor stalls
 
@@ -234,6 +240,11 @@ The key watcher SHALL fire `CELL_DELETION_ANOMALY:<cell_id>` while any of three 
 
 - **WHEN** the only hide markers under a deleted cell's prefix are older than its stop time plus the skew margin
 - **THEN** they raise no anomaly alert
+
+#### Scenario: The controller withholds its report that a cell stopped
+
+- **WHEN** a deleted cell still has no stop time at `purge_after`
+- **THEN** the watcher fires the anomaly alert for that cell
 
 ### Requirement: Account-level alerts follow the deletion set
 

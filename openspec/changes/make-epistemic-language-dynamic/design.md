@@ -37,10 +37,11 @@ Table rows cite the 2026-11-08 language inventory by ID: F for a branch on a fam
 | `plain_link` | The edge is a plain link. It ranks after typed edges, never counts as typed, and the census skips it. | F10, F11, K16 readers (projection_runtime 1825, vocabulary_projection 164, relation_census 64/902/1542) | links_to |
 | `opposes` | Source and target are rivals. Stance reads the pair as declared, the census flags it inside one supersession chain, and the audit raises it as an asserted contradiction. | K17 `CONTRADICTS`, K9 | contradicts |
 | `names_subject` | The edge names the entity a unit is about. Restricted working-set admission matches it against the turn's subject. | K20 | about_entity |
+| `names_assessed_claim` | The edge names the claim a belief unit assesses. A unit with the `credence` trait needs one. | new | assesses |
 | `earlier_than_target` | The source comes before the target in time. | new | precedes |
 | `later_than_target` | The source comes after the target in time. | new | follows |
 
-An extension's behaviours resolve through its core parent, never through a saved family. `assesses`, `precedes` and `follows` carry no behaviour beyond the order pair. Relation review counts all three as typed edges, because none is `associative`.
+An extension's behaviours resolve through its core parent, never through a saved family. `assesses` carries only `names_assessed_claim`, and `precedes` and `follows` only the order pair. Relation review counts all three as typed edges, because none is `associative`.
 
 `presentation_role` stays renderer metadata: it tells a viewer how to draw an edge. Behaviours decide what code does with the edge. `supersedes` carries both, for those two different reasons. `presentation_role` cannot carry a promise, because an extension may set and later change it.
 
@@ -100,6 +101,8 @@ Kinds need their own set, because a relation behaviour has a source and a target
 | `outcome` | Role review reads the unit as an outcome. The category fallback stays as debt. | C5 kind leg | result |
 | `question` | The graph's shared-open-question generator and the census read the unit as a question. The category leg stays as debt. | C6 kind leg, C7 | open_question |
 | `closable` | `flag_open` marks the unit while no verdict or answer exists. Declared in slice 5 with `flag_open`. | new | open_question, hypothesis, prediction, assumption |
+| `credence` | The unit takes `credence`, `credence_holder` and `credence_basis`, and the belief-unit rules apply to it. Those rows on a unit of another kind are an error (slice 4). | new | belief |
+| `dated_event` | The unit takes `occurred_at`. The row on a unit of another kind warns for one release (slice 4). | new | timeline_event |
 
 A trait never schedules a check. `check_by` already does that on any unit, so a trait for it would duplicate the governed key.
 
@@ -150,7 +153,7 @@ The generic families mention, link and relation belong to no dimension.
 The owner chose this shape on 2026-11-08: belief levels, plus numbers only with a source. The owner added that Exomem must not arbitrate belief.
 
 1. A belief is a unit of the new kind `belief`. It states the belief in prose, so it is never an empty unit. Its governed keys are `credence_holder` (a plain name or a link to an entity page), `credence` (the value) and `credence_basis` (free text).
-2. The unit points at the claim it assesses through the new core relation `assesses`, family `assessment`.
+2. The unit points at the claim it assesses through the new core relation `assesses`, family `assessment`. Validation finds that edge through its behaviour `names_assessed_claim`, so a vault extension of `assesses` serves too. A belief unit without it warns in the first release.
 3. The value is a key or label of the belief-level registry (speculative, plausible, likely and near-certain by default), or a probability from 0 to 1.
 4. Every belief names a holder. A probability also needs a basis, and the basis can be anything the holder gives, including intuition.
 5. Exomem keeps the stated value as written. A label resolves to its level key for matching, but the stored text is unchanged, and a probability is never rounded.
@@ -169,13 +172,13 @@ The rejected alternatives were levels only, which keeps the old rule but gives u
 
 - `asserted_by` is a plain name or a link to an entity page. Context presents a unit with it as that party's claim.
 - `modality` takes a modality-registry key: is, should, must, may. Retrieval and context never merge units whose modalities differ.
-- `occurred_at` is a date or a date and time on a `timeline_event`.
+- `occurred_at` is a date or a date and time on a unit with the `dated_event` trait, which ships on `timeline_event`.
 - `quantity_value`, `quantity_unit` and `quantity_error` record one measured quantity. Records remain the place for a series.
 - `inference_mode` takes an inference-mode registry key on a unit with the `assertion` trait.
 
 Every new key name is chosen to avoid ordinary rows: `value`, `at`, `holder`, `basis` and `mood` are common words in existing notes, and `credence`, `occurred_at` and `modality` are not.
 
-`credence` is a unit row on a belief unit, never a frontmatter field. The canonical rule that confidence is not a frontmatter field still holds. Today's teaching says Exomem keeps no credence or numeric confidence anywhere. Slice 6 rewrites those sites: the scaffold's frontmatter, skill and vault-care references, `judge_categorically` in `commands.py`, and the comment beside the verdict set in `semantic_units.py`.
+`credence` is a unit row on a belief unit, never a frontmatter field. The canonical rule that confidence is not a frontmatter field still holds. Today's teaching says Exomem keeps no credence or numeric confidence anywhere. Slice 4 rewrites `judge_categorically` in `commands.py`. Slice 6 rewrites the other sites: the scaffold's frontmatter, skill and vault-care references, and the comment beside the verdict set in `semantic_units.py`.
 
 Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release. The warning names the repair: rename the row, or give it a valid value.
 
@@ -191,14 +194,13 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 |---|---|---|
 | F7 same-page epistemic flag | relation_census 76, 1460 | Census-only. It is family-keyed, so extensions already reach it. |
 | Projected graph lane tier (K16, change 6) | projection_runtime 1825 | A stored projection edge keeps its canonical key and no extension parent, so only a core plain link ranks last. An extension of `links_to` ranks as typed here until the producer stores the parent. |
-| Shared-source copy in the relation queue (K14 fold) | relation_queue 700 | It reads the frontmatter field's stored edges only, while the graph copy also reads page-level extensions. Folding the two changes suggestions and needs its own evidence. It reads the field and relation from the binding. |
+| Shared-source copy, drifted from the graph copy (K14 fold) | relation_queue 700; epistemic_graph 14156 | The two copies disagree. The relation queue reads the frontmatter field's stored edges only. The graph copy also reads page-level extensions, and it reads the binding's relation from any origin. Folding them changes suggestions and needs its own evidence. Both read the field and relation from the binding. |
 | F8 affiliation count | relation_census 1232 | One entity-census count for one family. |
 | K7 evidence-target check, with C8 `_EVIDENTIAL_KINDS` | relation_census 74, 1447 | Census-only. `target_kinds` cannot express it, because folders and Sources pages count. The kind list stays with the check. |
 | K8 answers-target check (relation side) | relation_census 1454 | Census-only. `settles` is wrong here, because a `resolves` target is often not a question. The target side reads the `question` trait. |
 | K18 asserted-contradiction label | audit 7057 | A label on the finding. The pairs come from `opposes`, and an extension is labelled by its parent. |
 | K19 duplicate default | adoption_proposals 448, 1327 | A producer default that writes one core key. A vault cannot remove a core key. |
 | Wikilink producers and their authored-match checks | semantic_contract 4645; epistemic_graph 9046, 9312, 12361, 14135, 14923; relation_queue 661; governance/graph_producer 79 | Producer constants. `origins: [wikilink]` already states the fact. Convert them through one `origin_relation()` accessor when a second core relation lists that origin. |
-| Drifted shared-source copy | epistemic_graph 14156 | It reads the binding's relation from any origin, while the `relation_queue` copy reads the field only. Folding them changes suggestions, so the fold needs its own evidence. |
 | K21 pointer readers | find_types 202, 209; working_set 480, 1163, 2671; stance 77; delete_file 230; replace 436; context_pack 365, 673; memory_context 135; audit 6229, 6370; semantic_contract 4805; working_set_currency 34 | Naming the field tokens is sound. The repeated rule "a successor pointer means not current" is debt. Fold it into one lifecycle predicate that reads the reverse field from the `supersedes` binding. |
 | K22 field-name lists | lexstore 584; episode_capture 54; review_context 37; entity_types 76; governance/bridges 60; governance/egress 812, 856, 5138; working_set_conversation 143; memory_context 136 | Transport and allow-lists. They carry no behaviour. |
 | K24 teaching copy | commands 1600-1608; relation_vocabulary 84 | Prose. Slice 6 teaches from the pack. |
@@ -207,6 +209,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
 | Vault verdicts in the vault-neutral parse | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column; the `unit` an `observe_memory` result returns | These read the parse that uses the shipped registry, as vault kinds and categories already are there. A vault verdict shows in `metadata.verdict` and in the selected unit view, not in `unit.verdict` of the neutral parse. A vault-registry change does not rebuild the derived stores, as for relations. |
 | Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
+| Retry advice while the graph is stale | find `_resolve_relation_filter`, `_dimension_source` (warming site `relation_graph_rebuilding`) | On the scan path, a `unit.dimension` filter that needs edges, or a `relations=` filter, raises the warming outcome while the graph rebuilds, and its remediation says to retry. After a direct file edit, only a reconcile (`maintain_memory` with mode `reconcile`) ends that state, so a retry can return the same outcome. The remediation belongs to the shared warming outcome, so this slice does not change it. |
 
 Sound, not debt: K23 (NLI output labels, a closed model schema), the `generic_relation_key()` readers, and projection_runtime 1837 (a core-or-extension test).
 
@@ -284,4 +287,4 @@ Kinds:
 - **A non-core key means what its authoring page's instance defines.** A behaviour lookup uses that page's registry, as the census does.
 - **The grandfathered family-mismatch case flips silently.** The fixture holds one such extension.
 - **A partial cutover leaves one concept on mixed family and key reads.** The fixture asserts extension reach in every reader of a behaviour, not in one.
-- **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them. A vault overlay is not: older code reads a saved `verdicts:` section or a kind's `traits:` as `unknown_field` errors, so every vault category then resolves `registry_invalid`. Rolling back after a vault saves verdicts or kind traits needs those sections removed from its registry first.
+- **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them. A vault overlay is not: older code reads a saved `verdicts:` section or a kind's `traits:` as `unknown_field` errors, so every vault category then resolves `registry_invalid`. Code before slice 4 does the same with a saved `belief_levels:`, `modalities:` or `inference_modes:` section, and reads the trait values `credence` and `dated_event` on a vault kind as `unknown_trait` errors. Rolling back after a vault saves any of these needs those sections or trait values removed from its registry first.

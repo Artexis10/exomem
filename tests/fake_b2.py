@@ -5,6 +5,9 @@ edge depends on: SHA-1 on every upload, token use, two or more parts with a
 minimum size for all but the last, and a finish that is not repeatable. It also
 records every call, and it can lose a reply, with or without the call having taken effect.
 
+Two keys reach it, each with its own capabilities: the edge key writes and reads but
+cannot list, and the list key (`LIST_KEY_ID`) can only list versions.
+
 It models the media bucket's one lifecycle rule (collect-released-media D2): a hide
 or a newer version makes a version non-current, a HEAD by name answers 404 for a
 hidden name, and `lifecycle_tick` deletes each version that has been non-current for
@@ -13,6 +16,7 @@ hidden name, and `lifecycle_tick` deletes each version that has been non-current
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -24,6 +28,7 @@ import httpx
 API = "https://api000.fake-b2.test"
 DOWNLOAD = "https://dl000.fake-b2.test"
 UPLOAD = "https://up000.fake-b2.test"
+LIST_KEY_ID = "list-key"
 
 
 class FakeB2:
@@ -40,6 +45,8 @@ class FakeB2:
         self._parked: dict[str, dict] = {}
         self._counter = 0
         self.account_token, self._expired = "token-account", 0
+        self.list_page = 1000
+        self.repeat_cursor_pages = 0  # a provider fault: this many pages ignore their cursor
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -120,8 +127,13 @@ class FakeB2:
         url = request.url
         if url.path.endswith("/b2_authorize_account"):
             return "authorize", self._authorize(request)
-        if request.headers.get("authorization", "") != self.account_token and url.host != "up000.fake-b2.test":
+        token = request.headers.get("authorization", "")
+        listing = token == self._list_token()
+        if token != self.account_token and not listing and url.host != "up000.fake-b2.test":
             return "unauthorized", self._json(401, {"code": "bad_auth_token"})
+        # Each key holds only its own capabilities: the edge key cannot list, and the list key can only list.
+        if listing != url.path.endswith("/b2_list_file_versions"):
+            return "unauthorized", self._json(401, {"code": "unauthorized"})
         if url.host == "up000.fake-b2.test":
             return await self._upload(request)
         if url.host == "dl000.fake-b2.test":
@@ -133,10 +145,15 @@ class FakeB2:
             return f"unsupported:{endpoint}", self._json(400, {"code": "unsupported"})
         return endpoint, handler(payload)
 
+    def _list_token(self) -> str:
+        return f"{self.account_token}-list"
+
     def _authorize(self, request: httpx.Request) -> httpx.Response:
         if request.headers.get("authorization", "").startswith("Basic "):
+            listing = base64.b64decode(request.headers["authorization"][6:]).decode().startswith(f"{LIST_KEY_ID}:")
             storage = {"apiUrl": API, "downloadUrl": DOWNLOAD, "absoluteMinimumPartSize": self.minimum_part,
-                       "recommendedPartSize": 100_000_000, "capabilities": ["readFiles", "writeFiles"]}
+                       "recommendedPartSize": 100_000_000,
+                       "capabilities": ["listFiles"] if listing else ["readFiles", "writeFiles"]}
             bucket = {"id": self.bucket_id, "name": self.bucket}
             if self.shape == "single":
                 storage |= {"bucketId": self.bucket_id, "bucketName": self.bucket}
@@ -144,7 +161,8 @@ class FakeB2:
                 storage |= {"bucketId": None, "bucketName": None, "allowed": {"buckets": [bucket]}}
             else:
                 storage |= {"bucketId": None, "bucketName": None}
-            return self._json(200, {"accountId": "account", "authorizationToken": self.account_token,
+            token = self._list_token() if listing else self.account_token
+            return self._json(200, {"accountId": "account", "authorizationToken": token,
                                     "apiInfo": {"storageApi": storage}})
         return self._json(401, {"code": "unauthorized"})
 
@@ -195,6 +213,28 @@ class FakeB2:
         file_id = self._id()
         self.files[file_id] = {"name": payload["fileName"], "action": "hide", "parts": {}, "info": {}, "data": b""}
         return self._json(200, {"fileId": file_id, "fileName": payload["fileName"], "action": "hide"})
+
+    def _api_b2_list_file_versions(self, payload: dict) -> httpx.Response:
+        if payload.get("bucketId") != self.bucket_id:
+            return self._json(400, {"code": "bad_request"})
+        if self.repeat_cursor_pages:
+            self.repeat_cursor_pages -= 1
+            payload = {key: value for key, value in payload.items() if key not in ("startFileName", "startFileId")}
+        prefix = payload.get("prefix", "")
+        # By name, then newest first within a name; `files` holds the versions in upload order.
+        ordered = sorted(((position, file_id, item) for position, (file_id, item) in enumerate(self.files.items())
+                          if item["name"].startswith(prefix)), key=lambda entry: (entry[2]["name"], -entry[0]))
+        start = 0
+        if "startFileName" in payload:
+            start = next(index for index, (_, file_id, item) in enumerate(ordered)
+                         if (item["name"], file_id) == (payload["startFileName"], payload["startFileId"]))
+        page = ordered[start:start + min(payload.get("maxFileCount", 100), self.list_page)]
+        rest = ordered[start + len(page):]
+        files = [{"fileId": file_id, "fileName": item["name"], "action": item["action"],
+                  "contentLength": len(item["data"]) if item["data"] is not None else 0, "fileInfo": item["info"]}
+                 for _, file_id, item in page]
+        return self._json(200, {"files": files, "nextFileName": rest[0][2]["name"] if rest else None,
+                                "nextFileId": rest[0][1] if rest else None})
 
     def _api_b2_get_file_info(self, payload: dict) -> httpx.Response:
         item = self.files.get(payload["fileId"])

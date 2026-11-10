@@ -88,18 +88,26 @@ TASK_PROJECTION_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 4.0
 #: The largest share of a request's budget that reserve may take. The 6 s activation door keeps 1.5 s, so a
 #: steady-state method search (0.4-0.7 s for two queries on the same vault) still runs there.
 TASK_PROJECTION_RESERVE_SHARE = 0.25
-#: What an activation may spend inside its request's deadline. An activation is optional context for a turn, so
-#: it gives up well before the request does; the operator tunes this value with the variable, never by code.
-ACTIVATION_BUDGET_SECONDS = 15.0
+#: What an activation may spend inside its request's deadline when the operator sets one with the variable.
+#: Unset, an activation runs on its request's deadline: a nearer one stops the turn slice's compile (mostly in
+#: the conversation carry) where the request's own deadline lets the call serve its slice and leads late.
+ACTIVATION_BUDGET_SECONDS: float | None = None
 ACTIVATION_BUDGET_ENV_VAR = "EXOMEM_ACTIVATION_BUDGET_SECONDS"
+
+
+def task_context_reserve() -> float:
+    """Seconds the turn slice leaves for task discovery, so that a slow slice cannot spend the whole budget and
+    leave the call with the map alone. It is the projection reserve's own share of the current budget (1.5 s on
+    the 6 s door); none when no budget is bound."""
+    budget = current()
+    if budget is None:
+        return 0.0
+    return min(TASK_PROJECTION_RESERVE_SECONDS, budget.seconds * TASK_PROJECTION_RESERVE_SHARE)
 
 
 def task_projection_reserve(leads: int) -> float:
     """Seconds the task method search leaves for projecting `leads` found leads; none when there are none."""
-    budget = current()
-    if budget is None or leads <= 0:
-        return 0.0
-    return min(TASK_PROJECTION_RESERVE_SECONDS, budget.seconds * TASK_PROJECTION_RESERVE_SHARE)
+    return task_context_reserve() if leads > 0 else 0.0
 
 #: Operators may lengthen or shorten the origin budget. Clients may not: the
 #: client that most needs the bound is the one that cannot be trusted to set
@@ -131,7 +139,7 @@ def reset_resolution_cache() -> None:
         _RESOLVED.clear()
 
 
-def _setting_seconds(name: str, default: float, env: Mapping[str, str] | None) -> float:
+def _setting_seconds(name: str, default: float | None, env: Mapping[str, str] | None) -> float | None:
     """The seconds that variable `name` sets, falling back to `default` on nonsense."""
     source = os.environ if env is None else env
     raw = source.get(name)
@@ -149,11 +157,10 @@ def _setting_seconds(name: str, default: float, env: Mapping[str, str] | None) -
                 resolved = candidate
             else:
                 _log.warning(
-                    "%s=%r is not a positive number of seconds; "
-                    "falling back to the %.1fs default",
+                    "%s=%r is not a positive number of seconds; %s",
                     name,
                     raw,
-                    default,
+                    "binding no budget" if default is None else f"falling back to the {default:.1f}s default",
                 )
         _RESOLVED[name] = (raw, resolved)
         return resolved
@@ -161,11 +168,13 @@ def _setting_seconds(name: str, default: float, env: Mapping[str, str] | None) -
 
 def budget_seconds(env: Mapping[str, str] | None = None) -> float:
     """The configured origin budget, falling back to the default on nonsense."""
-    return _setting_seconds(BUDGET_ENV_VAR, MCP_REQUEST_BUDGET_SECONDS, env)
+    seconds = _setting_seconds(BUDGET_ENV_VAR, MCP_REQUEST_BUDGET_SECONDS, env)
+    assert seconds is not None  # the request budget always has a default
+    return seconds
 
 
-def activation_budget_seconds(env: Mapping[str, str] | None = None) -> float:
-    """The configured activation budget, falling back to the default on nonsense."""
+def activation_budget_seconds(env: Mapping[str, str] | None = None) -> float | None:
+    """The activation budget the operator set, or None when none is set or the value is nonsense."""
     return _setting_seconds(ACTIVATION_BUDGET_ENV_VAR, ACTIVATION_BUDGET_SECONDS, env)
 
 

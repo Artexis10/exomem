@@ -9,7 +9,7 @@ from test_activation_log import activation_log as activation_log  # noqa: F401  
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_context_catalogue import _built, _page, _source_schema, _write
-from test_context_views import _second_vault
+from test_context_views import _cold, _second_vault
 from test_governance_egress import _external, write_rule
 from test_working_set_index import _seed_structure
 from test_working_set_withheld_twins import _withhold
@@ -478,7 +478,9 @@ def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path
         request_budget.reset_current(token)
     assert {path.name for path in prepared} >= {"a-matching-reference.md", "z-matching-reference.md"}
     assert packet["abstained"] is False and "map" in packet
-    assert packet["task_context"]["state"] in ("partial", "unavailable")
+    # The deadline, not a fault, cut discovery short, and the block says so instead of reading unavailable.
+    assert packet["task_context"]["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in packet["task_context"]["missing"]
     assert packet["task_context"]["candidates"] == []
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
@@ -727,8 +729,8 @@ def test_a_deadline_during_the_text_query_stops_it_short_of_the_deadline_and_ser
     def stalls_past_the_query_share(self, conn, *args, **kwargs):
         # Only the task text query keeps raw material and leaves navigation out; no other lane asks for that pair.
         if kwargs.get("exclude_navigation") and not kwargs.get("exclude_raw_material"):
-            # 12 s of the 15 s the activation gets: past what the query may spend, with the projection reserve still unspent.
-            clock[0] += 12.0
+            # 46 s of the 50 s request: past what the query may spend, with the projection reserve still unspent.
+            clock[0] += 46.0
             try:
                 conn.execute(
                     "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500000) "
@@ -783,6 +785,86 @@ def test_a_deadline_spent_by_the_turn_slice_marks_task_context_partial_and_keeps
     assert task["state"] == "partial"
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
     assert task["candidates"] == []
+
+
+def test_a_slow_retrieval_carry_leaves_task_discovery_its_reserve(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, activation_log: Path
+) -> None:
+    """The turn slice once ran to the activation's deadline inside its carry, so task discovery found the budget
+    gone and the call returned the map alone."""
+    from test_working_set_carry import CARRY_TURN, _seed_carry_pages, seed_ordinary_notes
+
+    from exomem import request_budget, working_set
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_BUDGET_SECONDS", "15")
+    _seed_carry_pages(vault)
+    seed_ordinary_notes(vault)
+    _seed_structure(vault)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    _cold()
+    clock = _clock_at(monkeypatch)
+    rare_terms = working_set_runtime.rare_turn_terms
+
+    def runs_to_the_slice_deadline(*args, **kwargs):
+        result = rare_terms(*args, **kwargs)
+        # The carry's query ran until the deadline it was given, and the stage after it overran that by 1.5 s.
+        clock[0] += request_budget.current().remaining() + 1.5
+        return result
+
+    with monkeypatch.context() as slow:
+        slow.setattr(working_set_runtime, "rare_turn_terms", runs_to_the_slice_deadline)
+        packet, budget = _activate_within(vault, 50, turn=CARRY_TURN, max_chars=8000)
+    _cold()
+    unhurried, _ = _activate_within(vault, 50, turn=CARRY_TURN, max_chars=8000)
+
+    leads = {item["source_ref"] for item in packet["task_context"]["candidates"]}
+    unhurried_leads = {item["source_ref"] for item in unhurried["task_context"]["candidates"]}
+    assert not packet.get("abstained") and packet["map"] == unhurried["map"]
+    assert packet["turn_slice"]["state"] == "skipped"
+    assert working_set.CARRY_STAGE in budget.truncated
+    assert unhurried_leads and unhurried_leads <= leads
+    limited, _ = _rows(activation_log)
+    assert limited["outcome"] == "served" and limited["activation_result"]["budget_limited"] is True
+
+
+def test_a_caller_without_task_discovery_keeps_the_slice_time_that_discovery_would_reserve(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller whose task discovery is unavailable once lost its slice to a reserve kept for that discovery."""
+    from test_working_set_carry import (
+        CARRY_PAGE,
+        CARRY_TURN,
+        _seed_carry_pages,
+        seed_ordinary_notes,
+    )
+
+    from exomem import context_task
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    # Without the raw fast path and with released-corpus discovery off, task context is unavailable at once.
+    monkeypatch.setattr(context_task, "full_source_access", lambda *args, **kwargs: False)
+    _seed_carry_pages(vault)
+    seed_ordinary_notes(vault)
+    _seed_structure(vault)
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    _cold()
+    clock = _clock_at(monkeypatch)
+    rare_terms = working_set_runtime.rare_turn_terms
+
+    def ends_45_seconds_in(*args, **kwargs):
+        result = rare_terms(*args, **kwargs)
+        # 4 s before the 50 s request's own deadline less the stage reserve, inside the old 5 s task reserve.
+        clock[0] = 1045.0
+        return result
+
+    monkeypatch.setattr(working_set_runtime, "rare_turn_terms", ends_45_seconds_in)
+    packet, _ = _activate_within(vault, 50, turn=CARRY_TURN, max_chars=8000)
+    assert packet["task_context"]["state"] == "unavailable"
+    assert packet["turn_slice"]["state"] == "ready"
+    assert CARRY_PAGE in [item["ref"] for item in packet["turn_slice"]["items"]]
 
 
 def test_an_activation_stops_at_its_own_deadline_inside_a_longer_request_budget(

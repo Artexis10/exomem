@@ -26,6 +26,7 @@ from . import (
     memory_refs,
     procedure_approval,
     provenance,
+    request_budget,
     runtime_resources,
     semantic_index,
     semantic_units,
@@ -409,7 +410,13 @@ def compile_context(
     with find_types.timing_span(timings, "working_set.methods"):
         reset = _revalidate(root, held, caller, sources)
     block = empty(reset=reset)
-    covered, protected = prepare_slice() if prepare_slice is not None else (frozenset(), 0)
+    if prepare_slice is not None:
+        # The slice compiles first and must leave discovery its reserve; a slow slice would otherwise spend the
+        # whole budget and leave the call with the map alone.
+        with request_budget.leaving(request_budget.task_context_reserve()):
+            covered, protected = prepare_slice()
+    else:
+        covered, protected = frozenset(), 0
     # Reserve the possible continuation-capacity reset before admitting complete projections.
     allowance = max_chars - protected - (len(RESET_ADVICE) + 1 if held and not reset else 0)
     if not turn.strip() and not conversation.focus:
@@ -421,12 +428,19 @@ def compile_context(
         block["state"] = "partial"
         return block
     try:
-        with find_types.timing_span(timings, "working_set.task_context"):
-            discovered, missing = working_set.task_candidates(
-                root, catalogue=catalogue, caller=caller, turn=turn,
-                focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
-                index_token=index_token, projections=sources, timings=timings,
-            )
+        try:
+            with find_types.timing_span(timings, "working_set.task_context"):
+                discovered, missing = working_set.task_candidates(
+                    root, catalogue=catalogue, caller=caller, turn=turn,
+                    focus=conversation.focus, snapshot=snapshot, limit=MAX_CANDIDATES,
+                    index_token=index_token, projections=sources, timings=timings,
+                )
+        except TaskDeadline:
+            # The released corpus ran out of time before it ranked anything; a prefix would bias the ranking, so
+            # no lead is served, and the revalidated methods stand as at the boundary above.
+            _add_missing(block, "budget")
+            block["state"] = "partial"
+            return block
         block["missing"] = missing
         candidates = []
         identities: dict[tuple[str, str], dict[str, Any]] = {}

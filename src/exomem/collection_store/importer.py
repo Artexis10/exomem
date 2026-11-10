@@ -54,11 +54,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Never
 
-from .. import __version__, archive_members, auth_sessions, item_keys, records, vault
+from .. import __version__, archive_members, auth_sessions, item_keys, records, vault, writer_lease
 from .. import structured_collections as collections
 from ..governance import principal as principal_module
 from ..governance.authorization_session_lifecycle import AuthorizationSessionContext
-from ..query_engine import scalars
+from ..query_engine import reference_report, scalars
 from . import (
     connection,
     derived_rows,
@@ -108,8 +108,8 @@ _START = {"row": 0, "byte": 0, "state": {}}
 _RESUMABLE = ("authority_lost", "time_cap")
 _SESSION_STORE = "IMPORT_SESSION_STORE_UNAVAILABLE"
 # Fixed writer/store protocol refusals a later tick outlives; other batch errors fail the job.
-_STORE_STATE = frozenset(
-    {"MUTATION_BUSY", takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
+_STORE_STATE = writer_lease.TRANSIENT_WRITER_CODES | frozenset(
+    {takeover.BUSY, takeover.SYNC_PENDING, takeover.DIVERGED, takeover.CUSTODY_LOST, _SESSION_STORE}
 )
 
 
@@ -2296,7 +2296,25 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "last_receipt": progress["last_receipt"],
         "rejections": rejections,
         "error": error,
+        **_reference_report(writer, job, state),
     }
+
+
+def _reference_report(writer, job: _Job, state: str) -> dict:
+    """On completion, a non-derived job reports its declared references' resolution.
+
+    The check reads under the caller's own admission and never fails the status call.
+    """
+    if state != "complete":
+        return {}
+    try:
+        _, manifest, _ = writer._collection(job.collection_id)
+    except collections.CollectionError:
+        return {}  # the status call itself reports a collection the caller can no longer read
+    if manifest.derived or not collections.declared_references(manifest.schema):
+        return {}
+    report = reference_report.check_collection(writer.root, writer.handle.path, job.collection_id)
+    return {"reference_check": report, "warnings": reference_report.warnings(report)}
 
 
 @contextmanager
@@ -3268,8 +3286,9 @@ def _after_error(root: Path, writer, job_id: str, sequence: int, error: Exceptio
     """Classify a batch error once its transaction is gone.
 
     If the checkpoint moved, the batch committed and only its acknowledgement
-    failed. A store refusal (busy, sync pending, diverged, custody) blocks the
-    job on this host until a later tick finds the store writable. Anything
+    failed. A store refusal (busy, sync pending, diverged, custody, or the writer
+    coordinator or lease briefly out of reach) blocks the job on this host until
+    a later tick finds the store writable. Anything
     else fails the job with a typed code.
     """
     job = _load(writer.connection, job_id)

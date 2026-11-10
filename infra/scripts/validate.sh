@@ -111,5 +111,6 @@ uvx --from "mypy==${MYPY_VERSION}" mypy \
   "${infra_dir}"/scripts/*.py
 shellcheck "${script_dir}"/*.sh
 "${trivy_bin}" fs --scanners secret --exit-code 1 --no-progress \
+  --ignorefile "${infra_dir}/trivyignore.yaml" \
   --skip-dirs .git --skip-dirs .venv --skip-dirs .venv-hosted-ci \
   --skip-dirs .terraform --skip-dirs '**/__pycache__' --skip-dirs charts "${repo_root}"

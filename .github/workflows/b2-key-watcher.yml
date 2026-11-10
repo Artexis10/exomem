@@ -50,4 +50,9 @@ jobs:
           # collect-released-media D4: the list-only media key that counts hide markers.
           B2_WATCHER_MEDIA_KEY_ID: ${{ secrets.B2_WATCHER_MEDIA_KEY_ID }}
           B2_WATCHER_MEDIA_KEY: ${{ secrets.B2_WATCHER_MEDIA_KEY }}
+          # automate-cell-storage-deletion D4: Substrate's deletion set, and the list-only key that
+          # lists each deleted cell's backup prefix.
+          KEY_WATCHER_DELETIONS_URL: ${{ secrets.KEY_WATCHER_DELETIONS_URL }}
+          B2_WATCHER_BACKUP_LIST_KEY_ID: ${{ secrets.B2_WATCHER_BACKUP_LIST_KEY_ID }}
+          B2_WATCHER_BACKUP_LIST_KEY: ${{ secrets.B2_WATCHER_BACKUP_LIST_KEY }}
         run: python3 infra/scripts/b2_key_watcher.py

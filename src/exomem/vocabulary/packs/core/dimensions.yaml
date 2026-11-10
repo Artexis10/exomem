@@ -1,0 +1,72 @@
+# The epistemic dimensions Exomem ships. A dimension groups words by the question they answer.
+# Its members are relation families, unit kinds and governed unit-metadata keys, and a word may
+# belong to several dimensions. A unit belongs to a dimension when its kind is a member, when it
+# carries a member key, or when it is an endpoint of an edge whose relation family is a member.
+# Retrieval filters by `unit.dimension`, and a per-dimension row in the schema read counts units.
+# A vault adds dimensions or labels in the `dimensions` section of
+# `_Schema/semantic-language-registry.yaml`. `labels` maps a language tag to the label in that
+# language. Parsing accepts the key or any label, after NFKC normalisation and casefolding.
+#
+# `members` takes up to three lists. `families` names relation families, `kinds` names unit
+# kinds and `keys` names governed unit-metadata keys. The one wildcard is `kinds: ["*"]`: every
+# kind in the page's registry, shipped and vault-added. No other wildcard exists.
+#
+# `display` names behaviours from the closed set the registry schema declares and code
+# implements: `lead_with_current`, `show_origin`, `flag_open` and `order_in_time`. A display
+# behaviour changes only the order and annotation of compiled context. It never hides a unit,
+# changes a unit's standing or changes what a word means.
+schema_version: 1
+dimensions:
+  currency:
+    labels: {en: Currency}
+    description: Whether a statement is still current or a later one has replaced it.
+    members: {families: [supersession]}
+    display: [lead_with_current]
+  correction:
+    labels: {en: Correction}
+    description: Whether a statement was contradicted, tested or given a verdict.
+    members: {families: [contradiction, testing], keys: [verdict]}
+  provenance:
+    labels: {en: Provenance}
+    description: Where a statement came from.
+    members: {families: [derivation, evidence, citation, observation]}
+    display: [show_origin]
+  attribution:
+    labels: {en: Attribution}
+    description: Whose statement or belief it is.
+    members: {keys: [asserted_by, credence_holder]}
+    display: [show_origin]
+  kind:
+    labels: {en: Kind}
+    description: What kind of statement it is.
+    members: {kinds: ["*"], keys: [modality, inference_mode]}
+  argument:
+    labels: {en: Argument}
+    description: The case for and against a statement.
+    members: {families: [support, contradiction]}
+  dependency:
+    labels: {en: Dependency}
+    description: What a statement rests on.
+    members: {families: [dependency, causality, blocking, implementation, mitigation, use, production]}
+  entities:
+    labels: {en: Entities}
+    description: What and whom a statement is about.
+    members: {families: [entity, membership, kinship, affiliation, ownership, operation, supply, location, composition]}
+  identity:
+    labels: {en: Identity}
+    description: Whether two statements are the same thing.
+    members: {families: [duplication, specialization]}
+  scope:
+    labels: {en: Scope}
+    description: Where a statement holds.
+    members: {families: [refinement]}
+  uncertainty:
+    labels: {en: Uncertainty}
+    description: How sure we are.
+    members: {families: [question, answer, resolution, assessment], kinds: [belief, hypothesis, assumption, prediction, open_question, risk], keys: [check_by, credence]}
+    display: [flag_open]
+  order:
+    labels: {en: Order}
+    description: When it happened and what came before.
+    members: {families: [order], kinds: [timeline_event], keys: [occurred_at]}
+    display: [order_in_time]

@@ -173,7 +173,7 @@ def describe(root: Path, state: Any, registries: _Registries | None = None) -> d
                             "occurrence",
                         )
                     },
-                    "supersedes": [r.target for r in unit.relations if "replaces" in registry.behaviours_of_label(r.kind)],
+                    "supersedes": [r.target for r in unit.relations if registry.has_label(r.kind, "replaces")],
                 }
             )
     return {

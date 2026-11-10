@@ -582,7 +582,8 @@ def _eligibility_view_json(page: Any) -> str:
             "view": {
                 key: _encode_filter_value(value)
                 for key, value in view.items()
-                if key != "frontmatter"
+                # `path` names the page for a dimension filter; the catalogue row has its own path.
+                if key != "frontmatter" and key != "path"
             },
             "media_file": page.media_file,
             "frame_ts": page.frame_ts,

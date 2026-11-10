@@ -212,7 +212,7 @@ def governed_frontmatter_reason(
         return None
     # Deferred: `semantic_language_registry` imports this module. The vocabulary still has
     # exactly one definition, the verdict registry.
-    from . import semantic_language_registry, semantic_units
+    from . import semantic_labels, semantic_language_registry, semantic_units
 
     normalized_type = str(page_type or "").strip().casefold()
     if normalized_type != "experiment":
@@ -226,7 +226,7 @@ def governed_frontmatter_reason(
         semantic_language_registry.load_for_page(*page)
         if page is not None
         else semantic_language_registry.core_registry()
-    ).verdict_keys()
+    ).label_keys(semantic_labels.VERDICTS)
     # An outcome takes a key only; a unit verdict also takes a label.
     if not isinstance(value, str) or value.strip().casefold() not in keys:
         return (
