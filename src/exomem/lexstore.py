@@ -236,8 +236,8 @@ DEADLINE_STATUS = "deadline"
 #: SQLite calls the budget check once per this many VM instructions. Each call re-takes the GIL,
 #: which another busy thread holds for up to one 5 ms switch interval, so a check every 1000 made a
 #: contended query several times slower. The count is SQLite's alone: a streamed read that works
-#: through each batch in Python (`_SelectedUnits.contributions`) runs about 1000 per page, so a much
-#: larger interval would never stop that build. 10,000 is about ten pages of it.
+#: through each batch in Python (`_SelectedUnits.contributions`) runs about 130 to 1000 per page,
+#: by units per page, so a much larger interval lets a small build run past its deadline.
 _BUDGET_CHECK_INSTRUCTIONS = 10_000
 
 
