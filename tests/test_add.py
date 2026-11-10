@@ -867,3 +867,56 @@ def test_prepared_captures_reuse_core_allocation_and_refresh_shared_bookkeeping(
         assert vault_module.content_hash((vault / result.path).read_text()) == vault_module.content_hash(sealed["writes"][0].content)
     activity = (vault / "Knowledge Base/log.md").read_text()
     assert "First transfer" in activity and "Second transfer" in activity
+
+
+@pytest.mark.parametrize(
+    ("title", "tag"),
+    [
+        ("Tagged notes", "[[Unrelated page]]"),
+        # A stray backtick and a nested pair defeated a single escaping pass.
+        ("Tagged `notes", "[[ [[Unrelated page|]] ]]"),
+    ],
+)
+def test_an_activated_vault_keeps_a_wikilink_tag_inert_in_the_index(
+    activated_vault: Path, source_schema: schema_module.SourceSchema, title: str, tag: str
+) -> None:
+    """The gate does not classify the index a capture binds, so a tag must not become a live link there."""
+    from exomem import vault as vault_module
+    from exomem.governance.principal import library_scope
+
+    vault = activated_vault
+
+    with library_scope():
+        result = add_module.add(
+            vault, source_schema, content="Notes from the meeting.", source_type="session",
+            title=title, tags=[tag], today=TODAY,
+        )
+
+    assert (vault / result.path).is_file()
+    [activity] = [line for line in _read(vault / "Knowledge Base/index.md").splitlines() if "Tagged" in line]
+    assert "unrelated-page" in activity
+    assert vault_module.find_body_wikilinks(activity) == []
+
+
+def test_a_capture_whose_index_moved_before_its_commit_answers_busy(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch
+) -> None:
+    """An index changed by a writer outside the boundary is a race to retry, not a lost edit or a hard failure."""
+    from exomem.cli_ops import OpError
+
+    index = vault / "Knowledge Base/index.md"
+    commit = add_module.batch_atomic_write
+
+    def edit_outside_then_commit(writes, **kwargs):
+        index.write_text(_read(index) + "\nAn outside edit.\n", encoding="utf-8")
+        return commit(writes, **kwargs)
+
+    monkeypatch.setattr(add_module, "batch_atomic_write", edit_outside_then_commit)
+    with pytest.raises(OpError) as refused:
+        add_module.add(
+            vault, source_schema, content="Notes.", source_type="session", title="Raced capture", today=TODAY,
+        )
+
+    assert (refused.value.code, refused.value.details["cause"]) == ("MUTATION_BUSY", "auxiliary_changed")
+    assert "An outside edit." in _read(index)
+    assert not list((vault / "Knowledge Base/Sources/Sessions").glob("*raced-capture*"))

@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
-_ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer manifest defines these code-owned output roles.
+# A Source's original bytes, opaque under its page: `vocabulary_gate.begin_batch` binds their digest, never their content.
+SOURCE_ORIGINAL = "source-original"
+_ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer manifest defines these code-owned roles of bound writes.
     {
         "relation-review",
         "lifecycle-review",
@@ -19,6 +21,7 @@ _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer ma
         # The snapshot of the bytes a registry save replaced (`registry_history`).
         "registry-history",
         "compiled-history",  # The semantic writer retains its exact prior Markdown.
+        SOURCE_ORIGINAL,
     }
 )
 # Primary-bound roles are admitted through their one primary (`vault._validate_batch_write_access`).
@@ -73,6 +76,23 @@ def seal(
     entries: list[DerivedAuxiliary] = []
     for role, write in derived:
         guard = getattr(write, "guard", None)
+        if role == SOURCE_ORIGINAL:
+            from . import vault
+
+            # The batch writer publishes prepared bytes only at a missing destination.
+            if (
+                not isinstance(getattr(write, "content", None), vault.PreparedBinaryContent)
+                or not write.create_only or write.expected_hash != vault.MISSING_CONTENT_HASH
+                or guard is not None and guard.leaf_policy != "absent"
+            ):
+                raise ValueError("VOCABULARY_AUXILIARY_INVALID")
+            path = _relative(root, Path(write.path))
+            if path == primary_path:
+                raise ValueError("VOCABULARY_AUXILIARY_PRIMARY_COLLISION")
+            if not original_in_bound(primary_path, path):
+                raise ValueError("VOCABULARY_AUXILIARY_PATH_INVALID")
+            entries.append(DerivedAuxiliary(role, path, None, write.content.sha256))
+            continue
         if role not in _ROLES or not isinstance(getattr(write, "content", None), str) or guard is None:
             raise ValueError("VOCABULARY_AUXILIARY_INVALID")
         path = _relative(root, Path(write.path))
@@ -115,8 +135,8 @@ def seal(
 def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
     """Adapt complete guarded plans to the same validator as staged images.
 
-    Lazy on purpose: `validate` reads no image without a manifest, and a batch of many writes
-    revalidates its plan once per write, so building the images up front hashed every write each time.
+    Lazy on purpose: `validate` reads no image without a manifest. A batch that revalidates its plan
+    once per write builds these images once and passes them to every check.
     """
     root = Path(vault_root).resolve()
     for write in writes:
@@ -136,6 +156,44 @@ def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
             ),
             after_sha256=_hash(write.content),
         )
+
+
+def original_in_bound(primary_path: str, path: str) -> bool:
+    """Whether an original sits beside its Source page, or in a container's payload folder beside it.
+
+    An original is never a Markdown page or a registry file: those carry structural effects that
+    the gate must classify, and no writer stores an original under either name.
+    """
+    from . import document_containers
+    from .kbdir import kb_dirname
+
+    folded = path.casefold()
+    if folded.endswith(".md") or folded.startswith(f"{kb_dirname()}/_Schema/".casefold()):
+        return False
+    folder = PurePosixPath(primary_path).parent
+    container = document_containers.container_of(path)
+    return PurePosixPath(path).parent == folder or (
+        container is not None and PurePosixPath(container).parent == folder
+    )
+
+
+def declared_originals(vault_root: Path, manifest: Any) -> dict[str, tuple[str, str]]:
+    """The Source originals that one sealed binding, or a tuple of them, declares.
+
+    Each path maps to its sha256 and its Source page. `validate` checks that each claim is
+    exclusive to one primary.
+    """
+    root = Path(vault_root).resolve()
+    manifests = manifest if isinstance(manifest, tuple) else () if manifest is None else (manifest,)
+    declared: dict[str, tuple[str, str]] = {}
+    for item in manifests:
+        if not isinstance(item, DerivedAuxiliaryManifest) or item._seal is not _SEAL or item.root != root:
+            raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+        declared.update(
+            (claim.path, (claim.after_sha256, item.primary_path))
+            for claim in item.entries if claim.role == SOURCE_ORIGINAL
+        )
+    return declared
 
 
 def _validate_each(vault_root: Path, images: tuple[Any, ...], manifests: tuple[Any, ...]) -> dict[str, str]:
@@ -183,6 +241,12 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
         raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
     roles: dict[str, str] = {}
     for claim in manifest.entries:
+        if claim.role == SOURCE_ORIGINAL:
+            # No image carries opaque bytes; `vocabulary_gate.begin_batch` binds the staged digest.
+            if claim.path == manifest.primary_path or claim.path in roles:
+                raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+            roles[claim.path] = claim.role
+            continue
         image = by_path.get(claim.path)
         if (
             image is None or claim.role not in _ROLES or claim.path == manifest.primary_path

@@ -1877,10 +1877,10 @@ without authentication.
 ### Resumable uploads from a shell
 
 `transfer_artifact(operation="upload", lane="evidence")` returns a `resumable`
-object beside `upload_url`. A Source handoff advertises the same protocol when
-its active storage format supports an opaque original. Otherwise,
-`resumable_unavailable` reports why that path is unavailable. Never change the
-storage authority mode or use Evidence to bypass a Source refusal.
+object beside `upload_url`. A Source handoff advertises the same protocol: the
+Source writer keeps every original opaque, in every storage authority mode.
+Never change the storage authority mode or use Evidence to bypass a Source
+refusal.
 
 The handoff supplies `create_url`, `max_part_bytes`, `max_bytes` and the required
 metadata keys. The minted token authorizes creation. Later requests carry the

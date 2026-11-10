@@ -1335,3 +1335,23 @@ def test_run_manifest_body_carries_counts_and_the_run_reference_only(
     assert leaked == [], f"run manifest body names per-item detail: {leaked}"
     assert "```json" not in body
     assert "Machine-Readable" not in body
+
+
+def test_an_activated_vault_imports_several_legacy_files_as_sources(activated_vault):
+    """Catches an import refused because the index and log update its pages share is classified as authored edges."""
+    from exomem.governance.principal import library_scope
+
+    vault = activated_vault
+    legacy = {"Legacy/brief.md": b"# Brief\n\nShort.\n", "Legacy/notes.md": b"# Notes\n\nPlain.\n"}
+    for relative, data in legacy.items():
+        (vault / relative).parent.mkdir(parents=True, exist_ok=True)
+        (vault / relative).write_bytes(data)
+
+    with library_scope():
+        report = adopt_module.adopt(vault, mode="copy-as-sources", selected_paths=sorted(legacy), today=dt.date(2026, 7, 7))
+
+    copied = report["copy"]["copied_sources"]
+    assert [item["original_path"] for item in copied] == sorted(legacy)
+    assert all((vault / item["source_path"]).is_file() for item in copied)
+    recent = (vault / "Knowledge Base/Sources/index.md").read_text(encoding="utf-8")
+    assert all(item["source_path"].removesuffix(".md").rsplit("/", 1)[-1] in recent for item in copied)
