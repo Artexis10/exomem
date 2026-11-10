@@ -1048,6 +1048,21 @@ def external_pending_unscoped(vault_root: Path) -> bool:
         return _canon(vault_root) in _external_pending_unscoped
 
 
+def external_pending_only_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
+    """Whether every unrepaired external mark is a path-scoped mark on one of `paths`.
+
+    False for an unscoped mark, and for any mark another batch left on a path
+    outside `paths`: an acknowledgement through the latest epoch retires those
+    too, so only the batch that holds all of them may skip its own fencing.
+    """
+    with _lock:
+        root = _canon(vault_root)
+        if root in _external_pending_unscoped:
+            return False
+        own = {key for path in paths for key in (str(path), _external_path_key(path))}
+        return set(_external_pending_paths.get(root, {})) <= own
+
+
 def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
     """Whether an unrepaired external event covers any of `paths`.
 

@@ -1420,6 +1420,30 @@ def test_a_records_view_rewrite_leaves_a_current_graph_readable_and_queues_no_re
     assert deferred_index.graph_full_rebuild_pending(root) is None, "a rebuild was queued"
 
 
+def test_a_records_view_rewrite_keeps_the_fence_on_an_earlier_unrepaired_edit(
+    live_handoff_vault: Path,
+) -> None:
+    """A view batch acknowledges every mark through its epoch, not only its own.
+
+    An earlier batch's outside edit to a note is still marked and unrepaired (its
+    fan-out failed). A view batch that then cleared the marks without withdrawing
+    the graph would let readers see that note's old edges with nothing left to
+    repair them.
+    """
+    root = live_handoff_vault
+    note = root / GENERATED / "generated-note-0004.md"
+    freshness.mark_external_pending(root, paths=[note])
+    view = root / "Knowledge Base/Records/Health/Example/Items/_summary.md"
+    view.parent.mkdir(parents=True, exist_ok=True)
+    view.write_text("# Summary\n\n- refreshed row\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(root, debounce_seconds=0.2)
+
+    watcher._record(view, deleted=False)
+    watcher._flush()
+
+    assert not EpistemicGraphIndex(root).available(), "an unrepaired edit became readable"
+
+
 def test_an_unrelated_external_edit_does_not_fence_a_write(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
