@@ -1501,7 +1501,6 @@ class FileWatcher:
 
     def _after_import(self, report: ImportReport) -> None:
         """Tell the caches that read a changed path that the store now holds new bytes there."""
-        from .vault_store.importer import MEDIA_WAITS
         from .vocabulary import invalidate as invalidate_vocabulary
 
         for rel in (*report.imported, *report.moved, *report.moved.values()):
@@ -1513,11 +1512,14 @@ class FileWatcher:
                 len(report.imported), len(report.moved), len(report.held), len(report.removed),
                 len(report.cleared), len(report.refreshed), len(report.unjudged),
             )
-        if report.media_waiting:
+        if report.media_derived or report.media_failed or report.media_recovered:
             log.info(
-                "file watcher: %d imported media file(s): %s",
-                len(report.media_waiting), MEDIA_WAITS,
+                "file watcher: derived the media rows of %d imported file(s), recovered %d, "
+                "failed %d",
+                len(report.media_derived), report.media_recovered, len(report.media_failed),
             )
+        for rel in report.deferred:
+            self._pend_import(rel)  # the media store is moving it; the next batch looks again
 
     def _reconcile_access_policy(self, pending_epoch: int) -> None:
         """Reproject one observed `_access.yaml` edit before clearing its barrier."""

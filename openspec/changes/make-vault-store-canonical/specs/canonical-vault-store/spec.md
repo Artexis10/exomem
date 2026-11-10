@@ -78,6 +78,15 @@ In store mode, a file the store owns whose hash differs from the projection mani
 - **THEN** the store removes the binary's record in an audited import, and holds nothing
 - **AND** a binary renamed outside Exomem keeps its record under the new path, paired by its hash
 
+#### Scenario: An outside media file gets its derived rows from the store thread
+- **WHEN** a media file appears, changes or is renamed outside Exomem
+- **THEN** the importer records the binary, and the sidecar page that media processing derives for it commits on the store thread with that page's lexical and graph rows
+- **AND** a media job's result that arrives later commits on the store thread, never from the media worker's thread
+
+#### Scenario: The media store's eviction and restore are no outside change
+- **WHEN** the media store evicts an original from disk and later restores it
+- **THEN** the importer imports nothing, holds nothing, and leaves the binary's record and the sidecar page unchanged
+
 ### Requirement: A held item is resolved by an explicit choice
 In store mode, an agent SHALL be able to list every held item and to resolve each one on request with the choice keep-mine or keep-store. Listing SHALL show the person's file as it is now and the store's current revision. A resolve SHALL refuse, and change nothing, when the held record, the file or the store page differs from what the listing showed. Keep-mine SHALL make the person's current file the stored page without overwriting a store change newer than the hold, and SHALL NOT queue a projection. Keep-store SHALL save the person's file bytes durably outside the vault before it queues the store's version, and SHALL NOT delete or overwrite an earlier saved copy. A resolve SHALL need the same write authority as a governed write of the bytes it commits, and SHALL refuse with `WRITE_REFUSED`, before it saves or commits anything, when the caller lacks it. A resolve SHALL NOT depend on the body kept in the held record. The listing SHALL leave out, without a count, a held item whose page the caller may not read, and SHALL decide that in one order. The owner with unrestricted access sees every held item. Any other caller is judged on the stored page's bytes, not on the person's file or the path alone. When the store holds no page, the person's file is judged the same way. When neither exists, and for a binary, the path alone decides. The listing SHALL mark a held binary, and a held file above 64 MiB, as not yet resolvable with no choices and with a sentence that names why. A resolve SHALL refuse a binary and SHALL name that it stays held until a later release resolves binaries, and SHALL refuse a file above 64 MiB with `VAULT_STORE_HELD_TOO_LARGE`.
 

@@ -88,6 +88,7 @@ from .vault import (
     post_commit_batch_fanout,
     read_guarded_text,
 )
+from .vault_store import mode as store_mode
 from .writer_lease import get_manager
 
 log = logging.getLogger(__name__)
@@ -1630,6 +1631,10 @@ class MediaWorker:
         parent_receipted_handoff: bool = False,
     ) -> bool:
         publication_intents = tuple(publication_intents)
+        if token.checkpoint is None:
+            # A store-mode commit: the graph rows committed with the page, so no fan-out is owed.
+            deferred_index.clear_full_receipts(self._vault_root, receipts)
+            return True
         completed = False
         index_reports: list[object] = []
         registered_checkpoint: graph_sync.GraphSyncCheckpoint | None = None
@@ -2356,6 +2361,12 @@ class MediaWorker:
                 job.sidecar_path.relative_to(self._vault_root).as_posix(),
                 result.receipt_revision,
             )
+            if store_mode.store_mode_active(self._vault_root):
+                # A store commit carried the page's graph rows with it, so the prepared sidecar
+                # (a crash between the commit and its finalize) has no fan-out left to run.
+                deferred_index.clear_full_receipts(self._vault_root, [receipt])
+                self._finish_prepared_target(result, expected_sidecar=current_sidecar)
+                return
             coordinator = get_manager()._mutation_coordinator_for(self._vault_root)
             index_reports: list[object] = []
             registered_checkpoint: graph_sync.GraphSyncCheckpoint | None = None
@@ -2398,23 +2409,7 @@ class MediaWorker:
             deferred_index.clear_full_receipts(
                 self._vault_root, [receipt]
             )
-            pending_target = _sidecar_is_pending(job.sidecar_path)
-            current_binary = _binary_identity(job.binary_path)
-            binary_changed = (
-                current_binary is None
-                or _result_binary_identity(current_binary) != result.binary_identity
-            )
-            if binary_changed and not pending_target:
-                if not self._publish_pending_for_changed_binary(
-                    result, expected_sidecar=current_sidecar
-                ):
-                    return
-                return
-            self._store.finalize_result(
-                result,
-                requeue_remaining=result.kind in {"extraction", "pending"},
-                keep_ocr=pending_target,
-            )
+            self._finish_prepared_target(result, expected_sidecar=current_sidecar)
             return
         if binary_changed and replaces is not None:
             # The request named a file that has since been replaced. The sidecar keeps its
@@ -2560,6 +2555,26 @@ class MediaWorker:
         self._retire_surplus_parts(surplus)
         self._store.finalize_result(
             result, requeue_remaining=result.kind in {"extraction", "pending"}
+        )
+
+    def _finish_prepared_target(
+        self, result: media_jobs.MediaJobResult, *, expected_sidecar: str
+    ) -> None:
+        """End a result whose prepared sidecar is already published and fanned out."""
+        job = result.job
+        pending_target = _sidecar_is_pending(job.sidecar_path)
+        current_binary = _binary_identity(job.binary_path)
+        binary_changed = (
+            current_binary is None
+            or _result_binary_identity(current_binary) != result.binary_identity
+        )
+        if binary_changed and not pending_target:
+            self._publish_pending_for_changed_binary(result, expected_sidecar=expected_sidecar)
+            return
+        self._store.finalize_result(
+            result,
+            requeue_remaining=result.kind in {"extraction", "pending"},
+            keep_ocr=pending_target,
         )
 
     def _retire_surplus_parts(self, surplus: tuple[Path, ...]) -> None:

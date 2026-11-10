@@ -40,9 +40,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs, lexstore, media_processing, vault
+from .. import held_fs, lexstore, vault
 from ..cli_ops import OpError
-from . import ownership, projector, read, write
+from . import media, ownership, projector, read, write
 from .projector import HELD_DELETE, HELD_EDIT, Facts, OnDisk, Runner
 
 if TYPE_CHECKING:
@@ -54,9 +54,6 @@ _Item = TypeVar("_Item")
 
 #: What ``ImportReport.unjudged`` says of a file that changed between a read and its commit.
 CHANGED_WHILE_READ = "the file changed after it was read"
-
-#: The state of an imported media binary: store mode derives no preview or transcript for it yet.
-MEDIA_WAITS = "media waits for the store-mode media writer"
 
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
@@ -120,9 +117,16 @@ class ImportReport:
     cleared: list[str] = field(default_factory=list)
     #: Markdown files that the store does not own, whose derived rows were rederived from the file.
     refreshed: list[str] = field(default_factory=list)
-    #: Imported or renamed media binaries, each in the state ``MEDIA_WAITS`` names: the store-mode
-    #: media writer does not exist yet, so no derived media row follows the change.
-    media_waiting: list[str] = field(default_factory=list)
+    #: Imported or renamed media binaries whose derived media rows the store thread reconciled.
+    media_derived: list[str] = field(default_factory=list)
+    #: Media binaries whose reconciliation failed, each with its code; the next sweep tries again.
+    media_failed: dict[str, str] = field(default_factory=dict)
+    #: Media binaries that a sweep's recovery pass reconciled because their rows were missing.
+    media_recovered: int = 0
+    #: Media binaries whose file the media store itself evicted or restored: no outside change.
+    managed: list[str] = field(default_factory=list)
+    #: Media binaries that the media store is moving now, left for the next event or sweep.
+    deferred: list[str] = field(default_factory=list)
     #: Every path that was examined and carried no change, whatever its kind.
     unchanged: int = 0
     #: What a sweep's walk of the lexical corpus cost: the Markdown files it reached, and the
@@ -203,7 +207,7 @@ class Importer:
         with self._exclusive, self._filesystem() as filesystem:
             self._settle(filesystem, sorted(set(rels)), dict(moves or {}), report)
             self._refresh_noted(report)
-            self._note_media(report)
+            self._derive_media(report)
         return report
 
     def sweep(self) -> ImportReport:
@@ -246,7 +250,8 @@ class Importer:
             self._settle(filesystem, sorted({*differing, *missing}), {}, report)
             self._sweep_unowned(filesystem, report)
             self._refresh_noted(report)
-            self._note_media(report)
+            self._derive_media(report)
+            report.media_recovered = media.recover(self._root, self._run)
         return report
 
     def _take_refresh(self) -> dict[str, str | None]:
@@ -255,19 +260,15 @@ class Importer:
             taken, self._refresh = dict(sorted(self._refresh.items())), {}
         return taken
 
-    @staticmethod
-    def _note_media(report: ImportReport) -> None:
-        """Name the state of each imported media binary: its media rows wait for the media writer.
+    def _derive_media(self, report: ImportReport) -> None:
+        """Derive the media rows of each binary that this settle recorded, on the store thread.
 
-        ``media_processing.reconcile_media`` writes the media sidecar from the watcher thread, and
-        store mode refuses that write off the store thread, so nothing derives these rows yet.
+        A renamed binary derives under its new path. A deleted one keeps its sidecar page, which
+        holds extracted text that a person may have edited; file mode keeps it too.
         """
-        for rel in (*report.imported, *report.moved):
-            if (
-                ownership.classify(rel) is ownership.Ownership.BINARY
-                and media_processing.classify_media(rel) is not None
-            ):
-                report.media_waiting.append(rel)
+        report.media_derived, report.media_failed = media.derive(
+            self._root, self._run, (*report.imported, *report.moved)
+        )
 
     # -- reading the disk -------------------------------------------------------------------------
 
@@ -328,6 +329,12 @@ class Importer:
         for rel in rels:
             if ownership.classify(rel) is ownership.Ownership.NONE:
                 self._judge_unowned(filesystem, rel, report)
+                continue
+            managed = media.managed(self._root, rel)
+            if managed is not None:
+                # The media store's own eviction or restore changed this file, so it is no outside
+                # delete or create; a file in the middle of that move is read again later.
+                (report.managed if managed == media.SUPPRESS else report.deferred).append(rel)
                 continue
             disk = self._observe(filesystem, rel, report)
             if rel in report.unjudged:

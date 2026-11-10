@@ -4668,10 +4668,14 @@ class PlannedWrite:
 
 @dataclass(frozen=True, slots=True)
 class DeferredGraphCompletion:
-    """Exact graph handoff retained after a canonical deferred-completion batch."""
+    """Graph handoff kept after a canonical deferred-completion batch.
+
+    A store-mode commit has no checkpoint (``None``): its graph rows committed with its pages, so
+    the handoff names the paths and nothing is left to complete.
+    """
 
     replaced: tuple[Path, ...]
-    checkpoint: GraphSyncCheckpoint
+    checkpoint: GraphSyncCheckpoint | None
     predecessor: GraphSyncCheckpoint | None
 
 
