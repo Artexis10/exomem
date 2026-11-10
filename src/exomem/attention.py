@@ -75,6 +75,10 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # is authored work waiting on its author, so it is in the default union; a vault with
     # no store collection never sees it.
     "collection_view_corrections",
+    # A stored original that fixity found missing or damaged, or restored. Its bytes
+    # are what every note citing it rests on, so the owner sees it unasked; a vault
+    # whose originals all verify never sees it.
+    "original_fixity",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large

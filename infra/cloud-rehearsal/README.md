@@ -214,6 +214,15 @@ A requested stage failure exits 2, including with `--harness-check`.
 Ordinary governed writes do not initialize signed standalone custody, so signed custody recovery remains unproved.
 This stage does not qualify production storage, the systemd launcher, natural restic failures or other signal paths.
 
+## Original fixity
+
+`--original-fixity` proves `verify-stored-originals` tasks 5.1 and 5.2. It runs only on demand, as the `original-fixity` mode of the `Cloud rehearsal` workflow, after steps 1 and 2.
+The stage seeds stored originals and plain notes in the synthetic owner's cell. It measures one table rebuild and two passes, then damages one original.
+It then runs the two blocks of the restore runbook's "Restore one original" as written, and checks that the next pass and the cell's readiness count no unresolved original.
+The stage's `runbook_deviations` list each place where the rehearsal differs from an operator's run.
+Seeding costs about 3 seconds per original on a GitHub runner, so the default 1,000 originals take about an hour of the job's 150 minutes.
+Set the workflow inputs `original_fixity_originals` and `original_fixity_mean_kib` to change the fixture.
+
 ## Report
 
 `schema: exomem-cloud-rehearsal-report-v1`. It records:

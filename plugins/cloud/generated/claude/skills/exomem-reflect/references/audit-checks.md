@@ -110,6 +110,17 @@ lands) reads as `unchecked` with coverage `unknown`, never as zero findings. Pro
 curation plan, keep or change its canonical page, then preview and confirm the
 exact plan ([vault-care](vault-care.md#curation)).
 
+## Stored original fixity
+
+`original_fixity` lists each stored original that the background check found
+`missing` or `corrupt_no_copy` (`error`), or `restored` (`info`). Each finding
+names the binding page, with `meta.original_path`, `meta.kind`, `meta.cause`,
+`meta.expected_sha256` and `meta.route`, the candidate copies that may hold the
+expected bytes. A `restored` original needs no action: its changed bytes are in
+Trash. The item stays until the check verifies that original again, which takes
+up to one verification cycle. For the other two, tell the owner, with the cause
+and the route. Never record a new hash for changed bytes.
+
 ## Path variants
 
 `path_variants` (opt-in: `categories=["path_variants"]`) lists sibling names

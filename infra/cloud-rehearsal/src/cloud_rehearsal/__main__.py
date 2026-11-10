@@ -38,6 +38,7 @@ from . import (
     k3s_link,
     large_import,
     large_import_fixture,
+    original_fixity,
     platform,
     raw_import,
     substrate,
@@ -98,6 +99,17 @@ def _parser() -> argparse.ArgumentParser:
                             help="with --raw-import: an interpreter with the server and its extractors installed "
                             "(the local arm and the scorer run on it)")
     run_parser.add_argument(
+        "--original-fixity", action="store_true",
+        help="seed stored originals, time the fixity table rebuild and passes in the cell, then restore one "
+        "damaged original by the restore runbook's blocks; runs after provisioning (partial proof; never gates a node)",
+    )
+    run_parser.add_argument("--original-fixity-originals", type=int, default=original_fixity.DEFAULT_ORIGINALS,
+                            help="with --original-fixity: the number of stored originals to seed")
+    run_parser.add_argument("--original-fixity-mean-kib", type=int, default=original_fixity.DEFAULT_MEAN_KIB,
+                            help="with --original-fixity: the mean original size in KiB, exponentially distributed")
+    run_parser.add_argument("--original-fixity-notes", type=int, default=original_fixity.DEFAULT_NOTES,
+                            help="with --original-fixity: the number of plain notes beside the originals")
+    run_parser.add_argument(
         "--local-storage-coexistence", action="store_true",
         help="install TopoLVM while keeping Hetzner-class cells for the full P3 lifecycle",
     )
@@ -148,6 +160,19 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--raw-import runs alone; remove {', '.join(others)}")
         if args.raw_import_python is None:
             parser.error("--raw-import needs --raw-import-python")
+    if args.command == "run" and args.original_fixity:
+        others = [flag for flag, chosen in (
+            ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
+            ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
+            ("--raw-import", args.raw_import), ("--local-storage-coexistence", args.local_storage_coexistence),
+            ("--steps", args.steps)) if chosen]
+        if others:
+            parser.error(f"--original-fixity runs alone; remove {', '.join(others)}")
+        if args.original_fixity_originals < 1 or args.original_fixity_mean_kib < 1 or args.original_fixity_notes < 0:
+            parser.error("--original-fixity needs at least one original, a positive mean size and no negative note count")
+        if args.original_fixity_originals * args.original_fixity_mean_kib * 1024 > original_fixity.MAX_SEED_BYTES:
+            parser.error(f"--original-fixity seeds at most {original_fixity.MAX_SEED_BYTES // 1024**3} GiB "
+                         "(originals times mean size)")
     if args.command == "local-storage-drill":
         return asyncio.run(drill.run_drill(args))
     if args.command == "k3s-link":
@@ -182,6 +207,7 @@ async def _run(args: argparse.Namespace) -> int:
         "operator_restore_abort": args.operator_restore_abort,
         "large_import": args.large_import,
         "raw_import": args.raw_import,
+        "original_fixity": args.original_fixity,
     }
     if args.cell_image:
         report.valid = False
@@ -194,7 +220,7 @@ async def _run(args: argparse.Namespace) -> int:
     if not report.inputs["exomem_worktree_clean"]:
         report.notes.append("the exomem checkout had uncommitted changes")
     only = {int(part) for part in args.steps.split(",")} if args.steps else None
-    if args.large_import or args.raw_import:
+    if args.large_import or args.raw_import or args.original_fixity:
         # The cell must exist and be paid for; every later step is a P3 lifecycle check this mode does not make.
         only = {1, 2}
     if only is not None:
@@ -202,6 +228,7 @@ async def _run(args: argparse.Namespace) -> int:
         report.invalid_reasons.append(
             "the large-import mode runs steps 1 and 2, then its own scenario" if args.large_import
             else "the raw-import mode runs steps 1 and 2, then its own scenario" if args.raw_import
+            else "the original-fixity mode runs steps 1 and 2, then its own scenario" if args.original_fixity
             else f"only steps {sorted(only)} were selected")
     # The CLI journey needs the disposable CA in the images and versioned object storage.
     native_cli = args.cloud_import or args.large_import or args.raw_import
@@ -334,7 +361,10 @@ async def _run(args: argparse.Namespace) -> int:
                       cli_image=v1 if args.cloud_import else None,
                       raw_import=raw_plan,
                       owner_export_image=v1 if args.owner_export else None,
-                      operator_restore_abort=args.operator_restore_abort, large_import=plan)
+                      operator_restore_abort=args.operator_restore_abort, large_import=plan,
+                      original_fixity=original_fixity.FixityPlan(
+                          originals=args.original_fixity_originals, mean_bytes=args.original_fixity_mean_kib * 1024,
+                          notes=args.original_fixity_notes) if args.original_fixity else None)
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route.
             await ctx.admin_release({"cellImage": built.cell_v1})
@@ -371,6 +401,9 @@ async def _run(args: argparse.Namespace) -> int:
             code = 0 if report.stages["large_import"]["verdict"] in ("pass", "smoke_only") else 1
         elif args.raw_import:
             code = 0 if report.stages["raw_import"]["verdict"] == raw_import.PASS else 1
+        elif args.original_fixity:
+            # Its stage passed, or StageFailed would have ended the run; steps 3 to 12 did not run.
+            code = 0
         elif outcome["gates_node"] or args.harness_check:
             code = 0
         else:

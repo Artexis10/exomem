@@ -220,6 +220,84 @@ kubectl get namespace "exo-scratch-$CELL_ID-$RUN_ID" --ignore-not-found -o name
 
 Keep `/data/.restore-prior-<run ID>` until cellctl's next scheduled backup of the cell succeeds and the owner accepts the restore. Then remove it as the import runbook's step 9 removes its prior directory. Remove `/var/lib/exomem-restore/<run ID>` after you record the run.
 
+## Restore one original
+
+Use this when `cell-originals-damaged` fires and the owner asks for one stored original from a backup.
+The cell's fixity check reports a `missing` original and never restores it.
+It reports `corrupt_no_copy` when no copy in the cell matches the original's SHA-256.
+The owner's attention item names the original's path, its kind, its expected SHA-256 and the candidate copies it found.
+The kind decides what the expected SHA-256 covers:
+
+- `file`: the file's bytes.
+- `blob`: a pool blob's decompressed member, so the check runs `gzip -dc` first.
+- `text`: the text that a Source page fences, so the check reads it with the cell's own Exomem.
+
+The scratch restore is the reviewed way to read a snapshot without touching the cell.
+It restores the whole snapshot, so it costs the scratch restore's time and volume.
+The cell keeps serving throughout.
+
+1. Get the original's vault-relative path, kind and expected SHA-256 from the owner. Keep them out of every record.
+2. Mint a break-glass identity and set up `kubectl` as the import runbook's step 5 does.
+3. Set `CELL_ID`, `SNAPSHOT`, `ORIGINAL` (the vault-relative path), `KIND` and `EXPECTED` (the SHA-256).
+4. Set `CELLCTL_PYTHON` as the export runbook does, and run every block from the reviewed release's checkout root.
+5. Restore the snapshot into scratch, as the export runbook's "Render and apply only scratch resources" does. Expect the Job to complete.
+   If the command prints `scratch: 'b2-key-id'; stop` or `scratch: the cell's volume is not in the exomem-cloud-encrypted class; stop`, stop. The command does not yet support that cell (issue #2670).
+   The Job runs `restic restore <snapshot> --target / --delete --include /data/vault --include /data/host` on the scratch volume.
+6. Set `SCRATCH` to that scratch namespace, then run the first block. Expect `hash matches the binding`.
+7. Run the second block. It writes the original outside the vault, checks its hash, then moves it into place. Expect `original restored`.
+8. Remove the scratch namespace as the export runbook's last block does.
+9. Wait for the cell's next fixity pass, up to one hour, then read the cell's readiness. Expect `originals.unresolved` one lower.
+
+The first block defines `DIGEST`, the hash check for each kind, which both blocks run inside a pod.
+It then starts a read-only helper pod on the scratch volume and checks the restored file at `/data/vault/$ORIGINAL`.
+
+```bash
+: "${CELLCTL_PYTHON:?reviewed cellctl Python required}"
+: "${CELL_ID:?}" "${SCRATCH:?}" "${ORIGINAL:?}" "${KIND:?}" "${EXPECTED:?}"
+DIGEST=$(cat <<'EOF'
+case "$1" in
+  file) sha256sum -- "$2" | cut -d' ' -f1 ;;
+  blob) gzip -dc -- "$2" | sha256sum | cut -d' ' -f1 ;;
+  text) /app/.venv/bin/python -I - "$2" <<'PY'
+import hashlib, sys
+from exomem.source_coverage import fenced_capture
+text = fenced_capture(open(sys.argv[1], encoding="utf-8", newline="").read())
+print("no fenced text" if text is None else hashlib.sha256(text.encode()).hexdigest())
+PY
+  ;;
+  *) echo "unknown kind" ;;
+esac
+EOF
+)
+manifests() { "$CELLCTL_PYTHON" -I infra/scripts/cloud_restore_manifests.py "$@"; }
+manifests helper-pod --context break-glass --cell-id "$CELL_ID" --name original-helper \
+    --field-manager cloud-operator-restore --scratch "$SCRATCH" \
+  && kubectl -n "$SCRATCH" wait --for=condition=Ready pod/original-helper --timeout=180s \
+  && FOUND=$(kubectl -n "$SCRATCH" exec original-helper -- sh -c "$DIGEST" sh "$KIND" "/data/vault/$ORIGINAL") \
+  && [ "$FOUND" = "$EXPECTED" ] && echo 'hash matches the binding'
+```
+
+The second block streams the file into the running cell.
+It stages the bytes in `/data/.original-restore-<time>` on the same volume, outside the vault.
+It moves a damaged file at the path into that directory, never over it.
+
+```bash
+NS="exo-cell-$CELL_ID"
+STAGE="/data/.original-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+kubectl -n "$SCRATCH" exec original-helper -- cat -- "/data/vault/$ORIGINAL" \
+  | kubectl -n "$NS" exec -i cell-0 -c exomem -- sh -c '
+      set -eu
+      target="/data/vault/$1"; mkdir -p -- "$3/prior" "$(dirname -- "$target")"
+      cat > "$3/restored"
+      [ "$(sh -c "$4" sh "$5" "$3/restored")" = "$2" ] || { echo "hash differs; stop" >&2; exit 1; }
+      if [ -e "$target" ]; then mv -- "$target" "$3/prior/"; fi
+      mv -- "$3/restored" "$target" && echo "original restored"' sh "$ORIGINAL" "$EXPECTED" "$STAGE" "$DIGEST" "$KIND"
+kubectl -n "$SCRATCH" delete pod original-helper --ignore-not-found --wait=true
+```
+
+Keep `$STAGE` until the owner accepts the restore. Then remove it with `kubectl -n "$NS" exec cell-0 -c exomem -- rm -rf -- "$STAGE"`.
+Record the date, the cell ID, the snapshot ID and the hash check result.
+
 ## Record
 
 Record:

@@ -1160,6 +1160,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # process-global caches from a test that has already finished.
     # `tests/test_recall_resolver_warm.py` deletes this var to exercise it.
     monkeypatch.setenv("EXOMEM_DISABLE_RESOLVER_WARM", "1")
+    # The fixity thread would hash and restore files in each short-lived tmp vault the suite
+    # serves. `tests/test_original_fixity.py` deletes this var to exercise it.
+    monkeypatch.setenv("EXOMEM_DISABLE_ORIGINAL_FIXITY", "1")
     # A cold due-state projection now heals in a daemon thread so an ordinary
     # read never pays a vault-wide audit. Production is one long-lived process;
     # this suite creates hundreds of short-lived tmp vaults, so make that warm
