@@ -504,6 +504,8 @@ class LifecyclePreparedInspection:
     trash_content_guards: tuple[vault.PathGuard, ...]
     trash_target_guards: tuple[vault.PathGuard, ...]
     trash_proof: LifecycleTrashProof | None = None
+    #: The primary as the corpus showed it when the slot was judged; a store cleanup binds it.
+    current: LifecyclePrimaryBinding | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -2017,6 +2019,7 @@ def inspect_lifecycle_prepared_slots(
                 ),
                 trash_target_guards=target_guards,
                 trash_proof=proof,
+                current=current,
             )
         )
     cleanup_safe = not issues and trash is not None
@@ -2101,11 +2104,17 @@ def cleanup_stale_lifecycle_prepared_batch(
     items = tuple(inspections)
     if not items:
         return LifecyclePreparedCleanupBatch((), ())
-    # Each slot was judged stale against a corpus that reconcile builds from the files, and a
-    # store-mode vault holds its pages in the store with files that trail it, so that judgement may
-    # name a live transition. Removing the file of a slot also leaves its stored page behind. Each
-    # slot comes back as an issue, as for a snapshot mismatch, so that reconcile goes on without it.
-    if store_targets.owns_any(root, files=tuple(item.prepared.reference for item in items)):
+    # A slot that the store holds is a page whose file trails it: the store deletes it, bound to the
+    # bytes it holds. Without a writer bound here (an offline reconcile), each slot comes back as an
+    # issue, as for a snapshot mismatch, so that reconcile goes on without it.
+    in_store = store_targets.owns_any(root, files=tuple(item.prepared.reference for item in items))
+    writer = None
+    if in_store:
+        try:
+            writer = store_availability.page_writer(root)
+        except OpError:
+            writer = None
+    if in_store and writer is None:
         return LifecyclePreparedCleanupBatch(
             (),
             tuple(
@@ -2139,6 +2148,7 @@ def cleanup_stale_lifecycle_prepared_batch(
         )
     cleaned: list[str] = []
     blocked: list[LifecyclePreparedIssue] = []
+    stale: list[LifecyclePreparedInspection] = []
     with vault.vault_creation_lock(root, "semantic-creation"):
         try:
             census = semantic_contract.build_stable_identity_census(root)
@@ -2154,9 +2164,11 @@ def cleanup_stale_lifecycle_prepared_batch(
                 ),
             )
         try:
-            for guard in shared_directories:
+            # The trash guards bind the files that the trash proof read. In store mode those files
+            # are the projection, which trails the store: the commit binds the primary instead.
+            for guard in () if in_store else shared_directories:
                 guard.recheck(root)
-            for guard in shared_sidecars:
+            for guard in () if in_store else shared_sidecars:
                 guard.recheck(root)
         except vault.PathGuardError:
             return LifecyclePreparedCleanupBatch(
@@ -2184,6 +2196,9 @@ def cleanup_stale_lifecycle_prepared_batch(
                     LifecyclePreparedIssue("LIFECYCLE_PRIMARY_RACE", identity)
                 )
                 continue
+            if in_store:
+                stale.append(item)
+                continue
             try:
                 cleaned.append(
                     _cleanup_stale_lifecycle_prepared_locked(root, item)
@@ -2192,7 +2207,92 @@ def cleanup_stale_lifecycle_prepared_batch(
                 blocked.append(
                     LifecyclePreparedIssue("LIFECYCLE_RECONCILE_RACE", identity)
                 )
+        if stale:
+            removed, raced = _cleanup_stale_slots_in_store(root, writer, stale)
+            cleaned.extend(removed)
+            blocked.extend(raced)
     return LifecyclePreparedCleanupBatch(tuple(cleaned), tuple(blocked))
+
+
+def _cleanup_stale_slots_in_store(
+    root: Path, writer: Any, items: list[LifecyclePreparedInspection]
+) -> tuple[list[str], list[LifecyclePreparedIssue]]:
+    """Delete stale slots that the store holds, in one store transaction.
+
+    Each slot's bytes and its primary's are read from the store, and the commit binds them: a slot
+    or a primary that changed after the slot was judged refuses the whole commit, and each of its
+    slots comes back as a race for reconcile's next run. No file is unlinked here: the projector
+    removes each slot's file afterwards.
+    """
+    from .vault_store import batch as store_batch
+    from .vault_store import read as store_read
+    from .vault_store.write import Expect, PageDelete, StoreConflict
+
+    owners = {
+        item.prepared.page_identity: item.live_owner_paths[0]
+        for item in items
+        if item.live_owner_paths
+    }
+    with store_read.snapshot(root) as view:
+        slots = view.bodies(item.prepared.reference for item in items)
+        primaries = view.bodies(owners.values())
+
+    def as_judged(item: LifecyclePreparedInspection) -> bool:
+        """Whether the store holds the slot and the primary that the inspection judged."""
+        slot = slots.get(item.prepared.reference)
+        owner = owners.get(item.prepared.page_identity)
+        if slot is None or item.current is None:
+            return False
+        if owner is not None and (
+            owner not in primaries
+            or hashlib.sha256(primaries[owner]).hexdigest() != item.current.source_hash
+        ):
+            return False
+        try:
+            return (
+                _parse_lifecycle_prepared(slot, page_identity=item.prepared.page_identity)
+                == item.prepared
+            )
+        except RelationReviewError:
+            return False
+
+    expect: dict[str, Expect] = {}
+    ready: list[LifecyclePreparedInspection] = []
+    raced: list[LifecyclePreparedIssue] = []
+    for item in items:
+        if not as_judged(item):
+            raced.append(
+                LifecyclePreparedIssue("LIFECYCLE_RECONCILE_RACE", item.prepared.page_identity)
+            )
+            continue
+        assert item.current is not None  # as_judged checked it
+        expect[item.prepared.reference] = Expect(
+            sha256=hashlib.sha256(slots[item.prepared.reference]).hexdigest()
+        )
+        if item.prepared.page_identity in owners:
+            expect[owners[item.prepared.page_identity]] = Expect(sha256=item.current.source_hash)
+        ready.append(item)
+    if not ready:
+        return [], raced
+    try:
+        store_batch.commit_batch(
+            writer,
+            [],
+            vault_root=root,
+            lifecycle=store_batch.Lifecycle(
+                deletes=tuple(PageDelete(item.prepared.reference) for item in ready),
+                expect=expect,
+            ),
+        )
+    except StoreConflict:
+        code = "LIFECYCLE_RECONCILE_RACE"
+    except OpError as error:
+        # A store that refuses the commit (it stopped serving, say) leaves each slot for the next
+        # reconcile under the store's own code, as a missing writer does.
+        code = error.code
+    else:
+        return [item.prepared.reference for item in ready], raced
+    return [], raced + [LifecyclePreparedIssue(code, item.prepared.page_identity) for item in ready]
 
 
 def _ensure_lifecycle_decision_capacity(

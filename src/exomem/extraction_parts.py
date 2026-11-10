@@ -264,7 +264,7 @@ def plan(
 def _store_owned_part_rels(vault_root: Path, rels: list[str]) -> list[str]:
     """The part pages among `rels` that the store owns by path, whether it holds them yet or not.
 
-    The test is ownership: none of these has a file-side removal.
+    The test is ownership: the store deletes these, and none of them has a file-side removal.
     """
     from .vault_store import targets as store_targets
 
@@ -274,27 +274,58 @@ def _store_owned_part_rels(vault_root: Path, rels: list[str]) -> list[str]:
 def kept_note(kept: tuple[str, ...]) -> str:
     """The one sentence that a caller of `retire` logs for the part pages it kept."""
     return (
-        f"kept {len(kept)} surplus part page(s) that the store holds, because only the file side "
-        f"of a part page can be unlinked: {', '.join(kept)}"
+        f"kept {len(kept)} surplus part page(s) that the store owns, because the store could not "
+        f"delete them now; a later sweep retries: {', '.join(kept)}"
     )
+
+
+def _retire_in_store(vault_root: Path, rels: list[str]) -> tuple[str, ...]:
+    """Delete part pages that the store owns in one store transaction; return those it kept.
+
+    A part that the store does not hold yet is a file that nothing has imported: its delete queues
+    the file's removal. The commit runs on the store thread, as a media sidecar commit does. A store
+    that refuses the commit keeps every part, and the caller logs them.
+    """
+    from .cli_ops import OpError
+    from .vault_store import availability, batch, write
+    from .vault_store import media as store_media
+
+    if store_media.off_store_thread(vault_root):
+        return store_media.on_store_thread(vault_root, lambda: _retire_in_store(vault_root, rels))
+    try:
+        writer = availability.page_writer(vault_root)
+        if writer is None:
+            return tuple(rels)
+        batch.commit_batch(
+            writer,
+            [],
+            vault_root=vault_root,
+            lifecycle=batch.Lifecycle(
+                deletes=tuple(write.PageDelete(rel, absent_ok=True) for rel in rels)
+            ),
+        )
+    except OpError:
+        return tuple(rels)
+    return ()
 
 
 def retire(vault_root: Path, pages: tuple[Path, ...]) -> tuple[str, ...]:
     """Remove part pages that no extraction owns any more, and the folder once it is empty.
 
-    Returns the part pages it kept, as vault-relative paths. A part page that the store holds (the
-    folder of a raw-marked page is not a dot folder) has no file-side removal: the unlink would
-    leave the store's page in place. It stays, and the caller logs it with `kept_note`. A refusal
-    would report a failed write for a parent that already committed, and the job would retry it.
-    `sweep` lists such a part as unowned. A part page in a dot folder is on disk and is removed.
+    Returns the part pages it kept, as vault-relative paths. A part page that the store owns (the
+    folder of a raw-marked page is not a dot folder) is deleted from the store, and the projector
+    removes its file. A store that refuses keeps the parts, and the caller logs them with
+    `kept_note`. A raise would report a failed write for a parent that already committed, and the
+    job would retry it. A part page in a dot folder is on disk and is removed.
     """
     if not pages:
         return ()
     from . import file_watcher, index_sync
 
     rels = {page: page.relative_to(vault_root).as_posix() for page in pages}
-    kept = tuple(_store_owned_part_rels(vault_root, list(rels.values())))
-    pages = tuple(page for page in pages if rels[page] not in kept)
+    owned = _store_owned_part_rels(vault_root, list(rels.values()))
+    kept = _retire_in_store(vault_root, owned) if owned else ()
+    pages = tuple(page for page in pages if rels[page] not in owned)
     if not pages:
         return kept
 
@@ -678,12 +709,10 @@ def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
             else:
                 result.unowned.append(entry.relative_to(root).as_posix())
         removable = [entry.relative_to(root).as_posix() for entry in surplus]
-        # The same split `retire` makes, so a dry run and a real run name the same parts.
-        held = _store_owned_part_rels(root, removable)
-        result.unowned += held
-        result.removed += [rel for rel in removable if rel not in held]
-        if not dry_run:
-            retire(root, tuple(surplus))
+        # A part that the store refused to delete stays, and a real run names it with the unowned.
+        kept = () if dry_run else retire(root, tuple(surplus))
+        result.unowned += list(kept)
+        result.removed += [rel for rel in removable if rel not in kept]
         missing = [number for number in range(2, count + 1) if number not in present]
         if not missing:
             continue

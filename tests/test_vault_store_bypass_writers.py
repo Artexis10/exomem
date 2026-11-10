@@ -17,10 +17,12 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+import test_vault_store_media as media_suite
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_reconcile import _LIFECYCLE_IDS, _install_lifecycle_slot
+from test_vault_store_importer import StoreThread
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, vault  # noqa: F401
 from test_vault_store_write_path import (
     bm25_paths,
@@ -54,7 +56,16 @@ from exomem.governance.principal import (
     request_scope,
 )
 from exomem.governance.tool import op_govern_memory
-from exomem.vault_store import availability, batch, projection, read, verify, write
+from exomem.vault_store import (
+    availability,
+    batch,
+    importer,
+    projection,
+    projector,
+    read,
+    verify,
+    write,
+)
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -441,30 +452,56 @@ def test_a_registry_history_prune_deletes_from_the_store_snapshots_that_have_no_
     assert tree(served) == before, "no Markdown or YAML file may be written or removed"
 
 
-def test_lifecycle_prepared_cleanup_names_each_slot_unrouted_and_changes_nothing(served):
-    """A stale judgement made from the files that deletes a slot whose page the store holds."""
+def stored_stale_slot(root, writer):
+    """A stale crash slot and its page, which the importer took into the store from their files."""
     page_id = _LIFECYCLE_IDS["stale"]
-    _, prepared, _, _ = _install_lifecycle_slot(
-        served, state="stale", page_id=page_id, path="Knowledge Base/Notes/Insights/late-owner.md"
+    page, prepared, _, _ = _install_lifecycle_slot(
+        root, state="stale", page_id=page_id, path="Knowledge Base/Notes/Insights/late-owner.md"
     )
-    posthoc = semantic_writes.evaluate_posthoc_batch(served, operation="reconcile")
-    inspected = relation_review.inspect_lifecycle_prepared_slots(served, corpus=posthoc.corpus)
+    importer.Importer(root, run=lambda work: work(writer)).sweep()
+    reference = prepared.relative_to(root).as_posix()
+    assert read.page_exists(root, reference)
+    posthoc = semantic_writes.evaluate_posthoc_batch(root, operation="reconcile")
+    inspected = relation_review.inspect_lifecycle_prepared_slots(root, corpus=posthoc.corpus)
     assert [item.cleanup_eligible for item in inspected.inspections] == [True]
-    before = tree(served)
+    return page, reference, inspected.inspections
+
+
+def test_lifecycle_prepared_cleanup_deletes_a_stale_slot_from_the_store(served, writer):
+    """A cleanup that unlinks the slot's file and leaves the stored slot for the next reconcile."""
+    _page, reference, inspections = stored_stale_slot(served, writer)
     start = revision(served)
 
-    batch_result = relation_review.cleanup_stale_lifecycle_prepared_batch(
-        served, inspected.inspections
-    )
+    batch_result = relation_review.cleanup_stale_lifecycle_prepared_batch(served, inspections)
 
-    # Reconcile reads the issues and goes on, as it does for a snapshot mismatch.
+    assert (batch_result.cleaned, batch_result.blocked) == ((reference,), ())
+    assert revision(served) == start + 1
+    assert not read.page_exists(served, reference)
+    report = projector.Projector(served, run=lambda work: work(writer)).run_pass()
+    assert (report.held, report.deferred) == (0, {})
+    assert not (served / reference).exists()
+
+
+def test_lifecycle_prepared_cleanup_keeps_a_slot_whose_page_changed_after_it_was_judged(
+    served, writer
+):
+    """A cleanup that deletes a slot judged stale against a page that has since changed: the
+    transition it records may be live again."""
+    page, reference, inspections = stored_stale_slot(served, writer)
+    rel = page.relative_to(served).as_posix()
+    vault_module.batch_atomic_write(
+        [planned(served, rel, read.owned_bytes(served, rel).decode() + "\nEdited.\n")],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    start = revision(served)
+
+    batch_result = relation_review.cleanup_stale_lifecycle_prepared_batch(served, inspections)
+
     assert batch_result.cleaned == ()
-    assert [(issue.code, issue.page_identity) for issue in batch_result.blocked] == [
-        (availability.WRITER_UNROUTED, page_id)
-    ]
-    assert prepared.exists()
+    assert [issue.code for issue in batch_result.blocked] == ["LIFECYCLE_RECONCILE_RACE"]
     assert revision(served) == start
-    assert tree(served) == before
+    assert read.page_exists(served, reference)
 
 
 def test_companion_backfill_commit_refuses_by_name_before_it_arms_a_journal(served):
@@ -558,53 +595,97 @@ def test_reconcile_names_a_stored_frame_folder_it_kept_and_still_finishes(served
 RAW_SOURCE = "Knowledge Base/Sources/__exomem_raw_v1__minutes.md"
 
 
+def part_rel(number):
+    return extraction_parts.part_path(Path(RAW_SOURCE), number).as_posix()
+
+
 def stored_part(root, number):
-    """A part page of a raw-marked Source page: its folder is no dot folder, so it is stored."""
-    rel = extraction_parts.part_path(Path(RAW_SOURCE), number).as_posix()
+    """A part page of a raw-marked Source page, as `render_part` writes it: its folder is no dot
+    folder, so the store holds it."""
+    rel = part_rel(number)
     vault_module.batch_atomic_write(
-        [planned(root, rel, f"# Part {number}\n", create_only=True)],
+        [
+            planned(
+                root,
+                rel,
+                f"---\npart: {number}\npart_of: Minutes\n---\n# Part {number}\n",
+                create_only=True,
+            )
+        ],
         vault_root=root,
         post_commit_fanout=False,
     )
     return rel
 
 
-def test_retiring_a_stored_part_page_keeps_it_and_names_it_without_raising(served):
-    """A retire after the parent commit that raises, or unlinks the file and keeps the page."""
+def test_retiring_a_stored_part_page_deletes_it_from_the_store(served):
+    """A retire after the parent commit that raises, or unlinks a file and keeps the stored page."""
     part = stored_part(served, 3)
     before = tree(served)
     start = revision(served)
 
     kept = extraction_parts.retire(served, (served / part,))
 
-    assert kept == (part,)
-    assert revision(served) == start
-    assert tree(served) == before
-    assert read.owned_bytes(served, part) == b"# Part 3\n"
+    assert kept == ()
+    assert revision(served) == start + 1
+    assert not read.page_exists(served, part)
+    assert tree(served) == before, "the projector, not the retire, removes files"
 
 
-def test_the_part_sweep_leaves_a_stored_surplus_part_as_unowned_in_a_preview_and_a_run(served):
-    """A sweep that aborts reconcile on a stored part, or lists it as removed when it stayed."""
-    source = served / RAW_SOURCE
-    source.parent.mkdir(parents=True, exist_ok=True)
-    source.write_text(
-        "---\ntitle: Minutes\ntype: source\nextraction_parts: 2\n---\n# Minutes\n\n"
-        f"{preserve._EXTRACTED_HEADING}\n\nFirst part.\n",
-        encoding="utf-8",
+def test_retiring_a_stored_part_off_the_store_thread_commits_on_the_store_thread(
+    stored, monkeypatch
+):
+    """A retire from the media worker's own thread, whose commit the store refuses: the part would
+    stay in the store for ever, logged as kept on every pass."""
+    thread = StoreThread(stored)
+    try:
+        media_suite.serve_through(monkeypatch, thread)
+        thread.run(lambda _writer: stored_part(stored, 3))
+        threads = media_suite.commit_threads(monkeypatch)
+
+        kept = extraction_parts.retire(stored, (stored / part_rel(3),))
+    finally:
+        thread.close()
+
+    assert kept == ()
+    assert threads and set(threads) == {thread.ident}
+    assert not read.page_exists(stored, part_rel(3))
+
+
+def test_the_part_sweep_deletes_a_stored_surplus_part_in_a_run_and_only_names_it_in_a_preview(
+    served, writer
+):
+    """A preview that deletes a stored surplus part, or a run that names it removed and keeps it."""
+    vault_module.batch_atomic_write(
+        [
+            planned(
+                served,
+                RAW_SOURCE,
+                "---\ntitle: Minutes\ntype: source\nextraction_parts: 2\n---\n# Minutes\n\n"
+                f"{preserve._EXTRACTED_HEADING}\n\nFirst part.\n",
+                create_only=True,
+            )
+        ],
+        vault_root=served,
+        post_commit_fanout=False,
     )
-    part = served / stored_part(served, 3)
-    part.parent.mkdir(parents=True, exist_ok=True)
-    part.write_text(
-        "---\npart: 3\npart_of: Minutes\n---\n# Part 3\n", encoding="utf-8"
-    )
+    part = stored_part(served, 3)
+    # The sweep finds parts by their files, so the projector writes them first.
+    project = projector.Projector(served, run=lambda work: work(writer))
+    project.run_pass()
+    assert (served / part).is_file()
     before = tree(served)
 
-    for dry_run in (True, False):
-        swept = extraction_parts.sweep(served, dry_run=dry_run)
-        assert swept.removed == [], dry_run
-        assert swept.unowned == [part.relative_to(served).as_posix()], dry_run
+    preview = extraction_parts.sweep(served, dry_run=True)
+    assert (preview.removed, preview.unowned) == ([part], [])
+    assert read.page_exists(served, part)
 
-    assert tree(served) == before
+    swept = extraction_parts.sweep(served, dry_run=False)
+    assert (swept.removed, swept.unowned) == ([part], [])
+    assert not read.page_exists(served, part)
+    assert tree(served) == before, "the projector, not the sweep, removes the file"
+    project.run_pass()
+    assert not (served / part).exists()
 
 
 def test_init_overlay_refuses_in_store_mode_and_replaces_nothing(served):
