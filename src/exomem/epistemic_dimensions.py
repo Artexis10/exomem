@@ -20,7 +20,7 @@ edges of a candidate set (`read_edges`), and a pure step places each unit (`Unit
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +50,8 @@ class DimensionMembership:
     every_kind: frozenset[str]
     # Each dimension's own member lists, as `MEMBER_LISTS` names them.
     members: Mapping[str, Mapping[str, tuple[str, ...]]]
+    # Each dimension's display behaviours, from `DISPLAY_BEHAVIOURS`, as the registry lists them.
+    display: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def needs_edges(self) -> bool:
@@ -108,10 +110,12 @@ def membership(
     by: dict[str, dict[str, set[str]]] = {name: {} for name in semantic_labels.MEMBER_LISTS}
     every_kind: set[str] = set()
     members: dict[str, dict[str, tuple[str, ...]]] = {}
+    display: dict[str, tuple[str, ...]] = {}
     for key, dimension in language.label_definitions(semantic_labels.DIMENSIONS).items():
         if only is not None and key not in only:
             continue
         members[key] = dict(dimension.members)
+        display[key] = dimension.display
         for list_name, values in dimension.members:
             for value in values:
                 if list_name == "kinds" and value == semantic_labels.ALL_KINDS:
@@ -129,6 +133,7 @@ def membership(
         by_family=frozen["families"],
         every_kind=frozenset(every_kind),
         members=members,
+        display=display,
     )
 
 
@@ -168,8 +173,11 @@ def read_edges(
     pages: Collection[str] | None = None,
     admission: Callable[[str], bool] | None = None,
     resolver: Callable[[], WikilinkResolver] | None = None,
+    behaviours: Collection[str] = (),
 ) -> DimensionEdges:
-    """Read, in one graph read, every edge whose family a dimension of `lookups` has.
+    """Read, in one graph read, every edge whose family a dimension of `lookups` has, and every
+    edge whose relation has one of the relation `behaviours` that a group's display reads
+    (`dimension_display.edge_behaviours`). Membership keeps only the edges of its families.
 
     `pages` is the candidate set's pages: the read keeps the edges with an end on one of them.
     Without it the read covers the vault, for a caller whose candidate set is every unit. The
@@ -183,7 +191,7 @@ def read_edges(
     differently for that caller. The read never scans the corpus and never reports an unreadable
     graph as an empty one.
     """
-    if not lookups.needs_edges:
+    if not lookups.needs_edges and not behaviours:
         return DimensionEdges("available")
     from . import epistemic_graph
     from .governance import egress
@@ -191,7 +199,7 @@ def read_edges(
     keys = sorted(
         key
         for key, entry in lookups.relations.core.items()
-        if entry.family in lookups.by_family
+        if entry.family in lookups.by_family or not entry.behaviours.isdisjoint(behaviours)
     )
     keep = egress.edge_view(vault_root, admission)
     result = epistemic_graph.EpistemicGraphIndex(vault_root).unit_edges(
@@ -254,7 +262,7 @@ class UnitDimensions:
                 raise ValueError("a page view that is evaluated for a dimension names its path")
             families |= self.page_families.get(path, frozenset())
             if path in self.unit_pages:
-                node = _node_key(str(path), unit)
+                node = node_key(str(path), unit)
                 if node is not None:
                     families |= self.unit_families.get(node, frozenset())
         return self.membership.of(
@@ -264,7 +272,7 @@ class UnitDimensions:
         )
 
 
-def _node_key(path: str, unit: Mapping[str, Any]) -> str | None:
+def node_key(path: str, unit: Mapping[str, Any]) -> str | None:
     """The graph node key of a unit view's occurrence, derived from the parser's coordinates when
     the view holds them rather than the key, because the key costs a hash."""
     from . import epistemic_graph

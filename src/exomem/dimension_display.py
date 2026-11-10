@@ -336,3 +336,117 @@ def _by_edges(
     for c in component.values():
         sizes[c] = sizes.get(c, 0) + 1
     return result, tuple(i for i in order if sizes[component[i]] > 1)
+
+
+@dataclass(frozen=True, slots=True)
+class Group:
+    """One requested group: its dimension's key, the label a reply names it by, and the display
+    behaviours the dimension names."""
+
+    key: str
+    label: str
+    display: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GroupRequest:
+    """What a search hands to `group_hits`.
+
+    `groups` are the requested groups in the caller's order. `units` holds, by unit ref, what the
+    display reads of each unit the search selected and the requested dimensions it belongs to.
+    `edges` are the request's edges in its caller's view, or None when it read none.
+    """
+
+    groups: tuple[Group, ...]
+    units: Mapping[str, tuple[DisplayUnit, frozenset[str]]]
+    edges: DimensionEdges | None
+    language: SemanticLanguageRegistry
+    relations: RelationRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class Grouped:
+    """A search's hits in group order, each marked, and the reply's `dimension_groups` list."""
+
+    hits: list[Any]
+    groups: list[dict[str, Any]]
+
+
+def group_hits(hits: Sequence[Any], request: GroupRequest) -> Grouped:
+    """Order a search's released hits by group and mark each one by its group's behaviours.
+
+    A hit is in full in the first requested group it belongs to, where it carries that group's key
+    as `dimension` and its marks as `display`. Each later group it belongs to lists it as a ref
+    that names the group showing it. Grouping only orders and marks: the limit has already cut the
+    hits, so every hit stays, and one in no group keeps its rank after the groups.
+    """
+    members: dict[str, list[int]] = {group.key: [] for group in request.groups}
+    named: dict[End, str] = {}
+    for i, hit in enumerate(hits):
+        entry = request.units.get(getattr(hit, "unit_ref", ""))
+        if entry is None:
+            continue
+        unit, dimensions = entry
+        if unit.node is not None:
+            named[(unit.path, unit.node)] = unit.ref
+        for group in request.groups:
+            if group.key in dimensions:
+                members[group.key].append(i)
+    shown: dict[int, str] = {}
+    ordered: list[Any] = []
+    listed_groups: list[dict[str, Any]] = []
+    for group in request.groups:
+        indices = members[group.key]
+        view = display(
+            [request.units[hits[i].unit_ref][0] for i in indices],
+            group.display,
+            language=request.language,
+            relations=request.relations,
+            edges=request.edges,
+            named=named,
+        )
+        listed: list[dict[str, str]] = []
+        for position in view.order:
+            i = indices[position]
+            hit = hits[i]
+            if i in shown:
+                listed.append({"unit_ref": hit.unit_ref, "shown_in": shown[i]})
+                continue
+            shown[i] = group.key
+            hit.dimension = group.key
+            hit.display = dict(view.marks[position]) or None
+            ordered.append(hit)
+            listed.append({"unit_ref": hit.unit_ref})
+        block: dict[str, Any] = {
+            "dimension": group.key,
+            "label": group.label,
+            "count": len(indices),
+            **view.counts,
+        }
+        if view.order_conflict:
+            block["order_conflict"] = [hits[indices[p]].unit_ref for p in view.order_conflict]
+        if not view.edges_known:
+            block["edges"] = "unknown"
+        block["units"] = listed
+        listed_groups.append(block)
+    ordered.extend(hit for i, hit in enumerate(hits) if i not in shown)
+    return Grouped(ordered, listed_groups)
+
+
+def outcome(groups: Sequence[Mapping[str, Any]]) -> str:
+    """One sentence for each group of a `dimension_groups` list that an agent can repeat: the
+    group's label, how many units it holds and how many carry each counted mark."""
+    sentences = []
+    for group in groups:
+        count = int(group["count"])
+        text = f"{count} {'unit' if count == 1 else 'units'} in '{group['label']}'"
+        if "open" in group:
+            text += f"; {group['open']} {'is' if group['open'] == 1 else 'are'} open"
+        if "replaced" in group:
+            text += f"; {group['replaced']} {'was' if group['replaced'] == 1 else 'were'} replaced"
+        if group.get("order_conflict"):
+            text += f"; {len(group['order_conflict'])} have conflicting order links"
+        if group.get("edges") == "unknown":
+            text += "; its links could not be read yet, so its marks may be incomplete"
+        sentences.append(text + ".")
+    return " ".join(sentences)

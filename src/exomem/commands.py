@@ -70,6 +70,7 @@ from . import dataset_values as dataset_values_module
 from . import deferred_write_advisory as deferred_write_advisory_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
+from . import dimension_display as dimension_display_module
 from . import edit as edit_module
 from . import edit_operations as edit_operations_module
 from . import entity_candidates as entity_candidates_module
@@ -3032,6 +3033,8 @@ def op_find(
     degraded: list[str] = []
     failed: list[str] = []
     dimension_check: dict[str, int] = {}
+    dimension_groups: list[dimension_display_module.GroupRequest] = []
+    group_blocks: list[dict[str, Any]] | None = None
     projected_continuation: str | None = None
     if projection_runtime is not None:
         who = principal_module.effective_principal()
@@ -3121,6 +3124,7 @@ def op_find(
                 catalog_proof_out=catalog_proof,
                 admit_path=admit_path,
                 dimension_check_out=dimension_check,
+                dimension_groups_out=dimension_groups,
             )
         # Values of small datasets are a separate lane that `find` does not run. It answers an
         # unfiltered text query, and `annotate_hits` below releases its hits only at full level.
@@ -3161,6 +3165,12 @@ def op_find(
         with find_module._span(timings, "release_gate"):
             release = egress_module.annotate_hits(vault_root, hits, limit=limit, purpose=purpose)
             hits = release.hits
+        if dimension_groups:
+            # Grouping orders and marks the released hits; the limit has already cut them.
+            with find_module._span(timings, "dimension_groups"):
+                grouped = dimension_display_module.group_hits(hits, dimension_groups[0])
+            hits = grouped.hits
+            group_blocks = grouped.groups
     referents: dict[str, Any] | None = None
     if projection_runtime is None:
         # Referents compose over the released vault hits; the projected (hosted
@@ -3353,6 +3363,7 @@ def op_find(
         and projected_continuation is None
         and budget_block is None
         and dimension_block is None
+        and group_blocks is None
     ):
         if not pack and referents is None:
             return hit_dicts
@@ -3383,6 +3394,8 @@ def op_find(
         out["budget"] = budget_block
     if dimension_block is not None:
         out["dimension_check"] = dimension_block
+    if group_blocks is not None:
+        out["dimension_groups"] = group_blocks
     return out
 
 
@@ -7008,6 +7021,11 @@ def _agent_search_reply(result: list | dict, *, internals: bool) -> dict:
         summary = f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'}."
     else:
         summary = "Found no matches."
+    groups = envelope.get("dimension_groups")
+    if groups and hits:
+        # Each requested group leads with its label and counts, which the hit count repeats.
+        grouped = dimension_display_module.outcome(groups)
+        summary = f"{summary} {grouped}" if dimension_check else grouped
     reply: dict[str, Any] = {
         "user_summary": summary,
         "hits": hits,

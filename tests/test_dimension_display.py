@@ -87,61 +87,83 @@ def _view(reply: dict) -> list[tuple[str, str]]:
     return [(hit["parent_title"], hit["excerpt"]) for hit in reply["hits"]]
 
 
-# The fields every unit hit of these searches carries today, before any display mark.
+# The fields every unit hit of these searches carries, besides `verdict` and `display`.
 UNIT_FIELDS = [
-    "category", "excerpt", "kind", "parent_path", "parent_status", "parent_title", "parent_type",
-    "parent_updated", "result_type", "source_anchor", "unit_ref",
+    "category", "dimension", "excerpt", "kind", "parent_path", "parent_status", "parent_title",
+    "parent_type", "parent_updated", "result_type", "source_anchor", "unit_ref",
 ]
 
 
-def test_a_search_by_dimension_before_groups_returns_rank_order_and_no_marks(
-    tmp_path: Path,
-) -> None:
-    """The baseline: what a search filtered by a dimension returns before dimension groups. Each
-    line marked `Flips` is one this slice changes; the rest must hold after it.
+def test_a_search_by_dimension_returns_the_dimensions_view(tmp_path: Path) -> None:
+    """A search filtered by each shipped dimension that names a display behaviour returns that
+    dimension's group: its units ordered and marked, the group block, and an outcome that names
+    the group. The commit before the groups recorded the rank order, the bare reply keys, the
+    "Found N matches." summary and the unmarked hits that this test now replaces.
 
-    Catches a group request that loses a member or changes a member's own fields.
+    Catches a group request that loses a member, changes a member's own fields, or orders and
+    marks it without the dimension's behaviours.
     """
     vault = _display_vault(tmp_path)
     replies = {
         dimension: _search(vault, {"unit.dimension": {"$eq": dimension}})
         for dimension in ("currency", "uncertainty", "provenance", "order")
     }
+    decisions = context_refs.vault_ref(f"{NOTES}/Decision log.md")
 
-    # Flips: lead_with_current puts the current decision first.
+    # lead_with_current puts the current decision first and names its successor on the other.
     assert _view(replies["currency"]) == [
-        ("Decision log", "Ship in January."),
         ("Decision log", "Ship in March."),
+        ("Decision log", "Ship in January."),
     ]
+    assert [hit.get("display") for hit in replies["currency"]["hits"]] == [
+        None, {"replaced": {"by": f"{decisions}#after"}},
+    ]
+    # flag_open marks the question that nothing answers; the hypothesis has a verdict.
     assert _view(replies["uncertainty"]) == [
         ("Questions", "Does the launch need a beta?"),
         ("Questions", "Who owns support after launch?"),
         ("Questions", "Users prefer a March launch."),
         ("Answers", "The launch needs a beta for two weeks."),
     ]
+    assert [hit.get("display") for hit in replies["uncertainty"]["hits"]] == [
+        None, {"open": True}, None, None,
+    ]
+    assert [hit.get("verdict") for hit in replies["uncertainty"]["hits"]] == [
+        None, None, "confirmed", None,
+    ]
+    # show_origin names who asserted the analysis and the page it derives from.
     assert _view(replies["provenance"]) == [
         ("Survey", "Nine of ten users asked for exports."),
         ("Analysis", "Exports come first on the roadmap."),
     ]
-    # Flips: order_in_time orders the events by date and by their precedes and follows edges.
+    assert replies["provenance"]["hits"][1]["display"] == {
+        "origin": {"by": "Research team", "from": [context_refs.vault_ref(f"{NOTES}/Survey.md")]}
+    }
+    # order_in_time sorts the dated events, then the precedes edge puts the review before the
+    # launch; the follows edge already holds.
     assert _view(replies["order"]) == [
-        ("Timeline", "The launch happens."),
         ("Timeline", "The project kicks off."),
         ("Timeline", "The security review passes."),
+        ("Timeline", "The launch happens."),
         ("Timeline", "The team holds a retrospective."),
     ]
-    for dimension, reply in replies.items():
-        # Flips: the reply names its group in `dimension_groups`.
-        assert sorted(reply) == ["hits", "user_summary"], dimension
-        # Flips: the summary names the group by its label and gives its counts.
-        assert reply["user_summary"] == f"Found {len(reply['hits'])} matches.", dimension
-        for hit in reply["hits"]:
-            own = sorted(set(hit) - {"verdict"})
-            # Flips: each hit names its group in `dimension` and carries its marks in `display`.
-            assert own == UNIT_FIELDS, (dimension, hit["excerpt"])
-    assert [hit.get("verdict") for hit in replies["uncertainty"]["hits"]] == [
-        None, None, "confirmed", None,
+    assert [reply["user_summary"] for reply in replies.values()] == [
+        "2 units in 'Currency'; 1 was replaced.",
+        "4 units in 'Uncertainty'; 1 is open.",
+        "2 units in 'Provenance'.",
+        "4 units in 'Order'.",
     ]
+    for dimension, reply in replies.items():
+        assert sorted(reply) == ["dimension_groups", "hits", "user_summary"], dimension
+        [group] = reply["dimension_groups"]
+        assert group["dimension"] == dimension
+        assert [unit["unit_ref"] for unit in group["units"]] == [
+            hit["unit_ref"] for hit in reply["hits"]
+        ]
+        for hit in reply["hits"]:
+            assert hit["dimension"] == dimension
+            own = sorted(set(hit) - {"verdict", "display"})
+            assert own == UNIT_FIELDS, (dimension, hit["excerpt"])
 
 
 # ---------------------------------------------------------------------------
