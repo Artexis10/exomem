@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 from test_activate_context_maps import _activate, _without_response_id
+from test_activation_log import _rows
+from test_activation_log import activation_log as activation_log  # noqa: F401  (the pytest fixture)
 from test_collection_store_service import service as service  # noqa: F401  (the pytest fixture)
 from test_collection_store_writer import manifest_path
 from test_context_catalogue import _built, _page, _source_schema, _write
@@ -465,7 +467,8 @@ def test_incomplete_restricted_corpus_never_serves_a_prepared_prefix(vault: Path
         with original(root, path, **kwargs) as source:
             prepared.append(path)
             if path.name == "z-matching-reference.md":
-                budget.deadline = time.monotonic()
+                # The activation runs on its own budget beneath this one; expire the one it reads.
+                request_budget.current().deadline = time.monotonic()
             yield source
     monkeypatch.setattr(runtime_resources, "semantic_preparation", expires)
     token = request_budget.set_current(budget)
@@ -724,8 +727,8 @@ def test_a_deadline_during_the_text_query_stops_it_short_of_the_deadline_and_ser
     def stalls_past_the_query_share(self, conn, *args, **kwargs):
         # Only the task text query keeps raw material and leaves navigation out; no other lane asks for that pair.
         if kwargs.get("exclude_navigation") and not kwargs.get("exclude_raw_material"):
-            # 46 s of a 50 s budget: past what the query may spend, with the projection reserve still unspent.
-            clock[0] += 46.0
+            # 12 s of the 15 s the activation gets: past what the query may spend, with the projection reserve still unspent.
+            clock[0] += 12.0
             try:
                 conn.execute(
                     "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500000) "
@@ -746,6 +749,62 @@ def test_a_deadline_during_the_text_query_stops_it_short_of_the_deadline_and_ser
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
     assert "working_set.task_context_text" in budget.truncated
     assert not packet.get("abstained") and packet["map"]
+
+
+def test_an_activation_stops_at_its_own_deadline_inside_a_longer_request_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, activation_log: Path
+) -> None:
+    """A request that allows 50 s gave its activation all of them; it now gets the configured seconds and the row says so."""
+    import sqlite3
+
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
+    monkeypatch.setenv("EXOMEM_ACTIVATION_BUDGET_SECONDS", "2")
+    _seed_structure(vault)
+    manifest = "Knowledge Base/Records/Depot Stock/_collection.md"
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    turn = "Where can I query depot stock observations?"
+    clock = _clock_at(monkeypatch)
+    unhurried, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    assert manifest in {item["source_ref"] for item in unhurried["task_context"]["candidates"]}
+
+    store_type = type(lexstore.get_store(vault))
+    query = store_type._bm25_query
+    outcomes: list[str] = []
+
+    def stalls_past_the_activation_deadline(self, conn, *args, **kwargs):
+        # Only the task text query keeps raw material and leaves navigation out; no other lane asks for that pair.
+        if kwargs.get("exclude_navigation") and not kwargs.get("exclude_raw_material"):
+            # 3 s: past the activation's 2 s, 47 s short of what the request allows.
+            clock[0] += 3.0
+            try:
+                conn.execute(
+                    "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 500000) "
+                    "SELECT count(*) FROM n"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                outcomes.append("interrupted")
+                raise
+            outcomes.append("finished")
+        return query(self, conn, *args, **kwargs)
+
+    monkeypatch.setattr(store_type, "_bm25_query", stalls_past_the_activation_deadline)
+    packet, budget = _activate_within(vault, 50, turn=turn, max_chars=8000)
+    task = packet["task_context"]
+    assert outcomes == ["interrupted"]
+    assert packet.get("abstained") is False and packet["map"]
+    assert task["state"] == "partial"
+    assert {"role": "task_context", "reason": "budget"} in task["missing"]
+    assert packet["request_budget"]["seconds"] == 2.0
+    assert budget.remaining() > 40.0
+    assert "working_set.task_context_text" in budget.truncated
+    served, limited = _rows(activation_log)
+    assert served["activation_result"]["budget_limited"] is False
+    assert limited["outcome"] == "served"
+    assert limited["activation_result"] == {"abstained": False, "reason": None, "budget_limited": True}
+    assert limited["budget"]["seconds"] == 2.0
+    assert "working_set.task_context_text" in limited["budget"]["truncated"]
 
 
 def test_the_short_activation_door_still_runs_the_method_search(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

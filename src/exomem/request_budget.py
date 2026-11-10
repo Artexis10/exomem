@@ -88,6 +88,10 @@ TASK_PROJECTION_RESERVE_SECONDS = ACTIVATION_STAGE_RESERVE_SECONDS + 4.0
 #: The largest share of a request's budget that reserve may take. The 6 s activation door keeps 1.5 s, so a
 #: steady-state method search (0.4-0.7 s for two queries on the same vault) still runs there.
 TASK_PROJECTION_RESERVE_SHARE = 0.25
+#: What an activation may spend inside its request's deadline. An activation is optional context for a turn, so
+#: it gives up well before the request does; the operator tunes this value with the variable, never by code.
+ACTIVATION_BUDGET_SECONDS = 15.0
+ACTIVATION_BUDGET_ENV_VAR = "EXOMEM_ACTIVATION_BUDGET_SECONDS"
 
 
 def task_projection_reserve(leads: int) -> float:
@@ -115,29 +119,27 @@ _BUDGET: ContextVar[RequestBudget | None] = ContextVar(
 )
 
 _RESOLUTION_LOCK = threading.Lock()
-#: `(raw env value, resolved seconds)` for the last value resolved. The cache
+#: Per setting, `(raw env value, resolved seconds)` for the last value resolved. The cache
 #: is what makes the malformed-value warning ONE warning rather than one per
 #: call: a typo in a deployed variable must be visible, not a log flood.
-_RESOLVED: tuple[str | None, float] | None = None
+_RESOLVED: dict[str, tuple[str | None, float]] = {}
 
 
 def reset_resolution_cache() -> None:
-    """Drop the memoized override. For tests that change the environment."""
-    global _RESOLVED
+    """Drop the memoized overrides. For tests that change the environment."""
     with _RESOLUTION_LOCK:
-        _RESOLVED = None
+        _RESOLVED.clear()
 
 
-def budget_seconds(env: Mapping[str, str] | None = None) -> float:
-    """The configured origin budget, falling back to the default on nonsense."""
-    global _RESOLVED
+def _setting_seconds(name: str, default: float, env: Mapping[str, str] | None) -> float:
+    """The seconds that variable `name` sets, falling back to `default` on nonsense."""
     source = os.environ if env is None else env
-    raw = source.get(BUDGET_ENV_VAR)
+    raw = source.get(name)
     with _RESOLUTION_LOCK:
-        cached = _RESOLVED
+        cached = _RESOLVED.get(name)
         if cached is not None and cached[0] == raw:
             return cached[1]
-        resolved = MCP_REQUEST_BUDGET_SECONDS
+        resolved = default
         if raw is not None:
             try:
                 candidate = float(str(raw).strip())
@@ -149,12 +151,22 @@ def budget_seconds(env: Mapping[str, str] | None = None) -> float:
                 _log.warning(
                     "%s=%r is not a positive number of seconds; "
                     "falling back to the %.1fs default",
-                    BUDGET_ENV_VAR,
+                    name,
                     raw,
-                    MCP_REQUEST_BUDGET_SECONDS,
+                    default,
                 )
-        _RESOLVED = (raw, resolved)
+        _RESOLVED[name] = (raw, resolved)
         return resolved
+
+
+def budget_seconds(env: Mapping[str, str] | None = None) -> float:
+    """The configured origin budget, falling back to the default on nonsense."""
+    return _setting_seconds(BUDGET_ENV_VAR, MCP_REQUEST_BUDGET_SECONDS, env)
+
+
+def activation_budget_seconds(env: Mapping[str, str] | None = None) -> float:
+    """The configured activation budget, falling back to the default on nonsense."""
+    return _setting_seconds(ACTIVATION_BUDGET_ENV_VAR, ACTIVATION_BUDGET_SECONDS, env)
 
 
 def is_reconcile_class(tool: str | None, arguments: Mapping[str, object] | None) -> bool:
@@ -250,12 +262,15 @@ class RequestBudget:
         report a problem where there was none, while the row is an operator's
         instrument for tuning the PROVISIONAL reserves — and "50 seconds, 400
         left, nothing skipped" is exactly the reading that says a reserve is
-        about to start costing calls.
+        about to start costing calls. `truncated` names stages that returned part of
+        their answer; the call ledger keeps only the fields it fixes, and the
+        activation log keeps this block whole.
         """
         return {
-            "seconds": self.seconds,
+            "seconds": round(self.seconds, 3),
             "remaining_ms": int(self.remaining() * 1000.0),
             "skipped": self.skipped,
+            "truncated": self.truncated,
         }
 
 
@@ -280,6 +295,22 @@ def can_afford(reserve: float) -> bool:
 
 
 @contextmanager
+def _running_until(parent: RequestBudget, deadline: float) -> Iterator[None]:
+    """Run under a child budget that ends at `deadline`; the parent also learns what the child skipped or cut."""
+    now = time.monotonic()
+    child = RequestBudget(seconds=max(0.0, deadline - now), entry=now)
+    token = set_current(child)
+    try:
+        yield
+    finally:
+        reset_current(token)
+        for stage in child.skipped:
+            parent.note_skipped(stage)
+        for stage in child.truncated:
+            parent.note_truncated(stage)
+
+
+@contextmanager
 def leaving(reserve: float) -> Iterator[None]:
     """Run an optional part of the call on a deadline `reserve` seconds before the call's own.
 
@@ -291,17 +322,27 @@ def leaving(reserve: float) -> Iterator[None]:
     if parent is None:
         yield
         return
-    now = time.monotonic()
-    child = RequestBudget(seconds=max(0.0, parent.deadline - float(reserve) - now), entry=now)
-    token = set_current(child)
-    try:
+    with _running_until(parent, parent.deadline - float(reserve)):
         yield
-    finally:
-        reset_current(token)
-        for stage in child.skipped:
-            parent.note_skipped(stage)
-        for stage in child.truncated:
-            parent.note_truncated(stage)
+
+
+@contextmanager
+def capped(seconds: float) -> Iterator[None]:
+    """Run an optional call on its own budget of `seconds`, ending a stage reserve before the call's own deadline.
+
+    The call's own deadline always wins when it is nearer. Skips and truncations are recorded on the
+    parent budget too. Without a bound budget nothing changes: only a request that carries a deadline
+    has one to stay beneath.
+    """
+    parent = current()
+    if parent is None:
+        yield
+        return
+    deadline = min(
+        parent.deadline - ACTIVATION_STAGE_RESERVE_SECONDS, time.monotonic() + float(seconds)
+    )
+    with _running_until(parent, deadline):
+        yield
 
 
 class ReadBudgetExhausted(BaseException):

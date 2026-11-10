@@ -11,6 +11,7 @@ span.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -620,7 +621,9 @@ class _CountdownBudget(request_budget.RequestBudget):
 
 
 @pytest.fixture
-def countdown_budget():
+def countdown_budget(monkeypatch: pytest.MonkeyPatch):
+    # The countdown stands for the budget the activation reads; the leaf's own child budget would hide its count.
+    monkeypatch.setattr(request_budget, "capped", contextlib.nullcontext)
     tokens = []
 
     def _bind(healthy_calls: int) -> _CountdownBudget:

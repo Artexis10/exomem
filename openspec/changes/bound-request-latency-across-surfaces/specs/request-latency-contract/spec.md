@@ -285,10 +285,43 @@ than imply that its population exactly expands the bootstrap advisory.
 
 Budgeted read-only activation SHALL return a packet or its existing budget abstention within the existing absolute deadline, including packet finalization. Deadline handling SHALL reuse the existing budget and safe deferral paths. An overrun SHALL be a failed deadline observation and an unresolved repair. Canonical mutation immunity MUST NOT apply to read-only activation.
 
+An activation inside an MCP request budget SHALL also carry its own, nearer deadline: `EXOMEM_ACTIVATION_BUDGET_SECONDS` seconds after the activation starts, 15 by default, and never later than one second before the request's own deadline. Only the operator sets it; a value that is not a positive number SHALL log one warning and use the default. In the `maps` packet mode, an activation that reaches this deadline with its map built SHALL serve the map and the leads it has already found, SHALL mark the `task_context` block `partial` with a `budget` entry in `missing`, SHALL name what it left out in the packet's `request_budget` block, and SHALL NOT abstain. A stage that is mid-read at the deadline SHALL stop at its next check and serve nothing that it half-read. An activation that reaches the deadline before its map is built, and every activation in the `anchors` packet mode, SHALL keep the existing budget abstention. Activations without an MCP request budget (REST, CLI and in-process doors) SHALL keep their existing limits.
+
 #### Scenario: A read-only activation exhausts its budget
 
-- **WHEN** a read-only activation cannot afford its remaining work within the absolute deadline
+- **WHEN** a read-only activation cannot afford its remaining work within the absolute deadline, because its map is not built or the packet mode is `anchors`
 - **THEN** it returns its existing budget abstention, including finalization, within that deadline
+
+#### Scenario: An activation reaches its own deadline inside a longer request budget
+
+- **WHEN** a `maps` activation inside a 50-second request budget has used its 15 seconds while it discovers task leads
+- **THEN** it returns the map and the leads found so far, with `task_context.state` of `partial` and `{"role": "task_context", "reason": "budget"}` in `missing`
+- **AND** `abstained` is false, and the request's own budget names the stages that stopped
+
+#### Scenario: The operator sets the activation deadline
+
+- **WHEN** `EXOMEM_ACTIVATION_BUDGET_SECONDS` is set to `2` and the service restarts
+- **THEN** an activation inside the request budget stops looking for context two seconds after it starts
+- **AND** a value such as `soon` or `-1` uses 15 seconds and logs one warning
+
+#### Scenario: A request nearer its end than the activation deadline
+
+- **WHEN** the request has less than the activation's seconds left
+- **THEN** the activation ends one second before the request's deadline, as the request's own budget would
+
+### Requirement: The activation log records the budget outcome
+
+Each row that the activation log appends SHALL carry `activation_result` and `budget`. `activation_result` SHALL hold the same content-free observation that the call ledger records for the call: whether it abstained, the closed reason, and whether a budget limited it. `budget` SHALL hold the seconds the activation had, the milliseconds left, and the names of the stages skipped or truncated, never a query or content. Each SHALL be null when the call had no budget or its packet cannot be observed, never a value that reads as "not limited". A served packet that a budget limited SHALL keep `outcome` of `served`.
+
+#### Scenario: A limited activation is visible in its row
+
+- **WHEN** an activation serves a partial packet because its deadline arrived
+- **THEN** its row has `outcome` of `served`, `activation_result.budget_limited` of true and the stage names in `budget.truncated`
+
+#### Scenario: A call without a budget has no budget block
+
+- **WHEN** an activation runs from the CLI with no request budget
+- **THEN** its row has `budget` of null and no value that reads as "not limited"
 
 #### Scenario: A reproduction exceeds the deadline
 
