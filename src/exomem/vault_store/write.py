@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, ownership
+from . import derive, mode, ownership, rederive
 from .read import NOT_ACTIVE, inbound_sources
 
 if TYPE_CHECKING:
@@ -287,6 +287,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for binary in change.binary_deletes:
             _delete_binary(tx, binary, audit)
         derive.apply(tx, writer.root, change, existing)
+        # The pages above derived with the overlay that the disk still holds; the job settles them.
+        rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
         for held in change.resolves_held:
             _drop_held(tx, held)

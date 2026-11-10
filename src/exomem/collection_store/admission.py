@@ -1412,6 +1412,7 @@ def _publication_authority(session, token):
 
 
 def _publish_current_epoch(session, writer, token, *, unchanged=None):
+    from ..vault_store import marker as vault_marker
     from . import legacy_originals
 
     manager = session.manager
@@ -1423,11 +1424,13 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
     if (unchanged is not None
             and replica.published_evidence(legacy_originals.metadata(writer.connection)) == unchanged.evidence
             and takeover.replica_witness(session.root) == unchanged.witness
-            and not legacy_originals.needs_replica_copy(session.root, writer.connection)):
+            and not legacy_originals.needs_replica_copy(session.root, writer.connection)
+            and not vault_marker.replica_stale(session.root, writer.connection)):
         # The replica already carries this head under the stored epoch, which every later
         # grant exceeds; a new epoch would only force a copy no adopter reads (A3). No copy
         # is made, so no new published head needs checking against the chain.
         head = json.loads(unchanged.evidence[0])
+        vault_marker.settle(session.root, writer.handle)
         with manager._report_lock:
             session.require(token)
             manager._collection_store.record_admission(token)
@@ -1441,12 +1444,14 @@ def _publish_current_epoch(session, writer, token, *, unchanged=None):
         conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (schema.META_LEASE_EPOCH, str(token)))
         conn.execute("INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)", (authority.MARKER_REQUIRED, "1"))
     # A same-head archive backfill must survive loss of the live store before views replace its sources.
-    force = legacy_originals.needs_replica_copy(session.root, writer.connection)
+    force = (legacy_originals.needs_replica_copy(session.root, writer.connection)
+             or vault_marker.replica_stale(session.root, writer.connection))
     published = replica.publish_replica(session.root, writer.handle, authority_check=check, deadline=deadline,
                                        **({"force": True} if force else {}))
     if published.status == "published":
         if chain.verify_store_chain(writer.connection) != (published.commit_seq, published.head_hash):
             raise CollectionStoreError("COLLECTION_STORE_CREATE_CONFLICT", "publication did not reach current head")
+        vault_marker.settle(session.root, writer.handle)
         with manager._report_lock:
             session.require(token)
             manager._collection_store.record_admission(token)

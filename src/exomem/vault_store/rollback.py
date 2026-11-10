@@ -19,7 +19,7 @@ from pathlib import Path
 from .. import epistemic_graph, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
-from . import migrate, mode, projection
+from . import marker, migrate, mode, projection, rederive
 from .write import Origin
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
@@ -134,13 +134,15 @@ def apply_route(vault_root: Path, *, export_to: Path, why: str, export_held: boo
         raise OpError(
             "VAULT_STORE_EXPORT_DESTINATION", f"the export cannot go there: {placement.reason}"
         )
-    return admission.store_mode_route(
+    result = admission.store_mode_route(
         root,
         "store-mode rollback",
         lambda session, token, writer: _rollback(
             root, session, token, writer, destination=destination, why=why, export_held=export_held
         ),
     )
+    # What the replica says once the hand-back ran: "store" here means the republish is still owed.
+    return {**result, "vault_marker": marker.read_replica(root).state}
 
 
 def _rollback(
@@ -315,6 +317,8 @@ def _drop_store_mode(tx: sqlite3.Connection, *, revision: int, why: str) -> None
         "UPDATE store_mode SET mode = ?, revision = ?, changed_at = ? WHERE id = 1",
         (mode.FILE_MODE, revision, now),
     )
+    marker.clear(tx)
+    rederive.clear(tx)
 
 
 def _finish(
