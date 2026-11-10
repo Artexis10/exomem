@@ -626,7 +626,7 @@ class Refused(RuntimeError):
 
     def __init__(self, tool: str, code: str, message: str, *, error: dict[str, Any] | None = None) -> None:
         super().__init__(f"{tool} refused {code}: {message}")
-        self.tool = tool  # the command the step proves; the server's own wrapper names the command it ran
+        self.tool = tool  # the tool that was called, which the server's fault wrapper names
         self.code = code
         self.message = message
         self.error = error
@@ -739,7 +739,8 @@ class Session:
             text = "".join(getattr(block, "text", "") for block in result.content)
             # This checks the product's fixed refusal-code format, never the meaning of user text.
             code = re.search(r"\b([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)\b", text)
-            raise Refused(tool, code.group(1) if code else "UNKNOWN", text)
+            # The server's fault wrapper names the tool that was called, so the refusal carries that name.
+            raise Refused(called, code.group(1) if code else "UNKNOWN", text)
         data = getattr(result, "structured_content", None)
         if data is None:
             data = loop._result_data(result)
