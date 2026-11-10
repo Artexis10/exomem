@@ -333,7 +333,6 @@ def _delete_file_local(
     # audit reports it.
     from .governance import egress
 
-    visible = egress.restricted_release_filter(vault_root)
     # A stored page's links are in the store as of the last commit and the disk shows only its
     # projection and the notes nothing has imported, so a store-mode check reads both. The commit
     # binds the sources that the store named; the others are checked here, once, as file mode does.
@@ -342,14 +341,15 @@ def _delete_file_local(
         if store_writer is None
         else store_targets.inbound_links(vault_root, [rel_path])[rel_path]
     )
-    linked = (
-        find_inbound_wikilinks(vault_root, rel_path) if stored_check is None else stored_check.links
-    )
-    inbound_all = [match for match in linked if visible is None or visible(match.path)]
-    # An unimported file has no policy, and the store's filter withholds it from every reader, so
-    # to a restricted caller it is absent: no count, no path. The owner's audit reports the orphan.
-    if stored_check is not None and egress.file_mode_restricted_caller(vault_root, None) is None:
-        inbound_all += stored_check.unimported
+    if stored_check is None:
+        visible = egress.restricted_release_filter(vault_root)
+        inbound_all = [
+            match
+            for match in find_inbound_wikilinks(vault_root, rel_path)
+            if visible is None or visible(match.path)
+        ]
+    else:
+        inbound_all = store_targets.visible_links(vault_root, {rel_path: stored_check})[rel_path]
     inbound_ignored = [m for m in inbound_all if m.path in expected_set]
     inbound = [m for m in inbound_all if m.path not in expected_set]
 

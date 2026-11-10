@@ -9,9 +9,11 @@ store.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import sys
+from collections import Counter
 from contextlib import closing
 
 import pytest
@@ -31,7 +33,7 @@ from test_vault_store_bypass_writers import (
 from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows, tree
 
-from exomem import delete_file, move_file, recover_from_trash, semantic_contract
+from exomem import delete_directory, delete_file, move_file, recover_from_trash, semantic_contract
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
@@ -400,3 +402,219 @@ def test_a_recovery_onto_a_page_that_now_exists_refuses_and_keeps_both(served):
     assert refused.value.code == "DEST_EXISTS"
     assert revision(served) == start
     assert read.page_exists(served, trashed.trash_path)
+
+
+HARBOUR = "Knowledge Base/Projects/Harbour"
+#: The folder size of the folder-trash cases; the latency drill sets it to 200.
+FOLDER_PAGES = int(os.environ.get("EXOMEM_LIFECYCLE_DRILL_PAGES", "40"))
+
+
+def store_folder(root, pages, folder=HARBOUR):
+    """A folder of stored pages with no files, each linking to the first one inside the folder."""
+    paths = [f"{folder}/Log {n:03d}.md" for n in range(pages)]
+    vault_module.batch_atomic_write(
+        [
+            planned(
+                root,
+                path,
+                f"---\ntitle: Log {n:03d}\ntype: note\n---\n# Log {n:03d}\n\n"
+                f"Tide reading {n}, after [[Log 000]].\n",
+                create_only=True,
+            )
+            for n, path in enumerate(paths)
+        ],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    return paths
+
+
+def store_outside_linker(root):
+    """A stored page outside the folder that links to one page in it."""
+    vault_module.batch_atomic_write(
+        [planned(root, EPSILON, EPSILON_TEXT.replace("[[Gamma]]", "[[Log 001]]"), create_only=True)],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+
+
+def folder_rows(root, folder):
+    """Every derived row of the folder's pages, by the column that names the page in each table."""
+    below = f"{folder}/%"
+    return {
+        table: Counter(store_rows(root, f"SELECT * FROM {table} WHERE {column} LIKE ?", below))
+        for table, column in (("pages", "path"), ("graph_edges", "source_path"), ("identities", "path"))
+    }
+
+
+def test_a_folder_trash_moves_every_page_under_one_trash_folder_once_its_outside_link_is_waived(
+    served,
+):
+    """A folder trash that counts a link between its own pages, misses the link from outside it,
+    leaves a page or its rows at the old paths, or writes Markdown."""
+    pages = store_folder(served, FOLDER_PAGES)
+    store_outside_linker(served)
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+        delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+    assert refused.value.code == "INBOUND_LINKS"
+    assert "1 external inbound" in refused.value.reason
+    assert f"{EPSILON}:" in refused.value.reason and "Log 001.md" in refused.value.reason
+    assert revision(served) == start and tree(served) == before
+
+    result = delete_directory.delete_directory(
+        served, path=HARBOUR, confirm=True, recursive=True, force_orphan=True
+    )
+
+    assert (result.file_count, result.inbound_link_count) == (len(pages), 1)
+    trashed = [f"{result.trash_path}/{page[len(HARBOUR) + 1:]}" for page in pages]
+    with read.snapshot(served) as view:
+        assert view.held_pages(trashed) == frozenset(trashed)
+        assert view.held_pages(pages) == frozenset()
+    assert folder_rows(served, HARBOUR) == {
+        "pages": Counter(), "graph_edges": Counter(), "identities": Counter()
+    }
+    assert new_files(before, served) == {result.trash_meta_path}, "the projector moves the pages"
+    sidecar = json.loads((served / result.trash_meta_path).read_text(encoding="utf-8"))
+    assert (sidecar["original_path"], sidecar["file_count_at_trash"]) == (HARBOUR, len(pages))
+    assert result.index["components"], "the report names the row work that the commit did"
+
+
+def test_a_trashed_folder_recovers_with_every_page_and_its_rows(served):
+    """A folder round trip that loses a page or its rows, or leaves the sidecar's record for the
+    importer to find as a file with no entry."""
+    pages = store_folder(served, 5)
+    rows_before = folder_rows(served, HARBOUR)
+
+    trashed = delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+    recovered = recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+
+    assert (recovered.kind, recovered.restored_path) == ("directory", HARBOUR)
+    with read.snapshot(served) as view:
+        assert view.held_pages(pages) == frozenset(pages)
+        assert next(view.pages(f"{trashed.trash_path}/"), None) is None
+    assert folder_rows(served, HARBOUR) == rows_before
+    assert store_rows(
+        served, "SELECT 1 FROM store_binaries WHERE path = ?", trashed.trash_meta_path
+    ) == []
+
+
+def test_a_projected_folder_trash_and_its_recovery_need_nothing_from_the_importer(served, writer):
+    """A folder trash or recovery whose projection the importer then reads as outside renames,
+    deletes or edits, or that leaves a page's file in the trash."""
+    pages = store_folder(served, 5)
+    projecting = projector.Projector(served, run=lambda work: work(writer))
+    sweeping = importer.Importer(served, run=lambda work: work(writer))
+    projecting.run_pass()
+
+    trashed = delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+    projecting.run_pass()
+    swept_after_trash = sweeping.sweep()
+    in_trash = [f"{trashed.trash_path}/{page[len(HARBOUR) + 1:]}" for page in pages]
+    assert not any((served / page).exists() for page in pages)
+    assert all((served / page).read_bytes() == read.owned_bytes(served, page) for page in in_trash)
+
+    recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+    projecting.run_pass()
+    swept_after_recovery = sweeping.sweep()
+
+    assert all((served / page).read_bytes() == read.owned_bytes(served, page) for page in pages)
+    assert not any((served / page).exists() for page in in_trash)
+    assert not (served / trashed.trash_meta_path).exists()
+    for swept in (swept_after_trash, swept_after_recovery):
+        assert (swept.imported, swept.moved, swept.removed, swept.held) == ([], {}, [], [])
+
+
+def test_a_folder_trash_where_a_page_changed_after_the_check_refuses_and_commits_nothing(
+    served, writer, monkeypatch
+):
+    """A folder trash that half-applies, or that trashes bytes nobody read, when one page loses a
+    race against an edit."""
+    pages = store_folder(served, 3)
+    race_after_check(monkeypatch, writer, {"puts": (write.PagePut(pages[1], b"# Log, raced\n"),)})
+    before = tree(served)
+    start = revision(served)
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+        delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+
+    assert refused.value.code == "PATH_GUARD_CHANGED"
+    assert revision(served) == start + 1, "only the competing commit may have committed"
+    with read.snapshot(served) as view:
+        assert view.held_pages(pages) == frozenset(pages)
+    assert tree(served) == before, "the refused commit must roll back the sidecar it published"
+
+
+def test_a_folder_above_the_trash_cap_refuses_and_commits_nothing(served, monkeypatch):
+    """A folder trash whose single commit grows without a bound."""
+    monkeypatch.setattr(delete_directory, "DIRECTORY_TRANSITION_LIMIT", 3)
+    store_folder(served, 4)
+    start = revision(served)
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+        delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+
+    assert refused.value.code == "PATH_GUARD_LIMIT"
+    assert revision(served) == start
+
+
+def test_a_folder_with_a_binary_or_an_unimported_note_refuses_by_name_and_keeps_it(served):
+    """A folder trash that moves the pages and leaves behind a binary or a note that nothing has
+    imported, while it reports the folder trashed."""
+    store_folder(served, 2)
+    draft = served / HARBOUR / "Draft.md"
+    draft.parent.mkdir(parents=True)
+    draft.write_text("# Draft\n\nNot imported yet.\n", encoding="utf-8")
+    before = tree(served)
+    start = revision(served)
+
+    # The migrated Notes folder holds a binary that the store records.
+    for folder in ("Knowledge Base/Notes", HARBOUR):
+        with pytest.raises(OpError) as refused:
+            delete_directory.delete_directory(served, path=folder, confirm=True, recursive=True)
+        assert refused.value.code == availability.WRITER_UNROUTED, folder
+        assert "delete_directory" in refused.value.message
+
+    assert revision(served) == start
+    assert tree(served) == before
+
+
+def test_the_rows_of_a_folder_trash_equal_a_cold_derivation_from_the_files(served, tmp_path):
+    """Rows that a folder trash commits and that differ from what file mode derives from the same
+    vault: an edge into the old folder, or a search row left at an old path."""
+    store_folder(served, 5)
+    store_outside_linker(served)
+    delete_directory.delete_directory(
+        served, path=HARBOUR, confirm=True, recursive=True, force_orphan=True
+    )
+
+    assert differences_from_a_cold_build(served, tmp_path) == []
+
+
+def test_a_folder_trashs_store_reads_do_not_grow_with_its_pages(served, monkeypatch):
+    """A folder trash that opens a store snapshot per page: its cost grows with the folder, and its
+    reads may mix revisions in one plan."""
+    opened = []
+    real = connection.store_reader
+
+    def counting(*arguments, **keywords):
+        opened.append(1)
+        return real(*arguments, **keywords)
+
+    def reads_for_one_trash(folder, pages):
+        store_folder(served, pages, folder=folder)
+        opened.clear()
+        with monkeypatch.context() as patched:
+            patched.setattr(connection, "store_reader", counting)
+            result = delete_directory.delete_directory(
+                served, path=folder, confirm=True, recursive=True
+            )
+        assert result.file_count == pages
+        return len(opened)
+
+    few = reads_for_one_trash("Knowledge Base/Projects/Few", 2)
+    many = reads_for_one_trash("Knowledge Base/Projects/Many", 30)
+
+    assert few == many

@@ -32,13 +32,10 @@ from test_vault_store_write_path import (
 )
 
 from exomem import (
-    delete_directory,
     delete_file,
     extraction_parts,
-    move_file,
     preserve,
     reconcile,
-    recover_from_trash,
     registry_history,
     relation_review,
     reserved_paths,
@@ -409,32 +406,6 @@ def test_delete_of_a_binary_refuses_by_name_and_changes_nothing(served):
         delete_file.delete_file(served, path=DIAGRAM, confirm=True)
 
     assert refused.value.code == availability.WRITER_UNROUTED
-    assert revision(served) == start
-    assert tree(served) == before
-
-
-def test_move_recover_and_folder_delete_refuse_by_name_and_change_nothing(served):
-    """Writers whose semantic check reads the disk: each must refuse before it renames anything."""
-    before = tree(served)
-    start = revision(served)
-
-    refusals = {
-        "move_file": lambda: move_file.move_file(
-            served, old_path=BETA, new_path="Knowledge Base/Notes/Beta Two.md"
-        ),
-        "recover_from_trash": lambda: recover_from_trash.recover_from_trash(
-            served, trash_path="Knowledge Base/_trash/2026-01-01/000000-Notes__Beta.md"
-        ),
-        "delete_directory": lambda: delete_directory.delete_directory(
-            served, path="Knowledge Base/Notes", confirm=True
-        ),
-    }
-    for operation, attempt in refusals.items():
-        with pytest.raises(OpError) as refused:
-            attempt()
-        assert refused.value.code == availability.WRITER_UNROUTED, operation
-        assert operation in refused.value.message
-
     assert revision(served) == start
     assert tree(served) == before
 

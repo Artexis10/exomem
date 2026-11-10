@@ -150,11 +150,36 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     return checks
 
 
+def visible_links(
+    vault_root: Path, checks: Mapping[str, InboundCheck]
+) -> dict[str, list[vault.InboundLink]]:
+    """The links of each check that the calling writer may count and name.
+
+    A link from a page withheld from the caller, by a policy or by RAW, is dropped, so the writer
+    orphans it as ``force_orphan`` would, and the owner's audit reports it. An unimported file has
+    no policy, and the store's filter withholds it from every reader, so to a restricted caller it
+    is absent: no count, no path. Only the owner counts it.
+    """
+    from ..governance import egress
+
+    visible = egress.restricted_release_filter(vault_root)
+    owner = egress.file_mode_restricted_caller(vault_root, None) is None
+    return {
+        rel: [link for link in check.links if visible is None or visible(link.path)]
+        + (check.unimported if owner else [])
+        for rel, check in checks.items()
+    }
+
+
 #: The reasons a page-only store form refuses, each named once for the page and the folder forms.
 _NOT_A_PAGE = "only a Markdown page is held by the store, and a file's bytes stay on disk"
 _GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
 _CARRIES_MORE = "its stored original or its part pages move with it, and they have no store form"
 _FILES_ON_DISK = "the folder holds files whose bytes stay on disk, and they have no store form"
+_NOT_HELD = (
+    "the folder holds a Markdown file that the store holds no page for, and moving the folder "
+    "would leave it behind; retry once the store has imported or removed it"
+)
 
 
 def _carries_more(fm: Mapping[str, object]) -> bool:
@@ -204,11 +229,14 @@ def folder_form_gap(
 ) -> str | None:
     """Why a store-mode vault cannot move this folder of pages yet, or None when it has a store form.
 
-    ``pages`` maps each page that the store holds below ``folder`` to its frontmatter. The folder's
+    ``pages`` maps every page that the store holds below ``folder`` to its frontmatter. The folder's
     store form moves those pages and nothing else, so a folder that also holds a file whose bytes
     stay on disk, or a page that carries its original or its part pages, refuses before anything
-    changes. The disk is listed by name once: a Markdown file there is the store's to judge, as a
-    page's projection or a file not imported yet, so only a file of another owner refuses.
+    changes. The disk is listed by name once, and only names are read: a Markdown file there is a
+    stored page's projection, which moves with its page, or a file that the store holds no page
+    for. Such a file is a note that nothing has imported yet, or a page's old file that the
+    projector has not removed yet. It refuses, because the move would leave it behind while the
+    call reports the folder moved. A wrong refusal lasts until the importer or the projector runs.
     """
     from .. import extraction_parts
     from ..governance import lifecycle
@@ -219,12 +247,15 @@ def folder_form_gap(
     with read.snapshot(root) as view:
         if view.holds_binaries_under(f"{folder}/"):
             return _FILES_ON_DISK
+    notes: set[str] = set()
     for current, _folders, names in os.walk(root / folder):
         base = Path(current).relative_to(root).as_posix()
-        if any(
-            ownership.classify(f"{base}/{name}") is not ownership.Ownership.PAGE for name in names
-        ):
-            return _FILES_ON_DISK
+        for name in names:
+            if ownership.classify(f"{base}/{name}") is not ownership.Ownership.PAGE:
+                return _FILES_ON_DISK
+            notes.add(f"{base}/{name}")
+    if not notes <= pages.keys():
+        return _NOT_HELD
     # A raw-marked page's parts are pages in a sibling folder, which is then one of these folders.
     held = {parent.as_posix() for rel in pages for parent in Path(rel).parents}
     if any(
@@ -276,8 +307,8 @@ def active_catalog_gap(
 def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
     """Refuse ``operation`` while the vault is in store mode, for a writer whose paths are pages.
 
-    It prevents the same disk write as ``refuse_unrouted`` and is the form for a writer that has no
-    path to test before it starts, so it costs a rollback to run that writer on files.
+    It is the form for a writer that has no path to test with ``owns_any`` before it starts, so it
+    costs a rollback to run that writer on files.
     """
     if mode.store_mode_active(vault_root):
         raise availability.unrouted(operation, why)
@@ -308,19 +339,3 @@ def owns_any(
     except vault.VaultPathError:
         return False
 
-
-def refuse_unrouted(
-    vault_root: Path,
-    operation: str,
-    why: str,
-    *,
-    files: tuple[str, ...] = (),
-    folders: tuple[str, ...] = (),
-) -> None:
-    """Refuse ``operation`` in a store-mode vault when the store owns any path that it was given.
-
-    It runs before the writer reads or changes anything, so a refusal leaves the vault as it was. A
-    file-mode vault and a path that the store does not own pass: the disk writer serves them.
-    """
-    if owns_any(vault_root, files=files, folders=folders):
-        raise availability.unrouted(operation, why)
