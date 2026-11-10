@@ -41,7 +41,7 @@ _Result = TypeVar("_Result")
 #: watcher compares the same strings and imports them from here, so each is written once.
 DEFER = "defer"
 SUPPRESS = "suppress"
-#: What ``managed`` answers for a missing file when the media ledger cannot be read: the importer
+#: What ``managed`` answers for a missing file when the media store cannot be read: the importer
 #: cannot tell an eviction from a delete, so it settles nothing and the next sweep looks again.
 UNREADABLE = "unreadable"
 
@@ -121,20 +121,32 @@ def recover(root: Path) -> int:
 
 
 def managed(root: Path, rel: str) -> str | None:
-    """``SUPPRESS`` or ``DEFER`` when the media store itself changed or is changing ``rel``'s file.
+    """``DEFER`` or ``SUPPRESS`` when the media store itself is changing or has changed ``rel``.
 
-    ``UNREADABLE`` answers a missing file when the media ledger cannot be read. Any other failure
-    to inspect the file (a hard link or a symlink that the media store refuses) answers None: the
-    importer reads that file itself and records it or reports what refused it, as it does without
-    a media store.
+    ``SUPPRESS`` holds only for a missing file: an eviction removed it. A file that is there and
+    differs from its record is a change that the importer records, whatever the media store's cache
+    holds, so a copy that took an evicted original's record never keeps the restored original from
+    getting a record of its own. A restore that matches the record is judged unchanged before this
+    is asked.
+
+    ``UNREADABLE`` answers a missing file when the media store cannot be read: the importer cannot
+    tell an eviction from a delete. A present file answers None then, so the importer reads it
+    itself and records it or reports what refused it, as it does without a media store.
     """
     if ownership.classify(rel) is not ownership.Ownership.BINARY:
         return None
     path = root / rel
     try:
-        return media_store.managed_event(root, path)
-    except sqlite3.Error:
-        log.warning("media store ledger unreadable for %s", rel, exc_info=True)
+        answer = media_store.managed_event(root, path)
+    except (
+        sqlite3.Error,
+        OSError,
+        ValueError,
+        held_fs.HeldFsError,
+        reserved_paths.ReservedPathLeafError,
+    ):
+        log.warning("media store state unreadable for %s", rel, exc_info=True)
         return None if os.path.lexists(path) else UNREADABLE
-    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+    if answer == SUPPRESS and os.path.lexists(path):
         return None
+    return answer

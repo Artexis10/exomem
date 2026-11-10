@@ -383,6 +383,52 @@ def test_a_person_renaming_a_stored_original_moves_its_record_by_hash(
     assert report.moved == {moved: rel} and report.managed == []
 
 
+def test_a_media_store_that_cannot_be_inspected_keeps_the_record_of_a_missing_original(
+    vault, stored_original, original_thread, monkeypatch
+):
+    """An importer that reads a missing original as deleted when the media store fails to inspect
+    it for a reason other than its ledger, and so drops the record that an eviction would keep."""
+    rel = stored_original
+    settling = importer.Importer(vault, run=original_thread.run)
+    settling.sweep()
+    before = media_state(vault, rel)
+    (vault / rel).unlink()
+
+    def unreadable(_root, _path):
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(media_store, "managed_event", unreadable)
+    report = settling.import_paths([rel])
+
+    assert report.removed == [] and rel in report.unjudged
+    assert media_state(vault, rel) == before
+
+
+def test_a_copy_that_took_an_evicted_originals_record_leaves_the_restored_original_its_own(
+    vault, stored_original, original_thread
+):
+    """An importer that trusts the media store's cache for a file that has no record: a copy added
+    during an eviction pairs as a rename and takes the record, and the restored original then reads
+    as the media store's own bytes at every sweep and never gets a record back."""
+    rel = stored_original
+    copy = f"{NOTES}/copy-of-stored-original.txt"
+    settling = importer.Importer(vault, run=original_thread.run)
+    settling.sweep()
+    original = (vault / rel).read_bytes()
+    assert media_store.evict(vault, vault / rel)
+    (vault / copy).write_bytes(original)
+
+    assert settling.sweep().moved == {copy: rel}
+
+    assert media_store.hydrate_evicted(vault, vault / rel)
+    settling.sweep()
+    settling.sweep()
+
+    assert rows(
+        vault, "SELECT path FROM store_binaries WHERE path IN (?, ?) ORDER BY path", rel, copy
+    ) == sorted([(rel,), (copy,)])
+
+
 def test_a_path_that_a_media_store_read_holds_open_is_left_for_the_watcher_to_look_at_again(
     vault, stored_original, original_thread
 ):

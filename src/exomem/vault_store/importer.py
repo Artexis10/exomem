@@ -55,9 +55,9 @@ _Item = TypeVar("_Item")
 #: What ``ImportReport.unjudged`` says of a file that changed between a read and its commit.
 CHANGED_WHILE_READ = "the file changed after it was read"
 
-#: What ``ImportReport.unjudged`` says of a missing binary when the media ledger cannot say whether
-#: the media store evicted it: the record stays until a later sweep can tell.
-MEDIA_LEDGER_UNREADABLE = "the media store ledger could not be read"
+#: What ``ImportReport.unjudged`` says of a missing binary when the media store cannot say whether
+#: it evicted it: the record stays until a later sweep can tell.
+MEDIA_STORE_UNREADABLE = "the media store could not say whether this original was evicted"
 
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
@@ -349,9 +349,14 @@ class Importer:
         singles = self._without_media_store_changes(
             [rel for rel in looks if rel not in renamed], report
         )
-        # A rename that the store refused is two changes, each held to its own path's rule.
-        for rename in self._apply_renames(filesystem, renames, report):
-            singles.extend((rename.src, rename.dst))
+        # A rename that the store refused is two changes, each held to its own path's rule,
+        # including the media store's: its source may be an original that the media store evicted.
+        refused = self._apply_renames(filesystem, renames, report)
+        singles.extend(
+            self._without_media_store_changes(
+                [rel for rename in refused for rel in (rename.src, rename.dst)], report
+            )
+        )
         for chunk in _chunks(sorted(singles), APPLY_BATCH):
             units: list[tuple[str, OnDisk | None]] = []
             for rel in chunk:
@@ -377,7 +382,7 @@ class Importer:
             elif answer == media.DEFER:
                 report.deferred.append(rel)
             else:
-                report.unjudged[rel] = MEDIA_LEDGER_UNREADABLE
+                report.unjudged[rel] = MEDIA_STORE_UNREADABLE
         return settled
 
     def _bytes_to_keep(
