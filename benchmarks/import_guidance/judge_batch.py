@@ -1,15 +1,18 @@
 """One blind judge batch for the replay's stage-B answers and stage-C replies.
 
 `prepare` writes every answer into one shuffled file of items under opaque ids and the private map that binds each id to
-its run. An item holds the turn, the reference, the reply and the criteria of the scenario, and nothing that names the
-arm, the model or the stage. A seeded fraction of the items appears twice under two ids. `import_judgments` reads the
-judgments back by id. When fewer than `AGREEMENT_FLOOR` of the doubled items get the same pass or fail twice, the
-result reads "incomplete: judge agreement X". Items and judgments have the shapes of `session-score`: the item is
+its run and to the sha256 of its prompt. An item holds the turn, the reference, the reply and the criteria of the
+scenario, and nothing that names the arm, the model or the stage. A seeded fraction of the items appears twice under two
+ids. `import_judgments` reads the judgments back by id, against the runs and scenarios as they are then: a run whose
+prompt no longer has the prepared sha256 (the answer was rerun, or its reference or criteria changed) is `unknown`, as
+`session_score.native_answers` does. When fewer than `AGREEMENT_FLOOR` of the doubled items get the same pass or fail
+twice, the result reads "incomplete: judge agreement X". Items and judgments have the shapes of `session-score`: the item is
 `{"id", "prompt", "answer_schema"}` and a judgment is `{"id", "structured_output"}`. No model starts here.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import random
@@ -41,8 +44,8 @@ def answers_of(stage_b: Sequence[Path], stage_c: Sequence[Path]) -> list[tuple[d
     return found
 
 
-def prepare(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequence[Scenario], *, out: Path) -> int:
-    """Write `judge-views.jsonl` and `private/judge-map.json` under `out`; returns the item count."""
+def blind_items(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequence[Scenario]) -> list[tuple[dict, tuple[dict, ...], str]]:
+    """`(run, criteria, prompt)` for each run with a reply: the blind prompt that the judge reads for it."""
     by_id = {s.id: s for s in scenarios}
     entries = []
     for run, scenario_id, reply in answers_of(stage_b, stage_c):
@@ -51,6 +54,21 @@ def prepare(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequenc
         scenario = by_id[scenario_id]
         view = judge.render_answer_view(scenario.prompt, scenario.reference, reply)
         entries.append((run, scenario.criteria, judge.judge_prompt(view, scenario.criteria, answer_view=True)))
+    return entries
+
+
+def prompt_sha256(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode()).hexdigest()
+
+
+def run_id(run: dict) -> str:
+    """A run's identity as one comparable value: the map stores runs as JSON objects."""
+    return json.dumps(run, sort_keys=True)
+
+
+def prepare(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequence[Scenario], *, out: Path) -> int:
+    """Write `judge-views.jsonl` and `private/judge-map.json` under `out`; returns the item count."""
+    entries = blind_items(stage_b, stage_c, scenarios)
     rng = random.Random(BATCH_SEED)
     doubled = set(rng.sample(range(len(entries)), math.ceil(len(entries) * REJUDGE_FRACTION)))
     items, mapping = [], {}
@@ -58,7 +76,7 @@ def prepare(stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequenc
         first = uuid.uuid4().hex
         for item_id, twin_of in [(first, None), *([(uuid.uuid4().hex, first)] if position in doubled else [])]:
             items.append({"id": item_id, "prompt": prompt, "answer_schema": judge.answer_schema(criteria)})
-            mapping[item_id] = {"run": run, "criteria": list(criteria), "twin_of": twin_of}
+            mapping[item_id] = {"run": run, "criteria": list(criteria), "twin_of": twin_of, "prompt_sha256": prompt_sha256(prompt)}
     rng.shuffle(items)
     (out / "private").mkdir(parents=True, exist_ok=True)
     (out / "judge-views.jsonl").write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
@@ -73,17 +91,25 @@ def item_verdict(entry: dict, judgments: dict) -> tuple[str, list[checks.Outcome
     return checks.verdict(None, [], outcomes), outcomes
 
 
-def import_judgments(judgments: Path, *, out: Path) -> dict:
-    """Read the judgments of one batch; write `judged.json` under `out`. Starts no model."""
+def import_judgments(
+    judgments: Path, *, out: Path, stage_b: Sequence[Path], stage_c: Sequence[Path], scenarios: Sequence[Scenario]
+) -> dict:
+    """Read the judgments of one batch against the runs and scenarios that judge-prepare read, as they are now; write
+    `judged.json` under `out`. Starts no model."""
     mapping, lines = session_score.read_native(judgments, out / "private" / "judge-map.json")
     items = {item_id: {**entry, "id": item_id} for item_id, entry in (mapping.get("items") or {}).items()}
     if not items:
         raise SystemExit(f"{out / 'private' / 'judge-map.json'} holds no items; run judge-prepare first")
+    current = {run_id(run): prompt_sha256(prompt) for run, _criteria, prompt in blind_items(stage_b, stage_c, scenarios)}
     rows, agreed, usable = [], 0, 0
     doubled = [entry for entry in items.values() if entry["twin_of"] is not None]
     for entry in items.values():
         verdict, outcomes = item_verdict(entry, lines)
         if entry["twin_of"] is None:
+            if current.get(run_id(entry["run"])) != entry.get("prompt_sha256"):
+                # Bound to the exact prompt: a rerun answer or a changed reference must not inherit this judgment.
+                stale = "the run's answer, reference or criteria changed after judge-prepare; prepare and judge it again"
+                verdict, outcomes = checks.UNKNOWN, [checks.Outcome(c["id"], checks.UNKNOWN, stale) for c in entry["criteria"]]
             rows.append({**entry["run"], "verdict": verdict, "criteria": [o.__dict__ for o in outcomes]})
             continue
         first_verdict, _ = item_verdict(items[entry["twin_of"]], lines)

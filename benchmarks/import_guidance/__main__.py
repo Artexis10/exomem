@@ -103,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         "judge-import", help="read the native judgments of a batch by opaque id and report the judge agreement; starts no model"
     )
     imported.add_argument("--judgments", type=Path, required=True, help="JSONL lines of {id, structured_output}")
+    imported.add_argument("--stage-b", type=Path, nargs="*", default=[], help="the stage-B runs.jsonl files given to judge-prepare")
+    imported.add_argument("--stage-c", type=Path, nargs="*", default=[], help="the stage-C runs.jsonl files given to judge-prepare")
+    imported.add_argument(
+        "--suite", required=True, help="the scenario folder given to judge-prepare; a run whose prompt changed since then is unknown"
+    )
     imported.add_argument("--out", type=Path, required=True, help="the folder judge-prepare wrote; gets judged.json")
     replay = sub.add_parser(
         "replay-report", help="per set of cases, the paired pass difference and reply-length ratio of two arms on stage-B answers"
@@ -159,7 +164,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Prepared {count} blind items in {args.out / 'judge-views.jsonl'}. Keep private/judge-map.json from the judge.")
         return 0
     if args.command == "judge-import":
-        print(judge_batch.agreement_line(judge_batch.import_judgments(args.judgments, out=args.out)))
+        scenarios = runner.load_scenarios("all", args.suite)
+        summary = judge_batch.import_judgments(args.judgments, out=args.out, stage_b=args.stage_b, stage_c=args.stage_c, scenarios=scenarios)
+        print(judge_batch.agreement_line(summary))
         return 0
     if args.command in ("replay-report", "session-table"):
         if args.command == "replay-report":

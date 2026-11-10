@@ -408,14 +408,15 @@ def test_a_seeded_fifth_of_the_items_appears_twice_and_low_agreement_reads_incom
     """Catches a judge batch with no noise check: two judgments of the same answer that disagree would go unseen."""
     scenarios = [invented_scenario(f"c{n}") for n in range(5)]
     out = tmp_path / "batch"
-    assert judge_batch.prepare([ten_stage_b_runs(tmp_path)], [], scenarios, out=out) == 12
+    runs = ten_stage_b_runs(tmp_path)
+    assert judge_batch.prepare([runs], [], scenarios, out=out) == 12
     mapping = json.loads((out / "private" / "judge-map.json").read_text())["items"]
     twins = {i: e["twin_of"] for i, e in mapping.items() if e["twin_of"]}
     assert len(twins) == 2
     prompts = {json.loads(line)["id"]: json.loads(line)["prompt"] for line in (out / "judge-views.jsonl").read_text().splitlines()}
     assert all(prompts[twin] == prompts[first] for twin, first in twins.items())
 
-    steady = judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out)
+    steady = judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
     assert steady["agreement"] == 1.0 and not steady["incomplete"]
 
     flipped = next(iter(twins))
@@ -425,7 +426,7 @@ def test_a_seeded_fifth_of_the_items_appears_twice_and_low_agreement_reads_incom
         if line["id"] == flipped:
             line["structured_output"]["K1"] = False
     judgments.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
-    noisy = judge_batch.import_judgments(judgments, out=out)
+    noisy = judge_batch.import_judgments(judgments, out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
     assert noisy["agreement"] == 0.5 and noisy["incomplete"]
     assert judge_batch.agreement_line(noisy).startswith("incomplete: judge agreement 0.50")
 
@@ -433,16 +434,34 @@ def test_a_seeded_fifth_of_the_items_appears_twice_and_low_agreement_reads_incom
 def test_a_missing_judgment_is_unknown_and_never_a_disagreement_or_a_pass(tmp_path: Path) -> None:
     scenarios = [invented_scenario(f"c{n}") for n in range(5)]
     out = tmp_path / "batch"
-    judge_batch.prepare([ten_stage_b_runs(tmp_path)], [], scenarios, out=out)
+    runs = ten_stage_b_runs(tmp_path)
+    judge_batch.prepare([runs], [], scenarios, out=out)
     mapping = json.loads((out / "private" / "judge-map.json").read_text())["items"]
     first = next(entry["twin_of"] for entry in mapping.values() if entry["twin_of"])
     judgments = judge_batch_as(out, lambda run: True)
     kept = [line for line in judgments.read_text().splitlines() if json.loads(line)["id"] != first]
     judgments.write_text("\n".join(kept) + "\n", encoding="utf-8")
-    summary = judge_batch.import_judgments(judgments, out=out)
+    summary = judge_batch.import_judgments(judgments, out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
     verdicts = [row["verdict"] for row in json.loads((out / "judged.json").read_text())["rows"]]
     assert sorted(verdicts) == [checks.PASS] * 9 + [checks.UNKNOWN]
     assert summary["usable_pairs"] == summary["doubled_items"] - 1 and summary["agreement"] == 1.0
+
+
+def test_an_answer_rerun_after_judge_prepare_does_not_inherit_the_judgment_of_the_old_answer(tmp_path: Path) -> None:
+    """Catches a judgment bound by run key only: a run rerun under the same key after judge-prepare would receive the
+    verdict of an answer that the judge never read."""
+    scenarios = [invented_scenario(f"c{n}") for n in range(5)]
+    out = tmp_path / "batch"
+    runs = ten_stage_b_runs(tmp_path)
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    judgments = judge_batch_as(out, lambda run: True)
+    with runs.open("a", encoding="utf-8") as sink:
+        sink.write(json.dumps(stage_b_row("c2", "cand", "The first ferry sails at 09:40.")) + "\n")
+    judge_batch.import_judgments(judgments, out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
+    rows = {(row["scenario"], row["arm"]): row for row in json.loads((out / "judged.json").read_text())["rows"]}
+    rerun = rows.pop(("c2", "cand"))
+    assert rerun["verdict"] == checks.UNKNOWN and "changed after judge-prepare" in rerun["criteria"][0]["detail"]
+    assert {row["verdict"] for row in rows.values()} == {checks.PASS}
 
 
 def test_a_judge_item_shows_no_arm_model_or_stage_and_both_stages_share_one_shuffled_file(tmp_path: Path) -> None:
@@ -474,8 +493,9 @@ def test_a_case_with_no_known_pair_is_unknown_and_counted_never_a_failure(tmp_pa
     ]
     runs = write_rows(tmp_path / "b.jsonl", rows)
     out = tmp_path / "batch"
-    judge_batch.prepare([runs], [], [invented_scenario(f"c{n}") for n in range(3)], out=out)
-    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out)
+    scenarios = [invented_scenario(f"c{n}") for n in range(3)]
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
     sets = tmp_path / "case-sets.json"
     sets.write_text(json.dumps({"c0": "S", "c1": "S", "c2": "S"}), encoding="utf-8")
     text = replay_report.build([runs], judged=out / "judged.json", case_sets=sets, baseline="base", candidate="cand")
@@ -499,8 +519,9 @@ def test_a_model_with_an_extra_repeat_weighs_no_more_in_its_case_than_a_model_wi
     ]
     runs = write_rows(tmp_path / "b.jsonl", rows)
     out = tmp_path / "batch"
-    judge_batch.prepare([runs], [], [invented_scenario("c0")], out=out)
-    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out)
+    scenarios = [invented_scenario("c0")]
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
     sets = tmp_path / "case-sets.json"
     sets.write_text(json.dumps({"c0": "S"}), encoding="utf-8")
     text = replay_report.build([runs], judged=out / "judged.json", case_sets=sets, baseline="base", candidate="cand")
@@ -532,8 +553,9 @@ def test_a_run_that_used_a_tool_outside_the_script_is_counted_apart_and_is_neith
     ]
     runs = write_rows(tmp_path / "b.jsonl", rows)
     out = tmp_path / "batch"
-    judge_batch.prepare([runs], [], [invented_scenario("c0"), invented_scenario("c1")], out=out)
-    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out)
+    scenarios = [invented_scenario("c0"), invented_scenario("c1")]
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    judge_batch.import_judgments(judge_batch_as(out, lambda run: True), out=out, stage_b=[runs], stage_c=[], scenarios=scenarios)
     sets = tmp_path / "case-sets.json"
     sets.write_text(json.dumps({"c0": "S", "c1": "S"}), encoding="utf-8")
     text = replay_report.build([runs], judged=out / "judged.json", case_sets=sets, baseline="base", candidate="cand")
@@ -565,9 +587,10 @@ def test_the_judged_verdict_of_a_stage_c_reply_reaches_the_session_table(tmp_pat
     ]
     runs = write_rows(tmp_path / "c.jsonl", rows)
     out = tmp_path / "batch"
-    judge_batch.prepare([], [runs], [invented_scenario("c0")], out=out)
+    scenarios = [invented_scenario("c0")]
+    judge_batch.prepare([], [runs], scenarios, out=out)
     judgments = judge_batch_as(out, lambda run: run["arm"] == "base")
-    judge_batch.import_judgments(judgments, out=out)
+    judge_batch.import_judgments(judgments, out=out, stage_b=[], stage_c=[runs], scenarios=scenarios)
     row = next(r for r in session_table.build([runs], baseline="base", candidate="cand", judged=out / "judged.json").splitlines() if r.startswith("| c0"))
     assert row.rstrip().endswith("| pass / fail |")
 
