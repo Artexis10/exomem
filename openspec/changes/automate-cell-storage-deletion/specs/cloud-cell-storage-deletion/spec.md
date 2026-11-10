@@ -2,7 +2,7 @@
 
 ### Requirement: Substrate signs a deletion grant when it deletes a cell
 
-When Substrate sets a cell's desired state to deleted, it SHALL sign a deletion grant with its grant key. The grant SHALL be an Ed25519 JWT with exactly the claims `aud` (`exomem-cell-delete`), `iat`, `jti`, `cell_id` and `purge_after`, and SHALL carry no expiry. `purge_after` SHALL be `iat` plus the deletion grace, which Substrate's configuration holds in one place. Substrate SHALL store the grant in a column that `cellctl` can read and cannot write.
+When Substrate sets a cell's desired state to deleted, it SHALL sign a deletion grant with its grant key. The grant SHALL be an Ed25519 JWT with exactly the claims `aud` (`exomem-cell-delete`), `iat`, `jti`, `cell_id` and `purge_after`, and SHALL carry no expiry. `purge_after` SHALL be `iat` plus the deletion grace, which Substrate's code holds in one place. Substrate SHALL store the grant in a column that `cellctl` can read and cannot write.
 
 #### Scenario: A tenant deletes their account
 
