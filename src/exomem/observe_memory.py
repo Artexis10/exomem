@@ -15,6 +15,7 @@ from . import (
     access,
     capabilities,
     edit,
+    find,
     kbdir,
     note_types,
     origin_bindings,
@@ -307,6 +308,12 @@ def observe_memory(
         )
         normalized_category = _canonical_category(str(category))
         normalized_content = str(content).strip()
+        if "[[" in normalized_content:
+            # A link in a unit is stored as the vault stores one in a note body: `[[Title]]` becomes
+            # the page's path form. A forward reference stays as written.
+            normalized_content, _ = vault.normalize_body_wikilinks(
+                normalized_content, vault_root, resolver=find.writer_resolver_snapshot(vault_root)
+            )
         normalized_tags = _canonical_tags(tags or [])
         normalized_context = _canonical_context(context)
         normalized_relations = _canonical_relations(relations or [])

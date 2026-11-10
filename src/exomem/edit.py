@@ -33,9 +33,11 @@ even though they didn't create a new file.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -72,6 +74,8 @@ from .vault import (
     plan_log_writes,
     read_guarded_text,
     render_frontmatter_document,
+    render_title_links,
+    writer_link_visibility,
     yaml_flow_list,
 )
 
@@ -294,8 +298,14 @@ def edit(
         if validate_only:
             # Preview only — report the count (don't raise on 0 or >1; seeing
             # the count is the whole point) and write nothing.
-            match_count = body.count(old_string)  # type: ignore[arg-type]
-            matches = _match_contexts(body, old_string)  # type: ignore[arg-type]
+            found = match_old_string(
+                body,
+                old_string,  # type: ignore[arg-type]
+                vault_root,
+                functools.cache(lambda: find_module.writer_resolver_snapshot(vault_root)),
+            )
+            match_count = found.count
+            matches = _match_contexts(found.shown or body, old_string)  # type: ignore[arg-type]
             if match_count == 0 or (match_count > 1 and not replace_all):
                 return EditValidation(
                     path=rel_path,
@@ -723,6 +733,68 @@ def render_editable(editable: _Editable, body: str, fm_text: str) -> str:
     return render_frontmatter_document(fm_text, body, newline="\n")
 
 
+@dataclass(frozen=True, slots=True)
+class OldStringMatch:
+    """Where `old_string` is in a body: its occurrences, counted as the surgical replace will use them."""
+
+    count: int
+    #: Stored ranges of the occurrences, when the stored bytes do not hold `old_string` but the
+    #: body shown with its links by title does. None when the stored bytes hold it.
+    ranges: tuple[tuple[int, int], ...] | None = None
+    #: An occurrence in the shown body starts or ends inside a link, so no stored bytes stand for it.
+    cuts_link: bool = False
+    #: The shown body that `ranges` came from, for the lines an occurrence spans.
+    shown: str = ""
+
+
+def match_old_string(
+    body: str,
+    old_string: str,
+    vault_root: Path,
+    resolver: Callable[[], WikilinkResolver],
+) -> OldStringMatch:
+    """Count `old_string` in the stored body; failing that, in the body shown with links by title.
+
+    A reader of a page sees `[[Title]]` where the file holds the page's path. A snippet copied from
+    that view matches nothing stored, so a count of none falls back to the shown form and maps each
+    occurrence back to the stored bytes it stands for. A snippet that the stored bytes hold applies
+    as it always did, so a caller that never saw the shown form (REST, CLI) sees no change.
+    `resolver` is called only when the fallback needs it.
+    """
+    count = body.count(old_string)
+    if count or "[[" not in body:
+        return OldStringMatch(count)
+    view = render_title_links(
+        body, vault_root, resolver=resolver(), visible=writer_link_visibility(vault_root)
+    )
+    if not view.spans:
+        return OldStringMatch(0)
+    ranges: list[tuple[int, int]] = []
+    cuts_link = False
+    at = view.text.find(old_string)
+    while at != -1:
+        stored = view.stored_range(at, at + len(old_string))
+        if stored is None:
+            cuts_link = True
+        else:
+            ranges.append(stored)
+        at = view.text.find(old_string, at + len(old_string))
+    if cuts_link:
+        return OldStringMatch(0, cuts_link=True)
+    return OldStringMatch(len(ranges), tuple(ranges), shown=view.text)
+
+
+def replace_old_string(
+    body: str, found: OldStringMatch, old_string: str, new_string: str, replace_all: bool
+) -> str:
+    """`body` with the first occurrence of `old_string`, or every one, replaced by `new_string`."""
+    if found.ranges is None:
+        return body.replace(old_string, new_string, -1 if replace_all else 1)
+    for start, end in reversed(found.ranges if replace_all else found.ranges[:1]):
+        body = body[:start] + new_string + body[end:]
+    return body
+
+
 def apply_surgical_replace(
     body: str,
     old_string: str,
@@ -740,10 +812,19 @@ def apply_surgical_replace(
     inline surgical mode did. `pair_index` is woven into messages when called
     from `multi_edit` so a failing pair is identifiable. Pass a shared
     `resolver` to avoid rebuilding the wikilink index per pair.
+
+    `old_string` may also be copied from the page as a reader sees it, with links shown by
+    title (`match_old_string`); the stored bytes it stands for are replaced.
     """
     where = f" in {rel_path}" if rel_path else ""
     which = f" (edit #{pair_index})" if pair_index is not None else ""
-    count = body.count(old_string)
+    found = match_old_string(
+        body,
+        old_string,
+        vault_root,
+        lambda: resolver if resolver is not None else find_module.shared_resolver(vault_root),
+    )
+    count = found.count
     if count == 0:
         raise EditError(
             code="STRING_NOT_FOUND",
@@ -752,6 +833,11 @@ def apply_surgical_replace(
                 f"`old_string` not found{where}{which}. It must match the file "
                 "exactly, including whitespace. Read the page (or the section) "
                 "first to copy the snippet verbatim."
+                + (
+                    " It starts or ends inside a link; include each link it touches whole."
+                    if found.cuts_link
+                    else ""
+                )
             ),
         )
     if count > 1 and not replace_all:
@@ -771,8 +857,7 @@ def apply_surgical_replace(
     new_string_norm, warnings = normalize_body_wikilinks(
         new_string, vault_root, resolver=resolver
     )
-    n = -1 if replace_all else 1
-    return body.replace(old_string, new_string_norm, n), warnings
+    return replace_old_string(body, found, old_string, new_string_norm, replace_all), warnings
 
 
 def apply_section_edit(

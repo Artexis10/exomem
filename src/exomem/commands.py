@@ -8451,7 +8451,49 @@ def op_read_memory(
         result["id"] = named_id
     if units:
         result["units"] = observe_memory_module.page_units(vault_root, result)
+    if capabilities_module.current_tool_shape() == "public":
+        result = _show_links_by_title(vault_root, result)
     return result
+
+
+def _show_links_by_title(vault_root: Path, result: dict) -> dict:
+    """`result` with the links of its body and unit texts shown as `[[Title]]`, for an agent.
+
+    An agent on the public tool shape types a page's title, never its vault path, so it reads links
+    the way it writes them (`edit_note` takes the shown form back; `vault.render_title_links`). The
+    stored bytes, `content_hash` and `id` are not touched. Only a page released in full is shown
+    this way: a lower release level returns a projection, not the page's own text. A raw page
+    (Source, Evidence) keeps its recorded text. A read never builds a resolver: it borrows the
+    resident one, else forks a current cache, and with neither the links stay as stored.
+    """
+    if result.get("release_level", egress_module.LEVEL_FULL) != egress_module.LEVEL_FULL:
+        return result
+    body, units = result.get("body"), result.get("units")
+    if not isinstance(body, str) and not isinstance(units, list):
+        return result
+    frontmatter = result.get("frontmatter")
+    page_type = str(frontmatter.get("type") or "").casefold() if isinstance(frontmatter, dict) else ""
+    if note_types.Basis(vault_root).selects(page_type, note_types.raw):
+        return result
+    visible = egress_module.visible_page_filter(vault_root)
+    resolver = find_module.borrow_query_resolver(vault_root, visible, schedule_rebuild=False)
+    if resolver is None:
+        resolver = find_module.writer_resolver_snapshot(vault_root, allow_disk=False)
+    if resolver is None:
+        return result
+
+    def shown(text: str) -> str:
+        return vault.render_title_links(text, vault_root, resolver=resolver, visible=visible).text
+
+    shown_result = dict(result)
+    if isinstance(body, str):
+        shown_result["body"] = shown(body)
+    if isinstance(units, list):
+        shown_result["units"] = [
+            {**unit, "text": shown(unit["text"])} if isinstance(unit, dict) and isinstance(unit.get("text"), str) else unit
+            for unit in units
+        ]
+    return shown_result
 
 
 def op_browse_memory(
