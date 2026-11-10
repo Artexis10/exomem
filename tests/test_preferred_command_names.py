@@ -102,9 +102,13 @@ def test_mcp_lists_the_public_tools_and_each_reaches_guarded_execution(vault, mo
 def test_cloud_trace_classifies_preferred_writes() -> None:
     from exomem import cloud_plugin_evals
 
-    assert cloud_plugin_evals._is_write({"name": "create_note", "arguments": {}})
-    assert cloud_plugin_evals._is_write({"name": "edit_note", "arguments": {}})
-    assert not cloud_plugin_evals._is_write({"name": "search_memory", "arguments": {}})
+    created = {"title": "Retry policy", "type": "insight", "content": "# Retry policy\n"}
+    edited = {"note": "Retry policy", "why": "Cap changed", "action": "replace_text", "old_text": "a", "new_text": "b"}
+    assert cloud_plugin_evals._is_write({"name": "create_note", "arguments": created})
+    assert cloud_plugin_evals._is_write({"name": "edit_note", "arguments": edited})
+    assert not cloud_plugin_evals._is_write({"name": "search_memory", "arguments": {"query": "retry"}})
+    # A call that no public tool takes is refused before it writes.
+    assert not cloud_plugin_evals._is_write({"name": "create_note", "arguments": {}})
 
 
 def test_cli_lookup_uses_filtered_registry(monkeypatch) -> None:
