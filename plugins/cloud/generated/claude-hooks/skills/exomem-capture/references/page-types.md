@@ -383,10 +383,13 @@ the governed vocabulary you already have — `contradicts`, `evidenced_by`,
 - `check_by:` is one exact ISO calendar date (`YYYY-MM-DD`) naming the day the
   claim should be revisited. It is a due date, not a deadline, and nothing
   expires when it passes — it just becomes findable as overdue.
-- `verdict:` is exactly one of `confirmed`, `refuted`, `qualified`,
-  `inconclusive`, or `abandoned` — the same five words as an experiment's
-  `outcome:`, one altitude down. It is categorical state, never a number: this
-  vault stores no confidence score, so `verdict: 0.7` is rejected outright.
+- `verdict:` is exactly one verdict of the vault's registry, as its key or a
+  label. The shipped verdicts are `confirmed`, `refuted`, `qualified`,
+  `inconclusive`, and `abandoned` — the same five words as an experiment's
+  `outcome:`, one altitude down. `inspect_memory(operation="schema.infer",
+  arguments={'subject': 'categories'})` lists the vault's own under `verdicts`. A verdict is a
+  judgment in words, never a number: a claim carries no confidence score, so
+  `verdict: 0.7` is rejected outright.
 
 Both rows are rich-form only; a compact `- [category] ...` observation carries no
 metadata. Both are also preserved across edits — correcting the wording of a
@@ -396,6 +399,40 @@ prediction never costs you its verdict.
 superseded: nothing replaced it, the question simply got an answer. Leave it in
 place with the evidence that refuted it. A vault that quietly retires its
 negative results loses the expensive half of what it learned.
+
+### Recording a degree of belief
+
+A claim carries no confidence score. A degree of belief is its own `## Belief`
+unit: the belief in prose, the unit rows `credence_holder` and `credence`, and an
+`assesses` relation to the claim. `credence` is a unit row, never a frontmatter
+field. It is a belief level or a probability from 0 to 1. A probability needs
+`credence_basis`, and you never invent a number. A belief records what its holder
+stated: never write one on a holder's behalf. `inspect_memory(operation="schema.infer",
+arguments={'subject': 'categories'})` lists the accepted belief levels under
+`belief_levels`.
+
+A level, stated by the holder:
+
+```markdown
+## Belief
+- credence_holder: Dana
+- credence: likely
+- relations: assesses: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+
+Dana thinks the daily review slot will cut context switches.
+```
+
+A probability, with its basis:
+
+```markdown
+## Belief
+- credence_holder: Dana
+- credence: 0.7
+- credence_basis: Three of the last four batching trials cut switches by a third.
+- relations: assesses: [[Knowledge Base/Notes/Experiments/Workflow/2026-05-batching]]
+
+Dana puts the chance that the daily review slot halves context switches at 0.7.
+```
 
 ### Experiments are not research notes
 

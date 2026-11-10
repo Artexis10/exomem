@@ -54,6 +54,17 @@ def render_answer_view(prompt: str, reference: str, answer: str) -> str:
     return f"PERSON: {prompt}\n\nREFERENCE (what actually happened):\n{reference}\n\nAGENT ANSWER TO THE PERSON:\n{answer}"
 
 
+def criterion_problem(criterion: object) -> str | None:
+    """Why a judged criterion cannot be asked, or None: it needs a non-empty string `id` and `text` and a boolean
+    `expect`, the value of the judge's answer that counts as a pass."""
+    if not isinstance(criterion, dict):
+        return f"criterion {criterion!r} must be an object"
+    named = all(isinstance(criterion.get(key), str) and criterion[key].strip() for key in ("id", "text"))
+    if not named or not isinstance(criterion.get("expect"), bool):
+        return f"criterion {criterion.get('id')} needs id, text and a boolean expect"
+    return None
+
+
 def answer_schema(criteria: tuple[dict, ...]) -> dict:
     properties: dict = {}
     for criterion in criteria:
@@ -83,15 +94,19 @@ def judge_prompt(transcript: str, criteria: tuple[dict, ...], *, answer_view: bo
     )
 
 
-def parse_answer(stdout: str, criteria: tuple[dict, ...]) -> dict | None:
-    """The structured answer, or None when the output is not the schema's object."""
+def structured_output(stdout: str) -> dict | None:
+    """The judge's structured output object, or None when its output holds none."""
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
         return None
     answer = payload.get("structured_output") if isinstance(payload, dict) else None
-    if not isinstance(answer, dict) or not all(
-        isinstance(answer.get(c["id"]), bool) for c in criteria
-    ):
+    return answer if isinstance(answer, dict) else None
+
+
+def parse_answer(stdout: str, criteria: tuple[dict, ...]) -> dict | None:
+    """The structured answer, or None when the output is not the schema's object."""
+    answer = structured_output(stdout)
+    if answer is None or not all(isinstance(answer.get(c["id"]), bool) for c in criteria):
         return None
     return answer

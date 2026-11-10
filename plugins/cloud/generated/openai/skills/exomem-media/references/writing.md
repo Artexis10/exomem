@@ -219,8 +219,11 @@ These rules are non-negotiable.
     move on. This rule forbids *omitting a link you know about*, never *failing to
     find one*. Manufacturing an edge to look connected is worse than no edge.
 
-6. **No `confidence` floats.** Trust is conveyed through citations and link
-   counts, not numbers.
+6. **No `confidence` floats.** A claim carries no confidence score, and a
+   confidence or a degree of belief is never a frontmatter field. Trust is
+   conveyed through citations and link counts. A degree of belief that its holder
+   stated is a `## Belief` unit: see "Recording a degree of belief" in
+   `page-types.md`.
 
 7. **Supersession over deletion.** When information is replaced, mark the old page
    `superseded`, link to the new one, and never delete. See
@@ -528,8 +531,12 @@ A surface without the required edit owner reports that limit; it does not invent
 An update rebuilds the whole unit. `verdict`, `check_by` and the unit id persist
 (`edit_note` carries none of them), and metadata rows the tool does not own are
 carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
-clears it, so resend what should stay. `verdict` is a categorical epistemic outcome
-(abandoned, confirmed, inconclusive, qualified, refuted), never a confidence score;
-`add_observation` sets it on a new unit. `edit_note` with
+clears it, so resend what should stay. `verdict` is a categorical epistemic outcome,
+a judgment in words and never a confidence score;
+`inspect_memory(operation="schema.infer", arguments={'subject': 'categories'})`
+lists the accepted verdicts under `verdicts`. `add_observation` sets it on a new
+unit. A belief unit's `links` are replace-on-omit too: an update that omits
+`assesses` drops the claim the belief assesses, so resend it; "Recording a degree
+of belief" in `page-types.md` gives the unit's form. `edit_note` with
 `action="edit_observation"` or `"remove_observation"` takes the unit id as `observation`;
 the server checks the unit version and refuses a stale id with the current one.

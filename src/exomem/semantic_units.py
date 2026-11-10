@@ -1759,7 +1759,8 @@ def _rich_context(
     return context, None
 
 
-#: Why a number is no verdict, said once for every boundary that refuses one.
+#: Why a number is no verdict, said once for every boundary that refuses one. A degree of belief
+#: is a belief unit (`BELIEF_FORM`); the scaffold's page-types reference states the whole rule.
 NO_CONFIDENCE_RULE = (
     "A verdict is categorical state about how a claim turned out. A confidence, score or "
     "probability is not a verdict, so a number or percentage is never valid here."

@@ -49,7 +49,7 @@
         },
         "verdict": {
           "type": "string",
-          "description": "For a rich kind: confirmed, refuted, qualified, inconclusive or abandoned."
+          "description": "A rich verdict in words, never a number; see inspect_memory schema.infer."
         },
         "anchor": {
           "type": "string",

@@ -338,7 +338,7 @@ class AddObservation(Wire):
     context: str | None = None
     links: list[Link] | None = None
     kind: str | None = Field(default=None, description="A rich kind, such as hypothesis; omit for a compact observation.")
-    verdict: str | None = Field(default=None, description="For a rich kind: confirmed, refuted, qualified, inconclusive or abandoned.")
+    verdict: str | None = Field(default=None, description="A rich verdict in words, never a number; see inspect_memory schema.infer.")
     anchor: str | None = Field(default=None, description="Unique within the note; derived when omitted.")
     as_of: str | None = Field(default=None, description="ISO date this starts to hold.")
     until: str | None = Field(default=None, description="ISO date this stops holding.")

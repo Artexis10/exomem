@@ -133,8 +133,10 @@ is in **`audit-checks.md`**.
   transcripts, mid-flight tangents — not *signal*: it never licenses pruning
   context or detail from a note (see *Comprehensive coverage, minimal expression*
   under Proactive engagement).
-- Assign numeric confidence scores. Use citation count and recency as the trust
-  signal.
+- Score a claim. A claim carries no confidence score, and its verdict is a
+  judgment in words, never a number. A degree of belief that its holder stated
+  is a `## Belief` unit: see "Recording a degree of belief" in `page-types.md`.
+  Use citation count and recency as the trust signal for the claim itself.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
   mark it; if irrelevant, archive into an `_archive/` subfolder. (`list_review_items` and `decide_review_item`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review

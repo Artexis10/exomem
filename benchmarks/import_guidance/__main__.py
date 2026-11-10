@@ -10,8 +10,25 @@ from pathlib import Path
 # The reused harnesses (`epistemic`, `membench`) are top-level packages under benchmarks/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from import_guidance import report, runner, session_close, session_score, store_report  # noqa: E402
-from import_guidance.recording import parse_arm  # noqa: E402
+from epistemic.journeys.f27_replay import discover_agent_envelope  # noqa: E402
+
+from import_guidance import (  # noqa: E402
+    judge_batch,
+    replay_cases,
+    replay_report,
+    report,
+    runner,
+    session_close,
+    session_score,
+    session_table,
+    store_report,
+)
+from import_guidance.recording import (  # noqa: E402
+    graph_states,
+    load_recording,
+    parse_arm,
+    served_sizes,
+)
 from import_guidance.scripted_replies import DEFAULT_SUITE  # noqa: E402
 
 
@@ -33,15 +50,22 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
     )
-    run.add_argument("--case-dir", type=Path, help="session-close case inputs; seed identifiers still use shipped seeds")
+    run.add_argument("--case-dir", type=Path, help="session-close case inputs; a seed in <case-dir>/seeds wins over a shipped seed of the same name")
     run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill")
+    run.add_argument(
+        "--ready-graph",
+        action="store_true",
+        help="session-close only: build each seeded vault's relation graph before the session, as a live vault has it "
+        "(the arm's own reconcile, then wait until its recall_context reports the graph available)",
+    )
     run.add_argument("--credits-account", help="session-close only: select the maintained credits launcher account")
     run.add_argument("--credits-budget-usd", type=float, help="maximum requested for each capture or fresh process; requires account and reason")
     run.add_argument("--credits-reason", help="the maintained credits launcher's reason; requires account and budget")
     run.add_argument(
         "--suite",
         default=DEFAULT_SUITE,
-        help="a scenario folder: `import` (scenarios/) or a name under scenarios/, e.g. write-narration. "
+        help="a scenario folder: `import` (scenarios/), a name under scenarios/ such as write-narration, or the path "
+        "of a folder of scenario files (`write-scenarios` makes one). "
         "`session-close` runs real sessions in a seeded vault; it needs --product-root arms and no judge here",
     )
     run.add_argument(
@@ -63,6 +87,53 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="session-close only: after the close turn, send the arm's own episode ask (the Stop hook's text) as one more turn",
     )
+    write = sub.add_parser(
+        "write-scenarios",
+        help="write one context-replay scenario per case of a case folder; starts no model",
+    )
+    write.add_argument("--case-dir", type=Path, required=True, help="case files, with answer-keys/<id>.marks.json and seeds/")
+    write.add_argument("--out", type=Path, required=True, help="outside every repository; gets scenarios/ and case-sets.json")
+    prepare = sub.add_parser(
+        "judge-prepare",
+        help="export the blind judge items for stage-B answers and stage-C replies, shuffled together; starts no model",
+    )
+    prepare.add_argument("--stage-b", type=Path, nargs="*", default=[], help="runs.jsonl files of the replay suite")
+    prepare.add_argument("--stage-c", type=Path, nargs="*", default=[], help="runs.jsonl files of the session-close suite")
+    prepare.add_argument("--suite", required=True, help="the replay scenario folder that the runs used; it holds each case's turn, reference and criteria")
+    prepare.add_argument("--out", type=Path, required=True, help="gets judge-views.jsonl, and private/judge-map.json for the owner of the key only")
+    judging_run = sub.add_parser(
+        "judge-run",
+        help="judge each blind item of judge-views.jsonl in a judge process of its own; a rerun asks only the items without a judgment",
+    )
+    judging_run.add_argument("--out", type=Path, required=True, help="the folder judge-prepare wrote; gets judgments.jsonl")
+    judging_run.add_argument("--judge-model", default="opus", help="the judge's model")
+    judging_run.add_argument("--dry-run", action="store_true", help="print what would run; start nothing")
+    imported = sub.add_parser(
+        "judge-import", help="read the native judgments of a batch by opaque id and report the judge agreement; starts no model"
+    )
+    imported.add_argument("--judgments", type=Path, required=True, help="JSONL lines of {id, structured_output}")
+    imported.add_argument("--stage-b", type=Path, nargs="*", default=[], help="the stage-B runs.jsonl files given to judge-prepare")
+    imported.add_argument("--stage-c", type=Path, nargs="*", default=[], help="the stage-C runs.jsonl files given to judge-prepare")
+    imported.add_argument(
+        "--suite", required=True, help="the scenario folder given to judge-prepare; a run whose prompt changed since then is unknown"
+    )
+    imported.add_argument("--out", type=Path, required=True, help="the folder judge-prepare wrote; gets judged.json")
+    replay = sub.add_parser(
+        "replay-report", help="per set of cases, the paired pass difference and reply-length ratio of two arms on stage-B answers"
+    )
+    replay.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files of the replay suite")
+    replay.add_argument("--judged", type=Path, help="judged.json from judge-import; without it every judged criterion is unknown")
+    replay.add_argument("--case-sets", type=Path, required=True, help="case-sets.json from write-scenarios")
+    replay.add_argument("--criteria", nargs="+", help="the judged criteria that must hold; default is every criterion of each judgment, the case folder's rubric")
+    replay.add_argument("--baseline", required=True, help="the baseline arm's label")
+    replay.add_argument("--candidate", required=True, help="the candidate arm's label")
+    replay.add_argument("--out", type=Path, help="write the report here instead of printing it")
+    table = sub.add_parser("session-table", help="per pair, what each full session did, from session-close runs.jsonl")
+    table.add_argument("runs", type=Path, nargs="+", help="one or more runs.jsonl files of the session-close suite")
+    table.add_argument("--judged", type=Path, help="judged.json from judge-import, for the reply verdict column")
+    table.add_argument("--baseline", required=True, help="the baseline arm's label")
+    table.add_argument("--candidate", required=True, help="the candidate arm's label")
+    table.add_argument("--out", type=Path, help="write the table here instead of printing it")
     rep = sub.add_parser(
         "report", help="leak and pass rates per case, model and arm from runs.jsonl"
     )
@@ -93,6 +164,40 @@ def main(argv: list[str] | None = None) -> int:
     score.add_argument("--out", type=Path, required=True, help="a folder for scores.jsonl and report.md")
     args = parser.parse_args(argv)
 
+    if args.command == "write-scenarios":
+        paths = replay_cases.write_scenarios(args.case_dir, args.out)
+        print(f"Wrote {len(paths)} scenarios to {args.out / 'scenarios'} and the case sets to {args.out / 'case-sets.json'}.")
+        return 0
+    if args.command == "judge-prepare":
+        count = judge_batch.prepare(args.stage_b, args.stage_c, runner.load_scenarios("all", args.suite), out=args.out)
+        print(f"Prepared {count} blind items in {args.out / 'judge-views.jsonl'}. Keep private/judge-map.json from the judge.")
+        return 0
+    if args.command == "judge-run":
+        if args.dry_run:
+            print("\n".join(judge_batch.judge_plan(args.out, model=args.judge_model)))
+            return 0
+        executable = discover_agent_envelope().executable
+        total, judged, missing = judge_batch.judge_all(args.out, model=args.judge_model, executable=executable)
+        print(f"Judged {judged} items now with {args.judge_model}; {total - len(missing)} of {total} items have a judgment in {args.out / judge_batch.JUDGMENTS_FILE}.")
+        if missing:
+            print(f"{len(missing)} items still have none: the judge gave no answer that matches the schema in {judge_batch.JUDGE_ATTEMPTS} attempts. "
+                  "Run judge-run again to ask only those; judge-import reads them as unknown.")
+        return 1 if missing else 0
+    if args.command == "judge-import":
+        scenarios = runner.load_scenarios("all", args.suite)
+        summary = judge_batch.import_judgments(args.judgments, out=args.out, stage_b=args.stage_b, stage_c=args.stage_c, scenarios=scenarios)
+        print(judge_batch.agreement_line(summary))
+        return 0
+    if args.command in ("replay-report", "session-table"):
+        if args.command == "replay-report":
+            text = replay_report.build(args.runs, judged=args.judged, case_sets=args.case_sets, baseline=args.baseline, candidate=args.candidate, criteria=args.criteria)
+        else:
+            text = session_table.build(args.runs, baseline=args.baseline, candidate=args.candidate, judged=args.judged)
+        if args.out:
+            args.out.write_text(text, encoding="utf-8")
+        else:
+            print(text)
+        return 0
     if args.command == "session-score":
         if args.prepare_judge or not (args.judgments or args.automatic_judge):
             count = session_score.prepare_native(args.runs, out=args.out, case_dir=args.case_dir)
@@ -135,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
     args.client_mode = args.client_mode or session_close.DEFAULT_CLIENT_MODE
     if args.case_dir is not None and args.suite != session_close.SUITE:
         raise SystemExit("--case-dir applies to the session-close suite only")
+    if args.ready_graph and args.suite != session_close.SUITE:
+        raise SystemExit("--ready-graph applies to the session-close suite only; a replay scenario carries its own")
     if args.hook_turn and args.client_mode == "tool-only":
         raise SystemExit("--hook-turn requires --client-mode plugin")
     if args.hook_turn and args.suite != session_close.SUITE:
@@ -153,6 +260,16 @@ def main(argv: list[str] | None = None) -> int:
                         f"{label}{scenario.id}: "
                         f"{'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}"
                     )
+                    if not problems and arm and scenario.record:
+                        sizes = served_sizes(Path(scratch) / f"{scenario.id}.{arm.label}.shapes.json")
+                        shapes = Path(scratch) / f"{scenario.id}.{arm.label}.shapes.json"
+                        built = load_recording(shapes).get("ready")
+                        print(
+                            "  recorded:",
+                            ", ".join(f"{name} {size} chars" for name, size in sizes.items()),
+                            *(f"| graph {name}: {state}" for name, state in graph_states(shapes).items()),
+                            *([f"| graph built in {built['seconds']}s"] if built else []),
+                        )
                     if not problems:
                         argv_preview = runner.agent_argv(
                             Path("claude"),
@@ -160,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
                             mcp=Path("mcp.json"),
                             skill=Path("skill.md"),
                             model=args.model,
+                            # The real run stages the arm's hooks in a settings file whenever the scenario names any.
+                            settings=Path("settings.json") if scenario.hooks else None,
                         )
                         print(
                             "  would run:",
@@ -189,7 +308,14 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         with tempfile.TemporaryDirectory(prefix="ig-dry-") as scratch:
             for case in cases:
                 for arm in arms:
-                    problems = session_close.dry_run(case, arm, Path(scratch), hooked=args.hook_turn, client_mode=args.client_mode)
+                    problems = session_close.dry_run(
+                        case,
+                        arm,
+                        Path(scratch),
+                        hooked=args.hook_turn,
+                        client_mode=args.client_mode,
+                        ready_graph=args.ready_graph,
+                    )
                     print(f"{arm.label}: {case.id}: {'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}")
                     failed += bool(problems)
         return 1 if failed else 0
@@ -203,6 +329,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         hooked=args.hook_turn,
         client_mode=args.client_mode,
         credits=args.credits,
+        ready_graph=args.ready_graph,
     )
     return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 

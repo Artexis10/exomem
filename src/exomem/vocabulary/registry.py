@@ -210,6 +210,19 @@ def pack_text(name: str) -> str:
     return files("exomem.vocabulary").joinpath("packs", "core", name).read_text(encoding="utf-8")
 
 
+def pack_teach(pack: str, key: str, raw: object) -> str | None:
+    """The one line bootstrap teaches for a shipped entry, or None when the entry has none.
+
+    `teach` is shipped-pack data only: a vault entry that sets it is an unknown field, so
+    bootstrap never carries one vault's words to another. A malformed one is a build defect.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip() or raw != raw.strip() or "\n" in raw:
+        raise RuntimeError(f"shipped {pack} pack: {key!r} teach: must be one non-empty line")
+    return raw
+
+
 @cache
 def pack_entries(name: str) -> tuple[Entry, ...]:
     """The entries of a generic-grammar pack, in pack order.

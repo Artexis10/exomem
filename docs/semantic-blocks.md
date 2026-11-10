@@ -46,29 +46,17 @@ Headings inside fenced code blocks are ignored by the parser.
 
 ## Block types
 
-Supported types:
+The shipped kinds are the entries of `src/exomem/vocabulary/packs/core/kinds.yaml`.
+Each entry has its labels, its heading aliases and the traits that state what code
+does with it. A vault adds kinds, and labels in any language, in
+`_Schema/semantic-language-registry.yaml`. To list every kind in a vault, run
+`read_schema(operation={'kind': 'infer', 'subject': 'categories'})` and read
+`kinds`: each entry gives its `key`, its `labels` and whether it is `shipped`. The
+list also holds the compact kind `observation`, which no heading names.
 
-- `claim`
-- `finding`
-- `evidence`
-- `decision`
-- `assumption`
-- `inference`
-- `constraint`
-- `risk`
-- `open_question`
-- `hypothesis`
-- `result`
-- `metric`
-- `failure`
-- `pattern`
-- `record`
-- `case`
-- `timeline_event`
-- `requirement`
-- `action`
-- `definition`
-- `procedure`
+A heading names a kind by its key, one of its heading aliases or one of its labels.
+When a vault gives `claim` the label `Väite` in Finnish, `## Väite` is a `claim`
+unit, whatever the case of the heading.
 
 Heading labels normalize spaces and hyphens to underscores, so these are
 equivalent:

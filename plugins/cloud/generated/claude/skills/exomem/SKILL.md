@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, and preservation. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Sources and Evidence stay immutable; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 99d1f5cb5b84c4cd416b34bb23d7e2842046c3e8411e431fc84d27a53a848005
+  skill_contract: 44ea482ab4e0c18622db26fd0a2039ed26c96ebdadad512ff94d91c6e02250cf
   version: "0.32.0"
 ---
 
@@ -27,6 +27,9 @@ to `Notes/`; stable reusable identities to `Entities/`. Sources/Evidence are
 append-only. Everything outside `Knowledge Base/` is read-only input, and
 in-vault readonly/excluded paths remain protected. Prefer supersession over
 removal; never invent IDs, sources, relations, or numeric confidence scores.
+A degree of belief is a `## Belief` unit that records what its holder stated, with
+`credence_holder`, `credence` and an `assesses` relation, never a frontmatter
+field: see [page-types](references/page-types.md).
 Name a specific relation on every edge. When none fits, propose a new relation type;
 a plain link is the last resort, and a write that adds the generic relation is refused.
 Use product tools so validation, indexes, logs, and provenance stay governed.

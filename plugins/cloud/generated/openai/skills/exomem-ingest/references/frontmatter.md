@@ -185,12 +185,13 @@ removal.
 
 The following fields are deliberately **not** in the spec:
 
-- `confidence` — numeric scores misrepresent the underlying signal. Trust comes
-  from sources and link counts, both visible in frontmatter and via backlinks.
-  The categorical `outcome:` field, and a semantic unit's `verdict:` metadata,
-  are lifecycle *state* rather than a stored credence: they say what happened,
-  not how sure anyone feels. A number, percentage, or hedge is never a valid
-  value for either, and no alias of `confidence` is accepted.
+- `confidence` — a confidence or a degree of belief is never a frontmatter
+  field. Trust comes from sources and link counts, both visible in frontmatter
+  and via backlinks. The categorical `outcome:` field, and a semantic unit's
+  `verdict:` metadata, are lifecycle *state*: they say what happened in words,
+  and a number, percentage, or hedge is never a valid value for either. No alias
+  of `confidence` is accepted. A degree of belief that its holder stated is a
+  `## Belief` unit: see "Recording a degree of belief" in `page-types.md`.
 - `decay_at` / `expires_at` — knowledge does not expire on a schedule.
   Supersession or archival is explicit.
 - `auto_*` anything — no field reflects an automated background process.
