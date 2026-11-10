@@ -1,5 +1,5 @@
 # Realm: reference and scope. What is it about, and where does it hold?
-schema_version: 1
+schema_version: 2
 phenomena:
   # --- identity ---
   - {id: identity.rename, stage: s1, says: "A system or an organisation is renamed, and both names are one thing.", from: [f38]}
@@ -21,7 +21,7 @@ phenomena:
   # --- entities ---
   - {id: entities.owner-change, stage: s1, says: "An owner or a supplier changes.", from: [f38]}
   - {id: entities.role-change, stage: s1, says: "A person changes role, and the question asks who holds the role now."}
-  - {id: entities.who-to-ask, stage: s1, probes: [act], says: "A task needs the person who is now responsible for a subject."}
+  - {id: entities.who-to-ask, stage: s2, probes: [act], says: "A task needs the person who is now responsible for a subject."}
   - {id: entities.reporting-line, stage: s2, says: "A reorganisation changes who reports to whom."}
   - {id: entities.membership, stage: s2, says: "People join and leave a group, and the question asks who is in it now."}
   - {id: entities.parts, stage: s2, says: "The question asks what a system consists of after parts were added and removed."}
@@ -33,18 +33,18 @@ phenomena:
   - {id: entities.dissolved, stage: s2, says: "An entity ceased to exist, and the facts about it are history."}
   - {id: entities.succession, stage: s2, truth: [identity_map, interval_order], expect: [keeps_order], says: "The question asks who took over from whom, in order."}
   - {id: entities.kind-of-relation, stage: s3, says: "The kind of relation matters: a person who advises a team does not manage it.", from: [rippleedits]}
-  - {id: entities.recurring-referent, stage: s3, truth: [corpus_closure], probes: [audit], says: "A thing that many records mention deserves a record of its own.", from: [esb]}
-  - {id: entities.passing-mention, stage: s3, twin_of: entities.recurring-referent, truth: [corpus_closure], probes: [audit], expect: [over_flags], says: "A thing mentioned once in passing does not deserve a record of its own.", from: [esb]}
+  - {id: entities.recurring-referent, stage: s3, truth: [identity_map, corpus_closure], probes: [state, audit], says: "Many records mention one thing, and a question about it gets what all of them say.", from: [esb, home-design]}
+  - {id: entities.passing-mention, stage: s3, twin_of: entities.recurring-referent, truth: [identity_map, corpus_closure], probes: [state, audit], expect: [over_flags, invents_detail], says: "One record mentions a thing in passing, and a question about it gets that one mention and no more.", from: [esb, home-design]}
   # --- scope ---
   - {id: scope.one-client, stage: s1, says: "A rule holds for one client only.", from: [f38]}
-  - {id: scope.environment, stage: s1, says: "A setting holds in one environment and not in another."}
+  - {id: scope.environment, stage: s2, says: "A setting holds in one environment and not in another."}
   - {id: scope.exception, stage: s1, says: "A general rule has a stated exception."}
   - {id: scope.general-rule-applies, stage: s1, twin_of: scope.exception, expect: [over_flags], says: "The case falls under the general rule, and applying the exception is the error."}
   - {id: scope.override, stage: s2, says: "A specific rule overrides a general one."}
   - {id: scope.region, stage: s2, says: "A rule holds in one region."}
   - {id: scope.version, stage: s2, says: "A fact holds for one version of a product."}
   - {id: scope.period, stage: s2, truth: [scope_lattice, interval_order], says: "A rule holds during a stated period only."}
-  - {id: scope.overgeneralised, stage: s2, says: "A later note restates a narrow fact as general, and the narrow scope governs."}
+  - {id: scope.overgeneralised, stage: s2, says: "A later note restates a narrow fact as general, and the answer keeps the narrow scope."}
   - {id: scope.similar-project, stage: s2, says: "A fact from one project must not be applied to a similar project.", from: [utility]}
   - {id: scope.person-or-team, stage: s2, truth: [scope_lattice, holder_ledger], expect: [keeps_scope, keeps_attribution], says: "One person's preference is not the team's rule."}
   - {id: scope.widened-or-narrowed, stage: s2, truth: [scope_lattice, state_fold], expect: [keeps_scope, uses_current], says: "The scope of a rule widens or narrows on a date."}
@@ -60,7 +60,7 @@ phenomena:
   - {id: quantity.table-cell, stage: s2, says: "The value sits in one cell of a table.", from: [membench]}
   - {id: quantity.threshold, stage: s2, says: "The question asks whether a value crossed a stated limit."}
   - {id: quantity.running-total, stage: s2, says: "The answer is a balance after a sequence of changes."}
-  - {id: quantity.missing-term, stage: s2, truth: [quantity_calc, corpus_closure], probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "One of the values that the sum needs is not recorded, and the answer says which."}
+  - {id: quantity.missing-term, stage: s2, truth: [quantity_calc, corpus_closure], probes: [state, audit], expect: [abstains_when_unknown, invents_detail], says: "One of the values that the sum needs is not recorded, and the answer says which."}
   - {id: quantity.unit-conversion, stage: s3, says: "Values in different units are combined."}
   - {id: quantity.rounding, stage: s3, says: "A rounded figure and an exact figure are the same value."}
   - {id: quantity.precision, stage: s3, expect: [states_uncertainty], says: "The answer keeps the precision that the source gave."}
@@ -73,18 +73,18 @@ phenomena:
   - {id: quantity.measurement-error, stage: s3, expect: [states_uncertainty], says: "A measured value carries a stated error."}
   - {id: quantity.amount-at-date, stage: s4, truth: [quantity_calc, interval_order], says: "An amount in one currency is valued at a date."}
   # --- statistics ---
-  - {id: statistics.small-sample, stage: s3, says: "A rate comes from very few cases."}
-  - {id: statistics.survivors-only, stage: s3, truth: [quantity_calc, corpus_closure], says: "The records exist only for the cases that passed a filter."}
-  - {id: statistics.reversal-on-pooling, stage: s3, says: "A trend reverses when groups are combined.", from: [causal]}
-  - {id: statistics.rare-condition, stage: s3, truth: [quantity_calc, chance_model], probes: [forecast, state], says: "A positive test for a rare condition leaves the condition unlikely."}
+  - {id: statistics.small-sample, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "A rate comes from very few cases."}
+  - {id: statistics.survivors-only, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "The records exist only for the cases that passed a filter."}
+  - {id: statistics.reversal-on-pooling, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "A trend reverses when groups are combined.", from: [causal]}
+  - {id: statistics.rare-condition, stage: s3, truth: [quantity_calc, chance_model], norms: [stated-model, arithmetic], probes: [forecast, state], says: "A positive test for a rare condition leaves the condition unlikely."}
   - {id: statistics.no-denominator, stage: s3, probes: [abstain, weigh], expect: [abstains_when_unknown], says: "A count is given without the number it is a share of."}
   - {id: statistics.best-of-many, stage: s3, truth: [quantity_calc, corpus_closure], says: "A report cites the best of many trials, and the world holds all the trials."}
-  - {id: statistics.not-comparable, stage: s3, truth: [quantity_calc, scope_lattice], expect: [keeps_scope], says: "Two figures that were measured differently are compared."}
+  - {id: statistics.not-comparable, stage: s3, truth: [judged], key: rubric-track, norms: [], expect: [keeps_scope], says: "Two figures that were measured differently are compared."}
   - {id: statistics.replication, stage: s3, truth: [quantity_calc, state_fold], says: "A finding is repeated, and it holds or it does not."}
-  - {id: statistics.outlier, stage: s3, says: "One reading lies far from the rest."}
+  - {id: statistics.outlier, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "One reading lies far from the rest."}
   - {id: statistics.points-or-percent, stage: s3, says: "A change in percentage points is reported as a percent change."}
-  - {id: statistics.return-to-average, stage: s4, truth: [judged], key: rubric-track, says: "An extreme value is followed by an ordinary one, and no cause is recorded."}
-  - {id: statistics.noise-as-trend, stage: s4, truth: [chance_model, quantity_calc], says: "A change inside the recorded normal variation is reported as a trend."}
+  - {id: statistics.return-to-average, stage: s4, truth: [judged], key: rubric-track, norms: [], says: "An extreme value is followed by an ordinary one, and no cause is recorded."}
+  - {id: statistics.noise-as-trend, stage: s4, truth: [quantity_calc], norms: [stated-model, arithmetic], says: "A change inside the stated normal variation is reported as a trend."}
   # --- meaning ---
   - {id: meaning.team-jargon, stage: s2, says: "A word has a special meaning inside one team."}
   - {id: meaning.acronym-clash, stage: s2, truth: [identity_map, scope_lattice], expect: [resolves_identity, keeps_scope], says: "One acronym stands for two things in two contexts."}
@@ -94,7 +94,7 @@ phenomena:
   - {id: meaning.category-renamed, stage: s3, truth: [identity_map], expect: [resolves_identity], says: "A category is renamed, and its counts carry over."}
   - {id: meaning.what-counts-as-one, stage: s3, truth: [scope_lattice, quantity_calc], says: "Two records count different units, such as tickets and users."}
   - {id: meaning.scale-changed, stage: s3, truth: [state_fold, quantity_calc], says: "A rating scale changes from five points to ten."}
-  - {id: meaning.no-fixed-threshold, stage: s3, truth: [judged], key: rubric-track, says: "A word such as large has no recorded threshold, and the answer says so."}
-  - {id: meaning.mild-wording, stage: s3, truth: [judged], key: rubric-track, says: "A report words a failure mildly."}
+  - {id: meaning.no-fixed-threshold, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "A word such as large has no recorded threshold, and the answer says so."}
+  - {id: meaning.mild-wording, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "A report words a failure mildly."}
   - {id: meaning.translated-term, stage: s4, says: "A term and its translation cover different things."}
-  - {id: meaning.sense-drift, stage: s4, truth: [judged], key: rubric-track, says: "A word's use shifts gradually, and no record marks a date."}
+  - {id: meaning.sense-drift, stage: s4, truth: [judged], key: rubric-track, norms: [], says: "A word's use shifts gradually, and no record marks a date."}

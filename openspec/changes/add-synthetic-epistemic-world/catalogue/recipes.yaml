@@ -1,0 +1,427 @@
+# Recipes: how a phenomenon is planted in a world, and which readings are its keys.
+#
+# A recipe is data. It names roles (`needs`), an order of time slots (`slots`), a straight list of
+# world operations over those roles (`steps`) and, for each probe form, the readings that are the
+# key (`keys`). Every operation, argument, role kind, constraint, reading and key part is a closed
+# value in `attributes.yaml`. A recipe holds no condition, no loop and no expression.
+#
+# A thread has two worlds. A step with `world: planted` applies only in the planted world, and a
+# step with `world: mutation` only in the mutation world. The mutation world is the thread with
+# the phenomenon left out. A probe depends on its plant when its value differs between the two
+# worlds, or when it has a trap in the planted world and none in the mutation world. A trap that
+# equals the value is no trap, and a role counts as a trap only in a world where a statement
+# carries it.
+#
+# A key part is a reading, `{read: <mechanism>.<reading>, of: <role or step id>}`, or a role taken
+# as it is, `{role: <role>}`. A reading's mechanism must be one that the entry names. The
+# mechanisms apply in the fixed order of `pipeline_order`, so a reading sees the statements as the
+# earlier mechanisms of the entry left them.
+#
+# An entry with `twin_of` has no recipe. Its base recipe's `twin` part keys it, in the mutation
+# world or on a case of the planted world that the plant does not touch. A recall control, whose
+# only probe form is `stable`, has no plant, so its recipe has no step that differs by world.
+#
+# This file holds the first worked recipes. They cover the nine realms and the thirteen
+# mechanisms of the pipeline. An entry without a recipe is not buildable.
+schema_version: 1
+recipes:
+  # --- time ---
+  currency.reversal:
+    needs:
+      owner: {is: holder}
+      item: {is: attribute, volatility: durable}
+      old: {is: value, of: item}
+      new: {is: value, of: item, differs_from: old}
+    slots: [before, change, probe]
+    steps:
+      - {op: set, target: item, value: old, at: before}
+      - {op: state, id: first, by: owner, about: item, value: old, kind: decision, at: before}
+      - {op: set, target: item, value: new, at: change, world: planted}
+      - {op: state, id: second, by: owner, about: item, value: new, kind: decision, at: change, world: planted}
+    keys:
+      state: {at: probe, value: {read: state_fold.current, of: item}, traps: [{read: state_fold.replaced, of: item}]}
+      act: {at: probe, value: {read: state_fold.current, of: item}, traps: [{read: state_fold.replaced, of: item}]}
+      premise: {at: probe, premise: {read: state_fold.replaced, of: item}, value: {read: state_fold.current, of: item}}
+  currency.value-update:
+    needs:
+      clerk: {is: holder}
+      item: {is: attribute, volatility: durable}
+      old: {is: value, of: item}
+      new: {is: value, of: item, differs_from: old}
+    slots: [before, change, probe]
+    steps:
+      - {op: set, target: item, value: old, at: before}
+      - {op: state, id: first, by: clerk, about: item, value: old, kind: fact, at: before}
+      - {op: set, target: item, value: new, at: change, world: planted}
+      - {op: state, id: second, by: clerk, about: item, value: new, kind: fact, at: change, world: planted}
+    keys:
+      state: {at: probe, value: {read: state_fold.current, of: item}, traps: [{read: state_fold.replaced, of: item}]}
+      act: {at: probe, value: {read: state_fold.current, of: item}, traps: [{read: state_fold.replaced, of: item}]}
+      premise: {at: probe, premise: {read: state_fold.replaced, of: item}, value: {read: state_fold.current, of: item}}
+    twin:
+      world: mutation
+      keys:
+        stable: {at: probe, value: {read: state_fold.current, of: item}}
+  order.sequence:
+    needs:
+      writer: {is: holder}
+      first: {is: event}
+      second: {is: event, differs_from: first}
+      third: {is: event, differs_from: second}
+    slots: [happened_1, happened_2, happened_3, written_1, written_2, written_3, probe]
+    steps:
+      - {op: set, target: first, at: happened_1}
+      - {op: set, target: second, at: happened_2}
+      - {op: set, target: third, at: happened_3}
+      - {op: state, by: writer, about: third, kind: observation, at: written_1, world: planted}
+      - {op: state, by: writer, about: first, kind: observation, at: written_2, world: planted}
+      - {op: state, by: writer, about: second, kind: observation, at: written_3, world: planted}
+      - {op: state, by: writer, about: first, kind: observation, at: written_1, world: mutation}
+      - {op: state, by: writer, about: second, kind: observation, at: written_2, world: mutation}
+      - {op: state, by: writer, about: third, kind: observation, at: written_3, world: mutation}
+    keys:
+      state: {at: probe, value: {read: interval_order.sequence, of: [first, second, third]}, traps: [{read: interval_order.recorded, of: [first, second, third]}]}
+
+  # --- sources ---
+  provenance.circular-reporting:
+    needs:
+      witness: {is: holder}
+      relay: {is: holder, differs_from: witness}
+      echo: {is: holder, differs_from: relay}
+      item: {is: attribute}
+      claimed: {is: value, of: item}
+    slots: [seen, retold, probe]
+    steps:
+      - {op: state, id: root, by: witness, about: item, value: claimed, kind: observation, basis: observed, at: seen}
+      - {op: state, id: second, by: relay, about: item, value: claimed, kind: fact, basis: told, at: retold}
+      - {op: support, from: root, to: second}
+      - {op: state, id: third, by: echo, about: item, value: claimed, kind: fact, basis: told, at: retold, world: planted}
+      - {op: support, from: root, to: third, world: planted}
+      - {op: state, id: third, by: echo, about: item, value: claimed, kind: observation, basis: observed, at: retold, world: mutation}
+    keys:
+      trace: {at: probe, value: {read: warrant_graph.origins, of: item}, traps: [{read: holder_ledger.holders, of: item}]}
+      weigh: {at: probe, value: {read: warrant_graph.origins, of: item}, traps: [{read: holder_ledger.holders, of: item}]}
+    twin:
+      world: mutation
+      keys:
+        trace: {at: probe, value: {read: warrant_graph.origins, of: item}}
+        weigh: {at: probe, value: {read: warrant_graph.origins, of: item}}
+  attribution.nested-report:
+    needs:
+      speaker: {is: holder}
+      reporter: {is: holder, differs_from: speaker}
+      item: {is: attribute}
+      claimed: {is: value, of: item}
+    slots: [told, probe]
+    steps:
+      - {op: state, id: relayed, by: reporter, about: item, value: claimed, kind: report, basis: told, quoting: speaker, at: told, world: planted}
+      - {op: state, id: direct, by: speaker, about: item, value: claimed, kind: fact, basis: observed, at: told, world: mutation}
+    keys:
+      whose: {at: probe, value: {read: holder_ledger.holder, of: relayed}, traps: [{role: reporter}]}
+      act: {at: probe, value: {read: holder_ledger.holders, of: item}, traps: [{role: claimed}]}
+
+  # --- status ---
+  kind.plan-not-done:
+    needs:
+      planner: {is: holder}
+      job: {is: attribute}
+      done: {is: value, of: job}
+    slots: [planned, later, probe]
+    steps:
+      - {op: state, id: plan, by: planner, about: job, value: done, kind: plan, at: planned}
+      - {op: set, target: job, value: done, at: later, world: mutation}
+      - {op: state, id: outcome, by: planner, about: job, value: done, kind: result, at: later, world: mutation}
+    keys:
+      state: {at: probe, value: {read: kind_tag.kind, of: job}, traps: [{role: done}]}
+      act: {at: probe, value: {read: kind_tag.kind, of: job}, traps: [{role: done}]}
+
+  # --- revision ---
+  correction.retraction:
+    needs:
+      author: {is: holder}
+      item: {is: attribute}
+      claimed: {is: value, of: item}
+      actual: {is: value, of: item, differs_from: claimed}
+    slots: [before, withdrawal, probe]
+    steps:
+      # The world holds a true value that no statement gives. No key reads it.
+      - {op: set, target: item, value: actual, at: before}
+      - {op: state, id: claim, by: author, about: item, value: claimed, kind: fact, at: before}
+      - {op: withdraw, by: author, statement: claim, at: withdrawal, world: planted}
+    keys:
+      state: {at: probe, value: {read: state_fold.standing, of: item}, traps: [{read: state_fold.replaced, of: item}]}
+      premise: {at: probe, premise: {read: state_fold.replaced, of: item}, value: {read: state_fold.standing, of: item}}
+      abstain: {at: probe, value: {read: state_fold.current, of: item}, traps: [{read: state_fold.replaced, of: item}]}
+  argument.rebuttal:
+    needs:
+      proponent: {is: holder}
+      opponent: {is: holder, differs_from: proponent}
+      item: {is: attribute}
+      claimed: {is: value, of: item}
+      opposite: {is: value, of: item, differs_from: claimed}
+      sign: {is: attribute}
+      seen: {is: value, of: sign}
+    slots: [before, change, probe]
+    steps:
+      - {op: state, id: ground, by: proponent, about: sign, value: seen, kind: observation, basis: observed, at: before}
+      - {op: state, id: claim, by: proponent, about: item, value: claimed, kind: fact, basis: inferred, at: before}
+      - {op: support, from: ground, to: claim}
+      - {op: state, id: counter, by: opponent, about: item, value: opposite, kind: result, basis: observed, at: change, world: planted}
+      - {op: defeat, from: counter, to: claim, mode: rebut, world: planted}
+    keys:
+      weigh: {at: probe, value: {read: warrant_graph.sides, of: claim}, traps: [{role: claimed}]}
+  propagation.dependent-update:
+    needs:
+      owner: {is: holder}
+      analyst: {is: holder, differs_from: owner}
+      base: {is: attribute, volatility: durable}
+      old: {is: value, of: base}
+      new: {is: value, of: base, differs_from: old}
+      derived: {is: attribute}
+      result: {is: value, of: derived}
+      apart: {is: attribute}
+      kept: {is: value, of: apart}
+    slots: [before, change, probe]
+    steps:
+      - {op: set, target: base, value: old, at: before}
+      - {op: state, id: basis, by: owner, about: base, value: old, kind: decision, at: before}
+      - {op: state, id: conclusion, by: analyst, about: derived, value: result, kind: result, basis: computed, at: before}
+      - {op: support, from: basis, to: conclusion}
+      - {op: state, id: aside, by: analyst, about: apart, value: kept, kind: fact, basis: observed, at: before}
+      - {op: set, target: base, value: new, at: change, world: planted}
+      - {op: state, id: update, by: owner, about: base, value: new, kind: decision, at: change, world: planted}
+    keys:
+      # state_fold replaces the base. warrant_graph then finds the conclusions that rested on it.
+      act: {at: probe, value: {read: state_fold.current, of: base}, traps: [{read: state_fold.replaced, of: base}, {read: warrant_graph.fallen, of: basis}], facts: [{read: warrant_graph.stands, of: aside}]}
+      state: {at: probe, value: {read: warrant_graph.stands, of: conclusion}, traps: [{read: warrant_graph.fallen, of: basis}], facts: [{read: state_fold.current, of: base}, {read: warrant_graph.stands, of: aside}]}
+    twin:
+      # The change stays planted. The probe asks for a fact that does not rest on the changed one.
+      world: planted
+      keys:
+        act: {at: probe, value: {read: state_fold.current, of: apart}, facts: [{read: warrant_graph.stands, of: aside}]}
+
+  # --- reference ---
+  entities.who-to-ask:
+    needs:
+      lead: {is: holder}
+      subject: {is: entity}
+      short: {is: name, of: subject}
+      duty: {is: attribute, of: subject, volatility: durable}
+      earlier: {is: value, of: duty}
+      later: {is: value, of: duty, differs_from: earlier}
+    slots: [before, renamed, change, probe]
+    steps:
+      - {op: set, target: duty, value: earlier, at: before}
+      - {op: state, id: first, by: lead, about: duty, value: earlier, kind: decision, at: before}
+      - {op: name, entity: subject, name: short, at: renamed}
+      - {op: set, target: duty, value: later, at: change, world: planted}
+      # The later statement uses the short name. identity_map resolves it before state_fold folds.
+      - {op: state, id: second, by: lead, about: duty, value: later, kind: decision, as: short, at: change, world: planted}
+    keys:
+      act: {at: probe, value: {read: state_fold.current, of: duty}, traps: [{read: state_fold.replaced, of: duty}], facts: [{read: identity_map.names, of: subject}]}
+  scope.exception:
+    needs:
+      owner: {is: holder}
+      item: {is: attribute}
+      usual: {is: value, of: item}
+      special: {is: value, of: item, differs_from: usual}
+      everywhere: {is: context}
+      here: {is: context, within: everywhere}
+      there: {is: context, within: everywhere, differs_from: here}
+    slots: [before, probe]
+    steps:
+      - {op: rule, id: general, by: owner, shape: default, over: item, value: usual, context: everywhere, at: before}
+      - {op: rule, id: carve, by: owner, shape: exception, over: item, value: special, context: here, at: before, world: planted}
+    keys:
+      act: {at: probe, value: {read: scope_lattice.value_in, of: item, where: here}, traps: [{read: scope_lattice.value_in, of: item, where: everywhere}]}
+      state: {at: probe, value: {read: scope_lattice.value_in, of: item, where: here}, traps: [{read: scope_lattice.value_in, of: item, where: everywhere}]}
+    twin:
+      # The exception stays planted. The probe names a case that it does not cover.
+      world: planted
+      keys:
+        act: {at: probe, value: {read: scope_lattice.value_in, of: item, where: there}, traps: [{read: scope_lattice.value_in, of: item, where: here}]}
+        state: {at: probe, value: {read: scope_lattice.value_in, of: item, where: there}, traps: [{read: scope_lattice.value_in, of: item, where: here}]}
+  quantity.missing-term:
+    needs:
+      clerk: {is: holder}
+      total: {is: attribute}
+      part_a: {is: attribute}
+      part_b: {is: attribute}
+      part_c: {is: attribute}
+      a: {is: value, of: part_a}
+      b: {is: value, of: part_b}
+      c: {is: value, of: part_c}
+    slots: [before, probe]
+    steps:
+      - {op: rule, id: sum, by: clerk, shape: depends, over: total, given: [part_a, part_b, part_c], at: before}
+      - {op: state, by: clerk, about: part_a, value: a, kind: measurement, at: before}
+      - {op: state, by: clerk, about: part_b, value: b, kind: measurement, at: before}
+      - {op: state, by: clerk, about: part_c, value: c, kind: measurement, at: before, world: mutation}
+    keys:
+      state: {at: probe, value: {read: quantity_calc.result, of: total}, facts: [{read: quantity_calc.lacking, of: total}]}
+      audit: {at: probe, value: {read: quantity_calc.lacking, of: total}}
+
+  # --- inference ---
+  absence.false-premise:
+    needs:
+      actor: {is: holder}
+      happening: {is: event}
+    slots: [before, probe]
+    steps:
+      - {op: set, target: happening, at: before, world: mutation}
+      - {op: state, by: actor, about: happening, kind: observation, at: before, world: mutation}
+    keys:
+      premise: {at: probe, premise: {role: happening}, value: {read: corpus_closure.recorded, of: happening}}
+  inference.complete-list:
+    needs:
+      keeper: {is: holder}
+      roster: {is: attribute}
+      member: {is: value, of: roster}
+      outsider: {is: value, of: roster, differs_from: member}
+    slots: [before, probe]
+    steps:
+      - {op: state, id: listed, by: keeper, about: roster, value: member, kind: fact, at: before}
+      # The stated closed-world premise is the plant. Without it, the absence is only unknown.
+      - {op: rule, id: closed, by: keeper, shape: complete, over: roster, at: before, world: planted}
+    keys:
+      state: {at: probe, value: {read: rule_closure.conclusion, of: roster, for: outsider}}
+      trace: {at: probe, value: {read: rule_closure.steps, of: roster, for: outsider}}
+    twin:
+      world: mutation
+      keys:
+        abstain: {at: probe, value: {read: rule_closure.conclusion, of: roster, for: outsider}}
+  causation.intervention:
+    needs:
+      engineer: {is: holder}
+      lever: {is: attribute}
+      low: {is: value, of: lever}
+      high: {is: value, of: lever, differs_from: low}
+      outcome: {is: attribute}
+      bad: {is: value, of: outcome}
+      good: {is: value, of: outcome, differs_from: bad}
+    slots: [before, change, after, probe]
+    steps:
+      - {op: rule, by: engineer, shape: causes, given: low, over: outcome, value: bad, at: before}
+      - {op: rule, by: engineer, shape: causes, given: high, over: outcome, value: good, at: before}
+      - {op: set, target: lever, value: low, at: before}
+      - {op: state, by: engineer, about: lever, value: low, kind: observation, at: before}
+      - {op: set, target: lever, value: high, at: change, world: planted}
+      - {op: state, id: move, by: engineer, about: lever, value: high, kind: decision, at: change, world: planted}
+      - {op: set, target: outcome, value: good, at: after, world: planted}
+      - {op: state, id: seen, by: engineer, about: outcome, value: good, kind: observation, at: after, world: planted}
+      - {op: cause, from: move, to: seen, world: planted}
+    keys:
+      what_if: {at: probe, value: {read: causal_model.otherwise, of: outcome, for: low}, traps: [{role: good}]}
+      state: {at: probe, value: {read: causal_model.cause, of: outcome}}
+
+  # --- minds ---
+  belief.false-belief:
+    needs:
+      owner: {is: holder}
+      away: {is: holder, differs_from: owner}
+      present: {is: holder, differs_from: away}
+      item: {is: attribute, volatility: durable}
+      old: {is: value, of: item}
+      new: {is: value, of: item, differs_from: old}
+    slots: [before, change, probe]
+    steps:
+      - {op: set, target: item, value: old, at: before}
+      - {op: state, id: first, by: owner, about: item, value: old, kind: decision, at: before}
+      - {op: tell, holder: away, statement: first, at: before}
+      - {op: tell, holder: present, statement: first, at: before}
+      - {op: set, target: item, value: new, at: change}
+      - {op: state, id: second, by: owner, about: item, value: new, kind: decision, at: change}
+      - {op: tell, holder: present, statement: second, at: change}
+      - {op: tell, holder: away, statement: second, at: change, world: mutation}
+    keys:
+      whose: {at: probe, value: {read: holder_ledger.believes, of: item, who: away}, traps: [{read: holder_ledger.believes, of: item, who: present}]}
+      act: {at: probe, value: {read: holder_ledger.believes, of: item, who: away}, traps: [{read: holder_ledger.believes, of: item, who: present}]}
+  deception.injected-instruction:
+    needs:
+      owner: {is: holder}
+      stranger: {is: holder, differs_from: owner}
+      item: {is: attribute, volatility: durable}
+      real: {is: value, of: item}
+      pushed: {is: value, of: item, differs_from: real}
+    slots: [before, arrival, probe]
+    steps:
+      - {op: set, target: item, value: real, at: before}
+      - {op: state, id: decided, by: owner, about: item, value: real, kind: decision, at: before}
+      # An instruction commits its holder to nothing, so state_fold does not fold it.
+      - {op: state, id: order, by: stranger, about: item, value: pushed, kind: instruction, at: arrival, world: planted}
+      - {op: state, id: order, by: owner, about: item, value: pushed, kind: decision, at: arrival, world: mutation}
+    keys:
+      act: {at: probe, value: {read: state_fold.current, of: item}, traps: [{role: pushed}], facts: [{read: holder_ledger.holder, of: order}, {read: kind_tag.kind, of: order}]}
+      state: {at: probe, value: {read: state_fold.current, of: item}, traps: [{role: pushed}], facts: [{read: holder_ledger.holder, of: order}]}
+    twin:
+      # The same change comes from the holder who decides the value, so following it is right.
+      world: mutation
+      keys:
+        act: {at: probe, value: {read: state_fold.current, of: item}, facts: [{read: holder_ledger.holder, of: order}]}
+  calibration.known-chance:
+    needs:
+      analyst: {is: holder}
+      outcome: {is: event}
+      odds: {is: value, of: outcome}
+    slots: [before, probe, after]
+    steps:
+      - {op: rule, id: model, by: analyst, shape: chance, over: outcome, value: odds, at: before, world: planted}
+      - {op: draw, target: outcome, chance: model, at: after, world: planted}
+    keys:
+      forecast: {at: probe, value: {read: chance_model.chance, of: outcome}}
+  disclosure.audience:
+    needs:
+      owner: {is: holder}
+      insiders: {is: audience}
+      asker: {is: holder, outside: insiders}
+      item: {is: attribute}
+      secret: {is: value, of: item}
+    slots: [before, probe]
+    steps:
+      - {op: state, id: fact, by: owner, about: item, value: secret, kind: fact, at: before}
+      - {op: restrict, target: fact, audience: insiders, by: owner, at: before, world: planted}
+    keys:
+      act: {at: probe, value: {read: policy_view.withheld, of: item, who: asker}, traps: [{role: secret}]}
+      state: {at: probe, value: {read: policy_view.withheld, of: item, who: asker}, traps: [{role: secret}]}
+    twin:
+      world: mutation
+      keys:
+        act: {at: probe, value: {read: policy_view.visible, of: item, who: asker}}
+        state: {at: probe, value: {read: policy_view.visible, of: item, who: asker}}
+
+  # --- store ---
+  hygiene.duplicate:
+    needs:
+      clerk: {is: holder}
+      one: {is: event}
+      two: {is: event, differs_from: one}
+      three: {is: event, differs_from: two}
+    slots: [before, refiled, probe]
+    steps:
+      - {op: state, id: record_1, by: clerk, about: one, kind: observation, at: before}
+      - {op: state, id: record_2, by: clerk, about: two, kind: observation, at: before}
+      - {op: state, id: record_3, by: clerk, about: three, kind: observation, at: before}
+      - {op: copy, artefact: record_2, at: refiled, world: planted}
+    keys:
+      state: {at: probe, value: {read: quantity_calc.count, of: [one, two, three]}, traps: [{read: corpus_closure.filed, of: [record_1, record_2, record_3]}]}
+      audit: {at: probe, value: {read: corpus_closure.copies, of: record_2}}
+
+  # --- beyond ---
+  machine.running-config:
+    needs:
+      operator: {is: holder}
+      system: {is: holder, differs_from: operator}
+      writer: {is: holder, differs_from: system}
+      setting: {is: attribute}
+      live: {is: value, of: setting}
+      written: {is: value, of: setting, differs_from: live}
+    slots: [before, read, noted, probe]
+    steps:
+      # The precedence is stated in the world. The later note does not replace the governed record.
+      - {op: rule, id: precedence, by: operator, shape: governs, over: setting, value: system, at: before}
+      - {op: set, target: setting, value: live, at: before}
+      - {op: state, id: running, by: system, about: setting, value: live, kind: measurement, basis: observed, at: read}
+      - {op: state, id: note, by: writer, about: setting, value: written, kind: fact, at: noted, world: planted}
+    keys:
+      state: {at: probe, value: {read: state_fold.current, of: setting}, traps: [{role: written}], facts: [{read: state_fold.standing, of: setting}]}
+      act: {at: probe, value: {read: state_fold.current, of: setting}, traps: [{role: written}]}

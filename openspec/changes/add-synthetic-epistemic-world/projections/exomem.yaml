@@ -1,5 +1,8 @@
-# The Exomem projection of the catalogue. This file is the only place in the catalogue that
-# names a product. The world, its prose and its keys never read it.
+# The Exomem projection of the catalogue. It sits outside `catalogue/`, so that an edited
+# prediction changes no world's catalogue digest. The world, its prose and its keys never read it.
+#
+# The catalogue itself is not free of the product: `catalogue/families.yaml` marks the twelve
+# families that mirror a shipped Exomem dimension, and `catalogue/lineage.yaml` describes them.
 #
 # `dimension` is the shipped Exomem dimension key that a probe of the family carries when the
 # epistemic task suite (f38) plays a generated project. A family with no dimension has no shipped
@@ -7,7 +10,7 @@
 #
 # `models` says whether Exomem has a structure for the family today: yes, partial or no.
 # `predict` is the outcome this design expects from Exomem as shipped, before any run:
-#   pass     close to the gold-context ceiling;
+#   pass     close to the gold-evidence ceiling;
 #   partial  above the plain-folder arm and well below the ceiling;
 #   fail     no better than the plain-folder arm.
 # Each prediction is a reading of the shipped vocabulary pack and the active specs on 2026-11-10.

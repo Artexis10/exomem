@@ -1,59 +1,70 @@
 ## 1. Specification
 
-- [x] 1.1 Write the proposal, the design, the first catalogue and the delta. Validate strictly with the CI-pinned OpenSpec.
+- [x] 1.1 Write the proposal, the design, the first catalogue and the deltas. Validate strictly with the CI-pinned OpenSpec.
 - [ ] 1.2 Agree the open questions in design.md with the owner. Standing, seed custody and audience were answered on 2026-11-10; the first round's budget, model prose and shape numbers are decided before the slice that needs each.
-- [ ] 1.3 Agree the seams with the neighbours: `add-epistemic-task-bench` for the project format and the gold-evidence arm, `make-epistemic-language-dynamic` task 5.4 for the vault seeds, and `add-sensed-epistemic-model` for the training export.
+- [ ] 1.3 Agree the seams with the neighbours. `add-epistemic-task-bench`: the four changes to the case format in design decision 10, the gold-evidence arm and a no-memory arm that plays probes only. `make-epistemic-language-dynamic` task 5.4: the store seeds of slice 2. `add-sensed-epistemic-model`: the training export.
 
-## 2. Slice 1: catalogue and world core, with no model
+## 2. Slice 1: desk-check, before any code
 
-- [ ] 2.1 Move the catalogue to `benchmarks/membench/world/catalogue/` and add its loader. Check: the loader refuses an undeclared value, an unknown reference, a duplicate id and a stage that contradicts its key class, each by name. The loader's family counts equal the table in design.md.
-- [ ] 2.2 Build the world core: entities, attributes over time, events, statements, artefacts and the world validator. Check: one failing fixture per invariant. An import-boundary test finds no `exomem` import under `membench/world/`.
-- [ ] 2.3 Build seven mechanisms at one hop: `state_fold`, `kind_tag`, `holder_ledger`, `identity_map`, `scope_lattice`, `warrant_graph` and `corpus_closure`. Check, for each: the mutation, invariance and uniqueness checks of design.md pass.
-- [ ] 2.4 Build the backbone, three domain packs, the planner with reservations, and the wordbank's split partitions. Check: two runs give identical manifests. No attribute belongs to two threads. The split check finds no shared name or surface form. The privacy gate passes over the packs and over one generated world.
-- [ ] 2.5 Write the recipes for the 60 phenomena marked `s1`. Check: each recipe plants in each pack, and each key passes the mutation check.
-- [ ] 2.6 Build the template renderer at the levels `stated`, `paraphrased` and `unmarked`, with the anchor check. Check: one thread gives the same key and proof trace at each level. No artefact below `stated` holds an explicit form. No probe shares a surface form with its answering artefact.
+- [ ] 2.1 Write 46 recipes as data: the 26 that slice 1 needs, and 20 for later slices, with at least two per realm. 21 exist. Check: every recipe names only declared closed values. Record each closed value that a recipe forced, and each operation that no recipe uses.
+- [ ] 2.2 Read the result against design decision 2. If more than a quarter of the 46 needed a new mechanism or a new operation, stop and revise the design. Otherwise remove each operation that no recipe uses.
+- [ ] 2.3 Read each desk-checked entry's key class against its recipe, and move an entry to the rubric track when no reading fixes one answer. Record the measured authoring rate, and replace the unverified numbers in design.md's cost section with it.
 
-## 3. Slice 1: projections
+## 3. Slice 1: catalogue, world core and oracle, with no model
 
-- [ ] 3.1 Write the f38 projection. Check: the suite's existing case check passes on a generated development project from each pack. Each of the 11 dimensions has at least two change probes, and each project has four stable probes. Confirm that the suite accepts a family key as a probe's label, or keep those probes in a separate project file.
-- [ ] 3.2 Add the gold-evidence arm to the suite's history modes. Check: the arm's prompt holds the probe's proof-trace artefacts under a neutral header and nothing else from earlier sessions.
-- [ ] 3.3 Write the vault seed through the product's tools, with its list of expected marks and a twin vault without typed structure. Check: the marks read back equal the list. The two vaults differ only in typed structure. The parity report lists every fact. The neutral artefacts parse as no typed unit.
-- [ ] 3.4 Extend the report with each arm's position between the floor and the ceiling per family, and the readings `no room`, `saturated` and `not measured`. Add each prediction beside its result, and the share of probes per lineage group. Check: fixed score tables give the expected readings, including one contradicted prediction and one family with no sample.
+- [ ] 3.1 Move the catalogue to `benchmarks/membench/world/catalogue/` and add its loader. Check: the loader refuses an undeclared value, an unknown reference, a duplicate id, a key class that contradicts its mechanisms, and a computed `silent` entry with no stated norm, each by name. It lists the buildable entries and says what each other entry lacks.
+- [ ] 3.2 Build the world core: entities, attributes over time with volatility classes, events, statements, artefacts, the world operations and the world validator. Check: one failing fixture per invariant. An import-boundary test finds no `exomem` import under `membench/world/`.
+- [ ] 3.3 Build seven mechanisms in their smallest form: `state_fold`, `kind_tag`, `holder_ledger`, `identity_map`, `scope_lattice` with one level of nesting, `warrant_graph` at one hop, and `corpus_closure` for whether anything is recorded. `state_fold` emits `StatusSpan` records and calls membench's `truth_at`. Check, for each: the mutation, invariance and uniqueness checks of design.md pass. membench's span lint passes on the derived spans.
+- [ ] 3.4 Build the backbone, one domain pack, the planner with role binding, both worlds of a thread and reservations, and the `dev` partition of the wordbank. Check: two runs give identical manifests. No attribute belongs to two threads. The privacy gate and the banned-vocabulary lint pass over the pack and over one generated world.
+- [ ] 3.5 Build the template renderer at the levels `stated`, `paraphrased` and `unmarked`, with the anchor check. Check: one thread gives the same key and proof trace at each level. No artefact below `stated` holds an explicit form. No probe shares a surface form with its answering artefact.
+- [ ] 3.6 Write each probe's key, proof trace and contest set. Check: the contest set of a thread with a replaced value holds the artefact that carries the replaced value. The proof trace of a key that rests on a stated norm holds the document that states it.
 
-## 4. Slice 1: first rounds
+## 4. Slice 1: the task suite's seam
 
-- [ ] 4.1 State the cost and the question. Then run one development world with the arms `N`, `G`, `F` and `P` in one window.
-- [ ] 4.2 Read the gates: `G` solves at least 90% of the probes, and `N` fails at least 80%. Repair or drop each recipe and surface form that they flag, and record the repair rate.
-- [ ] 4.3 Check each repair on the probes that exposed it. Then judge the next round on a fresh development world.
-- [ ] 4.4 Hand the vault seeds to the display-marks check.
+- [ ] 4.1 Make the suite's judge and case check read `behaviours.yaml`, and remove the `BEHAVIOURS` constant. Check: the hand-written projects still pass the case check. A key that names an unregistered behaviour is refused by name. The judge's schema holds every registered behaviour.
+- [ ] 4.2 Add `key.traps` and `key.premise` to the case format. Check: each scenario of the `epistemic-utility-regression` delta passes as a test.
+- [ ] 4.3 Let a key name its reading. Check: the memory-needed gate skips a probe that is read as harm, and the report gives it as harm against arm `N`.
+- [ ] 4.4 Add the gold-evidence arm, and let arm `N` play probes only. Check: the gold-evidence prompt holds the probe's contest set in session order under a neutral header, and nothing else from earlier sessions. Arm `N` makes no session call.
+- [ ] 4.5 Write the f38 projection. Check: the suite's case check passes on a generated development project. Each of the 11 dimensions has at least two change probes, and the project has four recall probes. Confirm that the suite accepts a family key as a probe's label, or keep those probes in a separate project file.
+- [ ] 4.6 Extend the report with position, harm and the false-alarm rate, and with the readings `too few probes`, `room`, `room unclear`, `no room`, `saturated` and `not measured`. Add each prediction beside its result, the share of probes per lineage group, and the table of background norms. Check: fixed score tables give the expected readings, including a family with three probes, one contradicted prediction and one family with no sample.
 
-## 5. Slice 2: implied change and the model-free layer
+## 5. Slice 1: first round
 
-- [ ] 5.1 Add bridges and the levels `implied`, `propagated`, `embedded` and `silent`. Check: keys do not change across levels. The gold-evidence arm audits each bridge on the development split, and the manifest records each dropped bridge.
-- [ ] 5.2 Add cascades with independent support to `warrant_graph`, and build `interval_order`, `quantity_calc` and `rule_closure`, with the probe forms `impact` and `as_of` and the set and order scorers. Check: the three oracle checks pass for each.
-- [ ] 5.3 Write the recipes for the phenomena marked `s2`, one family at a time. Check: as task 2.5.
-- [ ] 5.4 Write the membench projection. Check: membench's span lint passes on the derived spans, and the existing runner reads the corpus unchanged.
-- [ ] 5.5 Add the dials to the round plan. Check: a plan with an undeclared dial is refused, and the manifest records each dial's value.
-- [ ] 5.6 State the cost. Then play the hand-written development project and a generated one in one window, and record where they agree and disagree by dimension.
-- [ ] 5.7 Add the neutral export for other products' own harnesses, with its documentation. Check: a world read back from the export holds the same statements and keys, and the export names no Exomem kind, relation or field.
+- [ ] 5.1 After the owner answers open question 4, state the cost and the question. Then play the hand-written f38 development project and one generated project in one window, with the arms `N`, `G`, `H`, `F` and `P`.
+- [ ] 5.2 Read the gates on the generated project: `H` solves at least 90% of the probes, and `N` fails at least 80% of the position probes. Repair or drop each recipe and surface form that they flag, and record the repair rate.
+- [ ] 5.3 Check each repair on the probes that exposed it. Then judge the next round on a fresh development world.
+- [ ] 5.4 Record the pooled comparison of the two projects as description, with its counts.
 
-## 6. Slice 3: minds, chance and adversaries
+## 6. Slice 2: implied change, the model-free layer and seeds
 
-- [ ] 6.1 Build nested `holder_ledger`, `chance_model`, `causal_model` and `policy_view`, with the probe forms `forecast` and `what_if` and the Brier scorer. Check: the three oracle checks pass for each.
-- [ ] 6.2 Write the recipes for the phenomena marked `s3`, and the rubric lines for the rubric-track entries. Check: as task 2.5, and a second-family judge re-judges a sample.
-- [ ] 6.3 Build the model-prose renderer, off by default, with the anchor and round-trip checks. State the cost first. Check: the mutation measurement reports the share of planted drops and additions that the check catches.
-- [ ] 6.4 Commission the independent review of the generator, the catalogue, the surface banks and the projections. Record each finding and its answer.
-- [ ] 6.5 File the preregistration amendment that registers the generated family, with its decision rules, thresholds and custody. Record the owner's acknowledgment.
-- [ ] 6.6 Tag the generator, generate the first held-out world and commit its commitment digest. State the cost. Then run the decision in two windows.
+- [ ] 6.1 Add bridges and the levels `implied`, `propagated`, `embedded` and `silent`. Check: keys do not change across levels. The loader refuses an `entails` bridge that names no norm. Arm `H` audits each bridge on development worlds, and the manifest records each dropped bridge.
+- [ ] 6.2 Add cascades with independent support to `warrant_graph` and nesting to `scope_lattice`. Build `interval_order`, `quantity_calc` and `rule_closure`, with the probe forms `impact` and `as_of` and the set and order scorers. Check: the three oracle checks pass for each.
+- [ ] 6.3 Write the recipes for the entries planned for slice 2, one family at a time. Check: each recipe plants in each pack, and each probe passes the mutation check.
+- [ ] 6.4 Write the membench projection. Check: the existing runner reads the corpus unchanged.
+- [ ] 6.5 Add two more packs. Partition names, surface forms, bridges and work-task templates across the three splits. Check: the split check finds no item in two splits.
+- [ ] 6.6 Add the dials to the round plan, including the share of mutation-world threads. Check: a plan with an undeclared dial is refused, and the manifest records each dial's value.
+- [ ] 6.7 Write the three store seeds: a plain folder, a typed vault and an untyped vault. The vault writer lives beside membench's native renderers. Check: the marks read back equal the projection's list. The two vaults differ only in typed structure. The folder holds the neutral artefacts only. The parity report lists every fact. The neutral artefacts parse as no typed unit. The overlap report is generated from the vocabulary pack. Then hand the seeds to the display-marks check.
+- [ ] 6.8 Add the neutral export for other products' own harnesses, with its documentation. Check: a world read back from the export holds the same statements and keys, and the export names no Exomem kind, relation or field.
+- [ ] 6.9 State the cost. Then run the concordance check of design decision 9 as one development round, and record its result and its limit.
 
-## 7. Slice 4: scale and reach
+## 7. Slice 3: minds, chance and adversaries
 
-- [ ] 7.1 Add the size profile and the large world. Check: the world's page count and shape statistics match the profile, and the latency gate reads it.
-- [ ] 7.2 Add the training export. Check: it refuses a world that is not `train`, and a round refuses a sensor trained on a `dev` or `heldout` digest.
-- [ ] 7.3 Add the media and language packs. Check: a profile without support reads `unsupported`, never zero.
-- [ ] 7.4 Add compound threads. Check: each declares both phenomena, and the mutation check passes for each part.
+- [ ] 7.1 Build nested `holder_ledger`, `chance_model`, `causal_model` and `policy_view`, with the probe forms `forecast` and `what_if` and the Brier scorer. Check: the three oracle checks pass for each. No key reads a chance or a causal rule that no document of the world states.
+- [ ] 7.2 Write the recipes for the entries planned for slice 3, and the rubric lines for the rubric-track entries. Check: as task 6.3, and a second-family judge re-judges a sample.
+- [ ] 7.3 Build the model-prose renderer, off by default, with the anchor and round-trip checks. State the cost first. Check: the mutation measurement reports the share of planted drops and additions that the check catches. A second run reads the stored prose and writes none.
+- [ ] 7.4 Add the held-out domain pack. Check: a `train` or `dev` world cannot load it.
+- [ ] 7.5 Commission the independent review of the generator, the catalogue, the surface banks and the projections. Record each finding and its answer.
+- [ ] 7.6 File the preregistration amendment that registers the generated family, with its decision rules, thresholds and custody. Record the owner's acknowledgment.
+- [ ] 7.7 Tag the generator, generate the first held-out world and commit its commitment digest. State the cost. Then run the decision in two windows.
 
-## 8. Delivery
+## 8. Slice 4: scale and reach
 
-- [ ] 8.1 After each slice merges, update `benchmarks/README.md` and the benchmark methodology page.
-- [ ] 8.2 When the non-optional tasks are done, synchronise the delta into the canonical specs and archive this change with `openspec archive`.
+- [ ] 8.1 Add the size profile and the large world. Check: the world's page count and shape statistics match the profile, and the latency gate reads it.
+- [ ] 8.2 Add the training export. Check: it refuses a world that is not `train`. A round refuses a sensor trained on a `dev` or `heldout` digest. A decision on a generated world refuses a component trained on the export.
+- [ ] 8.3 Add the media and language packs. Check: a profile without support reads `unsupported`, never zero.
+- [ ] 8.4 Add compound threads. Check: each declares both phenomena, and the mutation check passes for each part.
+
+## 9. Delivery
+
+- [ ] 9.1 After each slice merges, update `benchmarks/README.md` and the benchmark methodology page.
+- [ ] 9.2 When the non-optional tasks are done, synchronise the deltas into the canonical specs and archive this change with `openspec archive`.

@@ -1,10 +1,15 @@
 # The families of the phenomenon catalogue. A family groups phenomena by the question about
-# knowledge that they raise. The grouping follows the disciplines that study knowledge, and it
-# carries no product's vocabulary. `projections/` maps families to a product.
+# knowledge that they raise.
+#
+# The grouping is not neutral. Twelve families carry `from: [exomem-dimensions]`: eleven use the
+# key of a dimension that Exomem ships, and `propagation` covers its `dependency` dimension. The
+# other 24 families answer questions that Exomem ships no dimension for. A report states the share
+# of its probes that come from the twelve.
 #
 # `defaults` give the attribute values that a phenomenon of the family takes when its entry names
 # none. An entry that names an attribute replaces the family's whole value for that attribute.
-schema_version: 1
+# `truth` is a set: `attributes.yaml` fixes the order in which mechanisms apply.
+schema_version: 2
 
 realms:
   time: {label: "Time and change", question: "What holds, and when?"}
@@ -14,7 +19,7 @@ realms:
   reference: {label: "Reference and scope", question: "What is it about, and where does it hold?"}
   inference: {label: "Inference", question: "What follows from what is recorded?"}
   minds: {label: "Minds and society", question: "Who knows, believes, intends or hides what?"}
-  store: {label: "The store itself", question: "What does the memory know about its own contents?"}
+  store: {label: "The corpus and the memory", question: "What does a memory know about what it was given?"}
   beyond: {label: "Beyond human sources", question: "What do machines and instruments contribute, and where does the benchmark stop?"}
 
 families:
@@ -22,179 +27,191 @@ families:
     realm: time
     label: Currency
     question: Is this still the current value?
-    defaults: {truth: [state_fold], key: deterministic-oracle, probes: [state, act, premise], expect: [uses_current, trusts_stale, resists_premise]}
+    from: [exomem-dimensions]
+    defaults: {truth: [state_fold], key: deterministic-oracle, norms: [later-replaces], probes: [state, act, premise], expect: [uses_current, trusts_stale, resists_premise]}
   order:
     realm: time
     label: Order in time
     question: When did it happen, and in what order?
-    defaults: {truth: [interval_order], key: deterministic-oracle, probes: [state, as_of], expect: [keeps_order]}
+    from: [exomem-dimensions]
+    defaults: {truth: [interval_order], key: deterministic-oracle, norms: [calendar], probes: [state, as_of], expect: [keeps_order]}
   persistence:
     realm: time
     label: Persistence
     question: How long does a fact stay valid without new evidence?
-    defaults: {truth: [state_fold], key: deterministic-oracle, probes: [state, act], expect: [dates_old_value, trusts_stale]}
+    defaults: {truth: [state_fold], key: deterministic-oracle, norms: [common-volatility], probes: [state, act], expect: [dates_old_value, trusts_stale]}
   provenance:
     realm: sources
     label: Provenance
     question: Where did this come from?
-    defaults: {truth: [warrant_graph], key: deterministic-oracle, probes: [trace, state], expect: [cites_source]}
+    from: [exomem-dimensions]
+    defaults: {truth: [warrant_graph], key: deterministic-oracle, norms: [], probes: [trace, state], expect: [cites_source]}
   attribution:
     realm: sources
     label: Attribution
     question: Whose claim, decision or preference is this?
-    defaults: {truth: [holder_ledger], key: deterministic-oracle, probes: [whose, act], expect: [keeps_attribution]}
+    from: [exomem-dimensions]
+    defaults: {truth: [holder_ledger], key: deterministic-oracle, norms: [holder-is-kept], probes: [whose, act], expect: [keeps_attribution]}
   reliability:
     realm: sources
     label: Source reliability
     question: How far should this source be trusted on this point?
-    defaults: {truth: [state_fold], key: deterministic-oracle, probes: [state, weigh], expect: [uses_current, cites_source]}
+    defaults: {truth: [state_fold], key: deterministic-oracle, norms: [stated-precedence], probes: [state, weigh], expect: [uses_current, cites_source]}
   testimony:
     realm: sources
     label: Modes of testimony
     question: By what route did this statement reach the record?
-    defaults: {truth: [holder_ledger, kind_tag], key: deterministic-oracle, probes: [whose, state], expect: [keeps_attribution, states_uncertainty]}
+    defaults: {truth: [holder_ledger, kind_tag], key: deterministic-oracle, norms: [holder-is-kept, kind-is-kept], probes: [whose, state], expect: [keeps_attribution, states_uncertainty]}
   kind:
     realm: status
     label: Kind of statement
     question: Is this a fact, a plan, a guess or something else?
-    defaults: {truth: [kind_tag], key: deterministic-oracle, probes: [act, state], expect: [keeps_kind]}
+    from: [exomem-dimensions]
+    defaults: {truth: [kind_tag], key: deterministic-oracle, norms: [kind-is-kept], probes: [act, state], expect: [keeps_kind]}
   modality:
     realm: status
     label: Modality
     question: Does this say what is, what should be, what must be or what may be?
-    defaults: {truth: [kind_tag], key: deterministic-oracle, probes: [act, state], expect: [keeps_kind]}
+    defaults: {truth: [kind_tag], key: deterministic-oracle, norms: [kind-is-kept], probes: [act, state], expect: [keeps_kind]}
   uncertainty:
     realm: status
     label: Uncertainty
     question: How sure is anyone, and what is still open?
-    defaults: {truth: [kind_tag, corpus_closure], key: deterministic-oracle, probes: [state, abstain], expect: [states_uncertainty, invents_detail]}
+    from: [exomem-dimensions]
+    defaults: {truth: [kind_tag, corpus_closure], key: deterministic-oracle, norms: [kind-is-kept, absence-is-unknown], probes: [state, abstain], expect: [states_uncertainty, invents_detail]}
   calibration:
     realm: status
     label: Calibration
     question: Do stated degrees of belief match what happens?
-    defaults: {truth: [chance_model], key: deterministic-oracle, probes: [forecast, whose], expect: [states_uncertainty, keeps_attribution]}
+    defaults: {truth: [chance_model], key: deterministic-oracle, norms: [stated-model], probes: [forecast, whose], expect: [states_uncertainty, keeps_attribution]}
   correction:
     realm: revision
     label: Correction
     question: Was this corrected, withdrawn or refuted?
-    defaults: {truth: [state_fold], key: deterministic-oracle, probes: [state, act, premise], expect: [uses_current, trusts_stale, resists_premise]}
+    from: [exomem-dimensions]
+    defaults: {truth: [state_fold], key: deterministic-oracle, norms: [later-replaces, defeated-supports-nothing], probes: [state, act, premise], expect: [uses_current, trusts_stale, resists_premise]}
   conflict:
     realm: revision
     label: Conflict between sources
     question: Do the sources disagree, and does anything settle it?
-    defaults: {truth: [state_fold], key: deterministic-oracle, probes: [weigh, state], expect: [flags_conflict, cites_source]}
+    defaults: {truth: [state_fold], key: deterministic-oracle, norms: [unsettled-stays-open], probes: [weigh, state], expect: [flags_conflict, cites_source]}
   argument:
     realm: revision
     label: Argument
     question: What is the case for and against?
-    defaults: {truth: [warrant_graph], key: deterministic-oracle, probes: [weigh, trace], expect: [flags_conflict, cites_source]}
+    from: [exomem-dimensions]
+    defaults: {truth: [warrant_graph], key: deterministic-oracle, norms: [defeated-supports-nothing, unsettled-stays-open], probes: [weigh, trace], expect: [flags_conflict, cites_source]}
   propagation:
     realm: revision
     label: Propagation of change
     question: What else changes when this changes?
-    defaults: {truth: [warrant_graph], key: deterministic-oracle, probes: [impact, act], expect: [propagates_change, keeps_unaffected]}
+    from: [exomem-dimensions]
+    defaults: {truth: [state_fold, warrant_graph], key: deterministic-oracle, norms: [stated-rule, defeated-supports-nothing], probes: [impact, act], expect: [propagates_change, keeps_unaffected]}
   identity:
     realm: reference
     label: Identity
     question: Is this the same thing under another name?
-    defaults: {truth: [identity_map], key: deterministic-oracle, probes: [state, act], expect: [resolves_identity]}
+    from: [exomem-dimensions]
+    defaults: {truth: [identity_map], key: deterministic-oracle, norms: [same-referent], probes: [state, act], expect: [resolves_identity]}
   entities:
     realm: reference
     label: Entities and relations
     question: Who or what is this about, and how are they related now?
-    defaults: {truth: [identity_map, state_fold], key: deterministic-oracle, probes: [state, act], expect: [uses_current, resolves_identity]}
+    from: [exomem-dimensions]
+    defaults: {truth: [identity_map, state_fold], key: deterministic-oracle, norms: [later-replaces], probes: [state, act], expect: [uses_current, resolves_identity]}
   scope:
     realm: reference
     label: Scope
     question: Where does this hold?
-    defaults: {truth: [scope_lattice], key: deterministic-oracle, probes: [act, state], expect: [keeps_scope]}
+    from: [exomem-dimensions]
+    defaults: {truth: [scope_lattice], key: deterministic-oracle, norms: [stated-rule, scope-is-kept], probes: [act, state], expect: [keeps_scope]}
   quantity:
     realm: reference
     label: Quantity and measurement
     question: How much, in what unit and how exactly?
-    defaults: {truth: [quantity_calc], key: deterministic-oracle, probes: [state, act], expect: [cites_source]}
+    defaults: {truth: [quantity_calc], key: deterministic-oracle, norms: [arithmetic], probes: [state, act], expect: [cites_source]}
   statistics:
     realm: reference
     label: Statistical evidence
     question: What does a number drawn from many cases show?
-    defaults: {truth: [quantity_calc], key: deterministic-oracle, probes: [state, weigh], expect: [states_uncertainty]}
+    defaults: {truth: [quantity_calc], key: deterministic-oracle, norms: [arithmetic, observed-frequency], probes: [state, weigh], expect: [states_uncertainty]}
   meaning:
     realm: reference
     label: Meaning of terms
     question: What does this word mean here and now?
-    defaults: {truth: [scope_lattice, state_fold], key: deterministic-oracle, probes: [state, act], expect: [keeps_scope]}
+    defaults: {truth: [scope_lattice, state_fold], key: deterministic-oracle, norms: [stated-rule], probes: [state, act], expect: [keeps_scope]}
   inference:
     realm: inference
     label: Inference
     question: What follows from the records, and by what kind of step?
-    defaults: {truth: [rule_closure], key: deterministic-oracle, probes: [state, trace], expect: [cites_source]}
+    defaults: {truth: [rule_closure], key: deterministic-oracle, norms: [stated-rule], probes: [state, trace], expect: [cites_source]}
   causation:
     realm: inference
     label: Causation
     question: What caused this, and what would have happened otherwise?
-    defaults: {truth: [causal_model], key: deterministic-oracle, probes: [state, what_if], expect: [states_uncertainty]}
+    defaults: {truth: [causal_model], key: deterministic-oracle, norms: [stated-model], probes: [state, what_if], expect: [states_uncertainty]}
   absence:
     realm: inference
     label: Absence and negation
     question: Is this false, unknown, missing or withheld?
-    defaults: {truth: [corpus_closure], key: deterministic-oracle, probes: [abstain, premise], expect: [abstains_when_unknown, invents_detail, resists_premise]}
+    defaults: {truth: [corpus_closure], key: deterministic-oracle, norms: [absence-is-unknown], probes: [abstain, premise], expect: [abstains_when_unknown, invents_detail, resists_premise]}
   belief:
     realm: minds
     label: Belief states
     question: Who believes or knows what?
-    defaults: {truth: [holder_ledger], key: deterministic-oracle, probes: [whose, act], expect: [keeps_attribution]}
+    defaults: {truth: [holder_ledger], key: deterministic-oracle, norms: [witness-knows], probes: [whose, act], expect: [keeps_attribution]}
   consensus:
     realm: minds
     label: Consensus and disagreement
     question: How widely is this held, and who dissents?
-    defaults: {truth: [holder_ledger], key: deterministic-oracle, probes: [weigh, whose], expect: [flags_conflict, keeps_attribution]}
+    defaults: {truth: [holder_ledger], key: deterministic-oracle, norms: [holder-is-kept, unsettled-stays-open], probes: [weigh, whose], expect: [flags_conflict, keeps_attribution]}
   commitment:
     realm: minds
     label: Intent and commitment
     question: Who intends or owes what, and was it done?
-    defaults: {truth: [state_fold, kind_tag], key: deterministic-oracle, probes: [state, act], expect: [uses_current, keeps_kind]}
+    defaults: {truth: [state_fold, kind_tag], key: deterministic-oracle, norms: [later-replaces, kind-is-kept], probes: [state, act], expect: [uses_current, keeps_kind]}
   deception:
     realm: minds
     label: Deception and attack
     question: Is someone trying to mislead the reader or the store?
-    defaults: {truth: [holder_ledger, corpus_closure], key: deterministic-oracle, probes: [act, state], expect: [obeys_injected, trusts_stale]}
+    defaults: {truth: [holder_ledger, corpus_closure], key: deterministic-oracle, norms: [stated-precedence], probes: [act, state], expect: [obeys_injected, trusts_stale]}
   disclosure:
     realm: minds
     label: Disclosure
     question: Who may be told this?
-    defaults: {truth: [policy_view], key: deterministic-oracle, probes: [act, state], expect: [leaks_withheld, reports_withheld]}
+    defaults: {truth: [policy_view], key: deterministic-oracle, norms: [audience-rule], probes: [act, state], expect: [leaks_withheld, reports_withheld]}
   hygiene:
     realm: store
-    label: Memory hygiene
-    question: Is the store itself consistent and free of leftovers?
-    defaults: {truth: [corpus_closure], key: deterministic-oracle, probes: [audit, state], expect: [uses_current]}
+    label: Corpus hygiene
+    question: Does a memory cope with a corpus that is duplicated, scattered or damaged?
+    defaults: {truth: [corpus_closure], key: deterministic-oracle, norms: [], probes: [audit, state], expect: [uses_current]}
   self:
     realm: store
     label: Self-knowledge
-    question: Does the memory know what it holds and how it came to hold it?
-    defaults: {truth: [corpus_closure, holder_ledger], key: deterministic-oracle, probes: [audit, trace], expect: [cites_source, invents_detail]}
+    question: Does a memory know what it was given, when, and what it does not hold?
+    defaults: {truth: [corpus_closure, holder_ledger], key: deterministic-oracle, norms: [absence-is-unknown], probes: [audit, trace], expect: [cites_source, invents_detail]}
   procedure:
     realm: store
     label: Procedures
     question: How is this done, and is that still the way?
-    defaults: {truth: [rule_closure, state_fold], key: deterministic-oracle, probes: [act, state], expect: [uses_current, keeps_order]}
+    defaults: {truth: [rule_closure, state_fold], key: deterministic-oracle, norms: [stated-rule, later-replaces], probes: [act, state], expect: [uses_current, keeps_order]}
   media:
     realm: store
     label: Evidence in media
     question: What does a table, image, file or recording show?
-    defaults: {truth: [corpus_closure], key: deterministic-oracle, probes: [state, trace], expect: [cites_source]}
+    defaults: {truth: [corpus_closure], key: deterministic-oracle, norms: [], probes: [state, trace], expect: [cites_source]}
   language:
     realm: store
     label: Across languages
     question: Is this the same fact in another language or script?
-    defaults: {truth: [identity_map], key: deterministic-oracle, probes: [state], expect: [resolves_identity]}
+    defaults: {truth: [identity_map], key: deterministic-oracle, norms: [same-referent], probes: [state], expect: [resolves_identity]}
   machine:
     realm: beyond
     label: Machine and instrument sources
     question: What does a model, a sensor or a pipeline contribute as evidence?
-    defaults: {truth: [holder_ledger, corpus_closure], key: deterministic-oracle, probes: [whose, state], expect: [keeps_attribution, keeps_kind]}
+    defaults: {truth: [holder_ledger, corpus_closure], key: deterministic-oracle, norms: [holder-is-kept, kind-is-kept], probes: [whose, state], expect: [keeps_attribution, keeps_kind]}
   limits:
     realm: beyond
     label: Declared limits
     question: What can this benchmark not test?
-    defaults: {truth: [none], key: out-of-scope, probes: [], expect: []}
+    defaults: {truth: [none], key: out-of-scope, norms: [], probes: [], expect: []}

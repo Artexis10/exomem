@@ -189,3 +189,15 @@ lineage:
     checked: fetched
     adopt: "Capability evals that start at a low pass rate and graduate to regression checks when they saturate; cases where a behaviour should occur and cases where it should not; a reference solution for each task; code graders where they fit and model graders for open text."
     leave: "Nothing."
+  exomem-dimensions:
+    work: "The epistemic dimensions that Exomem ships"
+    address: src/exomem/vocabulary/packs/core/dimensions.yaml
+    checked: in-repo
+    adopt: "Twelve family groupings. Eleven families use a shipped dimension's key, and the family propagation covers the dimension dependency."
+    leave: "Every Exomem kind, relation and display behaviour. A family that carries this lineage is shaped by the home product, and a report says so."
+  home-design:
+    work: "Design choices of the home product, restated as outcomes"
+    address: benchmarks/epistemic/PREREGISTRATION.md
+    checked: in-repo
+    adopt: "Entries whose expected behaviour follows a choice that Exomem made, such as keeping a refuted idea findable. Each one states an outcome that any product can show."
+    leave: "The structure through which Exomem reaches that outcome. Another product may reasonably choose otherwise, and a report lists these entries apart."
