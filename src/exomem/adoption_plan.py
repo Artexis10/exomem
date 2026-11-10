@@ -439,6 +439,19 @@ class Destinations:
         path = self.root / rel_path
         self._names(path.parent).add(path.name.casefold())
 
+    @classmethod
+    def frozen_by(cls, root: Path, items: list[dict]) -> Destinations:
+        """Destinations that already hold every path the plan items froze, so a new path never takes a later item's."""
+        destinations = cls(root)
+        for item in items:
+            frozen = [(item.get("note") or {}).get("target_path")]
+            if item["action"] == "copy-as-source":
+                frozen += [item["target_path"], item.get("artifact_path")]
+            for rel_path in frozen:
+                if rel_path:
+                    destinations.reserve(rel_path)
+        return destinations
+
     def taken(self, rel_path: str) -> bool:
         path = self.root / rel_path
         return path.name.casefold() in self._names(path.parent)

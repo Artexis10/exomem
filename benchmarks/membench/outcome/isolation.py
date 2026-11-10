@@ -28,9 +28,18 @@ ACTOR_EFFORT = "high"
 #: appended to the system prompt of an arm that plays Exomem as its users get it.
 SHIPPED_PROMINENCE = "balanced"
 
-#: A skill reads its own ``references/`` files, so the plugin directory is readable and nothing
-#: else outside the workspace is. A protected-path disallow still wins over this allow.
-PLUGIN_READ_ALLOW = f"Read(/{PLUGIN_DIR}/**)"
+
+def plugin_read_allow(plugin_dir: Path) -> str:
+    """The permission rule that lets a skill read its own ``references/`` files in ``plugin_dir``.
+
+    The plugin directory is readable and nothing else outside the workspace is. A protected-path
+    disallow still wins over this allow.
+    """
+    return f"Read(/{plugin_dir}/**)"
+
+
+#: The rule for this checkout's own plugin.
+PLUGIN_READ_ALLOW = plugin_read_allow(PLUGIN_DIR)
 
 #: Non-EXOMEM keys the server itself needs from the pins.
 _SERVER_KEYS = frozenset(
@@ -45,17 +54,17 @@ _SERVER_KEYS = frozenset(
 )
 
 
-def server_pins(root: Path) -> dict[str, str]:
+def server_pins(root: Path, checkout: Path = REPO_ROOT) -> dict[str, str]:
     """The environment a disposable server needs, and nothing inherited: vault and state under ``root``.
 
-    The product is this checkout, which ``PYTHONPATH`` puts on the path. A release is tested by
-    running from a clean checkout of its tag.
+    The product is ``checkout`` (this one by default), which ``PYTHONPATH`` puts on the path. A
+    release is tested by running from a clean checkout of its tag.
     """
     state = root / "exomem-state"
     pins = isolated_env(
         state=state,
         vault=root / "vault",
-        server_root=REPO_ROOT,
+        server_root=checkout,
         extra={
             # No service credential and a private lease coordinator: nothing reaches a running service.
             "EXOMEM_SERVICE_ENV": str(state / "no-service.env"),
@@ -65,10 +74,10 @@ def server_pins(root: Path) -> dict[str, str]:
     return {k: v for k, v in pins.items() if k.startswith("EXOMEM_") or k in _SERVER_KEYS}
 
 
-def child_env(root: Path) -> dict[str, str]:
+def child_env(root: Path, checkout: Path = REPO_ROOT) -> dict[str, str]:
     """This process's environment without any inherited Exomem setting, plus the pins."""
     base = {k: v for k, v in os.environ.items() if not k.startswith(("EXOMEM_", "KB_"))}
-    return {**base, **server_pins(root)}
+    return {**base, **server_pins(root, checkout)}
 
 
 def claude_env() -> tuple[dict[str, str], tuple[str, ...]]:
@@ -95,13 +104,13 @@ def hook_env(root: Path, session: str | None = None) -> dict[str, str]:
     return pins
 
 
-def lay_instruction_block(path: Path) -> dict:
+def lay_instruction_block(path: Path, checkout: Path = REPO_ROOT) -> dict:
     """Write the documented custom-instruction block for the shipped prominence to ``path``.
 
-    Read out of the doc that publishes it at run time, so the arm cannot drift from what users
-    are told. Returns the record a manifest keeps: the prominence, where it was read, its digest.
+    Read out of the doc that ``checkout`` publishes it in at run time, so the arm cannot drift from
+    what users are told. Returns the record a manifest keeps: the prominence, where it was read, its digest.
     """
-    block, citation = custom_instructions_block(SHIPPED_PROMINENCE)
+    block, citation = custom_instructions_block(SHIPPED_PROMINENCE, checkout)
     path.write_text(block, encoding="utf-8")
     return {
         "prominence": SHIPPED_PROMINENCE,
@@ -126,8 +135,8 @@ def product_version(root: Path) -> str:
     return done.stdout.strip()
 
 
-def fresh_vault(root: Path) -> Path:
-    """Lay the shipped starter scaffold into ``root/vault`` once, under the pins."""
+def fresh_vault(root: Path, checkout: Path = REPO_ROOT) -> Path:
+    """Lay the starter scaffold that ``checkout`` ships into ``root/vault`` once, under the pins."""
     vault = root / "vault"
     if not vault.exists():
         vault.mkdir(parents=True)
@@ -139,20 +148,20 @@ def fresh_vault(root: Path) -> Path:
                 "from exomem.init import init_vault; init_vault(Path(sys.argv[1]))",
                 str(vault),
             ],
-            env=child_env(root),
+            env=child_env(root, checkout),
             check=True,
             capture_output=True,
         )
     return vault
 
 
-def mcp_server(root: Path) -> dict:
-    """An ``--mcp-config`` server entry for the disposable Exomem under ``root``."""
-    fresh_vault(root)
+def mcp_server(root: Path, checkout: Path = REPO_ROOT) -> dict:
+    """An ``--mcp-config`` server entry for the disposable Exomem of ``checkout`` under ``root``."""
+    fresh_vault(root, checkout)
     return {
         "command": sys.executable,
         "args": ["-m", "exomem", "--transport", "stdio"],
-        "env": server_pins(root),
+        "env": server_pins(root, checkout),
     }
 
 

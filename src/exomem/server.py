@@ -8,6 +8,7 @@ tools from the command registry.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import time
@@ -1387,6 +1388,12 @@ def run(
         worker_socket=worker_socket,
         http_host=None if transport == "stdio" else resolved_host,
     )
+    # Every full collection would otherwise walk the few hundred thousand objects that the
+    # imports and the build above leave, a pause that can exceed an interactive query's
+    # whole budget. They live as long as the process, so freeze them once, after
+    # collecting what startup discarded.
+    gc.collect()
+    gc.freeze()
 
     if transport == "stdio":
         log.info("exomem starting on stdio")

@@ -31,10 +31,12 @@ measuring that would measure the wrong path.
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
 import threading
+import time
 import traceback
 from collections import Counter
 from pathlib import Path
@@ -968,9 +970,31 @@ def test_every_request_shape_attributes_its_time(
     measured: dict[str, tuple[float, float]] = {}
     diagnostics: dict[str, Any] = {}
     for shape, kwargs in sorted(_SHAPES.items()):
-        timings = _recall(vault, **kwargs)["timings"]
+        # A breach seen twice in CI left most of a request outside every stage, with no
+        # cause. Collector pauses and the request thread's CPU time tell a collection
+        # (CPU spent collecting) from a descheduled thread (wall time with little CPU).
+        pause = {"started": 0.0, "ms": 0.0, "collections": 0}
+
+        def collector(phase: str, _info: dict, pause: dict = pause) -> None:
+            if phase == "start":
+                pause["started"] = time.perf_counter()
+            else:
+                pause["ms"] += (time.perf_counter() - pause["started"]) * 1000.0
+                pause["collections"] += 1
+
+        gc.callbacks.append(collector)
+        cpu = time.thread_time()
+        try:
+            timings = _recall(vault, **kwargs)["timings"]
+        finally:
+            gc.callbacks.remove(collector)
         measured[shape] = (float(timings["total_ms"]), float(timings["unattributed_ms"]))
-        diagnostics[shape] = timings
+        diagnostics[shape] = {
+            **timings,
+            "request_thread_cpu_ms": round((time.thread_time() - cpu) * 1000.0, 1),
+            "gc_pause_ms": round(pause["ms"], 1),
+            "gc_collections": pause["collections"],
+        }
 
     table = ", ".join(
         f"{shape} unattributed={unattributed:.1f}/total={total:.1f}"
