@@ -342,30 +342,45 @@ def _derived_residue_paths(vault_root: Path, source_rel: str) -> tuple[str, ...]
     )
 
 
-def _page_bytes(vault_root: Path, rel: str) -> tuple[bytes, float]:
-    """A Markdown file's bytes and modification time: the stored page's in a store-mode vault,
-    whose projection may trail it, and the file's otherwise. Raises ``OSError`` when it is absent.
+def _stored_bodies(vault_root: Path, rels: list[str]) -> dict[str, bytes] | None:
+    """The stored bytes of each page in ``rels`` that a store-mode vault serves, from one chunked
+    read, or None in file mode, where each file is read where it is judged.
+
+    A stored page's projection may trail it, so the scope of a page is judged on these bytes; a
+    file the store does not own, such as a part in a dot folder, is still read from the disk.
     """
-    from ..vault_store import read
+    from ..vault_store import mode, read
 
-    if read.serves(Path(vault_root), rel):
-        page = read.owned_page(Path(vault_root), rel)
-        if page is None:
-            raise FileNotFoundError(rel)
-        return page.body, page.meta.mtime_ns / 1e9
-    path = Path(vault_root) / rel
-    return path.read_bytes(), path.stat().st_mtime
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return None
+    with read.snapshot(root) as view:
+        return view.bodies(rel for rel in rels if read.serves(root, rel))
 
 
-def _scope_ids(vault_root: Path, item: ManifestItem, policy: policy_module.Policy) -> frozenset[str] | None:
+def _scope_ids(
+    vault_root: Path,
+    item: ManifestItem,
+    policy: policy_module.Policy,
+    stored: dict[str, bytes] | None = None,
+) -> frozenset[str] | None:
     source = Path(vault_root) / item.source_path
     if not item.source_path.lower().endswith(".md"):
         return membership.evaluate_path_only(
             vault_root, item.source_path, policy
         ).require_classified()
     try:
-        raw, mtime = _page_bytes(vault_root, item.source_path)
-        page = find_corpus.parse_page(source, mtime, vault_root, content=raw)
+        from ..vault_store import read
+
+        if stored is not None and read.serves(Path(vault_root), item.source_path):
+            if item.source_path not in stored:
+                return None
+            # The recovery's scope read passes no time either; a scope does not depend on it.
+            page = find_corpus.parse_page(source, 0.0, vault_root, content=stored[item.source_path])
+        else:
+            raw = source.read_bytes()
+            stat = source.stat()
+            page = find_corpus.parse_page(source, stat.st_mtime, vault_root, content=raw)
     except (OSError, UnicodeError, ValueError):
         return None
     if page is None:
@@ -407,9 +422,12 @@ def _is_governed(vault_root: Path, manifest: tuple[ManifestItem, ...]) -> bool:
     if policy.empty:
         return False
     restricting_scope_ids = _restricting_scope_ids(policy)
+    stored = _stored_bodies(
+        vault_root, [item.source_path for item in manifest if item.source_path.lower().endswith(".md")]
+    )
     for item in manifest:
         try:
-            scope_ids = _scope_ids(vault_root, item, policy)
+            scope_ids = _scope_ids(vault_root, item, policy, stored)
         except membership.MembershipUnresolved:
             return True
         if scope_ids is None or restricting_scope_ids.intersection(scope_ids):
@@ -1420,6 +1438,9 @@ def _is_governed_for_restore(vault_root: Path, manifest: tuple[ManifestItem, ...
     if policy.empty:
         return False
     restricting = _restricting_scope_ids(policy)
+    stored = _stored_bodies(
+        vault_root, [item.trash_path for item in manifest if item.source_path.lower().endswith(".md")]
+    )
     for item in manifest:
         if not item.source_path.lower().endswith(".md"):
             try:
@@ -1432,7 +1453,14 @@ def _is_governed_for_restore(vault_root: Path, manifest: tuple[ManifestItem, ...
                 return True
             continue
         try:
-            raw, _mtime = _page_bytes(vault_root, item.trash_path)
+            from ..vault_store import read
+
+            if stored is not None and read.serves(Path(vault_root), item.trash_path):
+                if item.trash_path not in stored:
+                    return True
+                raw = stored[item.trash_path]
+            else:
+                raw = (Path(vault_root) / item.trash_path).read_bytes()
             page = find_corpus.parse_page(
                 Path(vault_root) / item.source_path,
                 0.0,

@@ -21,6 +21,7 @@ import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_bypass_writers import GAMMA, GAMMA_TEXT, govern, store_gamma
+from test_vault_store_lifecycle_writers import store_folder
 from test_vault_store_migration import BETA, vault  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows
 
@@ -32,6 +33,7 @@ from exomem import (
     reserved_paths,
 )
 from exomem import vault as vault_module
+from exomem.collection_store import connection
 from exomem.governance import (
     authorization_custody,
     catalog_publication,
@@ -456,3 +458,32 @@ def test_a_backfill_planned_before_the_companion_changed_in_the_store_refuses_as
 
     assert stale.value.code == "STALE_COMPANION_BACKFILL"
     assert b"governance_companion:" not in read.owned_bytes(served, SECRET_PAGE)
+
+
+def test_a_folder_trash_on_a_governed_vault_reads_the_store_alike_for_any_size(served, monkeypatch):
+    """A folder trash on a vault with a policy whose manifest or scope check reads the store once
+    per page: every page is judged when none is governed, so its cost grows with the folder, up to
+    the 4096-entry cap."""
+    govern(served, BETA)
+    opened = []
+    real = connection.store_reader
+
+    def counting(*arguments, **keywords):
+        opened.append(1)
+        return real(*arguments, **keywords)
+
+    def reads_for_one_trash(folder, pages):
+        store_folder(served, pages, folder=folder)
+        opened.clear()
+        with monkeypatch.context() as patched:
+            patched.setattr(connection, "store_reader", counting)
+            result = delete_directory.delete_directory(
+                served, path=folder, confirm=True, recursive=True
+            )
+        assert result.file_count == pages
+        assert tombstones(served) == []
+        return len(opened)
+
+    assert reads_for_one_trash("Knowledge Base/Projects/Few", 2) == reads_for_one_trash(
+        "Knowledge Base/Projects/Many", 30
+    )
