@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import tarfile
 from collections.abc import Callable, Iterator
@@ -134,8 +135,6 @@ class ReadPolicy:
     portable_paths: bool = False
     #: The most bytes `tarfile` may read to parse one header and the pax, long-name and sparse headers chained to it.
     max_header_bytes: int | None = None
-    #: Flush with `os.sync`, as the Cloud job does. False flushes only the files and directories this unpack wrote.
-    host_wide_sync: bool = True
 
 
 def free_bytes(path: Path) -> int:
@@ -145,29 +144,40 @@ def free_bytes(path: Path) -> int:
 
 
 def _fsync_file(path: str) -> None:
-    with open(path, "rb+") as staged:
-        os.fsync(staged.fileno())
+    # A walked tree can hold entries this call did not write. Only regular files are flushed, opened
+    # read-only (fsync needs no write access), never through a link, and without blocking on a
+    # swapped-in pipe. A gone or unreadable entry is settled already — os.sync never failed either.
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except (FileNotFoundError, PermissionError):
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _fsync_directory(path: str) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return
     try:
         os.fsync(fd)
     finally:
         os.close(fd)
 
 
-def flush_to_disk(root: Path, *, host_wide: bool = True) -> None:
+def flush_to_disk(root: Path) -> None:
     """Put every file under `root` on disk.
 
-    `host_wide` uses `os.sync` where the platform has it. Otherwise, or when it is False, each file is fsynced and,
-    where a directory can be opened, each directory too, so that a request flushes what it wrote and not the whole host.
+    Each file is fsynced and, where a directory can be opened, each directory too, so that a request
+    flushes what it wrote and nothing else. Never `os.sync`: it waits on every filesystem the host
+    mounts, so one unrelated wedged mount would freeze the caller forever.
     """
 
-    sync = getattr(os, "sync", None)
-    if host_wide and sync is not None:
-        sync()
-        return
     files: list[str] = []
     directories: list[str] = []
     for directory, _, names in os.walk(root):
@@ -245,7 +255,7 @@ def unpack_stream(
         if staging is not None:
             # The caller commits with a rename and then deletes the
             # ciphertext, so the files must be on disk before success.
-            flush_to_disk(staging, host_wide=policy.host_wide_sync)
+            flush_to_disk(staging)
         return result
     except BaseException as error:
         if isinstance(error, ArchiveRefused):

@@ -507,10 +507,6 @@ class StoreCorpus:
         }
         return lambda path: stored.get(path) or freshness.stat_signature(path)
 
-    def freshness_key(self) -> tuple[int, int, str]:
-        """``walk_freshness_key``'s triple over every page of the corpus."""
-        return walk_freshness_key(self, self.signature_lookup())
-
 
 def signature_lookup(paths) -> Callable[[Path], freshness.FileSignature]:
     """The change signature of one page of ``paths``: a file stat, or a stored page's row."""

@@ -190,6 +190,10 @@ def read_edges(
     resolver; the read calls it only for a restricted caller, to re-derive a link that resolves
     differently for that caller. The read never scans the corpus and never reports an unreadable
     graph as an empty one.
+
+    A write to a page the caller may not see leaves its read as it was: the edges are those of a
+    vault that never had that write, or unknown when the graph cannot show that
+    (`EpistemicGraphIndex.unit_edges`). The owner's read keeps the graph's own gating.
     """
     if not lookups.needs_edges and not behaviours:
         return DimensionEdges("available")
@@ -206,7 +210,8 @@ def read_edges(
         keys,
         pages=pages,
         keep=keep,
-        resolver=resolver() if keep is not None and resolver is not None else None,
+        resolver=resolver,
+        reader=egress.visible_page_filter(vault_root) if keep is not None else None,
     )
     return DimensionEdges(result.status, result.edges if result.status == "available" else ())
 

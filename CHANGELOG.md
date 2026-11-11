@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.173.0](https://github.com/Artexis10/exomem/compare/v0.172.0...v0.173.0) (2026-11-11)
+
+
+### Features
+
+* **vault-store:** answer store-mode readers with SQL over the store ([#2727](https://github.com/Artexis10/exomem/issues/2727)) ([8ce4cd1](https://github.com/Artexis10/exomem/commit/8ce4cd172f0d79b2d5bcb82e2bd69915ed5a455e))
+
+
+### Bug Fixes
+
+* **dimensions:** keep a restricted caller's edge read unchanged by writes it may not see ([#2736](https://github.com/Artexis10/exomem/issues/2736)) ([1d4e971](https://github.com/Artexis10/exomem/commit/1d4e971ce775c2126c0c351a5ccd38d323731307))
+* **search:** match dataset values by their distinctive words ([#2745](https://github.com/Artexis10/exomem/issues/2745)) ([9fddcc6](https://github.com/Artexis10/exomem/commit/9fddcc6e26e594486b4ae1f1fff97d001f9f257d))
+
+## [0.172.0](https://github.com/Artexis10/exomem/compare/v0.171.0...v0.172.0) (2026-11-11)
+
+
+### Features
+
+* **benchmarks:** build slice 1 of the synthetic epistemic world ([#2739](https://github.com/Artexis10/exomem/issues/2739)) ([7bb4647](https://github.com/Artexis10/exomem/commit/7bb4647598985b47810896412b2dc92b470f3712))
+* **vault-store:** move, trash and recover binaries, folders and scene frames in store mode ([#2728](https://github.com/Artexis10/exomem/issues/2728)) ([2eace67](https://github.com/Artexis10/exomem/commit/2eace673681968858f93a8f2e4443c38179be8f5))
+
+
+### Bug Fixes
+
+* **service:** let the target release report whether it can serve the state ([#2748](https://github.com/Artexis10/exomem/issues/2748)) ([8e0249d](https://github.com/Artexis10/exomem/commit/8e0249dba014666f2c185ad1ebd4e1fd9f7cab9c))
+
+
+### Performance
+
+* **governance:** decide each page's container parents once per request in a content filter ([#2737](https://github.com/Artexis10/exomem/issues/2737)) ([a7703dd](https://github.com/Artexis10/exomem/commit/a7703dd798da6b344c9a66f91889a432cdb3a5f1))
+
 ## [0.171.0](https://github.com/Artexis10/exomem/compare/v0.170.0...v0.171.0) (2026-11-11)
 
 

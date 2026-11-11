@@ -1794,34 +1794,39 @@ def _guard_lifecycle_primary_paths(
 ) -> tuple[vault.PathGuard, ...]:
     guards: list[vault.PathGuard] = []
     for relative in sorted({prepared.before_path, prepared.after_path}):
-        path = root / relative
         try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
-            guards.append(
-                vault.PathGuard.capture(root, relative, leaf_policy="absent")
-            )
-            continue
-        except OSError as error:
+            _raw, guard = _read_bound(root, relative)
+        except (OSError, vault.PathGuardError) as error:
             raise RelationReviewError(
                 "LIFECYCLE_PRIMARY_INVALID",
                 "prepared transition primary cannot be inspected safely",
             ) from error
-        try:
-            guards.append(
-                vault.PathGuard.capture(
-                    root,
-                    relative,
-                    leaf_policy="content",
-                    expected_content_hash=hashlib.sha256(raw).hexdigest(),
-                )
-            )
-        except vault.PathGuardError as error:
-            raise RelationReviewError(
-                "LIFECYCLE_PRIMARY_INVALID",
-                "prepared transition primary cannot be inspected safely",
-            ) from error
+        guards.append(guard)
     return tuple(guards)
+
+
+def _read_bound(root: Path, relative: str) -> tuple[bytes | None, vault.PathGuard]:
+    """The bytes at ``relative``, None when nothing is there, and the guard that binds them.
+
+    A page that a store-mode vault serves is read from the store and bound to it: its file is only
+    a projection, which may lag or be absent. Any other path is read and bound on disk.
+    """
+    from .vault_store import read
+
+    if read.serves(root, relative):
+        try:
+            raw = read.owned_bytes(root, relative)
+        except FileNotFoundError:
+            return None, vault.PathGuard.of_stored(relative, None)
+        assert raw is not None  # the store serves the path
+        return raw, vault.PathGuard.of_stored(relative, hashlib.sha256(raw).hexdigest())
+    try:
+        raw = (root / relative).read_bytes()
+    except FileNotFoundError:
+        return None, vault.PathGuard.capture(root, relative, leaf_policy="absent")
+    return raw, vault.PathGuard.capture(
+        root, relative, leaf_policy="content", expected_content_hash=hashlib.sha256(raw).hexdigest()
+    )
 
 
 def _prepared_primary_binding(
@@ -1892,13 +1897,9 @@ def _trash_proof_for_prepared(
         if trash_path not in snapshot.files or not trash_path.endswith(".md"):
             continue
         try:
-            raw = (root / trash_path).read_bytes()
-            source_guard = vault.PathGuard.capture(
-                root,
-                trash_path,
-                leaf_policy="content",
-                expected_content_hash=hashlib.sha256(raw).hexdigest(),
-            )
+            raw, source_guard = _read_bound(root, trash_path)
+            if raw is None:
+                raise FileNotFoundError(trash_path)
             target_guards.append(source_guard)
             source = raw.decode("utf-8", errors="strict")
             frontmatter, _, _ = vault.parse_frontmatter(source)

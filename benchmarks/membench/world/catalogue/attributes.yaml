@@ -4,7 +4,7 @@
 # words: adding one is a data change. The sets in this file are closed: code implements each member, so
 # adding one is a code change and a change to this file. Code branches only on these values. It
 # never branches on a phenomenon id, a family key, a behaviour key or a norm key.
-schema_version: 2
+schema_version: 4
 
 # How the oracle knows the answer. Each mechanism is one pure function over the evidence layer.
 # `readings` are the named results that a recipe may take as a key, a trap or a premise.
@@ -51,7 +51,7 @@ truth_mechanisms:
     readings:
       kind: "The kind of a statement, or of the statements about an attribute. Of several, the latest one that asserts and stands decides, and when none asserts, the latest one that stands."
       modality: "Whether a statement says what is, should be, must be or may be."
-      hedge: "The hedge that a statement carries, a word from `hedges.yaml`, or none."
+      hedge: "The hedge that a statement carries: a word that marks how certain it is, or none."
   state_fold:
     description: "Turn the asserted statements about one attribute into status spans, under the norms that the entry names and the attribute's volatility class. membench's bitemporal resolution then evaluates the spans."
     readings:
@@ -179,6 +179,7 @@ role_constraints:
   within: "A context that contains this context."
   outside: "An audience or a context that the role does not belong to."
   volatility: "The volatility class that the attribute must have."
+  values: "The value generator that the attribute draws from. A role without it binds no attribute whose values are holders."
 
 # The parts of a recipe's key for one probe form. Each part is a reading, or a role taken as it is.
 key_parts:
@@ -234,11 +235,14 @@ bridge_strengths:
   suggests: "The observation makes the content likely. Its probe is on the rubric track."
 
 # Whether the key is computed. The first three values are membench's family classifications.
+# `truth` says which mechanisms a phenomenon of the class names: `pipeline` means the mechanisms
+# of `pipeline_order`, and a mechanism name means that mechanism alone. A class whose `truth` is
+# `pipeline` is the computed class.
 key_classes:
-  deterministic-oracle: "The oracle computes the key from the evidence layer."
-  rubric-track: "The oracle supplies facts, and a blind judge applies a predeclared rubric."
-  run-relative: "The key depends on what the arm itself did or held. The harness computes it from the run's own record, and it is reported as harm or description only."
-  out-of-scope: "The benchmark declares the phenomenon outside what it can test."
+  deterministic-oracle: {truth: pipeline, description: "The oracle computes the key from the evidence layer."}
+  rubric-track: {truth: judged, description: "The oracle supplies facts, and a blind judge applies a predeclared rubric."}
+  run-relative: {truth: run_record, description: "The key depends on what the arm itself did or held. The harness computes it from the run's own record, and it is reported as harm or description only."}
+  out-of-scope: {truth: none, description: "The benchmark declares the phenomenon outside what it can test."}
 
 # What a probe asks the actor to do. `read_as` says how its result is read: as a position between
 # the floor and the ceiling, or as harm against the no-memory arm.
@@ -254,9 +258,13 @@ probe_forms:
   weigh: {read_as: position, description: "Ask for the state of a disagreement or the case on each side."}
   forecast: {read_as: position, description: "Ask for a probability or a belief level. A proper scoring rule scores it."}
   audit: {read_as: position, description: "Ask about the corpus itself, such as what changed or what is duplicated."}
-  stable: {read_as: position, description: "Ask for a fact that never changes. This is the recall control."}
+  stable: {read_as: position, traits: [recall], description: "Ask for a fact that never changes. This is the recall control."}
   abstain: {read_as: harm, description: "Ask a question whose warranted answer is that the corpus does not say. A no-memory arm gets it right."}
   unaided: {read_as: harm, description: "Give a task that no stored memory bears on. Its key is the no-memory arm's own result."}
+
+# What a probe form's `traits` may name: a closed set that code implements.
+probe_form_traits:
+  recall: "The probe asks for a fact that never changes; it is the recall control."
 
 # How a probe's result is read.
 result_readings:
@@ -307,3 +315,25 @@ dials:
   composition: "The number of phenomena that one thread combines."
   history: "The number of sessions and pages in the world."
   margin: "How far apart the stated standing of two conflicting sources is."
+
+# The splits of the benchmark. A world belongs to one split, and the wordbank's names, a pack's surface
+# forms, bridges and work-task templates are each assigned to one split by a stable hash of their ids.
+splits:
+  train: "Public seed. Labelled spans for distilling the model-based sensors. Never scored."
+  dev: "Public seed. For iterating the generator, the harness and the product."
+  heldout: "Seed in evaluator custody. One decision, then the world is retired to `dev`."
+
+# The wordbank's name spaces. A domain pack gives each entity type one of them for its names.
+name_spaces:
+  person: "A first name and a last name composed from syllables."
+  org: "An organisation: a stem and a suffix."
+  project: "A project code name."
+  city: "A place name composed from two parts."
+  product: "A product or system name."
+  concept: "A named framework, charter or protocol."
+
+# How a domain pack draws a value for an attribute. Each generator takes the arguments given here.
+value_generators:
+  integer: "A whole number from `min` to `max`, both included."
+  choice: "One of the listed `from` values."
+  holder: "One of the world's holders of the entity type `from`."

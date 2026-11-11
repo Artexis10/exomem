@@ -181,6 +181,9 @@ class CellTraffic:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            from .governance.transaction import fsync_directory
+
+            fsync_directory(self.path.parent)
         except OSError:
             log.warning("event=cell_traffic_flush_failed the hourly counts were not saved")
         finally:
@@ -234,7 +237,13 @@ def shutdown_lifespan(inner, traffic: CellTraffic):
                 yield state
         finally:
             traffic.flush()
-            # A synced SQLite WAL replays on the next open, so the volume is consistent.
-            os.sync()
+            # A synced SQLite WAL replays on the next open. Only this state root's files: `os.sync`
+            # would wait on every filesystem the host mounts.
+            from . import cloud_import
+
+            try:
+                cloud_import.flush_to_disk(traffic.path.parent)
+            except OSError:
+                log.warning("event=cell_state_flush_failed the state root was not fully flushed")
 
     return _lifespan

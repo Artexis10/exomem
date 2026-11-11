@@ -9,9 +9,11 @@ claim with its source and its asserter, and four timeline events ordered by date
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
+from test_activate_context_request_path import _seed_live_recall
 from test_governance_egress import _external, _reset_caches, write_rule, write_scope
 
 from exomem import (
@@ -20,6 +22,7 @@ from exomem import (
     dimension_display,
     epistemic_dimensions,
     epistemic_graph,
+    freshness,
     memory_schema,
     relation_registry,
 )
@@ -400,6 +403,160 @@ def test_a_caller_who_may_not_see_the_answer_gets_the_reply_of_a_vault_without_i
     assert _marks(with_page)["Does the launch need a beta?"] == {"open": True}
 
 
+def _write_as_the_service_does(vault: Path, rel: str, body: str) -> None:
+    """A committed service write as the file watcher's batch publishes it: the file lands,
+    freshness announces the batch, and the resident link resolver is patched in the same batch.
+    The graph catches up later, so it trails the live recall checkpoint until then."""
+    path = vault / rel
+    path.write_text(body, encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[path])
+    find_module.on_resolver_files_changed(vault, [rel], [])
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_write_the_caller_may_not_see_leaves_its_marks_as_a_vault_without_that_write(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches a restricted reply that changes when a withheld page changes: the graph trails the
+    write, so the group would say its links are unknown and drop `open`, a one-bit signal that a
+    page the caller may not see was written."""
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    rewritten = PAGE.format(title="Answers", body=PAGES["Answers"] + "\n\nTwo weeks is enough.")
+    replies = []
+    for written in (True, False):
+        vault = _answer_twin(tmp_path / ("written" if written else "unwritten"), withheld=True)
+        _seed_live_recall(vault)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        with principal.request_scope(_external()):
+            before = _search(vault, filters, deep=True)
+            if written:
+                _write_as_the_service_does(vault, f"{NOTES}/{WITHHELD_ANSWER}.md", rewritten)
+            replies.append(_search(vault, filters, deep=True))
+        assert replies[-1] == before
+    after_write, never_written = replies
+
+    assert after_write == never_written
+    assert _marks(after_write)["Does the launch need a beta?"] == {"open": True}
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_withheld_page_created_while_the_graph_trails_reads_as_unknown(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Pins the limit the in-place edit fix does not cover: a withheld page created while the
+    graph trails changes the link topology, so no resolver can show the rows' links as derived,
+    and the restricted read says its edges are unknown rather than serving them as they were."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    created = f"{NOTES}/Patterns/Answer notes.md"
+    with principal.request_scope(_external()):
+        _write_as_the_service_does(
+            vault, created, PAGE.format(title="Answer notes", body="A new withheld page.")
+        )
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
+
+
+def test_a_lag_holding_a_deleted_page_reads_as_unknown(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    """Pins the deleted-path rule: a withheld page deleted while the graph trails is not one the
+    lag may keep. The graph's rows cannot be served as they stand, so the restricted read says
+    its edges are unknown rather than as a vault that still holds the page."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    request.getfixturevalue("warm_managed_cell")(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    with principal.request_scope(_external()):
+        # A first read leaves the published verdict that proves the page withheld for this caller.
+        _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True, scope="vault")
+        path = vault / f"{NOTES}/{WITHHELD_ANSWER}.md"
+        path.unlink()
+        freshness.on_files_changed(vault, deleted=[path])
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_watcher_batch_repairing_a_withheld_edit_leaves_the_reply_unchanged(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches the pending-window leak the trailing-marker fix alone left: a withheld page
+    edited inside a watcher batch arms the read barrier and a pending mark for the whole
+    repair window, and the restricted reply still must not flip to unknown while it does —
+    the batch names only a page the caller may not see."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    rewritten = PAGE.format(title="Answers", body=PAGES["Answers"] + "\n\nTwo weeks is enough.")
+    with principal.request_scope(_external()):
+        before = _search(vault, filters, deep=True)
+        withheld_path = vault / f"{NOTES}/{WITHHELD_ANSWER}.md"
+        _write_as_the_service_does(vault, f"{NOTES}/{WITHHELD_ANSWER}.md", rewritten)
+        index.suspend_reads()
+        epoch = freshness.mark_external_pending(vault, paths=[withheld_path])
+        try:
+            after = _search(vault, filters, deep=True)
+        finally:
+            freshness.clear_external_pending(vault, through=epoch)
+    assert after == before
+
+
+@pytest.mark.parametrize("mark", ["visible", "unscoped"], ids=["visible-path", "unscoped"])
+def test_a_pending_mark_on_what_the_caller_may_see_still_reads_as_unknown(
+    tmp_path: Path, mark: str
+) -> None:
+    """Pins the other half of the pending rule: a mark naming a page the caller may see — or
+    naming nothing at all — still flips the restricted read to unknown, because its stored
+    rows could be stale on something it is allowed to read."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    with principal.request_scope(_external()):
+        paths = [] if mark == "unscoped" else [vault / f"{NOTES}/Questions.md"]
+        epoch = freshness.mark_external_pending(vault, paths=paths)
+        try:
+            with pytest.raises(find_module.RetrievalIndexWarming):
+                _search(vault, filters, deep=True)
+        finally:
+            freshness.clear_external_pending(vault, through=epoch)
+
+
+def test_a_structurally_stale_sidecar_reads_as_unknown_under_a_withheld_lag(
+    tmp_path: Path,
+) -> None:
+    """Pins the boundary of the restricted consult: it rescues content lag the withheld proof
+    can decide, never structural staleness. A sidecar whose schema marker no longer matches —
+    though its stored marker is self-consistent and its only lag is a withheld edit — refuses
+    the restricted caller exactly as it refuses a public one."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    _write_as_the_service_does(
+        vault, f"{NOTES}/{WITHHELD_ANSWER}.md",
+        PAGE.format(title="Answers", body=PAGES["Answers"] + "\n\nTwo weeks is enough."),
+    )
+    with sqlite3.connect(index.path) as sidecar:
+        sidecar.execute(
+            "UPDATE graph_meta SET value = 'corrupted' WHERE key = 'schema_version'"
+        )
+    with principal.request_scope(_external()):
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            _search(vault, filters, deep=True)
+
+
 def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the_next(
     tmp_path: Path,
 ) -> None:
@@ -494,6 +651,36 @@ def test_an_unreadable_graph_marks_nothing_open_and_says_the_links_are_unknown(
     assert reply["user_summary"] == (
         "2 units in 'Questions'; its links could not be read yet, so its marks may be incomplete."
     )
+
+
+@pytest.mark.parametrize("restricted", [False, True], ids=["owner", "restricted"])
+def test_a_write_the_caller_may_see_makes_its_links_unknown_while_the_graph_trails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restricted: bool
+) -> None:
+    """Catches a lag rule that hides a write from a caller who may see it. The owner sees every
+    write, and a restricted caller sees a write to a page it may see. While the graph trails such
+    a write, their links are unknown, as for an unreadable graph."""
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
+    pages = {key: body for key, body in PAGES.items() if key != "Answers"}
+    pages[WITHHELD_ANSWER] = PAGES["Answers"]
+    vault = _vault(tmp_path, pages, registry=QUESTIONS_ONLY, graph=False)
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _seed_live_recall(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    _reset_caches()
+    written = "Questions" if restricted else WITHHELD_ANSWER
+    body = PAGE.format(title=written.rsplit("/", 1)[-1], body=pages[written] + "\n\nOne more line.")
+    filters = {"unit.dimension": {"$eq": "questions"}}
+    with principal.request_scope(_external() if restricted else principal.owner_principal()):
+        before = _search(vault, filters, deep=True)
+        _write_as_the_service_does(vault, f"{NOTES}/{written}.md", body)
+        after = _search(vault, filters, deep=True)
+
+    assert "edges" not in before["dimension_groups"][0]
+    [group] = after["dimension_groups"]
+    assert group["edges"] == "unknown"
+    assert not any(_marks(after).values())
 
 
 ARGUMENT_PAGES = {

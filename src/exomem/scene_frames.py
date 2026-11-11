@@ -107,28 +107,81 @@ def parse_frame_ts(name: str) -> float | None:
     return int(m.group(2)) / 1000.0
 
 
-def _refuse_in_store_mode(vault_root: Path, frames: Path) -> None:
-    """Refuse to clear frames that a store-mode vault holds: a sidecar is a stored page.
-
-    An unlink removes only the projection of a sidecar, and the frames may be stored with no file
-    on disk, so the clear would leave pages behind. A video without frames and a file-mode vault
-    clear as before. Callers that clear as a best-effort step log the refusal and go on.
-    """
-    from .vault_store import availability, mode, ownership, read
+def _stored_frames_folder(vault_root: Path, frames: Path) -> str | None:
+    """The vault-relative frames folder when a store-mode vault owns it, else None (file mode)."""
+    from .vault_store import mode, ownership
 
     if not mode.store_mode_active(vault_root):
-        return
+        return None
     try:
-        relative = frames.resolve().relative_to(vault_root.resolve()).as_posix()
+        relative = frames.resolve().relative_to(Path(vault_root).resolve()).as_posix()
     except (ValueError, OSError):
-        return
-    if not ownership.owns_folder(relative):
-        return
-    if frames.is_dir() or read.holds_folder(vault_root, relative):
-        raise availability.unrouted(
-            "clear_scene_frames",
-            "a frame sidecar is a stored page, and removing its file does not remove the page",
+        return None
+    return relative if ownership.owns_folder(relative) else None
+
+
+def _clear_in_store(vault_root: Path, frames: Path, frames_rel: str) -> int:
+    """Clear a video's frames in a store-mode vault: unlink each JPEG, then one commit.
+
+    A frame's JPEG is a binary, whose bytes are on disk, and its sidecar is a stored page. The
+    commit deletes every frame sidecar the store holds and the record of every JPEG it unlinked.
+    It runs on the store thread, as a media sidecar commit does; a thread with no writer and no
+    service to hop to raises before anything is unlinked. A kill between the unlinks and the commit
+    leaves the sidecar pages: the next sweep drops the records of the gone JPEGs, and reconcile's
+    frame pass clears the pages. Returns the number of JPEGs and sidecar pages removed.
+    """
+    from .vault_store import availability, batch, read, write
+    from .vault_store import media as store_media
+
+    if store_media.off_store_thread(vault_root):
+        return store_media.on_store_thread(
+            vault_root, lambda: _clear_in_store(vault_root, frames, frames_rel)
         )
+    writer = availability.page_writer(vault_root)
+    prefix = f"{frames_rel}/"
+    with read.snapshot(vault_root) as view:
+        sidecars = [
+            meta.path
+            for meta in view.pages(prefix)
+            if parse_frame_ts(meta.path[len(prefix):].removesuffix(".md")) is not None
+        ]
+        recorded = {
+            meta.path
+            for meta in view.binaries(prefix)
+            if parse_frame_ts(meta.path[len(prefix):]) is not None
+        }
+    unlinked: list[str] = []
+    if frames.is_dir():
+        for jpg in sorted(frames.iterdir()):
+            if parse_frame_ts(jpg.name) is None:
+                continue
+            try:
+                jpg.unlink()
+            except OSError as e:
+                log.warning("could not remove stale scene frame %s: %s", jpg.name, e)
+                continue
+            unlinked.append(jpg.name)
+    # A JPEG that stayed keeps its record; one that is gone, by this pass or before it, loses it.
+    gone = sorted(recorded - {f"{frames_rel}/{name}" for name in _on_disk(frames)})
+    if sidecars or gone:
+        batch.commit_batch(
+            writer,
+            [],
+            vault_root=vault_root,
+            lifecycle=batch.Lifecycle(
+                deletes=tuple(write.PageDelete(rel, absent_ok=True) for rel in sidecars),
+                binary_deletes=tuple(write.BinaryDelete(rel, on_disk=True) for rel in gone),
+            ),
+        )
+    return len(unlinked) + len(sidecars)
+
+
+def _on_disk(frames: Path) -> set[str]:
+    """The names of the entries still in a frames folder."""
+    try:
+        return {entry.name for entry in frames.iterdir()}
+    except OSError:
+        return set()
 
 
 def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
@@ -139,7 +192,9 @@ def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
     embedding index so stale rows don't linger. Returns the number of files removed.
     """
     d = frames_dir_for(video_path)
-    _refuse_in_store_mode(vault_root, d)
+    frames_rel = _stored_frames_folder(vault_root, d)
+    if frames_rel is not None:
+        return _clear_in_store(vault_root, d, frames_rel)
     if not d.is_dir():
         return 0
     removed_sidecars: list[str] = []
@@ -302,6 +357,21 @@ def write_scene_frames(
     its own atomic successor protocol. Encoding failures remain per-frame soft
     failures; exact-v4 catalog refusal/uncertainty is surfaced to its caller.
     """
+    from .vault_store import media as store_media
+
+    if store_media.off_store_thread(vault_root):
+        # A store-mode vault commits the frames and their sidecars on the store thread, as the
+        # media sidecar commit does; the caller's mutation guard stays held across the hop.
+        return store_media.on_store_thread(
+            vault_root,
+            lambda: write_scene_frames(
+                vault_root,
+                video_path,
+                scenes_with_images,
+                parent_clip_samples=parent_clip_samples,
+                today=today,
+            ),
+        )
     root = Path(os.path.abspath(vault_root))
     try:
         canonical_video = Path(os.path.abspath(video_path))

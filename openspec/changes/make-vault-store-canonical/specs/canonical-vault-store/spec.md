@@ -13,6 +13,11 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **THEN** the file stays on disk and is durable before the transaction that records its path and content hash commits
 - **AND** the store records that path and hash in the same transaction as the page that cites it
 
+#### Scenario: A governed move of a binary renames it, then records it
+- **WHEN** a delete, a move or a recovery in store mode moves a binary file
+- **THEN** the file is renamed on disk first, and one transaction records it at its new path and removes its old record, bound to the old record as read and to an empty new path
+- **AND** a refused transaction renames the file back, and a kill before the transaction leaves the old record to the next sweep, which pairs it with the moved file by its hash
+
 ### Requirement: One transaction per governed write
 A governed write in store mode SHALL commit every file it changes, the lexical catalogue rows, the graph nodes, edges and dependencies derived from those files, one audit row per file and one projection intent per file in one `BEGIN IMMEDIATE` transaction. The write SHALL acknowledge only after that transaction is durable. Derivation SHALL run from the bytes being written, before the transaction, with the same derivation code that file mode uses. When a write adds a title that makes links on other pages resolve, the same transaction SHALL update those pages' graph rows.
 

@@ -1201,9 +1201,11 @@ def pin_lexical_checkpoint(
     The release decision on each hit stays per request, on the live file.
     """
     request = snapshot.recall_checkpoint("kb")
-    if visible is None:
-        return request
     from . import lexstore
+
+    # A store-mode vault's rows are current at the request's snapshot: no published lag to bridge.
+    if visible is None or lexstore.store_rows_serve(vault_root):
+        return request
     from .governance import egress
 
     try:
@@ -1235,6 +1237,8 @@ def lexical_selection_scope(
     if (
         recall_checkpoint is None or not _managed() or not freshness.event_indexes_enabled()
         or lexstore.backend() == "python"
+        # The store's snapshot is the request's selection: no file-built catalogue to retain.
+        or lexstore.store_rows_serve(vault_root)
     ):
         yield recall_checkpoint
         return

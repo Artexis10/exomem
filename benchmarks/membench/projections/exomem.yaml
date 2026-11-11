@@ -1,8 +1,9 @@
-# The Exomem projection of the catalogue. It sits outside `catalogue/`, so that an edited
-# prediction changes no world's catalogue digest. The world, its prose and its keys never read it.
+# The Exomem projection of the catalogue. It sits outside `benchmarks/membench/world/catalogue/`, so that an edited
+# prediction changes no world's catalogue digest. The world, its prose and its keys never read it. A world's manifest
+# pins this file's digest as its `projection_digest`.
 #
-# The catalogue itself is not free of the product: `catalogue/families.yaml` marks the twelve
-# families that mirror a shipped Exomem dimension, and `catalogue/lineage.yaml` describes them.
+# The catalogue itself is not free of the product: `benchmarks/membench/world/catalogue/families.yaml` marks the twelve
+# families that mirror a shipped Exomem dimension, and `benchmarks/membench/world/catalogue/lineage.yaml` describes them.
 #
 # `dimension` is the shipped Exomem dimension key that a probe of the family carries when the
 # epistemic task suite (f38) plays a generated project. A family with no dimension has no shipped
@@ -17,9 +18,48 @@
 # No run backs any of them. A report prints the prediction beside the observed result, and a
 # wrong prediction in either direction is a finding. A family whose phenomena are all out of
 # scope has no row.
-schema_version: 1
+schema_version: 2
 product: exomem
 read_on: 2026-11-10
+
+# What the epistemic task suite (f38) needs beyond a family's dimension, to play a generated project. The text is
+# data, because a person edits it and no code branches on it. Slots are `str.format` slots.
+f38:
+  # The catalogue stage whose entries make a development project.
+  stage: s1
+  # Recall probes in one project. A round plants a recall control again until its project holds this many.
+  recall_probes: 4
+  # The task of a session's main work. A session draws one by a seeded choice. No task names a value.
+  work_tasks:
+    - "Go through this week's files. Reply to whatever needs a reply and update whatever needs updating."
+    - "Read the new files in this folder and handle what they ask of you, one item at a time."
+    - "Work through the files that arrived this week. Do what each one needs and note anything you must come back to."
+    - "Take the files from this week and carry out the work that they set, starting with the oldest."
+    - "Look at what was filed this week, do the work that follows from it and keep a short record of what you did."
+    - "Read this week's files in order, act on the ones that need action and leave the rest as they are."
+  # A premise probe's task presupposes a stale or false state. The line is added when the task does not already hold it.
+  premise_line: "The earlier setting I mean is {premise}."
+  # The readings whose answer is a property that an answer keeps, such as the kind of a statement, and no value that
+  # an answer states. The key carries such an answer in its rubric and leaves `value` null, because a kind or a hedge
+  # is a word that ordinary documents hold, and the suite's leak rule would then refuse the probe.
+  property_readings: [kind_tag.kind, kind_tag.modality, kind_tag.hedge, state_fold.standing]
+  # The behaviours that a probe of a thread planted in the mutation world asks, in place of its entry's. Nothing changed
+  # there, so the right answer reports no change, and the judge looks for the false alarm only.
+  mutation_behaviours: [over_flags]
+  # Words for the answers that are no name or value.
+  words: {"true": "yes", "false": "no", "none": "none"}
+  # How a statement reads inside a rubric line: its sentence in quotes, so that its own full stops end nothing.
+  statement: '"{text}"'
+  # How the owner of an attribute and its label read together, as the bank's probe forms read them.
+  attribute: "{about} for {subject}"
+  # A reading's argument, such as the context that it was taken in, after what the reading was asked of.
+  qualifier: " ({argument}: {value})"
+  # The lines of a key's rubric, for an answer that is no single value. `description` is the reading's own
+  # description in `attributes.yaml`.
+  rubric:
+    answer: "The correct answer is the result of this reading. {description} For {of}: {value}."
+    fact: "This also holds. {description} For {of}: {value}."
+
 families:
   currency: {dimension: currency, models: yes, predict: partial, why: "A stated replacement has a relation and a display mark. An implied or propagated update has no structure, so the agent must notice it unaided."}
   order: {dimension: order, models: partial, predict: partial, why: "Event dates and order relations are shipped. A question about a past date has no query, and the store keeps no second time axis."}

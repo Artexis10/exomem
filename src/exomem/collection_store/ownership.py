@@ -34,13 +34,17 @@ def _manager(root):
     return active_manager() or (runtime.manager if runtime is not None else _SERVED.get(Path(root).resolve())) or get_manager()
 
 
+def layer_folders():
+    """The vault-relative folder of each profile's placement layer: what lies below one is the collection store's."""
+    return tuple(vault.kb_dirname() + "/" + profile.placement_layer for profile in collection_profiles.PROFILES.values())
+
+
 def relevant(path, *, ancestors=False):
     """Profile placement proves disjoint knowledge without consulting collection SQL."""
     if path is None:
         return True
     key = collections._portable_path_key(str(path).replace("\\", "/").strip("/"))
-    roots = tuple(collections._portable_path_key(vault.kb_dirname() + "/" + profile.placement_layer)
-                  for profile in collection_profiles.PROFILES.values())
+    roots = tuple(collections._portable_path_key(folder) for folder in layer_folders())
     return any(key == root or key.startswith(root + "/") or ancestors and
                (not key or root.startswith(key + "/")) for root in roots)
 

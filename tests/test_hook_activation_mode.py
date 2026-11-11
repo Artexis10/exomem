@@ -989,3 +989,23 @@ def test_activation_token_reader_refuses_group_readable_anchor_binding(monkeypat
     monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
     monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "codex")
     assert retrieve._read_activation_token("s") == ""
+
+
+@pytest.mark.parametrize("level,has_repo_task", [("light", False), ("balanced", True)])
+def test_repository_task_sentence_follows_the_level(monkeypatch, capsys, level, has_repo_task):
+    """Catches a later edit that folds the sentence back into the shared text.
+
+    The copy-sync tests stay green once the copies are regenerated, so only this
+    pins `light` to the advice sentence without the repository-task sentence.
+    """
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    monkeypatch.setattr(
+        retrieve.sys,
+        "stdin",
+        io.StringIO(json.dumps({"prompt": "prepare a release of this repository", "session_id": "s"})),
+    )
+    assert retrieve.main() == 0
+    out = capsys.readouterr().out
+    assert "Advice on the user's own case needs that initial activation" in out
+    assert ("A task in the user's own repository or project" in out) is has_repo_task
