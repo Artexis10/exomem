@@ -179,10 +179,17 @@ def verify_remote_export(url: str, *, cell_id: str, archive_bytes: int, archive_
                 expected_vault_id=cell_id, limits=vault_portability.PortabilityLimits(
                     max_total_bytes=max_bytes, max_file_bytes=max_bytes))
         if verified.archive_sha256 != archive_sha256:
-            raise ExportRefused(EXPORT_FAILED)
+            raise ExportRefused(EXPORT_FAILED, {"mismatch": "sha256"})
         return {"bytes": verified.archive_size, "sha256": verified.archive_sha256, "verified": True}
-    except Exception:  # noqa: BLE001 -- dependency failures must never expose signed URLs
-        raise ExportRefused(EXPORT_FAILED) from None
+    except ExportRefused:
+        raise
+    except Exception as error:  # noqa: BLE001 -- dependency failures must never expose signed URLs
+        # The error's class names the cause; an HTTP response error also carries a status.
+        detail: dict[str, int | str] = {"cause": type(error).__name__}
+        status = getattr(error, "status", None)
+        if type(status) is int and 100 <= status <= 599:
+            detail["status"] = status
+        raise ExportRefused(EXPORT_FAILED, detail) from None
     finally:
         from fsspec.asyn import sync
         if fs._session is not None:
