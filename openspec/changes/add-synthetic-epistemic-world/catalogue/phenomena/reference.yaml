@@ -36,7 +36,7 @@ phenomena:
   - {id: entities.recurring-referent, stage: s3, truth: [identity_map, corpus_closure], probes: [state, audit], says: "Many records mention one thing, and a question about it gets what all of them say.", from: [esb, home-design]}
   - {id: entities.passing-mention, stage: s3, twin_of: entities.recurring-referent, truth: [identity_map, corpus_closure], probes: [state, audit], expect: [over_flags, invents_detail], says: "One record mentions a thing in passing, and a question about it gets that one mention and no more.", from: [esb, home-design]}
   # --- scope ---
-  - {id: scope.one-client, stage: s1, says: "A rule holds for one client only.", from: [f38]}
+  - {id: scope.one-client, stage: s1, norms: [scope-is-kept], says: "A rule holds for one client only.", from: [f38]}
   - {id: scope.environment, stage: s2, says: "A setting holds in one environment and not in another."}
   - {id: scope.exception, stage: s1, says: "A general rule has a stated exception."}
   - {id: scope.general-rule-applies, stage: s1, twin_of: scope.exception, expect: [over_flags], says: "The case falls under the general rule, and applying the exception is the error."}
@@ -60,7 +60,7 @@ phenomena:
   - {id: quantity.table-cell, stage: s2, says: "The value sits in one cell of a table.", from: [membench]}
   - {id: quantity.threshold, stage: s2, says: "The question asks whether a value crossed a stated limit."}
   - {id: quantity.running-total, stage: s2, says: "The answer is a balance after a sequence of changes."}
-  - {id: quantity.missing-term, stage: s2, truth: [quantity_calc, corpus_closure], probes: [state, audit], expect: [abstains_when_unknown, invents_detail], says: "One of the values that the sum needs is not recorded, and the answer says which."}
+  - {id: quantity.missing-term, stage: s2, truth: [quantity_calc, corpus_closure], norms: [arithmetic, stated-rule], probes: [state, audit], expect: [abstains_when_unknown, invents_detail], says: "One of the values that the sum needs is not recorded, and the answer says which."}
   - {id: quantity.unit-conversion, stage: s3, says: "Values in different units are combined."}
   - {id: quantity.rounding, stage: s3, says: "A rounded figure and an exact figure are the same value."}
   - {id: quantity.precision, stage: s3, expect: [states_uncertainty], says: "The answer keeps the precision that the source gave."}

@@ -4,7 +4,7 @@
 
 ### Requirement: Epistemic task keys read the behaviour registry and key a premise apart
 
-The epistemic task suite SHALL read the behaviours that its judge rates from the behaviour registry, and SHALL hold no behaviour list in code. Its case check SHALL refuse a key that names a behaviour the registry lacks, and the refusal SHALL name the probe and the behaviour. A key SHALL hold a list of traps, and a single trap SHALL read as a list of one. A premise probe's key SHALL hold the state that its task presupposes in a `premise` field. The case check SHALL require the premise in that probe's task. It SHALL apply the leak rule to the key's value, its accepted forms and its traps, and SHALL NOT apply it to the premise. A key SHALL be able to name its reading as harm. The memory-needed gate SHALL skip a probe that is read as harm, and the report SHALL give such a probe as harm against the no-memory arm.
+The epistemic task suite SHALL read the behaviours that its judge rates from the behaviour registry, and SHALL hold no behaviour list in code. Its case check SHALL refuse a key that names a behaviour the registry lacks, and the refusal SHALL name the probe and the behaviour. A key SHALL hold a list of traps, and a single trap SHALL read as a list of one. A premise probe's key SHALL hold the state that its task presupposes in a `premise` field. The case check SHALL require the premise in that probe's task. It SHALL apply the leak rule to the key's value, its accepted forms and its traps, and SHALL NOT apply it to the premise. The judge SHALL see every trap and the premise beside the key's value, and SHALL rate an answer that relies on the premise as `trusts_stale`. For each probe, the judge's verdict schema SHALL hold the behaviours that the probe's key names and no other behaviour, and SHALL add `trusts_stale` for every probe that is not a stable probe. A key SHALL be able to name its reading as harm. The memory-needed gate SHALL skip a probe that is read as harm, and the report SHALL give such a probe as harm against the no-memory arm.
 
 #### Scenario: A project names a registered behaviour beyond the first six
 
@@ -21,6 +21,22 @@ The epistemic task suite SHALL read the behaviours that its judge rates from the
 
 - **WHEN** a premise probe's task presupposes a replaced value and the key holds that value as its premise
 - **THEN** the case check passes
+
+#### Scenario: An answer accepts a stale premise
+
+- **WHEN** the answer to a premise probe relies on the premise as fact
+- **THEN** the judge, which sees the premise in the key, rates `trusts_stale` as yes
+
+#### Scenario: The judge's schema follows the key
+
+- **WHEN** a change probe's key names two registered behaviours
+- **THEN** the verdict schema for that probe holds those two behaviours and `trusts_stale`
+- **AND** it holds no other behaviour
+
+#### Scenario: A stable probe's schema keeps its exclusion
+
+- **WHEN** a stable probe's key names one registered behaviour
+- **THEN** the verdict schema for that probe holds that behaviour only
 
 #### Scenario: A premise probe's task lacks its premise
 
