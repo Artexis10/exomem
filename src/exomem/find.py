@@ -5865,17 +5865,14 @@ def _browse_order_key(rel_path: str, updated: str) -> tuple[str, str]:
     return (updated or "0000-00-00", rel_path)
 
 
-def _managed_browse_reader(vault_root: Path) -> bool:
-    """Whether the keyword and browse arms read the catalogue instead of parsing every match.
+def _managed_browse_reader() -> bool:
+    """Whether the contract governs this reader's browse.
 
     One name for the test both browse arms make, so a change of policy is a
     change in one place. An offline/CLI caller keeps its documented scan
-    fallback and is not under the read-path contract. A store-mode vault's rows
-    are the request's snapshot, so it reads them as the managed runtime does.
+    fallback and is not under the read-path contract.
     """
-    from . import lexstore
-
-    return bool(_managed_reader()) or lexstore.store_rows_serve(vault_root)
+    return bool(_managed_reader())
 
 
 def _find_managed_browse(
@@ -6242,9 +6239,12 @@ def _find_keyword(
     decide its label from what it actually did. `index` when it consumed a
     resolved path set, `computed` when it enumerated.
     """
-    if query_norm and _managed_browse_reader(vault_root):
-        from . import lexstore
+    from . import lexstore
 
+    # A store-mode vault's rows are the request's snapshot, so both arms read
+    # them as the managed runtime does, whatever the caller.
+    reads_catalogue = _managed_browse_reader() or lexstore.store_rows_serve(vault_root)
+    if query_norm and reads_catalogue:
         # The documented Python backend retains its exhaustive rollback path.
         if lexstore.backend() != "python":
             _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
@@ -6257,7 +6257,7 @@ def _find_keyword(
                 page_memo=page_memo,
                 select_pages=select_pages,
             )
-    if not query_norm and _managed_browse_reader(vault_root):
+    if not query_norm and reads_catalogue:
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
         return _find_managed_browse(
             vault_root,
