@@ -2124,10 +2124,25 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     """`content_permits` for each path of one walk.
 
     Inside a request scope the connector snapshot is read once for the walk;
-    see `connector_boundary.permits_filter`.
+    see `connector_boundary.permits_filter`. In that scope the filter also
+    keeps each path's container verdict: a maps activation asks one caller
+    view about every catalogue page twice, once for the map and once for the
+    turn slice's ranking, and the container check was most of each decision.
+    The connector and RAW checks stay live. Outside the scope nothing is kept.
     """
     boundary = connector_boundary.permits_filter(vault_root, who)
-    return lambda path: (_container_parents_permit(vault_root, path, who)
+    scope = state_paths.request_memo_scope()
+    containers: dict[str, bool] = {}
+
+    def containers_permit(path: str) -> bool:
+        if scope is None or state_paths.request_memo_scope() is not scope:
+            return _container_parents_permit(vault_root, path, who)
+        verdict = containers.get(path)
+        if verdict is None:
+            verdict = containers[path] = _container_parents_permit(vault_root, path, who)
+        return verdict
+
+    return lambda path: (containers_permit(path)
                          and boundary(path) and raw_protection.permits(vault_root, path, who))
 
 

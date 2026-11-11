@@ -367,6 +367,22 @@ def test_forged_missing_or_changed_parent_binding_never_grants_access(vault):
     assert not egress.content_permits(vault, child, owner_principal())
 
 
+def test_a_content_filter_kept_past_its_request_reads_a_changed_binding_again(vault):
+    """A content filter kept past its request reads a member's container binding again."""
+    from exomem import state_paths
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    stored = _capture(vault, container_bytes([("one.pdf", b"pdf")]))
+    child = stored.document_container["payloads"][0]
+    page = vault / (child + ".md")
+    with state_paths.resolution_scope():
+        keep = egress.content_permits_filter(vault, owner_principal())
+        assert keep(child)
+    page.write_text(page.read_text().replace("member_path: one.pdf", "member_path: different.pdf"))
+    assert not keep(child)
+
+
 def test_owner_bridge_review_cannot_release_payload_from_changed_parent(vault):
     from exomem.governance import egress
     from exomem.governance.principal import owner_principal, request_scope
