@@ -309,3 +309,15 @@ def test_the_report_counts_each_familys_value_keyed_and_rubric_only_probes() -> 
         assert (
             row["probes"]["value_keyed"] + row["probes"]["rubric_only"] == row["probes"]["played"]
         )
+
+
+def test_write_project_refuses_a_root_whose_case_set_names_another_project(
+    tmp_path: Path,
+) -> None:
+    """A second `generate` into one root must not silently drop the first project's SPLIT.json."""
+    summary = projection.generate(tmp_path, 7)
+    _, _, record = built(3)
+    with pytest.raises(SystemExit, match=str(tmp_path)):
+        projection.write_project(tmp_path, "project-other", record)
+    split = json.loads(cases.cases_dir(tmp_path).joinpath("SPLIT.json").read_text())
+    assert split["dev"] == [summary["project"]]

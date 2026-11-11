@@ -636,6 +636,36 @@ def test_a_run_with_the_gold_arm_reports_it_and_reads_an_earlier_report_for_satu
     assert "families by reading" in capsys.readouterr().out
 
 
+def test_an_earlier_report_path_that_is_missing_is_refused_with_its_path(tmp_path):
+    missing = tmp_path / "report-claude.json"
+    args = report_args("r5", Path("judge"), earlier=(missing,))
+    with pytest.raises(SystemExit) as refused:
+        command._earlier_reports(args, "dev")
+    assert "no such file" in str(refused.value) and str(missing) in str(refused.value)
+
+
+def test_an_earlier_report_of_another_split_or_case_set_is_refused(tmp_path):
+    heldout = tmp_path / "heldout.json"
+    heldout.write_text(json.dumps({"suite": "epistemic", "split": "heldout"}))
+    args = report_args("r5", Path("judge"), earlier=(heldout,))
+    with pytest.raises(SystemExit, match="heldout"):
+        command._earlier_reports(args, "dev")
+
+    other_set = tmp_path / "other.json"
+    other_set.write_text(
+        json.dumps({"suite": "epistemic", "split": "dev", "case_check": {"proj-b": {}}})
+    )
+    args = report_args("r5", Path("judge"), earlier=(other_set,))
+    with pytest.raises(SystemExit, match="case set"):
+        command._earlier_reports(args, "dev", {"proj-a": {}})
+
+    same = tmp_path / "same.json"
+    report_dict = {"suite": "epistemic", "split": "dev", "case_check": {"proj-a": {}}}
+    same.write_text(json.dumps(report_dict))
+    args = report_args("r5", Path("judge"), earlier=(same,))
+    assert command._earlier_reports(args, "dev", {"proj-a": {}}) == [report_dict]
+
+
 def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp_path, monkeypatch):
     """Every folder and Exomem answer in a smoke run named its store, which would show the judge the arm."""
     entries = [

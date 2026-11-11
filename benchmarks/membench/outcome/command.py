@@ -633,13 +633,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _earlier_reports(args: argparse.Namespace) -> list[dict]:
-    """The stored reports that ``--earlier-report`` names, newest first as given; each must be an epistemic report."""
+def _earlier_reports(
+    args: argparse.Namespace, split: str, case_check: dict | None = None
+) -> list[dict]:
+    """The stored reports that ``--earlier-report`` names, newest first as given; each must be an epistemic
+    report of the same split and, when both name one, the same case set."""
     stored = []
     for path in getattr(args, "earlier_report", None) or []:
-        found = json.loads(Path(path).read_text())
+        file = Path(path)
+        if not file.is_file():
+            raise refuse(f"--earlier-report {path}: no such file")
+        try:
+            found = json.loads(file.read_text())
+        except json.JSONDecodeError:
+            raise refuse(f"--earlier-report {path} is not a stored report") from None
         if found.get("suite") != "epistemic" or args.suite != "epistemic":
             raise refuse(f"--earlier-report {path} is not an epistemic report of an epistemic run")
+        if found.get("split") != split:
+            raise refuse(
+                f"--earlier-report {path} is a {found.get('split')} report; this run is {split}"
+            )
+        if case_check and found.get("case_check") is not None:
+            if set(found["case_check"]) != set(case_check):
+                raise refuse(f"--earlier-report {path} reports a different case set")
         stored.append(found)
     return stored
 
@@ -669,7 +685,11 @@ def _cmd_report(args: argparse.Namespace) -> int:
             f"add --judge {DECISION_JUDGE[0]}. Other judges serve development rounds only"
         )
     built = report_suite(
-        args.suite, [args.run_id], spec, jobs=args.jobs, earlier=_earlier_reports(args)
+        args.suite,
+        [args.run_id],
+        spec,
+        jobs=args.jobs,
+        earlier=_earlier_reports(args, stored["split"], stored.get("case_check")),
     )
     built["run"] = {
         k: stored.get(k) for k in ("model", "effort", "billing", "arms", "seeds", "gate")

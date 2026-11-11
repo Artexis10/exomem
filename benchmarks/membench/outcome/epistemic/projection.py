@@ -54,7 +54,7 @@ from ...world.planner import PLANTED, Plan, RoundSpec, Thread, plan_world
 from ...world.render import Document, Reader, Rendering, render
 from ...world.surface import load_bank
 from ..workspace import sha256_of
-from .cases import MIN_SUBSTRING_CHARS, STABLE, cases_dir, occurs, probe_forms
+from .cases import MIN_SUBSTRING_CHARS, STABLE, cases_dir, occurs, probe_forms, refused
 
 #: The projection data: the dimension and the filed prediction of each family, and what f38 needs to play a project.
 PROJECTION_FILE = Path(__file__).resolve().parents[2] / "projections" / "exomem.yaml"
@@ -373,10 +373,16 @@ def write_project(root: Path, name: str, project_record: Mapping[str, Any]) -> P
     development project, and the held-out list is empty."""
     directory = cases_dir(root)
     directory.mkdir(parents=True, exist_ok=True)
+    index = directory / "SPLIT.json"
+    if index.is_file():
+        existing = json.loads(index.read_text(encoding="utf-8"))
+        named = {*existing.get("dev", ()), *existing.get("heldout", ())}
+        if named != {name}:
+            raise refused(f"{root} already holds the case set of {sorted(named)}, not of {name}")
     path = directory / f"{name}.json"
     path.write_text(dump(project_record), encoding="utf-8")
     split = {"dev": [name], "heldout": [], "case_sha256": {name: sha256_of(path)}}
-    (directory / "SPLIT.json").write_text(json.dumps(split, indent=1) + "\n", encoding="utf-8")
+    index.write_text(json.dumps(split, indent=1) + "\n", encoding="utf-8")
     return path
 
 
