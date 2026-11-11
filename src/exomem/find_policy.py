@@ -22,10 +22,12 @@ from .temporal import Moment, Order
 from .temporal import compare as compare_moments
 from .temporal import parse as parse_moment
 
+# Relative connectives (when, before, after, since, until) are left out on
+# purpose: they place an event against an anchor ("after the migration"); they
+# do not ask for the newest notes, which is what the temporal lane ranks.
 TEMPORAL_MARKERS = re.compile(
     r"\b(recent|recently|latest|newest|today|yesterday|tonight|"
-    r"week|weeks|month|months|year|years|"
-    r"when|before|after|since|until|ago|"
+    r"week|weeks|month|months|year|years|ago|"
     r"20\d\d|\d{4}-\d{2}-\d{2})\b",
     re.IGNORECASE,
 )
