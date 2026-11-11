@@ -597,7 +597,7 @@ def _match(
                     for prefix in _prefixes(fields[field_no])
                 }
                 best = None
-                for prefix in parts:
+                for prefix in sorted(parts):
                     part_fields = members[prefix]
                     if len(part_fields) > MAX_PART_FIELDS:
                         continue
