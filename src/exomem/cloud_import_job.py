@@ -40,6 +40,7 @@ from .cloud_import import (
     DEFAULT_MAX_MEMBERS,
     RETRY_OWNER,
     ArchiveRefused,
+    flush_to_disk,
     reserve_bytes_from_env,
     unpack_stream,
 )
@@ -86,6 +87,23 @@ def _private_json(path: Path, value: dict) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _fsync_file(path: Path) -> None:
+    """Flush a file written by a subprocess, whose descriptor is long closed."""
+    with path.open("rb+") as stream:
+        os.fsync(stream.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush a directory's entries, so a name created or moved into it survives a stop."""
+    if os.name == "nt":  # Windows cannot open a directory descriptor.
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _check_cell(data_root: Path, cell_id: str) -> None:
     from .cloud_cell import cloud_mode_enabled
 
@@ -108,7 +126,11 @@ def prepare(data_root: Path, import_id: str, cell_id: str) -> str:
             subprocess.run(["age-keygen", "-o", str(temporary)], check=True, capture_output=True)
             os.chmod(temporary, 0o600)
             os.replace(temporary, identity)
-            os.sync()
+            _fsync_file(identity)
+            # `.import-keys` and `<import_id>` may have been created above; a lost name would leave the
+            # ciphertext undecryptable, so each directory on the way is flushed too.
+            for ancestor in (directory, directory.parent, data_root):
+                _fsync_directory(ancestor)
         finally:
             temporary.unlink(missing_ok=True)
     result = subprocess.run(["age-keygen", "-y", str(identity)], check=True, capture_output=True)
@@ -245,6 +267,14 @@ def run_import(
                     )
                 receipt["manifest"] = saved["path"]
                 _prove_manifest(vault_root, receipt["manifest"])
+                # The blobs sit beside the manifest; their bytes and every folder name up to the
+                # vault root must be on disk before the receipt reports them kept.
+                folder = vault_root / Path(receipt["manifest"]).parent
+                flush_to_disk(folder)
+                for ancestor in folder.parents:
+                    _fsync_directory(ancestor)
+                    if ancestor == vault_root:
+                        break
             elif request.kind == "adopt":
                 destination = vault_root / import_stage.STAGE_DIR / request.import_id
                 _ensure_private_directory(destination.parent)
@@ -271,10 +301,15 @@ def run_import(
                     ]
                 else:
                     os.rename(staging, destination)
+                # The adopted name and the `_Imports` name, when it was created above, land on disk;
+                # the staged bytes were already flushed by the unpack. The staging name's removal
+                # reaches the parent's flush as well.
+                _fsync_directory(destination.parent)
+                _fsync_directory(vault_root)
+                _fsync_directory(vault_root.parent)
                 receipt[import_stage.MEMBERS_KEY] = members
             else:
                 _restore(vault_root, staging, request)
-            os.sync()
             receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _private_json(receipt_path, receipt)
             return public
@@ -332,6 +367,11 @@ def _restore(vault_root: Path, staging: Path, request: CloudImportRequest) -> No
             return result
         if hashes(staging) != hashes(vault_root):
             raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "restore_committed")
+    # The renames' entries: `prior` gained the old vault and state, and the data root gained `prior`
+    # and the restored `vault_root`. The trees' bytes were already flushed when staging was unpacked.
+    _fsync_directory(prior)
+    _fsync_directory(state.parent)
+    _fsync_directory(vault_root.parent)
 
 
 def _prove_restore_collections(staging: Path) -> None:

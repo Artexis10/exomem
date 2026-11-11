@@ -134,8 +134,6 @@ class ReadPolicy:
     portable_paths: bool = False
     #: The most bytes `tarfile` may read to parse one header and the pax, long-name and sparse headers chained to it.
     max_header_bytes: int | None = None
-    #: Flush with `os.sync`, as the Cloud job does. False flushes only the files and directories this unpack wrote.
-    host_wide_sync: bool = True
 
 
 def free_bytes(path: Path) -> int:
@@ -157,17 +155,14 @@ def _fsync_directory(path: str) -> None:
         os.close(fd)
 
 
-def flush_to_disk(root: Path, *, host_wide: bool = True) -> None:
+def flush_to_disk(root: Path) -> None:
     """Put every file under `root` on disk.
 
-    `host_wide` uses `os.sync` where the platform has it. Otherwise, or when it is False, each file is fsynced and,
-    where a directory can be opened, each directory too, so that a request flushes what it wrote and not the whole host.
+    Each file is fsynced and, where a directory can be opened, each directory too, so that a request
+    flushes what it wrote and nothing else. Never `os.sync`: it waits on every filesystem the host
+    mounts, so one unrelated wedged mount would freeze the caller forever.
     """
 
-    sync = getattr(os, "sync", None)
-    if host_wide and sync is not None:
-        sync()
-        return
     files: list[str] = []
     directories: list[str] = []
     for directory, _, names in os.walk(root):
@@ -245,7 +240,7 @@ def unpack_stream(
         if staging is not None:
             # The caller commits with a rename and then deletes the
             # ciphertext, so the files must be on disk before success.
-            flush_to_disk(staging, host_wide=policy.host_wide_sync)
+            flush_to_disk(staging)
         return result
     except BaseException as error:
         if isinstance(error, ArchiveRefused):

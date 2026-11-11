@@ -440,14 +440,21 @@ def test_success_is_flushed_to_disk_before_it_is_reported(
 ) -> None:
     """The caller deletes the ciphertext once it commits; a crash must not leave empty files."""
 
-    synced: list[bool] = []
-    monkeypatch.setattr(cloud_import.os, "sync", lambda: synced.append(True))
+    flushed: list[int] = []
+    fsync = os.fsync
+
+    def recording(descriptor: int) -> None:
+        flushed.append(descriptor)
+        fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", recording)
 
     _unpack(_archive(_file("a.md", b"a")), tmp_path / "staging")
-    assert synced == [True]
+    flushed_before = len(flushed)
+    assert flushed_before > 0  # the member and the directories that hold it
 
     _refusal(_archive(_typed("l", tarfile.SYMTYPE, linkname="/")), tmp_path / "refused")
-    assert synced == [True]
+    assert len(flushed) == flushed_before  # a refusal writes nothing, so nothing is flushed
 
 
 def _pax_member(name: str, data: bytes, pax: dict[str, str]) -> bytes:

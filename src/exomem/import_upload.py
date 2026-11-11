@@ -260,7 +260,7 @@ def _unpack_tar(
         inflated = source = _Inflated(
             stream, cap + archive_members.MAX_ENTRIES * _MEMBER_OVERHEAD + cloud_import.END_WINDOW_BYTES)
     policy = cloud_import.ReadPolicy(
-        mode="r|", stop_after_end=True, portable_paths=True, max_header_bytes=_HEADER_LIMIT, host_wide_sync=False)
+        mode="r|", stop_after_end=True, portable_paths=True, max_header_bytes=_HEADER_LIMIT)
     try:
         cloud_import.unpack_stream(
             source, staging, max_bytes=cap, max_members=archive_members.MAX_ENTRIES,  # type: ignore[arg-type]
@@ -319,7 +319,7 @@ def _unpack_zip(
         refused.member = refused.member or current
         raise
     # The held bytes go once the stage exists, so the stage must be on disk first, as `unpack_stream` leaves a tar's.
-    cloud_import.flush_to_disk(staging, host_wide=False)
+    cloud_import.flush_to_disk(staging)
 
 
 def _named(member: str | None) -> str:

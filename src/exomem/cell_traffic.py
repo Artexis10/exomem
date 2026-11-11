@@ -181,6 +181,7 @@ class CellTraffic:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            _fsync_directory(self.path.parent)
         except OSError:
             log.warning("event=cell_traffic_flush_failed the hourly counts were not saved")
         finally:
@@ -222,6 +223,16 @@ def schedule_flush(traffic: CellTraffic) -> None:
         asyncio.get_running_loop().run_in_executor(None, traffic.flush)
 
 
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":  # Windows cannot open a directory descriptor.
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def shutdown_lifespan(inner, traffic: CellTraffic):
     """Outermost lifespan of a Cloud cell. At the stop signal, after every inner
     lifespan has closed its stores, it saves the counts and syncs the volume, so a
@@ -234,7 +245,10 @@ def shutdown_lifespan(inner, traffic: CellTraffic):
                 yield state
         finally:
             traffic.flush()
-            # A synced SQLite WAL replays on the next open, so the volume is consistent.
-            os.sync()
+            # A synced SQLite WAL replays on the next open. Only this state root's files: `os.sync`
+            # would wait on every filesystem the host mounts.
+            from . import cloud_import
+
+            cloud_import.flush_to_disk(traffic.path.parent)
 
     return _lifespan
