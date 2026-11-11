@@ -60,6 +60,7 @@ Candidate records are found from the heaviest groups. Sort groups by weight, hig
 - A lookup whose words are all common across datasets finds no value hit when the scope has 40 or more datasets. On the measured vault this cost 4 of 69 random lookups. Those lookups used only words that diagnostic exports share.
 - An entity named in more than 2% of datasets, such as a supplier with a separate export each month, passes the gate only when the other query words narrow the match. "Acme invoice March" passes and "Acme" alone fails.
 - A query that shares no word with a field or its value still misses: "payment details" does not find a field that holds only an IBAN. Semantic value matching is a separate change.
+- A dataset whose original carries the raw-protection prefix stays outside value search, as before this change. When the newest version of a profile is protected, the newest unprotected version comes first.
 - The numbers 40, 0.5, 0.02 and 3 are product limits, set as named constants with their reasons next to the existing bounds.
 
 ## Migration Plan

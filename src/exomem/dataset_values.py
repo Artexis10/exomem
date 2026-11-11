@@ -487,30 +487,23 @@ def _match(
     n = len(allowed)
     matches: dict[str, _Match] = {}
     if groups:
-        group_rows: dict[tuple[str, ...], set[tuple[str, int]]] = {}
+        df_cache: dict[tuple[str, ...], int] = {}
 
-        def datasets_holding(group: tuple[str, ...]) -> set[tuple[str, int]]:
-            if group not in group_rows:
-                group_rows[group] = {
-                    (original, record_id)
-                    for original, record_id in conn.execute(
-                        "SELECT r.original_path, f.record_id FROM value_fields "
-                        "JOIN fields f ON f.id = value_fields.rowid "
-                        "JOIN records r ON r.id = f.record_id "
-                        f"WHERE value_fields MATCH ? {scoped}",
-                        (_group_expression(group), allowed_json),
-                    )
-                }
-            return group_rows[group]
+        def df(group: tuple[str, ...]) -> int:
+            """Datasets with a field holding `group`; counted in SQL, not shipped as rows."""
+            if group not in df_cache:
+                df_cache[group] = conn.execute(
+                    "SELECT COUNT(DISTINCT r.original_path) FROM value_fields "
+                    "JOIN fields f ON f.id = value_fields.rowid "
+                    "JOIN records r ON r.id = f.record_id "
+                    f"WHERE value_fields MATCH ? {scoped}",
+                    (_group_expression(group), allowed_json),
+                ).fetchone()[0]
+            return df_cache[group]
 
         # A word weighs more the fewer datasets hold it, so a name that is not on file
         # outweighs every word that is.
-        weight = {
-            group: math.log(
-                1 + n / (len({original for original, _ in datasets_holding(group)}) + 1)
-            )
-            for group in groups
-        }
+        weight = {group: math.log(1 + n / (df(group) + 1)) for group in groups}
         total = sum(weight.values())
         # A group holding a digit is required in the part: a number is exact, so an account
         # number that differs in one group never matches by its other groups.
@@ -525,8 +518,25 @@ def _match(
             """Datasets with a record holding all `found` groups; cached per request."""
             key = frozenset(found)
             if key not in combo_cache:
-                common = set.intersection(*(datasets_holding(group) for group in key))
-                combo_cache[key] = len({original for original, _ in common})
+                # A record holds the set when it holds each group; intersect in SQL so a
+                # common group never ships its rows to Python.
+                holding = " INTERSECT ".join(
+                    "SELECT f.record_id FROM value_fields "
+                    "JOIN fields f ON f.id = value_fields.rowid "
+                    "JOIN records r ON r.id = f.record_id "
+                    f"WHERE value_fields MATCH ? {scoped}"
+                    for _ in key
+                )
+                params = tuple(
+                    param
+                    for group in key
+                    for param in (_group_expression(group), allowed_json)
+                )
+                combo_cache[key] = conn.execute(
+                    "SELECT COUNT(DISTINCT r2.original_path) FROM records r2 "
+                    f"WHERE r2.id IN ({holding})",
+                    params,
+                ).fetchone()[0]
             return combo_cache[key]
 
         # Candidate records come from the heaviest groups: a record without one of the
@@ -551,8 +561,10 @@ def _match(
             candidates.setdefault(record_id, (original, record_no))
         if candidates:
             ids_json = json.dumps(sorted(candidates))
-            held: dict[tuple[int, tuple[str, ...]], set[int]] = {}
-            held_value: dict[tuple[int, tuple[str, ...]], set[int]] = {}
+            # `held[record][group]` is the fields of the record holding the group anywhere;
+            # `held_value` restricts that to the value column.
+            held: dict[int, dict[tuple[str, ...], set[int]]] = {}
+            held_value: dict[int, dict[tuple[str, ...], set[int]]] = {}
             for group in groups:
                 for value_only, into in ((False, held), (True, held_value)):
                     for record_id, field_no in conn.execute(
@@ -562,7 +574,7 @@ def _match(
                         "AND f.record_id IN (SELECT value FROM json_each(?))",
                         (_group_expression(group, value_only=value_only), ids_json),
                     ):
-                        into.setdefault((record_id, group), set()).add(field_no)
+                        into.setdefault(record_id, {}).setdefault(group, set()).add(field_no)
             record_fields: dict[int, list[tuple[int, str]]] = {}
             for record_id, field_no, path in conn.execute(
                 "SELECT f.record_id, f.field_no, f.path FROM fields f "
@@ -573,43 +585,40 @@ def _match(
 
             for record_id, (original, record_no) in candidates.items():
                 fields = dict(record_fields.get(record_id, ()))
-                sizes: dict[str, int] = {}
-                for path in fields.values():
+                # A part is every field under one prefix; gather its members and size once.
+                members: dict[str, set[int]] = {}
+                for field_no, path in fields.items():
                     for prefix in _prefixes(path):
-                        sizes[prefix] = sizes.get(prefix, 0) + 1
+                        members.setdefault(prefix, set()).add(field_no)
                 parts = {
                     prefix
-                    for group in groups
-                    for field_no in held.get((record_id, group), ())
+                    for group_fields in held.get(record_id, {}).values()
+                    for field_no in group_fields
                     for prefix in _prefixes(fields[field_no])
                 }
                 best = None
                 for prefix in parts:
-                    size = sizes[prefix]
-                    if size > MAX_PART_FIELDS:
+                    part_fields = members[prefix]
+                    if len(part_fields) > MAX_PART_FIELDS:
                         continue
-
-                    def under(field_no: int, prefix: str = prefix, fields: dict = fields) -> bool:
-                        return prefix == "" or fields[field_no].startswith(prefix + ".")
-
+                    record_held = held.get(record_id, {})
                     found = [
                         group
                         for group in groups
-                        if any(under(field_no) for field_no in held.get((record_id, group), ()))
+                        if record_held.get(group, frozenset()) & part_fields
                     ]
                     if not required.issubset(found):
                         continue
                     if not any(
-                        under(field_no)
+                        held_value.get(record_id, {}).get(group, frozenset()) & part_fields
                         for group in found
-                        for field_no in held_value.get((record_id, group), ())
                     ):
                         continue
                     if gated and combo(tuple(found)) > combo_limit:
                         continue
                     coverage = sum(weight[group] for group in found) / total
-                    if best is None or (coverage, -size) > best[0]:
-                        best = ((coverage, -size), prefix, tuple(found))
+                    if best is None or (coverage, -len(part_fields)) > best[0]:
+                        best = ((coverage, -len(part_fields)), prefix, tuple(found))
                 if best is None or best[0][0] < MIN_COVERAGE:
                     continue
                 (coverage, neg_size), prefix, found = best

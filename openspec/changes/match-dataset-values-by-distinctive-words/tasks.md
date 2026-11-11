@@ -13,4 +13,4 @@
 ## 3. Proof
 
 - [x] 3.1 Tests for every scenario in the delta, and the existing value-search tests unchanged in intent
-- [ ] 3.2 After release, install on the personal service and check read-only that a supplier name with "IBAN", the possessive form and the "what is the IBAN for" question each return the newest supplier-profile original first, and that "test results" and "review verdict" return no dataset original. Record the results here
+- [ ] 3.2 After release, install on the personal service and check read-only that a supplier name with "IBAN", the possessive form and the "what is the IBAN for" question each return a supplier-profile original first (raw-protected versions stay outside value search, as before), and that "test results" and "review verdict" return no dataset original. Record the results here
