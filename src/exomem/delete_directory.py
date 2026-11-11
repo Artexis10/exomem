@@ -704,17 +704,22 @@ def _delete_in_store(
     today: dt.date | None,
     now: dt.datetime | None,
 ) -> DeleteDirectoryResult:
-    """Trash a folder of stored pages in one store transaction.
+    """Trash a folder in one store transaction.
 
-    The store moves each page under one trash folder with its rows, and the sidecar lands on disk
-    inside the same rollback window. A page that changed, or a link from a page that the inbound
-    check did not see, refuses the whole commit with nothing changed. No Markdown is written: the
-    projector moves the files afterwards. A folder that holds files whose bytes stay on disk, or a
-    page that carries its original or its part pages, refuses by name: it has no store form yet.
+    The store moves each page under one trash folder with its rows; the projector moves the page
+    files afterwards, and no Markdown is written. Each binary, and each file or folder the store
+    does not own, is renamed into the trash folder first, and the commit records the binaries there
+    (``vault_store.binaries`` names the window). A folder the store holds nothing below is renamed
+    whole. The commit binds every page and record it read and the folder's counts, so a page that
+    changed or that a commit added, or a link from a page that the inbound check did not see,
+    refuses the whole commit and every rename is undone. The sidecar lands on disk inside the same
+    rollback window.
     """
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
     from .vault_store import availability as store_availability
     from .vault_store import batch as store_batch
+    from .vault_store import binaries
+    from .vault_store import media as store_media
     from .vault_store import read as store_read
     from .vault_store.write import Expect, PageMove, StoreConflict
 
@@ -745,12 +750,9 @@ def _delete_in_store(
         if not pages and not abs_path.is_dir():
             raise DeleteDirectoryError(code="NOT_FOUND", reason=missing_path_reason(rel_path))
         curated = _refuse_protected(root, rel_path, allow_curated=allow_curated)
-        if not pages:
-            raise store_availability.unrouted(
-                "delete_directory",
-                "the store holds no page below this folder, and a folder of files whose bytes "
-                "stay on disk has no store form",
-            )
+        refusal = store_targets.governed_gap(root)
+        if refusal is not None:
+            raise store_availability.unrouted("delete_directory", refusal)
         if len(pages) > DIRECTORY_TRANSITION_LIMIT:
             raise DeleteDirectoryError(
                 code="PATH_GUARD_LIMIT",
@@ -758,23 +760,36 @@ def _delete_in_store(
             )
         with store_read.snapshot(root) as view:
             stored = view.bodies(pages)
-        refusal = store_targets.folder_form_gap(
-            root, rel_path, stored, error_class=DeleteDirectoryError
-        )
-        if refusal is not None:
-            raise store_availability.unrouted("delete_directory", refusal)
+            listing = store_targets.folder_files(
+                root,
+                view,
+                rel_path,
+                stored,
+                operation="delete_directory",
+                error_class=DeleteDirectoryError,
+                failed_code="DELETE_FAILED",
+            )
+        file_count = len(pages) + listing.file_count
+        if file_count > DIRECTORY_TRANSITION_LIMIT:
+            raise DeleteDirectoryError(
+                code="PATH_GUARD_LIMIT",
+                reason="directory exceeds the bounded trash census",
+            )
         from .collection_store import authority as collection_authority
 
-        collection_authority.refuse_view_paths(root, (rel_path, *pages), DeleteDirectoryError)
-        if not recursive:
-            raise _not_empty(rel_path, len(pages))
+        collection_authority.refuse_view_paths(
+            root, (rel_path, *pages, *listing.files), DeleteDirectoryError
+        )
+        if file_count and not recursive:
+            raise _not_empty(rel_path, file_count)
         hashes = {page: hashlib.sha256(body).hexdigest() for page, body in stored.items()}
         store_targets.active_catalog_gap(
             root,
             "delete_directory",
             error_class=DeleteDirectoryError,
-            removals=tuple(
-                catalog_publication.CatalogRemoval(page, hashes[page]) for page in pages
+            removals=(
+                *(catalog_publication.CatalogRemoval(page, hashes[page]) for page in pages),
+                *(catalog_publication.CatalogRemoval(rel, None) for rel in listing.files),
             ),
         )
 
@@ -796,9 +811,23 @@ def _delete_in_store(
             lambda slot: store_targets.holds(root, slot.relative_to(root).as_posix())
             or store_read.holds_folder(root, slot.relative_to(root).as_posix()),
         )
-    trash_rel = trash_abs.relative_to(root).as_posix()
+        trash_rel = trash_abs.relative_to(root).as_posix()
+
+        def trashed(source: str) -> str:
+            return f"{trash_rel}/{source[len(rel_path) + 1:]}"
+
+        if pages or listing.recorded:
+            entries = [
+                *(binaries.Entry(rel, trashed(rel)) for rel in listing.files),
+                *(binaries.Entry(rel, trashed(rel), folder=True) for rel in listing.folders),
+            ]
+        else:
+            # The store refers to nothing below the folder, so it moves as file mode moves it.
+            entries = [binaries.Entry(rel_path, trash_rel, folder=True)]
+        with store_read.snapshot(root) as view:
+            relocation = binaries.plan(view, entries)
     meta_rel = f"{trash_rel}{METADATA_SUFFIX}"
-    counts = {"files": len(pages), "md_files": len(pages), "inbound": inbound_total}
+    counts = {"files": file_count, "md_files": len(pages), "inbound": inbound_total}
     sidecar = PlannedWrite(
         root / meta_rel,
         _trash_metadata(
@@ -811,27 +840,53 @@ def _delete_in_store(
         ).decode("utf-8"),
         create_only=True,
     )
-    # A page that a commit adds to the folder after this read stays where it is, with its rows.
-    moves = {page: f"{trash_rel}/{page[len(rel_path) + 1:]}" for page in pages}
-    trashing = store_batch.Lifecycle(
-        moves=tuple(PageMove(source, destination) for source, destination in moves.items()),
-        expect={
-            page: Expect(sha256=hashes[page], linked_from=checks[page].bound) for page in pages
-        },
-    )
+    moves = {page: trashed(page) for page in pages}
+    expect = {
+        page: Expect(sha256=hashes[page], linked_from=checks[page].bound) for page in pages
+    }
+    expect.update(relocation.expect())
+    # A page or a record that a commit adds below the folder after this read refuses the trash.
+    expect[rel_path] = Expect(pages_below=len(pages), binaries_below=listing.recorded)
+    failed = "Trash placement could not be published"
     try:
-        store_batch.commit_batch(writer, [sidecar], vault_root=root, lifecycle=trashing)
+        with ExitStack() as hydrated:
+            if listing.recorded and originals.binding_for(root) is not None:
+                from .media_store import local_originals
+
+                # An evicted original's bytes move with its record, so they are fetched first.
+                hydrated.enter_context(local_originals(root, (rel_path,)))
+            with binaries.relocated(root, relocation) as moved:
+                store_batch.commit_batch(
+                    writer,
+                    [sidecar],
+                    vault_root=root,
+                    lifecycle=store_batch.Lifecycle(
+                        moves=tuple(PageMove(source, moves[source]) for source in pages),
+                        binary_deletes=relocation.binary_deletes,
+                        expect=expect,
+                        records=moved.records,
+                        refresh=moved.refresh,
+                    ),
+                )
     except StoreConflict as conflict:
-        if conflict.path in moves:
+        if conflict.path in moves or conflict.path in relocation.recorded or (
+            conflict.path == rel_path
+        ):
             raise DeleteDirectoryError(
                 "PATH_GUARD_CHANGED",
                 f"directory contents changed before the trash transition ({conflict.reason})",
             ) from conflict
-        raise DeleteDirectoryError(
-            "DELETE_FAILED", "Trash placement could not be published"
-        ) from conflict
-    except (CreateOnlyConflict, PathGuardError, OSError) as error:
-        raise DeleteDirectoryError("DELETE_FAILED", "Trash placement could not be published") from error
+        raise DeleteDirectoryError("DELETE_FAILED", failed) from conflict
+    except (
+        binaries.Stranded,
+        reserved_paths.ReservedPathLeafError,
+        CreateOnlyConflict,
+        PathGuardError,
+        OSError,
+    ) as error:
+        raise DeleteDirectoryError(*binaries.refusal(error, "DELETE_FAILED", failed)) from error
+    binaries.prune_empty(abs_path)
+    store_media.after_removal(root, listing.files)
 
     from . import due_state
 
@@ -865,8 +920,8 @@ def _delete_in_store(
         path=rel_path,
         trash_path=trash_rel,
         trash_meta_path=meta_rel,
-        file_count=len(pages),
+        file_count=file_count,
         inbound_link_count=inbound_total,
         warnings=warnings,
-        index=store_batch.row_report("delete", pages).as_dict(),
+        index=store_batch.row_report("delete", [*pages, *listing.files]).as_dict(),
     )

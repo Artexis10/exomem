@@ -2109,6 +2109,34 @@ def upsert_after_write(
     return report
 
 
+def drop_media_residue(vault_root: Path, removed_rel_paths: list[str]) -> None:
+    """Drop the speech progress and the scene frames of recordings that left these paths.
+
+    A removed video drops its scene-frame derivatives: clear_scene_frames deletes the
+    `<video>.frames/` jpg+sidecar pairs and their rows (recursive, idempotent). No-op (guarded
+    inside clear_scene_frames) when the video never had persisted frames. Each step is
+    best-effort: the removal it follows already happened.
+    """
+    from . import media_types, scene_frames
+
+    for rel in removed_rel_paths:
+        media_type = media_types.media_type_for(rel)
+        if media_type in {"audio", "video"}:
+            # A removed recording must not leave its partial transcript in vault state.
+            from . import onnx_asr_runtime
+
+            try:
+                onnx_asr_runtime.discard_progress(vault_root, rel)
+            except OSError:
+                log.warning("speech progress cleanup failed for %s", rel, exc_info=True)
+        if media_type != "video":
+            continue
+        try:
+            scene_frames.clear_scene_frames(vault_root, vault_root / rel)
+        except Exception:  # noqa: BLE001 - frame cleanup is best-effort
+            log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
+
+
 def delete_after_remove(
     vault_root: Path,
     removed_rel_paths: list[str],
@@ -2123,9 +2151,7 @@ def delete_after_remove(
         epistemic_graph,
         find,
         lexstore,
-        media_types,
         memory_refs,
-        scene_frames,
     )
 
     if not dispatch_lexstore and publish_corpus_change:
@@ -2204,27 +2230,7 @@ def delete_after_remove(
             lambda: find.on_resolver_files_changed(vault_root, [], md_rels) if md_rels else None
         )
     )
-    # A removed video also drops its scene-frame derivatives: clear_scene_frames
-    # deletes the `<video>.frames/` jpg+sidecar pairs from disk and purges their
-    # own lexical/embedding rows via its own delete_after_remove call (recursive,
-    # idempotent). No-op (guarded inside clear_scene_frames) when the video never
-    # had persisted frames.
-    for rel in safe_paths:
-        media_type = media_types.media_type_for(rel)
-        if media_type in {"audio", "video"}:
-            # A removed recording must not leave its partial transcript in vault state.
-            from . import onnx_asr_runtime
-
-            try:
-                onnx_asr_runtime.discard_progress(vault_root, rel)
-            except OSError:
-                log.warning("speech progress cleanup failed for %s", rel, exc_info=True)
-        if media_type != "video":
-            continue
-        try:
-            scene_frames.clear_scene_frames(vault_root, vault_root / rel)
-        except Exception:  # noqa: BLE001 - frame cleanup is best-effort
-            log.warning("scene-frame cleanup failed for %s", rel, exc_info=True)
+    drop_media_residue(vault_root, safe_paths)
     _apply_exact_path_custody(
         vault_root, changed=[], deleted=md_rels, reason="governed_delete"
     )

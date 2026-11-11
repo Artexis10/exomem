@@ -42,7 +42,6 @@ from . import audit as audit_module
 from . import indexes, maintenance_jobs, originals, relation_review, semantic_index, semantic_writes
 from .cli_ops import OpError
 from .vault import PlannedWrite, batch_atomic_write, content_hash, kb_root
-from .vault_store import availability as store_availability
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +65,7 @@ class ReconcileReport:
     clip_orphans_removed: int = 0
     frame_orphans_removed: int = 0
     #: Frame folders of a missing video that a store-mode vault holds as pages, which this run left
-    #: in place because no store form clears them yet.
+    #: in place because no service in this process serves the store that deletes them.
     frame_orphans_kept: list[str] = field(default_factory=list)
     part_orphans_removed: int = 0
     parts_rebuilt: int = 0
@@ -1180,14 +1179,15 @@ def _reconcile(vault_root: Path, *, dry_run: bool, rebuild_graph: bool, plan_id:
                 )
             if clip_orphans:
                 embeddings_module.delete_clip_after_remove(vault_root, clip_orphans)
+            from .vault_store import projector as store_projector
+
             cleared: list[tuple[Path, Path]] = []
             for frame_dir, video_path in frame_orphans:
                 try:
                     scene_frames.clear_scene_frames(vault_root, video_path)
-                except OpError as refusal:
-                    if refusal.code != store_availability.WRITER_UNROUTED:
-                        raise
-                    # A store-mode vault holds the sidecars as pages; the run goes on without them.
+                except store_projector.StoreNotServed:
+                    # A store-mode vault deletes the sidecar pages through its store, which no
+                    # service in this process serves: the run goes on without them.
                     report.frame_orphans_kept.append(_rel(frame_dir, vault_root))
                     continue
                 cleared.append((frame_dir, video_path))

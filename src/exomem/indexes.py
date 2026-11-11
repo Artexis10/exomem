@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path, PurePosixPath
@@ -515,6 +515,28 @@ _NOTES_TOTAL_LINE = re.compile(r"^- Notes:\s*\d+\s*$", re.MULTILINE)
 _ENTITIES_TOTAL_LINE = re.compile(r"^- Entities:\s*\d+\s*$", re.MULTILINE)
 
 
+def _counts_as_entity(parts: tuple[str, ...] | list[str]) -> bool:
+    """Whether a page below a type's folder, given by its path parts there, is one entity.
+
+    The type's own index and a page under a ``_`` folder are not.
+    """
+    return parts[-1] != "index.md" and not any(part.startswith("_") for part in parts[:-1])
+
+
+def count_entity_pages(
+    pages: Iterable[str], registry: EntityTypeRegistry
+) -> dict[str, int]:
+    """``_count_entities`` for a store-mode vault: ``pages`` are its stored pages, relative to the
+    Entities folder. A type with no page has no key, which a reader takes as zero."""
+    out: dict[str, int] = {}
+    for rel in pages:
+        sub, *parts = rel.split("/")
+        definition = None if sub.startswith("_") else registry.by_folder.get(sub.casefold())
+        if definition is not None and parts and _counts_as_entity(parts):
+            out[definition.id] = out.get(definition.id, 0) + 1
+    return out
+
+
 def _count_entities(
     entities_dir: Path,
     *,
@@ -536,10 +558,7 @@ def _count_entities(
         if definition is None:
             continue
         out[definition.id] = sum(
-            1
-            for f in sub.rglob("*.md")
-            if f.name != "index.md"
-            and not any(part.startswith("_") for part in f.relative_to(sub).parts[:-1])
+            1 for f in sub.rglob("*.md") if _counts_as_entity(f.relative_to(sub).parts)
         )
     return out
 
