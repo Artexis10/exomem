@@ -45,26 +45,14 @@ def _note(vault: Path, rel: str, text: str, *, updated: str, number: int) -> Non
     )
 
 
-def _as_external(
-    vault: Path, *, selector: str, ceiling: int, hidden: str | None = None
-) -> RequestPrincipal:
+def _as_external(vault: Path, *, selector: str, ceiling: int, hidden: str | None = None) -> RequestPrincipal:
     """Govern the vault so the external audience reads what `selector` picks at `ceiling`, and `hidden` not at all."""
     root = vault / "Knowledge Base" / "_Governance"
     (root / "scopes").mkdir(parents=True, exist_ok=True)
     (root / "rules").mkdir(parents=True, exist_ok=True)
-    pairs = [
-        ("datasets", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0", selector, ceiling)
-    ]
+    pairs = [("datasets", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FB0", selector, ceiling)]
     if hidden is not None:
-        pairs.append(
-            (
-                "hidden",
-                "01ARZ3NDEKTSV4RRFFQ69G5FAW",
-                "01ARZ3NDEKTSV4RRFFQ69G5FB1",
-                hidden,
-                egress.LEVEL_NONE,
-            )
-        )
+        pairs.append(("hidden", "01ARZ3NDEKTSV4RRFFQ69G5FAW", "01ARZ3NDEKTSV4RRFFQ69G5FB1", hidden, egress.LEVEL_NONE))
     for name, scope_id, rule_id, picks, level in pairs:
         (root / "scopes" / f"{name}.yaml").write_text(
             f"governance_version: 1\nid: {scope_id}\n{picks}\n", encoding="utf-8"
@@ -117,9 +105,7 @@ def test_reader_below_full_level_gets_no_value_hit_while_the_card_is_found(vault
     # A page the reader may not see ranks first, so a value hit that took its pool slot would push the
     # page they may see out of the pool before egress drops the value hit.
     _note(vault, "Notes/hidden/ledger.md", f"Ledger {ACCOUNT}", updated="2026-11-09", number=1)
-    _note(
-        vault, "Notes/shared/ledger.md", f"Shared ledger {ACCOUNT}", updated="2026-11-01", number=2
-    )
+    _note(vault, "Notes/shared/ledger.md", f"Shared ledger {ACCOUNT}", updated="2026-11-01", number=2)
     reader = _as_external(
         vault,
         selector='paths: ["Evidence/**", "Notes/shared/**"]',
@@ -179,13 +165,7 @@ def test_a_query_of_column_names_finds_no_dataset_and_displaces_no_page(vault):
     for number in range(3):
         data = f"customer_name,invoice_total\nAcme {number},{number}00\n".encode()
         _preserve(vault, f"customers-{number}.csv", data)
-        _note(
-            vault,
-            f"Notes/check-{number}.md",
-            "The customer name field is checked",
-            updated="2026-11-01",
-            number=10 + number,
-        )
+        _note(vault, f"Notes/check-{number}.md", "The customer name field is checked", updated="2026-11-01", number=10 + number)
     paths = _paths(_find(vault, "customer name", limit=4))
     assert not [path for path in paths if path.endswith(".csv")]
     assert len(paths) == 4
@@ -216,9 +196,7 @@ def test_a_changed_card_drops_the_value_it_no_longer_vouches_for(vault):
     assert result.path in _paths(_find(vault, ACCOUNT))
     card = vault / result.sidecar_path
     card.write_text(
-        card.read_text(encoding="utf-8").replace(
-            "inspection_status: ready", "inspection_status: invalid_data"
-        ),
+        card.read_text(encoding="utf-8").replace("inspection_status: ready", "inspection_status: invalid_data"),
         encoding="utf-8",
     )
     assert result.path not in _paths(_find(vault, ACCOUNT))
@@ -232,14 +210,9 @@ def test_a_dataset_replaced_together_with_its_card_is_searched_by_its_new_values
     card_text = card.read_text(encoding="utf-8")
     assert result.hash in card_text
     (vault / result.path).write_bytes(replaced)
-    card.write_text(
-        card_text.replace(result.hash, hashlib.sha256(replaced).hexdigest()), encoding="utf-8"
-    )
+    card.write_text(card_text.replace(result.hash, hashlib.sha256(replaced).hexdigest()), encoding="utf-8")
     assert result.path in _paths(_find(vault, "EE81 7701"))
-    # Four of the old number's five digit groups still match under the coverage rule; what is
-    # served must be the fresh rendering, so the passage holds the new value.
-    hits = [hit for hit in _find(vault, ACCOUNT) if hit["path"] == result.path]
-    assert all("7701" in hit["passage"]["text"] for hit in hits)
+    assert result.path not in _paths(_find(vault, ACCOUNT))
 
 
 def test_an_original_that_no_longer_matches_its_card_is_not_served(vault):
@@ -349,10 +322,29 @@ def test_the_newest_version_comes_first(vault):
     import re as _re
 
     # `page.updated` reads the card's `captured`; stamping it back makes `older` the older card.
-    card.write_text(
-        _re.sub(r"captured: .*", "captured: 2000-01-01T00:00:00Z", card_text), encoding="utf-8"
-    )
+    card.write_text(_re.sub(r"captured: .*", "captured: 2000-01-01T00:00:00Z", card_text), encoding="utf-8")
     for query in (ACCOUNT, "ee817700123456789012"):
         paths = _paths(_find(vault, query))
         originals = [path for path in paths if path in (older.path, newer.path)]
         assert originals[:1] == [newer.path], query
+
+
+def test_a_number_that_differs_in_one_group_finds_no_value_hit(vault):
+    first = _preserve(
+        vault,
+        "supplier-one.json",
+        json.dumps({"supplier": {"name": "Brightwater Haulage", "iban": ACCOUNT}}).encode(),
+    )
+    second = _preserve(
+        vault,
+        "supplier-two.json",
+        json.dumps(
+            {"supplier": {"name": "Zephyr Logistics", "iban": "EE81 7700 1234 5678 9099"}}
+        ).encode(),
+    )
+    found = _paths(_find(vault, "EE81 7700 1234 5678 9012"))
+    assert first.path in found
+    assert second.path not in found
+    found = _paths(_find(vault, "EE81 7700 1234 5678 9099"))
+    assert second.path in found
+    assert first.path not in found

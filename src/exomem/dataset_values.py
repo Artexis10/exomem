@@ -169,10 +169,7 @@ def _needles(query: str) -> _Needles | None:
     compact = _compact(query)
     # Identifiers carry digits. A query of plain words is matched by word, so a substring of a
     # column name or a common word never selects a dataset.
-    if not (
-        COMPACT_MIN_CHARS <= len(compact) <= COMPACT_MAX_CHARS
-        and any(ch.isdigit() for ch in compact)
-    ):
+    if not (COMPACT_MIN_CHARS <= len(compact) <= COMPACT_MAX_CHARS and any(ch.isdigit() for ch in compact)):
         compact = None
     return _Needles(terms, compact) if terms or compact else None
 
@@ -226,9 +223,7 @@ def _open(path: Path) -> sqlite3.Connection:
         # A sidecar built by another schema, tokenizer or rendering holds rows this code cannot
         # read. Rebuild it; the rows are derived.
         conn.execute("BEGIN IMMEDIATE")
-        if (
-            dict(conn.execute("SELECT key, value FROM meta")) == _meta()
-        ):  # another process rebuilt it
+        if dict(conn.execute("SELECT key, value FROM meta")) == _meta():  # another process rebuilt it
             conn.execute("COMMIT")
             return conn
         for table in _DATA_TABLES:
@@ -250,10 +245,7 @@ def _connect(vault_root: Path) -> sqlite3.Connection:
     try:
         return _open(path)
     except sqlite3.DatabaseError as error:
-        if getattr(error, "sqlite_errorcode", 0) & 0xFF not in (
-            sqlite3.SQLITE_CORRUPT,
-            sqlite3.SQLITE_NOTADB,
-        ):
+        if getattr(error, "sqlite_errorcode", 0) & 0xFF not in (sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB):
             raise
         # The file is damaged, not busy or full. Recreate it once; a process that still has the
         # old file open reads its own copy until it closes, and the rows are derived.
@@ -271,9 +263,7 @@ def _delete_dataset(conn: sqlite3.Connection, original: str) -> None:
     conn.execute("DELETE FROM datasets WHERE original_path = ?", (original,))
 
 
-def _store(
-    conn: sqlite3.Connection, card: Card, rendering: source_inspection.ValueRendering | None
-) -> None:
+def _store(conn: sqlite3.Connection, card: Card, rendering: source_inspection.ValueRendering | None) -> None:
     """Replace one dataset's rows. A dataset with no rendering keeps a row so it is not retried."""
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -283,8 +273,7 @@ def _store(
         )
         for number, record in enumerate(rendering.records if rendering is not None else ()):
             row = conn.execute(
-                "INSERT INTO records (original_path, record_no) VALUES (?, ?)",
-                (card.original, number),
+                "INSERT INTO records (original_path, record_no) VALUES (?, ?)", (card.original, number)
             ).lastrowid
             for field_no, (path, value) in enumerate(record.fields):
                 field_id = conn.execute(
@@ -361,9 +350,7 @@ def _cards_in_scope(
         # moves whenever a card is added, changed or removed, or the access policy changes, so
         # a search with no change reads no card.
         qualified = []
-        for path in sorted(
-            p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix)
-        ):
+        for path in sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix)):
             page = find_module._resolve_page(vault_root, path)
             card = _card_of(page) if page is not None else None
             if card is not None and access.is_indexable(vault_root, card.original):
@@ -416,20 +403,14 @@ def _reconcile(
     """
     stored = {
         original: (card_path, card_hash)
-        for original, card_path, card_hash in conn.execute(
-            "SELECT original_path, card_path, card_hash FROM datasets"
-        )
+        for original, card_path, card_hash in conn.execute("SELECT original_path, card_path, card_hash FROM datasets")
     }
     for original, (card_path, _card_hash) in stored.items():
         if original not in cards and card_path.startswith(prefix) and card_path not in projected:
             conn.execute("BEGIN IMMEDIATE")
             _delete_dataset(conn, original)
             conn.execute("COMMIT")
-    current = {
-        original
-        for original, card in cards.items()
-        if stored.get(original, ("", ""))[1] == card.card_hash
-    }
+    current = {original for original, card in cards.items() if stored.get(original, ("", ""))[1] == card.card_hash}
     pending = [card for original, card in cards.items() if original not in current]
     for card in pending[:MAX_BUILDS_PER_REQUEST]:
         data = _read_original(vault_root, card)
@@ -531,6 +512,11 @@ def _match(
             for group in groups
         }
         total = sum(weight.values())
+        # A group holding a digit is required in the part: a number is exact, so an account
+        # number that differs in one group never matches by its other groups.
+        required = {
+            group for group in groups if any(any(char.isdigit() for char in stem) for stem in group)
+        }
         gated = n >= NOISE_GATE_MIN_DATASETS
         combo_limit = max(NOISE_GATE_MIN_COUNT, NOISE_GATE_FRACTION * n)
         combo_cache: dict[frozenset[tuple[str, ...]], int] = {}
@@ -611,6 +597,8 @@ def _match(
                         for group in groups
                         if any(under(field_no) for field_no in held.get((record_id, group), ()))
                     ]
+                    if not required.issubset(found):
+                        continue
                     if not any(
                         under(field_no)
                         for group in found

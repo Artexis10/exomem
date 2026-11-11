@@ -26,7 +26,7 @@ Let N be the number of indexed datasets in the request's scope. A group's datase
 
 A part of a record is the set of fields under one path prefix: the whole record (prefix ""), or every field under `a`, `a.b` and so on, split on ".". Its size is its number of fields. Only parts with at most `MAX_PART_FIELDS` (40) fields count. A CSV row is one part with one field per column.
 
-For each part, the found groups are the groups that any of its fields holds. The part qualifies when at least one found group is in a value, its coverage (found weight / total weight of all groups) is at least `MIN_COVERAGE` (0.5), and it passes the noise gate. The record's score is its best qualifying part: highest coverage, then the fewest fields. A dataset's score is its best record.
+For each part, the found groups are the groups that any of its fields holds. A group with a stem that holds a digit is required: the part fails when it does not hold every such group. A number is exact, so an account number that differs in one group never matches by its other groups. The part qualifies when at least one found group is in a value, its coverage (found weight / total weight of all groups) is at least `MIN_COVERAGE` (0.5), and it passes the noise gate. The record's score is its best qualifying part: highest coverage, then the fewest fields. A dataset's score is its best record.
 
 Alternatives measured on the same vault:
 - Not requiring function words and fragments, and keeping every other word required: 42 of 69 random lookups found, but "test results" still returned 72 value hits.
