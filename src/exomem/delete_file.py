@@ -436,6 +436,7 @@ def _delete_file_local(
     if store_writer is not None:
         store_targets.refuse_kind_change("delete_file", rel_path, trash_rel)
 
+    source_hash: str | None = None
     if validate_only or expected_hash is not None:
         try:
             source_hash = (evicted_original.binary_sha256 if evicted_original is not None
@@ -489,7 +490,8 @@ def _delete_file_local(
             _fold.verify()
         return _trash_in_store(
             store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
-            metadata_bytes=metadata_bytes, linked_from=stored_check.bound,
+            metadata_bytes=metadata_bytes, judged_hash=catalog_before_hash or source_hash,
+            linked_from=stored_check.bound,
             prior_markdown=prior_markdown, stored_original=stored_original,
             log_entry=(today_iso, rel_no_ext, log_body), inbound=len(inbound),
             inbound_ignored=len(inbound_ignored), warnings=warnings,
@@ -829,6 +831,7 @@ def _trash_in_store(
     trash_rel: str,
     meta_rel: str,
     metadata_bytes: bytes,
+    judged_hash: str | None,
     linked_from: frozenset[str],
     prior_markdown: str | None,
     stored_original: originals.OriginalSnapshot | None,
@@ -843,9 +846,10 @@ def _trash_in_store(
     its file afterwards, and no Markdown is written. A binary's file is renamed to the trash first,
     and the commit records it there (``binaries``). The part pages of a long extraction go with
     their page: a dot folder of parts is renamed with it, and a raw-marked page's part pages move in
-    the store. The sidecar lands on disk inside the same rollback window. A stale source, or a link
-    from a page that the caller's inbound check did not see, refuses the whole commit, and every
-    rename is undone.
+    the store. The sidecar lands on disk inside the same rollback window. A page is bound to
+    ``judged_hash``, the hash of the bytes whose frontmatter or preview the caller judged; a page
+    that changed since, or a link from a page that the caller's inbound check did not see, refuses
+    the whole commit, and every rename is undone.
     """
     from . import extraction_parts
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
@@ -863,11 +867,13 @@ def _trash_in_store(
     entries: list[binaries.Entry] = []
     with store_read.snapshot(root) as view:
         if page:
-            source = view.page_meta(rel_path)
+            # A schema overlay page that is not Markdown has no judged bytes unless a preview
+            # hashed it: it is bound as this read finds it.
+            source = judged_hash or getattr(view.page_meta(rel_path), "sha256", None)
             if source is None:
                 raise DeleteFileError("STALE_DELETE", "delete source changed since it was read")
             moves.append(PageMove(rel_path, trash_rel))
-            expect[rel_path] = Expect(sha256=source.sha256, linked_from=linked_from)
+            expect[rel_path] = Expect(sha256=source, linked_from=linked_from)
             parts = extraction_parts.folder_for(Path(rel_path)).as_posix()
             trashed_parts = extraction_parts.folder_for(Path(trash_rel)).as_posix()
             if store_ownership.owns_folder(parts):

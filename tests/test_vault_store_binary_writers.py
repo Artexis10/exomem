@@ -159,6 +159,41 @@ def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
     assert binary_record(served, DIAGRAM) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
 
 
+JUDGED = "Knowledge Base/Notes/Judged.md"
+
+
+def test_a_page_trash_refuses_a_page_that_changed_after_it_was_judged(
+    served, writer, monkeypatch
+):
+    """A page trash that binds the page as a later read finds it, so a page that gained
+    `superseded_by:` after its check goes to the trash anyway."""
+    judged = b"---\ntitle: Judged\ntype: note\n---\n# Judged\n"
+    superseded = judged.replace(b"type: note\n", b"type: note\nsuperseded_by: '[[Next]]'\n")
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "page", puts=(write.PagePut(JUDGED, judged),)),
+    )
+    describe = delete_file._trash_metadata_bytes
+
+    def change_then_describe(*arguments, **options):
+        # A competing commit between the check and the trash.
+        write.commit(
+            writer,
+            write.StoreChange(
+                write.Origin.GOVERNED, "race", puts=(write.PagePut(JUDGED, superseded),)
+            ),
+        )
+        return describe(*arguments, **options)
+
+    monkeypatch.setattr(delete_file, "_trash_metadata_bytes", change_then_describe)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=JUDGED, confirm=True)
+
+    assert refused.value.code == "STALE_DELETE"
+    assert read.owned_bytes(served, JUDGED) == superseded
+
+
 def test_a_trash_that_cannot_put_the_binary_back_says_so_and_one_sweep_records_it(
     served, writer
 ):
