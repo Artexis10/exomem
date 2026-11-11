@@ -646,7 +646,7 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     # Pinned exactly, not loosened to an inequality: a chain that silently grew
     # another link would otherwise satisfy every assertion below while nobody
     # had adjudicated the new one.
-    assert len(identity.amendments) == 10
+    assert len(identity.amendments) == 11
     amendment = identity.amendments[0]
     assert amendment.acknowledgment_status == "acknowledged"
     assert amendment.introduced_family_ids == ("f15", "f16", "f17", "f18", "f19")
@@ -711,13 +711,23 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert acknowledged_ten.acknowledgment_status == "acknowledged"
     assert acknowledged_ten.introduced_family_ids == ()
     assert acknowledged_ten.contract.repository_revision == SEQUENCE_TEN_ACKNOWLEDGED_REVISION
-    assert identity.effective.sha256 == acknowledged_ten.contract.sha256
+    # Sequence 11 lets held-out runs billed to API credits decide, and adds no family. Its receipt
+    # is pending, so its amended revision is reconstructed from the introduction commit.
+    pending_eleven = identity.amendments[10]
+    assert pending_eleven.sequence == 11
+    assert pending_eleven.acknowledgment_status == "pending"
+    assert pending_eleven.introduced_family_ids == ()
+    assert (
+        pending_eleven.contract.repository_revision == pending_eleven.receipt.introduction_revision
+    )
+    assert identity.effective.sha256 == pending_eleven.contract.sha256
     assert identity.pending_amendments == (
         pending_two,
         pending_four,
         pending_five,
         pending_seven,
         pending_eight,
+        pending_eleven,
     )
     assert identity.withheld_family_ids == frozenset(
         SEQUENCE_TWO_FAMILIES
