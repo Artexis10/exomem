@@ -1,7 +1,7 @@
 # The closed attribute sets of the phenomenon catalogue.
 #
-# A phenomenon, a family, a behaviour, a norm, a statement kind and a recipe are open words:
-# adding one is a data change. The sets in this file are closed: code implements each member, so
+# A phenomenon, a family, a behaviour, a norm, a statement kind, a hedge and a recipe are open
+# words: adding one is a data change. The sets in this file are closed: code implements each member, so
 # adding one is a code change and a change to this file. Code branches only on these values. It
 # never branches on a phenomenon id, a family key, a behaviour key or a norm key.
 schema_version: 2
@@ -41,7 +41,7 @@ truth_mechanisms:
   holder_ledger:
     description: "Record for each holder what that holder said, was told and witnessed, and when."
     readings:
-      holder: "Who said or decided something."
+      holder: "Who said or decided something. Of several statements of one content, the holder is the one who stated it first; a statement that quotes a holder, or whose basis is `told`, passes on that holder's content."
       holders: "Every holder who asserts it."
       knows: "Who was told or witnessed it."
       believes: "What a holder believes, from what that holder was told and witnessed."
@@ -49,14 +49,14 @@ truth_mechanisms:
   kind_tag:
     description: "Each statement carries the kind, modality and hedge that the world gave it."
     readings:
-      kind: "The kind of a statement."
+      kind: "The kind of a statement, or of the statements about an attribute. Of several, the latest one that asserts and stands decides, and when none asserts, the latest one that stands."
       modality: "Whether a statement says what is, should be, must be or may be."
-      hedge: "The doubt that a statement carries."
+      hedge: "The hedge that a statement carries, a word from `hedges.yaml`, or none."
   state_fold:
     description: "Turn the asserted statements about one attribute into status spans, under the norms that the entry names and the attribute's volatility class. membench's bitemporal resolution then evaluates the spans."
     readings:
       current: "The value that holds at the probe's date, or none."
-      replaced: "Each value that held earlier and holds no longer."
+      replaced: "Each value that held earlier and holds no longer. It includes the content that a `correct` step replaced, as the record held it before the correction."
       history: "The values in order, with their dates."
       at_date: "The value that held at a named past date."
       standing: "Settled, contested, withdrawn, last known or unknown."
@@ -199,11 +199,6 @@ reading_arguments:
 defeat_modes:
   rebut: "The statement supports the opposite conclusion."
   undercut: "The statement removes the reason to believe, and supports no opposite."
-
-# The doubt that a holder puts on a statement. `kind_tag` reads it, and a renderer carries it.
-hedges:
-  firm: "The holder states the content without doubt. This is the default."
-  tentative: "The holder gives the content and says that it may be wrong."
 
 # On what basis a holder makes a statement.
 statement_bases:

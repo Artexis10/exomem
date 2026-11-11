@@ -50,7 +50,7 @@ The oracle SHALL apply only the norms that the norm registry lists. Each norm SH
 
 ### Requirement: The phenomenon catalogue is registry data
 
-Every phenomenon, family, behaviour, norm, statement kind, recipe, domain pack, surface form and bridge SHALL be an entry in a YAML registry. One schema file SHALL declare the closed sets that code implements: the truth mechanisms and their readings, the world operations, the rule shapes, the role kinds, the key parts, the key classes, the probe forms, the implicitness levels, the volatility classes, the scorers and the dials. Code SHALL branch only on those closed values. Code SHALL NOT branch on a phenomenon id, a family key, a behaviour key or a norm key. The loader SHALL refuse an entry that names an undeclared value or an unknown reference, and the refusal SHALL name the entry and the value.
+Every phenomenon, family, behaviour, norm, statement kind, hedge, recipe, domain pack, surface form and bridge SHALL be an entry in a YAML registry. One schema file SHALL declare the closed sets that code implements: the truth mechanisms and their readings, the world operations, the rule shapes, the role kinds, the key parts, the key classes, the probe forms, the statement bases, the commitments, the defeat modes, the implicitness levels, the volatility classes, the scorers and the dials. Code SHALL branch only on those closed values. Code SHALL NOT branch on a phenomenon id, a family key, a behaviour key or a norm key. The loader SHALL refuse an entry that names an undeclared value or an unknown reference, and the refusal SHALL name the entry and the value.
 
 #### Scenario: A new phenomenon reuses existing closed values
 

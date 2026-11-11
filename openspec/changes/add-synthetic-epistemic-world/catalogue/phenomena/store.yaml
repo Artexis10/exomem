@@ -15,7 +15,7 @@ phenomena:
   - {id: hygiene.long-unused, stage: s3, truth: [state_fold], probes: [stable], says: "A fact was stated once, long ago and never used since, and a later task asks for it.", from: [veracium]}
   - {id: hygiene.long-run, stage: s4, says: "After a year of updates, the question asks how many current facts are still right.", from: [membench]}
   # --- self ---
-  - {id: self.earlier-session, stage: s1, truth: [state_fold], norms: [], probes: [stable], says: "A task needs something that was agreed in an earlier session.", from: [longmemeval]}
+  - {id: self.earlier-session, stage: s1, truth: [state_fold], norms: [], probes: [stable], says: "A fact agreed in an earlier session is asked for later, and nothing has changed it.", from: [longmemeval]}
   - {id: self.invented-detail, stage: s2, probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "A task asks for a detail that was never stored."}
   - {id: self.holds-anything, stage: s2, says: "The question asks whether the store holds anything on a subject."}
   - {id: self.note-or-present-file, stage: s2, truth: [state_fold, corpus_closure], norms: [later-replaces], probes: [act, state], expect: [uses_current, trusts_stale], says: "A value learned in an earlier session and a newer file in the workspace disagree, and the task needs the newer one."}
