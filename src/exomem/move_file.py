@@ -697,10 +697,7 @@ def _move_file_local(
         )
     )
     if store_writer is not None and not recovering_from_trash:
-        # Recovery judges its own gaps. A move refuses before it reads more than the source.
-        refusal = store_targets.governed_gap(vault_root)
-        if refusal is not None:
-            raise store_availability.unrouted("move_file", refusal)
+        # Recovery judges its own gaps. A move writes no tombstone or receipt, as in file mode.
         stored_bytes = store_read.owned_bytes(vault_root, old_rel)
         store_targets.active_catalog_gap(
             vault_root,

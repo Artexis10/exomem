@@ -313,9 +313,6 @@ def _delete_file_local(
             pass
 
     if store_writer is not None:
-        refusal = store_targets.governed_gap(vault_root)
-        if refusal is not None:
-            raise store_availability.unrouted("delete_file", refusal)
         # Before validation returns, so a plan that validates is a plan that commits.
         store_targets.active_catalog_gap(
             vault_root,
@@ -842,12 +839,13 @@ def _trash_in_store(
     their page: a dot folder of parts is renamed with it, and a raw-marked page's part pages move in
     the store. The sidecar lands on disk inside the same rollback window. A stale source, or a link
     from a page that the caller's inbound check did not see, refuses the whole commit, and every
-    rename is undone.
+    rename is undone. A governed item keeps its tombstone and receipt around the commit
+    (``vault_store.governed``).
     """
     from . import extraction_parts
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
     from .vault_store import batch as store_batch
-    from .vault_store import binaries
+    from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import read as store_read
     from .vault_store.write import Expect, PageMove, StoreConflict
@@ -880,8 +878,12 @@ def _trash_in_store(
         relocation = binaries.plan(view, entries)
     expect.update(relocation.expect({rel_path: linked_from}))
     failed = "Trash placement could not be published"
+    # A governed item's receipt intent and tombstone come last before the commit, as in file mode.
+    deletion = governed.begin_deletion(
+        root, source_rel=rel_path, trash_rel=trash_rel, error_class=DeleteFileError
+    )
     try:
-        with binaries.relocated(root, relocation) as moved:
+        with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
             writes = [sidecar, *_trash_companion(root, trash_rel, stored_original, moved.records)]
             store_batch.commit_batch(
                 writer,
@@ -923,6 +925,7 @@ def _trash_in_store(
         due_state.refresh_after_writes(
             root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
         )
+    index = governed.settle(root, deletion, store_batch.row_report("delete", [rel_path]), warnings)
     today_iso, rel_no_ext, body = log_entry
     log_warning = write_log_entry(
         root, date_iso=today_iso, op="delete_file (trash)", rel_path_no_ext=rel_no_ext, body=body
@@ -936,7 +939,7 @@ def _trash_in_store(
         inbound_link_count=inbound,
         inbound_ignored_count=inbound_ignored,
         warnings=warnings,
-        index=store_batch.row_report("delete", [rel_path]).as_dict(),
+        index=index,
     )
 
 

@@ -389,22 +389,6 @@ def govern(root, rel):
     membership.clear_memo()
 
 
-def test_delete_of_a_governed_page_refuses_by_name_and_changes_nothing(served):
-    """A delete that skips the tombstone and receipt that a governed page's trash writes."""
-    govern(served, BETA)
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        delete_file.delete_file(served, path=BETA, confirm=True, force_orphan=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "delete_file" in refused.value.message
-    assert revision(served) == start
-    assert tree(served) == before
-    assert read.owned_bytes(served, BETA)
-
-
 def history_name(index):
     """A snapshot name in the form that ``registry_history`` writes: a UTC stamp and a hash tag."""
     return f"20260101T{index:012d}Z-abcdef01"

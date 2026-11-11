@@ -14,11 +14,12 @@ import os
 import sqlite3
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import unquote
 
 from .. import (
@@ -214,12 +215,72 @@ def _memory_ref(raw: bytes, rel_path: str) -> str:
     return f"sha256:{hashlib.sha256(raw).hexdigest()}"
 
 
+def _stored_tree(vault_root: Path, rel: str) -> dict[str, bytes] | None:
+    """The files at or below ``rel`` with their bytes, as a store-mode vault holds them, or None
+    when the vault is in file mode.
+
+    A page is the store's: its bytes come from the store, and a projection on disk, which may
+    trail it, is never read. A binary and a file the store does not own are the disk's, read
+    through the held no-follow leaf as file mode reads them. Pages below a folder come from one
+    range read and one chunked body read. An empty mapping means nothing is there.
+    """
+    from ..vault_store import mode, ownership, read
+
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return None
+    with read.snapshot(root) as view:
+        page = view.page(rel) if ownership.classify(rel) is ownership.Ownership.PAGE else None
+        if page is not None:
+            return {rel: page.body}
+        files = view.bodies(meta.path for meta in view.pages(f"{rel}/"))
+    on_disk = root / rel
+    if on_disk.is_symlink():
+        raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH")
+    if on_disk.is_file():
+        if ownership.classify(rel) is not ownership.Ownership.PAGE:
+            files[rel] = reserved_paths.read_generic_bytes(root, rel).data
+        return files
+    for directory, folders, names in os.walk(on_disk):
+        for name in [*folders, *names]:
+            if (Path(directory) / name).is_symlink():
+                # A folder write refuses a link below it too; nothing here follows one.
+                raise reserved_paths.ReservedPathLeafError("UNSAFE_PATH")
+        for name in names:
+            child = Path(directory, name).relative_to(root).as_posix()
+            if ownership.classify(child) is not ownership.Ownership.PAGE:
+                files[child] = reserved_paths.read_generic_bytes(root, child, physical=True).data
+    return files
+
+
 def _capture_manifest(
     vault_root: Path,
     source_rel: str,
     trash_rel: str,
 ) -> tuple[ManifestItem, ...]:
     source = Path(vault_root) / source_rel
+    try:
+        stored = _stored_tree(vault_root, source_rel)
+    except reserved_paths.ReservedPathLeafError as error:
+        code = "LIFECYCLE_SOURCE_MISSING" if error.code == "MISSING" else "LIFECYCLE_PATH_UNSAFE"
+        raise LifecycleError(code, "lifecycle source could not be acquired safely") from None
+    if stored is not None:
+        if not stored and not source.is_dir():
+            raise LifecycleError(
+                "LIFECYCLE_SOURCE_MISSING",
+                "lifecycle source is not a regular file or directory",
+            )
+        return tuple(
+            ManifestItem(
+                source_path=rel,
+                trash_path=trash_rel if rel == source_rel else f"{trash_rel}/{rel[len(source_rel) + 1:]}",
+                content_hash=hashlib.sha256(raw).hexdigest(),
+                size=len(raw),
+                kind="file",
+                affected_ref=_memory_ref(raw, rel),
+            )
+            for rel, raw in sorted(stored.items())
+        )
     try:
         if source.is_file():
             snapshots = (("", reserved_paths.read_generic_bytes(vault_root, source_rel)),)
@@ -281,6 +342,21 @@ def _derived_residue_paths(vault_root: Path, source_rel: str) -> tuple[str, ...]
     )
 
 
+def _page_bytes(vault_root: Path, rel: str) -> tuple[bytes, float]:
+    """A Markdown file's bytes and modification time: the stored page's in a store-mode vault,
+    whose projection may trail it, and the file's otherwise. Raises ``OSError`` when it is absent.
+    """
+    from ..vault_store import read
+
+    if read.serves(Path(vault_root), rel):
+        page = read.owned_page(Path(vault_root), rel)
+        if page is None:
+            raise FileNotFoundError(rel)
+        return page.body, page.meta.mtime_ns / 1e9
+    path = Path(vault_root) / rel
+    return path.read_bytes(), path.stat().st_mtime
+
+
 def _scope_ids(vault_root: Path, item: ManifestItem, policy: policy_module.Policy) -> frozenset[str] | None:
     source = Path(vault_root) / item.source_path
     if not item.source_path.lower().endswith(".md"):
@@ -288,9 +364,8 @@ def _scope_ids(vault_root: Path, item: ManifestItem, policy: policy_module.Polic
             vault_root, item.source_path, policy
         ).require_classified()
     try:
-        raw = source.read_bytes()
-        stat = source.stat()
-        page = find_corpus.parse_page(source, stat.st_mtime, vault_root, content=raw)
+        raw, mtime = _page_bytes(vault_root, item.source_path)
+        page = find_corpus.parse_page(source, mtime, vault_root, content=raw)
     except (OSError, UnicodeError, ValueError):
         return None
     if page is None:
@@ -319,15 +394,10 @@ def _restricting_scope_ids(policy: policy_module.Policy) -> set[str]:
     }
 
 
-def policy_governs_anything(vault_root: Path) -> bool:
-    """Whether a governance policy could cover some item: blocked, or any rule declared.
-
-    The store-mode lifecycle writers ask this, because they write no tombstone or receipt: they
-    serve a vault whose policy is empty, and name a refusal for any other. It is the coarse form of
-    ``_is_governed``, which also reads each item's scope, and a false "yes" costs a refusal.
-    """
+def _governs_nothing(vault_root: Path) -> bool:
+    """Whether no policy is in force, so that nothing a lifecycle write moves is governed."""
     policy = policy_module.load(vault_root)
-    return policy.blocked or not policy.empty
+    return not policy.blocked and policy.empty
 
 
 def _is_governed(vault_root: Path, manifest: tuple[ManifestItem, ...]) -> bool:
@@ -565,6 +635,44 @@ def begin_deletion(vault_root: Path, *, source_rel: str, trash_rel: str) -> Life
     return operation
 
 
+def begin_store_deletion(
+    vault_root: Path, *, source_rel: str, trash_rel: str
+) -> LifecycleOperation | None:
+    """``begin_deletion`` for a store-mode writer, or None when nothing that it trashes is governed.
+
+    The store commit binds what the writer read, so a store-mode trash needs the manifest only for
+    a tombstone and a receipt. With no policy in force there are neither, and the folder's bytes
+    are not read a second time.
+    """
+    if _governs_nothing(vault_root):
+        return None
+    operation = begin_deletion(vault_root, source_rel=source_rel, trash_rel=trash_rel)
+    return operation if operation.governed else None
+
+
+def begin_store_recovery(
+    vault_root: Path, *, trash_rel: str, source_rel: str
+) -> LifecycleOperation | None:
+    """``begin_recovery`` for a store-mode writer, or None when nothing that it restores is governed.
+
+    An item trashed under a policy keeps its tombstone after the policy goes, and its recovery
+    settles that tombstone, so only a vault with no policy and no tombstone skips the read.
+    """
+    tombstones = _tombstone_root(vault_root)
+    if _governs_nothing(vault_root) and not (
+        tombstones.is_dir() and any(tombstones.glob("*.json"))
+    ):
+        return None
+    operation = begin_recovery(vault_root, trash_rel=trash_rel, source_rel=source_rel)
+    return operation if operation.governed else None
+
+
+def placed_in_store(operation: LifecycleOperation) -> None:
+    """Mark that a store commit has placed the operation's items, where file mode's held rename
+    marks it: the crash seam between the placement and the settling of its receipt."""
+    _checkpoint("recovery_moved" if operation.operation == "recovery" else "deletion_moved")
+
+
 def _manifest_matches_source(
     vault_root: Path,
     source_root: Path,
@@ -573,6 +681,12 @@ def _manifest_matches_source(
     expected = {item.source_path: (item.content_hash, item.size) for item in manifest}
     try:
         source_rel = source_root.relative_to(vault_root).as_posix()
+        stored = _stored_tree(vault_root, source_rel)
+        if stored is not None:
+            # A folder that holds nothing matches an empty manifest only while it is there.
+            return (bool(stored) or source_root.is_dir()) and {
+                rel: (hashlib.sha256(raw).hexdigest(), len(raw)) for rel, raw in stored.items()
+            } == expected
         if source_root.is_file():
             snapshot = reserved_paths.read_generic_bytes(vault_root, source_rel)
             actual = {
@@ -843,34 +957,79 @@ def _operation_from_marker(vault_root: Path, path: Path, marker: Mapping[str, An
         return None
 
 
-def _query_path(path: Path, queries: tuple[tuple[str, tuple[str, ...]], ...]) -> bool | None:
-    if not path.exists():
-        return False
+class _DerivedTables(NamedTuple):
+    """Where the lexical, reference and graph rows of the vault's pages live."""
+
+    lexical: Path | sqlite3.Connection
+    refs: Path | sqlite3.Connection
+    graph: Path | sqlite3.Connection
+    #: The store snapshot that the connections belong to, or None in file mode.
+    view: Any = None
+
+
+@contextmanager
+def _derived_tables(vault_root: Path) -> Iterator[_DerivedTables]:
+    """The owners' sidecar files in file mode, and the store snapshot's connection in store mode.
+
+    A store commit writes a page's lexical, reference and graph rows with its bytes, into tables
+    that the owners create under the same names in both places, so one query runs on either. The
+    embedding and CLIP sidecars are files in both modes and are not named here.
+    """
+    from .. import epistemic_graph, lexstore, memory_refs
+    from ..vault_store import mode, read
+
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        yield _DerivedTables(
+            lexstore.lexical_path(root),
+            memory_refs.sidecar_path(root),
+            epistemic_graph.sidecar_path(root),
+        )
+        return
+    with read.snapshot(root) as view:
+        yield _DerivedTables(view.connection, view.connection, view.connection, view)
+
+
+@contextmanager
+def _rows(source: Path | sqlite3.Connection) -> Iterator[sqlite3.Connection | None]:
+    """A read connection to ``source``, or None for a sidecar file that does not exist."""
+    if isinstance(source, sqlite3.Connection):
+        yield source
+        return
+    if not source.exists():
+        yield None
+        return
+    conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _query_path(
+    path: Path | sqlite3.Connection, queries: tuple[tuple[str, tuple[str, ...]], ...]
+) -> bool | None:
+    try:
+        with _rows(path) as conn:
+            if conn is None:
+                return False
             for sql, values in queries:
                 for value in values:
                     if conn.execute(sql, (value,)).fetchone() is not None:
                         return True
-        finally:
-            conn.close()
     except sqlite3.Error:
         return None
     return False
 
 
-def _all_rows(path: Path, sql: str, values: tuple[str, ...]) -> bool | None:
+def _all_rows(path: Path | sqlite3.Connection, sql: str, values: tuple[str, ...]) -> bool | None:
     if not values:
         return True
-    if not path.exists():
-        return False
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        try:
+        with _rows(path) as conn:
+            if conn is None:
+                return False
             return all(conn.execute(sql, (value,)).fetchone() is not None for value in values)
-        finally:
-            conn.close()
     except sqlite3.Error:
         return None
 
@@ -884,29 +1043,45 @@ def direct_residue(
     rels = tuple(
         dict.fromkeys([*(item.source_path for item in manifest), *residue_paths])
     )
-    from .. import embedding_index, epistemic_graph, lexstore, memory_refs
+    from .. import embedding_index
 
-    lexical = _query_path(
-        lexstore.lexical_path(Path(vault_root)),
-        (
-            ("SELECT 1 FROM pages WHERE path = ? LIMIT 1", rels),
-            ("SELECT 1 FROM semantic_units WHERE parent_path = ? LIMIT 1", rels),
-        ),
-    )
-    refs = _query_path(
-        memory_refs.sidecar_path(Path(vault_root)),
-        (("SELECT 1 FROM identities WHERE path = ? LIMIT 1", rels),),
-    )
-    graph = _query_path(
-        epistemic_graph.sidecar_path(Path(vault_root)),
-        (
-            ("SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", rels),
-            ("SELECT 1 FROM graph_parent_refs WHERE path = ? LIMIT 1", rels),
-            ("SELECT 1 FROM graph_edges WHERE source_path = ? LIMIT 1", rels),
-            ("SELECT 1 FROM graph_dependencies WHERE source_path = ? LIMIT 1", rels),
-            ("SELECT 1 FROM graph_dependency_coverage WHERE source_path = ? LIMIT 1", rels),
-        ),
-    )
+    with _derived_tables(vault_root) as tables:
+        lexical = _query_path(
+            tables.lexical,
+            (
+                ("SELECT 1 FROM pages WHERE path = ? LIMIT 1", rels),
+                ("SELECT 1 FROM semantic_units WHERE parent_path = ? LIMIT 1", rels),
+            ),
+        )
+        refs = _query_path(
+            tables.refs, (("SELECT 1 FROM identities WHERE path = ? LIMIT 1", rels),)
+        )
+        graph = _query_path(
+            tables.graph,
+            (
+                ("SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", rels),
+                ("SELECT 1 FROM graph_parent_refs WHERE path = ? LIMIT 1", rels),
+                ("SELECT 1 FROM graph_edges WHERE source_path = ? LIMIT 1", rels),
+                ("SELECT 1 FROM graph_dependencies WHERE source_path = ? LIMIT 1", rels),
+                ("SELECT 1 FROM graph_dependency_coverage WHERE source_path = ? LIMIT 1", rels),
+            ),
+        )
+        scene = False
+        for rel in rels:
+            if tables.view is not None:
+                # The store holds a frame's sidecar page and records its JPEG; a file left on disk
+                # is a projection that the projector removes.
+                prefix = f"{rel}.frames/"
+                found = next(tables.view.pages(prefix), None) is not None or next(
+                    tables.view.binaries(prefix), None
+                ) is not None
+            else:
+                path = Path(vault_root) / rel
+                frame_dir = path.parent / f"{path.name}.frames"
+                found = frame_dir.exists() and any(frame_dir.rglob("*"))
+            if found:
+                scene = True
+                break
     embeddings = _query_path(
         index_paths.sidecar_path(Path(vault_root)),
         (
@@ -923,13 +1098,6 @@ def direct_residue(
         index_paths.clip_sidecar_path(Path(vault_root)),
         (("SELECT 1 FROM images WHERE file_path = ? LIMIT 1", rels),),
     )
-    scene = False
-    for rel in rels:
-        path = Path(vault_root) / rel
-        frame_dir = path.parent / f"{path.name}.frames"
-        if frame_dir.exists() and any(frame_dir.rglob("*")):
-            scene = True
-            break
     return {
         "lexical": lexical,
         "refs": refs,
@@ -1264,7 +1432,7 @@ def _is_governed_for_restore(vault_root: Path, manifest: tuple[ManifestItem, ...
                 return True
             continue
         try:
-            raw = (Path(vault_root) / item.trash_path).read_bytes()
+            raw, _mtime = _page_bytes(vault_root, item.trash_path)
             page = find_corpus.parse_page(
                 Path(vault_root) / item.source_path,
                 0.0,
@@ -1307,39 +1475,29 @@ def _restored_derivatives_exact(operation: LifecycleOperation) -> bool:
         if item.source_path.lower().endswith(".md")
     )
     if markdown:
-        from .. import epistemic_graph, lexstore, memory_refs
-
-        lexical_path = lexstore.lexical_path(Path(vault_root))
-        checks: list[bool | None] = [
-            _all_rows(
-                memory_refs.sidecar_path(Path(vault_root)),
-                "SELECT 1 FROM identities WHERE path = ? LIMIT 1",
-                markdown,
-            )
-        ]
-        if lexical_path.exists():
-            checks.append(
-                _all_rows(
-                lexical_path,
-                "SELECT 1 FROM pages WHERE path = ? LIMIT 1",
-                markdown,
-                )
-            )
         graph_enabled = os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX", "").strip().lower() not in {
             "1",
             "true",
             "yes",
             "on",
         }
-        if graph_enabled:
-            checks.append(
-                _all_rows(
-                    epistemic_graph.sidecar_path(Path(vault_root)),
-                    "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1",
-                    markdown,
-                )
-            )
         vectors_enabled = not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS")
+        with _derived_tables(vault_root) as tables:
+            checks: list[bool | None] = [
+                _all_rows(tables.refs, "SELECT 1 FROM identities WHERE path = ? LIMIT 1", markdown)
+            ]
+            lexical_exists = tables.view is not None or Path(tables.lexical).exists()
+            if lexical_exists:
+                checks.append(
+                    _all_rows(tables.lexical, "SELECT 1 FROM pages WHERE path = ? LIMIT 1", markdown)
+                )
+            if graph_enabled:
+                checks.append(
+                    _all_rows(
+                        tables.graph, "SELECT 1 FROM graph_nodes WHERE path = ? LIMIT 1", markdown
+                    )
+                )
+            stored = tables.view is not None
         if vectors_enabled:
             checks.append(
                 _all_rows(
@@ -1355,12 +1513,15 @@ def _restored_derivatives_exact(operation: LifecycleOperation) -> bool:
                 rel: semantic_index.build_parent_index_state(vault_root, vault_root / rel)
                 for rel in markdown
             }
+            # A store commit derives a page's lexical and graph unit rows from its bytes in the
+            # same transaction, and the audit reads them from the file-mode sidecars, so in store
+            # mode it audits the vector sidecar alone.
             drift = semantic_index.audit_semantic_unit_sidecars(
                 vault_root,
                 states,
-                include_lexical=lexical_path.exists(),
+                include_lexical=lexical_exists and not stored,
                 include_vectors=vectors_enabled,
-                include_graph=graph_enabled,
+                include_graph=graph_enabled and not stored,
             )
         except (OSError, UnicodeError, ValueError, sqlite3.Error):
             return False
@@ -1396,6 +1557,46 @@ def _restored_derivatives_exact(operation: LifecycleOperation) -> bool:
     return True
 
 
+def _frame_sidecars(
+    vault_root: Path, frame_dir: Path
+) -> list[tuple[float, Callable[[], str]]] | None:
+    """Each persisted frame's timestamp and a reader of its sidecar's text, or None when the video
+    has no frames folder.
+
+    A store-mode vault lists the frame JPEGs that the store records and reads each sidecar page
+    from the store, so a frame whose page has no projection yet still counts.
+    """
+    from .. import scene_frames
+    from ..vault_store import read
+
+    frames_rel = scene_frames.stored_frames_folder(vault_root, frame_dir)
+    if frames_rel is None:
+        if not frame_dir.is_dir():
+            return None
+        return [
+            (timestamp, partial(frame.with_name(frame.name + ".md").read_text, encoding="utf-8"))
+            for frame in frame_dir.iterdir()
+            if (timestamp := scene_frames.parse_frame_ts(frame.name)) is not None
+        ]
+    prefix = f"{frames_rel}/"
+    with read.snapshot(vault_root) as view:
+        jpgs = [meta.path for meta in view.binaries(prefix)]
+        bodies = view.bodies(f"{jpg}.md" for jpg in jpgs)
+    if not jpgs:
+        return None
+
+    def sidecar_text(jpg: str) -> str:
+        if f"{jpg}.md" not in bodies:
+            raise FileNotFoundError(f"{jpg}.md")
+        return bodies[f"{jpg}.md"].decode("utf-8")
+
+    return [
+        (timestamp, partial(sidecar_text, jpg))
+        for jpg in jpgs
+        if (timestamp := scene_frames.parse_frame_ts(jpg[len(prefix):])) is not None
+    ]
+
+
 def _scene_derivatives_exact(vault_root: Path, videos: tuple[str, ...]) -> bool:
     """Prove persisted scene frames match every indexed video scene timestamp."""
     from .. import scene_frames
@@ -1419,19 +1620,14 @@ def _scene_derivatives_exact(vault_root: Path, videos: tuple[str, ...]) -> bool:
                 if not indexed or len(indexed) != len(rows):
                     return False
                 frame_dir = scene_frames.frames_dir_for(Path(vault_root) / rel)
-                if not frame_dir.is_dir():
+                frames = _frame_sidecars(vault_root, frame_dir)
+                if frames is None:
                     return False
                 persisted: set[int] = set()
-                for frame in frame_dir.iterdir():
-                    timestamp = scene_frames.parse_frame_ts(frame.name)
-                    if timestamp is None:
-                        continue
+                for timestamp, read_sidecar in frames:
                     millis = int(round(timestamp * 1000))
-                    sidecar = frame.with_name(frame.name + ".md")
                     try:
-                        frontmatter, _body, _span = parse_frontmatter(
-                            sidecar.read_text(encoding="utf-8")
-                        )
+                        frontmatter, _body, _span = parse_frontmatter(read_sidecar())
                         sidecar_ts = int(
                             round(float(frontmatter.get("frame_ts")) * 1000)
                         )

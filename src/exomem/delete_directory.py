@@ -713,12 +713,13 @@ def _delete_in_store(
     whole. The commit binds every page and record it read and the folder's counts, so a page that
     changed or that a commit added, or a link from a page that the inbound check did not see,
     refuses the whole commit and every rename is undone. The sidecar lands on disk inside the same
-    rollback window.
+    rollback window. A folder that holds a governed item keeps its tombstone and receipt around the
+    commit (``vault_store.governed``), with file mode's limit on a receipt's items.
     """
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
     from .vault_store import availability as store_availability
     from .vault_store import batch as store_batch
-    from .vault_store import binaries
+    from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import read as store_read
     from .vault_store.write import Expect, PageMove, StoreConflict
@@ -750,9 +751,6 @@ def _delete_in_store(
         if not pages and not abs_path.is_dir():
             raise DeleteDirectoryError(code="NOT_FOUND", reason=missing_path_reason(rel_path))
         curated = _refuse_protected(root, rel_path, allow_curated=allow_curated)
-        refusal = store_targets.governed_gap(root)
-        if refusal is not None:
-            raise store_availability.unrouted("delete_directory", refusal)
         if len(pages) > DIRECTORY_TRANSITION_LIMIT:
             raise DeleteDirectoryError(
                 code="PATH_GUARD_LIMIT",
@@ -854,7 +852,11 @@ def _delete_in_store(
 
                 # An evicted original's bytes move with its record, so they are fetched first.
                 hydrated.enter_context(local_originals(root, (rel_path,)))
-            with binaries.relocated(root, relocation) as moved:
+            # A governed folder's receipt intent and tombstone come last before the commit.
+            deletion = governed.begin_deletion(
+                root, source_rel=rel_path, trash_rel=trash_rel, error_class=DeleteDirectoryError
+            )
+            with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
                 store_batch.commit_batch(
                     writer,
                     [sidecar],
@@ -901,6 +903,9 @@ def _delete_in_store(
         except UnicodeDecodeError:
             continue
     due_state.refresh_after_writes(root, trashed_pages)
+    index = governed.settle(
+        root, deletion, store_batch.row_report("delete", [*pages, *listing.files]), warnings
+    )
     log_warning = write_log_entry(
         root,
         date_iso=today.isoformat(),
@@ -924,5 +929,5 @@ def _delete_in_store(
         file_count=file_count,
         inbound_link_count=inbound_total,
         warnings=warnings,
-        index=store_batch.row_report("delete", [*pages, *listing.files]).as_dict(),
+        index=index,
     )

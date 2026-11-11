@@ -970,12 +970,13 @@ def _recover_in_store(
     part pages come back with it. The commit binds what it read and that nothing sits at or below
     the destination, so a page that a commit adds there meanwhile refuses with DEST_EXISTS and every
     rename is undone. The semantic preflight and commit are file mode's, judged against the stored
-    pages; a binary alone has none, as in file mode.
+    pages; a binary alone has none, as in file mode. A governed item keeps its recovery marker,
+    tombstone and receipt around the commit (``vault_store.governed``).
     """
     from . import extraction_parts
     from .vault_store import availability as store_availability
     from .vault_store import batch as store_batch
-    from .vault_store import binaries
+    from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import ownership as store_ownership
     from .vault_store import read as store_read
@@ -1030,9 +1031,6 @@ def _recover_in_store(
             allow_curated=allow_curated,
             fold=fold,
         )
-        refusal = store_targets.governed_gap(root)
-        if refusal is not None:
-            raise store_availability.unrouted("recover_from_trash", refusal)
 
         def restored(source: str) -> str:
             return f"{restore_rel.rstrip('/')}/{source[len(trash_rel) + 1:]}"
@@ -1250,18 +1248,23 @@ def _recover_in_store(
             raise RecoverError(code="RECOVER_FAILED", reason=failed) from error
 
     semantic: dict | None = None
-    if preflight is None:
-        restore_in_store()
-    else:
-        try:
-            committed = semantic_writes.commit_recovery(
-                root, preflight=preflight, mutate=restore_in_store
-            )
-        except semantic_writes.SemanticWriteError as error:
-            raise RecoverError(code=error.code, reason=error.reason) from error
-        except PathGuardError as error:
-            raise RecoverError(code=error.code, reason=error.reason) from error
-        semantic = committed.as_dict()
+    # A governed item's receipt intent and recovery marker come last before the commit.
+    recovery = governed.begin_recovery(
+        root, trash_rel=trash_rel, restore_rel=restore_rel, error_class=RecoverError
+    )
+    with governed.committing(recovery):
+        if preflight is None:
+            restore_in_store()
+        else:
+            try:
+                committed = semantic_writes.commit_recovery(
+                    root, preflight=preflight, mutate=restore_in_store
+                )
+            except semantic_writes.SemanticWriteError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+            except PathGuardError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+            semantic = committed.as_dict()
     if trash_kind == "directory":
         binaries.prune_empty(trash_abs)
 
@@ -1275,6 +1278,9 @@ def _recover_in_store(
         # A sidecar that the store does not record is a file of its own; file mode's step removes it.
         warnings.extend(_settle_sidecar(root, sidecar, sidecar_guard, _identity))
     store_media.derive(root, destinations)
+    index = governed.settle(
+        root, recovery, store_batch.row_report("upsert", [*moves.values(), *destinations]), warnings
+    )
     log_warning = write_log_entry(
         root,
         date_iso=(today or dt.date.today()).isoformat(),
@@ -1290,7 +1296,7 @@ def _recover_in_store(
         kind=trash_kind,
         warnings=warnings,
         semantic=semantic,
-        index=store_batch.row_report("upsert", [*moves.values(), *destinations]).as_dict(),
+        index=index,
     )
 
 

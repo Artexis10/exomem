@@ -200,24 +200,11 @@ def caller_is_owner(vault_root: Path) -> bool:
 
 
 #: The reasons a store form refuses, each named once for the page and the folder forms.
-_GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
 _LINKED = "the folder holds a symbolic link, which a folder write does not follow; remove it"
 _NOT_HELD = (
     "the folder holds a Markdown file that the store holds no page for, and moving the folder "
     "would leave it behind; retry once the store has imported or removed it"
 )
-
-
-def governed_gap(vault_root: Path) -> str | None:
-    """Why a store-mode vault cannot delete, move or recover a file yet, or None when it can.
-
-    A vault that declares a governance policy writes tombstones and receipts around a lifecycle
-    write, which the store form does not carry yet, so the writer refuses before it changes
-    anything.
-    """
-    from ..governance import lifecycle
-
-    return _GOVERNED if lifecycle.policy_governs_anything(vault_root) else None
 
 
 class FolderFiles(NamedTuple):
