@@ -22,6 +22,7 @@ leaves the field behind breaks nothing.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -664,6 +665,30 @@ class Sweep:
     unowned: list[str] = field(default_factory=list)
 
 
+def _knowledge_base_pages(root: Path) -> Iterator[tuple[Path, Callable[[], int]]]:
+    """Each page of the Knowledge Base with a call that reads the number of parts it lists.
+
+    A store-mode vault lists its stored pages from the store, so a part page that has no file yet
+    is found, and reads their front matter from the same listing; a file the store does not own is
+    read from disk, as file mode reads every page.
+    """
+    from . import find_corpus
+
+    corpus = find_corpus.corpus_paths(
+        root, "kb", lambda **walk: find_corpus.walk_md(root / kb_dirname(), **walk)
+    )
+    disk: Iterable[Path] = corpus
+    if isinstance(corpus, find_corpus.StoreCorpus):
+        for meta in corpus.pages:
+            yield (
+                root.joinpath(*meta.path.split("/")),
+                lambda fields=meta.frontmatter_json: count_of(json.loads(fields)) if fields else 1,
+            )
+        disk = corpus.other_paths()
+    for path in disk:
+        yield path, lambda path=path: _declared_count(path)
+
+
 def _declared_count(path: Path) -> int:
     """The number of parts the page at `path` lists, read from its front matter alone."""
     try:
@@ -723,16 +748,14 @@ def sweep(vault_root: Path, *, dry_run: bool) -> Sweep:
     lists is removed, but only when that Source page holds an extraction and the part is one
     `render_part` wrote; every other page at a part's path is reported, never removed.
     """
-    from . import find_corpus
-
     root = Path(vault_root)
     result = Sweep()
     declared: set[Path] = set()
     found: dict[Path, dict[int, Path]] = {}
-    for path in find_corpus.walk_md(root / kb_dirname()):
+    for path, count in _knowledge_base_pages(root):
         owner = source_page_for(path)
         if owner is None:
-            if _declared_count(path) > 1:
+            if count() > 1:
                 declared.add(path)
         elif (number := part_number(path)) is not None:
             found.setdefault(owner, {})[number] = path

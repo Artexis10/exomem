@@ -18,6 +18,7 @@ import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_scene_frames import _FakeImg, _scene
+from test_vault_store_bypass_writers import RAW_SOURCE, stored_part
 from test_vault_store_importer import StoreThread
 from test_vault_store_lifecycle_writers import project_by_hand, race_after_check
 from test_vault_store_media import serve_through
@@ -35,6 +36,7 @@ from exomem import (
     delete_file,
     extraction_parts,
     move_file,
+    preserve,
     reconcile,
     recover_from_trash,
     reserved_paths,
@@ -492,3 +494,27 @@ def test_writing_frames_off_the_store_thread_commits_them_there(stored, store_th
     jpg, sidecar = (path.relative_to(stored).as_posix() for path in pairs[0])
     assert binary_record(stored, jpg) == [(sha(b"\xff\xd8fakejpg"), len(b"\xff\xd8fakejpg"))]
     assert b"scene-frame" in read.owned_bytes(stored, sidecar)
+
+
+def test_the_part_sweep_finds_a_stored_surplus_part_that_has_no_file(served):
+    """A sweep that walks the disk and misses a stored part page the projector has not written."""
+    vault_module.batch_atomic_write(
+        [
+            planned(
+                served,
+                RAW_SOURCE,
+                "---\ntitle: Minutes\ntype: source\nextraction_parts: 2\n---\n# Minutes\n\n"
+                f"{preserve._EXTRACTED_HEADING}\n\nFirst part.\n",
+                create_only=True,
+            )
+        ],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    part = stored_part(served, 3)
+    assert not (served / part).exists()
+
+    swept = extraction_parts.sweep(served, dry_run=False)
+
+    assert (swept.removed, swept.unowned) == ([part], [])
+    assert not read.page_exists(served, part)
