@@ -142,9 +142,8 @@ def _decision_billing(declared: str | None, repo_root: Path) -> bool:
     """Whether a billing declaration may stand behind decision evidence.
 
     The subscription may decide under sequence 10 alone; credits may decide only once sequence 11
-    is acknowledged. A name outside ``billing.KEY_SOURCES`` is never decision billing.
+    is acknowledged. A name outside ``billing.KEY_SOURCES``, or none at all, is never decision billing.
     """
-    declared = billing.DEFAULT if declared is None else declared
     return (
         declared == billing.DEFAULT
         or declared in billing.KEY_SOURCES
@@ -167,7 +166,7 @@ def evidence_of(report: dict, stored: dict, repo_root: Path = REPO_ROOT) -> str:
     if report["actor"]["model_reported"] != [ACTOR_MODEL]:
         return "instrument"
     # The preregistration pays decision runs from the subscription or, after sequence 11, from API credits.
-    if not _decision_billing(stored.get("billing"), repo_root):
+    if not _decision_billing(stored.get("billing", billing.DEFAULT), repo_root):
         return "instrument"
     judge = report.get("judge")
     if judge is not None and (judge["backend"], judge["model"]) != DECISION_JUDGE:
