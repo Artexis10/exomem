@@ -2398,9 +2398,10 @@ def _redacted_coordinator_url(url: str) -> str:
 
 
 # Writer-authority refusals that background work (import batches, media jobs)
-# waits out instead of failing: the mutation lock is busy, the coordinator does
-# not answer, or another replica holds or fenced the lease. Each clears without
-# any change to the request.
+# waits out instead of failing: the mutation lock is busy or cannot be taken on
+# this host, the coordinator does not answer, or this replica's lease is held
+# elsewhere or its token is no longer current. Each clears without any change
+# to the request.
 TRANSIENT_WRITER_CODES = frozenset(
     {
         "MUTATION_BUSY",
@@ -2408,8 +2409,7 @@ TRANSIENT_WRITER_CODES = frozenset(
         "WRITER_COORDINATOR_UNAVAILABLE",
         # Deliberately transient too. A misconfigured coordinator URL is not
         # fixed by asking again, but it IS fixed by an operator without
-        # restarting anything -- so the caller waits rather than crashing. What
-        # changes is only how often it asks.
+        # restarting anything -- so the caller waits rather than crashing.
         "WRITER_COORDINATOR_CONTRACT_ABSENT",
         "WRITER_FENCED",
         "WRITER_LEASE_REQUIRED",

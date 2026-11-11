@@ -1,0 +1,31 @@
+# Realm: beyond human sources. What do machines and instruments contribute, and where does
+# the benchmark stop?
+schema_version: 2
+phenomena:
+  # --- machine ---
+  - {id: machine.running-config, stage: s2, truth: [state_fold], norms: [stated-precedence], probes: [state, act], expect: [uses_current, cites_source], says: "A stated rule makes the running configuration the record of what is deployed, and a document about it differs."}
+  - {id: machine.model-claim, stage: s3, says: "A statement produced by a language model stays that model's output."}
+  - {id: machine.model-version, stage: s3, says: "The question asks which version of a model produced a result."}
+  - {id: machine.sensor-reading, stage: s3, truth: [holder_ledger, quantity_calc], expect: [keeps_attribution, cites_source], says: "A reading is kept with its instrument and its time."}
+  - {id: machine.sensor-drift, stage: s3, truth: [state_fold, interval_order], norms: [stated-rule], probes: [state, weigh], expect: [states_uncertainty], says: "A record says that an instrument drifted from a date until its recalibration, so the readings in between are suspect."}
+  - {id: machine.gap-not-zero, stage: s3, truth: [corpus_closure, quantity_calc], probes: [state, abstain], expect: [abstains_when_unknown, invents_detail], says: "A gap in a series of readings is not a reading of zero."}
+  - {id: machine.log-line, stage: s3, truth: [corpus_closure, interval_order], probes: [trace, state], expect: [cites_source, keeps_order], says: "A log line is the evidence that an event happened."}
+  - {id: machine.simulated-or-observed, stage: s3, truth: [kind_tag], expect: [keeps_kind], says: "A simulated result is not a measurement."}
+  - {id: machine.synthetic-data, stage: s3, truth: [kind_tag], expect: [keeps_kind], says: "Data marked as synthetic must not be reported as real."}
+  - {id: machine.pipeline-report, stage: s3, truth: [warrant_graph, interval_order], probes: [trace, state], expect: [cites_source, dates_old_value], says: "A report that a pipeline generated is only as recent as its inputs."}
+  - {id: machine.agent-told-agent, stage: s3, says: "One agent tells another something, and it stays the first agent's claim.", from: [theory-of-mind]}
+  - {id: machine.stale-tool-result, stage: s3, truth: [state_fold, interval_order], probes: [state, act], expect: [uses_current, dates_old_value], says: "A cached tool result is older than the state that it describes."}
+  - {id: machine.models-disagree, stage: s3, probes: [weigh, whose], expect: [flags_conflict, keeps_attribution], says: "Two models give different answers to one question."}
+  - {id: machine.test-score-or-field-result, stage: s3, truth: [kind_tag, scope_lattice], probes: [state, act], expect: [keeps_kind, keeps_scope], says: "A score on a test set is not a result in the field."}
+  - {id: machine.summary-of-human-document, stage: s3, truth: [warrant_graph, holder_ledger], probes: [trace, state], expect: [cites_source, keeps_attribution], says: "A machine summarises a document that a person wrote, and the question asks what the document says."}
+  - {id: machine.field-meaning-changed, stage: s3, truth: [scope_lattice, state_fold], probes: [state, act], expect: [keeps_scope, uses_current], says: "A data field changes its meaning between two exports."}
+  - {id: machine.cites-nothing, stage: s3, truth: [corpus_closure, warrant_graph], probes: [trace, audit], expect: [cites_source, invents_detail], says: "A machine-written note cites a source that does not exist in the world."}
+  - {id: machine.computed-from-readings, stage: s4, truth: [quantity_calc, warrant_graph], probes: [trace, state], expect: [cites_source], says: "A value is computed from many readings by a recorded method."}
+  # --- limits ---
+  - {id: limits.tacit-skill, stage: out, says: "Know-how that nobody can write down cannot be seeded into a corpus.", from: [polanyi, membench]}
+  - {id: limits.what-it-is-like, stage: out, says: "What an experience is like for a person cannot be keyed."}
+  - {id: limits.unexpressed-thought, stage: out, says: "A thought that a person never expressed in any record cannot be keyed."}
+  - {id: limits.hidden-world-truth, stage: out, says: "A truth of the world that no statement bears on is scored only as an abstention."}
+  - {id: limits.real-world-fact, stage: out, says: "The benchmark keys no fact about the real world outside the invented one."}
+  - {id: limits.moral-truth, stage: out, says: "The benchmark scores who holds which value and never which value is right."}
+  - {id: limits.aesthetic-worth, stage: out, says: "Whether a text is beautiful cannot be keyed."}

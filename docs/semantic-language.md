@@ -267,7 +267,7 @@ a fabricated per-hit zero.
 
 ## Read and traverse exact units
 
-Unit-level recall returns an exact `unit_ref`. Pass it to `read_memory` to read
+Unit-level recall returns an exact `unit_ref`. Pass it to `read_page` (in `options`) to read
 the current unit with bounded parent context. Missing, stale, ambiguous, and
 superseded references are explicit statuses; Exomem never substitutes a nearby
 unit.

@@ -2359,6 +2359,35 @@ def _v1_view_field_names(query: Mapping) -> tuple[set[str], list[str]]:
     return names, related
 
 
+def _validate_v1_related_entry(entry, position: int) -> None:
+    """One ``related`` entry's shape: a string, a forward expansion or an inverse expansion.
+
+    The declaration the entry names is not checked — it belongs to another collection's
+    schema and surfaces as SAVED_VIEW_STALE at run time (D9).
+    """
+    at = f"related[{position}]"
+    if type(entry) is str:
+        return
+    if not isinstance(entry, Mapping):
+        raise CollectionError("INVALID_SAVED_VIEW", f"saved view {at} is invalid")
+    keys = set(entry)
+    forward = keys == {"field"} or keys == {"field", "limit"}
+    inverse = keys == {"inverse"} or keys == {"inverse", "limit"}
+    if not (forward or inverse):
+        raise CollectionError("INVALID_SAVED_VIEW", f"saved view {at} is invalid")
+    if "limit" in entry and (type(entry["limit"]) is not int
+                             or not 1 <= entry["limit"] <= 50):
+        raise CollectionError("INVALID_SAVED_VIEW", f"saved view {at} limit is invalid")
+    if forward:
+        if type(entry["field"]) is not str:
+            raise CollectionError("INVALID_SAVED_VIEW", f"saved view {at} is invalid")
+        return
+    target = entry["inverse"]
+    if (not isinstance(target, Mapping) or set(target) != {"collection", "field"}
+            or type(target["collection"]) is not str or type(target["field"]) is not str):
+        raise CollectionError("INVALID_SAVED_VIEW", f"saved view {at} is invalid")
+
+
 def _normalize_saved_view_v1(
     raw_query: Mapping,
     fields: set[str],
@@ -2385,6 +2414,8 @@ def _normalize_saved_view_v1(
     page = raw_query.get("page")
     if page is not None and (not isinstance(page, Mapping) or "after" in page):
         raise CollectionError("INVALID_SAVED_VIEW", "saved view query must not pin a page cursor")
+    for position, entry in enumerate(raw_query.get("related") or ()):
+        _validate_v1_related_entry(entry, position)
     names, related = _v1_view_field_names(raw_query)
     for name in sorted(names):
         if name in fields:

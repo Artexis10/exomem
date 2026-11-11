@@ -13,9 +13,9 @@
 
 ## 2. Inverse expansion (phase 2)
 
-- [ ] 2.1 Add `item_references` by a new collection-store schema revision, maintained in the canonical item transaction, kept out of the in-vault replica and rebuilt from items; reads report warming until it is built.
-- [ ] 2.2 Add bounded inverse expansion with exact counts, consulting only admitted collections' declarations, and list inbound declarations in `inspect`.
-- [ ] 2.3 Document how an owner retires a hand-kept back-link field once inverse expansion covers it.
+- [x] 2.1 Add `item_references` by a new collection-store schema revision, maintained in the canonical item transaction, kept out of the in-vault replica and rebuilt from items; reads report warming until it is built.
+- [x] 2.2 Add bounded inverse expansion with exact counts, consulting only admitted collections' declarations, and list inbound declarations in `inspect`.
+- [x] 2.3 Document how an owner retires a hand-kept back-link field once inverse expansion covers it.
 
 ## 3. Acceptance
 

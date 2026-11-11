@@ -415,21 +415,26 @@ def unready_state(conn: sqlite3.Connection, collection_id: str) -> str | None:
     return None if row is None else row[0]
 
 
-def backfill_due(conn) -> tuple[tuple[str, bool, bool], ...]:
-    """Each collection whose projection or rollups await backfill: (id, projection, rollups).
+def backfill_due(conn) -> tuple[tuple[str, bool, bool, bool], ...]:
+    """Each collection whose projection, rollups or reference index await backfill.
 
-    One read over the collections, for the serving store thread. A collection
-    with no projection mapping in any state is due: ``begin_missing`` starts it.
-    A derived collection's rollups build in its rebuild (``derived_rows``) instead.
+    One read over the collections, for the serving store thread: (id, projection,
+    rollups, references). A collection with no projection mapping in any state is due:
+    ``begin_missing`` starts it. A derived collection's rollups build in its rebuild
+    (``derived_rows``) instead. A ``ready=0`` row of ``item_reference_state`` warms the
+    reference index the same loop owns.
     """
-    return tuple((cid, bool(projection), bool(rollup)) for cid, projection, rollup in conn.execute(
+    return tuple((cid, bool(projection), bool(rollup), bool(reference_index))
+                 for cid, projection, rollup, reference_index in conn.execute(
         "SELECT * FROM (SELECT c.collection_id,"
         " EXISTS(SELECT 1 FROM query_projection_mappings m WHERE m.collection_id=c.collection_id"
         "  AND m.state='building') OR NOT EXISTS(SELECT 1 FROM query_projection_mappings m"
         "  WHERE m.collection_id=c.collection_id) AS projection,"
         " EXISTS(SELECT 1 FROM rollup_definitions r WHERE r.collection_id=c.collection_id"
-        "  AND r.state='building') AND c.derived=0 AS rollup"
-        " FROM collections c) WHERE projection OR rollup ORDER BY collection_id"))
+        "  AND r.state='building') AND c.derived=0 AS rollup,"
+        " EXISTS(SELECT 1 FROM item_reference_state s WHERE s.collection_id=c.collection_id"
+        "  AND s.ready=0) AS reference_index"
+        " FROM collections c) WHERE projection OR rollup OR reference_index ORDER BY collection_id"))
 
 
 def prepare_manifest(conn, manifest, data, declared) -> None:

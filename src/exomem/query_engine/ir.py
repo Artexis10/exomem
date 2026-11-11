@@ -162,6 +162,8 @@ class Pattern:
 class Related:
     path: str
     limit: int = 10
+    #: ``(source collection id, declaration dotted name)`` for an inverse entry, else None.
+    inverse: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)

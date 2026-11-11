@@ -1208,6 +1208,7 @@ def inspect(vault_root: Path, collection: str | collections.CollectionManifest) 
         ),
         **({"presentation": result["presentation"]} if "presentation" in result else {}),
         **({"references": result["references"]} if "references" in result else {}),
+        **({"inbound": result["inbound"]} if "inbound" in result else {}),
     }
     return _project_inspection(payload, manifest)
 
@@ -1429,7 +1430,7 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 #: The inspection keys a collection's shape adds: recipes in items mode, page bounds in summary mode.
-_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references")
+_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references", "inbound")
 
 
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1466,6 +1467,10 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
         # The same bounded report the Records inspection admits, so one shape reaches egress.
         result["references"] = record_governance.inspection_references(value["references"])
         if result["references"] is None:
+            return None
+    if "inbound" in value:
+        result["inbound"] = record_governance.inspection_inbound(value["inbound"])
+        if result["inbound"] is None:
             return None
     return result
 

@@ -8,7 +8,7 @@ anywhere.
 
 For the assistant-side behavior after the connector is added, see
 [ai-assistant-guide.md](ai-assistant-guide.md). Remote clients cannot use local
-hooks, so they should rely on custom instructions plus `bootstrap()`.
+hooks, so they should rely on custom instructions plus `read_instructions()`.
 
 **What you need:** a machine that stays on (desktop, home server, or a cheap
 VPS) and about **15 minutes**.
@@ -247,7 +247,7 @@ Use Exomem as the memory for my work. Before you start a task, recall what Exome
 The agent then recalls what Exomem holds before a task and saves what it learns.
 The two texts together are longer than a 1,500-character field, so where the
 client caps a field, give each its own field. If you cannot paste the block, at
-minimum start new chats by asking the agent to call `bootstrap(profile="compact")`
+minimum start new chats by asking the agent to call `read_instructions(profile="compact")`
 once before using the KB.
 
 ### Act as the owner from your remote connectors (optional)
@@ -316,7 +316,7 @@ the new packaged digest as `pending_tool_surface_sha256` with
 `refresh_required: true`; do not claim it is already registered. After the new
 service is deployed, confirm `/health/ready.mcp_tool_surface_sha256` matches the
 pending digest, refresh or recreate the Personal Plugin, and verify from a fresh
-conversation that `bootstrap` and `search_memory` both invoke. If that verified
+conversation that `read_instructions` and `search_memory` both invoke. If that verified
 digest is still the current packaged surface, promote it to
 `registered_tool_surface_sha256`, clear the pending value, and set
 `refresh_required: false`. If a newer surface landed meanwhile, promote only
