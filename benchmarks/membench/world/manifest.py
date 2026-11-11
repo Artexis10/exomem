@@ -96,4 +96,10 @@ def world_record(world: World) -> dict[str, Any]:
             "restrictions",
             "removals",
         )
+    } | {
+        # Which record each announcing document stands for: the operation's name and its `seq`.
+        "operations": [
+            {"id": id_, "operation": name, "seq": record.seq}
+            for id_, (name, record) in sorted(world.operations.items())
+        ]
     }

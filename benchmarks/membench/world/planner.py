@@ -45,8 +45,9 @@ HOLDER, USER, ENTITY, ATTRIBUTE, VALUE = "holder", "user", "entity", "attribute"
 NAME, CONTEXT, EVENT, AUDIENCE = "name", "context", "event", "audience"
 PLANTED, MUTATION = "planted", "mutation"
 DURABLE = "durable"
-# The operations that make a statement or a document, and so need an id of their own.
-_MAKES = ("state", "rule", "copy")
+# The operations that make a statement, a document or an announced operation, and so need an id of
+# their own.
+_MAKES = ("state", "rule", "copy", "withdraw", "correct", "name", "merge", "tell", "restrict")
 # The operation that gives an entity a name, and the argument that holds the name.
 _NAMES, _NAME_ARGUMENT = "name", "name"
 
@@ -186,32 +187,49 @@ class Plan:
         return world
 
     def _file(self, world: World, made: str | None) -> None:
-        """Put each statement into a document of its own, in the pack's kind for its statement kind."""
-        if made is not None and made in world.statements:
+        """Put each statement into a document of its own, in the pack's kind for its statement kind,
+        and announce each operation in a document of its own, in the pack's kind for the operation."""
+        if made is None:
+            return
+        if made in world.statements:
             statement = world.statements[made]
             kind = self.pack.artefact_kind(statement.kind)
             world.add_artefact(f"{made}.doc", statement.at, [made], kind, statement.by)
+        elif made in world.operations:
+            name, record = world.operations[made]
+            by = getattr(record, "by", None)
+            if name == "tell":  # a statement is told by the holder who made it
+                told = world.statements.get(record.item)
+                by = told.by if told is not None else None
+            world.add_artefact(
+                f"{made}.doc",
+                record.at,
+                kind=self.pack.operation_kind(name),
+                by=by,
+                announces=made,
+            )
 
-    def write(self, directory: Path) -> str:
+    def write(self, directory: Path, rendering: Mapping[str, Any] | None = None) -> str:
         """Write the manifest and the shared world into ``directory``. Returns the manifest's digest."""
-        record = self.manifest()
+        record = self.manifest(rendering)
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "manifest.json").write_text(manifest.dump(record), encoding="utf-8")
         world = manifest.world_record(self.world())
         (directory / "world.json").write_text(manifest.dump(world), encoding="utf-8")
         return manifest.digest(record)
 
-    def manifest(self) -> dict[str, Any]:
-        """Everything that fixes the world's bytes, and a hash of each artefact."""
+    def manifest(self, rendering: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Everything that fixes the world's bytes, and a hash of each artefact. ``rendering`` is the
+        manifest section of a renderer's output: the level and the surface form of each artefact."""
         world = self.world()
-        return {
+        record = {
             "generator": manifest.GENERATOR_VERSION,
             "split": self.split,
             "world": self.name,
             "seed_commitment": manifest.digest(self.seed),
             "catalogue_digest": self.catalogue_digest,
             "pack": {"id": self.pack.id, "digest": self.pack.digest},
-            "projection_digest": None,  # no projection has written this world yet
+            "projection_digest": None,  # the digest of the projection file; no projection has written this world yet
             "round": {
                 "entries": list(self.spec.entries),
                 "sessions": self.spec.sessions,
@@ -241,6 +259,7 @@ class Plan:
             "drops": [{"entry": d.entry, "code": d.code, "detail": d.detail} for d in self.drops],
             "artefacts": manifest.artefact_hashes(world),
         }
+        return record if rendering is None else {**record, "rendering": dict(rendering)}
 
 
 def plan_world(

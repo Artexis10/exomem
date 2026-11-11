@@ -29,29 +29,29 @@ entity_types:
     names: product
     count: 4
     attributes:
-      - {id: signal-level, label: "signal level", volatility: ephemeral, value: {generator: integer, min: 0, max: 99}}
+      - {id: signal-level, label: "signal level", paraphrases: ["strength of the signal"], volatility: ephemeral, value: {generator: integer, min: 0, max: 99}}
   - id: service
     holder: false
     names: product
     count: 12
     attributes:
-      - {id: approvals, label: "approvals required before a deploy", volatility: durable, value: {generator: integer, min: 1, max: 9}}
-      - {id: retention, label: "days that logs are kept", volatility: durable, value: {generator: integer, min: 7, max: 365}}
-      - {id: replicas, label: "replicas in production", volatility: durable, value: {generator: integer, min: 1, max: 12}}
-      - {id: retry-limit, label: "retries before a job fails", volatility: durable, value: {generator: integer, min: 1, max: 10}}
-      - {id: support-tier, label: "support tier", volatility: durable, value: {generator: choice, from: [bronze, silver, gold, platinum, basic, extended]}}
-      - {id: region, label: "hosting region", volatility: durable, value: {generator: choice, from: [north, south, east, west, central, coastal]}}
-      - {id: team-size, label: "people on the team", volatility: slow, value: {generator: integer, min: 2, max: 30}}
-      - {id: queue-depth, label: "jobs waiting in the queue", volatility: transient, value: {generator: integer, min: 0, max: 99}}
-      - {id: launch-year, label: "year of the first release", volatility: permanent, value: {generator: integer, min: 2008, max: 2024}}
+      - {id: approvals, label: "approvals required before a deploy", paraphrases: ["sign-offs needed to ship"], volatility: durable, value: {generator: integer, min: 1, max: 9}}
+      - {id: retention, label: "days that logs are kept", paraphrases: ["log retention period"], volatility: durable, value: {generator: integer, min: 7, max: 365}}
+      - {id: replicas, label: "replicas in production", paraphrases: ["production copies running"], volatility: durable, value: {generator: integer, min: 1, max: 12}}
+      - {id: retry-limit, label: "retries before a job fails", paraphrases: ["allowed retry count"], volatility: durable, value: {generator: integer, min: 1, max: 10}}
+      - {id: support-tier, label: "support tier", paraphrases: ["level of support"], volatility: durable, value: {generator: choice, from: [bronze, silver, gold, platinum, basic, extended]}}
+      - {id: region, label: "hosting region", paraphrases: ["place it is hosted"], volatility: durable, value: {generator: choice, from: [north, south, east, west, central, coastal]}}
+      - {id: team-size, label: "people on the team", paraphrases: ["headcount"], volatility: slow, value: {generator: integer, min: 2, max: 30}}
+      - {id: queue-depth, label: "jobs waiting in the queue", paraphrases: ["backlog of jobs"], volatility: transient, value: {generator: integer, min: 0, max: 99}}
+      - {id: launch-year, label: "year of the first release", paraphrases: ["when it first shipped"], volatility: permanent, value: {generator: integer, min: 2008, max: 2024}}
   - id: site
     holder: false
     names: city
     count: 6
     attributes:
-      - {id: capacity, label: "seats available", volatility: durable, value: {generator: integer, min: 10, max: 200}}
-      - {id: cleaning-day, label: "day of the weekly cleaning", volatility: durable, value: {generator: choice, from: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]}}
-      - {id: visitor-limit, label: "visitors allowed at once", volatility: durable, value: {generator: integer, min: 1, max: 20}}
+      - {id: capacity, label: "seats available", paraphrases: ["number of desks"], volatility: durable, value: {generator: integer, min: 10, max: 200}}
+      - {id: cleaning-day, label: "day of the weekly cleaning", paraphrases: ["weekday for cleaning"], volatility: durable, value: {generator: choice, from: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]}}
+      - {id: visitor-limit, label: "visitors allowed at once", paraphrases: ["guest cap"], volatility: durable, value: {generator: integer, min: 1, max: 20}}
 
 # Things that happen. Each has a chance that a document may state, drawn from `value`.
 event_types:
@@ -84,11 +84,18 @@ facts:
   kind: fact
   share: 0.25
 
-# The kind of document that carries a statement. A statement kind that no list names goes into
-# the `default` kind.
+# The kind of document that carries a statement, or announces an operation. A statement kind or an
+# operation that no list names goes into the `default` kind.
 artefacts:
   default: note
   kinds:
     message: [question, report, instruction, proposal, opinion, supposition, story]
     note: [fact, decision, rule, definition, plan, assumption, hypothesis, estimate, prediction, example]
     log: [observation, measurement, result]
+  operations:
+    correct: message
+    withdraw: message
+    tell: message
+    name: note
+    merge: note
+    restrict: note

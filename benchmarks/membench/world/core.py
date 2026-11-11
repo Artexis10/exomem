@@ -71,6 +71,8 @@ class Vocabulary:
     splits: frozenset[str] = frozenset()
     name_spaces: frozenset[str] = frozenset()
     value_generators: frozenset[str] = frozenset()
+    probe_forms: frozenset[str] = frozenset()
+    levels: tuple[str, ...] = ()  # the implicitness levels, in the order that the catalogue lists them
 
     @classmethod
     def from_raw(
@@ -89,6 +91,8 @@ class Vocabulary:
             splits=frozenset(attributes.get("splits", ())),
             name_spaces=frozenset(attributes.get("name_spaces", ())),
             value_generators=frozenset(attributes.get("value_generators", ())),
+            probe_forms=frozenset(attributes.get("probe_forms", ())),
+            levels=tuple(attributes.get("implicitness_levels", ())),
         )
 
     @classmethod
@@ -265,6 +269,7 @@ class Artefact:
     carries: tuple[str, ...]
     copy_of: str | None = None
     altered: bool = False
+    announces: str | None = None  # the operation that this document announces, in ``World.operations``
 
 
 @dataclass(frozen=True)
@@ -298,6 +303,8 @@ class World:
         self.causes: list[Cause] = []
         self.restrictions: list[Restriction] = []
         self.removals: list[Removal] = []
+        # The operations that a document announces, by id: each with the name of its operation.
+        self.operations: dict[str, tuple[str, Any]] = {}
         self._counter = itertools.count()
         # Indexes, so that a read costs one lookup and not a scan of every statement or artefact.
         self._about: dict[str, list[str]] = {}
@@ -317,6 +324,7 @@ class World:
             self.audiences,
             self.statements,
             self.artefacts,
+            self.operations,
         )
         if any(id_ in used for used in taken):
             raise StepRefused("duplicate-id", id_, f"{what} id is used twice in world {self.name}")
@@ -353,10 +361,11 @@ class World:
         carries: Iterable[str] = (),
         kind: str | None = None,
         by: str | None = None,
+        announces: str | None = None,
     ) -> Artefact:
-        """File statements in a document. The renderer decides which statements share one."""
+        """File statements, or announce one operation, in a document. The planner decides which."""
         self._claim(id_, "artefact")
-        self.artefacts[id_] = Artefact(id_, kind, by, at, tuple(carries))
+        self.artefacts[id_] = Artefact(id_, kind, by, at, tuple(carries), announces=announces)
         for statement in self.artefacts[id_].carries:
             self._filed.setdefault(statement, []).append(id_)
         return self.artefacts[id_]
@@ -402,6 +411,13 @@ class World:
             if key not in ends:
                 raise StepRefused("missing-argument", op, f"`{key}` is required")
         return ends["from"], ends["to"]
+
+    def _announce(self, id_: str | None, name: str, record: Any) -> str:
+        """Register an operation that a document announces, and return its id."""
+        id_ = id_ or self._fresh("OP")
+        self._claim(id_, "operation")
+        self.operations[id_] = (name, record)
+        return id_
 
     def _file(self, statement: Statement) -> str:
         self._claim(statement.id, "statement")
@@ -462,10 +478,14 @@ class World:
         return self._file(statement)
 
     def op_withdraw(self, id_, *, by, statement, at):
-        self.withdrawals.append(Withdrawal(by, statement, at, self._next()))
+        record = Withdrawal(by, statement, at, self._next())
+        self.withdrawals.append(record)
+        return self._announce(id_, "withdraw", record)
 
     def op_correct(self, id_, *, by, statement, value, at):
-        self.corrections.append(Correction(by, statement, value, at, self._next()))
+        record = Correction(by, statement, value, at, self._next())
+        self.corrections.append(record)
+        return self._announce(id_, "correct", record)
 
     def op_support(self, id_, **ends):
         self.edges.append(Edge(*self._ends("support", ends), None))
@@ -474,13 +494,19 @@ class World:
         self.edges.append(Edge(*self._ends("defeat", ends), mode))
 
     def op_name(self, id_, *, entity, name, at, replaces=None):
-        self.namings.append(Naming(entity, name, at, replaces, self._next()))
+        record = Naming(entity, name, at, replaces, self._next())
+        self.namings.append(record)
+        return self._announce(id_, "name", record)
 
     def op_merge(self, id_, *, entities, at):
-        self.merges.append(Merge(tuple(entities), at, self._next()))
+        record = Merge(tuple(entities), at, self._next())
+        self.merges.append(record)
+        return self._announce(id_, "merge", record)
 
     def op_tell(self, id_, *, holder, statement, at):
-        self.tellings.append(Telling(holder, statement, at, self._next()))
+        record = Telling(holder, statement, at, self._next())
+        self.tellings.append(record)
+        return self._announce(id_, "tell", record)
 
     def op_draw(self, id_, *, target, chance, at):
         self.draws.append(Draw(target, chance, at, self._next()))
@@ -489,7 +515,9 @@ class World:
         self.causes.append(Cause(*self._ends("cause", ends)))
 
     def op_restrict(self, id_, *, target, by, at, audience=None, until=None):
-        self.restrictions.append(Restriction(target, audience, by, at, until, self._next()))
+        record = Restriction(target, audience, by, at, until, self._next())
+        self.restrictions.append(record)
+        return self._announce(id_, "restrict", record)
 
     def op_copy(self, id_, *, artefact, at, altered=False):
         id_ = id_ or self._fresh("AR")

@@ -39,12 +39,12 @@ _FIELDS = {
         "artefacts",
     ),
     "entity type": ("id", "holder", "names", "count", "attributes"),
-    "attribute": ("id", "label", "volatility", "value"),
+    "attribute": ("id", "label", "paraphrases", "volatility", "value"),
     "event type": ("id", "label", "names", "count", "value"),
     "contexts": ("names", "roots", "children"),
     "audiences": ("count", "size", "from"),
     "facts": ("kind", "share"),
-    "artefacts": ("default", "kinds"),
+    "artefacts": ("default", "kinds", "operations"),
     "user": ("names",),
 }
 # The arguments that each value generator needs.
@@ -75,7 +75,8 @@ class Domain:
 @dataclass(frozen=True)
 class AttributeSchema:
     id: str
-    label: str
+    label: str  # how a probe names the attribute
+    paraphrases: tuple[str, ...]  # other ways to name it, for text that a probe must not echo
     volatility: str
     domain: Domain
 
@@ -116,9 +117,13 @@ class Pack:
     fact_share: float
     artefact_default: str
     artefact_kinds: Mapping[str, str]  # each statement kind with the artefact kind that carries it
+    operation_kinds: Mapping[str, str]  # each operation with the artefact kind that announces it
 
     def artefact_kind(self, statement_kind: str | None) -> str:
         return self.artefact_kinds.get(statement_kind or "", self.artefact_default)
+
+    def operation_kind(self, operation: str) -> str:
+        return self.operation_kinds.get(operation, self.artefact_default)
 
 
 def load_pack(path: Path, vocabulary: Vocabulary | None = None) -> Pack:
@@ -234,6 +239,10 @@ class _Checker:
                         "duplicate-id", "artefacts", f"`{kind}` is carried by two artefact kinds"
                     )
                 by_kind[kind] = artefact_kind
+        operations = dict(carried.get("operations") or {})
+        for operation in operations:
+            if operation not in self.vocabulary.operations:
+                self.refuse("unknown-reference", "artefacts", f"`{operation}` is no operation")
         return Pack(
             id=raw.get("pack", ""),
             digest=digest,
@@ -251,6 +260,7 @@ class _Checker:
             fact_share=float(share) if isinstance(share, int | float) else 0.0,
             artefact_default=carried.get("default", ""),
             artefact_kinds=by_kind,
+            operation_kinds=operations,
         )
 
     def statement_kind(self, item: str, kind: Any) -> None:
@@ -279,9 +289,13 @@ class _Checker:
         volatility = body.get("volatility")
         if volatility not in self.vocabulary.volatility_classes:
             self.refuse("undeclared-value", item, f"`{volatility}` is no declared volatility class")
+        paraphrases = tuple(body.get("paraphrases") or ())
+        if len(set(paraphrases)) != len(paraphrases) or body.get("label") in paraphrases:
+            self.refuse("duplicate-id", item, "a paraphrase repeats the label or another paraphrase")
         return AttributeSchema(
             body.get("id", ""),
             body.get("label", ""),
+            paraphrases,
             volatility,
             self.domain(item, body.get("value")),
         )
