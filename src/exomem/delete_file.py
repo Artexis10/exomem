@@ -484,6 +484,9 @@ def _delete_file_local(
 
             # The bytes move with their record, so an evicted original is fetched first.
             originals_context.enter_context(local_originals(vault_root, (rel_path,)))
+        if _fold is not None:
+            # Immediately before the move: the retained copy must still hold identical bytes.
+            _fold.verify()
         return _trash_in_store(
             store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
             metadata_bytes=metadata_bytes, linked_from=stored_check.bound,

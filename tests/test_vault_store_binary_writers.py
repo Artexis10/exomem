@@ -8,6 +8,7 @@ pass by hand, so a page that a commit stores has no file and every answer comes 
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import sys
@@ -32,9 +33,11 @@ from test_vault_store_migration import (  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows, tree
 
 from exomem import (
+    curation,
     delete_directory,
     delete_file,
     extraction_parts,
+    fold_leaf,
     move_file,
     preserve,
     reconcile,
@@ -126,6 +129,34 @@ def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monke
     assert refused.value.code == "STALE_DELETE"
     assert revision(served) == start + 1, "only the competing commit may have committed"
     assert tree(served) == before, "the file is back and the sidecar is rolled back"
+
+
+def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
+    """A fold that moves a binary to the trash without proving again, right before the move, that
+    a retained copy still holds the same bytes."""
+    now = dt.datetime(2026, 11, 11, 3, 14, 37)
+    preview = delete_file.delete_file(
+        served, path=DIAGRAM, confirm=True, validate_only=True, now=now
+    )
+
+    def verify():
+        raise fold_leaf.refuse("CURATION_BINDING_STALE", "the retained copy changed")
+
+    before = tree(served)
+
+    with pytest.raises(curation.CurationError) as refused:
+        delete_file.delete_file(
+            served,
+            path=DIAGRAM,
+            confirm=True,
+            now=now,
+            expected_hash=preview.content_hash,
+            _fold=fold_leaf.Placement(preview.result.trash_path, verify),
+        )
+
+    assert refused.value.code == "CURATION_BINDING_STALE"
+    assert tree(served) == before
+    assert binary_record(served, DIAGRAM) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
 
 
 def test_a_trash_that_cannot_put_the_binary_back_says_so_and_one_sweep_records_it(
