@@ -564,6 +564,21 @@ Do one of these:
   "Read and clear a paused rollout". Without the cell's own image, cellctl retries the cell's pinned target, not the
   fixed release. A second miss holds the cell again. After the cell is Ready on the fixed release, clear its own
   image with the admin token, so that later releases reach it.
+  1. Load `EXOMEM_ADMIN_TOKEN` and `EXOMEM_SUBSTRATE_URL` into the shell, as in "Read and clear a paused rollout". Set `CELL_ID` to the held cell, and `FIXED_IMAGE` to the fixed release's image. Choose only a release the canary already runs: a cell's own image bypasses the canary-first rule.
+  2. Set the cell's own image. The token goes in through a header file that the shell builds from the variable, so it never appears in curl's argument list:
+
+     ```bash
+     jq -n --arg cell "$CELL_ID" --arg image "$FIXED_IMAGE" '{cellId: $cell, cellDesiredImage: $image}' | curl --fail-with-body -sS -X PUT -H @<(printf 'Authorization: Bearer %s\n' "$EXOMEM_ADMIN_TOKEN") -H 'Content-Type: application/json' --data @- "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release" | jq .success
+     ```
+
+  3. Clear the pause (step 4 of "Read and clear a paused rollout"). Wait until the cell is Ready on the fixed release.
+  4. Clear the cell's own image. A `null` value returns the cell to the fleet's `cell_image`:
+
+     ```bash
+     jq -n --arg cell "$CELL_ID" '{cellId: $cell, cellDesiredImage: null}' | curl --fail-with-body -sS -X PUT -H @<(printf 'Authorization: Bearer %s\n' "$EXOMEM_ADMIN_TOKEN") -H 'Content-Type: application/json' --data @- "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release" | jq .success
+     ```
+
+  Expected result: steps 2 and 4 each print `true`.
 - Restore by hand with [cloud-operator-restore.md](cloud-operator-restore.md), from the attempt's own backup
   (`exomem.io/pre-upgrade-snapshot` on the cell's StatefulSet). Then set the cell's own image with the admin token,
   and do step 4.
