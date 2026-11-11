@@ -117,7 +117,10 @@ class _Derivation:
             row = self.tx.execute(
                 "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
             ).fetchone()
-            return None if row is None else (bytes(row[0]), row[1])
+            if row is not None:
+                return bytes(row[0]), row[1]
+            # A page path the store holds no row for is a file like any unowned one: the disk
+            # is its source until a governed write holds it.
         path = self.root / rel
         try:
             raw = vault.read_disk_bytes_without_pinning(path)
@@ -133,10 +136,11 @@ class _Derivation:
 
     def target_exists(self, rel: str) -> bool:
         if ownership.classify(rel) is ownership.Ownership.PAGE:
-            return (
-                self.tx.execute("SELECT 1 FROM store_pages WHERE path = ?", (rel,)).fetchone()
-                is not None
-            )
+            if self.tx.execute(
+                "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
+            ).fetchone():
+                return True
+            # No row: the disk decides, as it does for a path the store does not own.
         return (self.root / rel).exists()
 
     # ------------------------------------------------------------------ run

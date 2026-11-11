@@ -202,9 +202,10 @@ class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
 
     ``refresh`` names files that the store does not own (a Markdown file outside the Knowledge Base
-    folder, say) and that a caller made durable on disk before the commit: the commit derives their
-    rows from the file's bytes, so a search sees them at the same revision as the pages. The store
-    keeps no page, record or audit row for them.
+    folder, or one at a page path the store holds no row for, say) and that a caller made durable
+    on disk before the commit: the commit derives their rows from the file's bytes, so a search
+    sees them at the same revision as the pages. The store keeps no page, record or audit row for
+    them.
 
     ``resolves_held`` and ``files_seen`` are the bookkeeping of resolving a held item, and
     ``commit`` applies them in the same transaction as the page changes.
@@ -301,6 +302,11 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
         check(tx, change.expect)
+        for rel in change.refresh:
+            if tx.execute(
+                "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
+            ).fetchone():
+                raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
         _degrade_moves(tx, change.paths)
         existing = _held_pages(tx, change)
         now = timestamp()
@@ -340,7 +346,10 @@ def _require_owned(change: StoreChange) -> None:
     """Refuse, before any write, a path that the store cannot hold as its operation needs."""
     for rel in change.refresh:
         _require_safe(rel)
-        if ownership.classify(rel) is not ownership.Ownership.NONE:
+        # ``PAGE`` is refused inside ``commit``'s transaction, where the store_pages probe and the
+        # derived rows it guards are one atomic step: a file at a page path that the store holds no
+        # row for is disk-owned and refreshes like an unowned file.
+        if ownership.classify(rel) is ownership.Ownership.BINARY:
             raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
     pages = (
         *(put.rel for put in change.puts),

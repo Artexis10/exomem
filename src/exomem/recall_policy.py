@@ -12,6 +12,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Iterable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -232,7 +233,8 @@ def _admitted_relative(
 
     `proven_directories` holds the directories whose ancestry one pass has
     already proven (see `admitted_relative_paths`); None proves every ancestor.
-    `held` is the pass's `read.served_lookup`; None asks the store for this path alone.
+    `held` is the pass's `read.served_lookup`; None takes the batch pass's lookup
+    (`admitted_among`) when one is installed, else asks the store for this path alone.
     """
     from .foreground_activity import checkpoint
 
@@ -245,6 +247,8 @@ def _admitted_relative(
     # A page that the store serves is a row, not a file. Its projection may lag, be absent or be a
     # link to another page, and none of that changes what the store holds, so the row admits it and
     # the file checks below do not apply. The store never owns a Records or Planning path.
+    if held is None:
+        held = _HELD_PASS.get()
     stored = _stored_page(root, rel) if held is None else held(rel)
     if stored is not None:
         return rel if stored and access.is_indexable(root, rel) else None
@@ -361,13 +365,30 @@ def iter_admitted_relative(vault_root: Path, paths: Iterable[Path]) -> Iterator[
 
 def admitted_among(vault_root: Path, rels: Iterable[str]) -> frozenset[str]:
     """The vault-relative paths among ``rels`` that `is_recall_candidate` admits, decided in one
-    pass: the pages that the store serves take one keyed store read, not one read each."""
+    pass: the pages that the store serves take one keyed store read, not one read each.
+
+    Every path is still decided by ``is_recall_candidate`` itself: the pass only shares its
+    "does the store hold this page?" lookup across the batch (``_HELD_PASS``), so the admission
+    rule lives in one place and a changed verdict reaches both the single and the batch path.
+    """
     root = Path(vault_root)
     wanted = list(dict.fromkeys(rels))
     from .vault_store import read
 
-    held = read.held_lookup(root, wanted)
-    return frozenset(rel for rel in wanted if _admitted_relative(root, root / rel, None, held))
+    token = _HELD_PASS.set(read.held_lookup(root, wanted))
+    try:
+        return frozenset(
+            rel for rel in wanted if is_recall_candidate(root, root / rel)
+        )
+    finally:
+        _HELD_PASS.reset(token)
+
+
+#: The pass-wide "does the store hold this page?" that ``admitted_among`` installs: one keyed
+#: read decides every path of the batch while ``is_recall_candidate`` stays the one rule.
+_HELD_PASS: ContextVar[Callable[[str], bool | None] | None] = ContextVar(
+    "recall_policy_held_pass", default=None
+)
 
 
 def _held_pages(root: Path) -> Callable[[str], bool | None]:

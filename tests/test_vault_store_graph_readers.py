@@ -488,6 +488,70 @@ def test_a_commit_writes_the_link_rows_of_its_own_pages_and_no_others(
     )
 
 
+BIN_CITE = f"{INSIGHTS}/Bin Cite.md"
+BIN_HIDDEN = "Knowledge Base/Notes/Secret Bin.md"
+BIN_TWIN = "Knowledge Base/Notes/diagram.bin.md"
+BIN_TARGET = "Knowledge Base/Notes/diagram.bin"
+
+BIN_CITE_BODY = (
+    "---\ntitle: Bin Cite\ntype: note\n---\n# Bin Cite\n\n"
+    "Bare [[diagram.bin]] here.\n"
+    "Embed ![[diagram.bin]] too.\n"
+    "Alias [[diagram.bin|the map]].\n"
+    "Path [[Notes/diagram.bin]] form.\n"
+    "Full [[Knowledge Base/Notes/diagram.bin]] form.\n"
+)
+BIN_HIDDEN_BODY = (
+    "---\ntitle: Secret Bin\ntype: note\ntags: [secret]\n---\n# Secret Bin\n\n"
+    "Cites [[diagram.bin]] quietly.\n"
+)
+BIN_TWIN_BODY = (
+    "---\ntitle: Diagram Bin\ntype: note\n---\n# Diagram Bin\n\n"
+    "Self-cites [[diagram.bin]].\n"
+)
+
+
+def test_an_extensioned_target_counts_every_exact_filename_link(stored, writer):  # noqa: F811
+    """`[[diagram.bin]]` names the file: a store-mode read counts every raw target that is exactly
+    the filename (bare, embedded or aliased), like the graph's recorded link targets did, while a
+    page's stem rule keeps the path forms. A caller that may not see a source never sees its link,
+    and a page that shares the filename links to itself without counting."""
+    restrict_external(stored, 'tags: ["secret"]')
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "test",
+        puts=(
+            write.PagePut(BIN_CITE, BIN_CITE_BODY.encode()),
+            write.PagePut(BIN_HIDDEN, BIN_HIDDEN_BODY.encode()),
+        ),
+    ))
+    expected = [
+        (BIN_CITE, 7, "Bare [[diagram.bin]] here.", "diagram.bin"),
+        (BIN_CITE, 8, "Embed ![[diagram.bin]] too.", "diagram.bin"),
+        (BIN_CITE, 9, "Alias [[diagram.bin|the map]].", "diagram.bin"),
+        (BIN_CITE, 10, "Path [[Notes/diagram.bin]] form.", "Notes/diagram.bin"),
+        (BIN_CITE, 11, "Full [[Knowledge Base/Notes/diagram.bin]] form.",
+         "Knowledge Base/Notes/diagram.bin"),
+        (BIN_HIDDEN, 8, "Cites [[diagram.bin]] quietly.", "diagram.bin"),
+    ]
+    assert inbound(stored, BIN_TARGET) == (len(expected), sorted(expected))
+    # The release gate asks which pages the target names: a binary names none, so a
+    # restricted caller gets the absence shape rather than the binary's links.
+    with request_scope(EXTERNAL):
+        assert inbound(stored, BIN_TARGET) == (0, [])
+
+    # A page whose stem is the filename makes the stem count one, so the page rule also opens the
+    # basename bucket: the extensioned rule must add no duplicate of what it already counted, and
+    # the page's self-link stays out. The gate then decides the page the target names, and the
+    # hidden source's row still leaves the answer.
+    write.commit(writer, put(BIN_TWIN, BIN_TWIN_BODY.encode()))
+    assert inbound(stored, BIN_TARGET) == (len(expected), sorted(expected))
+    with request_scope(EXTERNAL):
+        answer = commands.op_list_inbound_links(stored, target=BIN_TARGET)
+    assert sorted(
+        (row["path"], row["line_number"]) for row in answer["inbound"]
+    ) == sorted((row[0], row[1]) for row in expected[:5])
+
+
 @pytest.mark.timeout(500)
 def test_the_correction_context_of_a_unit_reads_the_store_snapshot(vault):  # noqa: F811
     """The correction context of ``activate_context`` and ``context_pack`` asks the file-mode

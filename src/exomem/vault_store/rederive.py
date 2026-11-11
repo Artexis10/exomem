@@ -25,7 +25,7 @@ from sqlite3 import Connection
 
 from .. import access, registry_history, vault
 from ..kbdir import kb_dirname
-from . import derive, mode, ownership
+from . import derive, mode
 
 #: The ``store_meta`` keys: the revision of the last commit that changed an overlay source, the
 #: overlay revision that the derived rows reflect, and the running pass (its target revision and
@@ -221,9 +221,8 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
         "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
     )
     if "inbound_links" in created:
-        vault.derive_inbound_rows(
-            root, tx, include=lambda rel: ownership.classify(rel) is not ownership.Ownership.PAGE
-        )
+        held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
+        vault.derive_inbound_rows(root, tx, include=lambda rel: rel not in held)
 
 
 def _due(conn: Connection, root: Path) -> tuple[str, Registry]:

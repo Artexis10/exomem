@@ -6732,7 +6732,9 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
                 # under the vault at all is: not the release plane's
                 # business, and never stat'd or read to get there.
                 continue
-            if candidate_abs.is_file():
+            # Only a Markdown file is a page the target can name: a binary at the
+            # path is a vault item, but not one the release plane judges as a page.
+            if candidate_abs.is_file() and confined.lower().endswith(".md"):
                 return [confined]
         return []
     # Bare basename: resolve it the way the matcher does — by filename across
