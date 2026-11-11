@@ -4394,13 +4394,79 @@ def _plan_recovery_lifecycle(
     return tuple(writes), tuple(guards), tuple(states)
 
 
+def prepare_recovery_catalog(
+    vault_root: Path,
+    preflight: RecoveryPreflight,
+    *,
+    lifecycle_writes: tuple[vault.PlannedWrite, ...] = (),
+    destination_guards: tuple[vault.PathGuard | None, ...] | None = None,
+) -> Any:
+    """The catalog publication that a recovery's commit publishes, or None when the vault has none.
+
+    ``commit_recovery`` prepares it after its rechecks, with the review slots it writes and the
+    guards that bind each restored page; a validation prepares the same batch without them, so a
+    recovery that validates is one whose catalog accepts it. A catalog that cannot take the change
+    raises GOVERNANCE_CATALOG_PUBLICATION_BLOCKED.
+    """
+    from . import extraction_parts
+    from .governance import catalog_publication, graph_producer
+
+    root = Path(vault_root)
+    guards = destination_guards or (None,) * len(preflight.entries)
+    catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
+    catalog_writes.extend(
+        vault.PlannedWrite(
+            root / item.restore_path,
+            item.source,
+            create_only=True,
+            guard=destination_guard,
+        )
+        for item, destination_guard in zip(preflight.entries, guards, strict=True)
+    )
+    semantic_states = {item.after.path: item.after for item in preflight.evaluations}
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_semantic_transition(
+            root,
+            before_corpus=preflight.before_corpus,
+            after_corpus=preflight.after_corpus,
+            writes=tuple(catalog_writes),
+            semantic_states=semantic_states,
+        )
+
+    try:
+        return catalog_publication.prepare_catalog_membership_batch(
+            root,
+            writes=tuple(catalog_writes),
+            content_paths=preflight.catalog_content_paths,
+            graph_replacement_provider=graph_replacement_provider,
+            now=preflight.catalog_publication_now,
+            # A restored page's part pages leave Trash only after the catalog is ready.
+            part_folders={
+                item.restore_path: extraction_parts.folder_for(Path(item.trash_path)).as_posix()
+                for item in preflight.entries
+            },
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
+
+
 def commit_recovery(
     vault_root: Path,
     *,
     preflight: RecoveryPreflight,
     mutate: RecoveryMutation,
+    auxiliaries_in_mutate: bool = False,
 ) -> RecoveryCommit:
-    """Prepare lifecycle auxiliaries, then perform one exact restore mutation."""
+    """Prepare lifecycle auxiliaries, then perform one exact restore mutation.
+
+    ``auxiliaries_in_mutate`` says that ``mutate`` commits the catalog's auxiliary writes itself,
+    in the restore's own transaction, as a store-mode recovery commits its log entry; they are then
+    not written again after it.
+    """
     root = Path(vault_root)
     try:
         with vault.vault_creation_lock(root, "semantic-creation"):
@@ -4452,57 +4518,21 @@ def commit_recovery(
                     census_guard.recheck(root)
                 if preflight.recovery_sidecar_guard is not None:
                     preflight.recovery_sidecar_guard.recheck(root)
-            from . import extraction_parts
-            from .governance import catalog_publication, graph_producer
+            from .governance import catalog_publication
 
-            catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
-            catalog_writes.extend(
-                vault.PlannedWrite(
-                    root / item.restore_path,
-                    item.source,
-                    create_only=True,
-                    guard=destination_guard,
-                )
-                for item, destination_guard in zip(
-                    preflight.entries, destination_guards, strict=True
-                )
-            )
-            semantic_states = {item.after.path: item.after for item in preflight.evaluations}
             # The batch seam wants index states, not contract states, and it is
             # the only place a governed page in this batch can be named for
             # derived custody. Declare them on every batch this function owns.
             batch_semantic_states = {
-                path: semantic_index.from_semantic_page_state(state)
-                for path, state in semantic_states.items()
+                item.after.path: semantic_index.from_semantic_page_state(item.after)
+                for item in preflight.evaluations
             }
-
-            def graph_replacement_provider():
-                return graph_producer.replacements_for_semantic_transition(
-                    root,
-                    before_corpus=preflight.before_corpus,
-                    after_corpus=preflight.after_corpus,
-                    writes=tuple(catalog_writes),
-                    semantic_states=semantic_states,
-                )
-
-            try:
-                catalog_target = catalog_publication.prepare_catalog_membership_batch(
-                    root,
-                    writes=tuple(catalog_writes),
-                    content_paths=preflight.catalog_content_paths,
-                    graph_replacement_provider=graph_replacement_provider,
-                    now=preflight.catalog_publication_now,
-                    # A restored page's part pages leave Trash only after the catalog is ready.
-                    part_folders={
-                        item.restore_path: extraction_parts.folder_for(Path(item.trash_path)).as_posix()
-                        for item in preflight.entries
-                    },
-                )
-            except catalog_publication.CatalogPublicationError as error:
-                raise SemanticWriteError(
-                    "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
-                    str(error),
-                ) from error
+            catalog_target = prepare_recovery_catalog(
+                root,
+                preflight,
+                lifecycle_writes=lifecycle_writes,
+                destination_guards=destination_guards,
+            )
             if lifecycle_writes:
                 vault.batch_atomic_write(
                     lifecycle_writes,
@@ -4515,7 +4545,7 @@ def commit_recovery(
                 for destination_guard in destination_guards:
                     destination_guard.recheck(root)
             mutate()
-            if catalog_target is not None:
+            if catalog_target is not None and not auxiliaries_in_mutate:
                 if preflight.catalog_auxiliary_writes:
                     vault.batch_atomic_write(
                         preflight.catalog_auxiliary_writes,

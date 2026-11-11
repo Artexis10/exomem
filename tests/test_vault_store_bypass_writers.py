@@ -663,25 +663,25 @@ def test_a_store_that_refuses_its_writer_keeps_a_surplus_part_in_a_retire_and_a_
     assert revision(served) == start
 
 
-def test_delete_validation_refuses_what_the_commit_refuses_for_an_active_catalog(
+def test_delete_validation_refuses_what_the_commit_refuses_for_a_blocked_catalog(
     served, monkeypatch
 ):
-    """A plan that validates and then fails at its commit, because the catalog has no store form."""
+    """A plan that validates and then fails at its commit, because the active catalog cannot take
+    the change: the store form prepares the catalog before its validation returns."""
     store_gamma(served)
-    # The real publication needs an enrolled governance vault; its answer is the boundary here.
-    monkeypatch.setattr(
-        catalog_publication,
-        "prepare_catalog_membership_batch",
-        lambda *args, **kwargs: object(),
-    )
+    # The real publication needs an enrolled governance vault; its refusal is the boundary here.
+
+    def blocked(*_args, **_kwargs):
+        raise catalog_publication.CatalogPublicationError("catalog removal is stale")
+
+    monkeypatch.setattr(catalog_publication, "prepare_catalog_membership_batch", blocked)
     before = tree(served)
     start = revision(served)
 
     for validate_only in (True, False):
-        with pytest.raises(OpError) as refused:
+        with pytest.raises(delete_file.DeleteFileError) as refused:
             delete_file.delete_file(served, path=GAMMA, confirm=True, validate_only=validate_only)
-        assert refused.value.code == availability.WRITER_UNROUTED, validate_only
-        assert "catalog publication" in refused.value.message
+        assert refused.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", validate_only
 
     assert revision(served) == start
     assert tree(served) == before

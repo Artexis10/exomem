@@ -218,6 +218,8 @@ def test_a_paired_artifact_moves_its_bytes_and_its_page_in_one_commit(served, wr
             (result.new_path, "move"),
             (REPORT, "delete"),
             (MOVED_REPORT, "write"),
+            # The move's log entry commits in the same transaction.
+            ("Knowledge Base/log.md", "write"),
         ]
     )
 

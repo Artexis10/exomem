@@ -696,19 +696,6 @@ def _move_file_local(
             None if store_writer is None else partial(store_targets.holds, vault_root),
         )
     )
-    if store_writer is not None and not recovering_from_trash:
-        # Recovery judges its own gaps. A move writes no tombstone or receipt, as in file mode.
-        stored_bytes = store_read.owned_bytes(vault_root, old_rel)
-        store_targets.active_catalog_gap(
-            vault_root,
-            "move_file",
-            error_class=MoveFileError,
-            removals=(
-                catalog_publication.CatalogRemoval(
-                    old_rel, None if stored_bytes is None else hashlib.sha256(stored_bytes).hexdigest()
-                ),
-            ),
-        )
     if pair is not None:
         page_rel, binary_rel = pair
         if old_rel == binary_rel:
@@ -1162,19 +1149,11 @@ def _move_file_local(
                 item.after.path: semantic_index.from_semantic_page_state(item.after)
                 for item in preflight.evaluations
             }
-            if validate_only:
-                return validation_result(
-                    source_hash=content_hash(source),
-                    destination_hash=content_hash(moved_source),
-                )
 
-            def mutate(
+            def prepared_catalog(
                 lifecycle_writes: tuple[PlannedWrite, ...],
-                required_guards,
-                bound_destination: PathGuard,
-            ) -> None:
-                nonlocal catalog_target
-                bound_destination.recheck(vault_root)
+            ) -> catalog_publication.PreparedMarkdownCatalogPublication | None:
+                """The catalog publication of this move, prepared before anything changes."""
                 catalog_removals = [
                     catalog_publication.CatalogRemoval(
                         old_rel,
@@ -1213,24 +1192,41 @@ def _move_file_local(
                             semantic_states=graph_states,
                         )
 
-                    catalog_target = (
-                        catalog_publication.prepare_catalog_membership_batch(
-                            vault_root,
-                            writes=tuple(catalog_writes),
-                            removals=tuple(catalog_removals),
-                            graph_replacement_provider=graph_replacement_provider,
-                            now=int(time.time()),
-                            # The part pages follow the page only after the catalog is ready.
-                            part_folders=(
-                                {new_rel: paired_parts[0]} if paired_parts is not None else {}
-                            ),
-                        )
+                    return catalog_publication.prepare_catalog_membership_batch(
+                        vault_root,
+                        writes=tuple(catalog_writes),
+                        removals=tuple(catalog_removals),
+                        graph_replacement_provider=graph_replacement_provider,
+                        now=int(time.time()),
+                        # The part pages follow the page only after the catalog is ready.
+                        part_folders=(
+                            {new_rel: paired_parts[0]} if paired_parts is not None else {}
+                        ),
                     )
                 except catalog_publication.CatalogPublicationError as error:
                     raise MoveFileError(
                         code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                         reason=str(error),
                     ) from error
+
+            if validate_only:
+                if store_writer is not None:
+                    # Prepared as the commit prepares it, so a move that validates is one whose
+                    # catalog accepts it; file mode prepares it only at the commit.
+                    prepared_catalog(())
+                return validation_result(
+                    source_hash=content_hash(source),
+                    destination_hash=content_hash(moved_source),
+                )
+
+            def mutate(
+                lifecycle_writes: tuple[PlannedWrite, ...],
+                required_guards,
+                bound_destination: PathGuard,
+            ) -> None:
+                nonlocal catalog_target
+                bound_destination.recheck(vault_root)
+                catalog_target = prepared_catalog(lifecycle_writes)
                 destination_writes = (
                     # Rename preserves source bytes; bind the overwrite to that exact preimage.
                     [PlannedWrite(
@@ -1367,12 +1363,16 @@ def _move_file_local(
                 and a dot folder of its parts, are renamed on disk first and recorded by the same
                 commit; a raw-marked page's parts move in the store. A changed source, a link gained
                 since the scan, or a taken destination refuses the whole commit with nothing changed.
+                The log entry commits with the move; the catalog, prepared as file mode prepares it,
+                publishes after ``commit_move`` returns.
                 """
                 from .vault_store import batch as store_batch
                 from .vault_store import binaries
                 from .vault_store.write import Expect, PageMove
 
+                nonlocal catalog_target
                 bound_destination.recheck(vault_root)
+                catalog_target = prepared_catalog(lifecycle_writes)
                 entries: list[binaries.Entry] = []
                 if paired_binary is not None:
                     entries.append(binaries.Entry(*paired_binary))
@@ -1412,7 +1412,7 @@ def _move_file_local(
                         vault_root,
                         store_writer,
                         relocation,
-                        [*lifecycle_writes, *writes, *extra_writes],
+                        [*lifecycle_writes, *writes, *extra_writes, *log_plan.writes],
                         moved,
                         sources={old_rel, *stored_parts, *relocation.recorded},
                         destinations={new_rel, *part_moves.values(), *(e.dst for e in entries)},
@@ -1460,6 +1460,17 @@ def _move_file_local(
     else:
         _admit_publication(vault_root, new_rel, None)
         log_rel_no_ext, log_body, log_plan = plan_activity_log()
+        unsupported_rel = (
+            old_rel if not old_rel.lower().endswith(".md") else new_rel
+        )
+        if store_writer is not None:
+            # Before validation returns, so a plan that validates is a plan that commits.
+            catalog_target = store_targets.prepare_catalog(
+                vault_root,
+                error_class=MoveFileError,
+                writes=log_plan.writes,
+                removals=(catalog_publication.CatalogRemoval(unsupported_rel, None),),
+            )
         if validate_only:
             try:
                 source_hash = (stored_original.binary_sha256 if stored_original is not None
@@ -1474,20 +1485,20 @@ def _move_file_local(
                 source_hash=source_hash,
                 destination_hash=source_hash,
             )
-        unsupported_rel = (
-            old_rel if not old_rel.lower().endswith(".md") else new_rel
-        )
         if store_writer is not None:
-            # The catalog gate ran above; the store form has no epoch and no held rename.
+            # The store form has no epoch and no held rename; the log entry commits with the move.
             reading.close()
             _move_binary_in_store(
                 vault_root,
                 store_writer,
                 old_rel=old_rel,
                 new_rel=new_rel,
-                writes=writes,
+                writes=[*writes, *log_plan.writes],
                 originals_context=originals_context,
                 validate_prepared_bindings=_validate_prepared_bindings,
+            )
+            store_targets.publish_catalog(
+                catalog_target, error_class=MoveFileError, what="the file move committed"
             )
         else:
             try:
@@ -1564,15 +1575,8 @@ def _move_file_local(
             store_media.after_removal(vault_root, [moved_binary[0]])
             store_media.derive(vault_root, [moved_binary[1]])
 
-        log_warning = write_log_entry(
-            vault_root,
-            date_iso=today.isoformat(),
-            op="move_file",
-            rel_path_no_ext=log_rel_no_ext,
-            body=log_body,
-        )
-        if log_warning:
-            warnings.append(log_warning)
+        if log_plan.warning:
+            warnings.append(log_plan.warning)
         return MoveFileResult(
             old_path=old_rel,
             new_path=new_rel,
