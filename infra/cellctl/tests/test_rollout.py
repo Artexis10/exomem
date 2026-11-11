@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -228,6 +229,13 @@ def test_the_prepare_job_is_pinned_to_its_node_and_pulls_the_target() -> None:
     assert pod["nodeName"] == "agent-1"
     assert pod["containers"][0]["image"] == IMAGE_B
     assert "volumes" not in pod  # pull-only: it mounts nothing
+    # The shape the exomem-cellctl-scope admission admits: a cell-prepare
+    # Job pinned by nodeName alone, never a selector, toleration or affinity.
+    # A change here without the policy's exception stops every apply.
+    assert re.fullmatch(r"cell-prepare-[0-9a-f]{16}", job["metadata"]["name"])
+    for field in ("nodeSelector", "tolerations", "affinity", "runtimeClassName",
+                  "priorityClassName", "hostAliases"):
+        assert field not in pod
     # Long enough that a finished Job still exists at the next pass in the
     # window, keeping the per-node/per-target dedupe a no-op.
     assert job["spec"]["ttlSecondsAfterFinished"] == 26 * 60 * 60

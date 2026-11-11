@@ -1904,6 +1904,19 @@ def test_the_admission_policy_pins_the_lease_rule_after_the_broker_rule() -> Non
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_scope_policy_admits_the_prepare_job_and_its_no_egress_label() -> None:
+    # automate-cloud-releases D9: the rendered prepare Job must pass the same
+    # admission rules cellctl's other objects do, or every apply after the
+    # Job kind was added is refused and cells never converge.
+    documents = _helm_template()
+    egress = _admission_expression(documents, "cellctl may write job-egress")
+    assert "size(variables.np.podSelector.matchExpressions[1].values) == 3" in egress
+    assert "'prepare' in" in egress
+    placement = _admission_expression(documents, "cellctl may use only exact operator-selected")
+    assert "cell-prepare-" in placement and "podSpec.nodeName" in placement
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 @pytest.mark.parametrize(("setting", "refused_at"), [
     (("--set-string", "mediaSlotLease.image=example:latest"), "/mediaSlotLease/image"),
     (("--set-string", "mediaSlotLease.endpoint=http://10.43.0.26:8767"), "/mediaSlotLease/endpoint"),
