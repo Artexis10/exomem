@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.173.0](https://github.com/Artexis10/exomem/compare/v0.172.0...v0.173.0) (2026-11-11)
+
+
+### Features
+
+* **vault-store:** answer store-mode readers with SQL over the store ([#2727](https://github.com/Artexis10/exomem/issues/2727)) ([8ce4cd1](https://github.com/Artexis10/exomem/commit/8ce4cd172f0d79b2d5bcb82e2bd69915ed5a455e))
+
+
+### Bug Fixes
+
+* **dimensions:** keep a restricted caller's edge read unchanged by writes it may not see ([#2736](https://github.com/Artexis10/exomem/issues/2736)) ([1d4e971](https://github.com/Artexis10/exomem/commit/1d4e971ce775c2126c0c351a5ccd38d323731307))
+* **search:** match dataset values by their distinctive words ([#2745](https://github.com/Artexis10/exomem/issues/2745)) ([9fddcc6](https://github.com/Artexis10/exomem/commit/9fddcc6e26e594486b4ae1f1fff97d001f9f257d))
+
 ## [0.172.0](https://github.com/Artexis10/exomem/compare/v0.171.0...v0.172.0) (2026-11-11)
 
 
