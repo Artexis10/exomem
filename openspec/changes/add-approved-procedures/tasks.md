@@ -44,6 +44,8 @@
 - [ ] 4.4 Conflict between two approved procedures: check that the agent names the conflict and follows the user's instruction.
 - [ ] 4.5 Unrelated task: check that the agent does not apply a delivered procedure.
 - [ ] 4.6 Task outside Exomem: check that the agent finds and follows a matching procedure in a repository task.
+- [x] 4.7 Reword the native MCP activation nudge so a task in the user's own projects and repositories also starts initial activation, not only advice. Regenerate the plugin and Cloud hook copies.
+  - Evidence: claude-sonnet-5-5, 2026-11-11, scenario 4.6 passed 3 of 3 (was 0 of 2); the two 4.5 prompts and one plain coding question applied no procedure and did not call `recall_context`.
 
 ## 5. Validate, merge, release and archive
 
