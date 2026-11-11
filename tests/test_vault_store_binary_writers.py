@@ -17,7 +17,10 @@ import pytest
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_lifecycle_writers import race_after_check
+from test_scene_frames import _FakeImg, _scene
+from test_vault_store_importer import StoreThread
+from test_vault_store_lifecycle_writers import project_by_hand, race_after_check
+from test_vault_store_media import serve_through
 from test_vault_store_migration import (  # noqa: F401
     DIAGRAM,
     DIAGRAM_BYTES,
@@ -32,12 +35,15 @@ from exomem import (
     delete_file,
     extraction_parts,
     move_file,
+    reconcile,
     recover_from_trash,
     reserved_paths,
+    scene_frames,
 )
 from exomem import vault as vault_module
 from exomem.governance.principal import most_restrictive_principal, request_scope
 from exomem.vault_store import batch, importer, read, write
+from exomem.writer_lease import get_manager
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -390,3 +396,99 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
     assert (back.restored_path, back.kind) == (FOLDER, "directory")
     assert (root / DIAGRAM).read_bytes() == DIAGRAM_BYTES
     assert (root / CHART).read_bytes() == b"chart"
+
+
+VIDEO = "Knowledge Base/Media/harbour.mp4"
+FRAMES = f"{VIDEO}.frames"
+
+
+def frame_rows(root):
+    after = f"{FRAMES}0"  # "0" sorts right after "/": the end of the folder's path range
+    return (
+        store_rows(root, "SELECT path FROM store_pages WHERE path > ? AND path < ?", FRAMES, after),
+        store_rows(
+            root, "SELECT path FROM store_binaries WHERE path > ? AND path < ?", FRAMES, after
+        ),
+    )
+
+
+def store_frames(root, run):
+    """Two frames as a store-mode vault holds them: each JPEG on disk with its record, and each
+    sidecar a stored page with no file."""
+    puts, records = [], []
+    for index in range(2):
+        jpg = f"{FRAMES}/{scene_frames.frame_filename(index, index * 5.0)}"
+        body = b"\xff\xd8frame %d" % index
+        (root / jpg).parent.mkdir(parents=True, exist_ok=True)
+        (root / jpg).write_bytes(body)
+        records.append(write.BinaryRecord(jpg, sha(body), len(body)))
+        puts.append(write.PagePut(f"{jpg}.md", b"# Frame\n"))
+    change = write.StoreChange(
+        write.Origin.GOVERNED, "frames", puts=tuple(puts), binaries=tuple(records)
+    )
+    run(lambda writing: write.commit(writing, change))
+    return [record.rel for record in records]
+
+
+@pytest.fixture
+def store_thread(stored, monkeypatch):
+    thread = StoreThread(stored)
+    serve_through(monkeypatch, thread)
+    yield thread
+    thread.close()
+
+
+def test_clearing_stored_frames_off_the_store_thread_removes_pages_records_and_files(
+    stored, store_thread
+):
+    """A clear that leaves the stored sidecar pages behind, or records of JPEGs that are gone."""
+    assert scene_frames.clear_scene_frames(stored, stored / VIDEO) == 0, "no frames: nothing"
+    jpgs = store_frames(stored, store_thread.run)
+
+    removed = scene_frames.clear_scene_frames(stored, stored / VIDEO)
+
+    assert removed == 4
+    assert frame_rows(stored) == ([], [])
+    assert not any((stored / jpg).exists() for jpg in jpgs)
+
+
+def test_a_clear_killed_before_its_commit_heals_after_one_sweep_and_one_reconcile(
+    served, writer
+):
+    """A crash between the unlinks and the commit that leaves orphan sidecar pages for good."""
+    store_frames(served, lambda work: work(writer))
+
+    def killed(*_arguments, **_options):
+        raise RuntimeError("killed")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(batch, "commit_batch", killed)
+        with pytest.raises(RuntimeError):
+            scene_frames.clear_scene_frames(served, served / VIDEO)
+    importer.Importer(served, run=lambda work: work(writer)).sweep()
+    assert frame_rows(served)[1] == [], "the sweep drops the records of the gone JPEGs"
+    project_by_hand(served)
+
+    report = reconcile.reconcile(served)
+
+    assert frame_rows(served) == ([], [])
+    assert report.frame_orphans_removed == 1
+    assert report.frame_orphans_kept == []
+
+
+def test_writing_frames_off_the_store_thread_commits_them_there(stored, store_thread):
+    """The refusal that a media worker's frame write met in a store-mode vault, or a hop that
+    stalls under the mutation guard that the worker holds across it."""
+    video = stored / VIDEO
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"\x00video")
+
+    with get_manager().mutation_guard(
+        stored, operation="background_media_scene_frame_commit", holder_kind="background"
+    ):
+        pairs = scene_frames.write_scene_frames(stored, video, [(_scene(10.0), _FakeImg())])
+
+    assert len(pairs) == 1
+    jpg, sidecar = (path.relative_to(stored).as_posix() for path in pairs[0])
+    assert binary_record(stored, jpg) == [(sha(b"\xff\xd8fakejpg"), len(b"\xff\xd8fakejpg"))]
+    assert b"scene-frame" in read.owned_bytes(stored, sidecar)

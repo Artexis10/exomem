@@ -37,11 +37,9 @@ from exomem import (
     delete_file,
     extraction_parts,
     preserve,
-    reconcile,
     registry_history,
     relation_review,
     reserved_paths,
-    scene_frames,
     semantic_writes,
 )
 from exomem import init as init_module
@@ -512,28 +510,6 @@ def test_companion_backfill_commit_refuses_by_name_before_it_arms_a_journal(serv
     assert tree(served) == before
 
 
-def test_scene_frame_clear_refuses_a_stored_sidecar_and_passes_a_video_without_frames(served):
-    """A clear that unlinks projections and leaves the stored sidecar pages behind."""
-    video = served / "Knowledge Base/Media/harbour.mp4"
-    sidecar = "Knowledge Base/Media/harbour.mp4.frames/scene-000-t0ms.jpg.md"
-    assert scene_frames.clear_scene_frames(served, video) == 0, "no frames: it clears as before"
-    vault_module.batch_atomic_write(
-        [planned(served, sidecar, "# Frame\n", create_only=True)],
-        vault_root=served,
-        post_commit_fanout=False,
-    )
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        scene_frames.clear_scene_frames(served, video)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert revision(served) == start
-    assert tree(served) == before
-    assert read.owned_bytes(served, sidecar) == b"# Frame\n"
-
-
 def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served):
     """A publish, unlink or move of a stored page that skips the store; a sidecar still passes."""
     before = tree(served)
@@ -561,22 +537,6 @@ def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served)
         served, f"{DIAGRAM}.meta.json", b"{}", expected_identity=None
     )
     assert (served / f"{DIAGRAM}.meta.json").read_bytes() == b"{}"
-
-
-FRAME_SIDECAR = "Knowledge Base/Media/gone.mp4.frames/scene-000-t0ms.jpg.md"
-
-
-def test_reconcile_names_a_stored_frame_folder_it_kept_and_still_finishes(served):
-    """A reconcile that dies on a stored frame sidecar, or counts it as removed when it stayed."""
-    frames = served / FRAME_SIDECAR
-    frames.parent.mkdir(parents=True)
-    frames.write_text("# Frame\n", encoding="utf-8")
-
-    report = reconcile.reconcile(served)
-
-    assert report.frame_orphans_kept == ["Knowledge Base/Media/gone.mp4.frames"]
-    assert report.frame_orphans_removed == 0
-    assert frames.read_text(encoding="utf-8") == "# Frame\n"
 
 
 RAW_SOURCE = "Knowledge Base/Sources/__exomem_raw_v1__minutes.md"
