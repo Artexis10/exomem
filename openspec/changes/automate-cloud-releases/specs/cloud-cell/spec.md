@@ -102,7 +102,7 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 - **WHEN** a cell is in the forward-only hold and further passes run
 - **THEN** cellctl applies no target to the cell, and the cell stays stopped
-- **AND** after a person clears the pause, cellctl starts one new attempt toward the cell's own image when set, else toward its pinned target
+- **AND** after a person clears the pause, cellctl starts one new attempt: a tenant cell toward its own image when set, else its pinned target; the canary toward its current target
 - **AND** that attempt starts at once, even while the canary's image differs from its target
 - **AND** a tenant cell goes toward its own image when one is set, and otherwise retries its pinned target, so it never takes a `cell_image` the canary has not run unless a person set that image as the cell's own
 

@@ -126,7 +126,7 @@
   - a reconcile test: `cell_image` set back to a release before a one-way entry that a cell is past starts no attempt, keeps the cell serving, and pauses with `UPGRADE_BACKWARD_CROSSING`, which catches a withdrawal that moves cells back across a one-way change;
   - a reconcile test: the forward-only hold keeps the attempt's restore point while it lasts, which catches a hold that leaves a person no state to restore by hand;
   - a reconcile test: passes after the forward-only miss apply no target and keep 0 replicas, which catches a hold that restarts the failed target every deadline;
-  - a reconcile test: after a person clears the pause, one new attempt starts toward the held cell's own image when set, else its pinned target, which catches a hold that no action can end.
+  - a reconcile test: after a person clears the pause, one new attempt starts toward a held tenant's own image when set, else its pinned target, and a held canary's toward its current target, which catches a hold that no action can end.
 - [x] 1.11 Add the four rollout alerts to `cellctl` (D8). Add the three thresholds to the observability contract and the chart. Verify with tests:
   - each alert fires on its condition and resolves when the condition clears, which catches an alert that never fires or never resolves;
   - `UPGRADE_FORWARD_ONLY` fires `cloud-rollout-paused`, which catches a forward-only hold that nobody hears about;
