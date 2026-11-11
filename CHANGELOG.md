@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.174.0](https://github.com/Artexis10/exomem/compare/v0.173.0...v0.174.0) (2026-11-11)
+
+
+### Features
+
+* **hooks:** let the agent judge short follow-up turns in MCP mode ([#2733](https://github.com/Artexis10/exomem/issues/2733)) ([c5ef04a](https://github.com/Artexis10/exomem/commit/c5ef04a7a998fce5a71da78537692721778eda31))
+
+
+### Bug Fixes
+
+* **cloud:** fsync the written files, never the host's os.sync ([#2754](https://github.com/Artexis10/exomem/issues/2754)) ([9019564](https://github.com/Artexis10/exomem/commit/901956425f7a0525d60ce80328a86927959246da))
+* **hooks:** ask for recall before a task in the user's own repository ([#2729](https://github.com/Artexis10/exomem/issues/2729)) ([7f30eb9](https://github.com/Artexis10/exomem/commit/7f30eb9e5eda3ae946c45f07922d2f75c4291582))
+* **search:** stop treating relative time words as a request for recent notes ([#2740](https://github.com/Artexis10/exomem/issues/2740)) ([3b0701b](https://github.com/Artexis10/exomem/commit/3b0701b0ba9049bc622ffcf61d424c13fd06d974))
+
 ## [0.173.0](https://github.com/Artexis10/exomem/compare/v0.172.0...v0.173.0) (2026-11-11)
 
 
