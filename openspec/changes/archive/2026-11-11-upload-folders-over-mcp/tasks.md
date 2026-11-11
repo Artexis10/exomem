@@ -13,4 +13,4 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Independent review of the finished change, merge, release, and archive this change. **Evidence:** the review verdict on the PR, the merge commit and the release tag.
+- [x] 3.1 Independent review of the finished change, merge, release, and archive this change. **Evidence:** the review verdict on the PR, the merge commit and the release tag. Approved on #2710 after three review rounds; merged as bf2220f3a; released in v0.171.0.
