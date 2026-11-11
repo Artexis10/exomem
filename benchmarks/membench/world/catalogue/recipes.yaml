@@ -198,7 +198,7 @@ recipes:
     slots: [told, probe]
     steps:
       - {op: state, id: relayed, by: reporter, about: item, value: claimed, kind: report, basis: told, quoting: speaker, at: told, world: planted}
-      - {op: state, id: direct, by: speaker, about: item, value: claimed, kind: fact, basis: observed, at: told, world: mutation}
+      - {op: state, id: relayed, by: speaker, about: item, value: claimed, kind: fact, basis: observed, at: told, world: mutation}
     keys:
       whose: {at: probe, value: {read: holder_ledger.holder, of: relayed}, traps: [{role: reporter}]}
       act: {at: probe, value: {read: holder_ledger.holders, of: item}, traps: [{role: claimed}]}

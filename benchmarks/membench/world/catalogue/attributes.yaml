@@ -4,7 +4,7 @@
 # words: adding one is a data change. The sets in this file are closed: code implements each member, so
 # adding one is a code change and a change to this file. Code branches only on these values. It
 # never branches on a phenomenon id, a family key, a behaviour key or a norm key.
-schema_version: 2
+schema_version: 3
 
 # How the oracle knows the answer. Each mechanism is one pure function over the evidence layer.
 # `readings` are the named results that a recipe may take as a key, a trap or a premise.
@@ -234,11 +234,14 @@ bridge_strengths:
   suggests: "The observation makes the content likely. Its probe is on the rubric track."
 
 # Whether the key is computed. The first three values are membench's family classifications.
+# `truth` says which mechanisms a phenomenon of the class names: `pipeline` means the mechanisms
+# of `pipeline_order`, and a mechanism name means that mechanism alone. A class whose `truth` is
+# `pipeline` is the computed class.
 key_classes:
-  deterministic-oracle: "The oracle computes the key from the evidence layer."
-  rubric-track: "The oracle supplies facts, and a blind judge applies a predeclared rubric."
-  run-relative: "The key depends on what the arm itself did or held. The harness computes it from the run's own record, and it is reported as harm or description only."
-  out-of-scope: "The benchmark declares the phenomenon outside what it can test."
+  deterministic-oracle: {truth: pipeline, description: "The oracle computes the key from the evidence layer."}
+  rubric-track: {truth: judged, description: "The oracle supplies facts, and a blind judge applies a predeclared rubric."}
+  run-relative: {truth: run_record, description: "The key depends on what the arm itself did or held. The harness computes it from the run's own record, and it is reported as harm or description only."}
+  out-of-scope: {truth: none, description: "The benchmark declares the phenomenon outside what it can test."}
 
 # What a probe asks the actor to do. `read_as` says how its result is read: as a position between
 # the floor and the ceiling, or as harm against the no-memory arm.

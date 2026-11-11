@@ -1,8 +1,8 @@
-# The Exomem projection of the catalogue. It sits outside `catalogue/`, so that an edited
+# The Exomem projection of the catalogue. It sits outside `benchmarks/membench/world/catalogue/`, so that an edited
 # prediction changes no world's catalogue digest. The world, its prose and its keys never read it.
 #
-# The catalogue itself is not free of the product: `catalogue/families.yaml` marks the twelve
-# families that mirror a shipped Exomem dimension, and `catalogue/lineage.yaml` describes them.
+# The catalogue itself is not free of the product: `benchmarks/membench/world/catalogue/families.yaml` marks the twelve
+# families that mirror a shipped Exomem dimension, and `benchmarks/membench/world/catalogue/lineage.yaml` describes them.
 #
 # `dimension` is the shipped Exomem dimension key that a probe of the family carries when the
 # epistemic task suite (f38) plays a generated project. A family with no dimension has no shipped

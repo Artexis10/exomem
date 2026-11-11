@@ -70,7 +70,7 @@ The generator builds a world in three layers, and text comes after all three.
 - **Rejected: text first, keys extracted afterwards.** An audit that the Veracium paper cites found 6.4% of one benchmark's answer keys corrupt. STALE's scenarios are model-written and judge-validated, so their truth is asserted, not constructed.
 - **What would change this:** the full-history arm disagreeing with the keys on more than one probe in ten in a family. Then that family's norms are wrong, or its entries belong on the rubric track.
 
-**Every norm that a key rests on is registered.** Statements alone do not fix a key. The oracle also applies norms, such as that a holder's later statement replaces that holder's earlier one. `catalogue/norms.yaml` lists all 22, and the oracle applies no other.
+**Every norm that a key rests on is registered.** Statements alone do not fix a key. The oracle also applies norms, such as that a holder's later statement replaces that holder's earlier one. `benchmarks/membench/world/catalogue/norms.yaml` lists all 22, and the oracle applies no other.
 
 - A **stated** norm appears in a document of the world, and the proof trace holds that document. Which record governs a fact is always a stated norm. So is every causal rule, every chance and every claim that a list is complete.
 - A **background** norm appears in no document. A careful reader is assumed to share it. Sixteen of the 22 norms are background norms.
@@ -84,11 +84,11 @@ The oracle never reads the generator's own model of events. `causal_model` and `
 This is the shipped vocabulary's rule, applied to the benchmark: open words, closed behaviours.
 
 - **Open:** phenomena, families, behaviours, norms, statement kinds, hedges, recipes, domain packs, surface forms and bridges. Each is a YAML entry. Adding one is a data change. An open word carries a closed attribute only where code reads one, as a statement kind carries its commitment.
-- **Closed:** every set in `catalogue/attributes.yaml`. These include truth mechanisms and their readings, world operations, rule shapes, role kinds, key parts, key classes, probe forms, statement bases, commitments, defeat modes, implicitness levels, volatility classes, scorers and dials. Code implements each member. Adding one is a code change and a schema change.
+- **Closed:** every set in `benchmarks/membench/world/catalogue/attributes.yaml`. These include truth mechanisms and their readings, world operations, rule shapes, role kinds, key parts, key classes, probe forms, statement bases, commitments, defeat modes, implicitness levels, volatility classes, scorers and dials. Code implements each member. Adding one is a code change and a schema change.
 
 Code never branches on a phenomenon id, a family key, a behaviour key or a norm key. A phenomenon is a composition of closed parts. The 512 entries need 13 pipeline mechanisms, 14 probe forms and 16 world operations.
 
-**A recipe is data.** `catalogue/recipes.yaml` holds one recipe for each buildable phenomenon. A recipe holds no condition, no loop and no expression.
+**A recipe is data.** `benchmarks/membench/world/catalogue/recipes.yaml` holds one recipe for each buildable phenomenon. A recipe holds no condition, no loop and no expression.
 
 ```yaml
 currency.reversal:
@@ -123,7 +123,7 @@ currency.reversal:
 - **Five meanings were sharpened, with no new value.** A statement of a kind that commits its holder to nothing does not count for `corpus_closure.recorded`. A `correct` step replaces a statement's content for the whole period that it covers, and `state_fold.replaced` holds the content that it replaced. A replaced statement supports nothing, as a withdrawn or defeated one does. `kind_tag.kind` and `holder_ledger.holder` each say which of several statements decides.
 - **Every recipe now keys every probe form that its entry declares.** Five recipes left a form unkeyed: `order.sequence`, `argument.rebuttal` and `calibration.known-chance`, and the twin parts of `propagation.dependent-update` and `deception.injected-instruction`. Two of them gained a key, and three entries lost a form. Six of the new recipes also changed their entry's forms, where the family's default asks a question that the phenomenon does not raise: five dropped a form, and `uncertainty.hedged-claim` asks `act` in place of `abstain`.
 - **Six entries named the wrong norms.** Three propagation recipes rest on support edges and on no stated rule. `scope.one-client` rests on a scoped decision and on no stated rule. `quantity.missing-term` rests on a stated dependency that its entry did not name. `machine.gap-not-zero` rests on absence and volatility, and its family's default names neither.
-- **A role trap can be right in the mutation world.** A trap such as "done" is the content that the plant leaves unestablished. Where the phenomenon is left out, a result may assert that content, and then it is no error. Decision 3 therefore drops a role trap from the key of a thread planted in the mutation world, but only where a statement that asserts and stands carries the role there. A role that only a hypothesis or a defeated statement carries stays a trap. The mutation check keeps every role trap that a statement carries.
+- **A role trap can be right in the mutation world.** A trap such as "done" is the content that the plant leaves unestablished. Where the phenomenon is left out, a result may assert that content, and then it is no error. Decision 3 therefore drops a role trap from the key of a thread planted in the mutation world, but only where a statement that asserts and stands carries the role there. A role that only a proposed, reported or defeated statement carries stays a trap. The mutation check keeps every role trap that a statement carries.
 - **Still unexercised.** No recipe keys the probe form `as_of`. No recipe uses the rule shapes `implies` and `volatility`, or the arguments `set.scope`, `restrict.until` and `copy.altered`. 18 of the 52 pipeline readings are never read. `identity.alias` has no `twin` part, so its twin entry `identity.homonym` has no key yet, and the loader names it. The desk-check removed operations only, as this decision asks.
 - **What it does not show.** No recipe has been planted, so no key has met the mutation, invariance and uniqueness checks. `identity.rename` and `identity.alias` key the referent of the new name. A task that needs a fact filed under the other name has no key yet, because a key cannot say which name the probe uses.
 
@@ -250,7 +250,7 @@ A round plan declares each dial's value for each family before the round runs. N
 
 ### 7. Predictions are filed before a run
 
-`projections/exomem.yaml` states, per family, whether Exomem models it and what this design expects: pass, partial or fail. The file sits outside `catalogue/`. A manifest pins the catalogue's digest and the projection's digest apart, so an edited prediction changes no world. The report prints each prediction beside its result.
+`projections/exomem.yaml` states, per family, whether Exomem models it and what this design expects: pass, partial or fail. The file sits outside `benchmarks/membench/world/catalogue/`. A manifest pins the catalogue's digest and the projection's digest apart, so an edited prediction changes no world. The report prints each prediction beside its result.
 
 The first register expects no family to pass. It expects 13 of 35 to fail: persistence, source reliability, calibration, propagation, scope, quantity, statistics, meaning, inference, causation, belief states, deception and machine sources. It expects the implied and propagated levels to fail in every family. These are readings of the shipped pack and the active specs. No run backs them.
 
@@ -309,7 +309,7 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 
 **What is neutral.**
 
-- The evidence layer uses the W3C PROV names: entity, activity, agent, derivation and attribution. The statement kinds are the world's own (`catalogue/statement-kinds.yaml`). The world uses no Exomem kind, relation or dimension.
+- The evidence layer uses the W3C PROV names: entity, activity, agent, derivation and attribution. The statement kinds are the world's own (`benchmarks/membench/world/catalogue/statement-kinds.yaml`). The world uses no Exomem kind, relation or dimension.
 - The Exomem projection is the only file that maps the world to a product. It maps a family to the dimension key that f38 reports.
 - Every projection writes a parity report, as membench's native renderers do: each fact is represented, degraded or unsupported.
 - Arm `F` receives the same sessions, files and learning instruction as `P`.
@@ -347,11 +347,11 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 
 ## The catalogue
 
-`catalogue/` holds the first catalogue as data.
+`benchmarks/membench/world/catalogue/` holds the first catalogue as data.
 
 | File | Holds |
 |---|---|
-| `attributes.yaml` | The closed sets. They include 13 pipeline mechanisms with their readings, plus `run_record`, `judged` and `none`; 16 world operations; 9 rule shapes; 9 role kinds; 4 key classes; 14 probe forms; 4 statement bases; 4 commitments; 2 defeat modes; 7 implicitness levels; 5 volatility classes; 6 scorers; 8 dials. |
+| `attributes.yaml` | The closed sets. They include 13 pipeline mechanisms with their readings, plus `run_record`, `judged` and `none`; 16 world operations; 9 rule shapes; 9 role kinds; 4 key classes, each with the mechanisms that it admits; 14 probe forms; 4 statement bases; 4 commitments; 2 defeat modes; 7 implicitness levels; 5 volatility classes; 6 scorers; 8 dials. |
 | `behaviours.yaml` | 21 behaviours that a judge rates, each wanted or unwanted. The first six are f38's. |
 | `norms.yaml` | 22 norms that a key may rest on: 6 stated and 16 background. |
 | `statement-kinds.yaml` | 20 kinds of statement, each with how far it commits its holder. |
@@ -361,7 +361,7 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 | `recipes.yaml` | 46 recipes: the 26 that slice 1 needs, and 20 for later slices. |
 | `lineage.yaml` | 36 sources, each with what this benchmark adopts and leaves, and how it was checked. |
 
-`projections/exomem.yaml` sits beside the catalogue and holds the Exomem dimension and the filed prediction per family.
+`projections/exomem.yaml` sits in this change, outside the catalogue directory, and holds the Exomem dimension and the filed prediction per family.
 
 An entry reads:
 
@@ -371,7 +371,7 @@ An entry reads:
 
 It inherits the family's mechanisms (`state_fold`, `warrant_graph`), key class, norms, probe forms (`impact`, `act`) and behaviours.
 
-Size by family, counted on 2026-11-11 by loading every file in `catalogue/phenomena/`:
+Size by family, counted on 2026-11-11 by loading every file in `benchmarks/membench/world/catalogue/phenomena/`:
 
 | Realm | Families and entries |
 |---|---|
@@ -487,7 +487,7 @@ The claim that the other axes multiply the catalogue for free was wrong for surf
 
 ## What comes from outside work
 
-`catalogue/lineage.yaml` holds the full list. The main debts:
+`benchmarks/membench/world/catalogue/lineage.yaml` holds the full list. The main debts:
 
 | Work | Adopted | Left |
 |---|---|---|
