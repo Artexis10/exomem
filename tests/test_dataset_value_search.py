@@ -384,6 +384,23 @@ def test_a_compound_word_split_between_key_and_value_matches(vault):
     assert result.path in _paths(_find(vault, "acme-iban"))
 
 
+def test_a_compound_seen_only_in_field_names_finds_no_value_hit(vault):
+    # No field may borrow the value touch: the field holding the compound in its name
+    # must also hold one of the compound's stems in its value.
+    borrowed = _preserve(
+        vault,
+        "borrowed.json",
+        json.dumps({"test-results": "ok", "summary": "results in detail"}).encode(),
+    )
+    named = _preserve(
+        vault,
+        "named.json",
+        json.dumps({"acme-iban": "zzz", "note": "says iban"}).encode(),
+    )
+    assert borrowed.path not in _paths(_find(vault, "test-results"))
+    assert named.path not in _paths(_find(vault, "acme-iban"))
+
+
 def test_an_equal_coverage_match_prefers_the_record_with_the_fewest_fields(vault):
     wide = {f"a{n:02d}": f"filler{n:02d}" for n in range(30)}
     wide["note"] = "quillon"

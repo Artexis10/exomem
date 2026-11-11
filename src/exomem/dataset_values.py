@@ -567,8 +567,10 @@ def _match(
             # `held_value` restricts that to the value column.
             held: dict[int, dict[tuple[str, ...], set[int]]] = {}
             held_value: dict[int, dict[tuple[str, ...], set[int]]] = {}
-            # A compound word counts as touching a value when any one stem is in it, so a
-            # multi-stem group also gets the looser map. The digit rule keeps `held_value`.
+            # A compound word counts as touching a value when the field holding it also
+            # holds one of its stems in the value, so a multi-stem group also gets the
+            # looser map: group present anywhere AND a stem in the value, same row.
+            # The digit rule keeps `held_value`.
             held_value_any: dict[int, dict[tuple[str, ...], set[int]]] = {}
             for group in groups:
                 variants = ((False, held, False), (True, held_value, False))
@@ -576,7 +578,10 @@ def _match(
                     variants += ((True, held_value_any, True),)
                 for value_only, into, loose in variants:
                     if loose:
-                        expression = "words : (" + " OR ".join(_phrase(stem) for stem in group) + ")"
+                        stems = " OR ".join(_phrase(stem) for stem in group)
+                        expression = (
+                            _group_expression(group) + f" AND words : ({stems})"
+                        )
                     else:
                         expression = _group_expression(group, value_only=value_only)
                     for record_id, field_no in conn.execute(
