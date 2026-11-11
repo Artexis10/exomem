@@ -604,7 +604,7 @@ class Oracle:
         """The statements of the world that carry a role: a `state` or `correct` step gives the role
         as its value or, for a holder, the role makes the statement; a statement id stands for that
         statement. A rule carries no value. It reads the whole world that it is given, so a key is
-        read in one thread's own world (``Plan.pair``) and no statement of another thread bears."""
+        read in one thread's own world (``Plan.thread_world``) and no statement of another thread bears."""
         w = self.record.world
         found = {
             s.id: s

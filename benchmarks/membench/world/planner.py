@@ -12,10 +12,10 @@ session timeline. The planner decides three things and records each in the plan:
   validity window places its probe within one session of the moment before it and every other
   moment beyond the window, so that an observation is current at the probe in one world only.
 
-A thread has two worlds. ``Plan.pair`` builds them: the backbone plus that thread alone, planted and
-left out. ``Plan.world`` builds the shared world that a renderer reads, with each thread in the form
-that the plan chose for it. The oracle's checks read a thread's own two worlds, because its carry
-rule reads every statement of the world that it is given.
+A thread has two worlds. ``Plan.thread_world`` builds one of them and ``Plan.pair`` both: the
+backbone plus that thread alone, planted and left out. ``Plan.world`` builds the shared world that a
+renderer reads, with each thread in the form that the plan chose for it. The oracle and the key writer
+read a thread's own world, because the carry rule reads every statement of the world that it is given.
 """
 
 from __future__ import annotations
@@ -157,10 +157,13 @@ class Plan:
         """The shared world: the backbone, every thread in its chosen form and the stable facts."""
         return self._build(self.threads, variants or {}, self.facts)
 
+    def thread_world(self, thread: Thread, variant: str) -> World:
+        """One world of a thread, planted or in the mutation form: the backbone and that thread alone."""
+        return self._build((thread,), {thread.id: variant}, ())
+
     def pair(self, thread: Thread) -> tuple[World, World]:
-        """A thread's planted world and its mutation world: the backbone and that thread alone."""
-        planted = self._build((thread,), {thread.id: PLANTED}, ())
-        return planted, self._build((thread,), {thread.id: MUTATION}, ())
+        """A thread's planted world and its mutation world."""
+        return self.thread_world(thread, PLANTED), self.thread_world(thread, MUTATION)
 
     def _build(
         self, threads: Sequence[Thread], variants: Mapping[str, str], facts: Iterable[Fact]

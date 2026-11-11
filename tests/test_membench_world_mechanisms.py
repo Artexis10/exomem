@@ -310,6 +310,14 @@ def test_holder_ledger_follows_a_told_statement_back_to_the_person_who_said_it_f
     assert written(mutation, t, "whose") == (t.roles["person"], [])
     assert depends_on_plant(written(planted, t, "whose"), written(mutation, t, "whose"))
 
+    # The trail from the note back to the person runs through the telling, so a proof trace that
+    # follows it holds the note, the telling and the opinion.
+    note, opinion = t.step_ids["note"], t.step_ids["opinion"]
+    holder, trail = planted.holder_ledger.trail(note, t.slots["probe"])
+    assert (
+        holder == t.roles["person"] and (trail[0], trail[-1]) == (note, opinion) and len(trail) == 3
+    )
+
 
 def test_holder_ledger_refuses_a_told_statement_whose_telling_is_not_recorded() -> None:
     world, plan = bare_world()

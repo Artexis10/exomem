@@ -1,8 +1,8 @@
 """The key writer: each probe's key, proof trace and contest set, read from the oracle.
 
-A key is read in one thread's own world, the backbone and that thread alone (``Plan.pair``), so a
-value that two threads share never draws a statement of another thread into a key, a trap, a proof
-trace or a contest set.
+A key is read in one thread's own world, the backbone and that thread alone
+(``Plan.thread_world``), so a value that two threads share never draws a statement of another thread
+into a key, a trap, a proof trace or a contest set.
 
 * **Key.** The value, the traps, the premise and the facts that the recipe's key parts read, in the
   world that the plan chose for the thread. A trap that equals the value is no trap.
@@ -85,8 +85,7 @@ def write_keys(plan: Plan, catalogue: Catalogue) -> tuple[Key, ...]:
     keys: list[Key] = []
     refusals: list[Refusal] = []
     for thread in plan.threads:
-        planted, mutation = plan.pair(thread)
-        oracle = Oracle(mutation if thread.variant == MUTATION else planted, plan.validity())
+        oracle = Oracle(plan.thread_world(thread, thread.variant), plan.validity())
         entry = catalogue.entries[thread.entry]
         for form in entry.probes:
             try:
