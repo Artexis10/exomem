@@ -661,3 +661,18 @@ adversarial comparison at acceptable marginal cost.
   **f36 and f37 judge.** The decision judge is `claude-opus-5-5` on the Claude subscription. It is blind, it uses the same view and JSON schema as before, and it re-judges 20% of items. It is from the same model family as the actor, and every report says so. When Codex has room, `gpt-6.1-sol` re-judges a random 20% sample of the decision items. The report gives the agreement, which is description only and changes no decision. The f36 and f37 runs need no product change and may start once this receipt is acknowledged.
 
   **No other change.** Sequence 9's held-out inputs, measures, fault rules and loss bounds stand. Until the owner acknowledges this receipt, sequence 9's rules govern, and no run uses the PP arm, the reduced scale or the Opus decision judge as decision evidence.
+
+- 2026-11-11 — **Outcome evaluation amendment, sequence 11.** This amendment changes who pays for the sessions of f35, f36 and f37. It adds no family and changes no arm, scale, measure, judge model or loss bound. Reason: on 2026-11-11 the owner ruled that a run billed to Claude API credits is valid evidence, and that a run on the Claude subscription stays valid, because both serve the same frozen models. Sequences 9 and 10 paid decision runs from the subscription only and authorized no API or credit spend. That rule limited spend; it was not a rule of method.
+
+  **Billing.** A run declares one billing source before its first session: `subscription`, the Claude subscription login, or `credits`, Claude API credits paid through `ANTHROPIC_API_KEY`. Every actor session and every Claude judge call reports its credential source. The run file records the declared source and the observed one.
+  - A decision run may be billed to either source. Its actors and its Claude judge may use different sources.
+  - The frozen actor model and effort and the frozen decision judge of sequence 10 apply under either source.
+  - Credits are preferred when an account has room.
+
+  **Faults.** Sequence 9's fault "an API key as the credential source" becomes "a credential source other than the one the run declared". A credit balance that the API reports as too low is handled as a rejected subscription limit: the run stops at once, without retries, and waits for room as an incomplete run. Every other fault rule of sequence 9 stands.
+
+  **Earlier judgement files.** A Claude judgement file written before judgement files recorded their billing reads as billed to the subscription. The data and the report mark that source as inferred. The owner ruled so on 2026-11-11. A held-out result judged before this amendment keeps the evidence class it had.
+
+  **Spend and holds.** Decision runs may spend Claude API credits, and the Codex judge keeps its subscription. The owner sees each decision run's cost estimate before it starts. The holds of sequences 9 and 10 stand, except that a decision run billed to credits waits for room in a credit account in place of the Claude subscription window.
+
+  **No other change.** Every result stays an internal diagnostic, never a published suite result. Until the owner acknowledges this receipt, sequence 10's rules govern, and a run billed to credits is instrument evidence.
