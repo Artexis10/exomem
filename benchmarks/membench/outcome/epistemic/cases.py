@@ -125,7 +125,7 @@ def structure_problems(project: dict) -> list[str]:
                 f"probe {name}: key.accept, key.rubric and key.behaviours must be lists"
             )
         else:
-            problems += key_problems(name, key)
+            problems += key_problems(name, key, p.get("task"))
         # A probe that is neither stable nor tied to a change would silently drop out of every statistic.
         if (p.get("change_id") is None) != (p.get("dimension") == STABLE):
             problems.append(
@@ -153,8 +153,9 @@ def store_name_problems(project: dict) -> list[str]:
         for path, text in files_of(p).items():
             places.append((f"probe {name} file {path}", f"{path}\n{text}"))
         key = p.get("key") if isinstance(p.get("key"), dict) else {}
-        for field in ("value", "trap"):
-            places.append((f"probe {name} key.{field}", key.get(field)))
+        places.append((f"probe {name} key.value", key.get("value")))
+        # `key_problems` already names a trap field of the wrong type; `key_strings` skips it here.
+        places += [(f"probe {name} {field}", text) for field, text in trap_fields(key)]
         for field in ("accept", "rubric"):
             # `structure_problems` already names a field that is not a list.
             texts = key.get(field) if isinstance(key.get(field), list) else []
@@ -167,13 +168,34 @@ def store_name_problems(project: dict) -> list[str]:
     ]
 
 
-def key_problems(name: str, key: dict) -> list[str]:
+def key_traps(key: dict) -> list[str]:
+    """The traps of a key as a list: ``key.traps``, or a hand-written project's single ``key.trap`` as a list of one."""
+    if isinstance(key.get("traps"), list):
+        return list(key["traps"])
+    return [key["trap"]] if key.get("trap") else []
+
+
+def trap_fields(key: dict) -> list[tuple[str, object]]:
+    """``(field, trap)`` for each trap of a key, named as the author wrote it."""
+    if isinstance(key.get("traps"), list):
+        return [(f"key.traps[{i}]", trap) for i, trap in enumerate(key["traps"])]
+    return [("key.trap", key["trap"])] if key.get("trap") else []
+
+
+def key_problems(name: str, key: dict, task: object) -> list[str]:
     """What is wrong inside the lists of a key whose shape is right: each problem names what to fix."""
     problems = []
     if not all(isinstance(text, str) for text in key["accept"]):
         problems.append(f"probe {name}: every key.accept item must be a string")
     if not isinstance(key.get("trap"), (str, type(None))):
         problems.append(f"probe {name}: key.trap must be a string or null")
+    if "traps" in key:
+        traps = key["traps"]
+        if not isinstance(traps, list) or not all(isinstance(trap, str) for trap in traps):
+            problems.append(f"probe {name}: key.traps must be a list of strings")
+        elif key.get("trap"):
+            problems.append(f"probe {name}: give key.traps or key.trap, not both")
+    problems += premise_problems(name, key.get("premise"), task)
     if unknown := [b for b in key["behaviours"] if b not in behaviours()]:
         problems.append(
             f"probe {name}: key.behaviours names {unknown}, which the behaviour registry "
@@ -182,13 +204,31 @@ def key_problems(name: str, key: dict) -> list[str]:
     return problems
 
 
+def premise_problems(name: str, premise: object, task: object) -> list[str]:
+    """A premise is the state that the probe's task presupposes, so the task must contain it as authored."""
+    if premise is None:
+        return []
+    if not isinstance(premise, str) or not premise.strip():
+        return [f"probe {name}: key.premise must be a non-empty string or null"]
+    if isinstance(task, str) and not occurs(premise.strip(), task):
+        return [
+            f"probe {name}: key.premise is not in its task; a premise probe's task must state "
+            "the state that it presupposes"
+        ]
+    return []
+
+
 def key_strings(key: dict) -> list[tuple[str, str]]:
-    """``(field, string)`` for the key's value, each accepted phrasing and its trap, as authored."""
+    """``(field, string)`` for the key's value, each accepted phrasing and each trap, as authored.
+
+    The premise is not here: its task must hold it, so the leak rule would refuse every premise probe.
+    """
     found = [("key.value", key["value"])] if key["value"] is not None else []
     found += [(f"key.accept[{i}]", text) for i, text in enumerate(key["accept"])]
-    if key.get("trap"):
-        found.append(("key.trap", key["trap"]))
-    return [(field, text.strip()) for field, text in found if text.strip()]
+    found += trap_fields(key)
+    return [
+        (field, text.strip()) for field, text in found if isinstance(text, str) and text.strip()
+    ]
 
 
 def occurs(needle: str, text: str) -> bool:

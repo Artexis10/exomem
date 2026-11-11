@@ -861,6 +861,79 @@ def test_a_behaviour_that_no_probe_asks_has_no_report_row_and_one_that_a_probe_a
     )
 
 
+def premise_project(*, task: str, premise: str) -> dict:
+    """The invented project with a premise probe at p-first: its key holds a trap and a premise apart."""
+    project = invented_project()
+    project["probes"][1]["task"] = task
+    project["probes"][1]["key"].update(traps=["alpha"], premise=premise)
+    return project
+
+
+def test_a_premise_probe_whose_task_holds_its_premise_passes_without_the_premise_counting_as_a_leak():
+    """The task must state the stale state it presupposes, so the leak rule must not refuse the premise."""
+    project = premise_project(
+        task="[probe p-first] The opening fact is still open, so which fact did session two open with?",
+        premise="The opening fact is still open",
+    )
+
+    assert cases.structure_problems(project) == []
+    refusals, _, _ = cases.check_probes(project)
+    assert refusals == []
+
+
+def test_a_premise_that_the_probes_task_does_not_hold_refuses_the_case_set_and_names_the_probe():
+    """A premise the task never states would show the judge a state that no actor was asked to accept."""
+    project = premise_project(
+        task="[probe p-first] Which fact did session two open with?",
+        premise="The opening fact is still open",
+    )
+
+    problems = cases.structure_problems(project)
+
+    assert any(p.startswith("probe p-first: key.premise is not in its task") for p in problems)
+
+
+def test_the_leak_rule_still_covers_every_trap_of_a_key_and_a_key_gives_traps_or_a_trap_not_both():
+    """A trap in the task hands the answerer the wrong answer; two trap fields would leave one unread."""
+    project = invented_project()
+    project["probes"][1]["key"]["traps"] = ["unrelated", "session two"]
+    project["probes"][1]["task"] = "[probe p-first] Which fact did session two open with?"
+    project["probes"][2]["key"].update(traps=["delta"], trap="epsilon")
+
+    refusals, _, _ = cases.check_probes(project)
+    problems = cases.structure_problems(project)
+
+    assert refusals == ["probe p-first: key.traps[1] appears in its task"]
+    assert "probe p-second: give key.traps or key.trap, not both" in problems
+
+
+def test_a_hand_written_keys_single_trap_reads_as_a_list_of_one_and_the_project_loads_unchanged():
+    """The hand-written projects keep `key.trap`; the suite reads it as the first of a list."""
+    project = invented_project()
+    project["probes"][1]["key"]["trap"] = "alpha"
+
+    assert cases.structure_problems(project) == []
+    assert cases.key_traps(project["probes"][1]["key"]) == ["alpha"]
+    assert cases.key_traps(project["probes"][0]["key"]) == [], "a null trap is no trap"
+    assert epistemic_judge.shown_key(project["probes"][1]["key"])["traps"] == ["alpha"]
+
+
+def test_the_judges_prompt_holds_every_trap_and_the_premise_of_the_key(played):
+    """The judge rates `trusts_stale` from what it reads, so a trap or premise left out of its prompt could never be caught."""
+    projects = cases.load_split(played.root, "dev")
+    probe = next(p for p in projects["proj-a"][0]["probes"] if p["probe_id"] == "p-first")
+    probe["key"].update(traps=["alpha", "gamma-old"], premise="the opening fact is still open")
+
+    entries = epistemic_judge.collect(played.run_dir, projects, ["P"])
+    entry = next(e for e in entries if e["probe_id"] == "p-first" and e["state"] == "answered")
+    prompt = epistemic_judge.build_prompt(entry)
+
+    shown = json.loads(prompt.split("KEY:\n", 1)[1].split("\n\nANSWER:\n", 1)[0])
+    assert shown["traps"] == ["alpha", "gamma-old"]
+    assert shown["premise"] == "the opening fact is still open"
+    assert "relies on a trap or on the premise" in prompt
+
+
 def test_a_report_refuses_a_case_file_that_changed_since_the_run_played_it(scratch):
     """SPLIT.json can be repaired after a run; the report must still read the file the run played."""
     write_case_set(scratch.root, {"proj-a": invented_project()})

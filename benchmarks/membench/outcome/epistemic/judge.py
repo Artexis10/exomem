@@ -2,7 +2,7 @@
 
 ``items`` pools every scored probe answer under an opaque id and keeps the arm key in a separate
 file. ``judge`` gives one fresh judge process per item: the probe task, the key (value, accepted
-phrasings, rubric and trap), the final answer and a diff of the files the call changed. The judge never
+phrasings, rubric, traps and premise), the final answer and a diff of the files the call changed. The judge never
 sees the arm, the memory tool calls or another arm's answer, and decides ``correct`` itself, so a
 correct answer in other words scores as correct. The harness has no parser cross-check of the judge.
 ``membench outcome report epistemic`` drives this module.
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from . import layout
-from .cases import TRUSTS_STALE, behaviours, holds_store_name, is_stable
+from .cases import TRUSTS_STALE, behaviours, holds_store_name, is_stable, key_traps
 
 SEED = 20261108
 STORE_MARK = "[store]"
@@ -51,9 +51,9 @@ INTRO = """You grade one answer against a key. You see the task, the key, the an
 
 The mark [store] stands where the answerer named the place it keeps notes; it is not part of the task and says nothing about correctness.
 
-The key gives the correct value, other accepted phrasings of it, a rubric and, when the task has one, a trap: the outdated, refuted, unverified or out-of-scope value that a wrong answer relies on. When the value is null, the answer is not one value, and the rubric alone states what a correct answer does.
+The key gives the correct value, other accepted phrasings of it, a rubric and, when the task has them, traps and a premise. A trap is an outdated, refuted, unverified or out-of-scope value that a wrong answer relies on. The premise is the stale or false state that the task itself presupposes; a correct answer does not rely on it. When the value is null, the answer is not one value, and the rubric alone states what a correct answer does.
 
-Judge the answer and the changed files together, for what the key's fact needs. A correct answer in other words is correct. An answer that holds the right value and also relies on the trap is not correct."""
+Judge the answer and the changed files together, for what the key's fact needs. A correct answer in other words is correct. An answer that holds the right value and also relies on a trap or on the premise is not correct."""
 
 OUTRO = "Ignore style and everything else in the task."
 
@@ -64,10 +64,16 @@ def rubric(asked: tuple[str, ...] | list[str]) -> str:
     A behaviour's line is its registry description, so a behaviour added to ``behaviours.yaml`` needs no code here.
     """
     registry = behaviours()
-    lines = [f"- {name}: {registry[name]['description']}" for name in asked]
+    lines = []
+    for name in asked:
+        line = f"- {name}: {registry[name]['description']}"
+        if name == TRUSTS_STALE:
+            # The registry describes a replaced value; a premise is the other state that this behaviour covers.
+            line += " This covers reliance on any trap and on the premise; it is n/a when the key holds neither."
+        lines.append(line)
     return (
         f"{INTRO}\n\nReturn:\n"
-        "- correct: true when the answer meets the key's value or an accepted phrasing, or the rubric when the value is null, and does not rely on the trap.\n"
+        "- correct: true when the answer meets the key's value or an accepted phrasing, or the rubric when the value is null, and does not rely on any trap or on the premise.\n"
         'Then, for each behaviour below, "yes" when the answer shows it, "no" when the task gives an occasion for it and the answer does not show it, and "n/a" when the task gives no occasion for it:\n'
         + "\n".join(lines)
         + "\n- reason: one sentence.\n\n"
@@ -77,6 +83,17 @@ def rubric(asked: tuple[str, ...] | list[str]) -> str:
 
 #: What an answer with no reply scores without a judge call: a product failure, not correct.
 UNANSWERED_VERDICT = {"correct": False, "reason": "unanswered"}
+
+
+def shown_key(key: dict) -> dict:
+    """The key as a judge reads it: the value, accepted phrasings, rubric, every trap as a list and the premise."""
+    return {
+        "value": key.get("value"),
+        "accept": key.get("accept"),
+        "rubric": key.get("rubric"),
+        "traps": key_traps(key),
+        "premise": key.get("premise"),
+    }
 
 
 def shown_changes(changed: dict) -> str:
@@ -111,7 +128,7 @@ def collect(run_dir: Path, projects: dict[str, tuple[dict, dict]], arms: list[st
             "state": "answered",
             "log": found["log"],
             "task": probe["task"],
-            "key": {k: probe["key"].get(k) for k in ("value", "accept", "rubric", "trap")},
+            "key": shown_key(probe["key"]),
             "behaviours": list(behaviours_asked(probe)),
             "answer": found["reply"],
             "changed": shown_changes(found["changed"]),
