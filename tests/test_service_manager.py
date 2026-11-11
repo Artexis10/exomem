@@ -800,6 +800,192 @@ def test_a_supervisor_older_than_the_vault_state_names_the_launcher_fix_before_t
     asyncio.run(scenario())
 
 
+def test_a_supervisor_that_predates_the_recorded_format_still_starts_the_worker(
+    tmp_path, monkeypatch,
+):
+    """A manifest that records an optional format the launcher's catalogs predate
+    still starts the worker that wrote it: the verdict is the target's own,
+    computed under its interpreter. The launcher's own read only gates
+    orchestrating upgrades, which still names the launcher fix."""
+    from exomem import state_migration
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    monkeypatch.setattr(
+        state_migration,
+        "_OPTIONAL_COMPATIBILITY_IDS",
+        state_migration._OPTIONAL_COMPATIBILITY_IDS - {"collections-store-v1"},
+    )
+    # The launcher's own read now fails the way an older release's did, so
+    # orchestration still refuses with the documented offline fix.
+    assert "collections-store-v1" in module.upgrade_blocker()
+
+    async def scenario():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        real = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        serving.inspect = real.inspect
+        serving.migration_required = real.migration_required
+        serving.pid = 0
+        manager.initial_target = {
+            "python": sys.executable, "version": _release_of(sys.executable),
+        }
+        await manager.start()
+        assert serving.pid == 200
+        assert serving.events == ["start"]
+        assert manager.phase == "ready"
+        assert ingress.events[-1] == ("resume", "new-upstream")
+
+    asyncio.run(scenario())
+
+
+def test_a_candidate_refuses_state_its_own_release_cannot_read(
+    tmp_path, monkeypatch,
+):
+    """The verdict is the candidate's own: a rollback candidate that predates a
+    recorded optional format refuses itself before the serving worker is
+    touched, even when the launcher's catalogs do know the format."""
+    from exomem import state_migration, state_paths
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    # The vault records a format id this launcher's catalogs know as optional,
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["descriptors"] = sorted([*payload["descriptors"], "sample-format-v9"])
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        state_migration,
+        "_OPTIONAL_COMPATIBILITY_IDS",
+        state_migration._OPTIONAL_COMPATIBILITY_IDS | {"sample-format-v9"},
+    )
+    # so orchestration is not blocked; the candidate's own release predates it.
+    assert module.upgrade_blocker() is None
+
+    async def scenario():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        real = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        serving.inspect = real.inspect
+        serving.migration_required = real.migration_required
+        target = {"python": sys.executable, "version": _release_of(sys.executable)}
+        result = await manager.upgrade(target)
+        assert not result["ok"], result
+        assert "current admission unchanged" in result["error"], result
+        assert serving.pid == 100
+        assert serving.events == ingress.events == []
+        assert manager.records.pending() is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("report", [None, "not-a-verdict"])
+def test_a_target_without_a_verdict_leaves_the_supervisors_own_read(
+    tmp_path, monkeypatch, candidate_runtime, report,
+):
+    """A candidate whose probe reports no verdict -- a release that predates the
+    field, or a report that is not a verdict -- leaves the supervisor's own read
+    as the fallback, and state that read cannot parse declares the migrator
+    instead of failing the declaration."""
+    from exomem import state_migration, state_paths
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    async def scenario():
+        runtime, actual = candidate_runtime
+        if report is not None:
+            actual["state_verdict"] = report
+        target = await runtime.inspect({"python": sys.executable, "version": "1.2.3"})
+        assert runtime._verified_state_compatibility[4] is None
+        assert runtime.migration_required(target) == (False, "declared_none")
+        # Neither side can read this manifest: the declaration is the migrator's.
+        payload["families"] = "invalid"
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+        assert runtime.migration_required(target) == (
+            True, "state manifest unreadable by supervisor"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_a_target_that_reports_no_verdict_proceeds_past_an_unreadable_manifest(
+    tmp_path, monkeypatch,
+):
+    """When the target reports no verdict and the launcher's own read fails, a
+    first start declares the migration and lets the worker's own gate decide;
+    the launcher never interprets the format itself."""
+    from exomem import state_migration
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    state_migration.record_collection_store_compatibility(vault, authority_check=lambda: True)
+    monkeypatch.setattr(
+        state_migration,
+        "_OPTIONAL_COMPATIBILITY_IDS",
+        state_migration._OPTIONAL_COMPATIBILITY_IDS - {"collections-store-v1"},
+    )
+
+    async def scenario():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        real = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        serving.migration_required = real.migration_required
+        serving.pid = 0
+        await manager.start()
+        assert serving.pid == 200
+        assert serving.events == ["inspect", "start"]
+        assert manager.phase == "ready"
+
+    asyncio.run(scenario())
+
+
+def test_a_handoff_declares_the_migration_when_neither_side_reads_the_state(
+    tmp_path, monkeypatch, candidate_runtime,
+):
+    """A target that cannot report a verdict over a manifest the launcher cannot
+    read still runs the handoff's migrator step: the migrator decides under the
+    target's interpreter."""
+    from exomem import state_migration, state_paths
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["families"] = "invalid"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    async def scenario():
+        manager, ingress, runtime, target = _supervisor(tmp_path)
+        candidate, _ = candidate_runtime
+        runtime.inspect = candidate.inspect
+        runtime.migration_required = candidate.migration_required
+        result = await manager.upgrade(target)
+        assert result["ok"], result
+        assert runtime.events == ["stop", "migrate", "start"]
+        assert ingress.events[-1] == ("resume", "new-upstream")
+
+    asyncio.run(scenario())
+
+
 @pytest.fixture
 def candidate_runtime(tmp_path, monkeypatch):
     from exomem import state_migration
