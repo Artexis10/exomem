@@ -1553,7 +1553,7 @@ class WorkerRuntime:
         verdict = actual.get("state_verdict")
         if not (
             isinstance(verdict, dict)
-            and verdict.get("verdict") in {"serve", "migrate", "refuse"}
+            and verdict.get("verdict") in {"serve", "migrate", "refuse"}  # nosemgrep: ep-word-membership -- the verdict token set is fixed by the worker probe protocol
             and isinstance(verdict.get("reason"), str)
         ):
             # A target that predates the verdict probe, or whose report is not a
