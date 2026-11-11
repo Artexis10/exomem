@@ -306,12 +306,16 @@ RELATION_NOT_OFFERED_REMEDIATION = (
 
 
 def _candidate_options(
-    candidate: dict[str, Any], page: Any, fit: "RelationFit"
+    candidate: dict[str, Any], page: Any, fit: "RelationFit", *, sensed: bool = False
 ) -> list[dict[str, Any]]:
-    """The menu a candidate offers. A `retype` bullet or a plain link still
-    offers the generic relation's menu: it is (re-)typed, not re-authored."""
+    """The menu a candidate offers. A `retype` bullet, or a plain link that
+    carries a sensed proposal, offers the generic relation's menu: it is
+    (re-)typed, not re-authored. Without a proposal a plain link offers what
+    it offered before relation sensing."""
     relation = str(candidate.get("relation_type") or "")
-    if candidate.get("method") == "retype" or relation == fit.registry(page).link_key:
+    if candidate.get("method") == "retype" or (
+        sensed and relation == fit.registry(page).link_key
+    ):
         relation = relation_registry.generic_relation_key()
     return fit.options(candidate, source_page=page, relation=relation)
 
@@ -1342,6 +1346,8 @@ def _require_offered(
     selected: dict[str, Any],
     page: Any,
     fit: RelationFit,
+    *,
+    sensed: bool = False,
 ) -> None:
     """Refuse an unbound request for a relation that the candidate does not offer.
 
@@ -1349,7 +1355,7 @@ def _require_offered(
     outside them takes a recorded vocabulary decision and its exact binding. A candidate that
     offers none takes no requested relation: it writes its own.
     """
-    offered = _candidate_options(candidate, page, fit)
+    offered = _candidate_options(candidate, page, fit, sensed=sensed)
     chosen = str(selected.get("relation_type") or "")
     # The plain link is the last resort the candidate always allows.
     if chosen == fit.registry(page).link_key or chosen in {option["key"] for option in offered}:
@@ -1488,7 +1494,10 @@ def accept(
         source_page=page,
     )
     if requested_relation is not None and not bound:
-        _require_offered(vault_root, candidate, selected, page, fit)
+        _require_offered(
+            vault_root, candidate, selected, page, fit,
+            sensed=bool(proposed and proposed not in ("none", "abstain")),
+        )
     bullet = _bullet(selected)
     if str(candidate.get("method") or "") == "retype":
         # An authored plain-link/generic bullet is replaced by the typed one,

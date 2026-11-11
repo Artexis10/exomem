@@ -103,7 +103,9 @@ The queue read stays graph-native (`epistemic-graph`, "Relation review queue ass
 - **Accept.**
   - For a body wikilink, the accept adds a typed bullet.
   - For a `retype` candidate, the accept replaces that exact bullet line with one typed bullet to the same target, bound by the page hash it was read against. It uses the governed edit's exact-replacement form, not the section append the other methods use.
-  - The accept is the agent's `connect_memory(operation="accept-relation")`. It cites the reading id in its audit reason. The governed writer validates the relation as it does today.
+  - A `retype` candidate skips the authored-or-settled check that the other methods run, because the bullet it replaces is itself the authored edge. Its freshness is the exact bullet line plus the page hash.
+  - While a candidate carries a proposal, the accept offers the generic relation's menu for it, so the agent may name the proposal or any other menu relation without a separate vocabulary decision. Without a proposal, a plain link offers what it offers today.
+  - The accept is the agent's `connect_memory(operation="accept-relation")`. It never adopts the proposal on its own: the agent names the relation. The audit reason cites the reading id. The governed writer validates the relation as it does today.
 - **Ordering.** Candidates with a proposal may sort ahead of others within a source group. The group order and the queue's bounds do not change.
 
 ### D5. Absence is silence
