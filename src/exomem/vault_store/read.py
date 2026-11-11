@@ -177,6 +177,14 @@ class StoreSnapshot:
             )
         )
 
+    def holds_below(self, folder: str) -> bool:
+        """Whether the store holds a page or a binary record whose path is below ``folder``."""
+        prefix = f"{folder}/"
+        return (
+            next(self.pages(prefix), None) is not None
+            or next(self.binaries(prefix), None) is not None
+        )
+
     def binary_records(self, rels: Iterable[str]) -> dict[str, BinaryMeta]:
         """The record of each binary in ``rels`` that the store records, read in a few queries."""
         wanted = list(dict.fromkeys(rels))

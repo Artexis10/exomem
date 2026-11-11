@@ -191,12 +191,8 @@ def _delete_file_local(
     stored_page = store_writer is not None and store_ownership.classify(
         rel_path
     ) is store_ownership.Ownership.PAGE
-    if store_writer is not None and not stored_page and not abs_path.exists():
-        # The store keeps an evicted original's record while the media store holds its bytes.
-        if originals.binding_for(vault_root) is not None:
-            candidate = originals.original_state(vault_root, abs_path)
-            if candidate.state == "evicted":
-                evicted_original = candidate
+    if store_writer is not None:
+        evicted_original = store_targets.evicted_original(vault_root, rel_path)
     try:
         # A stored page has no file to acquire; its spelling is checked when its bytes are read.
         if evicted_original is None and not stored_page:
@@ -454,6 +450,7 @@ def _delete_file_local(
             graph_replacement_provider=_removed_graph(vault_root, rel_path, store_log.writes),
         )
 
+    source_hash: str | None = None
     if validate_only or expected_hash is not None:
         try:
             source_hash = (evicted_original.binary_sha256 if evicted_original is not None
@@ -490,9 +487,13 @@ def _delete_file_local(
             # The bytes move with their record, so an evicted original is fetched first.
             originals_context.enter_context(local_originals(vault_root, (rel_path,)))
         assert store_log is not None
+        if _fold is not None:
+            # Immediately before the move: the retained copy must still hold identical bytes.
+            _fold.verify()
         return _trash_in_store(
             store_writer, vault_root, rel_path=rel_path, trash_rel=trash_rel, meta_rel=meta_rel,
-            metadata_bytes=metadata_bytes, linked_from=stored_check.bound,
+            metadata_bytes=metadata_bytes, judged_hash=catalog_before_hash or source_hash,
+            linked_from=stored_check.bound,
             prior_markdown=prior_markdown, stored_original=stored_original,
             log_plan=store_log, catalog_target=catalog_target, inbound=len(inbound),
             inbound_ignored=len(inbound_ignored), warnings=warnings,
@@ -831,6 +832,7 @@ def _trash_in_store(
     trash_rel: str,
     meta_rel: str,
     metadata_bytes: bytes,
+    judged_hash: str | None,
     linked_from: frozenset[str],
     prior_markdown: str | None,
     stored_original: originals.OriginalSnapshot | None,
@@ -846,11 +848,12 @@ def _trash_in_store(
     its file afterwards, and no Markdown is written. A binary's file is renamed to the trash first,
     and the commit records it there (``binaries``). The part pages of a long extraction go with
     their page: a dot folder of parts is renamed with it, and a raw-marked page's part pages move in
-    the store. The sidecar lands on disk inside the same rollback window. A stale source, or a link
-    from a page that the caller's inbound check did not see, refuses the whole commit, and every
-    rename is undone. A governed item keeps its tombstone and receipt around the commit
-    (``vault_store.governed``). The log entry commits with the trash, and an active catalog
-    publication, prepared before validation returned, publishes after the commit.
+    the store. The sidecar lands on disk inside the same rollback window. A page is bound to
+    ``judged_hash``, the hash of the bytes whose frontmatter or preview the caller judged; a page
+    that changed since, or a link from a page that the caller's inbound check did not see, refuses
+    the whole commit, and every rename is undone. A governed item keeps its tombstone and receipt
+    around the commit (``vault_store.governed``). The log entry commits with the trash, and an
+    active catalog publication, prepared before validation returned, publishes after the commit.
     """
     from . import extraction_parts
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
@@ -868,11 +871,13 @@ def _trash_in_store(
     entries: list[binaries.Entry] = []
     with store_read.snapshot(root) as view:
         if page:
-            source = view.page_meta(rel_path)
+            # A schema overlay page that is not Markdown has no judged bytes unless a preview
+            # hashed it: it is bound as this read finds it.
+            source = judged_hash or getattr(view.page_meta(rel_path), "sha256", None)
             if source is None:
                 raise DeleteFileError("STALE_DELETE", "delete source changed since it was read")
             moves.append(PageMove(rel_path, trash_rel))
-            expect[rel_path] = Expect(sha256=source.sha256, linked_from=linked_from)
+            expect[rel_path] = Expect(sha256=source, linked_from=linked_from)
             parts = extraction_parts.folder_for(Path(rel_path)).as_posix()
             trashed_parts = extraction_parts.folder_for(Path(trash_rel)).as_posix()
             if store_ownership.owns_folder(parts):
@@ -917,16 +922,14 @@ def _trash_in_store(
                 "STALE_DELETE", f"delete source changed since it was read ({conflict.reason})"
             ) from conflict
         raise DeleteFileError("DELETE_FAILED", failed) from conflict
-    except binaries.Stranded as error:
-        raise DeleteFileError("DELETE_FAILED", f"{failed}; {binaries.STRANDED}") from error
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "CROSS_DEVICE":
-            raise DeleteFileError(
-                "CROSS_DEVICE_MOVE", "the trash is on another filesystem than the file"
-            ) from error
-        raise DeleteFileError("DELETE_FAILED", failed) from error
-    except (CreateOnlyConflict, PathGuardError, OSError) as error:
-        raise DeleteFileError("DELETE_FAILED", failed) from error
+    except (
+        binaries.Stranded,
+        reserved_paths.ReservedPathLeafError,
+        CreateOnlyConflict,
+        PathGuardError,
+        OSError,
+    ) as error:
+        raise DeleteFileError(*binaries.refusal(error, "DELETE_FAILED", failed)) from error
     if not page:
         from .media_store import forget_original
 

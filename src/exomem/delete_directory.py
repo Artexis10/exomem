@@ -774,6 +774,7 @@ def _delete_in_store(
                 stored,
                 operation="delete_directory",
                 error_class=DeleteDirectoryError,
+                failed_code="DELETE_FAILED",
             )
         file_count = len(pages) + listing.file_count
         if file_count > DIRECTORY_TRANSITION_LIMIT:
@@ -905,16 +906,14 @@ def _delete_in_store(
                 f"directory contents changed before the trash transition ({conflict.reason})",
             ) from conflict
         raise DeleteDirectoryError("DELETE_FAILED", failed) from conflict
-    except binaries.Stranded as error:
-        raise DeleteDirectoryError("DELETE_FAILED", f"{failed}; {binaries.STRANDED}") from error
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "CROSS_DEVICE":
-            raise DeleteDirectoryError(
-                "CROSS_DEVICE_MOVE", "the trash is on another filesystem than the folder"
-            ) from error
-        raise DeleteDirectoryError("DELETE_FAILED", failed) from error
-    except (CreateOnlyConflict, PathGuardError, OSError) as error:
-        raise DeleteDirectoryError("DELETE_FAILED", failed) from error
+    except (
+        binaries.Stranded,
+        reserved_paths.ReservedPathLeafError,
+        CreateOnlyConflict,
+        PathGuardError,
+        OSError,
+    ) as error:
+        raise DeleteDirectoryError(*binaries.refusal(error, "DELETE_FAILED", failed)) from error
     binaries.prune_empty(abs_path)
     store_media.after_removal(root, listing.files)
 

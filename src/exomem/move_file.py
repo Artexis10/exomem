@@ -623,20 +623,11 @@ def _move_file_local(
         old_abs, old_rel, stored_original = _resolve_source_on_files(vault_root, old_path)
     else:
         # A store key is an exact path: the store answers NOT_FOUND and withheld as a read does.
-        stored_original = None
         try:
             old_abs, old_rel = store_targets.resolve_existing(vault_root, old_path)
         except VaultPathError as e:
             raise MoveFileError(code=e.code, reason=e.reason) from e
-        if (
-            not old_abs.exists()
-            and store_ownership.classify(old_rel) is store_ownership.Ownership.BINARY
-            and originals.binding_for(vault_root) is not None
-        ):
-            # The store keeps an evicted original's record while the media store holds its bytes.
-            candidate = originals.original_state(vault_root, old_abs)
-            if candidate.state == "evicted":
-                stored_original = candidate
+        stored_original = store_targets.evicted_original(vault_root, old_rel)
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
@@ -744,10 +735,7 @@ def _move_file_local(
             new_folder = extraction_parts.folder_for(Path(new_rel)).as_posix()
             with store_read.snapshot(vault_root) as view:
                 stored_parts = {meta.path: meta.sha256 for meta in view.pages(f"{old_folder.as_posix()}/")}
-                parts_taken = (
-                    next(view.pages(f"{new_folder}/"), None) is not None
-                    or next(view.binaries(f"{new_folder}/"), None) is not None
-                )
+                parts_taken = view.holds_below(new_folder)
             if stored_parts:
                 paired_parts = (old_folder.as_posix(), new_folder)
                 if parts_taken:
@@ -1780,7 +1768,7 @@ def _commit_in_store(
         raise MoveFileError("MOVE_FAILED", "move could not be published") from conflict
     except binaries.Stranded as error:
         raise MoveFileError(
-            "MOVE_FAILED", f"move could not be published; {binaries.STRANDED}"
+            *binaries.refusal(error, "MOVE_FAILED", "move could not be published")
         ) from error
     except reserved_paths.ReservedPathLeafError as error:
         raise _rename_error(error) from error

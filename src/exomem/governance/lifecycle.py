@@ -1089,10 +1089,7 @@ def direct_residue(
             if tables.view is not None:
                 # The store holds a frame's sidecar page and records its JPEG; a file left on disk
                 # is a projection that the projector removes.
-                prefix = f"{rel}.frames/"
-                found = next(tables.view.pages(prefix), None) is not None or next(
-                    tables.view.binaries(prefix), None
-                ) is not None
+                found = tables.view.holds_below(f"{rel}.frames")
             else:
                 path = Path(vault_root) / rel
                 frame_dir = path.parent / f"{path.name}.frames"

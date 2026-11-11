@@ -8,6 +8,7 @@ pass by hand, so a page that a commit stores has no file and every answer comes 
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import sys
@@ -32,9 +33,11 @@ from test_vault_store_migration import (  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows, tree
 
 from exomem import (
+    curation,
     delete_directory,
     delete_file,
     extraction_parts,
+    fold_leaf,
     move_file,
     preserve,
     reconcile,
@@ -126,6 +129,69 @@ def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monke
     assert refused.value.code == "STALE_DELETE"
     assert revision(served) == start + 1, "only the competing commit may have committed"
     assert tree(served) == before, "the file is back and the sidecar is rolled back"
+
+
+def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
+    """A fold that moves a binary to the trash without proving again, right before the move, that
+    a retained copy still holds the same bytes."""
+    now = dt.datetime(2026, 11, 11, 3, 14, 37)
+    preview = delete_file.delete_file(
+        served, path=DIAGRAM, confirm=True, validate_only=True, now=now
+    )
+
+    def verify():
+        raise fold_leaf.refuse("CURATION_BINDING_STALE", "the retained copy changed")
+
+    before = tree(served)
+
+    with pytest.raises(curation.CurationError) as refused:
+        delete_file.delete_file(
+            served,
+            path=DIAGRAM,
+            confirm=True,
+            now=now,
+            expected_hash=preview.content_hash,
+            _fold=fold_leaf.Placement(preview.result.trash_path, verify),
+        )
+
+    assert refused.value.code == "CURATION_BINDING_STALE"
+    assert tree(served) == before
+    assert binary_record(served, DIAGRAM) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
+
+
+JUDGED = "Knowledge Base/Notes/Judged.md"
+
+
+def test_a_page_trash_refuses_a_page_that_changed_after_it_was_judged(
+    served, writer, monkeypatch
+):
+    """A page trash that binds the page as a later read finds it, so a page that gained
+    `superseded_by:` after its check goes to the trash anyway."""
+    judged = b"---\ntitle: Judged\ntype: note\n---\n# Judged\n"
+    superseded = judged.replace(b"type: note\n", b"type: note\nsuperseded_by: '[[Next]]'\n")
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "page", puts=(write.PagePut(JUDGED, judged),)),
+    )
+    describe = delete_file._trash_metadata_bytes
+
+    def change_then_describe(*arguments, **options):
+        # A competing commit between the check and the trash.
+        write.commit(
+            writer,
+            write.StoreChange(
+                write.Origin.GOVERNED, "race", puts=(write.PagePut(JUDGED, superseded),)
+            ),
+        )
+        return describe(*arguments, **options)
+
+    monkeypatch.setattr(delete_file, "_trash_metadata_bytes", change_then_describe)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=JUDGED, confirm=True)
+
+    assert refused.value.code == "STALE_DELETE"
+    assert read.owned_bytes(served, JUDGED) == superseded
 
 
 def test_a_trash_that_cannot_put_the_binary_back_says_so_and_one_sweep_records_it(
@@ -312,6 +378,29 @@ def test_a_folder_trash_moves_pages_in_the_store_and_files_on_disk(served, write
     assert not (served / trashed).exists()
 
 
+def test_a_folder_trash_names_a_recorded_binary_whose_file_is_gone_and_moves_after_a_sweep(
+    served, writer
+):
+    """A folder trash that refuses for a record whose file is gone with a reason that names
+    neither the file nor what resolves it."""
+    build_folder(served, writer)
+    (served / CHART).unlink()
+    before = tree(served)
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+        delete_directory.delete_directory(served, path=FOLDER, confirm=True, recursive=True)
+
+    assert refused.value.code == "DELETE_FAILED"
+    assert CHART in refused.value.reason and "next sweep" in refused.value.reason
+    assert tree(served) == before
+    importer.Importer(served, run=lambda work: work(writer)).sweep()
+
+    result = delete_directory.delete_directory(served, path=FOLDER, confirm=True, recursive=True)
+
+    assert (served / result.trash_path / SKETCH[len(FOLDER) + 1:]).read_bytes() == b"sketch"
+    assert binary_record(served, CHART) == []
+
+
 def test_a_restricted_writers_folder_trash_names_no_file_that_nothing_imported(served, writer):
     """A folder trash, or its refusal, that tells a restricted caller the path of a file that no
     policy covers yet."""
@@ -380,9 +469,10 @@ def test_an_empty_folder_goes_to_the_trash_and_back(served):
 def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both_modes(
     request, store
 ):
-    """A store form whose codes or results drift from file mode's for the same calls."""
+    """A store form whose codes or results drift from file mode's for the same calls, or that
+    drops an empty folder of the trashed folder."""
     root = request.getfixturevalue("served" if store else "vault")
-    (root / FOLDER).mkdir()
+    (root / FOLDER / "empty" / "nested").mkdir(parents=True)
     (root / CHART).write_bytes(b"chart")
     (root / PLAN).write_text(PLAN_TEXT, encoding="utf-8")
     if store:
@@ -394,6 +484,7 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
         delete_directory.delete_directory(root, path=FOLDER, confirm=True)
     trashed = delete_file.delete_file(root, path=DIAGRAM, confirm=True)
     folder = delete_directory.delete_directory(root, path=FOLDER, confirm=True, recursive=True)
+    kept_in_trash = (root / folder.trash_path / "empty" / "nested").is_dir()
     restored = recover_from_trash.recover_from_trash(root, trash_path=trashed.trash_path)
     back = recover_from_trash.recover_from_trash(root, trash_path=folder.trash_path)
 
@@ -403,6 +494,7 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
     assert (back.restored_path, back.kind) == (FOLDER, "directory")
     assert (root / DIAGRAM).read_bytes() == DIAGRAM_BYTES
     assert (root / CHART).read_bytes() == b"chart"
+    assert kept_in_trash and (root / FOLDER / "empty" / "nested").is_dir()
 
 
 VIDEO = "Knowledge Base/Media/harbour.mp4"
@@ -570,3 +662,41 @@ def test_an_offline_overlay_and_schema_reclaim_commit_to_the_store_and_write_no_
     }
     assert written_pages == set(), "the projector, not the CLIs, writes the pages' files"
     assert (stored / legacy).read_bytes() == source.read_bytes(), "the projector removes it"
+
+
+def test_an_offline_overlay_writes_nothing_before_admission_and_commits_a_missing_marker(stored):
+    """An overlay that overwrites a file that a running service reads before the owner's route
+    refuses it, or that writes the migration marker or the activation manifest through the
+    service's path and refuses with a code the operator cannot act on."""
+    deployed = init_module.shipped_schema_target(stored) / "SKILL.md"
+    deployed.parent.mkdir(parents=True, exist_ok=True)
+    deployed.write_bytes(b"# The deployed skill, as the service reads it\n")
+    before = tree(stored)
+
+    with pytest.raises(Exception) as refused:
+        init_module.init_vault(stored, force=True)
+
+    assert getattr(refused.value, "code", None) == "SCHEMA_FENCE_OPERATOR_UNAVAILABLE"
+    assert tree(stored) == before
+    marker = "Knowledge Base/_Schema/workflow-contract-migration.yaml"
+    manifest = "Knowledge Base/_Schema/semantic-activation.yaml"
+    # A vault that lacks both, as the projector leaves it once it removes their files.
+    with connection.open_writer(connection.store_path(stored), lease_check=lambda: True) as handle:
+        write.commit(
+            CollectionWriter(stored, handle),
+            write.StoreChange(
+                write.Origin.GOVERNED,
+                "setup",
+                deletes=(write.PageDelete(marker), write.PageDelete(manifest)),
+            ),
+        )
+    for rel in (marker, manifest):
+        (stored / rel).unlink(missing_ok=True)
+
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        overlay = init_module.init_vault(stored, force=True)
+
+    assert read.owned_bytes(stored, marker) == b"schema_version: 1\nreview_required: true\n"
+    assert b"schema_version" in read.owned_bytes(stored, manifest)
+    assert manifest in overlay["created"]

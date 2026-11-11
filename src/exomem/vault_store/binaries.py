@@ -13,7 +13,9 @@ The window between the renames and the commit, for every writer that uses this m
   two by their bytes (``importer._pair_renames``) and commits the same change as an outside
   rename. No byte is lost, and no record stays dangling past one sweep. The writer's retry finds
   the file at its new path. A folder's renames that ran before the kill resolve the same way, one
-  file each, and the pages that the commit would have moved have not moved.
+  file each, and the pages that the commit would have moved have not moved. A dot folder of parts
+  holds nothing that the store records, so no sweep pairs it: its parts stay at the new path, and
+  reconcile rebuilds the parts at their page.
 - A commit that refuses renames each file back (``relocated``). When a rename back fails too, the
   file stays at its new path and ``Stranded`` says so; the next sweep records it there.
 - A kill after the commit leaves nothing to do: the commit is the last step.
@@ -145,6 +147,21 @@ def relocated(vault_root: Path, relocation: Relocation) -> Iterator[Moved]:
     except BaseException:
         _undo(root, done)
         raise
+
+
+def refusal(error: BaseException, failed_code: str, failed: str) -> tuple[str, str]:
+    """The code and reason that a writer raises when its relocation did not commit.
+
+    ``failed_code`` and ``failed`` are the writer's own. A file left at its new path adds what the
+    next sweep does, and a rename across filesystems has its own code, as file mode names it.
+    """
+    from .. import reserved_paths
+
+    if isinstance(error, Stranded):
+        return failed_code, f"{failed}; {STRANDED}"
+    if isinstance(error, reserved_paths.ReservedPathLeafError) and error.code == "CROSS_DEVICE":
+        return "CROSS_DEVICE_MOVE", "the destination is on another filesystem than the source"
+    return failed_code, failed
 
 
 def _undo(root: Path, done: list[Entry]) -> None:
