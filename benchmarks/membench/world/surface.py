@@ -37,7 +37,7 @@ from .pack import Pack
 # Closed values that this module and the renderer implement: the implicitness levels that the
 # template renderer builds, and the one that every other level is read against.
 LEVELS = ("stated", "paraphrased", "unmarked")
-STATED = "stated"
+STATED, PARAPHRASED = LEVELS[:2]
 # The slots that a text may hold. A document frame takes `by` and `date`.
 SLOTS = frozenset(
     "by subject about value quoting as scope old name former holder absorbed audience until text".split()
@@ -165,11 +165,11 @@ class _Checker:
             if form is None:
                 continue
             if form.id in seen_ids:
-                self.refuse("duplicate-id", form.id, "a form id is used twice")
+                self.refuse("duplicate-id", f"form {form.id}", "a form id is used twice")
             elif form.text in seen_text:
                 self.refuse(
                     "duplicate-pattern",
-                    form.id,
+                    f"form {form.id}",
                     f"has the text of `{seen_text[form.text]}`; one text is one form",
                 )
             seen_ids.add(form.id)

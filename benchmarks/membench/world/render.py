@@ -41,7 +41,7 @@ from .loader import Catalogue, Refusal
 from .manifest import dump
 from .pack import AttributeSchema
 from .planner import Plan, Thread
-from .surface import LEVELS, STATED, Bank, Form
+from .surface import LEVELS, PARAPHRASED, STATED, Bank, Form
 
 
 class RenderRefused(Exception):
@@ -389,18 +389,13 @@ class _Renderer:
 
     def phrase(self, item: _Item, level: str) -> str | None:
         """How the sentence names the attribute: its label, or at `paraphrased` one of its paraphrases."""
-        if item.schema is None or level != "paraphrased":
-            return None if item.schema is None else item.schema.label
-        if not item.schema.paraphrases:
-            raise _Unrenderable("no-paraphrase", f"attribute `{item.schema.id}` has no paraphrase")
-        return self.pick_phrase(item)
-
-    def pick_phrase(self, item: _Item) -> str:
-        assert item.schema is not None
-        phrases = item.schema.paraphrases
-        return phrases[
-            Random(child_seed(self.plan.seed, f"phrase:{item.ref}", 0)).randrange(len(phrases))
-        ]
+        schema = item.schema
+        if schema is None or level != PARAPHRASED:
+            return None if schema is None else schema.label
+        if not schema.paraphrases:
+            raise _Unrenderable("no-paraphrase", f"attribute `{schema.id}` has no paraphrase")
+        draw = Random(child_seed(self.plan.seed, f"phrase:{item.ref}", 0))
+        return schema.paraphrases[draw.randrange(len(schema.paraphrases))]
 
     def line(self, item: _Item, level: str) -> Line:
         fills = dict(item.fills)

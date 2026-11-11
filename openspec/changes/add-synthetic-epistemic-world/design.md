@@ -147,6 +147,15 @@ A world has a backbone and threads.
 - **A thread** plants one phenomenon on backbone entities, by its recipe. The planner plants a thread only when the world holds what the recipe needs, as RECON's production rules do.
 - **The planner reserves** every attribute that a thread's key reads. No other thread may change a reserved attribute. Each probe therefore depends on one planted change, which f38 requires.
 
+**How the planner reads its recipes.** Six rulings from task 3.4 fix the spec to the build.
+
+- Reservation is exclusive over every bound `attribute`, `entity` and `event`.
+- An attribute role that no constraint narrows binds a `durable` attribute.
+- The value roles of one thread take distinct values.
+- A `name` role that no `name` step introduces is the entity's own name. One that a step introduces is a new name from the split's partition.
+- A recipe that binds an attribute of a windowed volatility class places the probe one session after the last moment before it, and every other gap exceeds the window. That is what makes `persistence.transient` depend on its plant.
+- The `distance` dial means that each gap between two adjacent moments is 1 to `distance` sessions.
+
 **Each thread has two worlds.** A recipe step may apply in the planted world only, or in the mutation world only. The mutation world is the thread with its phenomenon left out. It has three uses.
 
 - **The mutation check.** A probe depends on its plant when its value differs between the two worlds. It also does when it has a trap in the planted world and none in the mutation world. The check reads each world's key under the carry rule of `recipes.yaml`: a role counts as a trap in a world where a statement of the thread carries it. It never drops a role trap by the rule for twins below, because a trap dropped there would hide a probe whose plant changes nothing. A probe that meets neither condition is refused. An abstention probe meets the first condition: its mutation world holds the statement that answers it.
@@ -204,6 +213,19 @@ Real difficulty lives in statements that nobody marks. The design plants them wi
 - **Probes use their own surface forms.** No probe shares wording with the artefact that answers it. An audit of membench found the opposite defect: a renderer that phrased facts in the question's vocabulary.
 
 The level and the bridge of every artefact go into the world's manifest, so a report can split results by level.
+
+**How the template renderer reads these rules.** Eight rulings from task 3.5 fix the spec to the build.
+
+- The `implicitness` dial sets the level of the artefacts that carry the planted change: those of the steps that apply in one world only. Every other artefact renders at `stated`.
+- A correction, a withdrawal, a rename, a merger, a telling and a restriction each have an artefact of their own. It announces the operation, carries no statement, and is in the evidence layer, so `corpus_closure` and the proof trace can find it. No mechanism reads an artefact today, so no key moves. At `stated` a correction names the content that it replaces and the content that replaces it.
+- An **explicit form** of a statement is any sentence that a `stated` surface form gives for it: the form's pattern filled with the attribute's label or with one of its paraphrases. The check compares those sentences with the text of an artefact. It uses no word list.
+- **Sharing a surface form** means using one registered text pattern. A bank may not hold one text twice, so a pattern is one form. A probe's task takes a form that no artefact of its thread uses, and the world is refused when none is left.
+- In slice 1 a form belongs to the split of the bank file that holds it, and a world refuses a bank of another split. Decision 8's partition of forms by a hash of their ids comes with the other splits in task 6.5, together with the check that no form id or text is in two banks.
+- At `paraphrased` the pack's paraphrase of an attribute replaces its label, so that the text avoids the words of the probe. A pack with no paraphrase for an attribute refuses the level.
+- An **anchor** is a name, a value or a date of the statements that an artefact carries. The check reads tokens (`str.split` with the punctuation at the ends stripped) and finds each anchor as a run of tokens. A **trap value** is the value of another statement about the same attribute, which the artefact neither carries nor announces. A key-derived trap list joins it when task 3.6 writes the keys, and the model-prose renderer of task 7.3 reuses the same check.
+- A probe's task names the thing and the attribute that its key reads, and carries no value. The projection adds the stale value of a `premise` probe (task 4.5).
+
+The manifest records, for each artefact, the level, the surface forms and a hash of the text. Its `projection_digest` stays `null`, because it is the digest of the projection file of decision 7 and no projection has written a world yet.
 
 **Model-written prose is optional and gated.** Templates are the default renderer and cost nothing. A model may rewrite an artefact for natural, messy prose. Then a check must pass in both directions:
 
@@ -488,7 +510,7 @@ One number in this section comes from a timing: the rate at which a lane drafts 
 - **The drafting rate.** The desk-check of 2026-11-11 drafted 25 recipes in about 18 minutes, which is about 80 recipes an hour. The source is the drafting lane's own session clock. No run file records it, so the rate is unverified. That time holds the design of each recipe, the entry edits and a scratch check of closed values. It leaves out the reading of this design. It is one measurement, of one model lane, on recipes that mostly reuse the shapes of the first 21.
 - **What slowed the drafting.** Five things did, and none was the writing. An entry whose error is "cannot find it" needs a mutation world that changes a value, and the identity entries took the longest. A family's default probe forms did not fit six of the 25 entries. A family's default norms did not fit five. Three recipes needed a value that did not exist. A role trap needed a rule for the mutation world.
 - **What the rate does not cover.** At that rate, a draft of the 412 remaining recipes is about five lane-hours. A drafted recipe is not a working one: it must still plant in each pack and pass the mutation, invariance and uniqueness checks. No measurement backs the time for that, and task 6.3 records it for the first family of slice 2.
-- **Surface forms.** One form serves one pack, statement kind, level and artefact kind, in one split. Slice 1 writes the `dev` bank of one pack at three levels: about 200 forms, at eight kinds, three artefact kinds and three variants each. Each further pack, level and split is that work again. No measurement backs a rate for them.
+- **Surface forms.** One form serves one pack, statement kind, level and artefact kind, in one split. Slice 1 writes the `dev` bank of one pack at three levels: about 200 forms, at eight kinds, three artefact kinds and three variants each. Each further pack, level and split is that work again. No measurement backs a rate for them. The slice 1 bank holds 108 forms: nine statement kinds, three rule shapes, six operations, six qualifiers and the eight probe forms that slice 1 asks, at one or two variants each. No run file records the time that they took.
 - **Bridges.** Each is written for one attribute of one pack, with the norm that makes it entail. The four deeper levels need them from slice 2. No measurement backs a rate for them.
 
 The claim that the other axes multiply the catalogue for free was wrong for surface forms and bridges, and this section replaces it.

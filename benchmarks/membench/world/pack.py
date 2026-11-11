@@ -291,7 +291,9 @@ class _Checker:
             self.refuse("undeclared-value", item, f"`{volatility}` is no declared volatility class")
         paraphrases = tuple(body.get("paraphrases") or ())
         if len(set(paraphrases)) != len(paraphrases) or body.get("label") in paraphrases:
-            self.refuse("duplicate-id", item, "a paraphrase repeats the label or another paraphrase")
+            self.refuse(
+                "duplicate-id", item, "a paraphrase repeats the label or another paraphrase"
+            )
         return AttributeSchema(
             body.get("id", ""),
             body.get("label", ""),

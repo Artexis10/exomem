@@ -70,36 +70,42 @@ def artefact_hashes(world: World) -> list[dict[str, Any]]:
 
 def world_record(world: World) -> dict[str, Any]:
     """The world's records as plain data, for a file that a person or another tool can read."""
-    return {
-        field: [asdict(item) for item in sorted(getattr(world, field).values(), key=lambda i: i.id)]
-        for field in (
-            "entities",
-            "attributes",
-            "events",
-            "contexts",
-            "audiences",
-            "statements",
-            "artefacts",
-        )
-    } | {
-        field: [asdict(item) for item in getattr(world, field)]
-        for field in (
-            "assignments",
-            "withdrawals",
-            "corrections",
-            "edges",
-            "namings",
-            "merges",
-            "tellings",
-            "draws",
-            "causes",
-            "restrictions",
-            "removals",
-        )
-    } | {
-        # Which record each announcing document stands for: the operation's name and its `seq`.
-        "operations": [
-            {"id": id_, "operation": name, "seq": record.seq}
-            for id_, (name, record) in sorted(world.operations.items())
-        ]
-    }
+    return (
+        {
+            field: [
+                asdict(item) for item in sorted(getattr(world, field).values(), key=lambda i: i.id)
+            ]
+            for field in (
+                "entities",
+                "attributes",
+                "events",
+                "contexts",
+                "audiences",
+                "statements",
+                "artefacts",
+            )
+        }
+        | {
+            field: [asdict(item) for item in getattr(world, field)]
+            for field in (
+                "assignments",
+                "withdrawals",
+                "corrections",
+                "edges",
+                "namings",
+                "merges",
+                "tellings",
+                "draws",
+                "causes",
+                "restrictions",
+                "removals",
+            )
+        }
+        | {
+            # Which record each announcing document stands for: the operation's name and its `seq`.
+            "operations": [
+                {"id": id_, "operation": name, "seq": record.seq}
+                for id_, (name, record) in sorted(world.operations.items())
+            ]
+        }
+    )

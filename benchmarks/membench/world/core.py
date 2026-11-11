@@ -72,7 +72,9 @@ class Vocabulary:
     name_spaces: frozenset[str] = frozenset()
     value_generators: frozenset[str] = frozenset()
     probe_forms: frozenset[str] = frozenset()
-    levels: tuple[str, ...] = ()  # the implicitness levels, in the order that the catalogue lists them
+    levels: tuple[
+        str, ...
+    ] = ()  # the implicitness levels, in the order that the catalogue lists them
 
     @classmethod
     def from_raw(
@@ -269,7 +271,9 @@ class Artefact:
     carries: tuple[str, ...]
     copy_of: str | None = None
     altered: bool = False
-    announces: str | None = None  # the operation that this document announces, in ``World.operations``
+    announces: str | None = (
+        None  # the operation that this document announces, in ``World.operations``
+    )
 
 
 @dataclass(frozen=True)
