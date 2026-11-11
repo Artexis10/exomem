@@ -3018,8 +3018,11 @@ def _step(root: Path, writer, job_id: str) -> str:
     with principal_module.request_scope(job.principal()):
         outcome = _batch(root, writer, job)
     if outcome == "authority_lost":
-        # A batch that straddled its deadline lost its grant to the clock, not to a revocation.
-        return _pause(root, writer, job, "time_cap" if _deadline_passed(job) else "authority_lost")
+        # An expired authorization session is the only deadline that also fails a batch's grant
+        # check; a run window that closed mid-batch keeps the reason at the authority actually lost.
+        session = job.binding["principal"]["session"]
+        capped = session is not None and _now() >= session["expires_at"]
+        return _pause(root, writer, job, "time_cap" if capped else "authority_lost")
     if outcome == "deferred":
         return outcome  # a derived collection's rebuild, or another job's open member, holds it
     _unblock(writer, job.id)

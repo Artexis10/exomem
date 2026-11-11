@@ -1982,6 +1982,38 @@ def test_a_cloud_cells_login_keeps_the_one_hour_window(store, monkeypatch):
     assert (paused["state"], paused["reason"]) == ("partial", "time_cap")
 
 
+def test_a_batch_that_loses_authority_as_its_window_closes_stays_authority_lost(store, monkeypatch):
+    """A run window names the pause only when the clock itself ended the job, not a real loss."""
+    from exomem import cloud_cell, cloud_origin
+    from exomem.governance import principal as principal_module
+
+    setup(store)
+    small(monkeypatch, rows=2)
+    cell = "abcdefghijklmnop"
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", cell)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_TOKEN", "example-credential-" * 3)
+    request = cloud_origin.RequestOrigin(cloud_origin.Origin(
+        tenant_id="tenant-1", cell_id=cell, client_id="gateway-client", grant_id="grant-1",
+        family_id="family-1", resource="https://cloud.example.test"), None)
+    with cloud_origin.bound(request):
+        who = cloud_origin.with_origin(RequestPrincipal(
+            audience_id="owner", surface="mcp", issuer_family=cloud_cell.issuer_family(cell)))
+        job = start(store, who)
+        run(store, max_batches=1)
+        batch = importer()._batch
+
+        def past_the_window(*args, **kwargs):
+            _hours_later(monkeypatch, 1.1)
+            return batch(*args, **kwargs)
+
+        monkeypatch.setattr(importer(), "_batch", past_the_window)
+        monkeypatch.setattr(principal_module, "cloud_owner_binding_matches", lambda issuer: False)
+        run(store)
+        paused = status(store, job, who)
+    assert (paused["state"], paused["reason"]) == ("partial", "authority_lost")
+
+
 @pytest.mark.parametrize("pause", ["between-batches", "during-settlement"])
 def test_an_unreadable_session_store_pauses_the_job_as_store_unavailable_until_it_answers(
     store, tmp_path, monkeypatch, pause,
