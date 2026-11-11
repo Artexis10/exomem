@@ -8401,7 +8401,34 @@ def store_inbound_wikilinks(
         stem = PurePosixPath(path).stem
         stem_counts[stem] = stem_counts.get(stem, 0) + 1
     data = _InboundIndexData(buckets=buckets, stem_counts=stem_counts, sources=sources)
-    return {target: _select_inbound_wikilinks(data, target, visible) for target in wanted}
+    found: dict[str, list[InboundLink]] = {}
+    for target in wanted:
+        selected = _select_inbound_wikilinks(data, target, visible)
+        if not target.endswith(".md"):
+            # An extensioned link `[[diagram.bin]]` lands in the file's basename bucket, which the
+            # page rule only opens for a unique stem: a page stem is `.md`, so a file's stem count
+            # is never one and its links would drop. The extension names the file unambiguously,
+            # so a store-mode read counts each raw that is exactly the filename, as the graph's
+            # recorded link targets did before these tables.
+            _target, full, stripped, basename = _inbound_target_forms(target)
+            if basename not in (full, stripped):
+                self_keys = (full, stripped)
+                seen = {(link.path, link.line_number) for link in selected}
+                selected.extend(
+                    InboundLink(
+                        path=e.path,
+                        line_number=e.line_number,
+                        context=e.context,
+                        raw_target=e.raw_target,
+                    )
+                    for e in sorted(data.buckets.get(basename, ()), key=lambda e: e.seq)
+                    if e.raw_target.split("#", 1)[0].rstrip() == basename
+                    and e.path.removesuffix(".md") not in self_keys
+                    and (e.path, e.line_number) not in seen
+                    and (visible is None or visible(e.path))
+                )
+        found[target] = selected
+    return found
 
 
 def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:

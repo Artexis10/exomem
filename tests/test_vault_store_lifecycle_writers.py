@@ -617,9 +617,9 @@ def test_a_folder_above_the_trash_cap_refuses_and_commits_nothing(served, monkey
     assert revision(served) == start
 
 
-def test_a_folder_with_a_binary_or_an_unimported_note_refuses_by_name_and_keeps_it(served):
-    """A folder trash that moves the pages and leaves behind a binary or a note that nothing has
-    imported, while it reports the folder trashed."""
+def test_a_folder_with_an_unimported_note_refuses_by_name_and_keeps_it(served):
+    """A folder trash that moves the pages and leaves behind a note that nothing has imported,
+    while it reports the folder trashed."""
     store_folder(served, 2)
     draft = served / HARBOUR / "Draft.md"
     draft.parent.mkdir(parents=True)
@@ -627,12 +627,10 @@ def test_a_folder_with_a_binary_or_an_unimported_note_refuses_by_name_and_keeps_
     before = tree(served)
     start = revision(served)
 
-    # The migrated Notes folder holds a binary that the store records.
-    for folder in ("Knowledge Base/Notes", HARBOUR):
-        with pytest.raises(OpError) as refused:
-            delete_directory.delete_directory(served, path=folder, confirm=True, recursive=True)
-        assert refused.value.code == availability.WRITER_UNROUTED, folder
-        assert "delete_directory" in refused.value.message
+    with pytest.raises(OpError) as refused:
+        delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
+    assert refused.value.code == availability.WRITER_UNROUTED
+    assert "delete_directory" in refused.value.message
 
     assert revision(served) == start
     assert tree(served) == before

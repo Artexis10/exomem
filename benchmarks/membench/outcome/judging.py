@@ -29,9 +29,9 @@ from .isolation import claude_env
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
 #: The Codex judge's reasoning effort. The Claude judge takes the CLI default, as before.
 DEFAULT_EFFORT = {"claude": None, "codex": "high"}
-#: The judge a decision needs (PREREGISTRATION section 7, sequence 10): Claude Opus on the Claude
-#: subscription. A held-out report judged by another model or on API credits is instrument evidence
-#: (``gate.evidence_of``); decision runs stay on the subscription as registered.
+#: The judge a decision needs (PREREGISTRATION section 7, sequence 10): Claude Opus, paid from the
+#: Claude subscription or — once the sequence-11 amendment is acknowledged — from API credits. A
+#: held-out report judged by another model reads as instrument evidence (``gate.evidence_of``).
 DECISION_JUDGE = ("claude", DEFAULT_MODELS["claude"])
 #: How a judge backend relates to the actor, which always runs through the Claude CLI. A Claude judge is
 #: the actor's own model family, so its reports say so; a Codex judge re-judges a sample for agreement only.

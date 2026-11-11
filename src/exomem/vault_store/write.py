@@ -22,7 +22,7 @@ from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, ownership, rederive
-from .read import NOT_ACTIVE
+from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -55,6 +55,11 @@ class Expect:
     link to the path: a link from a page outside it, in the inbound-link rows at commit time (the
     rule that ``list_inbound_links`` and a move's rewrite use), refuses the commit. A delete reads
     its inbound links and commits on that reading through it.
+
+    ``pages_below`` and ``binaries_below`` bind a folder: the number of stored pages, and of binary
+    records, whose path starts with ``rel + "/"``. A folder write binds the counts it read, so a page
+    that a commit adds below the folder after the read refuses it. An expectation that sets only
+    these says nothing of ``rel`` itself, which as a folder holds no page.
     """
 
     revision: int | None = None
@@ -62,15 +67,31 @@ class Expect:
     absent: bool = False
     projected: bool = False
     linked_from: frozenset[str] | None = None
+    pages_below: int | None = None
+    binaries_below: int | None = None
 
     def __post_init__(self) -> None:
-        if self.absent and (self.revision, self.sha256, self.projected, self.linked_from) != (
+        if self.absent and self.names_path_state:
+            raise ValueError("an expectation of absence names nothing else")
+
+    @property
+    def names_path_state(self) -> bool:
+        """Whether the expectation binds what ``rel`` itself holds, beyond its absence."""
+        return (self.revision, self.sha256, self.projected, self.linked_from) != (
             None,
             None,
             False,
             None,
-        ):
-            raise ValueError("an expectation of absence names nothing else")
+        )
+
+    @property
+    def binds_path(self) -> bool:
+        """Whether ``rel`` itself must hold something, or nothing: a bare folder count binds neither."""
+        return (
+            self.absent
+            or self.names_path_state
+            or (self.pages_below, self.binaries_below) == (None, None)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,6 +419,9 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
         tx, [rel for rel, want in expect.items() if want.linked_from is not None]
     )
     for rel, want in expect.items():
+        _check_below(tx, rel, want)
+        if not want.binds_path:
+            continue
         have = _stored(tx, rel)
         if want.absent:
             if have is not None:
@@ -416,6 +440,27 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
             if gained:
                 # No name: the page that linked may be one the caller is not allowed to see.
                 raise StoreConflict(rel, "a page now links to it")
+
+
+def _check_below(tx: Connection, rel: str, want: Expect) -> None:
+    """Raise ``StoreConflict`` when a folder's count of pages or binary records is not the bound one.
+
+    Each count is one range read of the table's path key, so a folder of thousands costs two reads.
+    """
+    prefix = f"{rel}/"
+    # The two tables are the store schema's own, a closed pair: a page or a binary record.
+    for table, bound, kind in (
+        ("store_pages", want.pages_below, "pages"),
+        ("store_binaries", want.binaries_below, "binary records"),
+    ):
+        if bound is None:
+            continue
+        (count,) = tx.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE path >= ? AND path < ?",
+            (prefix, prefix + AFTER),
+        ).fetchone()
+        if count != bound:
+            raise StoreConflict(rel, f"the folder holds {count} {kind}, not {bound}")
 
 
 def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:

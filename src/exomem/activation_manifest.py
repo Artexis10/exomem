@@ -397,6 +397,17 @@ def ensure_manifest(
         return written
 
 
+def new_manifest(vault_root: Path) -> str | None:
+    """The manifest that ``ensure_manifest`` would establish, or None when the vault holds one.
+
+    A writer that commits the manifest with its own change, as the offline store-mode overlay
+    does, takes it from here.
+    """
+    if load_manifest(vault_root) is not None:
+        return None
+    return _serialize(_snapshot(Path(vault_root)))
+
+
 def is_grandfathered(
     vault_root: Path,
     path: Path | str,

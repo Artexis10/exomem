@@ -441,19 +441,25 @@ def test_the_decision_reads_pp_and_stays_incomplete_while_an_interval_holds_its_
     assert built["decision"]["run_indexes_played"] == [1, 2, 3]
 
 
-def receipts_repo(tmp_path: Path, *, sequence_ten_acknowledged: bool) -> Path:
-    """A repository root holding the real amendment receipts, with sequence 10 left pending or acknowledged."""
+def receipts_repo(
+    tmp_path: Path, *, sequence_ten_acknowledged: bool, sequence_eleven_acknowledged: bool = False
+) -> Path:
+    """A repository root holding the real amendment receipts, with sequences 10 and 11 left pending or acknowledged."""
     source = Path(__file__).resolve().parents[1] / CONTRACTS_DIR
     contracts = tmp_path / CONTRACTS_DIR
     contracts.mkdir(parents=True)
     for receipt in source.glob("amendment-*.v1.json"):
         shutil.copy(receipt, contracts / receipt.name)
-    ten = contracts / "amendment-2026-11-outcome-scale-judge.v1.json"
     nine = json.loads((contracts / "amendment-2026-11-outcome-evals.v1.json").read_text())
-    body = json.loads(ten.read_text())
-    for field in ("ratifier", "acknowledged_on", "repository_revision"):
-        body[field] = nine[field] if sequence_ten_acknowledged else None
-    ten.write_text(json.dumps(body))
+    for name, acknowledged in (
+        ("amendment-2026-11-outcome-scale-judge.v1.json", sequence_ten_acknowledged),
+        ("amendment-2026-11-outcome-billing.v1.json", sequence_eleven_acknowledged),
+    ):
+        receipt = contracts / name
+        body = json.loads(receipt.read_text())
+        for field in ("ratifier", "acknowledged_on", "repository_revision"):
+            body[field] = nine[field] if acknowledged else None
+        receipt.write_text(json.dumps(body))
     return tmp_path
 
 
@@ -488,13 +494,26 @@ def test_only_an_opus_judged_report_under_an_acknowledged_amendment_is_decision_
 
     pending = receipts_repo(tmp_path / "pending", sequence_ten_acknowledged=False)
     acknowledged = receipts_repo(tmp_path / "acknowledged", sequence_ten_acknowledged=True)
+    billed = receipts_repo(
+        tmp_path / "billed", sequence_ten_acknowledged=True, sequence_eleven_acknowledged=True
+    )
     assert gate.evidence_of(report("claude"), stored, acknowledged) == "decision"
     assert gate.evidence_of(report("codex"), stored, acknowledged) == "instrument"
     assert gate.evidence_of(report("claude"), stored, pending) == "instrument"
-    # The preregistration pays decision runs from the subscription only.
-    assert gate.evidence_of(report("claude"), {**stored, "billing": "credits"}, acknowledged) == "instrument"
+    # A subscription run and a subscription judge decide under sequence 10 alone.
+    assert gate.evidence_of(report("claude"), stored, billed) == "decision"
+    # A run or a Claude judge billed to credits decides only once sequence 11 is acknowledged.
+    assert (
+        gate.evidence_of(report("claude"), {**stored, "billing": "credits"}, acknowledged)
+        == "instrument"
+    )
+    assert (
+        gate.evidence_of(report("claude"), {**stored, "billing": "credits"}, billed) == "decision"
+    )
     assert gate.evidence_of(report("claude", "credits"), stored, acknowledged) == "instrument"
+    assert gate.evidence_of(report("claude", "credits"), stored, billed) == "decision"
     assert gate.evidence_of(report("claude", "unknown"), stored, acknowledged) == "instrument"
+    assert gate.evidence_of(report("claude", "unknown"), stored, billed) == "instrument"
 
 
 VERDICT = {
@@ -680,6 +699,51 @@ def rejecting_cli(path: Path, launches: Path) -> Path:
     path.write_text(f"#!/bin/sh\necho launched >> {launches}\nread line\n{lines}\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
+
+
+def credits_cli(path: Path, launches: Path) -> Path:
+    """A CLI whose credit balance runs out: the session reports ``billing_error`` and ends in an error result."""
+    init = {
+        "type": "system",
+        "subtype": "init",
+        "model": "m",
+        "apiKeySource": "ANTHROPIC_API_KEY",
+        "mcp_servers": [{"name": "exomem", "status": "connected"}],
+    }
+    limit = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": []},
+        "error": "billing_error",
+    }
+    error = {
+        "type": "result",
+        "subtype": "error",
+        "is_error": True,
+        "api_error_status": 400,
+        "result": "billing_error",
+    }
+    lines = "\n".join(f"echo '{json.dumps(event)}'" for event in (init, limit, error))
+    path.write_text(f"#!/bin/sh\necho launched >> {launches}\nread line\n{lines}\n")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def test_a_billing_error_stops_the_run_like_a_rejected_limit(tmp_path, monkeypatch):
+    """A credit balance that runs out stops the run at once, retries nothing and scores no loss."""
+    launches = tmp_path / "launches"
+    cli = credits_cli(tmp_path / "claude", launches)
+    monkeypatch.setattr(
+        planted_answer, "discover_agent_envelope", lambda: AgentEnvelope(cli, "0.0-test")
+    )
+    run = tmp_path / "run"
+    (run / "E" / "built" / "vault").mkdir(parents=True)
+    (run / "E" / "built" / "exomem-state").mkdir()
+
+    with pytest.raises(LimitRejected, match="credit balance"):
+        answer_all(planted_cases(3), run / "E", "m", "high")
+
+    assert not list((run / "E" / "answers").glob("*.json")), "an empty balance is no answer"
+    assert launches.read_text().count("launched") == 1, "no retry, and no later case"
 
 
 def test_a_rejected_limit_stops_the_run_and_the_decision_waits_for_room(tmp_path, monkeypatch):

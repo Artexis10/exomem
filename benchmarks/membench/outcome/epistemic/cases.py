@@ -8,10 +8,14 @@ from that digest, whose structure is wrong, or whose probe holds its own answer.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from pathlib import Path
 
+import yaml
+
+from ...world.loader import CATALOGUE_DIR
 from ..workspace import sha256_of
 
 #: Where a project file sits under the run root.
@@ -20,15 +24,15 @@ CASES_DIR = ("cases", "epistemic")
 STABLE = "stable"
 #: A key string of this many characters or more is checked as a substring; a shorter one as a whole token.
 MIN_SUBSTRING_CHARS = 4
-#: The behaviours the judge rates yes, no or n/a. A key lists the ones its probe asks for; ``judge`` imports this tuple.
-BEHAVIOURS = (
-    "uses_current",
-    "flags_conflict",
-    "cites_source",
-    "keeps_attribution",
-    "abstains_when_unknown",
-    "trusts_stale",
-)
+#: The one behaviour that code names: the judge rates reliance on a trap as this, and ``judge.behaviours_asked``
+#: adds it to every change probe. The registry must hold it; every other behaviour is read from the registry.
+TRUSTS_STALE = "trusts_stale"
+#: The one reading that code acts on: a probe whose key names it is read as harm against arm N, which is expected to pass
+#: it, so the memory-needed gate skips it. ``attributes.yaml`` declares it in ``result_readings`` and code implements it.
+HARM = "harm"
+#: The one arm that reads a key's contest set: it has no memory and sees the scripted files that ``key.contest`` names.
+#: Its code is named here because the case check and the scheduler both act on it; the arm table is in ``run.py``.
+GOLD_ARM = "G"
 #: Top-level workspace names the harness owns: a scripted file there would collide with an arm's memory or instruction.
 RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
@@ -36,6 +40,37 @@ RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: that holds one as a neutral mark, and the case check keeps them out of case text, so every masked token comes
 #: from an arm. The mask hides these names; it does not hide every hint of the arm.
 STORE_NAMES = ("memory/", "exomem")
+
+
+@functools.cache
+def _catalogue(name: str, field: str) -> dict:
+    """``field`` of one catalogue file, read once: the shipped registry is the only list that the suite reads."""
+    return yaml.safe_load((CATALOGUE_DIR / name).read_text(encoding="utf-8"))[field]
+
+
+def behaviours() -> dict[str, dict]:
+    """Every behaviour that the judge may rate, with its polarity and description, from ``behaviours.yaml``."""
+    return _catalogue("behaviours.yaml", "behaviours")
+
+
+def readings() -> dict[str, str]:
+    """Every way that a probe's result is read, from ``result_readings`` in ``attributes.yaml``."""
+    return _catalogue("attributes.yaml", "result_readings")
+
+
+def probe_forms() -> dict[str, dict]:
+    """Every form of probe, with how its result is read (``read_as``), from ``attributes.yaml``."""
+    return _catalogue("attributes.yaml", "probe_forms")
+
+
+def families() -> dict[str, dict]:
+    """Every family of the phenomenon catalogue, in registry order, from ``families.yaml``."""
+    return _catalogue("families.yaml", "families")
+
+
+def lineage_sources() -> dict[str, dict]:
+    """Every lineage source that a phenomenon or a family may name, from ``lineage.yaml``."""
+    return _catalogue("lineage.yaml", "lineage")
 
 
 def holds_store_name(text: str) -> bool:
@@ -68,6 +103,11 @@ def is_stable(probe: dict) -> bool:
     return probe["dimension"] == STABLE
 
 
+def is_harm(probe: dict) -> bool:
+    """Whether the probe's key reads it as harm; a key with no reading is read as a position, as every hand-written key is."""
+    return probe["key"].get("reading") == HARM
+
+
 def unsafe_paths(files: dict) -> list[str]:
     """The scripted file paths that leave the workspace or collide with a name the harness owns."""
     bad = []
@@ -95,6 +135,9 @@ def structure_problems(project: dict) -> list[str]:
             )
         elif bad := unsafe_paths(s["files"]):
             problems.append(f"session {s['session']} has unsafe or reserved file paths: {bad}")
+    files_of_session = {
+        s.get("session"): s["files"] for s in sessions if isinstance(s.get("files"), dict)
+    }
     seen: set[str] = set()
     for p in probes:
         name = p.get("probe_id")
@@ -116,7 +159,8 @@ def structure_problems(project: dict) -> list[str]:
                 f"probe {name}: key.accept, key.rubric and key.behaviours must be lists"
             )
         else:
-            problems += key_problems(name, key)
+            problems += key_problems(name, key, p.get("task"))
+            problems += contest_problems(name, p, files_of_session)
         # A probe that is neither stable nor tied to a change would silently drop out of every statistic.
         if (p.get("change_id") is None) != (p.get("dimension") == STABLE):
             problems.append(
@@ -144,8 +188,9 @@ def store_name_problems(project: dict) -> list[str]:
         for path, text in files_of(p).items():
             places.append((f"probe {name} file {path}", f"{path}\n{text}"))
         key = p.get("key") if isinstance(p.get("key"), dict) else {}
-        for field in ("value", "trap"):
-            places.append((f"probe {name} key.{field}", key.get(field)))
+        places.append((f"probe {name} key.value", key.get("value")))
+        # `key_problems` already names a trap field of the wrong type; `key_strings` skips it here.
+        places += [(f"probe {name} {field}", text) for field, text in trap_fields(key)]
         for field in ("accept", "rubric"):
             # `structure_problems` already names a field that is not a list.
             texts = key.get(field) if isinstance(key.get(field), list) else []
@@ -158,27 +203,122 @@ def store_name_problems(project: dict) -> list[str]:
     ]
 
 
-def key_problems(name: str, key: dict) -> list[str]:
+def key_traps(key: dict) -> list[str]:
+    """The traps of a key as a list: ``key.traps``, or a hand-written project's single ``key.trap`` as a list of one."""
+    if isinstance(key.get("traps"), list):
+        return list(key["traps"])
+    return [key["trap"]] if key.get("trap") else []
+
+
+def trap_fields(key: dict) -> list[tuple[str, object]]:
+    """``(field, trap)`` for each trap of a key, named as the author wrote it."""
+    if isinstance(key.get("traps"), list):
+        return [(f"key.traps[{i}]", trap) for i, trap in enumerate(key["traps"])]
+    return [("key.trap", key["trap"])] if key.get("trap") else []
+
+
+def key_problems(name: str, key: dict, task: object) -> list[str]:
     """What is wrong inside the lists of a key whose shape is right: each problem names what to fix."""
     problems = []
     if not all(isinstance(text, str) for text in key["accept"]):
         problems.append(f"probe {name}: every key.accept item must be a string")
     if not isinstance(key.get("trap"), (str, type(None))):
         problems.append(f"probe {name}: key.trap must be a string or null")
-    if unknown := [b for b in key["behaviours"] if b not in BEHAVIOURS]:
+    if "traps" in key:
+        traps = key["traps"]
+        if not isinstance(traps, list) or not all(isinstance(trap, str) for trap in traps):
+            problems.append(f"probe {name}: key.traps must be a list of strings")
+        elif key.get("trap"):
+            problems.append(f"probe {name}: give key.traps or key.trap, not both")
+    problems += premise_problems(name, key.get("premise"), task)
+    reading = key.get("reading")
+    if reading is not None and (not isinstance(reading, str) or reading not in readings()):
         problems.append(
-            f"probe {name}: key.behaviours names {unknown}, which the judge does not rate; use {list(BEHAVIOURS)}"
+            f"probe {name}: key.reading names {reading!r}, which the registry lacks "
+            f"(result_readings in attributes.yaml); use {list(readings())} or leave it out"
+        )
+    if unknown := [b for b in key["behaviours"] if b not in behaviours()]:
+        problems.append(
+            f"probe {name}: key.behaviours names {unknown}, which the behaviour registry "
+            f"(behaviours.yaml) lacks; use {list(behaviours())}"
         )
     return problems
 
 
+def contest_problems(name: str, probe: dict, files_of_session: dict[int, dict]) -> list[str]:
+    """What is wrong with ``key.contest``: each entry names a scripted file of the probe's session or an earlier one.
+
+    ``key.contest`` is optional here: a hand-written project has none, and only arm G needs it
+    (``require_contest_sets``). A file that the project does not hold would drop out of G's prompt unseen.
+    """
+    contest = probe["key"].get("contest")
+    if contest is None:
+        return []
+    shape = (
+        isinstance(contest, list)
+        and all(isinstance(ref, dict) and set(ref) == {"session", "file"} for ref in contest)
+        and all(isinstance(ref["session"], int) and isinstance(ref["file"], str) for ref in contest)
+    )
+    if not shape:
+        return [
+            f"probe {name}: key.contest must be a list of objects with a `session` number and a `file` name"
+        ]
+    return [
+        f"probe {name}: key.contest names file {ref['file']!r} of session {ref['session']}, "
+        "which is not a scripted file of the probe's session or an earlier one"
+        for ref in contest
+        if ref["session"] > probe["session"]
+        or ref["file"] not in files_of_session.get(ref["session"], {})
+    ]
+
+
+def require_contest_sets(projects: dict[str, tuple[dict, dict]], arms: list[str]) -> None:
+    """Refuse arm G on a project with a probe that has no contest set, before any session starts.
+
+    G is the ceiling: it reads what the key's author says bears on the probe. A probe without that
+    would reach G as it reaches N, and a ceiling that equals the floor on some probes reads as no room
+    for a reason the case set hides. A case set that holds no contest set (the hand-written projects)
+    plays the other arms.
+    """
+    if GOLD_ARM not in arms:
+        return
+    lacking = [
+        f"{name}: {', '.join(p['probe_id'] for p in project['probes'] if 'contest' not in p['key'])}"
+        for name, (project, _) in projects.items()
+        if any("contest" not in p["key"] for p in project["probes"])
+    ]
+    if lacking:
+        raise refused(
+            f"arm {GOLD_ARM} reads each probe's contest set (`key.contest`), and these probes have none: "
+            f"{'; '.join(lacking)}. Add a contest set to each, or leave {GOLD_ARM} out of --arms"
+        )
+
+
+def premise_problems(name: str, premise: object, task: object) -> list[str]:
+    """A premise is the state that the probe's task presupposes, so the task must contain it as authored."""
+    if premise is None:
+        return []
+    if not isinstance(premise, str) or not premise.strip():
+        return [f"probe {name}: key.premise must be a non-empty string or null"]
+    if isinstance(task, str) and not occurs(premise.strip(), task):
+        return [
+            f"probe {name}: key.premise is not in its task; a premise probe's task must state "
+            "the state that it presupposes"
+        ]
+    return []
+
+
 def key_strings(key: dict) -> list[tuple[str, str]]:
-    """``(field, string)`` for the key's value, each accepted phrasing and its trap, as authored."""
+    """``(field, string)`` for the key's value, each accepted phrasing and each trap, as authored.
+
+    The premise is not here: its task must hold it, so the leak rule would refuse every premise probe.
+    """
     found = [("key.value", key["value"])] if key["value"] is not None else []
     found += [(f"key.accept[{i}]", text) for i, text in enumerate(key["accept"])]
-    if key.get("trap"):
-        found.append(("key.trap", key["trap"]))
-    return [(field, text.strip()) for field, text in found if text.strip()]
+    found += trap_fields(key)
+    return [
+        (field, text.strip()) for field, text in found if isinstance(text, str) and text.strip()
+    ]
 
 
 def occurs(needle: str, text: str) -> bool:

@@ -340,7 +340,13 @@ def run_suite(
         raise refuse("the panel plays its fixed slice of development cases: no --seeds or --limit")
     known = suite_arms(suite)
     decides = DECISION_ARMS if split == "heldout" and suite == "clbench" else known
-    requested = arms or list(decides)
+    default = decides
+    if suite == "epistemic":
+        from .epistemic.cases import GOLD_ARM
+
+        # G reads a key's contest set, which the hand-written projects lack: it plays only when asked for.
+        default = tuple(a for a in known if a != GOLD_ARM)
+    requested = arms or list(default)
     if set(requested) - set(known):
         raise refuse(f"--arms takes {', '.join(known)} for {suite}, not {','.join(requested)}")
     if set(requested) - set(decides):
@@ -361,9 +367,10 @@ def run_suite(
     verdict = passed_gate(suite, split)
     if suite == "epistemic":
         # The case check runs before the record or any session: a refused case set leaves no run behind.
-        from .epistemic.cases import load_split
+        from .epistemic.cases import load_split, require_contest_sets
 
         projects = load_split(RUN_ROOT, split, project)
+        require_contest_sets(projects, arms)
     indexes = (
         [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
     )
@@ -413,7 +420,9 @@ def present(pairs: tuple[str, ...], arms) -> list[tuple[str, str]]:
     return [(a, b) for a, b in split if a in arms and b in arms]
 
 
-def epistemic_report(run_dir: Path, stored: dict, spec, wanted, arms, jobs: int) -> dict:
+def epistemic_report(
+    run_dir: Path, stored: dict, spec, wanted, arms, jobs: int, earlier: list[dict] | None = None
+) -> dict:
     """Judge an f38 run's answers, then build its report from every project of the split it played."""
     from .epistemic import cases, judge, report
 
@@ -429,7 +438,13 @@ def epistemic_report(run_dir: Path, stored: dict, spec, wanted, arms, jobs: int)
         "run_id": run_dir.name,
         "judge_family": spec.family,
         **report.build(
-            run_dir, projects, judge_run, wanted, arms, heldout=stored["split"] == "heldout"
+            run_dir,
+            projects,
+            judge_run,
+            wanted,
+            arms,
+            heldout=stored["split"] == "heldout",
+            earlier=earlier or (),
         ),
     }
 
@@ -441,8 +456,11 @@ def report_suite(
     *,
     jobs: int = 1,
     arms: list[str] | None = None,
+    earlier: list[dict] | None = None,
 ) -> dict:
-    """The unstamped report of runs of one suite. Lab and planted judge first; CL-Bench needs no judge."""
+    """The unstamped report of runs of one suite. Lab and planted judge first; CL-Bench needs no judge.
+
+    ``earlier`` holds the epistemic reports before this one, newest first, for the ``saturated`` reading."""
     run_dir = runs_dir() / run_ids[0]
     stored = read_record(run_dir)
     heldout = stored["split"] == "heldout"
@@ -460,7 +478,7 @@ def report_suite(
             run_dir, wanted, scheduled=stored.get("seeds"), heldout=heldout, arms=have
         )
     elif suite == "epistemic":
-        built = epistemic_report(run_dir, stored, spec, wanted, have, jobs)
+        built = epistemic_report(run_dir, stored, spec, wanted, have, jobs, earlier)
     else:
         if spec is None:
             raise refuse(f"{suite} needs a judge: add --judge claude or --judge codex")
@@ -615,6 +633,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _earlier_reports(
+    args: argparse.Namespace, split: str, case_check: dict | None = None
+) -> list[dict]:
+    """The stored reports that ``--earlier-report`` names, newest first as given; each must be an epistemic
+    report of the same split and, when both name one, the same case set."""
+    stored = []
+    for path in getattr(args, "earlier_report", None) or []:
+        file = Path(path)
+        if not file.is_file():
+            raise refuse(f"--earlier-report {path}: no such file")
+        try:
+            found = json.loads(file.read_text())
+        except json.JSONDecodeError:
+            raise refuse(f"--earlier-report {path} is not a stored report") from None
+        if found.get("suite") != "epistemic" or args.suite != "epistemic":
+            raise refuse(f"--earlier-report {path} is not an epistemic report of an epistemic run")
+        if found.get("split") != split:
+            raise refuse(
+                f"--earlier-report {path} is a {found.get('split')} report; this run is {split}"
+            )
+        if case_check and found.get("case_check") is not None:
+            if set(found["case_check"]) != set(case_check):
+                raise refuse(f"--earlier-report {path} reports a different case set")
+        stored.append(found)
+    return stored
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     run_dir = runs_dir() / args.run_id
     if not run_dir.is_dir():
@@ -639,7 +684,13 @@ def _cmd_report(args: argparse.Namespace) -> int:
             f"a held-out {args.suite} report is judged by {DECISION_JUDGE[1]} on {DECISION_JUDGE[0]}: "
             f"add --judge {DECISION_JUDGE[0]}. Other judges serve development rounds only"
         )
-    built = report_suite(args.suite, [args.run_id], spec, jobs=args.jobs)
+    built = report_suite(
+        args.suite,
+        [args.run_id],
+        spec,
+        jobs=args.jobs,
+        earlier=_earlier_reports(args, stored["split"], stored.get("case_check")),
+    )
     built["run"] = {
         k: stored.get(k) for k in ("model", "effort", "billing", "arms", "seeds", "gate")
     }
@@ -697,7 +748,10 @@ def register(sub) -> None:
         default="dev",
         help="dev is an instrument run; heldout is a decision run and passes the gate first",
     )
-    p_run.add_argument("--arms", help="comma-separated arm codes; default all of the suite's arms")
+    p_run.add_argument(
+        "--arms",
+        help="comma-separated arm codes; default all of the suite's arms, except epistemic's G",
+    )
     p_run.add_argument(
         "--seeds",
         help="CL-Bench only: comma-separated run indexes. A held-out run plays 1; 1,2 and 1,2,3 add orderings in order",
@@ -730,6 +784,13 @@ def register(sub) -> None:
     p_report.add_argument("suite", choices=SUITES)
     p_report.add_argument("--run-id", required=True)
     p_report.add_argument("--jobs", type=int, default=1, help="parallel judge calls")
+    p_report.add_argument(
+        "--earlier-report",
+        action="append",
+        metavar="PATH",
+        help="an epistemic report that came before this one, newest first; give it once for each "
+        "earlier report that a family's `saturated` reading needs",
+    )
     p_report.add_argument(
         "--rejudge-sample",
         choices=sorted(DEFAULT_MODELS),
