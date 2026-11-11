@@ -352,14 +352,16 @@ def unowned_sweep(conn: Connection) -> dict:
 #: The one sentence for each registry state that every store reader (search, graph or links)
 #: attaches unchanged while the pass runs or its state is unknown: an agent can repeat it as is,
 #: and the figures go in ``lag``. It names every derived row that the pass rewrites, so no reader
-#: needs a sentence of its own.
+#: needs a sentence of its own. A pass follows a change to either overlay input, the schema or the
+#: access policy (``rederive.is_overlay_source``), so the sentence names both.
 _REBUILDING_NOTICE = (
-    "A schema change is still being applied to the stored pages, so some search, graph and link "
-    "rows may follow the previous schema until it finishes."
+    "A schema or access-policy change is still being applied to the stored pages, so some "
+    "search, graph and link rows may follow the previous schema or access policy until it "
+    "finishes."
 )
 _UNKNOWN_NOTICE = (
     "Exomem has not yet confirmed that the search, graph and link rows of every stored page "
-    "follow the current schema; a background pass is checking them."
+    "follow the current schema and access policy; a background pass is checking them."
 )
 
 
