@@ -368,7 +368,7 @@ def run_suite(
         [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
     )
     # Refuses a credits declaration without a key before the record or any session exists.
-    billing.session_env(os.environ)
+    billing.require_billing_env(os.environ)
     run_dir = runs_dir() / run_id
     write_record(
         run_dir,
@@ -526,6 +526,8 @@ def summary(report: dict) -> list[str]:
     # Billing leads: a run whose sessions were billed otherwise than declared changes how every figure reads.
     stated = report.get("billing") or {}
     lines = [billing.line(stated.get("declared"), stated.get("observed") or [])]
+    if inferred := billing.judge_line(report.get("judge")):
+        lines.append(inferred)
     if report.get("suite") == "epistemic":
         from .epistemic.report import summary_lines
 

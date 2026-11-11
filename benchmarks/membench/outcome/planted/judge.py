@@ -26,7 +26,15 @@ from pathlib import Path
 from membench.utility.organisation_replay.score import _table, newcombe_paired
 
 from ..faults import STRIKE_LIMIT, books, incomplete_why
-from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
+from ..judging import (
+    Judge,
+    JudgeSpec,
+    failed_judgements,
+    grade_item,
+    judge_all,
+    read_rows,
+    stored_record,
+)
 from ..stats import MIN_UNITS, usage_totals
 
 SEED = 20261107
@@ -275,7 +283,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
     for case in struck:
         by_case.pop(case, None)
     report: dict = {
-        "judge": json.loads((judge_run / "judge" / "judge.json").read_text()),
+        "judge": stored_record(judge_run / "judge" / "judge.json"),
         "judge_model_reported": sorted(
             {m for r in rows for m in r.get("judge_model_reported") or []}
         ),

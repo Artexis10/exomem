@@ -124,7 +124,7 @@ USES_RULE = {
 }
 #: Removed from every child: the hook's inject switches (current and legacy name),
 #: so a packet arrives only through activate_context, and the bearer token, which is no declared
-#: billing source. ``ANTHROPIC_API_KEY`` follows the run's billing declaration (``billing.session_env``).
+#: billing source. ``ANTHROPIC_API_KEY`` follows the run's billing declaration (``billing.claude_session_env``).
 CHILD_ENV_REMOVED: tuple[str, ...] = (
     "EXOMEM_RETRIEVE_INJECT",
     "KB_RETRIEVE_INJECT",
@@ -935,7 +935,7 @@ def run_driver(
         raise client.JourneySetupError(f"{out_dir} exists; every driver run needs a fresh --out")
     floor, removed = client.environment_floor(parent)
     # The declaration decides the key: dropped under subscription, required under credits.
-    billed = billing.session_env(floor)
+    billed = billing.claude_session_env(floor)
     removed = tuple(sorted({*removed, *(set(floor) - set(billed))}))
     floor = billed
     out_dir.mkdir(parents=True)

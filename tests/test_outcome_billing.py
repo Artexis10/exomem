@@ -9,7 +9,7 @@ from membench.outcome import billing, command
 from membench.outcome.command import summary
 from membench.outcome.faults import init_faults
 from membench.outcome.isolation import claude_env
-from membench.outcome.judging import JudgeSpec, judge_all
+from membench.outcome.judging import Judge, JudgeSpec, judge_all, stored_record
 from membench.outcome.record import observed, run_identity
 
 INIT = {"model": "m", "apiKeySource": "ANTHROPIC_API_KEY"}
@@ -53,18 +53,19 @@ def test_a_misspelt_declaration_refuses_the_run(monkeypatch):
         billing.declared()
 
 
-def _arm_manifest(run_dir, *parts, source):
-    cell = run_dir.joinpath(*parts)
-    cell.mkdir(parents=True)
+def _arm_manifest(run_dir, window, source):
+    """The epistemic layout: one ``window-N/manifest.json`` per window, with its actor record."""
+    cell = run_dir / window
+    cell.mkdir(parents=True, exist_ok=True)
     init = None if source is None else {"apiKeySource": source}
     (cell / "manifest.json").write_text(json.dumps({"actor": {"observed": observed(init)}}))
 
 
 def test_the_report_line_names_the_declared_and_observed_sources_of_an_epistemic_run(tmp_path):
     """Fails when the epistemic report reads `window-1` as an arm, or hides that a run was billed
-    to another account than it declared. The layout is the real one: window-N/<project>/<arm>/."""
-    _arm_manifest(tmp_path, "window-1", "project-a", "PP", source="none")
-    _arm_manifest(tmp_path, "window-1", "project-a", "N", source="ANTHROPIC_API_KEY")
+    to another account than it declared. The layout is the one the suite writes: window-N/manifest.json."""
+    _arm_manifest(tmp_path, "window-1", source="none")
+    _arm_manifest(tmp_path, "window-2", source="ANTHROPIC_API_KEY")
     seen = run_identity(tmp_path)["billing"]
     assert seen == ["credits", "subscription"]
     report = {"pairs": {}, "arms": {}, "billing": {"declared": "subscription", "observed": seen}}
@@ -80,7 +81,7 @@ def test_the_report_line_is_short_when_every_session_billed_as_declared():
 
 def test_a_session_with_no_recorded_source_reads_unknown_and_unverified(tmp_path):
     """Fails when a missing record is shown as a billing source."""
-    _arm_manifest(tmp_path, "window-1", "project-a", "PP", source=None)
+    _arm_manifest(tmp_path, "window-1", source=None)
     seen = run_identity(tmp_path)["billing"]
     assert seen == ["unknown"]
     assert "unverified" in billing.line("subscription", seen)
@@ -120,11 +121,28 @@ def test_a_refused_judge_leaves_no_judge_record_behind(monkeypatch, tmp_path):
     assert not (tmp_path / "judge.json").exists()
 
 
-def test_a_judge_directory_from_before_the_billing_field_reads_unknown(monkeypatch, tmp_path):
-    """Fails when an old judge.json, whose environment was never checked, is taken as a subscription run."""
+def test_a_judge_directory_from_before_the_billing_field_resumes_with_inferred_billing(
+    monkeypatch, tmp_path
+):
+    """Fails when a judge.json written before the billing field refuses every resume and re-report,
+    or is rewritten, or reads as recorded billing instead of inferred."""
     monkeypatch.delenv(billing.ENV_VAR, raising=False)
-    (tmp_path / "judge.json").write_text(json.dumps(JudgeSpec.of("claude").record()))
-    with pytest.raises(SystemExit, match="one judge judges every item"):
-        judge_all(
-            tmp_path, JudgeSpec.of("claude"), [], lambda *a: {}, rejudge_fraction=0.0, jobs=1, seed=1
-        )
+    legacy = json.dumps(JudgeSpec.of("claude").record())
+    (tmp_path / "judge.json").write_text(legacy)
+    judge_all(
+        tmp_path, JudgeSpec.of("claude"), [], lambda *a: {}, rejudge_fraction=0.0, jobs=1, seed=1
+    )
+    assert (tmp_path / "judge.json").read_text() == legacy
+    judge = stored_record(tmp_path / "judge.json")
+    assert judge["billing"] == "subscription"
+    assert judge["billing_inferred"] is True
+    assert "inferred; recorded before billing was checked" in summary(
+        {"pairs": {}, "arms": {}, "judge": judge}
+    )[1]
+
+
+def test_a_codex_judge_gets_no_anthropic_key(monkeypatch, tmp_path):
+    """Fails when a Codex judge inherits the shell's Anthropic key."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
+    monkeypatch.setenv(billing.ENV_VAR, "credits")
+    assert "ANTHROPIC_API_KEY" not in Judge(JudgeSpec.of("codex"), tmp_path).env

@@ -3,7 +3,7 @@
 The same model answers through a subscription login and through API credits, so a run may use
 either. It declares which one it expects, and a session that reports the other is a harness
 fault (``faults.init_faults``): one run never mixes sources by accident. The declaration also decides
-the environment (``session_env``), and a report opens with one line that sets the declared source
+the environment (``claude_session_env``), and a report opens with one line that sets the declared source
 against the sources its sessions reported (``line``).
 """
 
@@ -42,13 +42,13 @@ def of_key_source(api_key_source: object) -> str:
     return by_value.get(api_key_source, UNKNOWN) if isinstance(api_key_source, str) else UNKNOWN
 
 
-def session_env(env: Mapping[str, str], declared_name: str | None = None) -> dict[str, str]:
-    """``env`` as every actor and judge session gets it: the declaration decides who pays.
+def claude_session_env(env: Mapping[str, str]) -> dict[str, str]:
+    """``env`` as every Claude actor and judge session gets it: the declaration decides who pays.
 
     A subscription declaration drops ``ANTHROPIC_API_KEY``, so a shell that holds a key never bills it.
     A credits declaration needs the key, and refuses here, before any session, when it is absent.
     """
-    name = declared_name or declared()
+    name = declared()
     out = {k: v for k, v in env.items() if k != KEY_VARIABLE}
     if KEY_SOURCES[name] == KEY_VARIABLE:
         if not env.get(KEY_VARIABLE):
@@ -58,6 +58,20 @@ def session_env(env: Mapping[str, str], declared_name: str | None = None) -> dic
             )
         out[KEY_VARIABLE] = env[KEY_VARIABLE]
     return out
+
+
+def require_billing_env(env: Mapping[str, str]) -> None:
+    """Refuse, before the first session, a declaration that the environment cannot pay for."""
+    claude_session_env(env)
+
+
+def judge_line(judge: Mapping[str, object] | None) -> str | None:
+    """The report's line on the judge's billing when it was inferred, not recorded; None otherwise."""
+    if judge and judge.get("billing_inferred"):
+        return (
+            f"judge billing: {judge.get('billing')} (inferred; recorded before billing was checked)."
+        )
+    return None
 
 
 def line(declared_name: str | None, observed: list[str]) -> str:

@@ -84,13 +84,13 @@ def child_env(root: Path, checkout: Path = REPO_ROOT) -> dict[str, str]:
 
 def claude_env() -> tuple[dict[str, str], tuple[str, ...]]:
     """The environment of every Claude actor and judge: no Exomem or KB setting, no nested-session marker,
-    and the credential the run's billing declaration allows (``billing.session_env``).
+    and the credential the run's billing declaration allows (``billing.claude_session_env``).
 
     Returns the names the nested-session strip removed, so a run record can state them.
     Claude Code's own auto memory would be a second, unmeasured store in every arm.
     """
     floor, removed = environment_floor(os.environ)
-    env = billing.session_env(
+    env = billing.claude_session_env(
         {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
     )
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"

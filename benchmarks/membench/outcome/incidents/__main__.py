@@ -288,7 +288,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"--arm {name}: {path} holds no src/exomem and plugins/claude-code")
     cases = load_cases(args.case)
     # Refuses a credits declaration without a key before the run directory or any session exists.
-    billing.session_env(os.environ)
+    billing.require_billing_env(os.environ)
     try:
         run_root = refuse_unsafe_out_dir(args.run_root)
     except JourneySetupError as error:

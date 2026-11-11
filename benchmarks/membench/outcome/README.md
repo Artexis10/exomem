@@ -284,4 +284,7 @@ refuses before its first session when the shell holds none. A credit run starts 
   panel also says when it ran on other sources than the previous panel.
 - The claude judge's billing is declared, not observed: its result names no credential source.
   `judge.json` records the declaration, and a judging directory keeps one source. A `judge.json`
-  from before the field reads `unknown`.
+  from before the field resumes and re-reports unchanged: its billing reads `subscription`, marked
+  `billing_inferred`, because the run followed the protocol that put decision judges on the
+  subscription although the judge's own environment was never checked. The report says so in a
+  `judge billing:` line. A Codex judge gets no `ANTHROPIC_API_KEY`.

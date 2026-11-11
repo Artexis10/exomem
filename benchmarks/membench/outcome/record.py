@@ -102,7 +102,6 @@ def run_identity(*run_dirs: Path) -> dict:
         for path in [
             *run_dir.glob("*/manifest.json"),
             *run_dir.glob("*/*/result.json"),
-            *run_dir.glob("*/*/*/manifest.json"),
         ]:
             data = json.loads(path.read_text())
             actor = data.get("actor")

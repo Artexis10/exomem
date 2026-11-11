@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import subprocess
 import threading
@@ -90,8 +91,13 @@ class Judge:
         self.empty_mcp = work / "no-mcp.json"
         self.empty_mcp.write_text('{"mcpServers": {}}')
         self.schema_file = work / "verdict-schema.json"
-        # Refuses, before any judgement, a credits declaration that has no key to bill.
-        self.env = claude_env()[0]
+        # Only the Claude CLI bills Anthropic: a credits declaration without a key refuses here, before any
+        # judgement. A Codex judge is billed by another provider and gets no Anthropic key.
+        self.env = (
+            claude_env()[0]
+            if spec.backend == "claude"
+            else {k: v for k, v in os.environ.items() if k != billing.KEY_VARIABLE}
+        )
 
     def argv(self, schema: dict, out: Path) -> list[str]:
         """The judge's command. Both backends read the prompt from stdin: a matter's deliverable can
@@ -246,6 +252,18 @@ def write_sample(judge_run: Path, sample_run: Path, fraction: float, seed: int) 
     return len(chosen)
 
 
+def stored_record(path: Path) -> dict:
+    """A ``judge.json`` as read. One from before the billing field gets ``subscription``, marked inferred.
+
+    Those runs followed the protocol that put decision judges on the subscription and faulted their actors
+    on any other source, but the judge's own environment was never checked. The file stays as written.
+    """
+    record = json.loads(path.read_text())
+    if record.get("backend") == "claude" and "billing" not in record:
+        record = {**record, "billing": billing.DEFAULT, "billing_inferred": True}
+    return record
+
+
 def judge_all(
     judge_dir: Path,
     spec: JudgeSpec,
@@ -262,13 +280,10 @@ def judge_all(
     """
     stored = judge_dir / "judge.json"
     # The claude judge's billing is declared, not observed: its json result carries no credential source.
-    # A judging directory from before the billing field never had its environment checked: unknown.
     claude = spec.backend == "claude"
     record = {**spec.record(), **({"billing": billing.declared()} if claude else {})}
     if stored.exists():
-        have = json.loads(stored.read_text())
-        if claude:
-            have.setdefault("billing", billing.UNKNOWN)
+        have = {k: v for k, v in stored_record(stored).items() if k != "billing_inferred"}
         if have != record:
             raise SystemExit(
                 f"{judge_dir} was judged by {stored.read_text()}; one judge judges every item. "
@@ -276,7 +291,8 @@ def judge_all(
             )
     # The guard runs before the record: a refused judge leaves no file that locks the directory.
     judge = Judge(spec, judge_dir)
-    stored.write_text(json.dumps(record, indent=2))
+    if not stored.exists():
+        stored.write_text(json.dumps(record, indent=2))
     sample = math.ceil(len(items) * rejudge_fraction)
     rejudge = random.Random(seed + 1).sample(items, sample)
     work = [(i, "verdicts") for i in items] + [(i, "rejudge") for i in rejudge]
