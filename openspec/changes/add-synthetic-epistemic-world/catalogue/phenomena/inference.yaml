@@ -36,7 +36,7 @@ phenomena:
   - {id: causation.necessary-or-sufficient, stage: s4, says: "A condition is needed for an effect and is not enough to produce it."}
   - {id: causation.explaining-away, stage: s4, truth: [causal_model, chance_model], says: "One of two possible causes is confirmed, which makes the other less likely."}
   # --- absence ---
-  - {id: absence.not-recorded, stage: s1, says: "Nothing in the corpus speaks to the question.", from: [membench, longmemeval]}
+  - {id: absence.not-recorded, stage: s1, probes: [abstain], says: "Nothing in the corpus speaks to the question.", from: [membench, longmemeval]}
   - {id: absence.recorded-as-false, stage: s2, probes: [state], expect: [uses_current], says: "The corpus records that something is not the case.", from: [membench]}
   - {id: absence.false-premise, stage: s1, probes: [premise], expect: [resists_premise, invents_detail], says: "The task assumes an event that the corpus does not contain.", from: [stale, abstentionbench, veracium]}
   - {id: absence.similar-entity, stage: s2, truth: [corpus_closure, identity_map], says: "The corpus holds the fact for a similar entity only.", from: [memconflict]}

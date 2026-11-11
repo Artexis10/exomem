@@ -35,7 +35,7 @@ phenomena:
   - {id: conflict.against-common-knowledge, stage: s3, norms: [world-is-the-record], expect: [uses_current], says: "The invented world's record differs from what is true of the real world, and the answer follows the world's record.", from: [knowledge-conflict, memoryagentbench]}
   - {id: conflict.awaiting-ruling, stage: s3, says: "A disagreement awaits the ruling of a named authority."}
   # --- argument ---
-  - {id: argument.both-sides, stage: s1, says: "A claim has recorded evidence for it and against it.", from: [f38]}
+  - {id: argument.both-sides, stage: s1, probes: [weigh], says: "A claim has recorded evidence for it and against it.", from: [f38]}
   - {id: argument.rebuttal, stage: s1, says: "New evidence supports the opposite conclusion.", from: [pollock]}
   - {id: argument.undercut, stage: s2, says: "New evidence removes the reason to believe a claim and does not support the opposite.", from: [pollock]}
   - {id: argument.support-chain, stage: s2, probes: [trace], expect: [cites_source], says: "Evidence supports a claim through an intermediate claim.", from: [tms]}
@@ -51,13 +51,13 @@ phenomena:
   - {id: argument.same-evidence-both-sides, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "Both sides cite the same observation."}
   - {id: argument.trade-off, stage: s3, truth: [judged], key: rubric-track, norms: [], says: "Options are compared on several criteria, and no option wins on all of them."}
   # --- propagation ---
-  - {id: propagation.dependent-update, stage: s1, probes: [act, state], says: "One fact depends on another, the other changes, and the first must be updated.", from: [f38, stale]}
-  - {id: propagation.plan-invalidated, stage: s1, probes: [act, state], says: "A plan rests on a fact that changed."}
+  - {id: propagation.dependent-update, stage: s1, norms: [later-replaces, defeated-supports-nothing], probes: [act, state], says: "One fact depends on another, the other changes, and the first must be updated.", from: [f38, stale]}
+  - {id: propagation.plan-invalidated, stage: s1, norms: [later-replaces, defeated-supports-nothing], probes: [act, state], says: "A plan rests on a fact that changed."}
   - {id: propagation.cascade, stage: s2, says: "A change runs through several levels of dependent conclusions.", from: [recon, tms]}
-  - {id: propagation.independent-support, stage: s2, says: "A conclusion loses one support and survives on another.", from: [recon, agm]}
+  - {id: propagation.independent-support, stage: s2, norms: [defeated-supports-nothing], says: "A conclusion loses one support and survives on another.", from: [recon, agm]}
   - {id: propagation.support-collapse, stage: s2, says: "A conclusion's only support is withdrawn.", from: [esb, tms]}
   - {id: propagation.derived-figure, stage: s2, truth: [warrant_graph, quantity_calc], says: "A total must be computed again when one input changes."}
-  - {id: propagation.neighbour-unchanged, stage: s2, twin_of: propagation.dependent-update, expect: [keeps_unaffected, over_flags], says: "A related fact does not depend on the changed fact and must stay as it is.", from: [rippleedits, agm]}
+  - {id: propagation.neighbour-unchanged, stage: s2, twin_of: propagation.dependent-update, probes: [act], expect: [keeps_unaffected, over_flags], says: "A related fact does not depend on the changed fact and must stay as it is.", from: [rippleedits, agm]}
   - {id: propagation.earlier-conclusion-kept, stage: s2, probes: [as_of, state], expect: [uses_current, keeps_unaffected], says: "After a dependent conclusion is updated, a later task asks for the earlier conclusion, and the answer gives it as history.", from: [esb, home-design]}
   - {id: propagation.rename-reaches-dependents, stage: s2, truth: [warrant_graph, identity_map], expect: [propagates_change, resolves_identity], says: "A rename reaches every record that depends on the old name.", from: [rippleedits]}
   - {id: propagation.group-to-member, stage: s2, truth: [warrant_graph, rule_closure], says: "A change to a group applies to each of its members.", from: [rippleedits]}

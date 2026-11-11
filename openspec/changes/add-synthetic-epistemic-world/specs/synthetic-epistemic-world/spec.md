@@ -66,7 +66,7 @@ Every phenomenon, family, behaviour, norm, statement kind, recipe, domain pack, 
 
 ### Requirement: A recipe plants a phenomenon as data
 
-A recipe SHALL name its roles, an order of time slots, a list of world operations over those roles and, for each probe form it keys, the readings that give the key. A recipe SHALL hold no condition, no loop and no expression. A phenomenon that names several truth mechanisms SHALL list them as a set, and the schema file SHALL fix the order in which they apply. Each key part SHALL be one reading of a mechanism that the phenomenon names, or one role taken as it is. A recipe step SHALL be able to apply in the planted world only or in the mutation world only.
+A recipe SHALL name its roles, an order of time slots, a list of world operations over those roles and, for each probe form it keys, the readings that give the key. A recipe SHALL hold no condition, no loop and no expression. A phenomenon that names several truth mechanisms SHALL list them as a set, and the schema file SHALL fix the order in which they apply. Each key part SHALL be one reading of a mechanism that the phenomenon names, or one role taken as it is. A recipe SHALL key every probe form that its phenomenon declares, and no other. A recipe step SHALL be able to apply in the planted world only or in the mutation world only.
 
 #### Scenario: A recipe names an operation that is not declared
 
@@ -77,6 +77,11 @@ A recipe SHALL name its roles, an order of time slots, a list of world operation
 
 - **WHEN** a recipe's key names a reading of a mechanism that its phenomenon does not list
 - **THEN** the loader refuses the recipe and names the reading
+
+#### Scenario: A recipe leaves a declared probe form unkeyed
+
+- **WHEN** a phenomenon declares a probe form and its recipe holds no key for that form
+- **THEN** the loader refuses the recipe and names the phenomenon and the form
 
 #### Scenario: Two mechanisms decide one key
 

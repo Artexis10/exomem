@@ -2,17 +2,17 @@
 
 - [x] 1.1 Write the proposal, the design, the first catalogue and the deltas. Validate strictly with the CI-pinned OpenSpec.
 - [ ] 1.2 Agree the open questions in design.md with the owner. Standing, seed custody and audience were answered on 2026-11-10; the first round's budget, model prose and shape numbers are decided before the slice that needs each.
-- [ ] 1.3 Agree the seams with the neighbours. `add-epistemic-task-bench`: the four changes to the case format in design decision 10, the gold-evidence arm and a no-memory arm that plays probes only. `make-epistemic-language-dynamic` task 5.4: the store seeds of slice 2. `add-sensed-epistemic-model`: the training export.
+- [ ] 1.3 Agree the seams with the neighbours. `add-epistemic-task-bench`: the four changes to the case format in design decision 10, the gold-evidence arm and a no-memory arm that plays probes only. Agreed on 2026-11-11: one owner holds both changes, and that change's requirement text now states the premise exception and the harm exception. The other two seams are still open. `make-epistemic-language-dynamic` task 5.4: the store seeds of slice 2. `add-sensed-epistemic-model`: the training export.
 
 ## 2. Slice 1: desk-check, before any code
 
-- [ ] 2.1 Write 46 recipes as data: the 26 that slice 1 needs, and 20 for later slices, with at least two per realm. 21 exist. Check: every recipe names only declared closed values. Record each closed value that a recipe forced, and each operation that no recipe uses.
-- [ ] 2.2 Read the result against design decision 2. If more than a quarter of the 46 needed a new mechanism or a new operation, stop and revise the design. Otherwise remove each operation that no recipe uses.
-- [ ] 2.3 Read each desk-checked entry's key class against its recipe, and move an entry to the rubric track when no reading fixes one answer. Record the measured authoring rate, and replace the unverified numbers in design.md's cost section with it.
+- [x] 2.1 Write 46 recipes as data: the 26 that slice 1 needs, and 20 for later slices, with at least two per realm. 21 exist. Check: every recipe names only declared closed values. Record each closed value that a recipe forced, and each operation that no recipe uses. Done on 2026-11-11: 46 recipes, and a scratch check found no undeclared value. Forced: the role kind `user` and the closed set `hedges`. Unused: `split` and `omit`.
+- [x] 2.2 Read the result against design decision 2. If more than a quarter of the 46 needed a new mechanism or a new operation, stop and revise the design. Otherwise remove each operation that no recipe uses. Done: none of the 46 needed one. `split` and `omit` are removed, and 16 operations remain.
+- [x] 2.3 Read each desk-checked entry's key class against its recipe, and move an entry to the rubric track when no reading fixes one answer. Record the measured authoring rate, and replace the unverified numbers in design.md's cost section with it. Done: none of the 54 keyed entries moved. Ten entries changed their probe forms and seven their norms. The rate is about 80 drafted recipes an hour, from 25 recipes in about 18 minutes, and design.md says what it leaves out.
 
 ## 3. Slice 1: catalogue, world core and oracle, with no model
 
-- [ ] 3.1 Move the catalogue to `benchmarks/membench/world/catalogue/` and add its loader. Check: the loader refuses an undeclared value, an unknown reference, a duplicate id, a key class that contradicts its mechanisms, and a computed `silent` entry with no stated norm, each by name. It lists the buildable entries and says what each other entry lacks.
+- [ ] 3.1 Move the catalogue to `benchmarks/membench/world/catalogue/` and add its loader. Check: the loader refuses an undeclared value, an unknown reference, a duplicate id, a key class that contradicts its mechanisms, and a computed `silent` entry with no stated norm, each by name. It also refuses a recipe that leaves unkeyed a probe form that its entry declares, a recipe that keys a form that its entry does not declare, and a `twin` part that does either for its twin entry. It lists the buildable entries and says what each other entry lacks.
 - [ ] 3.2 Build the world core: entities, attributes over time with volatility classes, events, statements, artefacts, the world operations and the world validator. Check: one failing fixture per invariant. An import-boundary test finds no `exomem` import under `membench/world/`.
 - [ ] 3.3 Build seven mechanisms in their smallest form: `state_fold`, `kind_tag`, `holder_ledger`, `identity_map`, `scope_lattice` with one level of nesting, `warrant_graph` at one hop, and `corpus_closure` for whether anything is recorded. `state_fold` emits `StatusSpan` records and calls membench's `truth_at`. Check, for each: the mutation, invariance and uniqueness checks of design.md pass. membench's span lint passes on the derived spans.
 - [ ] 3.4 Build the backbone, one domain pack, the planner with role binding, both worlds of a thread and reservations, and the `dev` partition of the wordbank. Check: two runs give identical manifests. No attribute belongs to two threads. The privacy gate and the banned-vocabulary lint pass over the pack and over one generated world.
@@ -21,8 +21,8 @@
 
 ## 4. Slice 1: the task suite's seam
 
-- [ ] 4.1 Make the suite's judge and case check read `behaviours.yaml`, and remove the `BEHAVIOURS` constant. Check: the hand-written projects still pass the case check. A key that names an unregistered behaviour is refused by name. The judge's schema holds every registered behaviour.
-- [ ] 4.2 Add `key.traps` and `key.premise` to the case format. Check: each scenario of the `epistemic-utility-regression` delta passes as a test.
+- [ ] 4.1 Make the suite's judge and case check read `behaviours.yaml`, and remove the `BEHAVIOURS` constant. Check: the hand-written projects still pass the case check. A key that names an unregistered behaviour is refused by name. The judge's schema for a probe holds the behaviours that the probe's key names and `trusts_stale`, and no other.
+- [ ] 4.2 Add `key.traps` and `key.premise` to the case format, and show both to the judge. Check: each scenario of the `epistemic-utility-regression` delta passes as a test. The judge's prompt holds every trap and the premise.
 - [ ] 4.3 Let a key name its reading. Check: the memory-needed gate skips a probe that is read as harm, and the report gives it as harm against arm `N`.
 - [ ] 4.4 Add the gold-evidence arm, and let arm `N` play probes only. Check: the gold-evidence prompt holds the probe's contest set in session order under a neutral header, and nothing else from earlier sessions. Arm `N` makes no session call.
 - [ ] 4.5 Write the f38 projection. Check: the suite's case check passes on a generated development project. Each of the 11 dimensions has at least two change probes, and the project has four recall probes. Confirm that the suite accepts a family key as a probe's label, or keep those probes in a separate project file.
@@ -39,7 +39,7 @@
 
 - [ ] 6.1 Add bridges and the levels `implied`, `propagated`, `embedded` and `silent`. Check: keys do not change across levels. The loader refuses an `entails` bridge that names no norm. Arm `H` audits each bridge on development worlds, and the manifest records each dropped bridge.
 - [ ] 6.2 Add cascades with independent support to `warrant_graph` and nesting to `scope_lattice`. Build `interval_order`, `quantity_calc` and `rule_closure`, with the probe forms `impact` and `as_of` and the set and order scorers. Check: the three oracle checks pass for each.
-- [ ] 6.3 Write the recipes for the entries planned for slice 2, one family at a time. Check: each recipe plants in each pack, and each probe passes the mutation check.
+- [ ] 6.3 Write the recipes for the entries planned for slice 2, one family at a time. Check: each recipe plants in each pack, and each probe passes the mutation check. For the first family, read the result against design decision 2 again, and record the time from a drafted recipe to a planted one.
 - [ ] 6.4 Write the membench projection. Check: the existing runner reads the corpus unchanged.
 - [ ] 6.5 Add two more packs. Partition names, surface forms, bridges and work-task templates across the three splits. Check: the split check finds no item in two splits.
 - [ ] 6.6 Add the dials to the round plan, including the share of mutation-world threads. Check: a plan with an undeclared dial is refused, and the manifest records each dial's value.

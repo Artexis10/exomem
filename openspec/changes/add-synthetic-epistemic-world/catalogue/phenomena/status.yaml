@@ -24,7 +24,9 @@ phenomena:
   # --- modality ---
   - {id: modality.should-not-is, stage: s2, says: "A recommendation is not the current practice."}
   - {id: modality.must-or-may, stage: s2, says: "A requirement and a permission are kept apart."}
-  - {id: modality.policy-or-practice, stage: s2, says: "The written rule and the recorded practice differ, and the answer reports each as what it is."}
+  # No `act` probe: a task would have to follow the rule or the practice, and only a stated precedence
+  # fixes which. With one, the entry is `reliability.authority-conflict`.
+  - {id: modality.policy-or-practice, stage: s2, probes: [state, weigh], says: "The written rule and the recorded practice differ, and the answer reports each as what it is."}
   - {id: modality.prohibition, stage: s2, says: "A rule forbids an action that the task would otherwise take."}
   - {id: modality.one-time-permission, stage: s2, truth: [kind_tag, scope_lattice], expect: [keeps_kind, keeps_scope], says: "A permission is granted for one case against a standing prohibition."}
   - {id: modality.possible-not-actual, stage: s2, says: "What could happen is not what did happen."}
@@ -37,14 +39,14 @@ phenomena:
   - {id: modality.rules-collide, stage: s3, truth: [judged], key: rubric-track, norms: [], probes: [weigh], expect: [flags_conflict], says: "Two rules require things that cannot both be done."}
   # --- uncertainty ---
   - {id: uncertainty.open-question, stage: s1, says: "A question stays open, and the answer invents nothing.", from: [f38, esb]}
-  - {id: uncertainty.hedged-claim, stage: s1, says: "A claim is made with a hedge, and the hedge survives retelling."}
+  - {id: uncertainty.hedged-claim, stage: s1, probes: [state, act], says: "A claim is made with a hedge, and the hedge survives retelling."}
   - {id: uncertainty.known-unknown, stage: s2, says: "The record states that something is not yet known.", from: [esb]}
   - {id: uncertainty.insufficient-evidence, stage: s2, probes: [abstain], expect: [abstains_when_unknown, invents_detail], says: "The evidence supports no answer to the question.", from: [longmemeval, abstentionbench]}
   - {id: uncertainty.range, stage: s2, truth: [kind_tag, quantity_calc], says: "A value is known only as a range."}
   - {id: uncertainty.approximate, stage: s2, truth: [kind_tag, quantity_calc], says: "A value is given as approximate."}
   - {id: uncertainty.question-answered, stage: s2, truth: [kind_tag, state_fold], expect: [uses_current], says: "A later record answers a question that was open."}
   - {id: uncertainty.level-in-words, stage: s2, truth: [kind_tag, holder_ledger], expect: [states_uncertainty, keeps_attribution], says: "A holder says in words how sure they are, and the answer keeps that level.", from: [estimative-language]}
-  - {id: uncertainty.competing-explanations, stage: s2, probes: [weigh], says: "Several explanations stay live against the same evidence, and the answer lists them and picks none.", from: [competing-hypotheses]}
+  - {id: uncertainty.competing-explanations, stage: s2, truth: [kind_tag, warrant_graph], norms: [kind-is-kept, unsettled-stays-open, defeated-supports-nothing], probes: [weigh], says: "Several explanations stay live against the same evidence, and presenting one of them as established is the error.", from: [competing-hypotheses]}
   - {id: uncertainty.awaiting-check, stage: s2, says: "A claim awaits a named check that has not yet run."}
   - {id: uncertainty.lost-hedge, stage: s2, says: "A later restatement dropped a hedge, and the answer keeps the hedge of the original statement."}
   - {id: uncertainty.ambiguous-task, stage: s2, truth: [identity_map, corpus_closure], probes: [act], expect: [asks_when_ambiguous], says: "The task could mean either of two recorded things, and the right act is to ask.", from: [abstentionbench]}
@@ -57,7 +59,7 @@ phenomena:
   - {id: calibration.resolved-forecast, stage: s3, truth: [chance_model, state_fold], probes: [state, audit], expect: [uses_current], says: "A forecast comes due, and the outcome is recorded against it.", from: [esb]}
   - {id: calibration.forecaster-record, stage: s3, truth: [chance_model, quantity_calc], norms: [observed-frequency], probes: [state], says: "A forecaster's past hit rate follows from their resolved forecasts.", from: [proper-scoring]}
   - {id: calibration.base-rate, stage: s3, truth: [chance_model, quantity_calc], norms: [observed-frequency], says: "The base rate of an event follows from the world's own history."}
-  - {id: calibration.known-chance, stage: s3, says: "A document states the chance of an outcome, so the best forecast is that chance.", from: [proper-scoring]}
+  - {id: calibration.known-chance, stage: s3, probes: [forecast], says: "A document states the chance of an outcome, so the best forecast is that chance.", from: [proper-scoring]}
   - {id: calibration.overconfident-source, stage: s3, norms: [observed-frequency], says: "A source says that it is certain, and its record shows frequent errors."}
   - {id: calibration.update-on-evidence, stage: s3, says: "New evidence of stated strength should move a probability by a computable amount."}
   - {id: calibration.conjunction, stage: s3, norms: [arithmetic], says: "Two events together are not more likely than either one alone."}

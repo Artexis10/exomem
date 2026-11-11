@@ -8,7 +8,7 @@ phenomena:
   - {id: machine.model-version, stage: s3, says: "The question asks which version of a model produced a result."}
   - {id: machine.sensor-reading, stage: s3, truth: [holder_ledger, quantity_calc], expect: [keeps_attribution, cites_source], says: "A reading is kept with its instrument and its time."}
   - {id: machine.sensor-drift, stage: s3, truth: [state_fold, interval_order], norms: [stated-rule], probes: [state, weigh], expect: [states_uncertainty], says: "A record says that an instrument drifted from a date until its recalibration, so the readings in between are suspect."}
-  - {id: machine.gap-not-zero, stage: s3, truth: [corpus_closure, quantity_calc], probes: [state, abstain], expect: [abstains_when_unknown, invents_detail], says: "A gap in a series of readings is not a reading of zero."}
+  - {id: machine.gap-not-zero, stage: s3, truth: [corpus_closure, quantity_calc], norms: [absence-is-unknown, common-volatility], probes: [state, abstain], expect: [abstains_when_unknown, invents_detail], says: "A gap in a series of readings is not a reading of zero."}
   - {id: machine.log-line, stage: s3, truth: [corpus_closure, interval_order], probes: [trace, state], expect: [cites_source, keeps_order], says: "A log line is the evidence that an event happened."}
   - {id: machine.simulated-or-observed, stage: s3, truth: [kind_tag], expect: [keeps_kind], says: "A simulated result is not a measurement."}
   - {id: machine.synthetic-data, stage: s3, truth: [kind_tag], expect: [keeps_kind], says: "Data marked as synthetic must not be reported as real."}
