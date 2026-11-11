@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from test_activate_context_request_path import _seed_live_recall
 from test_governance_egress import _external, _reset_caches, write_rule, write_scope
 
 from exomem import (
@@ -20,6 +21,7 @@ from exomem import (
     dimension_display,
     epistemic_dimensions,
     epistemic_graph,
+    freshness,
     memory_schema,
     relation_registry,
 )
@@ -400,6 +402,73 @@ def test_a_caller_who_may_not_see_the_answer_gets_the_reply_of_a_vault_without_i
     assert _marks(with_page)["Does the launch need a beta?"] == {"open": True}
 
 
+def _write_as_the_service_does(vault: Path, rel: str, body: str) -> None:
+    """A committed service write: the file lands, then freshness announces it. The graph and the
+    link resolver catch up later, so they trail the live recall checkpoint until then."""
+    path = vault / rel
+    path.write_text(body, encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[path])
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_write_the_caller_may_not_see_leaves_its_marks_as_a_vault_without_that_write(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches a restricted reply that changes when a withheld page changes: the graph trails the
+    write, so the group would say its links are unknown and drop `open`, a one-bit signal that a
+    page the caller may not see was written."""
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    rewritten = PAGE.format(title="Answers", body=PAGES["Answers"] + "\n\nTwo weeks is enough.")
+    replies = []
+    for written in (True, False):
+        vault = _answer_twin(tmp_path / ("written" if written else "unwritten"), withheld=True)
+        _seed_live_recall(vault)
+        if served:
+            request.getfixturevalue("warm_managed_cell")(vault)
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        with principal.request_scope(_external()):
+            before = _search(vault, filters, deep=True)
+            if written:
+                _write_as_the_service_does(vault, f"{NOTES}/{WITHHELD_ANSWER}.md", rewritten)
+            replies.append(_search(vault, filters, deep=True))
+        assert replies[-1] == before
+    after_write, never_written = replies
+
+    assert after_write == never_written
+    assert _marks(after_write)["Does the launch need a beta?"] == {"open": True}
+
+
+def test_deleting_a_namesake_the_caller_may_not_see_leaves_its_origin_as_it_was(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> None:
+    """Catches a link re-read as the owner reads it after a withheld namesake is deleted. The claim
+    links `[[Survey]]`, which a visible and a withheld page share, so the caller reads it as a
+    link to the visible one. The graph trails the deletion, and a page that is gone reads as
+    visible, so the link would keep the owner's reading and the origin would change. The
+    vault-wide search leaves the verdict that proves the deleted page withheld."""
+    pages = {key: body for key, body in PAGES.items() if key != "Analysis"}
+    pages["Patterns/Survey"] = "## Claim\n\nThe private survey found the same."
+    pages["Analysis"] = PAGES["Analysis"].replace(f"[[{NOTES}/Survey]]", "[[Survey]]")
+    vault = _vault(tmp_path, pages, graph=False)
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _reset_caches()
+    _seed_live_recall(vault)
+    request.getfixturevalue("warm_managed_cell")(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    filters = {"unit.dimension": {"$eq": "attribution"}}
+    with principal.request_scope(_external()):
+        before = _search(vault, filters, deep=True, scope="vault")
+        path = vault / f"{NOTES}/Patterns/Survey.md"
+        path.unlink()
+        freshness.on_files_changed(vault, deleted=[path])
+        after = _search(vault, filters, deep=True, scope="vault")
+
+    assert after == before
+    origin = {"by": "Research team", "from": [context_refs.vault_ref(f"{NOTES}/Survey.md")]}
+    assert _marks(after)["Exports come first on the roadmap."] == {"origin": origin}
+
+
 def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the_next(
     tmp_path: Path,
 ) -> None:
@@ -494,6 +563,36 @@ def test_an_unreadable_graph_marks_nothing_open_and_says_the_links_are_unknown(
     assert reply["user_summary"] == (
         "2 units in 'Questions'; its links could not be read yet, so its marks may be incomplete."
     )
+
+
+@pytest.mark.parametrize("restricted", [False, True], ids=["owner", "restricted"])
+def test_a_write_the_caller_may_see_makes_its_links_unknown_while_the_graph_trails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restricted: bool
+) -> None:
+    """Catches a lag rule that hides a write from a caller who may see it. The owner sees every
+    write, and a restricted caller sees a write to a page it may see. While the graph trails such
+    a write, their links are unknown, as for an unreadable graph."""
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
+    pages = {key: body for key, body in PAGES.items() if key != "Answers"}
+    pages[WITHHELD_ANSWER] = PAGES["Answers"]
+    vault = _vault(tmp_path, pages, registry=QUESTIONS_ONLY, graph=False)
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_NONE)
+    _seed_live_recall(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    _reset_caches()
+    written = "Questions" if restricted else WITHHELD_ANSWER
+    body = PAGE.format(title=written.rsplit("/", 1)[-1], body=pages[written] + "\n\nOne more line.")
+    filters = {"unit.dimension": {"$eq": "questions"}}
+    with principal.request_scope(_external() if restricted else principal.owner_principal()):
+        before = _search(vault, filters, deep=True)
+        _write_as_the_service_does(vault, f"{NOTES}/{written}.md", body)
+        after = _search(vault, filters, deep=True)
+
+    assert "edges" not in before["dimension_groups"][0]
+    [group] = after["dimension_groups"]
+    assert group["edges"] == "unknown"
+    assert not any(_marks(after).values())
 
 
 ARGUMENT_PAGES = {
