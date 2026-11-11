@@ -3240,7 +3240,8 @@ class EpistemicGraphIndex:
         reader_held: frozenset[str] | None = None
         stored_checkpoint_value = values.get(_RECALL_CHECKPOINT_KEY)
         stored_checkpoint = _checkpoint_from_value(stored_checkpoint_value)
-        current = self._snapshot_metadata_current(values)
+        metadata_current = self._snapshot_metadata_current(values)
+        current = metadata_current
         if require_current_projection:
             # The availability marker is a *reader's* claim that the stored
             # projection is current, and its absence is what every deferral
@@ -3409,7 +3410,7 @@ class EpistemicGraphIndex:
                             mine.set()
                     break
             # A sidecar read through a reader's lag describes its stored checkpoint, not the corpus.
-            if current and stored_checkpoint is not None and not live_only and reader_held is None:
+            if current and stored_checkpoint is not None and not live_only:
                 # The proof above (or the exact-live check) has just established
                 # that this sidecar describes the corpus this registry is
                 # projecting. Say so to the registry, so the *next* bounded
@@ -3426,13 +3427,18 @@ class EpistemicGraphIndex:
                     stored_checkpoint,
                     sampled_generation=sampled_generation,
                 )
-        # A restricted caller's consult runs on any demotion the checks above
-        # leave behind — a trailing marker, the read barrier, a pending batch —
-        # not only on the marker comparison, as long as the stored marker still
-        # names the stored checkpoint self-consistently. The withheld-lag proof
-        # then decides whether what changed is anything the caller may see.
+        # A restricted caller's consult runs on any content-lag demotion the
+        # checks above leave behind — a trailing marker, the read barrier, a
+        # pending batch, a sync acknowledgement that trails — as long as the
+        # stored marker still names the stored checkpoint self-consistently.
+        # The withheld-lag proof decides whether what changed is anything the
+        # caller may see, so it never rescues structural staleness: a sidecar
+        # whose registry metadata is no longer current, or a malformed sync
+        # record, refuses for this caller exactly as for a public one.
         if (
             require_current_projection
+            and metadata_current
+            and graph_sync_state != "malformed"
             and not current
             and reader is not None
             and bounded_checkpoint is None

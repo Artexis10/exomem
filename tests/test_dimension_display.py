@@ -9,6 +9,7 @@ claim with its source and its asserter, and four timeline events ordered by date
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -529,6 +530,31 @@ def test_a_pending_mark_on_what_the_caller_may_see_still_reads_as_unknown(
                 _search(vault, filters, deep=True)
         finally:
             freshness.clear_external_pending(vault, through=epoch)
+
+
+def test_a_structurally_stale_sidecar_reads_as_unknown_under_a_withheld_lag(
+    tmp_path: Path,
+) -> None:
+    """Pins the boundary of the restricted consult: it rescues content lag the withheld proof
+    can decide, never structural staleness. A sidecar whose schema marker no longer matches —
+    though its stored marker is self-consistent and its only lag is a withheld edit — refuses
+    the restricted caller exactly as it refuses a public one."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    _write_as_the_service_does(
+        vault, f"{NOTES}/{WITHHELD_ANSWER}.md",
+        PAGE.format(title="Answers", body=PAGES["Answers"] + "\n\nTwo weeks is enough."),
+    )
+    with sqlite3.connect(index.path) as sidecar:
+        sidecar.execute(
+            "UPDATE graph_meta SET value = 'corrupted' WHERE key = 'schema_version'"
+        )
+    with principal.request_scope(_external()):
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            _search(vault, filters, deep=True)
 
 
 def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the_next(
