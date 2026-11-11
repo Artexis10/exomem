@@ -546,3 +546,20 @@ def test_the_correction_context_of_a_unit_reads_the_store_snapshot(vault):  # no
         in_store_mode = unit_corrections.discover(vault, [reference], accept=lambda _row: True)
 
     assert in_store_mode == in_file_mode
+
+
+def test_a_relation_filter_answers_from_the_store_when_the_sidecar_file_is_gone(
+    stored, writer  # noqa: F811
+):
+    """A graph reader that asks whether the file-built sidecar exists before it reads the store: in
+    a store-mode vault whose state holds no sidecar, every relation filter reports warming."""
+    for rel in (CLAIM, EVIDENCE, RIVAL):
+        write.commit(writer, put(rel, PAGES[rel].encode()))
+    epistemic_graph.sidecar_path(stored).unlink(missing_ok=True)
+    find.clear_cache()
+
+    found = find.find(stored, query="", relations=["supports"], limit=15)
+    participants = epistemic_graph.EpistemicGraphIndex(stored).relation_participants(["supports"])
+
+    assert {hit.path for hit in found} == {CLAIM, EVIDENCE}
+    assert (participants.status, participants.paths) == ("available", frozenset({CLAIM, EVIDENCE}))

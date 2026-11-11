@@ -2882,6 +2882,12 @@ class EpistemicGraphIndex:
             **kwargs,
         )
 
+    def _rows_exist(self) -> bool:
+        """Whether there are graph rows to read: the store's, or else the sidecar file's."""
+        from .vault_store import mode as store_mode
+
+        return store_mode.store_mode_for_reads(self.vault_root) or self.path.exists()
+
     def available(self) -> bool:
         conn = self._open_read_snapshot()
         if conn is None:
@@ -8884,7 +8890,7 @@ class EpistemicGraphIndex:
             return RelationFilterResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return RelationFilterResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -9063,7 +9069,7 @@ class EpistemicGraphIndex:
             return RelationEdgeResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return RelationEdgeResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -9142,7 +9148,7 @@ class EpistemicGraphIndex:
 
         if not graph_enabled():
             return UnitEdgeResult(status="temporarily_unavailable", reason="graph_index_disabled")
-        if not self.path.exists():
+        if not self._rows_exist():
             return UnitEdgeResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -9220,7 +9226,7 @@ class EpistemicGraphIndex:
             return DependencySourcesResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return DependencySourcesResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
