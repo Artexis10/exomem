@@ -745,3 +745,17 @@ def test_new_stdio_server_recalls_the_canonical_update_after_capture_closes(tmp_
     assert unavailable["before"] == captured == unavailable["after"]
     assert unavailable["cost_usd"] is None
     assert session_score.recall_evidence({"fresh": unavailable}) == (checks.UNKNOWN, [])
+
+
+def test_working_set_actor_reaches_only_the_pinned_vault_and_mcp_stays_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "parent-key")
+    pinned = {"EXOMEM_VAULT_PATH": str(tmp_path / "vault"), "PYTHONPATH": "arm/src", "HOME": "scratch-home"}
+    plain = session_close.agent_env(tmp_path, case(), "mcp", pinned)
+    assert plain["EXOMEM_RETRIEVE_INJECT"] == "mcp" and "EXOMEM_VAULT_PATH" not in plain and "EXOMEM_RETRIEVE_INJECT_CLI" not in plain
+    carried = session_close.agent_env(tmp_path, case(), "working_set", pinned)
+    assert carried["EXOMEM_RETRIEVE_INJECT"] == "working_set" and carried["EXOMEM_RETRIEVE_INJECT_CLI"] == "1"
+    # The CLI rung needs the arm's vault; the REST rung must find no key, port or file of a live service.
+    assert carried["EXOMEM_VAULT_PATH"] == pinned["EXOMEM_VAULT_PATH"] and carried["HOME"] != "scratch-home"
+    assert "EXOMEM_REST_API_KEY" not in carried and not Path(carried["EXOMEM_SERVICE_ENV"]).exists()
+    with pytest.raises(ValueError, match="--hook-inject"):
+        session_close.run_all([], model="unused", repeats=1, out=tmp_path / "out", arms=[], hook_inject="stub")

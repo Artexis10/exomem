@@ -54,6 +54,8 @@ Capture and fresh rows retain `client_mode`, the actual argv, supplied settings,
 
 The native Claude route remains the default. For the maintained credits launcher, supply `--credits-account`, `--credits-budget-usd` and `--credits-reason` together. These options apply only to session-close. Empty account or reason values and nonpositive or nonfinite budgets fail before executable discovery.
 
+`--hook-inject {mcp,working_set}` (session-close only, default `mcp`) pins the retrieve hook's inject mode for every arm of a run. It is recorded as `hook_inject` in each `runs.jsonl` row and named in the `session-score` report. `working_set` also turns on the hook's CLI rung against the arm's pinned vault, points the hook away from any live service's `service.env`, and zeroes the hook's length, control-prompt and cooldown gates, as `mcp` mode does. Run each mode into its own `--out` folder. `outcome.json` belongs to the membench outcome command and is not written here.
+
 The adapter resolves `harness` on PATH without a shell. It uses `claude-credits run --stream-json` with the existing `--budget` option; the launcher owns framing, model and session flags. The remaining actor flags preserve strict MCP access, tool restrictions, settings, hook events and the selected client mode.
 
 The budget is the maximum requested for **each independent process**, including fresh recall. It is neither a decision-wide cap nor spending authority. The evaluation owner still agrees the total budget and reconciles costs. The maintained launcher must ship its literal duplex support before a programme run selects this route. Missing launchers and failed payer launches never fall back to subscription Claude.
