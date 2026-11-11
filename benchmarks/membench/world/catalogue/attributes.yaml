@@ -51,7 +51,7 @@ truth_mechanisms:
     readings:
       kind: "The kind of a statement, or of the statements about an attribute. Of several, the latest one that asserts and stands decides, and when none asserts, the latest one that stands."
       modality: "Whether a statement says what is, should be, must be or may be."
-      hedge: "The hedge that a statement carries, a word from `hedges.yaml`, or none."
+      hedge: "The hedge that a statement carries: a word that marks how certain it is, or none."
   state_fold:
     description: "Turn the asserted statements about one attribute into status spans, under the norms that the entry names and the attribute's volatility class. membench's bitemporal resolution then evaluates the spans."
     readings:
