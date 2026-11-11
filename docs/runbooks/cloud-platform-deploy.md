@@ -416,6 +416,192 @@ kubectl get storageclass exomem-cloud-encrypted
 
 Both scheduler CronJobs must print `suspend=false` while Cloud is enabled.
 
+## Record the platform Deployment
+
+The `cloud-deploy` workflow sets a release's cell image only when the platform runs that release's chart and
+controller. A GitHub Deployment in the `cloud-platform` environment records which release the platform runs.
+Record one after each successful upgrade.
+
+The workflow reads only the newest successful platform Deployment. So each Deployment lists every barrier entry
+crossed so far, not only the entries that its own upgrade crossed.
+
+1. Set the release tag that you upgraded to, for example `TAG=v0.171.0`.
+2. If this is the first platform Deployment, list every barrier entry at or below the live release as crossed:
+
+   ```bash
+   CROSSED=$(jq -c --arg v "${TAG#v}" '[.barriers[] | select((.version | split(".") | map(tonumber)) <= ($v | split(".") | map(tonumber))) | .id]' infra/contracts/upgrade-barriers-v1.json)
+   ```
+
+3. Otherwise, read the list from the newest successful platform Deployment:
+
+   ```bash
+   PREVIOUS=$(for id in $(gh api "repos/Artexis10/exomem/deployments?environment=cloud-platform&per_page=20" --jq '.[].id'); do if [ "$(gh api "repos/Artexis10/exomem/deployments/$id/statuses?per_page=1" --jq '.[0].state')" = success ]; then gh api "repos/Artexis10/exomem/deployments/$id" --jq '.payload | if type == "string" then fromjson else . end | .barriers_crossed // [] | tojson'; break; fi; done)
+   ```
+
+4. After you did each entry's runbook step, add the entries that this upgrade crossed. With none, use `'[]'`:
+
+   ```bash
+   CROSSED=$(jq -cn --argjson previous "$PREVIOUS" --argjson new '["secret-matrix-0.172.0"]' '$previous + $new | unique')
+   ```
+
+   The command prints an error when `PREVIOUS` is empty. Then no successful Deployment exists, and step 2 applies.
+5. Create the Deployment and mark it successful:
+
+   ```bash
+   id=$(jq -n --arg ref "$TAG" --argjson crossed "$CROSSED" '{ref: $ref, environment: "cloud-platform", auto_merge: false, required_contexts: [], payload: {barriers_crossed: $crossed}, description: "Platform upgrade"}' | gh api repos/Artexis10/exomem/deployments --input - --jq .id) && gh api "repos/Artexis10/exomem/deployments/$id/statuses" -f state=success --jq .state
+   ```
+
+6. Start the workflow on `main`, so that it sets the release's cell image:
+
+   ```bash
+   gh workflow run cloud-deploy.yml --ref main -R Artexis10/exomem
+   ```
+
+Expected result: step 5 prints `success`, and the next `cloud-deploy` run ends with `cloud-deploy: CANARY_ON_TARGET`
+or `cloud-deploy: CELL_IMAGE_CURRENT`.
+
+If the upgrade failed, record nothing: the newest successful Deployment keeps naming the release the platform runs.
+
+## Cell releases
+
+Each release that succeeds on its tag starts the `cloud-deploy` workflow
+(`.github/workflows/cloud-deploy.yml`). The workflow verifies the cell image's attestation and sets it as
+Substrate's `cell_image` with the deploy token. cellctl then rolls the canary at once, and every other cell in its
+own upgrade window. The workflow never clears a pause and never sends an older release. Its log prints codes only.
+
+### Enable the workflow
+
+Do these steps once, after Substrate has shipped the image history and you have run its seed again
+(Substrate's Cloud operations runbook, "Seed the image history"). These are live settings of the repository.
+
+1. Create the `cloud-deploy` environment, with a branch policy:
+
+   ```bash
+   echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/Artexis10/exomem/environments/cloud-deploy --input -
+   ```
+
+2. Admit only `main`:
+
+   ```bash
+   gh api repos/Artexis10/exomem/environments/cloud-deploy/deployment-branch-policies -f name=main -f type=branch
+   ```
+
+3. Add the deploy token. Paste it at the prompt:
+
+   ```bash
+   gh secret set EXOMEM_DEPLOY_TOKEN --env cloud-deploy -R Artexis10/exomem
+   ```
+
+4. Add the alert receiver URL that carries the `cloud-deploy` capability. Paste it at the prompt:
+
+   ```bash
+   gh secret set EXOMEM_CLOUD_DEPLOY_ALERT_URL --env cloud-deploy -R Artexis10/exomem
+   ```
+
+5. Set Substrate's public origin. Load it into `EXOMEM_SUBSTRATE_URL` first, as an `https://` URL:
+
+   ```bash
+   gh variable set EXOMEM_SUBSTRATE_URL --env cloud-deploy --body "$EXOMEM_SUBSTRATE_URL" -R Artexis10/exomem
+   ```
+
+6. Optional: set the poll interval and timeout in seconds. The defaults are 30 and 3600.
+
+   ```bash
+   gh variable set CLOUD_DEPLOY_POLL_INTERVAL_SECONDS --body 30 -R Artexis10/exomem && gh variable set CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS --body 3600 -R Artexis10/exomem
+   ```
+
+7. Check the branch policy:
+
+   ```bash
+   gh api repos/Artexis10/exomem/environments/cloud-deploy/deployment-branch-policies --jq '.branch_policies[].name'
+   ```
+
+Expected result: step 7 prints only `main`.
+
+To stop the automation, delete `EXOMEM_DEPLOY_TOKEN` from the environment. The workflow then prints
+`cloud-deploy: CLOUD_DEPLOY_NOT_CONFIGURED` and sets nothing.
+
+### Read and clear a paused rollout
+
+Load `EXOMEM_ADMIN_TOKEN` and `EXOMEM_SUBSTRATE_URL` into the shell for these steps only.
+
+1. Read the rollout view:
+
+   ```bash
+   curl --fail-with-body -sS -H "Authorization: Bearer $EXOMEM_ADMIN_TOKEN" "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release/rollout" | jq .view
+   ```
+
+2. Find the held cell and its error in cellctl's log:
+
+   ```bash
+   kubectl -n exomem-cloud logs deployment/cellctl --since=24h | grep -E 'cloud-rollout-paused|failed with|rollout pauses'
+   ```
+
+3. Fix the cause. For a broken release, fix forward: set the fixed release's image and tag with the admin token.
+
+   ```bash
+   jq -n --arg image "$FIXED_IMAGE" --arg release "$FIXED_TAG" '{cellImage: $image, release: $release}' | curl --fail-with-body -sS -X PUT -H "Authorization: Bearer $EXOMEM_ADMIN_TOKEN" -H 'Content-Type: application/json' --data @- "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release" | jq .success
+   ```
+
+4. Clear the pause:
+
+   ```bash
+   curl --fail-with-body -sS -X PUT -H "Authorization: Bearer $EXOMEM_ADMIN_TOKEN" -H 'Content-Type: application/json' --data '{"clearRolloutPause":true}' "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release" | jq .success
+   ```
+
+Expected result: step 4 prints `true`, step 1 then shows `"paused": false`, and `cloud-rollout-paused` resolves on
+cellctl's next pass.
+
+### End a forward-only hold
+
+The error `UPGRADE_FORWARD_ONLY` means that an attempt across a one-way `cell` barrier missed readiness. The target
+may have changed state that the previous image cannot read, so cellctl did not restore. The cell stays stopped under
+its upgrade hold, with the attempt's restore point kept.
+
+Do one of these:
+
+- Fix forward: set the held cell's own image to the fixed release with the admin token. Then do steps 3 and 4 of
+  "Read and clear a paused rollout". Without the cell's own image, cellctl retries the cell's pinned target, not the
+  fixed release. A second miss holds the cell again. After the cell is Ready on the fixed release, clear its own
+  image with the admin token, so that later releases reach it.
+- Restore by hand with [cloud-operator-restore.md](cloud-operator-restore.md), from the attempt's own backup
+  (`exomem.io/pre-upgrade-snapshot` on the cell's StatefulSet). Then set the cell's own image with the admin token,
+  and do step 4.
+
+### Never withdraw across a one-way barrier
+
+Do not set `cell_image` back to a release before a one-way `cell` barrier that cells already run past. cellctl
+refuses that move: it starts no attempt, keeps each cell on its image, and pauses the rollout with
+`UPGRADE_BACKWARD_CROSSING`. Fix forward with a new release instead, then clear the pause.
+
+### Respond to a release or rollout alert
+
+| Alert | Meaning | Step |
+|---|---|---|
+| `cloud-release-platform-needed` | The release changes the chart or cellctl since the platform's release, or no platform Deployment exists | Upgrade the platform to the release ("Render and upgrade the release"), then "Record the platform Deployment". The next run resolves the alert |
+| `cloud-release-barrier` | A barrier entry at or below the release is not crossed. The workflow log names its ID | Do the entry's runbook step (`runbook` in `infra/contracts/upgrade-barriers-v1.json`), upgrade the platform, and record the Deployment with the ID in `CROSSED` |
+| `cloud-rollout-paused` | The rollout is paused, for any error code | "Read and clear a paused rollout". For `UPGRADE_FORWARD_ONLY`, "End a forward-only hold" |
+| `cloud-rollout-held` | A cell's upgrade or restore hold is older than `alerts.rollout_held_warn_seconds` | Find the cell in cellctl's log (`grep cloud-rollout-held`). Check its pod and its backup or restore Job with `kubectl -n exo-cell-<cell id> get pods,jobs` |
+| `cloud-rollout-stalled` | A cell has stayed behind its target for longer than `alerts.rollout_stalled_warn_seconds` | Find the cell in cellctl's log. A busy cell rolls only in the last `cellctl.upgradeWindow.forceMinutes` of its window: raise that value, or set `cellctl.upgradeWindow.enabled: false` for one platform upgrade |
+| `cloud-rollout-canary-waiting` | The canary has stayed behind its target for longer than `alerts.canary_wait_warn_seconds` | Check the canary's pod and readiness. A canary that is stopped or refused holds every tenant |
+
+### Rotate a key under upgrade windows
+
+A rotation that changes the render digest, such as a new cell-token key version, restarts each cell in its own
+upgrade window. A step that retires the previous key version must wait until every cell runs the new render.
+
+1. Note the time when the rotation's platform upgrade finished, in UTC.
+2. List each cell pod's start time:
+
+   ```bash
+   kubectl get pods -A -l app.kubernetes.io/name=exomem-cell -o custom-columns=NAMESPACE:.metadata.namespace,STARTED:.status.startTime
+   ```
+
+3. Retire the previous version only when every cell pod started after the time from step 1.
+
+For an urgent re-render, set `cellctl.upgradeWindow.enabled: false` for the rotation's platform upgrade. cellctl then
+re-applies cells one at a time as soon as each is eligible. Set it back to `true` after the retire step.
+
 ## After the backup key conversion
 
 Do this section once, after "Upgrade the release" and "Verify". When a follow-up release is planned, such as the

@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "barriers": [
+    {
+      "id": "secret-matrix-0.92.0",
+      "version": "0.92.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix gained the control database server's destinations; apply the re-signed active secrets first."
+    },
+    {
+      "id": "secret-matrix-0.94.0",
+      "version": "0.94.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix gained the K3s agent nodes' destinations; apply the re-signed active secrets first."
+    },
+    {
+      "id": "secret-matrix-0.95.0",
+      "version": "0.95.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The production secret registry became complete; apply the re-signed active secrets first."
+    },
+    {
+      "id": "secret-matrix-0.104.0",
+      "version": "0.104.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix gained the artifact signing keys; apply the re-signed active secrets first."
+    },
+    {
+      "id": "secret-matrix-0.109.0",
+      "version": "0.109.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix gained the dedicated K3s agents' destinations; apply the re-signed active secrets first."
+    },
+    {
+      "id": "secret-matrix-0.112.0",
+      "version": "0.112.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix dropped the destinations that shared control ownership replaced; re-sign the registry first."
+    },
+    {
+      "id": "secret-matrix-0.116.0",
+      "version": "0.116.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix dropped the retired Hosted destinations; re-sign the registry and apply the active secrets first."
+    },
+    {
+      "id": "backup-key-conversion",
+      "version": "0.147.0",
+      "scope": "platform",
+      "kind": "one-way",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#cross-the-backup-key-conversion",
+      "summary": "cellctl converts each cell's backup key on its first apply; an older cellctl cannot read a converted cell."
+    },
+    {
+      "id": "secret-matrix-0.157.0",
+      "version": "0.157.0",
+      "scope": "platform",
+      "kind": "operator-step",
+      "runbook": "docs/runbooks/cloud-platform-deploy.md#apply-the-active-secrets",
+      "summary": "The secret matrix gained the key custodian's destinations; apply the re-signed active secrets first."
+    }
+  ]
+}

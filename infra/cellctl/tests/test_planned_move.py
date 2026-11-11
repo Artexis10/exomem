@@ -198,7 +198,7 @@ def test_another_hold_blocks_a_planned_move(hold: str) -> None:
     # retire a claim that a backup or restore Job is still using.
     observation = _local(**MARKED, statefulset_hold_kind=hold, statefulset_hold_started_at=STARTED,
                          statefulset_pre_upgrade_snapshot=LAST_BACKUP, statefulset_previous_image=IMAGE_A,
-                         pod_ready=False)
+                         statefulset_upgrade_target=IMAGE_A, pod_ready=False)
 
     decision = _decide(observation, _marked_row(hold_kind="backup", hold_started_at=STARTED))
 

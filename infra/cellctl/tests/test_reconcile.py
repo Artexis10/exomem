@@ -69,6 +69,10 @@ class FakeClusterGateway:
         self.events: list[tuple] = []
         # The relayed grants' ConfigMap data; None until cellctl first writes it.
         self.cell_deletions: dict[str, str] | None = None
+        # automate-cloud-releases D4: each cell's readiness answer and traffic history.
+        self.readiness: dict[str, bytes] = {}
+        self.histories: dict[str, bytes] = {}
+        self.history_reads: list[str] = []
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
         return self.observations.get(cell_id, ClusterObservation())
@@ -146,7 +150,24 @@ class FakeClusterGateway:
         return {}
 
     def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]:
-        return {}
+        return {cell: body for cell, body in self.readiness.items() if cell in addresses}
+
+    def read_cell_traffic_history(self, addresses: dict[str, str]) -> dict[str, bytes]:
+        self.history_reads.extend(sorted(addresses))
+        return {cell: body for cell, body in self.histories.items() if cell in addresses}
+
+    def patch_statefulset_annotations(self, namespace: str, annotations: dict[str, str | None]) -> None:
+        # The live object: a merge patch sets or removes these keys, whichever manager wrote them.
+        self.events.append(("patch_annotations", namespace, dict(annotations)))
+        statefulset = self.applied.get((namespace, "StatefulSet", "cell"))
+        if statefulset is None:
+            return
+        live = statefulset["metadata"]["annotations"]
+        for key, value in annotations.items():
+            if value is None:
+                live.pop(key, None)
+            else:
+                live[key] = value
 
     def read_secret_value(self, namespace: str, name: str, key: str) -> str:
         return "https://receiver.example/alerts/token"
@@ -1033,6 +1054,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
     from cellctl.manifests import (
         BACKUP_RETRY_AFTER_ANNOTATION,
         BACKUP_RETRY_MINUTES_ANNOTATION,
+        CANDIDATE_SINCE_ANNOTATION,
         HOLD_ANNOTATION,
         HOLD_STARTED_ANNOTATION,
         MEDIA_EDGE_ACCESS_LABEL,
@@ -1043,6 +1065,10 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         RESTORED_SNAPSHOT_ANNOTATION,
         ROW_GENERATION_ANNOTATION,
         TARGET_APPLIED_ANNOTATION,
+        UPGRADE_PHASE_ANNOTATION,
+        UPGRADE_TARGET_ANNOTATION,
+        UPGRADE_WINDOW_ANNOTATION,
+        UPGRADE_WINDOW_AT_ANNOTATION,
     )
 
     statefulset = cluster.applied[(namespace_name(cell_id), "StatefulSet", "cell")]
@@ -1077,6 +1103,11 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_row_generation=int(annotations[ROW_GENERATION_ANNOTATION])
         if ROW_GENERATION_ANNOTATION in annotations
         else None,
+        statefulset_upgrade_target=annotations.get(UPGRADE_TARGET_ANNOTATION),
+        statefulset_upgrade_phase=annotations.get(UPGRADE_PHASE_ANNOTATION),
+        statefulset_upgrade_window=annotations.get(UPGRADE_WINDOW_ANNOTATION),
+        statefulset_upgrade_window_at=annotations.get(UPGRADE_WINDOW_AT_ANNOTATION),
+        statefulset_candidate_since=_parse_timestamp(annotations.get(CANDIDATE_SINCE_ANNOTATION)),
         pod_exists=running,
         pod_uses_volume=running,
         pod_ready=running,
