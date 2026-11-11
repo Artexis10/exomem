@@ -17,5 +17,5 @@ The `balanced` and `maximal` capture contracts and the activation `capture_polic
 - **THEN** the server instructions count the turn as clear relevance for recall
 
 #### Scenario: Light carries no repository-task sentence
-- **WHEN** the level is `light` and the native MCP activation nudge is sent
+- **WHEN** the hook's level is `light` and the native MCP activation nudge is sent
 - **THEN** the nudge carries no repository-task sentence and still counts advice on the user's own case
