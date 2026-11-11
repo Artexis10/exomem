@@ -481,6 +481,56 @@ def test_a_lag_holding_a_deleted_page_reads_as_unknown(
             _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
 
 
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_watcher_batch_repairing_a_withheld_edit_leaves_the_reply_unchanged(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches the pending-window leak the trailing-marker fix alone left: a withheld page
+    edited inside a watcher batch arms the read barrier and a pending mark for the whole
+    repair window, and the restricted reply still must not flip to unknown while it does —
+    the batch names only a page the caller may not see."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    rewritten = PAGE.format(title="Answers", body=PAGES["Answers"] + "\n\nTwo weeks is enough.")
+    with principal.request_scope(_external()):
+        before = _search(vault, filters, deep=True)
+        withheld_path = vault / f"{NOTES}/{WITHHELD_ANSWER}.md"
+        _write_as_the_service_does(vault, f"{NOTES}/{WITHHELD_ANSWER}.md", rewritten)
+        index.suspend_reads()
+        epoch = freshness.mark_external_pending(vault, paths=[withheld_path])
+        try:
+            after = _search(vault, filters, deep=True)
+        finally:
+            freshness.clear_external_pending(vault, through=epoch)
+    assert after == before
+
+
+@pytest.mark.parametrize("mark", ["visible", "unscoped"], ids=["visible-path", "unscoped"])
+def test_a_pending_mark_on_what_the_caller_may_see_still_reads_as_unknown(
+    tmp_path: Path, mark: str
+) -> None:
+    """Pins the other half of the pending rule: a mark naming a page the caller may see — or
+    naming nothing at all — still flips the restricted read to unknown, because its stored
+    rows could be stale on something it is allowed to read."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    filters = {"unit.dimension": {"$eq": "uncertainty"}}
+    with principal.request_scope(_external()):
+        paths = [] if mark == "unscoped" else [vault / f"{NOTES}/Questions.md"]
+        epoch = freshness.mark_external_pending(vault, paths=paths)
+        try:
+            with pytest.raises(find_module.RetrievalIndexWarming):
+                _search(vault, filters, deep=True)
+        finally:
+            freshness.clear_external_pending(vault, through=epoch)
+
+
 def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the_next(
     tmp_path: Path,
 ) -> None:

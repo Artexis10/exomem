@@ -3082,8 +3082,13 @@ class EpistemicGraphIndex:
         by pages the caller may not see (`view_lag.recall_withheld_lag`), is as
         current as the live one would be, so a write it may not see never
         changes its read. Every other check still holds. The bridged delta is
-        the lineage proof the exact live checkpoint gives. A lag that holds any
-        deleted path reads as unknown: no verdict proof is offered for it.
+        the lineage proof the exact live checkpoint gives. A lag that holds a
+        deleted path reads as unknown unless the caller's request already
+        proved that page withheld: no verdict proof is offered for it here, so
+        an unproved delete is refused. The read barrier and armed external-pending
+        marks demote or refuse for other readers; for this caller they are
+        decided per-path the same way (`view_lag.pending_only_withheld`), so a
+        batch that names only withheld pages does not flip its reply either.
 
         Public readers require the stored graph projection to match the current
         event-maintained (or cold-walk) projection. Incremental maintenance may
@@ -3159,9 +3164,15 @@ class EpistemicGraphIndex:
                 refusal_out.append("graph_disabled")
             return None
         if require_current_projection and freshness.external_pending(self.vault_root):
-            if refusal_out is not None:
-                refusal_out.append("external_pending")
-            return None
+            # For a restricted caller the marks decide per-path: a batch naming
+            # only pages it may not see changes nothing it can read. An unscoped
+            # mark or one on a visible page still refuses, as for any reader.
+            if reader is None or not view_lag.pending_only_withheld(
+                self.vault_root, reader
+            ):
+                if refusal_out is not None:
+                    refusal_out.append("external_pending")
+                return None
         if not self.path.exists():
             if refusal_out is not None:
                 refusal_out.append("sidecar_missing")
@@ -3305,29 +3316,6 @@ class EpistemicGraphIndex:
                     )
                 )
             current = stored_projection == _availability_freshness_value(current_identity)
-            if (
-                not current
-                and reader is not None
-                and bounded_checkpoint is None
-                and stored_checkpoint is not None
-                and stored_projection == _availability_freshness_value(
-                    (
-                        stored_checkpoint.triple,
-                        stored_checkpoint.policy_version,
-                        stored_checkpoint.access_policy_fingerprint,
-                    )
-                )
-            ):
-                reader_held = view_lag.recall_withheld_lag(
-                    self.vault_root,
-                    "vault",
-                    stored_checkpoint,
-                    reader,
-                    # A deleted page reads unknown, even one a verdict held
-                    # withheld: no proof is offered, so the lag refuses it.
-                    withheld_before=lambda _paths: frozenset(),
-                )
-                current = reader_held is not None
             # A checkpoint is an O(delta) proof only inside the exact process
             # lineage that published it.  A cold/direct reader, or a process
             # that inherited a sidecar from an older registry instance, cannot
@@ -3336,7 +3324,7 @@ class EpistemicGraphIndex:
             # canonical source bytes and resolver topology directly before
             # trusting the derived sidecar.  Live readers at the exact stored
             # checkpoint retain the event-maintained fast path.
-            exact_live_checkpoint = reader_held is not None or (
+            exact_live_checkpoint = (
                 stored_checkpoint is not None
                 and current_checkpoint is not None
                 and (live_only or freshness.recall_is_live(self.vault_root, "vault"))
@@ -3438,6 +3426,36 @@ class EpistemicGraphIndex:
                     stored_checkpoint,
                     sampled_generation=sampled_generation,
                 )
+        # A restricted caller's consult runs on any demotion the checks above
+        # leave behind — a trailing marker, the read barrier, a pending batch —
+        # not only on the marker comparison, as long as the stored marker still
+        # names the stored checkpoint self-consistently. The withheld-lag proof
+        # then decides whether what changed is anything the caller may see.
+        if (
+            require_current_projection
+            and not current
+            and reader is not None
+            and bounded_checkpoint is None
+            and stored_checkpoint is not None
+            and stored_projection
+            == _availability_freshness_value(
+                (
+                    stored_checkpoint.triple,
+                    stored_checkpoint.policy_version,
+                    stored_checkpoint.access_policy_fingerprint,
+                )
+            )
+        ):
+            reader_held = view_lag.recall_withheld_lag(
+                self.vault_root,
+                "vault",
+                stored_checkpoint,
+                reader,
+                # A deleted page reads unknown, even one a verdict held
+                # withheld: no proof is offered, so the lag refuses it.
+                withheld_before=lambda _paths: frozenset(),
+            )
+            current = reader_held is not None
         if bounded_checkpoint is not None and (
             freshness.live_recall_checkpoint(self.vault_root, "vault") != bounded_checkpoint
         ):
@@ -3450,7 +3468,12 @@ class EpistemicGraphIndex:
         # Class A/C signal that landed mid-proof still fails closed. Scoped to
         # public readers for the reason the head of this method gives.
         if not current or (
-            require_current_projection and freshness.external_pending(self.vault_root)
+            require_current_projection
+            and freshness.external_pending(self.vault_root)
+            and (
+                reader is None
+                or not view_lag.pending_only_withheld(self.vault_root, reader)
+            )
         ) or (live_only and not freshness.recall_checkpoint_is_current(
             self.vault_root, "vault", bounded_checkpoint
         )):
