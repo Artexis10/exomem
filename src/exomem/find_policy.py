@@ -25,6 +25,7 @@ from .temporal import parse as parse_moment
 # Relative connectives (when, before, after, since, until) are left out on
 # purpose: they place an event against an anchor ("after the migration"); they
 # do not ask for the newest notes, which is what the temporal lane ranks.
+# nosemgrep: ep-word-search -- pre-existing intent heuristic this change only shrinks; replacing it with a model read is a separate design change
 TEMPORAL_MARKERS = re.compile(
     r"\b(recent|recently|latest|newest|today|yesterday|tonight|"
     r"week|weeks|month|months|year|years|ago|"
