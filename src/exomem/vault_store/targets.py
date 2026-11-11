@@ -71,18 +71,19 @@ class InboundCheck(NamedTuple):
 
 
 def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundCheck]:
-    """The links to each stored page in ``rels``: the store's inbound rows, then the files in the
-    Knowledge Base that the store holds no page for.
+    """The links to each stored page in ``rels``: the store's inbound rows, then each file that the
+    store holds no rows for, read off the disk.
 
-    The rows answer for every page that the store holds, as of the snapshot, by the file index's
-    own rule (``vault.store_inbound_wikilinks``), with line and context: a page that has no file
-    yet counts, and a file that a queued delete has not removed yet does not. A file that the
-    store holds no page for (a note that nothing has imported yet) is read off the disk, and a bare
-    ``[[name]]`` in it counts even when another page shares the name. Each wrong count costs one
-    ``force_orphan``. ``bound`` is every page that the rows name: the commit binds the same rule
-    (``write.check``) and refuses a link from a page outside it. A folder's pages share one read of
-    the rows and one walk of the disk, so the cost grows with the links and not with the pages
-    times the vault.
+    The rows answer for every page that the store holds and every file that the importer's sweep
+    reached, as of the snapshot, by the file index's own rule (``vault.store_inbound_wikilinks``),
+    with line and context: a page that has no file yet counts, and a file that a queued delete has
+    not removed yet does not. A file with no rows (a note that nothing has imported or swept yet)
+    is read off the disk, and a bare ``[[name]]`` in it counts even when another page shares the
+    name. Such a note outside what the store owns counts as a link; one in the Knowledge Base goes
+    to ``unimported``. Each wrong count costs one ``force_orphan``. ``bound`` is every page that
+    the rows name: the commit binds the same rule (``write.check``) and refuses a link from a page
+    outside it. A folder's pages share one read of the rows and one walk of the disk, so the cost
+    grows with the links and not with the pages times the vault.
     """
     root = Path(vault_root)
     targets = list(dict.fromkeys(rels))
@@ -94,15 +95,13 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     unimported: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     with read.snapshot(root) as view:
         links = vault.store_inbound_wikilinks(view.connection, targets)
-        candidates: dict[str, Path] = {}
-        for path in vault.walk_vault_md(root):
-            source = vault.relative_posix(path, root)
-            if ownership.classify(source) is ownership.Ownership.PAGE:
-                candidates[source] = path
-        stored = view.held_pages(candidates)
+        candidates = {vault.relative_posix(path, root): path for path in vault.walk_vault_md(root)}
+        derived = vault.store_inbound_sources(view.connection, candidates)
+    bound = {rel: frozenset(link.path for link in links[rel]) for rel in targets}
     for source, path in candidates.items():
-        if source in stored:
+        if source in derived:
             continue
+        owned = ownership.classify(source) is ownership.Ownership.PAGE
         try:
             # The descriptor read refuses a symlink, which a file swapped after the walk could be;
             # `read_guarded_text` would look for the file in the store instead.
@@ -112,11 +111,10 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
         for line, context, target in vault._scan_wikilinks(raw.decode("utf-8", errors="replace")):
             for rel in reached.get(vault._inbound_bucket_key(target), ()):
                 if rel != source:
-                    unimported[rel].append(vault.InboundLink(source, line, context, target))
-    return {
-        rel: InboundCheck(links[rel], unimported[rel], frozenset(link.path for link in links[rel]))
-        for rel in targets
-    }
+                    (unimported if owned else links)[rel].append(
+                        vault.InboundLink(source, line, context, target)
+                    )
+    return {rel: InboundCheck(links[rel], unimported[rel], bound[rel]) for rel in targets}
 
 
 def visible_links(

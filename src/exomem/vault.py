@@ -8404,6 +8404,21 @@ def store_inbound_wikilinks(
     return {target: _select_inbound_wikilinks(data, target, visible) for target in wanted}
 
 
+def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
+    """The paths among ``rels`` that the store holds inbound rows for, read in a few keyed queries."""
+    from .vault_store import read as store_read
+
+    wanted = list(dict.fromkeys(rels))
+    found: set[str] = set()
+    for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
+        chunk = wanted[start : start + store_read.KEYS_PER_QUERY]
+        found.update(path for path, in conn.execute(
+            f"SELECT path FROM inbound_sources WHERE path IN ({', '.join('?' * len(chunk))})",
+            chunk,
+        ))
+    return frozenset(found)
+
+
 def _store_inbound(
     vault_root: Path, targets: Iterable[str], visible: Callable[[str], bool] | None
 ) -> dict[str, list[InboundLink]] | None:
