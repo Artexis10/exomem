@@ -8434,6 +8434,30 @@ def recall_resolver_snapshot_at_checkpoint(
         return cached[1]
 
 
+def borrow_recall_resolver(
+    vault_root: Path,
+) -> tuple[WikilinkResolver, freshness.RecallFreshnessCheckpoint | None] | None:
+    """A copy of the resident recall resolver and the live checkpoint it stands at, or None when
+    none is resident. Never builds.
+
+    The checkpoint is None when the resolver was built from a direct disk proof. The caller proves
+    that the copy fits what it reads. The copy is taken under the lock, because a publisher patches
+    the resident resolver in place.
+    """
+    root = Path(vault_root)
+    with _RESOLVER_LOCK:
+        checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
+        cached = _RECALL_RESOLVER_CACHE.get(root)
+        if cached is None:
+            return None
+        if (
+            checkpoint is not None
+            and cached[0] == _recall_checkpoint_identity(checkpoint)
+        ):
+            return cached[1].fork(), checkpoint
+        return cached[1].fork(), None
+
+
 def prime_resolver_from_entries(
     vault_root: Path,
     entries,
