@@ -213,6 +213,24 @@ def test_each_operation_is_announced_in_a_document_that_says_what_it_did() -> No
     )
     plan = dataclasses.replace(PLAN, threads=(*PLAN.threads, extra))
     texts = {k: v.text for k, v in render(plan, CATALOGUE, BANK, STATED).documents.items()}
+    # The same operations, as steps of the planted change, at the other levels.
+    changed = tuple({**step, "world": PLANTED} for step in steps)
+    plan_changed = dataclasses.replace(
+        plan, threads=(*PLAN.threads, dataclasses.replace(extra, steps=changed))
+    )
+    paraphrased = render(plan_changed, CATALOGUE, BANK, "paraphrased").documents
+    assert all(
+        paraphrased[f"x.{op}.doc"].level == "paraphrased"
+        for op in ("fix", "drop", "tell", "limit", "rename", "merge")
+    )
+    assert all(paraphrased[k].text != v for k, v in texts.items() if k.startswith("x."))
+    # A withdrawal, a telling, a restriction and a merger have no `unmarked` form: with no new content
+    # to show, the bank names the gap in place of writing a marked line.
+    with pytest.raises(RenderRefused) as unmarked:
+        render(plan_changed, CATALOGUE, BANK, "unmarked")
+    assert {(r.code, r.item) for r in unmarked.value.refusals} == {
+        ("no-form", f"x.{op}.doc") for op in ("drop", "tell", "limit", "merge")
+    }
 
     def names(*ids: str) -> list[str]:
         return [backbone.entities[i].name for i in ids]
