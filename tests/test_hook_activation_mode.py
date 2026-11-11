@@ -429,7 +429,6 @@ def test_explicit_mode_preserves_untrusted_config_refusal(tmp_path, unsafe):
 @pytest.mark.parametrize(
     "input_change",
     [
-        {"prompt": "ok"},
         {"hook_event_name": "TaskNotification"},
         {"prompt": "Check adapter decisions", "type": "task_notification"},
     ],
@@ -444,6 +443,17 @@ def test_mcp_keeps_task_control_silent(monkeypatch, capsys, input_change):
     monkeypatch.setattr(retrieve.sys, "stdin", io.StringIO(json.dumps(data)))
     assert retrieve.main() == 0
     assert capsys.readouterr().out == ""
+
+
+def test_mcp_sends_the_reminder_on_a_short_acknowledgement(monkeypatch, capsys):
+    # "thanks" matches the control regex and is not referential, so the old
+    # default would have skipped it; the MCP default must not.
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
+    data = {"prompt": "thanks", "session_id": "s"}
+    monkeypatch.setattr(retrieve.sys, "stdin", io.StringIO(json.dumps(data)))
+    assert retrieve.main() == 0
+    context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "[Exomem native MCP activation]" in context
 
 
 @pytest.mark.parametrize(

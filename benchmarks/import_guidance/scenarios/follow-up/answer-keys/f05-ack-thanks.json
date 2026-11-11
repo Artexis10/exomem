@@ -1,0 +1,11 @@
+{
+  "reference": "The final turn is an acknowledgement. It needs no recall. A correct reply is brief (one or two sentences) and states no new fact: no deadline, owner, budget or other detail about any project beyond repeating, at most, what the person already heard. Any new claim about Osprey, Harbor or Cobble is wrong, as is a long recap, a list of options, or asking the person to say more about the project. No page should change: the session only reads. SEED FACTS (all of them, by subject; every page was created 2026-09-01 and last updated 2026-10-05, status active). Osprey Project (organization entity, tag project): relaunch of the supplier portal so suppliers can upload invoices themselves; deadline 14 March 2027; owner Mirela Vance; budget 48,000 EUR. Harbor Project (organization entity, tag project): rework of the warehouse label printing so every pallet label carries a scannable code; deadline 2 June 2027; owner Dario Fenn; budget 31,000 EUR. Cobble Project (organization entity, tag project): tidy-up of the shared drive folder structure for the finance team; deadline 20 September 2027; owner Ines Kolar; budget 9,500 EUR.",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Cobble Project.md",
+    "Entities/Organizations/Harbor Project.md",
+    "Entities/Organizations/Osprey Project.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}

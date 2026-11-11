@@ -1,0 +1,11 @@
+{
+  "id": "f06-ack-sounds-good",
+  "title": "'sounds good' after an agent recommendation needs no recall and no new claim",
+  "suite": "session-close",
+  "seed": "fu-projects",
+  "engagement": "balanced",
+  "turns": [
+    "Between Project Osprey and Project Harbor, which one should I look at first?",
+    "sounds good"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "f03-do-that",
+  "title": "'ok, do that' after the agent proposes a handover that depends on a seeded runbook",
+  "suite": "session-close",
+  "seed": "fu-handover",
+  "engagement": "balanced",
+  "turns": [
+    "I have to hand over the Larch archive migration next week. What do we have on file for it, and how would you suggest I go about the handover? End by offering to draft the handover email to the team.",
+    "do that"
+  ]
+}
