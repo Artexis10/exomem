@@ -2128,7 +2128,8 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     keeps each path's container verdict: a maps activation asks one caller
     view about every catalogue page twice, once for the map and once for the
     turn slice's ranking, and the container check was most of each decision.
-    The connector and RAW checks stay live. Outside the scope nothing is kept.
+    The member's own connector and RAW checks stay live; its parents' floors
+    are part of the kept verdict. Outside the scope nothing is kept.
     """
     boundary = connector_boundary.permits_filter(vault_root, who)
     scope = state_paths.request_memo_scope()
@@ -2139,7 +2140,9 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
             return _container_parents_permit(vault_root, path, who)
         verdict = containers.get(path)
         if verdict is None:
-            verdict = containers[path] = _container_parents_permit(vault_root, path, who)
+            verdict = _container_parents_permit(vault_root, path, who)
+            if verdict:
+                containers[path] = True
         return verdict
 
     return lambda path: (containers_permit(path)

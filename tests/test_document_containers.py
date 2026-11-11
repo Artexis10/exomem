@@ -381,6 +381,8 @@ def test_a_content_filter_kept_past_its_request_reads_a_changed_binding_again(va
         assert keep(child)
     page.write_text(page.read_text().replace("member_path: one.pdf", "member_path: different.pdf"))
     assert not keep(child)
+    with state_paths.resolution_scope():
+        assert not keep(child)
 
 
 def test_owner_bridge_review_cannot_release_payload_from_changed_parent(vault):
