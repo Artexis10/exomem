@@ -245,3 +245,11 @@ def test_a_family_key_is_accepted_as_a_probe_label() -> None:
     # A family that ships no dimension keeps its own key as the label.
     assert projection._dimension(DATA, "persistence") == "persistence"
     assert projection._dimension(DATA, "absence") == "uncertainty"
+
+
+def test_every_probe_names_its_phenomenon_and_the_family_that_the_phenomenon_belongs_to() -> None:
+    """The report finds a probe's lineage and its norms through the phenomenon, and its family through the family."""
+    _, _, record = built(7)
+    entries = CATALOGUE.entries
+    assert {p["phenomenon"] for p in record["probes"]} <= set(entries)
+    assert all(entries[p["phenomenon"]].family == p["family"] for p in record["probes"])

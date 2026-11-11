@@ -547,10 +547,11 @@ def test_a_contest_reference_to_a_missing_file_or_a_later_session_is_named_by_pr
 # --------------------------------------------------------------------------
 
 
-def report_args(run_id: str, judge: Path) -> SimpleNamespace:
+def report_args(run_id: str, judge: Path, earlier: tuple[Path, ...] = ()) -> SimpleNamespace:
     return SimpleNamespace(
         suite="epistemic",
         run_id=run_id,
+        earlier_report=[str(path) for path in earlier],
         rejudge_sample=None,
         judge="claude",
         judge_model=None,
@@ -605,6 +606,34 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
     for text in prompts:
         for leak in (str(played.root), "window-", "unblinding", "history"):
             assert leak not in text, f"a judge input contains {leak!r}"
+
+
+def test_a_run_with_the_gold_arm_reports_it_and_reads_an_earlier_report_for_saturation(
+    scratch, monkeypatch, capsys
+):
+    """G has no pair of its own: it is the ceiling that the families read, so it must reach the report's tables."""
+    write_case_set(scratch.root, {"proj-a": contest_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+    judge = script(scratch.tmp / "judge", FAKE_JUDGE, prompts=scratch.tmp / "judge-prompts.jsonl")
+    play("r5", arms=["N", "G", "F"])
+
+    command._cmd_report(report_args("r5", judge))
+    first = scratch.root / "runs" / "r5" / "report-claude.json"
+    built = json.loads(first.read_text())
+    command._cmd_report(report_args("r5", judge, earlier=(first,)))
+    again = json.loads(first.read_text())
+
+    assert built["status"] == "complete" and "G" in built["arms"]
+    families = built["description"]["families"]
+    assert families["pooled"]["probes"]["played"] == 2
+    assert families["pooled"]["reading"] == "too few probes", "two probes are far under the count"
+    assert set(built["description"]["stable_probes"]) == {"N", "G", "F"}
+    assert (
+        families["earlier_reports"] == 0
+        and again["description"]["families"]["earlier_reports"] == 1
+    )
+    assert "families by reading" in capsys.readouterr().out
 
 
 def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp_path, monkeypatch):
@@ -1150,7 +1179,7 @@ def outcome(arm, project, probe_id, window, correct):
 def test_a_probe_scores_the_mean_of_its_windows_and_an_unjudged_window_is_unknown_not_a_loss():
     """Two windows average to 0, 0.5 or 1; a window the judge failed on drops out of the mean instead of reading as 0."""
     meta = {
-        (project, probe_id): {"dimension": "supersession", "probe_id": probe_id}
+        (project, probe_id): {"dimension": "supersession", "probe_id": probe_id, "key": {}}
         for project, probe_id in (("a", "a1"), ("a", "a2"), ("b", "b1"), ("b", "b2"))
     }
     answers = {

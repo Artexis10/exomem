@@ -7,6 +7,9 @@ bootstrap over probes that resamples inside each project. A decision reads a hel
 valid windows per project, at least ``MIN_WINDOW_GAP_HOURS`` apart. Every other figure describes.
 Unknown, partial and failed values stay visible as such, never 0.
 
+A probe whose key reads it as harm (``key.reading``) has no floor: no pair and no decision reads it. The report
+gives it as harm against arm N, and ``readings.py`` reads each family, the lineage groups and the background norms.
+
 ``membench outcome report epistemic`` drives this module.
 """
 
@@ -14,7 +17,8 @@ from __future__ import annotations
 
 import json
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from recall_parity.scoring import DEFAULT_RESAMPLES
@@ -25,6 +29,8 @@ from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
 from .cases import STORE_NAMES, behaviours, holds_store_name, is_harm, is_stable
 from .judge import HISTORY_ARM, behaviours_asked, scored
+from .projection import load_projection
+from .readings import background_norms, lineage_shares, section
 
 BOOTSTRAP_SEED = 20261108
 #: Agreement of a judge with its own second judgement on ``correct``, below which a run is incomplete. Final for the run.
@@ -63,8 +69,15 @@ def score_tables(outcomes: list[dict], arms: list[str]) -> dict[str, dict[Unit, 
 def paired_diffs(
     a: str, b: str, scores: dict, meta: dict, *, stable: bool
 ) -> tuple[list[Unit], list[float]]:
-    """The probes both arms scored (change probes, or stable ones) and ``a`` minus ``b`` on each."""
-    units = sorted(u for u in scores[a] if u in scores[b] and is_stable(meta[u]) == stable)
+    """The probes both arms scored (change probes, or stable ones) and ``a`` minus ``b`` on each.
+
+    A probe read as harm is in neither set: N answers it correctly, so it has no floor to be read from.
+    """
+    units = sorted(
+        u
+        for u in scores[a]
+        if u in scores[b] and is_stable(meta[u]) == stable and not is_harm(meta[u])
+    )
     return units, [
         mean(list(scores[a][u].values())) - mean(list(scores[b][u].values())) for u in units
     ]
@@ -192,15 +205,23 @@ def harm(outcomes: list[dict], *, arm: str = "P", probes: str = "change and stab
     }
 
 
-def harm_read_probes(outcomes: list[dict], meta: dict, arms: list[str]) -> dict | None:
+def harm_read_probes(
+    outcomes: list[dict], meta: dict, arms: list[str], units: Collection[Unit] | None = None
+) -> dict | None:
     """Per arm other than N, the harm on the probes whose keys read them as harm; None when N did not play.
 
     These probes have no floor, because N answers them correctly. An arm's reading is the share that N gets right
     and the arm gets wrong. A run with no such probe gives each arm a rate of None: unknown, not 0.
+    ``units`` limits the probes to those of one group, such as a family.
     """
     if "N" not in arms:
         return None
-    read_as_harm = [o for o in outcomes if is_harm(meta[(o["project"], o["probe_id"])])]
+    read_as_harm = [
+        o
+        for o in outcomes
+        if is_harm(meta[(o["project"], o["probe_id"])])
+        and (units is None or (o["project"], o["probe_id"]) in units)
+    ]
     return {
         arm: harm(read_as_harm, arm=arm, probes="probes whose key reads them as harm")
         for arm in arms
@@ -365,8 +386,13 @@ def build(
     arms: list[str],
     *,
     heldout: bool,
+    earlier: Sequence[dict] = (),
 ) -> dict:
-    """The unstamped report of an f38 run whose answers are judged under ``judge_run``."""
+    """The unstamped report of an f38 run whose answers are judged under ``judge_run``.
+
+    ``earlier`` holds the stored reports before this one, newest first: a family reads ``saturated`` only when its
+    gap to the ceiling stays inside the margin in this report and in the ones before it that the rule counts.
+    """
     outcomes, failed, again = scored(judge_run)
     states = layout.project_states(run_dir)
     counted = layout.counted_windows(states)
@@ -376,10 +402,16 @@ def build(
         for p in project["probes"]
     }
     scores = score_tables(outcomes, arms)
+    unit_scores = {
+        arm: {unit: mean(list(by_window.values())) for unit, by_window in table.items()}
+        for arm, table in scores.items()
+    }
     rows = {f"{a}-{b}": pair_row(a, b, scores, meta) for a, b in pairs}
     why = incomplete_reasons(failed, again, heldout=heldout, states=states, expected=list(projects))
     decision, gaps = decide(why, heldout=heldout, counted=counted, rows=rows)
     play = [o for o in outcomes if o["arm"] != HISTORY_ARM]
+    history = score_tables(outcomes, [HISTORY_ARM])[HISTORY_ARM]
+    history_scores = {unit: mean(list(by_window.values())) for unit, by_window in history.items()}
     stable_pairs = [(a, b) for a, b in pairs if a in arms and b in arms]
     p_gain = None
     if all(a in scores for a in ("P", "N")):
@@ -454,6 +486,23 @@ def build(
             "behaviours": behaviour_rates(play, meta, arms),
             "harm": harm(play) if {"N", "P"} <= set(arms) else None,
             "harm_read_probes": harm_read_probes(play, meta, arms),
+            "families": section(
+                meta=meta,
+                outcomes=play,
+                unit_scores=unit_scores,
+                arms=arms,
+                seed=BOOTSTRAP_SEED,
+                earlier=earlier,
+                projection=load_projection(),
+                harm_of=lambda units: harm_read_probes(play, meta, arms, set(units)),
+            ),
+            "lineage": lineage_shares(meta),
+            "background_norms": background_norms(
+                meta,
+                history_scores,
+                declared_share=SOLVABLE_FLOOR,
+                history_played=any(o["arm"] == HISTORY_ARM for o in outcomes),
+            ),
             "answers_naming_a_store": {
                 "scope": f"share of the raw answers that contain any of {list(STORE_NAMES)}, case-folded; the judge read them masked",
                 "arms": store_mentions(play, arms),
@@ -509,6 +558,7 @@ def summary_lines(report: dict) -> list[str]:
         lines.append(
             f"skipped {skipped['arm']} answer to {skipped['probe_id']} of {skipped['project']}: {skipped['reason']}"
         )
+    lines += family_lines(report["description"])
     for name, gate in report.get("dev_gates", {}).items():
         if "status" in gate:
             lines.append(f"gate {name}: {gate['status']}")
@@ -522,4 +572,33 @@ def summary_lines(report: dict) -> list[str]:
                     else ""
                 )
             )
+    return lines
+
+
+def family_lines(description: dict) -> list[str]:
+    """The family readings, the contradicted predictions, the lineage groups and the norms below the declared share."""
+    if "families" not in description:
+        return []  # a report stored before task 4.6 holds none of these rows: print nothing, not a guess
+    families = description["families"]
+    by_reading = Counter(row["reading"] for row in families["rows"].values())
+    lines = [
+        f"pooled change probes read: {families['pooled']['reading']}",
+        "families by reading: " + ", ".join(f"{name} {n}" for name, n in by_reading.items()),
+    ]
+    for item in families["contradicted_predictions"]:
+        lines.append(
+            f"prediction contradicted: {item['family']} was filed as {item['predicted']} and reads "
+            f"{item['observed']}; read its {len(item['read_first'])} probes first"
+        )
+    lineage = description["lineage"]
+    if lineage["probes"]:
+        shares = ", ".join(
+            f"{key} {group['share']:.2f}"
+            for key, group in lineage["groups"].items()
+            if group["probes"]
+        )
+        lines.append(f"lineage shares of {lineage['probes']} probes: {shares or 'none'}")
+    below = description["background_norms"]["below_declared_share"]
+    if below:
+        lines.append(f"background norms that the full-history arm reaches too seldom: {below}")
     return lines

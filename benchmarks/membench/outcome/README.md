@@ -131,6 +131,24 @@ probes, and arm `N` without it fails at least 80%. Each gate lists the probes th
 description rows include the share of answers per arm that name a memory store (`memory/` or the
 product name), because the blind judge reads the answer text.
 
+A probe whose key reads it as harm (`key.reading`) has no floor, so no pair, decision or position reads it.
+The report gives each such probe as harm against `N`.
+
+The report reads each family of the catalogue from the probes that carry it (`description.families`; the
+rules and numbers are in `epistemic/readings.yaml`, and design.md decision 6 explains them). A family reads
+`not measured` when no probe of it played, `too few probes` under 20 position probes, `no room` when the
+ceiling `G` does not clearly lead the floor `N`, `room` when it does, `room unclear` between the two, and
+`saturated` when `P` stays at `G` in two reports in a row. Name the earlier report with `--earlier-report
+PATH`, newest first; without one, no family reads `saturated`. A family that reads `room` prints each arm's
+position, (arm − `N`) / (`G` − `N`), with its paired differences. Each family row also gives its harm, its
+false-alarm rate (the answers on which the judge finds `over_flags`, among the probes that ask for it) and
+the filed prediction beside the outcome that the arms give. The report lists each contradicted prediction
+with the probes to read first. `description.lineage` gives the share of probes per lineage group, and
+`description.background_norms` the keys that rest on each background norm and the share that the full-history
+arm reaches. These rows need a project that carries `family` and `phenomenon` on each probe, as a generated
+project does; a hand-written project has neither, so every family reads `not measured` and its lineage is
+unknown.
+
 A held-out epistemic run refuses today: f38 is not registered in the preregistration, so no gate
 can pass it.
 

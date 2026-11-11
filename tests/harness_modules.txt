@@ -158,6 +158,7 @@ tests/test_operator_site_cohort.py
 tests/test_outcome_billing.py
 tests/test_outcome_epistemic.py
 tests/test_outcome_epistemic_projection.py
+tests/test_outcome_epistemic_report.py
 tests/test_outcome_eval_harness.py
 tests/test_protocol_budget.py
 tests/test_protocol_canary.py

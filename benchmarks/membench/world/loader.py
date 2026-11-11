@@ -91,6 +91,7 @@ class Entry:
     probes: tuple[str, ...]
     expect: tuple[str, ...]
     twin_of: str | None
+    lineage: tuple[str, ...]  # the lineage keys of the entry and of its family
 
 
 @dataclass(frozen=True)
@@ -308,6 +309,7 @@ class _Checker:
             probes=tuple(merged.get("probes", [])),
             expect=tuple(merged.get("expect", [])),
             twin_of=entry.get("twin_of"),
+            lineage=tuple(dict.fromkeys([*family.get("from", []), *entry.get("from", [])])),
         )
         self.entries[eid] = resolved
         self.used[eid] = used | {("truth_mechanisms", m) for m in resolved.truth}

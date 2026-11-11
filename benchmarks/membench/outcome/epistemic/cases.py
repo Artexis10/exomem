@@ -63,6 +63,16 @@ def probe_forms() -> dict[str, dict]:
     return _catalogue("attributes.yaml", "probe_forms")
 
 
+def families() -> dict[str, dict]:
+    """Every family of the phenomenon catalogue, in registry order, from ``families.yaml``."""
+    return _catalogue("families.yaml", "families")
+
+
+def lineage_sources() -> dict[str, dict]:
+    """Every lineage source that a phenomenon or a family may name, from ``lineage.yaml``."""
+    return _catalogue("lineage.yaml", "lineage")
+
+
 def holds_store_name(text: str) -> bool:
     """Whether ``text`` holds a store name: the one rule that the mask, the case check and the report count share."""
     folded = text.casefold()

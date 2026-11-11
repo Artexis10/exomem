@@ -310,6 +310,7 @@ def project(
                 "dimension": STABLE if stable else _dimension(data, entry.family),
                 "change_id": None if stable else thread.id,
                 "family": entry.family,
+                "phenomenon": entry.id,
                 "key": key_record,
             }
         )
