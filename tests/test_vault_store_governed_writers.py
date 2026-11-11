@@ -22,18 +22,29 @@ import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_bypass_writers import GAMMA, GAMMA_TEXT, govern, store_gamma
 from test_vault_store_migration import BETA, vault  # noqa: F401
-from test_vault_store_write_path import revision, store_rows
+from test_vault_store_write_path import planned, revision, store_rows
 
-from exomem import delete_directory, delete_file, embeddings, recover_from_trash
+from exomem import (
+    delete_directory,
+    delete_file,
+    embeddings,
+    recover_from_trash,
+    reserved_paths,
+)
+from exomem import vault as vault_module
 from exomem.governance import (
     authorization_custody,
     catalog_publication,
+    companion_backfill,
     lifecycle,
     projection_store,
     receipts,
     schema_v4,
     store,
 )
+from exomem.governance.principal import owner_principal
+from exomem.governance.recovery import reconcile_governance_operations
+from exomem.governance.tool import GovernanceCrash, GovernanceError, op_govern_memory
 from exomem.vault_store import read
 
 pytestmark = pytest.mark.skipif(
@@ -342,3 +353,106 @@ def test_a_store_mode_trash_whose_catalog_publication_fails_reports_it_uncertain
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     assert not stored_page(served, GAMMA)
 
+
+SECRET = "Knowledge Base/Evidence/Private/Files/secret.bin"
+SECRET_PAGE = f"{SECRET}.md"
+SECRET_BYTES = b"\x00opaque-secret\xff"
+SECRET_PAGE_TEXT = (
+    "---\ntype: source\nproject: page-only-project\n---\n\n# Existing page\n\nBody stays exact.\n"
+)
+
+
+def legacy_companion(root: Path) -> dict:
+    """A binary on disk and its companion page, which only the store holds, before a backfill;
+    returns the owner's reviewed backfill input for them."""
+    (root / SECRET).parent.mkdir(parents=True, exist_ok=True)
+    (root / SECRET).write_bytes(SECRET_BYTES)
+    vault_module.batch_atomic_write(
+        [planned(root, SECRET_PAGE, SECRET_PAGE_TEXT, create_only=True)],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    return {
+        "version": 1,
+        "artifact_class": "binary",
+        "artifact_path": SECRET,
+        "expected_artifact_sha256": hashlib.sha256(SECRET_BYTES).hexdigest(),
+        "expected_artifact_size": len(SECRET_BYTES),
+        "expected_companion_path": SECRET_PAGE,
+        "expected_companion_sha256": hashlib.sha256(SECRET_PAGE_TEXT.encode()).hexdigest(),
+        "semantics": {
+            "projects": ["client-a"],
+            "tags": ["confidential"],
+            "types": ["source"],
+            "classes": ["pii"],
+        },
+    }
+
+
+def backfill(root: Path, action: str, payload: dict, **extra) -> dict:
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        return op_govern_memory(
+            root,
+            operation="backfill_companion",
+            backfill_action=action,
+            companion_input=payload,
+            principal=owner_principal(),
+            **extra,
+        )
+
+
+@pytest.mark.parametrize(
+    ("crash_at", "descriptor", "expected_phases"),
+    [
+        ("after_reservation", False, []),
+        ("after_intent", False, ["intent", "aborted"]),
+        ("after_arming", False, ["intent", "aborted"]),
+        ("after_publish", True, ["intent", "committed"]),
+        ("after_terminal", True, ["intent", "committed"]),
+    ],
+)
+def test_a_store_mode_companion_backfill_resumes_at_each_crash_point_as_file_mode_does(
+    served, crash_at, descriptor, expected_phases
+):
+    """A backfill whose journal says committed while the store does not hold the classified
+    companion, or one that writes the companion page to disk where the store holds it."""
+    payload = legacy_companion(served)
+    target = companion_backfill.plan(served, payload).target_bytes
+    preview = backfill(served, "preview", payload, now=300.0)
+
+    with pytest.raises(GovernanceCrash):
+        backfill(
+            served,
+            "commit",
+            payload,
+            proposal_id=preview["proposal_id"],
+            now=301.0,
+            crash_at=crash_at,
+        )
+    with reserved_paths._owner_authority_scope("govern_memory"):
+        result = reconcile_governance_operations(served)
+
+    assert result["blocked"] is False
+    assert read.owned_bytes(served, SECRET_PAGE) == (
+        target if descriptor else SECRET_PAGE_TEXT.encode()
+    )
+    assert [row["phase"] for row in receipts.event_records(served)] == expected_phases
+    assert not (served / SECRET_PAGE).exists()
+
+
+def test_a_backfill_planned_before_the_companion_changed_in_the_store_refuses_as_stale(served):
+    """A backfill that commits over a companion the store changed after the owner's review,
+    because a stored page has no file identity to bind."""
+    payload = legacy_companion(served)
+    preview = backfill(served, "preview", payload, now=300.0)
+    vault_module.batch_atomic_write(
+        [planned(root=served, rel=SECRET_PAGE, text=SECRET_PAGE_TEXT + "\nEdited.\n")],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+
+    with pytest.raises(GovernanceError) as stale:
+        backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=301.0)
+
+    assert stale.value.code == "STALE_COMPANION_BACKFILL"
+    assert b"governance_companion:" not in read.owned_bytes(served, SECRET_PAGE)

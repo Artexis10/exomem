@@ -49,10 +49,8 @@ from exomem.governance import catalog_publication, membership, policy
 from exomem.governance.principal import (
     library_scope,
     most_restrictive_principal,
-    owner_principal,
     request_scope,
 )
-from exomem.governance.tool import op_govern_memory
 from exomem.vault_store import (
     availability,
     batch,
@@ -470,27 +468,6 @@ def test_lifecycle_prepared_cleanup_keeps_a_slot_whose_page_changed_after_it_was
     assert [issue.code for issue in batch_result.blocked] == ["LIFECYCLE_RECONCILE_RACE"]
     assert revision(served) == start
     assert read.page_exists(served, reference)
-
-
-def test_companion_backfill_commit_refuses_by_name_before_it_arms_a_journal(served):
-    """A backfill that publishes its companion page to disk where the store holds the page."""
-    before = tree(served)
-    start = revision(served)
-
-    with reserved_paths._owner_authority_scope("govern_memory"), pytest.raises(OpError) as refused:
-        op_govern_memory(
-            served,
-            operation="backfill_companion",
-            backfill_action="commit",
-            proposal_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            companion_input={},
-            principal=owner_principal(),
-        )
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "companion_backfill" in refused.value.message
-    assert revision(served) == start
-    assert tree(served) == before
 
 
 def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served):

@@ -334,16 +334,6 @@ def publish_catalog(target: object | None, *, error_class: Callable[..., Excepti
         ) from error
 
 
-def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
-    """Refuse ``operation`` while the vault is in store mode, for a writer whose paths are pages.
-
-    It is the form for a writer that has no path to test with ``owns_any`` before it starts, so it
-    costs a rollback to run that writer on files.
-    """
-    if mode.store_mode_active(vault_root):
-        raise availability.unrouted(operation, why)
-
-
 def relative(vault_root: Path, path: str) -> str:
     """The vault-relative form of a path, or ``VaultPathError`` when it does not resolve."""
     resolution = vault.resolve_under_vault(vault_root, path, return_details=True)
