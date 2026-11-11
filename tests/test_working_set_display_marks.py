@@ -400,3 +400,48 @@ def test_a_packet_compiled_while_the_graph_was_unreadable_is_not_served_again(
 
     assert "display_edges" not in readable["generation"]
     assert _units(readable)["Who owns orchard launch support?"]["display"] == {"open": True}
+
+
+def _profile(vault: Path, caller=None) -> dict:
+    """The orchard hub's anchor profile, as `read_memory` serves it through the terminal guard."""
+    from test_context_views import _ask
+
+    from exomem import context_catalogue, context_views
+
+    context_catalogue.ContextCatalogue(vault).rebuild()
+    return _ask(vault, context_views.anchor_profile_ref(HUB), caller)
+
+
+def test_the_profile_a_maps_packet_points_to_marks_an_open_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches marks that reach the agent in the anchors packet only: the default `maps` packet
+    points to this profile, and an open question there would read as any other unit."""
+    monkeypatch.delenv("EXOMEM_ACTIVATION_PACKET")
+
+    profile = _profile(_vault(tmp_path))
+
+    units = {item["text"]: item for item in profile["items"] if item["kind"] == "units"}
+    assert units["Who owns orchard launch support?"]["display"] == {"open": True}
+    assert "display" not in units["Does the orchard launch need a beta?"]
+
+
+def test_a_caller_who_may_not_see_the_answer_gets_the_profile_of_a_vault_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a profile mark read from an edge the caller may not see: the question would lose
+    `open` and tell the caller that a withheld page answers it."""
+    from test_governance_egress import _external
+
+    monkeypatch.delenv("EXOMEM_ACTIVATION_PACKET")
+
+    replies = [
+        _profile(_withheld_answer_twin(tmp_path, withheld=withheld), _external())
+        for withheld in (True, False)
+    ]
+    with_page, without_page = replies
+
+    assert with_page == without_page
+    units = {item["text"]: item for item in with_page["items"] if item["kind"] == "units"}
+    assert units["Does the orchard launch need a beta?"]["display"] == {"open": True}
+    assert units["Who owns orchard launch support?"]["display"] == {"open": True}

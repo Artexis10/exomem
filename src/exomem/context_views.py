@@ -856,6 +856,8 @@ def _compile_profile(prepared: _Prepared) -> View:
         anchors=(), roles=roles, current_state=state, ambiguity=(), missing=missing,
         max_chars=working_set.MAX_BUDGET_CHARS, generation={}, status="resolved",
         status_basis=basis, visible=visible,
+        # A maps packet points the agent here, so the units carry the marks that the anchors packet gives.
+        display_edges=working_set._display_edges(root, visible, caller.purpose),  # noqa: SLF001 - the packet's own edge read
     )
     missing = packet["missing"]
     if any(entry.get("reason") == "lane_failed" for entry in missing):
