@@ -20,6 +20,7 @@ from pathlib import Path
 from recall_parity.scoring import DEFAULT_RESAMPLES
 
 from ..faults import books
+from ..judging import stored_record
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
 from .cases import STORE_NAMES, holds_store_name, is_stable
@@ -358,7 +359,7 @@ def build(
     report = {
         "run_id": run_dir.name,
         "status": "complete" if not why else f"incomplete: {'; '.join(why)}",
-        "judge": json.loads((judge_run / "judge" / "judge.json").read_text()),
+        "judge": stored_record(judge_run / "judge" / "judge.json"),
         "failed_judgements": failed,
         "judge_self_agreement": {"on": "correct", **again},
         "parser_cross_check": NO_CROSS_CHECK,

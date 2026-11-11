@@ -18,6 +18,8 @@ from pathlib import Path
 from collection_ingest.mcp_session import isolated_env
 from epistemic.journeys.f27_replay import PLUGIN_DIR, custom_instructions_block, environment_floor
 
+from . import billing
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: The actor model and effort every suite runs unless the operator names another.
@@ -81,13 +83,16 @@ def child_env(root: Path, checkout: Path = REPO_ROOT) -> dict[str, str]:
 
 
 def claude_env() -> tuple[dict[str, str], tuple[str, ...]]:
-    """The environment of every Claude actor and judge: no Exomem or KB setting, no nested-session marker.
+    """The environment of every Claude actor and judge: no Exomem or KB setting, no nested-session marker,
+    and the credential the run's billing declaration allows (``billing.claude_session_env``).
 
     Returns the names the nested-session strip removed, so a run record can state them.
     Claude Code's own auto memory would be a second, unmeasured store in every arm.
     """
     floor, removed = environment_floor(os.environ)
-    env = {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
+    env = billing.claude_session_env(
+        {k: v for k, v in floor.items() if not k.startswith(("EXOMEM_", "KB_"))}
+    )
     env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     return env, removed
 

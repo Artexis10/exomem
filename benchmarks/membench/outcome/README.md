@@ -1,7 +1,7 @@
 # Outcome evaluations
 
 These suites ask one question: does Exomem change what an agent gets done? Each plays a
-Claude Code actor on the operator's subscription against a task whose score does not depend on
+Claude Code actor, on a subscription login or on API credits, against a task whose score does not depend on
 Exomem. Every figure they produce is an **internal diagnostic**. The actor is not the suites' own
 protocol, so no number here may be quoted as a CL-Bench or LAB result.
 
@@ -139,7 +139,7 @@ The run prints each case's passed, failed and unknown counts per arm. The run ro
 (one record per unit, and the only place that maps a unit to its arm) and `units/<id>/` (the stream
 and the judge's verdict). The actor model defaults to the one that the other suites use; pass
 `--model` (a full model id) when the incident happened on another. A session costs about $0.2 to $1 of notional
-subscription usage.
+usage.
 
 Reading the result: three repeats cannot prove a difference. When the changed arm passes fewer runs
 than the base arm, treat the case as suspect and rerun it with more repeats before you merge. Any
@@ -196,7 +196,7 @@ case scores as `stale_trusted` and not `correct`. A LAB matter with no deliverab
 harness fault is the harness failing to run the product. The evidence is a CLI crash or a CLI that
 sends no `init` event before its timeout, an Exomem MCP server that is not `connected`, a lost
 transcript, a reported model other than the requested one, a credential source other than
-`none`, or a subscription limit that the CLI reports as rejected. Every session's `init` event is
+the one the run declared (see Billing), or a subscription limit that the CLI reports as rejected. Every session's `init` event is
 checked.
 
 1. The run retries a session with a harness fault, with the same inputs, at most twice. In
@@ -258,4 +258,33 @@ Run them from the repository root with `PYTHONPATH=benchmarks:src`, as `python -
    without an actor change.
 6. Run a decision: `membench outcome run lab --split heldout --run-id h1`.
 
-A run spends subscription quota. State the cost before starting one.
+A run spends subscription quota or API credits. State the cost before starting one.
+
+## Billing
+
+A session is billed to a subscription login or to API credits. It is the same model either way,
+so the source is a run condition to record, not a defect. A run declares its source with
+`EXOMEM_OUTCOME_BILLING` (`subscription`, the default, or `credits`). The declaration decides the
+environment of every actor and judge session: under `subscription` the sessions get no
+`ANTHROPIC_API_KEY`, even from a shell that holds one; under `credits` they get it, and the run
+refuses before its first session when the shell holds none. A credit run starts from a shell whose
+`ANTHROPIC_API_KEY` is a Console org's key, for example the one that `harness claude-credits run` uses.
+
+- Faults. A session whose `init` event reports another `apiKeySource` than the declared one (`none` for
+  `subscription`, `ANTHROPIC_API_KEY` for `credits`) is a harness fault. A source outside that
+  closed set is a fault too. One run never mixes sources by accident.
+- Evidence. Credit runs are instrument evidence. Decision runs stay on the subscription as the
+  preregistration registers: a held-out run declared on credits, or judged on credits, never reads as
+  decision evidence.
+- Records. `outcome.json`, the incidents manifest and the f33 manifest store the declared source. Each
+  arm manifest stores the reported `api_key_source` and its `billing` name beside the model. A session
+  with no recorded source reads `unknown`.
+- Reports. Every report opens with one `billing:` line that sets the declared source against the
+  sources the run's sessions reported. It says plainly when they differ or one is unknown. The
+  panel also says when it ran on other sources than the previous panel.
+- The claude judge's billing is declared, not observed: its result names no credential source.
+  `judge.json` records the declaration, and a judging directory keeps one source. A `judge.json`
+  from before the field resumes and re-reports unchanged: its billing reads `subscription`, marked
+  `billing_inferred`, because the run followed the protocol that put decision judges on the
+  subscription although the judge's own environment was never checked. The report says so in a
+  `judge billing:` line. A Codex judge gets no `ANTHROPIC_API_KEY`.

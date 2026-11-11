@@ -24,7 +24,15 @@ from collections import defaultdict
 from pathlib import Path
 
 from ..faults import STRIKE_LIMIT, books, incomplete_why
-from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
+from ..judging import (
+    Judge,
+    JudgeSpec,
+    failed_judgements,
+    grade_item,
+    judge_all,
+    read_rows,
+    stored_record,
+)
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from ..workspace import RUN_ROOT
 from .prepare import slug
@@ -277,7 +285,7 @@ def score(judge_run: Path, pairs: list[tuple[str, str]], *, heldout: bool = Fals
     }
     arms_seen = sorted({s["arm"] for s in sessions}, key=ARMS.index)
     report: dict = {
-        "judge": json.loads((judge_run / "judge" / "judge.json").read_text()),
+        "judge": stored_record(judge_run / "judge" / "judge.json"),
         "judge_model_reported": sorted(
             {m for r in rows for m in r.get("judge_model_reported") or []}
         ),
