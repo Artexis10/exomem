@@ -291,10 +291,10 @@ def plain_links(
             raw_line = str(json.loads(str(metadata or "{}")).get("line") or "")
         except (ValueError, TypeError):
             pass
-        if registry.is_specific(canonical):
-            specific.add(target)
-        elif canonical == registry.link_key or registry.is_generic(canonical):
+        if canonical == registry.link_key or registry.is_generic(canonical):
             bullets.append((number, canonical, target, raw_line))
+        elif registry.is_specific(canonical):
+            specific.add(target)
     for target, raw_evidence in rows:
         try:
             internal = json.loads(str(raw_evidence or "{}")).get("internal") or {}
@@ -348,9 +348,12 @@ def build_requests(
     out: list[tuple[str, sensing.SenseRequest, dict[str, Any]]] = []
     for link in links[:LINKS_PER_PAGE]:
         target = _file_node(conn, link.target)
-        if target is None or _body_lines(vault_root, target) is None:
+        if target is None:
+            continue
+        target_lines = _body_lines(vault_root, target)
+        if target_lines is None:
             continue  # target missing or ahead of the graph: only this link drops
-        target_text = excerpt(vault_root, conn, target)
+        target_text = excerpt(vault_root, conn, target, lines=target_lines)
         link_text = link_line(body, link.line) if link.kind == "wikilink" else ""
         candidate = {
             "from": source.rel_path,

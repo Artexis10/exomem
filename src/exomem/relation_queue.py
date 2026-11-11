@@ -308,10 +308,10 @@ RELATION_NOT_OFFERED_REMEDIATION = (
 def _candidate_options(
     candidate: dict[str, Any], page: Any, fit: "RelationFit"
 ) -> list[dict[str, Any]]:
-    """The menu a candidate offers. A `retype` bullet still offers the generic
-    relation's menu: it is re-typed, not re-authored."""
+    """The menu a candidate offers. A `retype` bullet or a plain link still
+    offers the generic relation's menu: it is (re-)typed, not re-authored."""
     relation = str(candidate.get("relation_type") or "")
-    if candidate.get("method") == "retype":
+    if candidate.get("method") == "retype" or relation == fit.registry(page).link_key:
         relation = relation_registry.generic_relation_key()
     return fit.options(candidate, source_page=page, relation=relation)
 
@@ -1459,15 +1459,20 @@ def accept(
         expected_hash = _page_content_hash(page)
     store = review_state_module.ReviewStateStore(vault_root)
     fit = RelationFit(vault_root)
-    reason, _enriched = _classify_current(
-        vault_root,
-        page,
-        candidate,
-        store=store,
-        state_payload=store.load(),
-        exact_refs=resolved.identity_refs,
-        fit=fit,
-    )
+    reason = _enriched = None
+    if str(candidate.get("method") or "") != "retype":
+        # A retype candidate IS an authored plain-link/generic bullet; the
+        # authored/settled classification would refuse it as already done.
+        # Its freshness is the exact bullet line plus the page hash below.
+        reason, _enriched = _classify_current(
+            vault_root,
+            page,
+            candidate,
+            store=store,
+            state_payload=store.load(),
+            exact_refs=resolved.identity_refs,
+            fit=fit,
+        )
     if reason == "unverifiable":
         raise _refresh_required(ref)
     if reason is not None:

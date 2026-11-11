@@ -11,6 +11,7 @@ import pytest
 import sensing_fixture as sf
 
 from exomem import (
+    commands,
     epistemic_graph,
     freshness,
     relation_queue,
@@ -382,3 +383,195 @@ def test_ingest_cursor_walks_starved_rows(tmp_path: Path, monkeypatch) -> None:
     conn.close()
     assert first <= 50
     assert second == 25
+
+
+def _log(vault: Path) -> Path:
+    """The governed audit log: present so entries are written, not skipped."""
+    log = vault / sf.KB / "log.md"
+    log.write_text("# Log\n", encoding="utf-8")
+    return log
+
+
+def _warm(vault: Path, monkeypatch) -> None:
+    """The reference-identity snapshot the one-shot accept verifies against."""
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    from exomem import semantic_contract
+
+    semantic_contract.reset_corpus_context_cache()
+    semantic_contract.build_corpus_context(vault)
+
+
+def _worker_and_ingest(vault: Path, stub: TypeStub) -> None:
+    """Judge every relation.type job with `stub`, then settle the verdicts in."""
+    pair = sf.StubInstrument(sf.default_table())
+
+    def admit_selected(q):
+        return stub if q == sensing.RELATION_TYPE else pair
+
+    sensor_worker.run_child(
+        vault, parent_pid=0, cpu_allotment=1e9, judgement_allotment=10**6,
+        idle_seconds=0.0, admit_selected=admit_selected, sleep=lambda s: None,
+    )
+    sf.settle(vault)
+
+
+def _sensed_items(vault: Path):
+    """(group, item) pairs whose item carries a sensed proposal."""
+    result = commands.op_review_memory(vault, mode="relation-queue")
+    return [
+        (group, item)
+        for group in result.get("groups", [])
+        for item in group.get("items", [])
+        if item.get("sensed")
+    ]
+
+
+def _accept(vault: Path, group: dict, item: dict, **kw) -> dict:
+    return commands.op_connect_memory(
+        vault,
+        operation="accept-relation",
+        ref=item["ref"],
+        expected_hash=group["content_hash"],
+        expected_fingerprint=item["fingerprint"],
+        why="accept of the sensed candidate",
+        **kw,
+    )
+
+
+def test_accept_wikilink_with_proposal(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    log = _log(vault)
+    pairs = _sensed_items(vault)
+    assert pairs, "queue annotated a wikilink candidate"
+    group, item = pairs[0]
+    proposal = item["sensed"]["relation"]
+    before = (vault / item["from"]).read_text(encoding="utf-8")
+    assert proposal not in before or f"- {proposal} " not in before
+    result = _accept(vault, group, item, requested_relation=proposal)
+    assert result.get("accepted") is True
+    after = (vault / item["from"]).read_text(encoding="utf-8")
+    assert f"- {proposal} [[" in after
+    assert result.get("sensed", {}).get("relation") == proposal
+    assert "[reading" in log.read_text(encoding="utf-8")
+
+
+def test_accept_a_different_offered_option(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    group, item = _sensed_items(vault)[0]
+    proposal = item["sensed"]["relation"]
+    other = next(
+        option["key"] for option in item.get("options", [])
+        if option["key"] != proposal
+    )
+    result = _accept(vault, group, item, requested_relation=other)
+    assert result.get("accepted") is True
+    after = (vault / item["from"]).read_text(encoding="utf-8")
+    assert f"- {other} [[" in after
+    assert f"- {proposal} [[" not in after
+    assert result.get("sensed", {}).get("relation") == proposal or proposal in json.dumps(result)
+
+
+def test_no_requested_relation_never_writes_the_proposal(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    group, item = _sensed_items(vault)[0]
+    proposal = item["sensed"]["relation"]
+    before = (vault / item["from"]).read_text(encoding="utf-8")
+    try:
+        result = _accept(vault, group, item)
+    except Exception as exc:
+        result = {"error": str(exc)}
+    after = (vault / item["from"]).read_text(encoding="utf-8")
+    if result.get("accepted"):
+        # If the rule accepts without a choice, it is still never the proposal.
+        assert f"- {proposal} [[" not in after
+    else:
+        assert after == before
+
+
+RTYPE = f"{sf.KB}/Notes/Insights/retype-me.md"
+
+
+def _build_retype_vault(tmp_path: Path) -> Path:
+    """The sensing vault plus a page whose authored link bullet is a retype case."""
+    vault = sf.build(tmp_path)
+    fx.write(
+        vault,
+        RTYPE,
+        sf.note(
+            "Retype me",
+            "2026-05-04",
+            "A generic link bullet awaits a type.",
+            links="Mentions [[Notes/Insights/inlet-pressure]] too.",
+            extra="\n## Relations\n\n- links_to [[Notes/Insights/seal-wear]]\n",
+        ),
+    )
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    return vault
+
+
+def test_retype_accept_replaces_one_line(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = _build_retype_vault(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    result = commands.op_review_memory(vault, mode="relation-queue")
+    retype = [
+        (group, item)
+        for group in result.get("groups", [])
+        for item in group.get("items", [])
+        if item.get("method") == "retype" and item.get("from") == RTYPE
+    ]
+    assert retype, "a retype candidate appears with its verdict"
+    group, item = retype[0]
+    proposal = item["sensed"]["relation"]
+    before = (vault / RTYPE).read_text(encoding="utf-8")
+    out = _accept(vault, group, item, requested_relation=proposal)
+    assert out.get("accepted") is True
+    after = (vault / RTYPE).read_text(encoding="utf-8")
+    new_line = f"- {proposal} [[Knowledge Base/Notes/Insights/seal-wear]]"
+    # The governed edit also re-stamps `updated:`; everything else is the
+    # one-line replacement.
+    norm = lambda text: "\n".join(
+        line for line in text.splitlines() if not line.startswith("updated:")
+    )
+    assert norm(after) == norm(before).replace(
+        "- links_to [[Notes/Insights/seal-wear]]", new_line
+    )
+
+
+def test_retype_accept_refuses_on_drift(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = _build_retype_vault(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    result = commands.op_review_memory(vault, mode="relation-queue")
+    group, item = next(
+        (g, i)
+        for g in result.get("groups", [])
+        for i in g.get("items", [])
+        if i.get("method") == "retype" and i.get("from") == RTYPE
+    )
+    drifted = (vault / RTYPE).read_text(encoding="utf-8") + "\ndrifted line\n"
+    (vault / RTYPE).write_text(drifted, encoding="utf-8")
+    with pytest.raises(Exception, match="REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED|drift|changed"):
+        _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
+    assert (vault / RTYPE).read_text(encoding="utf-8") == drifted

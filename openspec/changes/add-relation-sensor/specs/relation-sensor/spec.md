@@ -63,7 +63,7 @@ A changed `propose_min` SHALL be a new label-map version, and SHALL re-derive ve
 
 ### Requirement: The Dreamer schedules relation sensing in bounded pages
 
-The sensed tick SHALL submit `relation.type` requests from published graph rows only. It SHALL NOT parse Markdown, load a model, or wait for a reading.
+The sensed tick SHALL take `relation.type` candidates, anchors and menus from published graph rows. It SHALL read page text from a page file only for the chosen source pages and their link targets, and only when the file's content hash equals the graph's source hash for that page; otherwise it SHALL skip the page. It SHALL NOT load a model or wait for a reading.
 
 The producer SHALL take the plain-link cohort the relation review queue lists: body wikilinks, plain-link bullets and generic bullets, excluding pairs that already carry a specific authored relation. It SHALL read pages whose graph source hash changed first, then continue a persisted cursor in path order. It SHALL submit at most a fixed number of source pages, and of links per page, per tick. Each source page SHALL be one replaceable scope, keyed per link by source path, target path and occurrence anchor.
 

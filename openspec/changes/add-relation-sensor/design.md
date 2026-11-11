@@ -81,7 +81,7 @@ This replaces `relation.applies` in `add-sensed-epistemic-model` D1. One evaluat
 
 ### D3. The Dreamer schedules it
 
-The sensed tick gains a bounded `relation.type` producer. It reads published graph rows only, and never parses Markdown or loads a model.
+The sensed tick gains a bounded `relation.type` producer. It never loads a model. Candidates, anchors, page types and menus come from published graph rows. The graph does not publish page bodies, so the producer reads the text of the chosen source pages and their link targets from the page files. It uses a file only when the file's content hash equals the graph's `source_hash` for that page, so line anchors and text describe the same bytes. A mismatched page is skipped and is picked up again once the graph catches up. The relation queue read never reads page files.
 
 - **Candidates.** The producer reads two kinds of plain link from the graph:
   - body wikilinks, from the same indexed wikilink evidence the relation queue's `wikilink` method reads;
