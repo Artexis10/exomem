@@ -615,7 +615,13 @@ def recall_checkpoint_is_current(
     the projected map.  An observed-but-not-yet-dispatched filesystem event is
     also a mismatch: its generation has not advanced yet, but serving or
     publishing against the old proof during that debounce window is unsafe.
+
+    A store-mode vault's proof names a store revision, which the store's snapshot checks.
     """
+    from .vault_store import read as store_read
+
+    if expected.instance_id == store_read.STORE_CHECKPOINT:
+        return store_read.checkpoint_is_current(Path(vault_root), scope, expected)
     root = _canon(Path(vault_root))
     key = (root, scope)
     with _lock:

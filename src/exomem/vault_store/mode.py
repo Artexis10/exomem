@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
-from contextlib import closing
+import threading
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from .. import state_migration, state_paths
@@ -72,6 +75,40 @@ def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
     return (found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns, found.st_ctime_ns)
 
 
+#: The answer that a request holds for one vault on its own thread (``read_mode_scope``): the vault, the
+#: thread and the answer.
+_REQUEST_MODE: ContextVar[tuple[str, int, bool] | None] = ContextVar("vault_store_request_mode", default=None)
+
+
+@contextmanager
+def read_mode_scope(vault_root: Path) -> Iterator[bool]:
+    """Read the mode once for a request: until the scope ends, ``store_mode_for_reads`` on this thread
+    answers for this vault without a stat.
+
+    A vault changes mode only offline, so no request sees a change while it runs. Without the scope a
+    file-mode request pays a manifest stat at each byte chokepoint that it passes. A scope inside one
+    for the same vault joins it, and ``forget_read_mode`` drops the held answer.
+    """
+    held = _held_mode(vault_root)
+    if held is not None:
+        yield held
+        return
+    answer = store_mode_for_reads(vault_root)
+    token = _REQUEST_MODE.set((os.fspath(vault_root), threading.get_ident(), answer))
+    try:
+        yield answer
+    finally:
+        _REQUEST_MODE.reset(token)
+
+
+def _held_mode(vault_root: Path) -> bool | None:
+    """The answer that this thread's request holds for ``vault_root``, or None outside a scope."""
+    held = _REQUEST_MODE.get()
+    if held is None or held[0] != os.fspath(vault_root) or held[1] != threading.get_ident():
+        return None
+    return held[2]
+
+
 def store_mode_for_reads(vault_root: Path) -> bool:
     """``store_mode_active`` for a byte reader: it re-reads the records only when the manifest changes.
 
@@ -82,7 +119,11 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     commits the store's file mode before it changes the manifest; ``read.snapshot`` meets that
     window when it opens the store, and ``forget_read_mode`` drops the kept answer there. The write
     refusal in ``availability`` does not use this: it asks ``store_mode_active`` every time.
+    Inside ``read_mode_scope`` the request's answer holds.
     """
+    held = _held_mode(vault_root)
+    if held is not None:
+        return held
     key = (os.fspath(vault_root), state_paths._placement_environment())
     cached = _READ_MODES.get(key)
     if cached is not None and _manifest_signature(cached[0]) == cached[1]:
@@ -101,6 +142,8 @@ def store_mode_for_reads(vault_root: Path) -> bool:
 def forget_read_mode(vault_root: Path) -> None:
     """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
     _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
+    if _held_mode(vault_root) is not None:
+        _REQUEST_MODE.set(None)
 
 
 def _stored_mode(vault_root: Path) -> str | None:
@@ -139,6 +182,7 @@ STORE_FIGURES = (
     "registry_revision",
     "registry_target_revision",
     "registry_waiting_on_paths",
+    "unowned_rows_as_of",
 )
 
 
@@ -155,6 +199,8 @@ def status(vault_root: Path) -> dict:
     toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
     ``registry_waiting_on_paths`` counts the overlay paths that the projector has not put on disk or
     that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
+    ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
+    the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
     on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
     root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and
@@ -190,7 +236,7 @@ def _reason(error: Exception) -> str:
 
 
 def _store_figures(vault_root: Path) -> dict:
-    from . import rederive
+    from . import read, rederive
 
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
@@ -216,6 +262,7 @@ def _store_figures(vault_root: Path) -> dict:
         held_by_kind = dict(
             reader.execute("SELECT kind, COUNT(*) FROM store_held GROUP BY kind").fetchall()
         )
+        unowned = read.unowned_sweep(reader)
     return {
         "revision": revision,
         "release": release,
@@ -232,4 +279,5 @@ def _store_figures(vault_root: Path) -> dict:
         "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
         "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,
         "registry_waiting_on_paths": waiting,
+        "unowned_rows_as_of": unowned.get("at"),
     }

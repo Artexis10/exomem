@@ -30,6 +30,7 @@ a path whose file changed in between to the next event or sweep.
 from __future__ import annotations
 
 import enum
+import json
 import logging
 import threading
 import time
@@ -37,11 +38,13 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs, lexstore, vault
+from .. import held_fs, lexstore, memory_refs, vault
 from ..cli_ops import OpError
+from ..collection_store import ownership as collection_ownership
 from ..media_store import DEFER, SUPPRESS
 from . import media, ownership, projector, read, write
 from .projector import HELD_DELETE, HELD_EDIT, Facts, OnDisk, Runner
@@ -63,6 +66,19 @@ MEDIA_STORE_UNREADABLE = "the media store could not say whether this original wa
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
 APPLY_BATCH = 32
+
+#: The hash of the bytes that each unowned file's rows were derived from: its lexical row's, or, for
+#: a page that recall policy keeps out of the lexical rows (a raw Records item), its identity row's.
+_RECORDED_HASHES = (
+    "SELECT path, content_hash FROM pages WHERE content_hash IS NOT NULL "
+    "UNION ALL SELECT path, source_hash FROM identities "
+    "WHERE path NOT IN (SELECT path FROM pages WHERE content_hash IS NOT NULL)"
+)
+#: ``_RECORDED_HASHES`` for one path: one row, whose value is None when no row describes the file.
+_RECORDED_HASH = (
+    "SELECT COALESCE((SELECT content_hash FROM pages WHERE path = ?1), "
+    "(SELECT source_hash FROM identities WHERE path = ?1))"
+)
 
 
 class Verdict(enum.Enum):
@@ -253,8 +269,14 @@ class Importer:
             self._clean = clean
             missing = [rel for rel in known if rel not in seen and not _below_any(rel, skipped)]
             self._settle(filesystem, sorted({*differing, *missing}), {}, report)
+            unowned_from = datetime.now(UTC).isoformat(timespec="seconds")
+            left_before = set(report.unjudged)
             self._sweep_unowned(filesystem, report)
             self._refresh_noted(report)
+            if report.unjudged.keys() <= left_before:
+                # A sweep that left an unowned file unjudged leaves the record of the last complete
+                # one, which is still the oldest that any unowned row can be.
+                self._record_unowned_sweep(unowned_from, report.corpus_files)
             self._derive_media(report)
             report.media_attempted = media.recover(self._root)
         return report
@@ -712,8 +734,9 @@ class Importer:
             rowed = {
                 rel
                 for (rel,) in view.connection.execute(
-                    f"SELECT path FROM pages WHERE content_hash IS NOT NULL AND path IN ({marks})",
-                    rels,
+                    f"SELECT path FROM pages WHERE content_hash IS NOT NULL AND path IN ({marks}) "
+                    f"UNION SELECT path FROM identities WHERE path IN ({marks})",
+                    [*rels, *rels],
                 )
             }
         for rel in rels:
@@ -729,8 +752,9 @@ class Importer:
         """Note a Markdown file outside the store's ownership whose derived rows are stale.
 
         The store does not hold such a file's bytes, so nothing is imported: ``_refresh_noted``
-        rederives the page's rows from the file. A file with no row is noted only when a corpus
-        walk reaches it: the Knowledge Base walk or the vault walk, as the sweep's corpus is both.
+        rederives the page's rows from the file. A file with no row is noted only when a walk that
+        gives it rows reaches it: the Knowledge Base or vault corpus walk, as the sweep's corpus is
+        both, or the reference scan, which gives a raw Records item its identity row.
         """
         if not ownership.is_markdown(rel):
             return
@@ -738,30 +762,30 @@ class Importer:
         if rel in report.unjudged:
             return
         with read.snapshot(self._root) as view:
-            row = view.connection.execute(
-                "SELECT content_hash FROM pages WHERE path = ?", (rel,)
-            ).fetchone()
-        if row is None and not any(read.corpus_member(rel, scope) for scope in ("kb", "vault")):
+            (recorded,) = view.connection.execute(_RECORDED_HASH, (rel,)).fetchone()
+        if recorded is None and not (
+            memory_refs.is_scanned_page(rel)
+            or any(read.corpus_member(rel, scope) for scope in ("kb", "vault"))
+        ):
             return
-        self._check_unowned(rel, disk, None if row is None else row[0], report)
+        self._check_unowned(rel, disk, recorded, report)
 
     def _sweep_unowned(self, filesystem: held_fs.HeldFilesystem, report: ImportReport) -> None:
         """Compare each unowned Markdown file with its rows, and find the files that have none.
 
-        A file with a row is judged by its hash. A file that the lexical corpus holds and no row
-        describes is new, or its rows are withheld by recall policy. The corpus walk that file mode
-        makes finds it. That walk reads the vault's whole Markdown tree, so the report carries
-        what it cost (``corpus_files``, ``corpus_seconds``).
+        A file with a row is judged by its hash. A file that no row describes is new, or its rows
+        are withheld by recall policy. Two walks find it: the corpus walk that file mode makes, and
+        the reference scan of the collection layers, whose raw pages that corpus leaves out and
+        whose identity rows file mode keeps. The corpus walk reads the vault's whole Markdown tree,
+        so the report carries what it cost (``corpus_files``, ``corpus_seconds``).
         """
         with read.snapshot(self._root) as view:
-            rows = view.connection.execute(
-                "SELECT path, content_hash FROM pages WHERE content_hash IS NOT NULL"
-            ).fetchall()
-        rowed: set[str] = set()
+            rows = view.connection.execute(_RECORDED_HASHES).fetchall()
+        judged: set[str] = set()
         for rel, content_hash in rows:
             if self._owned_or_not_markdown(rel):
                 continue
-            rowed.add(rel)
+            judged.add(rel)
             disk = self._observe(filesystem, rel, report)
             if rel in report.unjudged:
                 continue
@@ -770,14 +794,48 @@ class Importer:
         corpus = lexstore.corpus_paths(self._root)
         report.corpus_seconds = time.monotonic() - started
         report.corpus_files = len(corpus)
-        for path in corpus:
-            rel = vault.relative_posix(path, self._root)
-            if rel in rowed or self._owned_or_not_markdown(rel):
+        walked = [vault.relative_posix(path, self._root) for path in corpus]
+        for rel in (*walked, *self._layer_pages()):
+            if rel in judged or self._owned_or_not_markdown(rel):
                 continue
+            judged.add(rel)  # both walks reach a layer page that the corpus holds
             disk = self._observe(filesystem, rel, report)
             if rel in report.unjudged:
                 continue
             self._check_unowned(rel, disk, None, report)
+
+    def _record_unowned_sweep(self, started: str, corpus_files: int) -> None:
+        """Record that the rows of the files that the store does not own reflect them from ``started``.
+
+        Readers show it as how fresh those rows are (``read.readiness``). Only a sweep that judged
+        every unowned file records it. It is no derived row, so the write moves no revision.
+        """
+
+        def work(writer: CollectionWriter) -> None:
+            with writer.handle.transaction() as tx:
+                row = tx.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
+                record = {
+                    "revision": None if row is None else row[0],
+                    "at": started,
+                    "corpus_files": corpus_files,
+                }
+                tx.execute(
+                    "INSERT INTO store_meta(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (read.UNOWNED_SWEEP, json.dumps(record, sort_keys=True)),
+                )
+
+        self._run(work)
+
+    def _layer_pages(self) -> list[str]:
+        """The pages of the collection layers that the reference scan reads, by a walk of each layer."""
+        found = []
+        for folder in collection_ownership.layer_folders():
+            for path in (self._root / folder).rglob("*"):
+                rel = vault.relative_posix(path, self._root)
+                if memory_refs.is_scanned_page(rel):
+                    found.append(rel)
+        return sorted(found)
 
     @staticmethod
     def _owned_or_not_markdown(rel: str) -> bool:

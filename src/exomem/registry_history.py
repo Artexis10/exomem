@@ -163,6 +163,26 @@ def read_previous(
         )
 
 
+def read_override(root: Path, path: Path, *, max_bytes: int) -> str | None:
+    """A loader's read of a registry override: its text, or None when the vault has none.
+
+    When the vault's store serves the override, the stored page is the override: its file is only a
+    projection that may lag or be absent. Otherwise the file is read as ``read_previous`` reads it.
+    """
+    from .vault_store import read as store_read
+
+    try:
+        page = store_read.owned_page(root, path.relative_to(root).as_posix())
+    except FileNotFoundError:
+        return None  # the store serves the path and holds no override
+    if page is None:
+        raw, _ = read_previous(root, path, max_bytes=max_bytes, guard_absence=False)
+        return raw
+    if len(page.body) > max_bytes:
+        raise RegistryFileTooLarge("registry override exceeds its read limit")
+    return page.body.decode("utf-8")
+
+
 def commit(
     vault_root: Path,
     *,

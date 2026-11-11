@@ -1261,8 +1261,19 @@ def run_lanes(
         neighbourhood = _neighbourhood_paths(
             root, anchors, reached=reached, material_scopes=material_scopes,
         )
-    if visible is not None:
-        neighbourhood = frozenset(path for path in neighbourhood if visible(path))
+    indexable = _store_indexable(root)
+
+    def readable(paths: frozenset[str]) -> frozenset[str]:
+        """The pages a lane may read: those the reader sees, less any that the live policy
+        excludes in a store-mode vault (`_store_indexable`)."""
+        if visible is None and indexable is None:
+            return paths
+        return frozenset(
+            path for path in paths
+            if (visible is None or visible(path)) and (indexable is None or indexable(path))
+        )
+
+    neighbourhood = readable(neighbourhood)
     # The unit lanes select overlapping units off the same pages: each page is
     # read, checked and parsed once for all of them.
     parent_reads = find.UnitParentReads()
@@ -1290,9 +1301,7 @@ def run_lanes(
                 standing_pages: frozenset[str] = frozenset()
                 if precedent_reach is not None and definition.id == PRECEDENTS_ROLE:
                     precedent_pages, standing_pages = precedent_reach()
-                if visible is not None:
-                    precedent_pages = frozenset(path for path in precedent_pages if visible(path))
-                    standing_pages = frozenset(path for path in standing_pages if visible(path))
+                precedent_pages, standing_pages = readable(precedent_pages), readable(standing_pages)
                 extra = precedent_pages | standing_pages
                 result = _lane(
                     root,
@@ -1490,12 +1499,14 @@ def task_candidates(
     entries = []
     with find_types.timing_span(timings, "working_set.task_context_entries"):
         page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+        indexable = _store_indexable(vault_root)
         try:
             for position, entry in enumerate(catalogue.task_entries()):
                 if position and not position % request_budget.CHECKPOINT_EVERY:
                     budget_checkpoint("working_set.task_context_entries")
                 if (entry.path and context_views._admits(entry, caller.visible)
-                        and (page_visible is None or page_visible(entry.path))):
+                        and (page_visible is None or page_visible(entry.path))
+                        and (indexable is None or indexable(entry.path))):
                     entries.append(entry)
         except BudgetExhausted:
             # A prefix of the catalogue would quietly narrow the allowed set, so a stopped scan gives no lead.
@@ -1839,6 +1850,24 @@ def reach_precedents(
             for owner in standing_owners[path]:
                 reached.setdefault(owner, set()).add(path)
     return frozenset(precedent), selected_standing
+
+
+def _store_indexable(vault_root: Path) -> Callable[[str], bool] | None:
+    """The live access policy's `is_indexable` for a store-mode vault's lane inputs, else None.
+
+    A lane bounds its reads by paths from the context catalogue, the working-set index or the
+    graph, which do not apply the access policy, and passes them to the catalogue as its own set.
+    File mode's catalogue rows hold no excluded page, and after a policy change it declines them
+    until they are rebuilt. A store-mode vault's rows serve as current but keep the pages that a
+    newer policy excludes until a pass re-derives them. The filter on the store's recall rows
+    (`lexstore`'s `_snapshot_recall_rows`) never sees a lane's own set, so the live policy keeps
+    those pages out of it here. None in file mode, or when the policy excludes nothing.
+    """
+    from . import access, find_corpus
+
+    if not find_corpus.store_serves(vault_root):
+        return None
+    return access.indexable_filter(vault_root)[1]
 
 
 def _neighbourhood_paths(

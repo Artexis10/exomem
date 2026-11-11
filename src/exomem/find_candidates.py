@@ -340,7 +340,6 @@ def collect_candidates(
     failed_out: list[str] | None,
     recall_paths: AbstractSet[str],
     lexical_repair: bool = True,
-    from_store: bool = False,
     eligible_paths: set[str] | None = None,
     filtered: bool = False,
     admitted_paths: set[str] | None = None,
@@ -701,11 +700,7 @@ def collect_candidates(
     else:
         try:
             with _span(timings, "bm25"):
-                if (
-                    not lexical_repair
-                    and not from_store
-                    and lexstore.maintained_content_index_enabled()
-                ):
+                if not lexical_repair and lexstore.maintained_content_index_enabled():
                     catalog_result = lexstore.search_bm25_result(
                         vault_root,
                         query,
@@ -776,13 +771,8 @@ def collect_candidates(
             # which resolves from the maintained lexical index and never
             # enumerates the scope. The branch that CAN enumerate is the
             # empty-query one in `find._find_keyword`, which marks itself
-            # `computed` when it takes the walk. A store-mode vault has no such
-            # index for this lane, so its scan of the store corpus is `computed`.
-            _mark_source(
-                timings,
-                "keyword",
-                find_types.SOURCE_COMPUTED if from_store else find_types.SOURCE_INDEX,
-            )
+            # `computed` when it takes the walk.
+            _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             # Over-fetch by the same factor the BM25 lane uses, and for the same
             # reason: `collapse_frame_children` and `_eligible` below can drop
             # members, so a lane that supplied exactly the fused depth could
@@ -794,7 +784,6 @@ def collect_candidates(
                 scope,
                 freshness=snapshot.for_scope(scope),
                 repair=lexical_repair,
-                from_store=from_store,
                 k=candidate_k * 3,
             )
     if shadow is not None:

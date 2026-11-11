@@ -255,16 +255,34 @@ _FOREGROUND_LEXICAL_REPAIR_PAGE_CAP = 64
 _FIND_CACHE_DELTA_PATH_CAP = 64
 
 
+def _store_lexical_profile(vault_root: Path) -> dict:
+    """The owner diagnostic of a store-mode request's lexical lanes.
+
+    Which rows served, the registry state that they reflect, and when the importer last swept the
+    files that the store does not own (their rows are as fresh as that sweep).
+    """
+    from . import lexstore
+    from .vault_store import read
+
+    state = read.readiness(vault_root)
+    return {
+        "corpus": "store",
+        "catalogue": "store" if lexstore.maintained_content_index_enabled() else "bypassed",
+        "registry": state.registry,
+        "unowned_rows_as_of": state.unowned_rows_as_of,
+    }
+
+
 def _managed_reader() -> bool:
     """Whether the managed runtime's catalogue contract governs this request's reads.
 
-    A request that reads a store-mode vault is not under it: no catalogue covers the store's pages,
-    so the request reads the store's corpus (`lexstore.catalogue_retired_scope`) and no warm-up or
-    repair can make a catalogue answer for it.
+    A request that reads a store-mode vault is not under it: its catalogue is the store's own rows,
+    current at the request's snapshot (`lexstore.store_catalogue_scope`), so no warm-up, admission
+    or repair applies to it.
     """
     from . import lexstore, readiness
 
-    return bool(readiness.runtime_managed()) and not lexstore.catalogue_retired()
+    return bool(readiness.runtime_managed()) and not lexstore.store_catalogue()
 
 
 def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
@@ -280,7 +298,7 @@ def _bounded_lexical_repair_allowed(freshness_key: tuple | None) -> bool:
     from . import lexstore
 
     # A repair rebuilds the catalogue from files; the store-mode request has no catalogue to repair.
-    if _managed_reader() or lexstore.catalogue_retired():
+    if _managed_reader() or lexstore.store_catalogue():
         return False
     return bool(
         freshness_key
@@ -335,6 +353,7 @@ _RECALL_PROJECTION_SOURCES = {
     "live_cache": find_types.SOURCE_CACHE,
     "live": find_types.SOURCE_INDEX,
     "admitted": find_types.SOURCE_INDEX,
+    "store": find_types.SOURCE_INDEX,
     "offline": find_types.SOURCE_COMPUTED,
     "offline_fallback": find_types.SOURCE_COMPUTED,
     "warming": find_types.SOURCE_DECLINED,
@@ -592,24 +611,26 @@ class FreshnessSnapshot:
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
-            # A store-mode vault's pages have no files to stat, so its key comes from the store.
-            stored = find_corpus.store_serves(self._root)
-            live = None if stored else freshness.triple(self._root, "kb")
-            if live is not None:
-                self._kb = live
-            else:
-                self._kb = _walk_freshness_key(_corpus_walk(self._root, "kb"))
+            self._kb = self._scope_key("kb")
         return self._kb
 
     def vault(self) -> tuple[int, int, str]:
         if self._vault is None:
-            stored = find_corpus.store_serves(self._root)
-            live = None if stored else freshness.triple(self._root, "vault")
-            if live is not None:
-                self._vault = live
-            else:
-                self._vault = _walk_freshness_key(_corpus_walk(self._root, "vault"))
+            self._vault = self._scope_key("vault")
         return self._vault
+
+    def _scope_key(self, scope: str) -> tuple[int, int, str]:
+        from . import lexstore
+
+        # A store-mode vault's key is its snapshot's revision: no page has a file to stat.
+        if lexstore.store_rows_serve(self._root):
+            from .vault_store import read
+
+            return read.scope_triple(self._root, scope)
+        live = (
+            None if find_corpus.store_serves(self._root) else freshness.triple(self._root, scope)
+        )
+        return live if live is not None else _walk_freshness_key(_corpus_walk(self._root, scope))
 
     def for_scope(self, scope: str) -> tuple[int, int, str]:
         """Projected freshness for ordinary recall only.
@@ -686,8 +707,11 @@ class FreshnessSnapshot:
 
         The checkpoint binds the policy version and access fingerprint that
         admitted each row, so a member needs no per-request symlink and access
-        re-proof to be ranked or counted. Hydrating a hit still re-proves it
-        (`_resolve_page`). A scope that came from the live registry proves nothing here.
+        re-proof to be ranked or counted. A store-mode vault's rows can lag a
+        change of access policy, so there the live policy filters them where
+        they are read (`LexicalStore._snapshot_recall_rows`). Hydrating a hit still
+        re-proves it (`_resolve_page`). A scope that came from the live registry
+        proves nothing here.
         """
         projected = self.recall_paths(scope)
         return projected if scope in self._catalogue_scopes else frozenset()
@@ -811,6 +835,32 @@ class FreshnessSnapshot:
         shadowed = pending.shadow_set(projected)
         return shadowed | admitted if admitted else shadowed
 
+    def _load_store_recall_projection(self, scope: str) -> None:
+        """The recall projection of a store-mode vault: its derived page rows at the snapshot.
+
+        Each commit derives its pages' rows under the recall policy. The access policy can change
+        before a pass re-derives them, so the live policy withholds the rows that it excludes.
+        The rows left in the scope are the admitted set, read once per revision and access policy
+        (``LexicalStore.recall_admitted_paths``). They follow the live access policy, as the
+        checkpoint's own access fingerprint does.
+        """
+        from . import lexstore
+        from .vault_store import read
+
+        checkpoint = read.recall_checkpoint(self._root, scope)
+        paths = lexstore.get_store(self._root).recall_admitted_paths(scope, checkpoint)
+        if paths is None:
+            raise freshness.RecallProjectionUnavailable("the store's page rows could not be read")
+        self._recall[scope] = checkpoint
+        self._recall_paths[scope] = paths
+        self._expected_recall_checkpoints = {**self._expected_recall_checkpoints, scope: checkpoint}
+        self._catalogue_scopes.add(scope)
+        if scope == "vault":
+            self._vault = checkpoint.triple
+        else:
+            self._kb = checkpoint.triple
+        _set_recall_projection_timing_outcome(self._timings, "store")
+
     def _load_recall_projection(self, scope: str) -> None:
         if scope in self._recall and scope in self._recall_paths:
             return
@@ -829,6 +879,9 @@ class FreshnessSnapshot:
                 stale = scope in self._stale_recall_scopes
                 from . import lexstore
 
+                if lexstore.store_rows_serve(self._root):
+                    self._load_store_recall_projection(scope)
+                    return
                 if stale or lexstore._admitted_catalog_view(self._root) is not None:
 
                     expected = self._expected_recall_checkpoints.get(scope)
@@ -1419,7 +1472,7 @@ def _with_catalog_scope(function):
         with (
             lexstore.admitted_catalog_scope(vault_root),
             store_read.request_snapshot(vault_root),
-            lexstore.catalogue_retired_scope(vault_root),
+            lexstore.store_catalogue_scope(vault_root),
         ):
             if (
                 not _managed_reader() or not freshness.event_indexes_enabled()
@@ -3932,85 +3985,41 @@ def _find_semantic_units(
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
-    # A store-mode request has no catalogue to seed from: the oracle below reads the store's corpus.
-    if not lexstore.catalogue_retired():
-        if dnf_clauses is not None:
-            # Exact eligibility is normal-table metadata only. Hybrid/vector
-            # content ranking consumes this finite candidate set independently,
-            # so FTS absence cannot change the catalog outcome.
-            with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
-                exact_freshness = snapshot.for_scope(scope)
-                exact_repair = (
-                    _bounded_lexical_repair_allowed(exact_freshness)
-                    if repair is None
-                    else repair
-                )
-                exact_checkpoint = recall_checkpoint
-                exact_allow_delta = True if repair is None else repair
-                bounded_filter_only = (
-                    not query.strip() and limit is not None and not algebra.post_filter_required
-                )
-                if bounded_filter_only:
-                    # SQL and final filter-only ordering are identical. Read a
-                    # small leading prefix, apply access/current-parent checks,
-                    # and expand only when canonical rejection underfills it.
-                    # Re-reading from zero makes each prefix self-contained if a
-                    # concurrent catalog writer inserts, deletes, or reorders a
-                    # row between reads; offset pagination could skip across that
-                    # moving boundary. The common eligible path still opens only
-                    # max(8, requested_limit) rows.
-                    prefix_size = max(8, requested_limit)
-                    if max_catalog_candidates is not None:
-                        prefix_size = min(prefix_size, max_catalog_candidates)
-                    indexed = []
-                    records = {}
-                    while True:
-                        catalog_result = lexstore.search_semantic_units_result(
-                            vault_root,
-                            query,
-                            k=prefix_size,
-                            clauses=dnf_clauses,
-                            scope=scope,
-                            freshness=exact_freshness,
-                            recall_checkpoint=exact_checkpoint,
-                            allowed_parent_paths=allowed_parent_paths,
-                            admitted_parent_paths=allowed_parent_paths,
-                            released_parent_paths=released_parent_paths,
-                            _repair_stale=True,
-                            repair=exact_repair,
-                            allow_delta=exact_allow_delta,
-                            validated=parent_reads.validated if parent_reads else None,
-                            _validate_current=False,
-                        )
-                        _set_catalog_timing_profile(timings, catalog_result.readiness)
-                        if not catalog_result.readiness.complete:
-                            _raise_catalog_outcome(catalog_result.readiness)
-                        indexed = list(catalog_result.value or [])
-                        records = select(indexed)
-                        if len(records) >= requested_limit or len(indexed) < prefix_size:
-                            break
-                        if (
-                            max_catalog_candidates is not None
-                            and prefix_size >= max_catalog_candidates
-                        ):
-                            if truncated_out is not None:
-                                truncated_out.append(True)
-                            break
-                        prefix_size = (
-                            min(prefix_size * 2, max_catalog_candidates)
-                            if max_catalog_candidates is not None
-                            else prefix_size * 2
-                        )
-                else:
-                    # Category/kind rows are only the exact seed. Page
-                    # predicates and other canonical filters run after
-                    # hydration, so limiting this seed before post-evaluation
-                    # can false-empty when the first window is ineligible.
-                    exact_limit = 2_147_483_647
+    if dnf_clauses is not None:
+        # Exact eligibility is normal-table metadata only. Hybrid/vector
+        # content ranking consumes this finite candidate set independently,
+        # so FTS absence cannot change the catalog outcome.
+        with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
+            exact_freshness = snapshot.for_scope(scope)
+            exact_repair = (
+                _bounded_lexical_repair_allowed(exact_freshness)
+                if repair is None
+                else repair
+            )
+            exact_checkpoint = recall_checkpoint
+            exact_allow_delta = True if repair is None else repair
+            bounded_filter_only = (
+                not query.strip() and limit is not None and not algebra.post_filter_required
+            )
+            if bounded_filter_only:
+                # SQL and final filter-only ordering are identical. Read a
+                # small leading prefix, apply access/current-parent checks,
+                # and expand only when canonical rejection underfills it.
+                # Re-reading from zero makes each prefix self-contained if a
+                # concurrent catalog writer inserts, deletes, or reorders a
+                # row between reads; offset pagination could skip across that
+                # moving boundary. The common eligible path still opens only
+                # max(8, requested_limit) rows.
+                prefix_size = max(8, requested_limit)
+                if max_catalog_candidates is not None:
+                    prefix_size = min(prefix_size, max_catalog_candidates)
+                indexed = []
+                records = {}
+                while True:
                     catalog_result = lexstore.search_semantic_units_result(
                         vault_root,
                         query,
-                        k=exact_limit,
+                        k=prefix_size,
                         clauses=dnf_clauses,
                         scope=scope,
                         freshness=exact_freshness,
@@ -4018,7 +4027,6 @@ def _find_semantic_units(
                         allowed_parent_paths=allowed_parent_paths,
                         admitted_parent_paths=allowed_parent_paths,
                         released_parent_paths=released_parent_paths,
-                        literal_all=mode == "keyword" and bool(query.strip()),
                         _repair_stale=True,
                         repair=exact_repair,
                         allow_delta=exact_allow_delta,
@@ -4029,60 +4037,101 @@ def _find_semantic_units(
                     if not catalog_result.readiness.complete:
                         _raise_catalog_outcome(catalog_result.readiness)
                     indexed = list(catalog_result.value or [])
-                    records = (
-                        {}
-                        if mode == "vector"
-                        else select(indexed)
+                    records = select(indexed)
+                    if len(records) >= requested_limit or len(indexed) < prefix_size:
+                        break
+                    if (
+                        max_catalog_candidates is not None
+                        and prefix_size >= max_catalog_candidates
+                    ):
+                        if truncated_out is not None:
+                            truncated_out.append(True)
+                        break
+                    prefix_size = (
+                        min(prefix_size * 2, max_catalog_candidates)
+                        if max_catalog_candidates is not None
+                        else prefix_size * 2
                     )
-        else:
-            indexed = lexstore.search_semantic_units(
-                vault_root,
-                query,
-                k=candidate_limit + 1,
-                allowed_parent_paths=allowed_parent_paths,
-                admitted_parent_paths=allowed_parent_paths,
-                released_parent_paths=released_parent_paths,
-                scope=scope,
-                freshness=snapshot.for_scope(scope),
-                literal_all=mode == "keyword" and bool(query.strip()),
-                _repair_stale=True,
-                repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
-                _validate_current=False,
-            )
-        if indexed is None:
-            if lexstore.backend() != "python":
-                # A safe exact plan the maintained index cannot yet answer must
-                # not degrade to an empty result: the lexical layer already
-                # scheduled the single-flight repair, so raise the typed,
-                # non-cacheable warming outcome (page-level eligibility parity).
-                if algebra.status == "complete":
-                    raise RetrievalIndexWarming(site="semantic_unit_index")
-                if failed_out is not None:
-                    failed_out.append("semantic_units_lexical")
-                _record_degradation("semantic_units_lexical")
-                # Content-only unit recall may use its established Python rung
-                # for a provably small corpus.  A catalog-identity change can
-                # invalidate every stored semantic row even though the text
-                # query remains answerable from current Markdown; do not turn
-                # that bounded fallback into an authoritative empty result.
-                records = (
-                    _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
-                    if _bounded_lexical_repair_allowed(snapshot.for_scope(scope))
-                    else {}
-                )
             else:
-                records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
-        elif dnf_clauses is None:
-            if len(indexed) > candidate_limit:
-                candidate_window_exhausted = True
-                indexed = indexed[:candidate_limit]
-            records = (
-                {}
-                if mode == "vector"
-                else select(indexed)
-            )
+                # Category/kind rows are only the exact seed. Page
+                # predicates and other canonical filters run after
+                # hydration, so limiting this seed before post-evaluation
+                # can false-empty when the first window is ineligible.
+                exact_limit = 2_147_483_647
+                catalog_result = lexstore.search_semantic_units_result(
+                    vault_root,
+                    query,
+                    k=exact_limit,
+                    clauses=dnf_clauses,
+                    scope=scope,
+                    freshness=exact_freshness,
+                    recall_checkpoint=exact_checkpoint,
+                    allowed_parent_paths=allowed_parent_paths,
+                    admitted_parent_paths=allowed_parent_paths,
+                    released_parent_paths=released_parent_paths,
+                    literal_all=mode == "keyword" and bool(query.strip()),
+                    _repair_stale=True,
+                    repair=exact_repair,
+                    allow_delta=exact_allow_delta,
+                    validated=parent_reads.validated if parent_reads else None,
+                    _validate_current=False,
+                )
+                _set_catalog_timing_profile(timings, catalog_result.readiness)
+                if not catalog_result.readiness.complete:
+                    _raise_catalog_outcome(catalog_result.readiness)
+                indexed = list(catalog_result.value or [])
+                records = (
+                    {}
+                    if mode == "vector"
+                    else select(indexed)
+                )
     else:
-        records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
+        indexed = lexstore.search_semantic_units(
+            vault_root,
+            query,
+            k=candidate_limit + 1,
+            allowed_parent_paths=allowed_parent_paths,
+            admitted_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
+            literal_all=mode == "keyword" and bool(query.strip()),
+            _repair_stale=True,
+            repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)),
+            _validate_current=False,
+        )
+    if indexed is None:
+        if lexstore.backend() != "python":
+            # A safe exact plan the maintained index cannot yet answer must
+            # not degrade to an empty result: the lexical layer already
+            # scheduled the single-flight repair, so raise the typed,
+            # non-cacheable warming outcome (page-level eligibility parity).
+            if algebra.status == "complete":
+                raise RetrievalIndexWarming(site="semantic_unit_index")
+            if failed_out is not None:
+                failed_out.append("semantic_units_lexical")
+            _record_degradation("semantic_units_lexical")
+            # Content-only unit recall may use its established Python rung
+            # for a provably small corpus.  A catalog-identity change can
+            # invalidate every stored semantic row even though the text
+            # query remains answerable from current Markdown; do not turn
+            # that bounded fallback into an authoritative empty result.
+            records = (
+                _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
+                if _bounded_lexical_repair_allowed(snapshot.for_scope(scope))
+                else {}
+            )
+        else:
+            records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
+    elif dnf_clauses is None:
+        if len(indexed) > candidate_limit:
+            candidate_window_exhausted = True
+            indexed = indexed[:candidate_limit]
+        records = (
+            {}
+            if mode == "vector"
+            else select(indexed)
+        )
 
     if not query.strip():
         if not records:
@@ -5179,14 +5228,16 @@ def _resolve_eligible_filter_paths(
     the typed warming outcome, and an unsupported plan keeps the canonical
     full-scan oracle. A CLI user with a cold catalogue must still get an
     answer, including for the fields no index can evaluate.
+
+    A store-mode vault's rows are the request's snapshot, so a plan that the
+    columns answer takes the managed route; any other plan keeps the offline
+    ladder below, so a store-mode answer never turns into a refusal.
     """
     from . import lexstore
 
-    if lexstore.catalogue_retired():
-        # No catalogue covers the store, so the exact oracle reads the store's corpus.
-        _mark_source(timings, "filter_eligibility", find_types.SOURCE_COMPUTED)
-        return _eligible_filter_paths(vault_root, scope=scope, plan=plan, pending=pending)
-    if _managed_reader():
+    if _managed_reader() or (
+        lexstore.store_rows_serve(vault_root) and _index_answers(plan)
+    ):
         return _managed_eligible_filter_paths(
             vault_root,
             scope=scope,
@@ -5238,6 +5289,12 @@ def _resolve_eligible_filter_paths(
         candidate_parent_paths=candidate_parents,
         pending=pending,
     )
+
+
+def _index_answers(plan: structured_filters.FilterPlan) -> bool:
+    """Whether the managed route answers ``plan`` from the columns, without a refusal."""
+    eligibility = structured_filters.plan_index_eligibility(plan)
+    return eligibility.resolvable and eligibility.narrows and not eligibility.refuses
 
 
 def _unsupported_filter_fields(plan: structured_filters.FilterPlan) -> tuple[str, ...]:
@@ -6188,9 +6245,12 @@ def _find_keyword(
     decide its label from what it actually did. `index` when it consumed a
     resolved path set, `computed` when it enumerated.
     """
-    if query_norm and _managed_browse_reader():
-        from . import lexstore
+    from . import lexstore
 
+    # A store-mode vault's rows are the request's snapshot, so both arms read
+    # them as the managed runtime does, whatever the caller.
+    reads_catalogue = _managed_browse_reader() or lexstore.store_rows_serve(vault_root)
+    if query_norm and reads_catalogue:
         # The documented Python backend retains its exhaustive rollback path.
         if lexstore.backend() != "python":
             _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
@@ -6203,7 +6263,7 @@ def _find_keyword(
                 page_memo=page_memo,
                 select_pages=select_pages,
             )
-    if not query_norm and _managed_browse_reader():
+    if not query_norm and reads_catalogue:
         _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
         return _find_managed_browse(
             vault_root,
@@ -6407,18 +6467,14 @@ def _find_semantic(
 
         lexical_freshness = snapshot.for_scope(scope)
         lexical_repair = _bounded_lexical_repair_allowed(lexical_freshness)
-        lexical_from_store = False
         if mode != "vector":
             if find_corpus.store_serves(vault_root):
-                # The catalogue is built from files, so it never covers the store corpus and an
-                # inline build would present the files as the whole store. Every lexical lane
-                # reads the store corpus instead, so the answer is whole: no notice, only an
-                # owner diagnostic. The store decides this, not the backend switch: the python
-                # rung and a build without FTS5 read the store corpus too.
-                lexical_from_store = True
+                # The store's own rows are the catalogue, current at the request's snapshot: no
+                # readiness proof, no repair. Without FTS5, or under the python switch, the python
+                # rung reads the store corpus, as file mode's ladder reads the files.
                 lexical_repair = False
                 if timings is not None:
-                    timings.profile["lexical_lanes"] = {"corpus": "store", "catalogue": "bypassed"}
+                    timings.profile["lexical_lanes"] = _store_lexical_profile(vault_root)
             elif lexstore.maintained_content_index_enabled() and not lexical_repair:
                 catalog = lexstore.get_store(vault_root).catalog_readiness(
                     scope,
@@ -6488,8 +6544,12 @@ def _find_semantic(
             timings=timings,
             snapshot=snapshot,
             page_of=_page_of,
+            # A store-mode vault's rows are this call's snapshot, so they rank without a parse.
             ranking_metadata=(
-                _ranking_metadata if snapshot.requires_live_recall and lexstore._catalog_usable() else None
+                _ranking_metadata
+                if (snapshot.requires_live_recall and lexstore._catalog_usable())
+                or lexstore.store_rows_serve(vault_root)
+                else None
             ),
             keyword_match_paths=_keyword_lane,
             outbound_wikilink_paths=_outbound_wikilink_paths,
@@ -6503,7 +6563,6 @@ def _find_semantic(
                 else snapshot.recall_paths(recall_scope or scope) & admitted_paths
             ),
             lexical_repair=lexical_repair,
-            from_store=lexical_from_store,
             eligible_paths=eligible_paths,
             filtered=filtered,
             admitted_paths=admitted_paths,
@@ -7671,7 +7730,6 @@ def _keyword_match_paths(
     k: int | None = None,
     pending: Any | None = None,
     allowed_paths: set[str] | None = None,
-    from_store: bool = False,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -7696,9 +7754,6 @@ def _keyword_match_paths(
     the truncation below do.
 
     Both backends bound the result identically, so parity holds at any `k`.
-
-    `from_store` is the caller's proof that the vault serves its reads from the store: the
-    catalogue is built from files and cannot answer, so the scan below reads the store corpus.
 
     `pending` supplies the exact committed generations the persistent catalogue
     has not published yet. Its identities shadow every catalogue row they own --
@@ -7750,7 +7805,7 @@ def _keyword_match_paths(
         return []
     from . import lexstore
 
-    if not from_store and not repair and lexstore.maintained_content_index_enabled():
+    if not repair and lexstore.maintained_content_index_enabled():
         catalog_result = lexstore.search_substring_result(
             vault_root,
             query_norm,
@@ -7762,22 +7817,18 @@ def _keyword_match_paths(
         if not catalog_result.readiness.complete:
             _raise_catalog_outcome(catalog_result.readiness)
         return _merged(list(catalog_result.value or []))
-    indexed = (
-        None
-        if from_store
-        else lexstore.search_substring(
-            vault_root,
-            query_norm,
-            scope=scope,
-            freshness=freshness,
-            repair=repair,
-            k=persistent_k,
-            allowed_paths=allowed_paths,
-        )
+    indexed = lexstore.search_substring(
+        vault_root,
+        query_norm,
+        scope=scope,
+        freshness=freshness,
+        repair=repair,
+        k=persistent_k,
+        allowed_paths=allowed_paths,
     )
     if indexed is not None:
         return _merged(indexed)
-    if not from_store and lexstore.backend() != "python":
+    if lexstore.backend() != "python":
         # The sidecar declined. `search_substring` documents exactly one meaning
         # for None -- "fall back" -- and its causes are a retired store, a
         # catalog that is not on disk, a sqlite error, or a sync that could not
@@ -8271,7 +8322,13 @@ def recall_resolver_snapshot(
         identity = (freshness_key, policy_version, access_fingerprint)
     checkpoint: freshness_module.RecallFreshnessCheckpoint | None = None
     candidate = expected_checkpoint
-    if candidate is not None and not allow_fallback:
+    stored = lexstore.store_rows_serve(root)
+    if stored and candidate is None:
+        from .vault_store import read as store_read
+
+        # The store's rows are current at the request's snapshot, and its checkpoint names them.
+        candidate = store_read.recall_checkpoint(root, "vault")
+    if candidate is not None and not allow_fallback and not stored:
         if not freshness_module.recall_checkpoint_is_current(root, "vault", candidate):
             # The registry moved past the request's admission, so the catalogue
             # may trail it. The lag repair replays that delta and falls back to
@@ -8357,13 +8414,9 @@ def recall_resolver_snapshot(
     # would then elect itself leader and rebuild -- reintroducing the stampede
     # this exists to prevent, just narrowed to a race window.
     try:
-        # A store-mode vault builds from its pages: the catalogue is a derived copy of rows that the
-        # store holds.
-        entries = (
-            None
-            if find_corpus.store_serves(root)
-            else lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
-        )
+        # A store-mode vault's entries are the store's own page rows; under the python switch the
+        # walk below reads the store corpus.
+        entries = lexstore.get_store(root).recall_resolver_entries("vault", checkpoint)
         if entries is None:
             if not allow_fallback and not find_corpus.store_serves(root):
                 lexstore.request_repair(
