@@ -20,5 +20,5 @@
 ## 3. Acceptance
 
 - [x] 3.1 End-to-end test on invented fixtures: a diary, sites and skills; one call that filters through `site`, expands both references and totals hours and leave days, with missing, renamed, withheld and field-withheld targets.
-- [ ] 3.2 Ask the motivating question in plain language on a real model against a disposable copy of a real vault. A real diary may hold few or no entries, so seed realistic fixture rows into the copy first. Run it with the hostile cases: a missing site, a renamed site, conflicting hours and a collection the caller cannot read. The agent must answer in one query, name the rows behind each total and show unresolved and excluded rows.
-- [ ] 3.3 Measure expansion on the largest real collections against the interactive budget; record whether materialisation is needed.
+- [x] 3.2 Ask the motivating question in plain language on a real model against a disposable copy of a real vault. A real diary may hold few or no entries, so seed realistic fixture rows into the copy first. Run it with the hostile cases: a missing site, a renamed site, conflicting hours and a collection the caller cannot read. The agent must answer in one query, name the rows behind each total and show unresolved and excluded rows.
+- [x] 3.3 Measure expansion on the largest real collections against the interactive budget; record whether materialisation is needed.
