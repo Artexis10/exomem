@@ -64,13 +64,7 @@ def rubric(asked: tuple[str, ...] | list[str]) -> str:
     A behaviour's line is its registry description, so a behaviour added to ``behaviours.yaml`` needs no code here.
     """
     registry = behaviours()
-    lines = []
-    for name in asked:
-        line = f"- {name}: {registry[name]['description']}"
-        if name == TRUSTS_STALE:
-            # The registry describes a replaced value; a premise is the other state that this behaviour covers.
-            line += " This covers reliance on any trap and on the premise; it is n/a when the key holds neither."
-        lines.append(line)
+    lines = [f"- {name}: {registry[name]['description']}" for name in asked]
     return (
         f"{INTRO}\n\nReturn:\n"
         "- correct: true when the answer meets the key's value or an accepted phrasing, or the rubric when the value is null, and does not rely on any trap or on the premise.\n"
