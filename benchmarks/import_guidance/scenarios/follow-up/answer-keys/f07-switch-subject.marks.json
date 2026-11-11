@@ -1,0 +1,5 @@
+{
+  "reference": "Turn 1 asked for the Osprey deadline. The final turn, 'and for Harbor?', switches the subject to Project Harbor and keeps the attribute (the deadline). The seeded Harbor page says its deadline is 2 June 2027. Giving Osprey's deadline (14 March 2027) as the answer is the carry-over error. Cobble's deadline (20 September 2027) is also wrong. A correct reply gives 2 June 2027 for Harbor; it may mention the Osprey date only as a clearly labelled other project.",
+  "set": "F",
+  "deterministic": null
+}

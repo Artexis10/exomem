@@ -1,0 +1,11 @@
+{
+  "reference": "The final turn asks for the owner of Project Harbor, the project turn 1 named. The seeded Harbor page says its owner is Dario Fenn. Mirela Vance (owner of Project Osprey) and Ines Kolar (owner of Project Cobble) are the wrong answer. A correct reply names Dario Fenn without asking which project the person means. No page should change: the session only reads. ",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Cobble Project.md",
+    "Entities/Organizations/Harbor Project.md",
+    "Entities/Organizations/Osprey Project.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}

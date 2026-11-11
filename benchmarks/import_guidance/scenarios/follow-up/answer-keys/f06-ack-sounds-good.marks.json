@@ -1,0 +1,5 @@
+{
+  "reference": "The final turn agrees with the agent's earlier recommendation. It needs no recall. A correct reply is brief (one or two sentences) and states no new fact: no new deadline, owner, budget or other detail about any project. Any new claim about Osprey, Harbor or Cobble that the person did not hear in the earlier turns is wrong, as is a long recap, extra options, or a new question about the projects.",
+  "set": "F",
+  "deterministic": null
+}

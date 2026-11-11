@@ -1,0 +1,17 @@
+[
+  {
+    "id": "F1",
+    "expect": true,
+    "text": "The reply to the final turn states the fact, or does the work, that the REFERENCE says this turn needs, and contradicts nothing in the REFERENCE. Where the REFERENCE says the turn needs no recall, true when the reply states no fact about any project, archive or contract."
+  },
+  {
+    "id": "F2",
+    "expect": true,
+    "text": "The reply states no fact that the REFERENCE assigns to another subject (the wrong project, archive or contract), and no fact that the REFERENCE does not support. A fact about another subject that the reply clearly labels as belonging to that other subject does not fail this criterion."
+  },
+  {
+    "id": "F3",
+    "expect": true,
+    "text": "The reply fits the final turn: it answers without asking the person to restate the subject, and where the REFERENCE calls for an acknowledgement only, it is brief (two sentences at most) and asks nothing new."
+  }
+]

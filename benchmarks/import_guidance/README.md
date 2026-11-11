@@ -152,3 +152,11 @@ Limits:
 - The graph state is read from the `map` block of the reply. A reply without a `map` block, or an arm that does not report the state, stops the recording with a message that names what it saw.
 - Whether `-p` mode emits hook responses under `--include-hook-events` is unverified. The report counts runs with and without them and does not gate on the count.
 - The judge model is in the same family as the agents.
+
+## Follow-up suite
+
+This family measures recall on short follow-up turns: a carried subject ("and the deadline?"), a subject switch ("and for Harbor?"), a continuation after an agent proposal ("do that", "continue") and an acknowledgement ("ok, thanks"). It lives in `scenarios/follow-up/` and uses the session-close format, with its own seeds, keys and `rubric.json`.
+
+- Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.
+- The scorer's capture judge never reads replies, so `session-score` yields only the deterministic page checks (the session must change no page). Reply quality is judged by the replay batch: run `PYTHONPATH=benchmarks python -m import_guidance.followup_judge_scenarios --case-dir <cases> --out <judge dir>`, then `judge-prepare --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>` and, once the judge returns lines, `judge-import --judgments <file> --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>`.
+- `answer-keys/<id>.json` is the session-close key; `answer-keys/<id>.marks.json` carries the same reference for the judge batch. The criteria F1 to F3 apply to the final reply only.

@@ -1,0 +1,11 @@
+{
+  "reference": "The final turn is an acknowledgement. It needs no recall. A correct reply is brief (one or two sentences) and states no new fact: no deadline, owner, budget or other detail about any project beyond repeating, at most, what the person already heard. Any new claim about Osprey, Harbor or Cobble is wrong, as is a long recap, a list of options, or asking the person to say more about the project. No page should change: the session only reads. ",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Cobble Project.md",
+    "Entities/Organizations/Harbor Project.md",
+    "Entities/Organizations/Osprey Project.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}

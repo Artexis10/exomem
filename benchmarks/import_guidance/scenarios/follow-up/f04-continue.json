@@ -1,0 +1,11 @@
+{
+  "id": "f04-continue",
+  "title": "'continue' after a one-step-at-a-time walkthrough of a seeded checklist",
+  "suite": "session-close",
+  "seed": "fu-checklist",
+  "engagement": "balanced",
+  "turns": [
+    "Walk me through the Calder Mills renewal checklist, but give me only step 1 and then wait until I say continue.",
+    "continue"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "reference": "The final turn asks for the deadline of Project Osprey, the project turn 1 named. The seeded Osprey page says its deadline is 14 March 2027. The Harbor Project deadline (2 June 2027) and the Cobble Project deadline (20 September 2027) are the wrong answer. A correct reply gives 14 March 2027 for Osprey without asking which project the person means. No page should change: the session only reads. ",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Cobble Project.md",
+    "Entities/Organizations/Harbor Project.md",
+    "Entities/Organizations/Osprey Project.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none"
+}

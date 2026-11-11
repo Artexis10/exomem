@@ -1,0 +1,12 @@
+{
+  "id": "f08-carry-then-switch",
+  "title": "One carry, then a switch that keeps the asked attribute",
+  "suite": "session-close",
+  "seed": "fu-projects",
+  "engagement": "balanced",
+  "turns": [
+    "Who owns Project Osprey?",
+    "and its budget?",
+    "and for Harbor?"
+  ]
+}
