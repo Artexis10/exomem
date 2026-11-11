@@ -224,9 +224,9 @@ class FolderFiles(NamedTuple):
     """What sits below a folder besides its stored pages: what a folder write renames on disk.
 
     ``files`` are the binaries (recorded or not) and the files the store does not own; ``folders``
-    are folders the store owns nothing in (a dot folder of parts), renamed whole. ``recorded`` is
-    how many binary records the store holds below the folder, which the commit binds, and
-    ``file_count`` how many files the renames move, the ones inside ``folders`` included.
+    are folders the store owns nothing in (a dot folder of parts, an empty folder), renamed whole.
+    ``recorded`` is how many binary records the store holds below the folder, which the commit
+    binds, and ``file_count`` how many files the renames move, the ones inside ``folders`` included.
     """
 
     files: tuple[str, ...]
@@ -243,6 +243,7 @@ def folder_files(
     *,
     operation: str,
     error_class: Callable[..., Exception],
+    failed_code: str,
 ) -> FolderFiles:
     """The files and folders below ``folder`` that move on disk beside its stored ``pages``.
 
@@ -254,11 +255,21 @@ def folder_files(
     ``operation``'s unrouted error; a wrong refusal lasts until the importer or the projector
     runs. A symbolic link below the folder raises ``error_class`` with RESERVED_PATH, as file
     mode's folder read refuses one: neither form follows a link out of the folder or leaves it
-    behind.
+    behind. A binary that the store records and the disk no longer holds raises ``failed_code``,
+    which names the file to a caller that may see it; the importer's next sweep drops the record.
+    An empty folder that holds no stored page moves whole, as file mode's rename keeps it.
     """
     root = Path(vault_root)
     recorded = [meta.path for meta in view.binaries(f"{folder}/")]
-    files: set[str] = set(recorded)
+    # The folders that a stored page or record lies below: a folder empty on disk is one of them
+    # until the projector writes the page's file, and the page's move takes care of it.
+    held: set[str] = set()
+    for rel in (*pages, *recorded):
+        parent = rel.rpartition("/")[0]
+        while parent and parent not in held:
+            held.add(parent)
+            parent = parent.rpartition("/")[0]
+    files: set[str] = set()
     folders: list[str] = []
     unheld = False
     inside = 0
@@ -269,6 +280,8 @@ def folder_files(
             entries = list(os.scandir(root / current))
         except OSError:
             continue  # as `os.walk` does: a folder that cannot be listed names nothing
+        if not entries and current != folder and current not in held:
+            folders.append(current)
         for entry in entries:
             rel = f"{current}/{entry.name}"
             if entry.is_symlink():
@@ -285,8 +298,26 @@ def folder_files(
                 files.add(rel)
     if unheld:
         raise availability.unrouted(operation, _NOT_HELD)
+    gone = [rel for rel in recorded if rel not in files]
+    if gone:
+        raise error_class(code=failed_code, reason=_gone_reason(root, gone))
     return FolderFiles(
         tuple(sorted(files)), tuple(sorted(folders)), len(recorded), len(files) + inside
+    )
+
+
+def _gone_reason(vault_root: Path, gone: list[str]) -> str:
+    """Why a folder write refused a binary record whose file is gone, naming only what the caller
+    may see."""
+    from ..governance import egress
+
+    visible = egress.restricted_release_filter(vault_root)
+    shown = next((rel for rel in gone if visible is None or visible(rel)), None)
+    named = "a file below the folder" if shown is None else shown
+    more = f" and {len(gone) - 1} more" if len(gone) > 1 else ""
+    return (
+        f"the store records {named}{more}, but the disk no longer holds it; the next sweep drops "
+        "the record, and the folder can move after it"
     )
 
 

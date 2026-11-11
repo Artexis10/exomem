@@ -1056,6 +1056,7 @@ def _recover_in_store(
                     stored,
                     operation="recover_from_trash",
                     error_class=RecoverError,
+                    failed_code="RECOVER_FAILED",
                 )
             if len(stored) + listing.file_count > DIRECTORY_TRANSITION_LIMIT:
                 raise RecoverError(

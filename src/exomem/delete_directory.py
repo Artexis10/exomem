@@ -767,6 +767,7 @@ def _delete_in_store(
                 stored,
                 operation="delete_directory",
                 error_class=DeleteDirectoryError,
+                failed_code="DELETE_FAILED",
             )
         file_count = len(pages) + listing.file_count
         if file_count > DIRECTORY_TRANSITION_LIMIT:

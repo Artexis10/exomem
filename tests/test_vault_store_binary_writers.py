@@ -376,6 +376,29 @@ def test_a_folder_trash_moves_pages_in_the_store_and_files_on_disk(served, write
     assert not (served / trashed).exists()
 
 
+def test_a_folder_trash_names_a_recorded_binary_whose_file_is_gone_and_moves_after_a_sweep(
+    served, writer
+):
+    """A folder trash that refuses for a record whose file is gone with a reason that names
+    neither the file nor what resolves it."""
+    build_folder(served, writer)
+    (served / CHART).unlink()
+    before = tree(served)
+
+    with pytest.raises(delete_directory.DeleteDirectoryError) as refused:
+        delete_directory.delete_directory(served, path=FOLDER, confirm=True, recursive=True)
+
+    assert refused.value.code == "DELETE_FAILED"
+    assert CHART in refused.value.reason and "next sweep" in refused.value.reason
+    assert tree(served) == before
+    importer.Importer(served, run=lambda work: work(writer)).sweep()
+
+    result = delete_directory.delete_directory(served, path=FOLDER, confirm=True, recursive=True)
+
+    assert (served / result.trash_path / SKETCH[len(FOLDER) + 1:]).read_bytes() == b"sketch"
+    assert binary_record(served, CHART) == []
+
+
 def test_a_restricted_writers_folder_trash_names_no_file_that_nothing_imported(served, writer):
     """A folder trash, or its refusal, that tells a restricted caller the path of a file that no
     policy covers yet."""
@@ -444,9 +467,10 @@ def test_an_empty_folder_goes_to_the_trash_and_back(served):
 def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both_modes(
     request, store
 ):
-    """A store form whose codes or results drift from file mode's for the same calls."""
+    """A store form whose codes or results drift from file mode's for the same calls, or that
+    drops an empty folder of the trashed folder."""
     root = request.getfixturevalue("served" if store else "vault")
-    (root / FOLDER).mkdir()
+    (root / FOLDER / "empty" / "nested").mkdir(parents=True)
     (root / CHART).write_bytes(b"chart")
     (root / PLAN).write_text(PLAN_TEXT, encoding="utf-8")
     if store:
@@ -458,6 +482,7 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
         delete_directory.delete_directory(root, path=FOLDER, confirm=True)
     trashed = delete_file.delete_file(root, path=DIAGRAM, confirm=True)
     folder = delete_directory.delete_directory(root, path=FOLDER, confirm=True, recursive=True)
+    kept_in_trash = (root / folder.trash_path / "empty" / "nested").is_dir()
     restored = recover_from_trash.recover_from_trash(root, trash_path=trashed.trash_path)
     back = recover_from_trash.recover_from_trash(root, trash_path=folder.trash_path)
 
@@ -467,6 +492,7 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
     assert (back.restored_path, back.kind) == (FOLDER, "directory")
     assert (root / DIAGRAM).read_bytes() == DIAGRAM_BYTES
     assert (root / CHART).read_bytes() == b"chart"
+    assert kept_in_trash and (root / FOLDER / "empty" / "nested").is_dir()
 
 
 VIDEO = "Knowledge Base/Media/harbour.mp4"
