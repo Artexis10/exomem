@@ -42,7 +42,6 @@ from exomem import (
     reserved_paths,
     semantic_writes,
 )
-from exomem import init as init_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
@@ -678,44 +677,6 @@ def test_a_store_that_refuses_its_writer_keeps_a_surplus_part_in_a_retire_and_a_
     assert (listed.removed, listed.unowned) == ([], [part])
     assert read.page_exists(served, part)
     assert revision(served) == start
-
-
-def test_init_overlay_refuses_in_store_mode_and_replaces_nothing(served):
-    """A forced init whose overlay copies the scaffold's log over a page that the store holds."""
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        init_module.init_vault(served, force=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "exomem init --force" in refused.value.message
-    assert revision(served) == start
-    assert tree(served) == before
-
-
-def test_reclaim_schema_previews_but_refuses_to_delete_in_store_mode(served):
-    """A reclaim that deletes the legacy `_Schema` copies from disk where the store holds pages."""
-    source = next(iter(init_module.shipped_schema_sources()))
-    relative = source.relative_to(init_module._SCAFFOLD).as_posix().split("/", 1)[1]
-    legacy = served / "Knowledge Base/_Schema" / relative
-    deployed = init_module.shipped_schema_target(served) / relative
-    for copy in (legacy, deployed):
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        copy.write_bytes(source.read_bytes())
-    before = tree(served)
-    start = revision(served)
-
-    preview = init_module.reclaim_legacy_shipped_schema(served)
-    assert preview["removed"] == [relative], "the preview reads the disk and stays available"
-    with pytest.raises(OpError) as refused:
-        init_module.reclaim_legacy_shipped_schema(served, apply=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "exomem reclaim-schema --apply" in refused.value.message
-    assert legacy.is_file()
-    assert revision(served) == start
-    assert tree(served) == before
 
 
 def test_delete_validation_refuses_what_the_commit_refuses_for_an_active_catalog(

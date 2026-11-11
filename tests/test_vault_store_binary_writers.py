@@ -42,9 +42,12 @@ from exomem import (
     reserved_paths,
     scene_frames,
 )
+from exomem import init as init_module
 from exomem import vault as vault_module
+from exomem.collection_store import connection
+from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import most_restrictive_principal, request_scope
-from exomem.vault_store import batch, importer, read, write
+from exomem.vault_store import batch, importer, ownership, read, write
 from exomem.writer_lease import get_manager
 
 pytestmark = pytest.mark.skipif(
@@ -518,3 +521,50 @@ def test_the_part_sweep_finds_a_stored_surplus_part_that_has_no_file(served):
 
     assert (swept.removed, swept.unowned) == ([part], [])
     assert not read.page_exists(served, part)
+
+
+def test_an_offline_overlay_and_schema_reclaim_commit_to_the_store_and_write_no_markdown(stored):
+    """An overlay that writes a page's projection, or a reclaim that previews what it does not
+    remove or unlinks a file that the store still holds."""
+    source = next(iter(init_module.shipped_schema_sources()))
+    relative = source.relative_to(init_module._SCAFFOLD).as_posix().split("/", 1)[1]
+    legacy = f"Knowledge Base/_Schema/{relative}"
+    deployed = init_module.shipped_schema_target(stored) / relative
+    deployed.parent.mkdir(parents=True, exist_ok=True)
+    deployed.write_bytes(source.read_bytes())
+    # The legacy copy is a stored page whose file the projector already wrote.
+    (stored / legacy).parent.mkdir(parents=True, exist_ok=True)
+    (stored / legacy).write_bytes(source.read_bytes())
+    with connection.open_writer(connection.store_path(stored), lease_check=lambda: True) as handle:
+        write.commit(
+            CollectionWriter(stored, handle),
+            write.StoreChange(
+                write.Origin.GOVERNED,
+                "setup",
+                puts=(
+                    write.PagePut(legacy, source.read_bytes()),
+                    write.PagePut("Knowledge Base/index.md", b"# My own index\n"),
+                ),
+            ),
+        )
+    before = tree(stored)
+
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        overlay = init_module.init_vault(stored, force=True)
+        preview = init_module.reclaim_legacy_shipped_schema(stored)
+        applied = init_module.reclaim_legacy_shipped_schema(stored, apply=True)
+
+    scaffold_index = (init_module._SCAFFOLD / "index.md").read_bytes()
+    assert read.owned_bytes(stored, "Knowledge Base/index.md") == scaffold_index
+    assert "Knowledge Base/index.md" in overlay["created"]
+    assert relative in preview["removed"]
+    assert applied["removed"] == preview["removed"]
+    assert store_rows(stored, "SELECT 1 FROM store_pages WHERE path = ?", legacy) == []
+    written_pages = {
+        rel
+        for rel in new_files(before, stored)
+        if ownership.classify(rel) is ownership.Ownership.PAGE
+    }
+    assert written_pages == set(), "the projector, not the CLIs, writes the pages' files"
+    assert (stored / legacy).read_bytes() == source.read_bytes(), "the projector removes it"
