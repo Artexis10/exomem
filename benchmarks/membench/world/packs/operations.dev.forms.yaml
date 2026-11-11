@@ -15,7 +15,8 @@
 # that carries no word of change. A withdrawal and a merger have no `unmarked` form: with no new
 # content to show, their only unmarked form would be an absence, which belongs to the `silent` level.
 #
-# A rule's `{scope}` is the context that the rule holds in. A statement's scope is a wrapper.
+# A rule's `{scope}` is the context that the rule holds in. A statement's scope is a wrapper. A probe's
+# `{where}` is the context that its key reads, and a probe whose key reads one gets a form that holds it.
 schema_version: 1
 pack: operations
 split: dev
@@ -132,8 +133,12 @@ forms:
   # --- probes: the task wording, which no artefact line may share ---
   - {id: probe-state-1, serves: [probe.state], text: "What is the {about} for {subject} right now?"}
   - {id: probe-state-2, serves: [probe.state], text: "Which thing is meant by {subject} today?"}
+  - {id: probe-state-3, serves: [probe.state], text: "What is the {about} for {subject} at {where} right now?"}
+  - {id: probe-state-4, serves: [probe.state], text: "Which {about} applies to {subject} for {where} today?"}
   - {id: probe-act-1, serves: [probe.act], text: "Prepare the next step for {subject}, which depends on its {about}."}
   - {id: probe-act-2, serves: [probe.act], text: "Prepare the next step that involves {subject}."}
+  - {id: probe-act-3, serves: [probe.act], text: "Prepare the next step for {subject} at {where}, which depends on its {about}."}
+  - {id: probe-act-4, serves: [probe.act], text: "Prepare the next step that involves {subject} for {where}, based on its {about}."}
   - {id: probe-premise-1, serves: [probe.premise], text: "Carry on with {subject} on the basis of the earlier setting for {about}."}
   - {id: probe-premise-2, serves: [probe.premise], text: "Carry on with {subject} as the earlier notes have it."}
   - {id: probe-stable-1, serves: [probe.stable], text: "Remind me of the {about} for {subject}."}

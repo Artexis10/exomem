@@ -69,8 +69,8 @@ with a probe that has no `contest` is refused before any session starts.
 A generated development project comes from the synthetic world. `projection.generate(root, seed)` in
 `epistemic/projection.py` writes the world with its keys under `root/world` and the project under
 `root/cases/epistemic`, with the `SPLIT.json` that names it as the dev project. Its sessions are the
-weeks of the world's timeline. A probe also holds its `family` and `planned_session`: it is asked in
-the first session from its planned one on whose files hold no string of its key. Its label is the
+weeks of the world's timeline. A probe also holds its `family`. It is asked in the session of its
+date, which the planner keeps free of the key's things. Its label is the
 dimension of its family in `benchmarks/membench/projections/exomem.yaml`, or the family's own key when
 the product ships no dimension. The report builds a row for each label, so a family key is a row of
 description. The project goes under a temporary root, never into the repository.

@@ -528,6 +528,12 @@ class _Renderer:
             return names[0]
         return " and ".join(n for n, _ in names), None
 
+    def context(self, thread: Thread, spec: Mapping[str, Any], at: date) -> dict[str, str]:
+        """The context that a probe's key reads, as the `where` slot that a form may fill: the name that
+        the documents use for it. A key that reads no context has no such slot."""
+        ref = spec["value"].get("where")
+        return {} if ref is None else {"where": self.reader.text(thread.resolve(ref), at)}
+
     def probes(self, documents: Mapping[str, Document]) -> list[Probe]:
         used: dict[str, set[str]] = {}
         for artefact in self.world.artefacts.values():
@@ -539,9 +545,13 @@ class _Renderer:
                 spec = key_spec(self.catalogue, thread, form)
                 at = thread.slots[spec["at"]]
                 subject, schema = self.subject(thread, spec, at)
-                fills = {"subject": subject} | ({} if schema is None else {"about": schema.label})
+                fills = (
+                    {"subject": subject}
+                    | ({} if schema is None else {"about": schema.label})
+                    | self.context(thread, spec, at)
+                )
                 item = f"probe {thread.id} {form}"
-                pool = self.bank.eligible(f"probe.{form}", None, fills, {"about"})
+                pool = self.bank.eligible(f"probe.{form}", None, fills, {"about", "where"})
                 free = [f for f in pool if f.id not in used.get(thread.id, set())]
                 if not free:
                     self.refuse(

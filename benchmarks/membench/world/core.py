@@ -35,18 +35,21 @@ from membench.ids import stable_id
 
 from .loader import CATALOGUE_DIR
 
-# Closed values that this module implements. `BOTH` is the step world that applies in either world;
+# Closed values that this module implements. `BOTH` is the step world that applies in either world,
+# `PLANTED` the one that carries a phenomenon and `MUTATION` the one that leaves it out;
 # `PERMANENT` is the volatility class whose value cannot change; `ASSERTED` and `REPORTED` are the
 # commitments that put a content forward as a fact or as another holder's words; `CHANCE` is the
 # rule shape that records the chance of an outcome.
 BOTH = "both"
+PLANTED = "planted"
+MUTATION = "mutation"
 PERMANENT = "permanent"
 ASSERTED = "asserted"
 REPORTED = "reported"
 CHANCE = "chance"
 
 # A step's own fields, which no operation declares as an argument.
-_STEP_FIELDS = ("op", "id", "world")
+STEP_FIELDS = ("op", "id", "world")
 
 
 class StepRefused(Exception):
@@ -395,7 +398,7 @@ class World:
         if step.get("world", BOTH) not in (BOTH, in_world):
             return None
         declared = self.vocabulary.operations[op]
-        args = {key: value for key, value in step.items() if key not in _STEP_FIELDS}
+        args = {key: value for key, value in step.items() if key not in STEP_FIELDS}
         for key in args:
             if key not in declared:
                 raise StepRefused("undeclared-argument", op, f"`{key}` is not an argument")

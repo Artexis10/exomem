@@ -165,6 +165,8 @@ def test_every_bound_role_meets_the_constraints_of_its_recipe() -> None:
                 assert held.schema.volatility == need.get("volatility", "durable"), where
                 if "of" in need:
                     assert held.entity == thread.roles[need["of"]], where
+                generator = held.schema.domain.generator
+                assert (generator == need["values"]) if "values" in need else generator != "holder"
             if need["is"] == "value":
                 target = thread.roles[need["of"]]
                 domain = (
@@ -172,7 +174,7 @@ def test_every_bound_role_meets_the_constraints_of_its_recipe() -> None:
                     if target in backbone.attributes
                     else backbone.events[target].type.domain
                 )
-                assert value in domain.values(), where
+                assert value in backbone.values(domain), where
             if need["is"] == "holder":
                 assert value in backbone.holders(), where  # never the user
             if need["is"] == "user":
@@ -295,4 +297,15 @@ def test_a_pack_whose_audience_is_drawn_from_things_that_make_no_statement_is_re
         raw["audiences"]["from"] = "service"
 
     with pytest.raises(PackRefused, match="audiences.*service"):
+        pack_without(edit)
+
+
+def test_a_pack_attribute_whose_values_are_drawn_from_things_that_make_no_statement_is_refused() -> (
+    None
+):
+    def edit(raw: dict[str, Any]) -> None:
+        owner = next(a for a in raw["entity_types"][2]["attributes"] if a["id"] == "owner")
+        owner["value"]["from"] = "service"
+
+    with pytest.raises(PackRefused, match="attribute owner.*service"):
         pack_without(edit)

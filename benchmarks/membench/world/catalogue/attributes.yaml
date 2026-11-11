@@ -179,6 +179,7 @@ role_constraints:
   within: "A context that contains this context."
   outside: "An audience or a context that the role does not belong to."
   volatility: "The volatility class that the attribute must have."
+  values: "The value generator that the attribute draws from. A role without it binds no attribute whose values are holders."
 
 # The parts of a recipe's key for one probe form. Each part is a reading, or a role taken as it is.
 key_parts:
@@ -331,3 +332,4 @@ name_spaces:
 value_generators:
   integer: "A whole number from `min` to `max`, both included."
   choice: "One of the listed `from` values."
+  holder: "One of the world's holders of the entity type `from`."

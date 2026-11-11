@@ -40,7 +40,7 @@ LEVELS = ("stated", "paraphrased", "unmarked")
 STATED, PARAPHRASED = LEVELS[:2]
 # The slots that a text may hold. A document frame takes `by` and `date`.
 SLOTS = frozenset(
-    "by subject about value quoting as scope old name former holder absorbed audience until text".split()
+    "by subject about value quoting as scope old name former holder absorbed audience until text where".split()
 )
 FRAME_SLOTS = frozenset({"by", "date"})
 # The families of what a form serves, each with the registry that its item is read from.

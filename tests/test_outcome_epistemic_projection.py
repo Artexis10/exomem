@@ -12,6 +12,7 @@ session, and a family key as a probe's label.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import hashlib
 import json
@@ -26,6 +27,7 @@ import pytest
 from benchmarks.membench.outcome.epistemic import cases, projection
 from benchmarks.membench.world import core
 from benchmarks.membench.world.core import Vocabulary
+from benchmarks.membench.world.keys import key_spec
 from benchmarks.membench.world.loader import load_catalogue
 from benchmarks.membench.world.pack import PACKS_DIR, load_pack
 from benchmarks.membench.world.planner import plan_world
@@ -122,30 +124,78 @@ def test_two_runs_give_the_same_project_and_the_manifest_pins_the_projection_fil
 # -- what the projection does that the case check alone would refuse ----------------------------------
 
 
-def test_a_probe_whose_planned_week_names_its_answer_is_asked_in_a_later_session() -> None:
-    _, _, record = built(1)
-    files = {s["session"]: s["files"] for s in record["sessions"]}
-    slid = [p for p in record["probes"] if p["session"] > p["planned_session"]]
-    assert slid
-    for probe in slid:
-        key = probe["key"]
-        strings = [s for s in (key["value"], *key["accept"], *key["traps"]) if s]
-        planned = files[probe["planned_session"]].values()
-        # In its planned week a file holds a string of the key: the case check would refuse it there.
-        assert any(cases.occurs(s, t) for s in strings if len(s) >= 4 for t in planned)
-        assert not any(
-            cases.occurs(s, t) for s in strings for t in files[probe["session"]].values()
-        )
+def test_every_probe_plays_in_the_session_that_the_planner_chose() -> None:
+    for seed in (
+        1,
+        2,
+        7,
+    ):  # on the first commit of this projection, seed 1 shifted and seed 2 refused
+        _, rendering, record = built(seed)
+        planned = {f"{k.thread}.{k.form}": projection.session_of(k.at) for k in rendering.keys}
+        files = {s["session"]: s["files"] for s in record["sessions"]}
+        for probe in record["probes"]:
+            assert probe["session"] == planned[probe["probe_id"]], (seed, probe["probe_id"])
+            key = probe["key"]
+            strings = [s for s in (key["value"], *key["accept"], *key["traps"]) if s]
+            held = [
+                t
+                for t in files[probe["session"]].values()
+                if any(cases.occurs(s, t) for s in strings if len(s) >= cases.MIN_SUBSTRING_CHARS)
+            ]
+            assert not held, (seed, probe["probe_id"])
 
 
-def test_a_world_with_a_probe_that_no_session_can_hold_is_refused(tmp_path: Path) -> None:
+def test_a_session_that_holds_a_string_of_a_probes_key_is_refused() -> None:
+    plan, rendering, record = built(7)
+    probe = next(p for p in record["probes"] if p["key"]["value"] and len(p["key"]["value"]) >= 4)
+    leaky = next(  # a document of another thread, dated in the probe's session
+        d
+        for d in rendering.documents.values()
+        if projection.session_of(plan.world().artefacts[d.artefact].at) == probe["session"]
+        and not d.artefact.startswith(probe["probe_id"].rsplit(".", 1)[0])
+    )
+    documents = {
+        **rendering.documents,
+        leaky.artefact: dataclasses.replace(leaky, text=f"{leaky.text} {probe['key']['value']}"),
+    }
     with pytest.raises(projection.ProjectionRefused) as refused:
-        projection.generate(
-            tmp_path, 2
-        )  # its last-week probe names a person who writes in every later week
-    assert {r.code for r in refused.value.refusals} == {"no-free-session"}
-    assert "probe dev-00.t17 whose" in str(refused.value)
-    assert not (tmp_path / "cases").exists()  # a refused world writes no project
+        projection.project(
+            plan, dataclasses.replace(rendering, documents=documents), CATALOGUE, DATA
+        )
+    thread, form = probe["probe_id"].rsplit(".", 1)
+    assert f"session-holds-key-string: probe {thread} {form}" in str(refused.value)
+
+
+def test_an_owner_or_seat_role_binds_an_attribute_whose_values_are_people() -> None:
+    for seed in (7, 3):
+        plan, rendering, _ = built(seed)
+        threads = [
+            t for t in plan.threads if t.recipe in ("entities.owner-change", "entities.role-change")
+        ]
+        assert threads
+        for thread in threads:
+            roles = (
+                ("owner",) if thread.recipe == "entities.owner-change" else ("seat", "next_seat")
+            )
+            for role in roles:
+                schema = plan.backbone.attributes[thread.roles[role]].schema
+                assert schema.domain.generator == "holder", (thread.id, schema.label)
+            for statement in plan.thread_world(thread, thread.variant).statements.values():
+                person = plan.backbone.entities[statement.value]
+                assert person.type == "person", (thread.id, person.name)
+                assert person.name in rendering.documents[f"{statement.id}.doc"].text
+
+
+def test_a_scope_probe_names_the_context_that_its_key_reads() -> None:
+    for seed in (7, 3):
+        plan, _, record = built(seed)
+        scoped = [p for p in record["probes"] if p["family"] == "scope"]
+        assert scoped
+        for probe in scoped:
+            thread = plan.thread(probe["change_id"])
+            form = probe["probe_id"].rsplit(".", 1)[1]
+            context = key_spec(CATALOGUE, thread, form)["value"]["where"]
+            assert cases.occurs(plan.backbone.context_names[thread.roles[context]], probe["task"])
 
 
 def test_a_work_task_that_holds_a_key_value_is_refused() -> None:

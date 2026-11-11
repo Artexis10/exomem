@@ -21,15 +21,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import manifest
-from .core import World
+from .core import MUTATION, World
 from .loader import Catalogue, Refusal
 from .mechanisms import Oracle
-from .planner import MUTATION, Plan, Thread
 from .proof import Basis, NoBasis, Prover, artefacts
 from .record import NotUnique, distinct
+
+if TYPE_CHECKING:  # the planner reads keys, so keys reads the planner's types for annotations only
+    from .planner import Plan, Thread
 
 # The operation of a document that states a norm besides a rule: who may see a fact.
 _RESTRICT = "restrict"

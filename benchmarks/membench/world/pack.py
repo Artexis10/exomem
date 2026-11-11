@@ -48,7 +48,9 @@ _FIELDS = {
     "user": ("names",),
 }
 # The arguments that each value generator needs.
-_GENERATOR_ARGUMENTS = {"integer": ("min", "max"), "choice": ("from",)}
+_GENERATOR_ARGUMENTS = {"integer": ("min", "max"), "choice": ("from",), "holder": ("from",)}
+# The value generator whose values are a world's holders. Their ids exist only once a world is built.
+HOLDERS = "holder"
 
 
 class PackRefused(Exception):
@@ -67,8 +69,11 @@ class Domain:
     arguments: Mapping[str, Any]
 
     def values(self) -> tuple[Any, ...]:
+        """The values that the pack fixes. A holder domain fixes none: ``Backbone.values`` draws them."""
         if self.generator == "integer":
             return tuple(range(self.arguments["min"], self.arguments["max"] + 1))
+        if self.generator == HOLDERS:
+            raise ValueError("the values of a holder domain are the holders of a world")
         return tuple(self.arguments["from"])
 
 
@@ -181,6 +186,8 @@ class _Checker:
             and arguments["min"] <= arguments["max"]
         ):
             self.refuse("invalid-value", item, "integer takes whole numbers with min up to max")
+        elif generator == HOLDERS and not isinstance(arguments["from"], str):
+            self.refuse("invalid-value", item, "holder takes the id of an entity type")
         elif generator == "choice" and not (
             isinstance(arguments["from"], list)
             and len(set(arguments["from"])) == len(arguments["from"]) > 0
@@ -204,6 +211,16 @@ class _Checker:
         types = {t.id: t for t in entity_types}
         if len(types) != len(entity_types):
             self.refuse("duplicate-id", "entity_types", "an entity type id is used twice")
+        for kind in entity_types:
+            for schema in kind.attributes:
+                if schema.domain.generator == HOLDERS:
+                    source = types.get(schema.domain.arguments["from"])
+                    if source is None or not source.holder:
+                        self.refuse(
+                            "not-a-holder",
+                            f"entity type {kind.id}, attribute {schema.id}",
+                            f"`{schema.domain.arguments['from']}` is no entity type whose entities make statements",
+                        )
         event_types = tuple(self.event_type(e) for e in raw.get("event_types") or ())
         if len({t.id for t in event_types}) != len(event_types):
             self.refuse("duplicate-id", "event_types", "an event type id is used twice")

@@ -11,7 +11,8 @@ words each key for a judge that reads text, and labels each probe with the dimen
 * **Probes.** A probe belongs to the session of its date. Its task is the renderer's task, plus, for
   a premise probe, one line that states the stale state, because the case check requires the premise
   in the task. Every other string of the key stays out of the task, the probe's files and its
-  session's files, by the case check's leak rule.
+  session's files, by the case check's leak rule. The planner keeps a probe's session free of the key's
+  things, so the projection only checks that, and refuses a world where a session holds a string.
 * **Keys.** The oracle's answers are ids. The projection names each in words: an entity by its names
   that the task does not use, a statement by the sentence that its document renders, a set by its
   members. A key whose answer is no single value carries ``value: null`` and a rubric, which every
@@ -39,7 +40,7 @@ from typing import Any
 
 import yaml
 
-from membench.clock import EPOCH
+from membench.clock import week_of
 from membench.ids import child_seed
 
 from ...world import core
@@ -99,7 +100,7 @@ def round_spec(catalogue: Catalogue, data: Mapping[str, Any], **dials: Any) -> R
 
 def session_of(day: date) -> int:
     """The session of a date: the week of the world's timeline that it falls in."""
-    return (day - EPOCH).days // 7
+    return week_of(day)
 
 
 class _Words:
@@ -289,23 +290,21 @@ def project(
             detail = f"the work task of session {leaked} holds a string of its key"
             refusals.append(Refusal("work-task-holds-key-string", about, detail))
             continue
-        planned = session_of(key.at)
-        asked = _free_session(plan, thread, strings, task, files, planned)
-        if asked is None:
+        asked = session_of(key.at)
+        if any(occurs(s, task) for s in strings):
             refusals.append(
-                Refusal(
-                    "no-free-session",
-                    about,
-                    "its task, or every session from its date on, holds a string of its key",
-                )
+                Refusal("task-holds-key-string", about, "its task holds a string of its key")
             )
+            continue
+        if any(occurs(s, text) for s in strings for text in files.get(asked, {}).values()):
+            detail = f"a file of session {asked} holds a string of its key"
+            refusals.append(Refusal("session-holds-key-string", about, detail))
             continue
         stable = key.form == RECALL_FORM
         probes.append(
             {
                 "probe_id": f"{thread.id}.{key.form}",
                 "session": asked,
-                "planned_session": planned,
                 "task": task,
                 "files": {},
                 "dimension": STABLE if stable else _dimension(data, entry.family),
@@ -317,33 +316,6 @@ def project(
     if refusals:
         raise ProjectionRefused(refusals)
     return {"sessions": sessions, "probes": probes}
-
-
-def _free_session(
-    plan: Plan,
-    thread: Thread,
-    strings: list[str],
-    task: str,
-    files: Mapping[int, Mapping[str, str]],
-    planned: int,
-) -> int | None:
-    """The session that a probe is asked in: the first from its planned one on whose files hold no string of its
-    key, or ``None`` when its task holds one or no session is free. Other threads' documents and the backbone's
-    name the same people and things, so a planned week can hold a key string by chance. The probe is the
-    thread's last moment and the thread's attributes are reserved, so the key reads the same in a later session.
-    A thread that binds an attribute with a validity window is asked in its planned session only, because
-    its key depends on the date."""
-    if any(occurs(s, task) for s in strings):
-        return None
-    windowed = any(
-        plan.backbone.attributes[ref].schema.volatility in plan.pack.windows
-        for ref in thread.roles.values()
-        if isinstance(ref, str) and ref in plan.backbone.attributes
-    )
-    for session in range(planned, planned + 1 if windowed else plan.spec.sessions + 1):
-        if not any(occurs(s, text) for s in strings for text in files.get(session, {}).values()):
-            return session
-    return None
 
 
 def _is_one(value: Any) -> bool:

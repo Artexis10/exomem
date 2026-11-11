@@ -11,12 +11,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from random import Random
+from typing import Any
 
 from membench.clock import week_date
 
 from .core import World
 from .names import NamePool
-from .pack import AttributeSchema, EventType, Pack
+from .pack import HOLDERS, AttributeSchema, Domain, EventType, Pack
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,15 @@ class Backbone:
     def things(self) -> list[str]:
         """The entities that statements are about and that make none."""
         return sorted(i for i, e in self.entities.items() if not e.holder)
+
+    def values(self, domain: Domain) -> tuple[Any, ...]:
+        """The values that a domain gives in this world: the holders of the domain's entity type for a
+        holder domain, and the values that the pack fixes for any other."""
+        if domain.generator == HOLDERS:
+            return tuple(
+                i for i, e in sorted(self.entities.items()) if e.type == domain.arguments["from"]
+            )
+        return domain.values()
 
     def attributes_of(self, entity: str) -> list[str]:
         return sorted(i for i, a in self.attributes.items() if a.entity == entity)

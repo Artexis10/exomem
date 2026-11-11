@@ -52,6 +52,7 @@ _CLOSED_ARGUMENT = {
     "mode": "defeat_modes",
     "shape": "rule_shapes",
     "volatility": "volatility_classes",
+    "values": "value_generators",
 }
 _REGISTRY_ARGUMENT = {"kind": "statement_kinds", "hedge": "hedges"}
 SLOT_ARGUMENTS = ("at", "until", "when")

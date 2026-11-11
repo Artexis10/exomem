@@ -44,6 +44,8 @@ entity_types:
       - {id: team-size, label: "people on the team", paraphrases: ["headcount"], volatility: slow, value: {generator: integer, min: 2, max: 30}}
       - {id: queue-depth, label: "jobs waiting in the queue", paraphrases: ["backlog of jobs"], volatility: transient, value: {generator: integer, min: 0, max: 99}}
       - {id: launch-year, label: "year of the first release", paraphrases: ["when it first shipped"], volatility: permanent, value: {generator: integer, min: 2008, max: 2024}}
+      - {id: owner, label: "owning engineer", paraphrases: ["engineer in charge"], volatility: durable, value: {generator: holder, from: person}}
+      - {id: on-call, label: "engineer on call", paraphrases: ["person carrying the pager"], volatility: durable, value: {generator: holder, from: person}}
   - id: site
     holder: false
     names: city
@@ -52,6 +54,7 @@ entity_types:
       - {id: capacity, label: "seats available", paraphrases: ["number of desks"], volatility: durable, value: {generator: integer, min: 10, max: 200}}
       - {id: cleaning-day, label: "day of the weekly cleaning", paraphrases: ["weekday for cleaning"], volatility: durable, value: {generator: choice, from: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]}}
       - {id: visitor-limit, label: "visitors allowed at once", paraphrases: ["guest cap"], volatility: durable, value: {generator: integer, min: 1, max: 20}}
+      - {id: site-lead, label: "site lead", paraphrases: ["person who runs the site"], volatility: durable, value: {generator: holder, from: person}}
 
 # Things that happen. Each has a chance that a document may state, drawn from `value`.
 event_types:

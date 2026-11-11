@@ -11,6 +11,10 @@ session timeline. The planner decides three things and records each in the plan:
 * **Placement.** Each slot takes a week. A recipe that binds an attribute of a volatility class with a
   validity window places its probe within one session of the moment before it and every other
   moment beyond the window, so that an observation is current at the probe in one world only.
+* **Session reservation.** A probe's session is reserved against the key's value, traps and premise:
+  no other thread's document and no stable fact of that session names a thing that the key holds, and
+  a thread whose documents name such a thing in the session of another probe is bound or placed
+  again. The thread that cannot be planted so is dropped, and the drop says why.
 
 A thread has two worlds. ``Plan.thread_world`` builds one of them and ``Plan.pair`` both: the
 backbone plus that thread alone, planted and left out. ``Plan.world`` builds the shared world that a
@@ -21,6 +25,7 @@ read a thread's own world, because the carry rule reads every statement of the w
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -28,22 +33,23 @@ from pathlib import Path
 from random import Random
 from typing import Any
 
-from membench.clock import week_date
+from membench.clock import week_date, week_of
 from membench.ids import child_seed
 
 from . import manifest
 from .backbone import Backbone, build_backbone
-from .core import Vocabulary, World
+from .core import BOTH, MUTATION, PLANTED, STEP_FIELDS, Vocabulary, World
+from .keys import KeyRefused, write_key
 from .loader import SLOT_ARGUMENTS, WORD_ARGUMENTS, Catalogue, Refusal
+from .mechanisms import Oracle
 from .names import NamePool
-from .pack import Domain, Pack
+from .pack import HOLDERS, Pack
 
 # Closed values that the planner implements: the nine role kinds and the constraints that it reads,
 # the step world that applies in either world, and the volatility class of an attribute that no role
 # constrains (the class that holds a value until a recorded change).
 HOLDER, USER, ENTITY, ATTRIBUTE, VALUE = "holder", "user", "entity", "attribute", "value"
 NAME, CONTEXT, EVENT, AUDIENCE = "name", "context", "event", "audience"
-PLANTED, MUTATION = "planted", "mutation"
 DURABLE = "durable"
 # The operations that make a statement, a document or an announced operation, and so need an id of
 # their own.
@@ -51,7 +57,7 @@ _MAKES = ("state", "rule", "copy", "withdraw", "correct", "name", "merge", "tell
 # The operation that gives an entity a name, and the argument that holds the name.
 _NAMES, _NAME_ARGUMENT = "name", "name"
 
-# Draws of a whole binding that the planner makes before it drops the recipe.
+# Draws of a whole binding and placement that the planner makes before it drops the recipe.
 ATTEMPTS = 16
 # Days of a week that a thread's moments may fall on: Monday to Friday.
 _WORKDAYS = 5
@@ -151,7 +157,7 @@ class Plan:
 
     def validity(self) -> dict[str, timedelta]:
         """How long an observation of each volatility class with a window stays current."""
-        return {cls: timedelta(days=days) for cls, days in self.pack.windows.items()}
+        return validity(self.pack)
 
     def world(self, variants: Mapping[str, str] | None = None) -> World:
         """The shared world: the backbone, every thread in its chosen form and the stable facts."""
@@ -168,49 +174,9 @@ class Plan:
     def _build(
         self, threads: Sequence[Thread], variants: Mapping[str, str], facts: Iterable[Fact]
     ) -> World:
-        world = World(self.name, self.vocabulary)
-        self.backbone.declare(world)
-        for thread in threads:
-            variant = variants.get(thread.id, thread.variant)
-            for step in thread.steps:
-                self._file(world, world.apply(step, variant))
-        for fact in facts:
-            world.op_set(None, target=fact.attribute, value=fact.value, at=week_date(0))
-            self._file(
-                world,
-                world.op_state(
-                    fact.id,
-                    by=fact.by,
-                    about=fact.attribute,
-                    value=fact.value,
-                    kind=self.pack.fact_kind,
-                    at=fact.at,
-                ),
-            )
-        return world
-
-    def _file(self, world: World, made: str | None) -> None:
-        """Put each statement into a document of its own, in the pack's kind for its statement kind,
-        and announce each operation in a document of its own, in the pack's kind for the operation."""
-        if made is None:
-            return
-        if made in world.statements:
-            statement = world.statements[made]
-            kind = self.pack.artefact_kind(statement.kind)
-            world.add_artefact(f"{made}.doc", statement.at, [made], kind, statement.by)
-        elif made in world.operations:
-            name, record = world.operations[made]
-            by = getattr(record, "by", None)
-            if name == "tell":  # a statement is told by the holder who made it
-                told = world.statements.get(record.item)
-                by = told.by if told is not None else None
-            world.add_artefact(
-                f"{made}.doc",
-                record.at,
-                kind=self.pack.operation_kind(name),
-                by=by,
-                announces=made,
-            )
+        return build_world(
+            self.name, self.vocabulary, self.backbone, self.pack, threads, variants, facts
+        )
 
     def write(
         self,
@@ -274,6 +240,68 @@ class Plan:
         return record if rendering is None else {**record, "rendering": dict(rendering)}
 
 
+def validity(pack: Pack) -> dict[str, timedelta]:
+    return {cls: timedelta(days=days) for cls, days in pack.windows.items()}
+
+
+def build_world(
+    name: str,
+    vocabulary: Vocabulary,
+    backbone: Backbone,
+    pack: Pack,
+    threads: Sequence[Thread],
+    variants: Mapping[str, str],
+    facts: Iterable[Fact],
+) -> World:
+    """The backbone, each thread in the form that ``variants`` gives it (its own when it is not
+    there) and the stable facts."""
+    world = World(name, vocabulary)
+    backbone.declare(world)
+    for thread in threads:
+        variant = variants.get(thread.id, thread.variant)
+        for step in thread.steps:
+            _file(world, pack, world.apply(step, variant))
+    for fact in facts:
+        world.op_set(None, target=fact.attribute, value=fact.value, at=week_date(0))
+        _file(
+            world,
+            pack,
+            world.op_state(
+                fact.id,
+                by=fact.by,
+                about=fact.attribute,
+                value=fact.value,
+                kind=pack.fact_kind,
+                at=fact.at,
+            ),
+        )
+    return world
+
+
+def _file(world: World, pack: Pack, made: str | None) -> None:
+    """Put each statement into a document of its own, in the pack's kind for its statement kind,
+    and announce each operation in a document of its own, in the pack's kind for the operation."""
+    if made is None:
+        return
+    if made in world.statements:
+        statement = world.statements[made]
+        kind = pack.artefact_kind(statement.kind)
+        world.add_artefact(f"{made}.doc", statement.at, [made], kind, statement.by)
+    elif made in world.operations:
+        name, record = world.operations[made]
+        by = getattr(record, "by", None)
+        if name == "tell":  # a statement is told by the holder who made it
+            told = world.statements.get(record.item)
+            by = told.by if told is not None else None
+        world.add_artefact(
+            f"{made}.doc",
+            record.at,
+            kind=pack.operation_kind(name),
+            by=by,
+            announces=made,
+        )
+
+
 def plan_world(
     spec: RoundSpec,
     catalogue: Catalogue,
@@ -296,7 +324,7 @@ def plan_world(
     seed = child_seed(master_seed, f"world:{split}", index)
     pool = NamePool(split, vocabulary.splits)
     backbone = build_backbone(pack, name, pool, Random(child_seed(seed, "backbone", 0)))
-    planner = _Planner(spec, catalogue, pack, backbone, pool, name, seed)
+    planner = _Planner(spec, catalogue, pack, vocabulary, backbone, pool, name, seed)
     threads, drops = planner.plant()
     return Plan(
         spec,
@@ -313,21 +341,57 @@ def plan_world(
     )
 
 
+@dataclass(frozen=True)
+class _Footprint:
+    """What something puts into each session: the things that its documents name, and the things that
+    the keys of its probes hold. A thing is the id of an entity, a context or an event, or a value as text."""
+
+    named: Mapping[int, frozenset[str]] = field(default_factory=dict)
+    asked: Mapping[int, frozenset[str]] = field(default_factory=dict)
+
+
+class _Ledger:
+    """The footprints of what the planner has planted so far, by session."""
+
+    def __init__(self) -> None:
+        self.named: dict[int, set[str]] = defaultdict(set)
+        self.asked: dict[int, set[str]] = defaultdict(set)
+
+    def clash(self, mine: _Footprint) -> str | None:
+        """Where a footprint meets the ledger: a document that names what a probe of its session holds,
+        or a probe that holds what a document of its session names. ``None`` when it meets nothing."""
+        for session, things in sorted(mine.named.items()):
+            if hit := things & self.asked[session]:
+                return f"session {session}: a document names {sorted(hit)[0]}, which a probe asked there holds"
+        for session, things in sorted(mine.asked.items()):
+            if hit := things & self.named[session]:
+                return f"session {session}: a probe asked there holds {sorted(hit)[0]}, which a document there names"
+        return None
+
+    def add(self, mine: _Footprint) -> None:
+        for session, things in mine.named.items():
+            self.named[session] |= things
+        for session, things in mine.asked.items():
+            self.asked[session] |= things
+
+
 class _Planner:
     def __init__(
         self,
         spec: RoundSpec,
         catalogue: Catalogue,
         pack: Pack,
+        vocabulary: Vocabulary,
         backbone: Backbone,
         pool: NamePool,
         name: str,
         seed: int,
     ):
-        self.spec, self.catalogue, self.pack = spec, catalogue, pack
+        self.spec, self.catalogue, self.pack, self.vocabulary = spec, catalogue, pack, vocabulary
         self.backbone, self.pool, self.name, self.seed = backbone, pool, name, seed
         self.reserved: dict[str, str] = {}  # a reserved thing, and the thread that holds it
         self.threads: list[Thread] = []
+        self.ledger = _Ledger()
 
     # -- planting ------------------------------------------------------------------------------
 
@@ -340,56 +404,69 @@ class _Planner:
             thread_id = f"{self.name}.t{n:02d}"
             rng = Random(child_seed(self.seed, "thread", n))
             try:
-                roles = self.bind_with_attempts(recipe, rng)
-                slots = self.place(recipe, roles, rng)
+                thread, footprint = self.plant_with_attempts(
+                    thread_id, entry_id, recipe_id, recipe, rng
+                )
             except _Cannot as cannot:
                 drops.append(Drop(entry_id, cannot.code, cannot.detail))
+                continue
+            self.reserve(thread)
+            self.ledger.add(footprint)
+            self.threads.append(thread)
+        return tuple(self.threads), tuple(drops)
+
+    def plant_with_attempts(
+        self, thread_id: str, entry_id: str, recipe_id: str, recipe: Mapping[str, Any], rng: Random
+    ) -> tuple[Thread, _Footprint]:
+        """One thread that binds its roles and takes its slots, and whose footprint meets nothing in the
+        ledger. A draw that cannot bind a role or that meets the ledger is made again, ``ATTEMPTS`` times."""
+        entry = self.catalogue.entries[entry_id]
+        failure = _Cannot("unbound-role", "no attempt was made")
+        for _ in range(ATTEMPTS):
+            try:
+                roles = self.bind(recipe, rng)
+                slots = self.place(recipe, roles, rng)
+            except _Cannot as cannot:
+                if cannot.code != "unbound-role":
+                    raise
+                failure = cannot
                 continue
             twin_world = (recipe.get("twin") or {}).get("world")
             if entry.twin_of is not None:
                 variant = MUTATION if twin_world == MUTATION else PLANTED
             else:
                 variant = MUTATION if rng.random() < self.spec.twins else PLANTED
-            reserved = self.reserve(thread_id, recipe, roles)
             steps, step_ids = self.resolve_steps(thread_id, recipe, roles, slots)
-            self.threads.append(
-                Thread(
-                    thread_id,
-                    entry_id,
-                    recipe_id,
-                    entry.family,
-                    variant,
-                    roles,
-                    slots,
-                    steps,
-                    reserved,
-                    step_ids,
+            held = tuple(
+                sorted(
+                    roles[role]
+                    for role, need in recipe["needs"].items()
+                    if need["is"] in (ATTRIBUTE, ENTITY, EVENT)
                 )
             )
-        return tuple(self.threads), tuple(drops)
+            thread = Thread(
+                thread_id,
+                entry_id,
+                recipe_id,
+                entry.family,
+                variant,
+                roles,
+                slots,
+                steps,
+                held,
+                step_ids,
+            )
+            footprint = self.footprint(thread)
+            if (clash := self.ledger.clash(footprint)) is None:
+                return thread, footprint
+            failure = _Cannot("session-clash", clash)
+        raise failure
 
-    def reserve(
-        self, thread_id: str, recipe: Mapping[str, Any], roles: Mapping[str, Any]
-    ) -> tuple[str, ...]:
-        held = sorted(
-            roles[role]
-            for role, need in recipe["needs"].items()
-            if need["is"] in (ATTRIBUTE, ENTITY, EVENT)
-        )
-        for ref in held:
-            self.reserved[ref] = thread_id
-        return tuple(held)
+    def reserve(self, thread: Thread) -> None:
+        for ref in thread.reserved:
+            self.reserved[ref] = thread.id
 
     # -- binding -------------------------------------------------------------------------------
-
-    def bind_with_attempts(self, recipe: Mapping[str, Any], rng: Random) -> dict[str, Any]:
-        failure = _Cannot("unbound-role", "no attempt was made")
-        for _ in range(ATTEMPTS):
-            try:
-                return self.bind(recipe, rng)
-            except _Cannot as cannot:
-                failure = cannot
-        raise failure
 
     def bind(self, recipe: Mapping[str, Any], rng: Random) -> dict[str, Any]:
         needs = recipe["needs"]
@@ -420,11 +497,10 @@ class _Planner:
         if kind == NAME:
             return self.pick_name(role, need, bound, introduced, rng)
         if kind == VALUE:
-            domain = self.domain_of(bound.get(need.get("of")))
             avoid = {bound[r] for r in bound if needs[r]["is"] == VALUE}
             if need.get("differs_from") in bound:
                 avoid.add(bound[need["differs_from"]])
-            options = [v for v in (domain.values() if domain else ()) if v not in avoid]
+            options = [v for v in self.values_of(bound.get(need.get("of"))) if v not in avoid]
         elif kind == HOLDER:
             options = [h for h in self.backbone.holders() if h not in taken]
             outside = bound.get(need.get("outside"))
@@ -443,6 +519,7 @@ class _Planner:
                 if self.backbone.attributes[a].schema.volatility == volatility
                 and (owner is None or self.backbone.attributes[a].entity == owner)
                 and a not in unavailable
+                and self.takes(self.backbone.attributes[a].schema.domain.generator, need)
             ]
         elif kind == CONTEXT:
             options = self.context_options(role, need, needs, bound, taken)
@@ -454,12 +531,20 @@ class _Planner:
             raise _Cannot("unbound-role", f"role {role}: no free {kind} meets its constraints")
         return options[rng.randrange(len(options))]
 
-    def domain_of(self, ref: Any) -> Domain | None:
+    @staticmethod
+    def takes(generator: str, need: Mapping[str, Any]) -> bool:
+        """Whether an attribute whose values come from ``generator`` meets a role's `values` constraint.
+        A role that sets none binds no attribute of holders: a recipe that compares plain values would
+        otherwise read people as numbers or words."""
+        return generator == need["values"] if "values" in need else generator != HOLDERS
+
+    def values_of(self, ref: Any) -> tuple[Any, ...]:
+        """The values that an attribute or an event takes in this world."""
         if ref in self.backbone.attributes:
-            return self.backbone.attributes[ref].schema.domain
+            return self.backbone.values(self.backbone.attributes[ref].schema.domain)
         if ref in self.backbone.events:
-            return self.backbone.events[ref].type.domain
-        return None
+            return self.backbone.values(self.backbone.events[ref].type.domain)
+        return ()
 
     def pick_name(
         self,
@@ -534,6 +619,58 @@ class _Planner:
             placed[slot] = week_date(week, day)
         return placed
 
+    # -- footprints ----------------------------------------------------------------------------
+
+    def footprint(self, thread: Thread) -> _Footprint:
+        """What a thread puts into each session. A document of a step that applies in the thread's world
+        names every thing among the step's arguments, and among those of a statement that it refers to, so
+        that a correction names the content that it replaces. A probe's key holds its value, traps and
+        premise, read in the thread's own world."""
+        world = build_world(self.name, self.vocabulary, self.backbone, self.pack, (thread,), {}, ())
+        steps = {s["id"]: s for s in thread.steps if "id" in s}
+        named: dict[int, set[str]] = defaultdict(set)
+        for step in thread.steps:
+            if step["op"] in _MAKES and step.get("world", BOTH) in (BOTH, thread.variant):
+                refs = [r for v in step.values() for r in (v if isinstance(v, list) else [v])]
+                for source in (
+                    step,
+                    *(steps[r] for r in refs if isinstance(r, str) and r in steps),
+                ):
+                    named[week_of(step["at"])] |= self.things(source)
+        oracle = Oracle(world, validity(self.pack))
+        asked: dict[int, set[str]] = defaultdict(set)
+        for form in self.catalogue.entries[thread.entry].probes:
+            try:
+                key = write_key(
+                    oracle, thread, self.catalogue, form, twin=thread.variant == MUTATION
+                )
+            except KeyRefused:  # the key writer refuses it again when the keys are written
+                continue
+            held = [key.value, *key.traps, key.premise]
+            ids = world.statements.keys() | world.operations.keys() | world.attributes.keys()
+            asked[week_of(key.at)] |= {
+                t for leaf in _leaves(held) if leaf not in ids for t in self.things(leaf)
+            }
+        return _Footprint(
+            {s: frozenset(t) for s, t in named.items()}, {s: frozenset(t) for s, t in asked.items()}
+        )
+
+    def things(self, source: Any) -> set[str]:
+        """The things that a step's arguments or a value name: an attribute names the entity that it
+        belongs to, an audience its members, and anything else, a date or a word argument aside, itself as text."""
+        if isinstance(source, Mapping):
+            skipped = (*STEP_FIELDS, *SLOT_ARGUMENTS, *WORD_ARGUMENTS)
+            return {t for arg, v in source.items() if arg not in skipped for t in self.things(v)}
+        found: set[str] = set()
+        for leaf in _leaves(source):
+            if leaf in self.backbone.attributes:
+                found.add(self.backbone.attributes[leaf].entity)
+            elif leaf in self.backbone.audiences:
+                found |= set(self.backbone.audiences[leaf])
+            elif leaf is not None and not isinstance(leaf, bool | date):
+                found.add(str(leaf))
+        return found
+
     # -- resolving -----------------------------------------------------------------------------
 
     def resolve_steps(
@@ -564,25 +701,39 @@ class _Planner:
     # -- the backbone's own statements -----------------------------------------------------------
 
     def facts(self) -> tuple[Fact, ...]:
-        """A stable fact for a share of the attributes that no thread reserved."""
+        """A stable fact for a share of the attributes that no thread reserved. A fact is drawn again when
+        it names what a probe of its session holds, and left out when no draw is clear of the ledger."""
         rng = Random(child_seed(self.seed, "facts", 0))
         holders = self.backbone.holders()
         facts = []
         for attribute in sorted(self.backbone.attributes):
             if attribute in self.reserved or rng.random() >= self.pack.fact_share:
                 continue
-            values = self.backbone.attributes[attribute].schema.domain.values()
-            week = 1 + rng.randrange(self.spec.sessions)
-            facts.append(
-                Fact(
+            values = self.values_of(attribute)
+            for _ in range(ATTEMPTS):
+                week = 1 + rng.randrange(self.spec.sessions)
+                fact = Fact(
                     f"{attribute}.fact",
                     attribute,
                     values[rng.randrange(len(values))],
                     holders[rng.randrange(len(holders))],
                     week_date(week, rng.randrange(_WORKDAYS)),
                 )
-            )
+                mine = _Footprint({week: frozenset(self.things([fact.by, attribute, fact.value]))})
+                if self.ledger.clash(mine) is None:
+                    self.ledger.add(mine)
+                    facts.append(fact)
+                    break
         return tuple(facts)
+
+
+def _leaves(value: Any) -> Iterable[Any]:
+    """The members of a value that is no list, however deeply lists nest."""
+    if isinstance(value, list | tuple):
+        for member in value:
+            yield from _leaves(member)
+    else:
+        yield value
 
 
 def _dependency_order(needs: Mapping[str, Any]) -> list[str]:
