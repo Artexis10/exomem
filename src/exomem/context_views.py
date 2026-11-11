@@ -58,6 +58,7 @@ from . import (
     working_set,
     working_set_conversation,
     working_set_index,
+    working_set_marks,
     working_set_resolve,
     working_set_runtime,
     working_set_state,
@@ -432,6 +433,9 @@ class View:
     state_available: bool = True
     #: Profiles expose only truncation and notice markers; maps and warming omit this field.
     missing: tuple[dict[str, Any], ...] | None = None
+    #: `unknown` on a profile whose display marks could not read their edges, as a packet's
+    #: `generation` reports it; None otherwise. It says nothing about any page.
+    display_edges: str | None = None
 
 
 def _recency(activity: str) -> tuple[int, object]:
@@ -874,12 +878,16 @@ def _compile_profile(prepared: _Prepared) -> View:
         for section in PROFILE_SECTIONS
         for item in packet[section]
     )
-    generation = _digest(json.dumps([row.item() for row in rows], sort_keys=True))
+    # The packet's own edge state, so a profile and a packet never disagree on it.
+    edges = packet["generation"].get(working_set_marks.GENERATION_KEY)
+    # The generation names the response, so a response that says its edges are unknown has its own.
+    generation = _digest(json.dumps([[row.item() for row in rows], edges], sort_keys=True))
     # A losing build cannot publish lines from an obsolete catalogue state.
     if catalogue.token() != token:
         return _abstention(prepared, INDEX_WARMING)
     return View(prepared.ref, READY, generation, stale, rows,
-                missing=tuple(entry for entry in missing if entry.get("reason") == MISSING_TRUNCATED))
+                missing=tuple(entry for entry in missing if entry.get("reason") == MISSING_TRUNCATED),
+                display_edges=edges)
 
 
 # --------------------------------------------------------------------------- #
@@ -2039,5 +2047,7 @@ def _response(
         out["missing"] = list(view.missing)
     if view.graph is not None:
         out["membership_graph"] = view.graph
+    if view.display_edges is not None:
+        out[working_set_marks.GENERATION_KEY] = view.display_edges
     out.update(extra or {})
     return out

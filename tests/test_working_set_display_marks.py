@@ -445,3 +445,25 @@ def test_a_caller_who_may_not_see_the_answer_gets_the_profile_of_a_vault_without
     units = {item["text"]: item for item in with_page["items"] if item["kind"] == "units"}
     assert units["Does the orchard launch need a beta?"]["display"] == {"open": True}
     assert units["Who owns orchard launch support?"]["display"] == {"open": True}
+
+
+def test_a_profile_says_when_its_edges_are_unknown_and_only_then(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a profile that marks nothing open and says nothing when it could not read its
+    edges, which an agent reads as every question answered."""
+    monkeypatch.delenv("EXOMEM_ACTIVATION_PACKET")
+    monkeypatch.setattr(epistemic_graph, "schedule_background_rebuild", lambda *a, **k: None)
+    vault = _vault(tmp_path, graph=False)
+
+    unread = _profile(vault)
+
+    assert unread["display_edges"] == "unknown"
+    assert unread["items"]
+    assert not any("open" in item.get("display", {}) for item in unread["items"])
+
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    read = _profile(vault)
+
+    assert "display_edges" not in read
+    assert read["generation"] != unread["generation"]
