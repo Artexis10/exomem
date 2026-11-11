@@ -58,7 +58,7 @@ def menu_columns(request: sensing.SenseRequest) -> tuple[list[dict[str, Any]], l
     raw = json.loads(slots["menu"])
     if not isinstance(raw, list) or any(
         not isinstance(entry, dict)
-        or any(name not in entry for name in ("key", "label", "definition"))
+        or any(name not in entry for name in ("key", "label", "definition"))  # nosemgrep: ep-word-search -- the closed field names of the relation-menu-v1 payload this module writes
         for entry in raw
     ):
         raise ValueError("menu slot is not the canonical relation-menu-v1 payload")
@@ -249,7 +249,7 @@ ADMISSION_EVIDENCE: dict[str, AdmissionEvidence] = {}
 #: to be reported as ignored on the diagnostic surface; it never adds a pin.
 ENV_MODEL = "EXOMEM_SENSOR_MODEL"
 
-REFUSAL_REASONS = frozenset(
+REFUSAL_REASONS = frozenset(  # nosemgrep: ep-word-set -- closed refusal codes this module emits, like sensing.ABSTAIN_REASONS
     {
         "no-admitted-sensor-model",
         "evidence-missing",
