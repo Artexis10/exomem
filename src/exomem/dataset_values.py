@@ -226,7 +226,9 @@ def _open(path: Path) -> sqlite3.Connection:
         if dict(conn.execute("SELECT key, value FROM meta")) == _meta():  # another process rebuilt it
             conn.execute("COMMIT")
             return conn
-        for table in _DATA_TABLES:
+        # value_terms was the schema-2 token index; a rebuild must not leave its
+        # stale raw-value rows behind.
+        for table in (*_DATA_TABLES, "value_terms"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")  # noqa: S608 - closed table names above
         conn.execute("DELETE FROM meta")
         for statement in schema:
@@ -451,7 +453,7 @@ def _group_expression(group: tuple[str, ...], *, value_only: bool = False) -> st
     stems = " AND ".join(_phrase(stem) for stem in group)
     if value_only:
         return f"words : ({stems})"
-    return f"(paths : ({stems}) OR words : ({stems}))"
+    return f"({stems})"
 
 
 def _prefixes(path: str) -> list[str]:
@@ -565,14 +567,24 @@ def _match(
             # `held_value` restricts that to the value column.
             held: dict[int, dict[tuple[str, ...], set[int]]] = {}
             held_value: dict[int, dict[tuple[str, ...], set[int]]] = {}
+            # A compound word counts as touching a value when any one stem is in it, so a
+            # multi-stem group also gets the looser map. The digit rule keeps `held_value`.
+            held_value_any: dict[int, dict[tuple[str, ...], set[int]]] = {}
             for group in groups:
-                for value_only, into in ((False, held), (True, held_value)):
+                variants = ((False, held, False), (True, held_value, False))
+                if len(group) > 1:
+                    variants += ((True, held_value_any, True),)
+                for value_only, into, loose in variants:
+                    if loose:
+                        expression = "words : (" + " OR ".join(_phrase(stem) for stem in group) + ")"
+                    else:
+                        expression = _group_expression(group, value_only=value_only)
                     for record_id, field_no in conn.execute(
                         "SELECT f.record_id, f.field_no FROM value_fields "
                         "JOIN fields f ON f.id = value_fields.rowid "
                         "WHERE value_fields MATCH ? "
                         "AND f.record_id IN (SELECT value FROM json_each(?))",
-                        (_group_expression(group, value_only=value_only), ids_json),
+                        (expression, ids_json),
                     ):
                         into.setdefault(record_id, {}).setdefault(group, set()).add(field_no)
             record_fields: dict[int, list[tuple[int, str]]] = {}
@@ -607,10 +619,21 @@ def _match(
                         for group in groups
                         if record_held.get(group, frozenset()) & part_fields
                     ]
-                    if not required.issubset(found):
+                    # A number is exact: its groups must sit together in one field's
+                    # value, so a field that only shares a group by name never counts.
+                    digit_fields = part_fields
+                    for group in required:
+                        digit_fields = digit_fields & held_value.get(record_id, {}).get(
+                            group, frozenset()
+                        )
+                    if required and not digit_fields:
                         continue
+                    value_held = held_value.get(record_id, {})
+                    value_any = held_value_any.get(record_id, {})
                     if not any(
-                        held_value.get(record_id, {}).get(group, frozenset()) & part_fields
+                        (value_any if len(group) > 1 else value_held)
+                        .get(group, frozenset())
+                        & part_fields
                         for group in found
                     ):
                         continue
@@ -624,7 +647,7 @@ def _match(
                 (coverage, neg_size), prefix, found = best
                 match = _Match(record_no, coverage, -neg_size, prefix, found, compact=False)
                 current = matches.get(original)
-                if current is None or (coverage, -neg_size) > (
+                if current is None or (coverage, neg_size) > (
                     current.coverage,
                     -current.part_size,
                 ):
@@ -703,10 +726,8 @@ def _window(lines: list[str], shown: list[int]) -> str:
         return "\n".join(parts)
 
     ordered = sorted(kept)
-    while len(ordered) > len(keep) and ordered[-1] not in keep:
-        # Gap markers were not counted; drop trailing fill lines until they fit too.
-        if len(emit(ordered)) <= budget:
-            break
+    while len(ordered) > 1 and len(emit(ordered)) > budget:
+        # Gap markers were not counted; drop later lines, shown included, until they fit.
         ordered.pop()
     return emit(ordered)
 

@@ -348,3 +348,82 @@ def test_a_number_that_differs_in_one_group_finds_no_value_hit(vault):
     found = _paths(_find(vault, "EE81 7700 1234 5678 9099"))
     assert second.path in found
     assert first.path not in found
+
+
+def test_a_digit_group_held_only_by_another_field_finds_no_value_hit(vault):
+    # The differing group sits in the same record and even the same row, but not in the
+    # same field as the rest of the number, so the match must not happen.
+    json_hit = _preserve(
+        vault,
+        "supplier-scattered.json",
+        json.dumps(
+            {"supplier": {"iban": "EE81 7700 1234 5678 9099"}, "audit": {"count": 9012}}
+        ).encode(),
+    )
+    csv_hit = _preserve(
+        vault,
+        "payments.csv",
+        b"iban,amount\nEE81 7700 1234 5678 9099,9012\n",
+    )
+    found = _paths(_find(vault, "EE81 7700 1234 5678 9012"))
+    assert json_hit.path not in found
+    assert csv_hit.path not in found
+
+
+def test_a_digit_in_a_field_name_finds_no_value_hit(vault):
+    keyed = _preserve(
+        vault,
+        "keyed.json",
+        json.dumps({"code": {"9012": "hello there"}}).encode(),
+    )
+    assert keyed.path not in _paths(_find(vault, "9012 hello"))
+
+
+def test_a_compound_word_split_between_key_and_value_matches(vault):
+    result = _preserve(vault, "acme.json", json.dumps({"iban": "Acme Corp"}).encode())
+    assert result.path in _paths(_find(vault, "acme-iban"))
+
+
+def test_an_equal_coverage_match_prefers_the_record_with_the_fewest_fields(vault):
+    wide = {f"a{n:02d}": f"filler{n:02d}" for n in range(30)}
+    wide["note"] = "quillon"
+    data = json.dumps([{"b": {"name": "quillon"}}, wide]).encode()
+    result = _preserve(vault, "wide.json", data)
+    hits = [hit for hit in _find(vault, "quillon") if hit["path"] == result.path]
+    assert hits
+    assert "b.name" in hits[0]["passage"]["text"]
+    assert "filler" not in hits[0]["passage"]["text"]
+
+
+def test_a_passage_never_exceeds_its_character_bound(vault):
+    pad = "x" * 290
+    record = {
+        "a0": f"needle {pad}",
+        "a1": pad,
+        "a2": pad,
+        "a3": f"needle {pad}",
+    }
+    result = _preserve(vault, "padded.json", json.dumps(record).encode())
+    hits = [hit for hit in _find(vault, "needle") if hit["path"] == result.path]
+    assert hits
+    text = _rendered_part(hits[0]["passage"]["text"])
+    assert len(text) <= dataset_values.MAX_VALUE_PASSAGE_CHARS
+    assert "needle" in text
+
+
+def test_a_stale_value_terms_index_is_dropped_on_rebuild(vault, tmp_path):
+    import sqlite3
+
+    sidecar = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(sidecar)
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta VALUES ('schema', '2')")
+    conn.execute("CREATE VIRTUAL TABLE value_terms USING fts5(tokens)")
+    conn.execute("INSERT INTO value_terms VALUES ('stale raw value')")
+    conn.commit()
+    conn.close()
+    dataset_values._open(sidecar).close()
+    conn = sqlite3.connect(sidecar)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+    conn.close()
+    assert not any(name.startswith("value_terms") for name in tables)

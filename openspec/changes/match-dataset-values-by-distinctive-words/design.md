@@ -16,7 +16,7 @@ Non-goals: semantic matching of values (a paraphrase that shares no word with th
 
 The lane takes its query words from `find_policy.query_word_stem_groups`, the same split that page search uses. One group is one query word with its stems. A group that `query_word_stem_groups` marks as a function word is not required. One-character stems that hold no digit are removed from a group, and a group left empty is dropped. This removes the "s" of a possessive, which the tokenizer splits off. The function-word lexicon in `find_policy` is existing code debt. This change reuses it and adds no new word list.
 
-A group is present in a field when all its stems are in that field's path or value. It is in a value when all its stems are in the value.
+A group is present in a field when all its stems are in that field's path or value, and each stem may sit in either. It touches a value when at least one of its stems is in the value; a compound like `acme-iban` counts, since its key stem names the value. A group that appears only in field paths still matches nothing, so a query of field names alone finds no hit. The digit rule is stricter: it needs every digit group's stems together in one field's value. For an unspaced run page search counts a word present at a strict majority of its bigrams; this lane requires all of them, which is stricter. That divergence is accepted debt, not a contract: no delta scenario depends on it and no query the vault asks hits it today.
 
 ### Weights
 
@@ -26,7 +26,7 @@ Let N be the number of indexed datasets in the request's scope. A group's datase
 
 A part of a record is the set of fields under one path prefix: the whole record (prefix ""), or every field under `a`, `a.b` and so on, split on ".". Its size is its number of fields. Only parts with at most `MAX_PART_FIELDS` (40) fields count. A CSV row is one part with one field per column.
 
-For each part, the found groups are the groups that any of its fields holds. A group with a stem that holds a digit is required: the part fails when it does not hold every such group. A number is exact, so an account number that differs in one group never matches by its other groups. The part qualifies when at least one found group is in a value, its coverage (found weight / total weight of all groups) is at least `MIN_COVERAGE` (0.5), and it passes the noise gate. The record's score is its best qualifying part: highest coverage, then the fewest fields. A dataset's score is its best record.
+For each part, the found groups are the groups that any of its fields holds. A group with a stem that holds a digit is required: the part fails unless one of its fields holds every digit-bearing group together in its value. A number is exact, so an account number that differs in one group never matches, even when another field of the record happens to hold the missing group. The part qualifies when at least one found group is in a value, its coverage (found weight / total weight of all groups) is at least `MIN_COVERAGE` (0.5), and it passes the noise gate. The record's score is its best qualifying part: highest coverage, then the fewest fields. A dataset's score is its best record.
 
 Alternatives measured on the same vault:
 - Not requiring function words and fragments, and keeping every other word required: 42 of 69 random lookups found, but "test results" still returned 72 value hits.
