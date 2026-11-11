@@ -562,7 +562,8 @@ Do one of these:
 
 - Fix forward: set the held cell's own image to the fixed release with the admin token. Then do steps 3 and 4 of
   "Read and clear a paused rollout". Without the cell's own image, cellctl retries the cell's pinned target, not the
-  fixed release. A second miss holds the cell again.
+  fixed release. A second miss holds the cell again. After the cell is Ready on the fixed release, clear its own
+  image with the admin token, so that later releases reach it.
 - Restore by hand with [cloud-operator-restore.md](cloud-operator-restore.md), from the attempt's own backup
   (`exomem.io/pre-upgrade-snapshot` on the cell's StatefulSet). Then set the cell's own image with the admin token,
   and do step 4.
