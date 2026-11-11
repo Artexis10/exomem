@@ -1,7 +1,7 @@
 ## 1. Phase 1: seamless switch, upgrade windows, release workflow and alerts (D1–D5, D8)
 
 - [ ] 1.0 Read the matching pick-by-problem rows of the engineering primary-source roster for retry budgets, rollout windows and deploy custody. Cite them in design.md. Verify: design.md cites each row, or records a design change that a row forces. It catches an implementation that repeats a design flaw the roster names.
-- [ ] 1.1 Substrate (separate repository): add the gateway hold and the upstream timeouts to the cloud handler (D5).
+- [x] 1.1 Substrate (separate repository): add the gateway hold and the upstream timeouts to the cloud handler (D5).
   - Reuse the prepared-body reader of `cloud-artifacts.ts` and its 1 MiB cap for every request while the hold budget is above 0. Stream a larger body without a hold.
   - Size the reader's buffer from `content-length` when the header is present, with the 1 MiB cap as the bound.
   - Retry only on a connect error, listed by its documented error codes, at the interval with jitter, until the budget runs out. Then answer `503 CELL_NOT_READY` with `Retry-After`.
@@ -21,8 +21,8 @@
   - a cell that sends no headers gets `504 CELL_TIMEOUT` after the header timeout, and its slot frees, which catches the missing timeout;
   - a cell that sends SSE headers and then stalls has its stream closed after the idle bound, and its slot frees, which catches a hung cell that holds a slot for ever;
   - a budget of 0 answers at once, which catches a hold that the rollback setting cannot turn off.
-- [ ] 1.2 Render the gateway hold and timeout values from `cloudGateway.hold.*` and `cloudGateway.upstream.*` into the gateway's environment. Extend C3's pinned environment set and the chart schema. Verify: the chart test that pins the gateway environment passes with the new names. It catches a value that the chart never renders, which would stop the gateway at its next deploy.
-- [ ] 1.3 Substrate (separate repository): add the image history, the rollout view and the narrower deploy principal (D1).
+- [x] 1.2 Render the gateway hold and timeout values from `cloudGateway.hold.*` and `cloudGateway.upstream.*` into the gateway's environment. Extend C3's pinned environment set and the chart schema. Verify: the chart test that pins the gateway environment passes with the new names. It catches a value that the chart never renders, which would stop the gateway at its next deploy.
+- [x] 1.3 Substrate (separate repository): add the image history, the rollout view and the narrower deploy principal (D1).
   - Record each digest the first time it becomes `cell_image`, with its release tag and the time. Require the tag for a digest new to the history.
   - Add an idempotent seed: every published release's cell image digest and tag, the live `cell_image` and `last_good_image`, and each cell's observed and desired images. A digest that matches no published release gets no tag.
   - Grant `cellctl`'s database role read access to the history table.
@@ -47,7 +47,7 @@
   - the admin token still clears a pause, which catches a narrowing that locks out the person;
   - the receiver refuses the `cloud-deploy` capability for any other job name, which catches a CI capability that can raise or resolve other alerts.
 - [ ] 1.4 Measure client tool-call timeouts against the hold budget. For each MCP client that Cloud supports, record how long it waits for a tool-call answer, and whether it retries a `503` with `Retry-After`. Use a disposable cell that refuses connections for 10, 30, 45 and 60 seconds. Record the longest tool call that the rehearsal cell answers. Verify: design.md records each client's timeout and retry behaviour, a gateway latency budget, and the idle bound. The chosen budget sits below the shortest timeout, and the idle bound above the longest tool call. It catches a budget that clients abandon before the cell returns, and an idle bound that cuts a long tool call.
-- [ ] 1.5 Add hourly traffic counts to the cloud cell (D4).
+- [x] 1.5 Add hourly traffic counts to the cloud cell (D4).
   - Keep the counts file under `/data/host`, outside `/data/vault`.
   - Add `inflight` and `last_request_age_seconds` to the readiness `traffic` block.
   - Serve the history on `/health/traffic-history`, with `retention_hours` and two integer arrays. Add the path to the shared protocol module, `infra/cellctl/src/cellctl/cell_readiness.py`, and update its note on the health-only listener.
@@ -62,7 +62,7 @@
   - the readiness answer carries no history, which catches history sent to every 5-second probe;
   - `last_request_age_seconds` is null before the first request, which catches a fresh cell that reads as idle for years and rolls at once;
   - the counts file never appears in a vault listing or a vault export, which catches platform data that leaks into the tenant's notes.
-- [ ] 1.6 Add `infra/cellctl/src/cellctl/upgrade_window.py`, a pure module beside `rollout.py`, with its unit tests first (D4). Verify:
+- [x] 1.6 Add `infra/cellctl/src/cellctl/upgrade_window.py`, a pure module beside `rollout.py`, with its unit tests first (D4). Verify:
   - a history that is quietest at 04:00 UTC gives `4 history`, which catches a window that picks the busiest hour;
   - coverage below the minimum gives a default hour with the source `default`, which catches a window computed from one day of data;
   - 1,000 unmeasured cell IDs spread across the default range, and none lands in the nightly backup window, which catches a fleet-wide default hour;
@@ -72,7 +72,7 @@
   - tied hours follow the cell-ID hash and stay the same across recomputes, which catches every tied cell choosing hour 0;
   - a lookback longer than the cell's reported retention is clamped, which catches a coverage computed over hours the cell never kept;
   - the due rule: idle in the window is due; busy is due only in the force minutes; outside the window is not due; a window that ends at midnight works. It catches a busy cell that never rolls, or one that rolls mid-burst.
-- [ ] 1.7 Pin attempts and abort them on a pause in `cellctl` (D4).
+- [x] 1.7 Pin attempts and abort them on a pause in `cellctl` (D4).
   - Write `exomem.io/upgrade-target` when an attempt starts, and read only the pin in `_continue_upgrade`.
   - On a pause, end every attempt that has not applied its pinned target, and restart that cell on its current image.
   - Apply no target while paused.
@@ -87,7 +87,7 @@
   - two concurrent failures keep the first `held_cell_id`, which catches a held cell that a person never sees;
   - a routine apply keeps every copied annotation, and the next pass recomputes no window, which catches server-side apply stripping annotations each pass;
   - a `cellctl` restart mid-attempt resumes with the pinned target, which catches a pin kept only in memory.
-- [ ] 1.8 Wire the windows into `cellctl` (D4):
+- [x] 1.8 Wire the windows into `cellctl` (D4):
   - the daily recompute from `/health/traffic-history`, and the `exomem.io/upgrade-window` and `exomem.io/upgrade-window-at` annotations;
   - the due set into `select_upgrade_candidate`, ordered by `candidate-since`, with the canary exempt;
   - render-digest re-applies under the due set;
@@ -108,7 +108,7 @@
   - a canary that is behind its target but not eligible (stopped, not Ready, refused or in backoff) blocks every tenant attempt, including a tenant with an older `candidate-since`, which catches a tenant that pins a new image before the canary ran it;
   - a canary whose attempt ended on an older pin, while `cell_image` moved on, blocks every tenant attempt until it runs the new target, which catches a finished pin read as "canary on target";
   - a restore hold on one node blocks new attempts on every node, which catches a silent relaxation of today's restore rule.
-- [ ] 1.10 Add the barrier file `infra/contracts/upgrade-barriers-v1.json`, its JSON schema, its CI check and the chart's copy (D3).
+- [x] 1.10 Add the barrier file `infra/contracts/upgrade-barriers-v1.json`, its JSON schema, its CI check and the chart's copy (D3).
   - Seed the 0.147.0 entry. Read the release history for earlier secret-registry changes, and add each as `operator-step`.
   - State the author rule in `CONTRIBUTING.md`, and add the entry to its review checklist.
   - Add the forward-only rule to `cellctl`: decide a crossing attempt from the previous image's and the pinned target's releases, through the image history and the chart's barrier file.
@@ -127,13 +127,13 @@
   - a reconcile test: the forward-only hold keeps the attempt's restore point while it lasts, which catches a hold that leaves a person no state to restore by hand;
   - a reconcile test: passes after the forward-only miss apply no target and keep 0 replicas, which catches a hold that restarts the failed target every deadline;
   - a reconcile test: after a person clears the pause, one new attempt starts toward the current target, which catches a hold that no action can end.
-- [ ] 1.11 Add the four rollout alerts to `cellctl` (D8). Add the three thresholds to the observability contract and the chart. Verify with tests:
+- [x] 1.11 Add the four rollout alerts to `cellctl` (D8). Add the three thresholds to the observability contract and the chart. Verify with tests:
   - each alert fires on its condition and resolves when the condition clears, which catches an alert that never fires or never resolves;
   - `UPGRADE_FORWARD_ONLY` fires `cloud-rollout-paused`, which catches a forward-only hold that nobody hears about;
   - a newer target keeps the earlier `candidate-since` time, which catches a stall that hides because releases arrive every 8 hours;
   - a pass that could not observe a cell sends no transition, which catches a blind pass that resolves a firing alert;
   - `cellctl` refuses to start without a threshold, which catches a deploy whose alerts are silently off.
-- [ ] 1.12 Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
+- [x] 1.12 Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
   - an unattested digest sets nothing, which catches a pushed image that reaches the fleet;
   - a `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER` answer ends the run as success with nothing set, which catches a red run on every merge after a withdrawal;
   - a paused rollout sets nothing, and the run fails with the pause's code, which catches automation that resumes a paused fleet;
@@ -145,7 +145,7 @@
   - the CI log of every recorded case holds no token, no cell ID and no tenant ID, which catches tenant identifiers in a public log;
   - a release run on `main` without a tag starts no run, which catches a run on every merge;
   - `actionlint` passes, and `gh api` shows that the environment's branch policy admits only `main`, which catches a token that a branch can reach.
-- [ ] 1.13 Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
+- [x] 1.13 Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
   - record the platform Deployment after each manual upgrade, with one `gh api` command, then dispatch `gh workflow run cloud-deploy.yml --ref main`;
   - record the first platform Deployment, with every barrier entry at or below the live release in `barriers_crossed`;
   - list `barriers_crossed` when an upgrade crosses a barrier;
@@ -155,6 +155,9 @@
   - add the derived quiet hour per tenant to the list of data that the platform keeps, in Substrate's Cloud privacy documentation.
 
   Verify: every alert name of D2, D3 and D8 has a runbook step, and each new command runs as written against the rehearsal cluster. It catches an alert that fires with no step for the person who receives it, and a dispatch that the branch policy refuses.
+- [ ] 1.14 Open follow-up: sign the origin proof and the artifact grant per attempt, before task 1.4 raises the hold budget above about 50 s. Verify: a request that the gateway retries for the full budget still carries a valid proof and grant. It catches a held request that the cell refuses, because its proof expired during the hold.
+- [ ] 1.15 Open follow-up: make the cloud-rehearsal harness send `release` with `cellImage`. Verify: the harness sets the image through the deploy route without a refusal. It catches a rehearsal that fails on the narrowed deploy principal.
+- [ ] 1.16 Open follow-up: add a test of the gateway server-slot leave and retake around a hold. Verify: a held request leaves its server slot, and retakes it when the cell accepts. It catches a slot that leaks, or a hold that counts against the server cap.
 
 ## 2. Phase 1 rehearsal
 

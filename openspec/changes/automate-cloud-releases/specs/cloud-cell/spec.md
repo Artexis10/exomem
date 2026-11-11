@@ -15,7 +15,7 @@ The platform release SHALL be the digest in the `cell_image` setting.
 
 cellctl SHALL start the canary's attempt as soon as its target changes. The canary is the non-deleted cell with the lowest `rollout_priority`. While the canary's image differs from its target (`desired_image` or `cell_image`), no other attempt SHALL run. A canary that is behind its target and cannot start, because it is stopped, not ready, refused or in backoff, SHALL block every tenant attempt. After that, cellctl SHALL start an attempt only for a cell in the due set, oldest candidate first by the time it became a candidate. Until per-node concurrency ships, one attempt SHALL run fleet-wide. After it ships, at most the configured number of cells per node SHALL carry an upgrade hold. A restore hold anywhere SHALL block every new attempt. Each attempt SHALL:
 
-1. pin its target when it starts, and use that pinned target on every later pass, whatever `cell_image` becomes;
+1. pin its target when it starts, and use that pinned target on every later pass, whatever `cell_image` becomes. An attempt that started before pinning existed SHALL be pinned on its first pass to the image that it applied, or ended if it did not apply one;
 2. stop the cell;
 3. take a restore point while the cell is stopped and its volume is flushed: a volume snapshot on a storage class with snapshot support, otherwise a backup without a prune, within a bounded deadline;
 4. start the pinned target;
@@ -103,6 +103,24 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 - **WHEN** a cell is in the forward-only hold and further passes run
 - **THEN** cellctl applies no target to the cell, and the cell stays stopped
 - **AND** after a person clears the pause, cellctl starts one new attempt toward the current target
+- **AND** that attempt keeps the canary-first rule: no tenant attempt starts while the canary's image differs from its target
+
+#### Scenario: A held tenant cell retries its pinned target
+
+- **WHEN** a tenant cell is held on a target, and a person clears the pause without setting that cell's own image
+- **THEN** the cell's new attempt pins the same target that it held on, not a newer `cell_image`
+
+#### Scenario: Fix-forward sets the cell's own image
+
+- **WHEN** a person sets the held cell's own image to the fixed release, and then clears the pause
+- **THEN** the cell's new attempt pins the fixed release
+- **AND** once the cell is Ready on it, the person clears the cell's own image so that later releases reach the cell
+
+#### Scenario: An attempt that started before pinning existed
+
+- **WHEN** cellctl finds an attempt with no pin, and the cell has applied a target
+- **THEN** cellctl pins the applied image on that pass
+- **AND** if the cell has applied none, cellctl ends the attempt on the cell's current image
 
 #### Scenario: A target moves back across a one-way barrier
 
