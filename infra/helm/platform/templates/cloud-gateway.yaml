@@ -148,6 +148,26 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.cloudGateway.cellTokenKeySecretName }}
                   key: current
+            # automate-cloud-releases D5: the hold while a cell refuses
+            # connections, and the timeouts on every call to a cell.
+            - name: EXOMEM_CLOUD_HOLD_BUDGET_SECONDS
+              value: {{ .Values.cloudGateway.hold.budgetSeconds | quote }}
+            - name: EXOMEM_CLOUD_HOLD_INTERVAL_MS
+              value: {{ .Values.cloudGateway.hold.intervalMs | quote }}
+            - name: EXOMEM_CLOUD_HOLD_JITTER_MS
+              value: {{ .Values.cloudGateway.hold.jitterMs | quote }}
+            - name: EXOMEM_CLOUD_HOLD_RETRY_AFTER_SECONDS
+              value: {{ .Values.cloudGateway.hold.retryAfterSeconds | quote }}
+            - name: EXOMEM_CLOUD_HOLD_MAX
+              value: {{ .Values.cloudGateway.hold.max | quote }}
+            - name: EXOMEM_CLOUD_HOLD_MAX_PER_TENANT
+              value: {{ .Values.cloudGateway.hold.maxPerTenant | quote }}
+            - name: EXOMEM_CLOUD_CONNECT_TIMEOUT_MS
+              value: {{ .Values.cloudGateway.upstream.connectTimeoutMs | quote }}
+            - name: EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS
+              value: {{ .Values.cloudGateway.upstream.timeoutSeconds | quote }}
+            - name: EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS
+              value: {{ .Values.cloudGateway.upstream.idleSeconds | quote }}
           readinessProbe:
             httpGet:
               path: /readyz

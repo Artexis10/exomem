@@ -76,6 +76,12 @@ CLEANUP_PENDING_ALERT = "cell-storage-cleanup-pending"
 # out-of-cluster key watcher alerts on a burst instead.
 MEDIA_OVER_ALLOWANCE_ALERT = "media-over-allowance"
 MEDIA_METER_UNKNOWN_ALERT = "media-meter-unknown"
+# automate-cloud-releases D8: the rollout is paused, a hold lasts too long, a
+# candidate stays behind its target, or the canary does.
+ROLLOUT_PAUSED_ALERT = "cloud-rollout-paused"
+ROLLOUT_HELD_ALERT = "cloud-rollout-held"
+ROLLOUT_STALLED_ALERT = "cloud-rollout-stalled"
+ROLLOUT_CANARY_WAITING_ALERT = "cloud-rollout-canary-waiting"
 # An hourly backup missed twice, or a nightly one missed once with two hours'
 # grace for the window.
 HOURLY_ALERT_AFTER = timedelta(hours=2)
@@ -101,6 +107,11 @@ class AlertThresholds:
     unavailable_after: timedelta  # pending_operation_warn_seconds
     disk_free_floor_bytes: int  # pvc_reserved_free_bytes
     recall_lag_after: timedelta  # recall_lag_warn_seconds
+    # automate-cloud-releases D8: the rollout alerts. main.py always sets them;
+    # None leaves the rollout alerts off.
+    rollout_held_after: timedelta | None = None  # rollout_held_warn_seconds
+    rollout_stalled_after: timedelta | None = None  # rollout_stalled_warn_seconds
+    canary_wait_after: timedelta | None = None  # canary_wait_warn_seconds
 
 
 def stale_backups(
@@ -358,3 +369,34 @@ def deliver(webhook_url: str, *, alert: str, active: bool, observed_at: datetime
                 raise RuntimeError("alert delivery failed")
     except (OSError, urllib.error.URLError, ValueError) as error:
         raise RuntimeError("alert delivery failed") from error
+
+
+def held_cells(
+    rows: Iterable[CellRow], observations: Mapping[str, ClusterObservation], now: datetime, *, after: timedelta
+) -> list[str]:
+    """automate-cloud-releases D8: cells whose upgrade or restore hold is older than `after`."""
+
+    held = []
+    for row in rows:
+        observation = observations.get(row.cell_id)
+        if observation is None or observation.statefulset_hold_kind not in ("upgrade", "restore"):
+            continue
+        started = observation.statefulset_hold_started_at
+        if started is not None and now - started > after:
+            held.append(row.cell_id)
+    return sorted(held)
+
+
+def behind_cells(
+    rows: Iterable[CellRow], observations: Mapping[str, ClusterObservation], now: datetime, *, after: timedelta
+) -> list[str]:
+    """D8: cells that have stayed behind their target for longer than `after`, from
+    `exomem.io/candidate-since`, which a newer target does not reset."""
+
+    behind = []
+    for row in rows:
+        observation = observations.get(row.cell_id)
+        since = observation.statefulset_candidate_since if observation is not None else None
+        if since is not None and now - since > after:
+            behind.append(row.cell_id)
+    return sorted(behind)

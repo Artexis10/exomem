@@ -25,6 +25,7 @@ from kubernetes.client.rest import ApiException
 
 from . import alerts, cell_readiness, db
 from .backup_source import MEDIA_COLLECTION_COMPLETE
+from .barriers import crosses_backward, crosses_forward, image_digest, needs_history, parse_release
 from .capacity import (
     GIB,
     CapacityConfig,
@@ -82,6 +83,7 @@ from .exports import HOLD as EXPORT_HOLD
 from .imports import StagedObjects
 from .manifests import (
     BACKUP_JOB_NAME,
+    CANDIDATE_SINCE_ANNOTATION,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     HOURLY_RETENTION_ARGS,
@@ -90,6 +92,8 @@ from .manifests import (
     RETENTION_ARGS,
     SNAPSHOT_NAME,
     STORAGE_CLASS,
+    UPGRADE_WINDOW_ANNOTATION,
+    UPGRADE_WINDOW_AT_ANNOTATION,
     CellManifestSpec,
     ResourceSettings,
     check_artifact_broker_url,
@@ -130,9 +134,11 @@ from .media_meter import UNKNOWN, PhysicalFigure, meter_prefix, over_allowance
 from .rollout import (
     current_image,
     initial_image,
+    is_candidate,
     owner_cell,
     parked_canary,
     select_upgrade_candidate,
+    target_image,
 )
 from .secrets import derive_cell_bearer, unwrap_secret, wrap_secret
 from .state import (
@@ -148,6 +154,7 @@ from .state import (
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
     TARGET_REJECTED,
+    UPGRADE_BACKWARD_CROSSING,
     CellRow,
     ClusterObservation,
     Decision,
@@ -169,6 +176,18 @@ from .storage_config import (
     LEGACY_CLASS,
     LocalStorage,
     StorageConfig,
+)
+from .upgrade_window import (
+    DEFAULT,
+    Idle,
+    TrafficHistory,
+    Window,
+    WindowConfig,
+    compute_window,
+    default_hour,
+    is_due,
+    parse_window,
+    window_open,
 )
 
 logger = logging.getLogger("cellctl")
@@ -345,6 +364,11 @@ class LoopMemory:
     recall_read_at: datetime | None = None
     recall_verdicts: dict[str, bool] = field(default_factory=dict)
     recall_logged: tuple[list[str], list[str]] = field(default_factory=lambda: ([], []))
+    # automate-cloud-releases D4: when to read again a cell's traffic history that
+    # did not answer, so an unreadable cell is not read every pass.
+    history_retry_at: dict[str, datetime] = field(default_factory=dict)
+    # D8: the cells each rollout alert last named in the log.
+    rollout_logged: dict[str, list[str]] = field(default_factory=dict)
     # The cell-originals-damaged alert, judged from the same readiness answers:
     # each serving cell's last definite verdict (cell_readiness.originals_verdict)
     # and the cells last logged. A restart forgets them, as above.
@@ -677,6 +701,10 @@ class ClusterGateway:
     def read_secret_value(self, namespace: str, name: str, key: str) -> str: ...  # pragma: no cover
     def scrape_pod_metrics(self, namespace: str, selector: str, port: int) -> dict[str, str]: ...  # pragma: no cover
     def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]: ...  # pragma: no cover
+    def read_cell_traffic_history(self, addresses: dict[str, str]) -> dict[str, bytes]: ...  # pragma: no cover
+    def patch_statefulset_annotations(
+        self, namespace: str, annotations: dict[str, str | None]
+    ) -> None: ...  # pragma: no cover
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
     def apply_media_edge_active_set(self, manifest: dict) -> None: ...  # pragma: no cover
@@ -1168,6 +1196,197 @@ def _select_relocation_candidates(
     return {row.cell_id for row in due[: max(0, room)]}
 
 
+def _release(image: str | None, releases: dict[str, str]):
+    """automate-cloud-releases D3: the release an image maps to through the image
+    history, or None when it maps to none."""
+
+    digest = image_digest(image)
+    return parse_release(releases.get(digest)) if digest else None
+
+
+def _serving(row: CellRow) -> bool:
+    return row.desired_state in ("running", "read_only")
+
+
+def _rollout_annotation_items(observation: ClusterObservation) -> tuple[tuple[str, str], ...]:
+    """D4: the window and candidate-since annotations to copy into a render."""
+
+    items = []
+    if observation.statefulset_upgrade_window:
+        items.append((UPGRADE_WINDOW_ANNOTATION, observation.statefulset_upgrade_window))
+    if observation.statefulset_upgrade_window_at:
+        items.append((UPGRADE_WINDOW_AT_ANNOTATION, observation.statefulset_upgrade_window_at))
+    if observation.statefulset_candidate_since:
+        items.append((CANDIDATE_SINCE_ANNOTATION, observation.statefulset_candidate_since.isoformat()))
+    return tuple(items)
+
+
+async def _sync_rollout_annotations(
+    cluster: ClusterGateway,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    cell_image: str | None,
+    now: datetime,
+    window_config: WindowConfig | None,
+    memory: LoopMemory,
+) -> dict[str, ClusterObservation]:
+    """automate-cloud-releases D4. `exomem.io/candidate-since` is set when a cell first
+    falls behind its target, kept through a newer target, and removed once it runs its
+    target. With windows on, each serving cell's window is recomputed once per UTC day
+    from its traffic history; an unreadable history keeps the cached window, and a cell
+    with none takes its default hour. Each change is one merge patch of the
+    StatefulSet's metadata, which restarts no pod. Returns the observations with the
+    new values, which every render copies."""
+
+    today = now.date().isoformat()
+
+    def recompute(row: CellRow, observation: ClusterObservation) -> bool:
+        return (window_config is not None and _serving(row) and observation.statefulset_exists
+                and (parse_window(observation.statefulset_upgrade_window) is None
+                     or observation.statefulset_upgrade_window_at != today))
+
+    addresses = {
+        row.cell_id: observation.ready_pod_ip
+        for row in rows
+        if recompute(row, observation := observations[row.cell_id]) and observation.ready_pod_ip
+        and now >= memory.history_retry_at.get(row.cell_id, now)
+    }
+    histories: dict[str, bytes] = {}
+    if addresses:
+        try:
+            histories = await asyncio.to_thread(cluster.read_cell_traffic_history, addresses)
+        except Exception as error:  # noqa: BLE001 - every cell keeps its cached window
+            logger.error("cellctl: no cell traffic history could be read: %s", _describe_error(error))
+    updated = dict(observations)
+    for row in rows:
+        observation = observations[row.cell_id]
+        if not observation.statefulset_exists:
+            continue
+        changes: dict[str, str | None] = {}
+        behind = is_candidate(row, observation, cell_image) or _active_hold(row, observation) in ("upgrade", "restore")
+        if behind and observation.statefulset_candidate_since is None:
+            changes[CANDIDATE_SINCE_ANNOTATION] = now.isoformat()
+        elif not behind and observation.statefulset_candidate_since is not None:
+            changes[CANDIDATE_SINCE_ANNOTATION] = None
+        if recompute(row, observation):
+            window: Window | None = None
+            try:
+                parsed = cell_readiness.traffic_history(histories[row.cell_id]) if row.cell_id in histories else None
+                if parsed is not None:
+                    window = compute_window(row.cell_id, TrafficHistory(*parsed), now, window_config)
+            except Exception as error:  # noqa: BLE001 - one cell's answer never stops the fleet pass
+                # The error type only: the message could echo the cell's answer.
+                logger.error("cellctl: event=upgrade_window_failed cell %s: %s", row.cell_id,
+                             type(error).__name__)
+            if window is not None:
+                memory.history_retry_at.pop(row.cell_id, None)
+            else:
+                if row.cell_id in addresses:
+                    memory.history_retry_at[row.cell_id] = now + timedelta(hours=1)
+                if parse_window(observation.statefulset_upgrade_window) is None:
+                    window = Window(default_hour(row.cell_id, window_config), DEFAULT)
+            if window is not None:
+                logger.info("cellctl: cell %s upgrade window %02d:00 UTC from %s", row.cell_id, window.hour,
+                            window.source)
+                changes[UPGRADE_WINDOW_ANNOTATION] = window.annotation()
+                changes[UPGRADE_WINDOW_AT_ANNOTATION] = today
+        if not changes:
+            continue
+        try:
+            await asyncio.to_thread(cluster.patch_statefulset_annotations, namespace_name(row.cell_id), changes)
+        except Exception as error:  # noqa: BLE001 - the next pass tries again
+            logger.error("cellctl: the rollout annotations of cell %s could not be written: %s", row.cell_id,
+                         _describe_error(error))
+            continue
+        fields: dict[str, object] = {}
+        if CANDIDATE_SINCE_ANNOTATION in changes:
+            fields["statefulset_candidate_since"] = now if changes[CANDIDATE_SINCE_ANNOTATION] else None
+        if UPGRADE_WINDOW_ANNOTATION in changes:
+            fields["statefulset_upgrade_window"] = changes[UPGRADE_WINDOW_ANNOTATION]
+            fields["statefulset_upgrade_window_at"] = changes[UPGRADE_WINDOW_AT_ANNOTATION]
+        updated[row.cell_id] = dataclass_replace(observation, **fields)
+    return updated
+
+
+async def _due_cells(
+    cluster: ClusterGateway,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    cell_image: str | None,
+    render_digests: dict[str, str],
+    now: datetime,
+    window_config: WindowConfig | None,
+) -> frozenset[str] | None:
+    """automate-cloud-releases D4: the due set, or None with windows off. Readiness is
+    read only for candidates whose window is open, so a pass reads a bounded number of
+    cells; an unreadable readiness block counts as not idle."""
+
+    if window_config is None:
+        return None
+    open_cells: dict[str, int] = {}
+    for row in rows:
+        observation = observations[row.cell_id]
+        window = parse_window(observation.statefulset_upgrade_window)
+        wants_restart = (is_candidate(row, observation, cell_image)
+                         or observation.statefulset_render_digest != render_digests.get(row.cell_id))
+        if window is not None and _serving(row) and wants_restart and window_open(window.hour, now):
+            open_cells[row.cell_id] = window.hour
+    addresses = {cell: observations[cell].ready_pod_ip for cell in open_cells if observations[cell].ready_pod_ip}
+    answers: dict[str, bytes] = {}
+    if addresses:
+        try:
+            answers = await asyncio.to_thread(cluster.read_cell_readiness, addresses)
+        except Exception as error:  # noqa: BLE001 - every open cell then reads as not idle
+            logger.error("cellctl: no readiness could be read for the due set: %s", _describe_error(error))
+    due = set()
+    for cell, hour in open_cells.items():
+        idle_fields = cell_readiness.traffic_idle(answers[cell]) if cell in answers else None
+        idle = Idle(*idle_fields) if idle_fields is not None else None
+        if is_due(hour, now, idle, window_config):
+            due.add(cell)
+    return frozenset(due)
+
+
+async def _rollout_alerts(
+    cluster: ClusterGateway,
+    cluster_config: ClusterConfig,
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    rollout,
+    now: datetime,
+    memory: LoopMemory,
+) -> None:
+    """automate-cloud-releases D8: four content-free transitions through the alert
+    receiver, with the affected cells by id in this log. Only a pass that observed
+    every cell calls this, so a blind pass resolves nothing. Neither cellctl nor the
+    workflow clears a pause: cloud-rollout-paused follows the row."""
+
+    thresholds = cluster_config.alert_thresholds
+    if thresholds is None or None in (thresholds.rollout_held_after, thresholds.rollout_stalled_after,
+                                      thresholds.canary_wait_after):
+        return
+    held = alerts.held_cells(rows, observations, now, after=thresholds.rollout_held_after)
+    stalled = [] if rollout.paused else alerts.behind_cells(rows, observations, now,
+                                                             after=thresholds.rollout_stalled_after)
+    canary = owner_cell(rows).cell_id if rows else None
+    canary_waiting = [] if rollout.paused or canary is None else alerts.behind_cells(
+        [row for row in rows if row.cell_id == canary], observations, now, after=thresholds.canary_wait_after)
+    firing = {
+        alerts.ROLLOUT_PAUSED_ALERT: [rollout.held_cell_id or "-"] if rollout.paused else [],
+        alerts.ROLLOUT_HELD_ALERT: held,
+        alerts.ROLLOUT_STALLED_ALERT: stalled,
+        alerts.ROLLOUT_CANARY_WAITING_ALERT: canary_waiting,
+    }
+    for alert, cells in firing.items():
+        if cells != memory.rollout_logged.get(alert, []):
+            if cells:
+                logger.warning("cellctl: %s: %s", alert, ", ".join(cells))
+            else:
+                logger.info("cellctl: %s resolved", alert)
+            memory.rollout_logged[alert] = cells
+        await _deliver_alert(cluster, cluster_config, memory, alert, bool(cells), now)
+
+
 def _select_render_digest_candidate(
     rows: list[CellRow],
     observations: dict[str, ClusterObservation],
@@ -1176,9 +1395,11 @@ def _select_render_digest_candidate(
     config: ReconcileConfig,
     parked: frozenset[str] = frozenset(),
     statefulset_blocked: frozenset[str] = frozenset(),
+    due: frozenset[str] | None = None,
 ) -> str | None:
     """D4: a row dirty only because its render digest changed is re-applied
-    one cell at a time. The next one waits only while a cell is in flight:
+    one cell at a time, and, with upgrade windows on, only once it is due
+    (automate-cloud-releases D4), since the re-apply restarts it like an upgrade. The next one waits only while a cell is in flight:
     it carries the current digest, is not Ready on its update revision, and
     was re-applied less than `render_digest_in_flight` ago. A cell that is
     not Ready for any other reason never blocks the fleet, and a row whose
@@ -1207,6 +1428,7 @@ def _select_render_digest_candidate(
             and not row.is_dirty(refusal_parked=row.cell_id in parked)
             and row.cell_id not in statefulset_blocked
             and observations[row.cell_id].statefulset_render_digest != digests[row.cell_id]
+            and (due is None or row.cell_id in due)
         ),
         key=lambda row: row.cell_id,
     )
@@ -1534,6 +1756,10 @@ async def reconcile_once(
     _label_media_edge_namespaces(cluster, cluster_config, rows, observations)
 
     non_deleted_rows = [row for row in rows if row.desired_state != "deleted"]
+    window_config = config.upgrade_window if config.upgrade_window and config.upgrade_window.enabled else None
+    if not fleet_unobserved:
+        observations = await _sync_rollout_annotations(
+            cluster, non_deleted_rows, observations, cell_image, now, window_config, memory)
     # H1/H9: an upgrade or a restore hold blocks new candidates; a deleted
     # row never counts, whatever its stale annotations or row state say.
     any_upgrading = any(_active_hold(row, observations[row.cell_id]) == "upgrade" for row in non_deleted_rows)
@@ -1586,6 +1812,8 @@ async def reconcile_once(
             len(unobserved_rows),
         )
     else:
+        due = await _due_cells(cluster, non_deleted_rows, observations, cell_image, render_digests, now,
+                               window_config)
         upgrade_candidate = select_upgrade_candidate(
             non_deleted_rows,
             observations,
@@ -1594,11 +1822,49 @@ async def reconcile_once(
             now=now,
             any_cell_already_upgrading=any_upgrading or any_restoring,
             refused=refused,
+            due=due,
         )
         await _publish_parked_canary(connection, rollout, non_deleted_rows, observations, cell_image, refused)
         render_digest_candidate = _select_render_digest_candidate(
-            non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked
+            non_deleted_rows, observations, render_digests, now, config, parked, statefulset_blocked, due=due
         )
+    # automate-cloud-releases D3: map the images of every attempt to releases, only
+    # when a one-way `cell` barrier makes the releases matter.
+    releases: dict[str, str] | None = {}
+    if needs_history(config.upgrade_barriers) and (any_upgrading or upgrade_candidate is not None):
+        try:
+            releases = await db.read_image_releases(connection)
+        except asyncpg.PostgresError as error:
+            # Fail closed: no attempt starts, and a running attempt that misses holds instead of restoring.
+            logger.error("cellctl: the image history could not be read; no upgrade starts this pass: %s",
+                         _describe_error(error))
+            releases = None
+            upgrade_candidate = None
+    if upgrade_candidate is not None and releases is not None:
+        candidate_row = next(row for row in non_deleted_rows if row.cell_id == upgrade_candidate)
+        candidate_observation = observations[upgrade_candidate]
+        if crosses_backward(_release(current_image(candidate_row, candidate_observation), releases),
+                            _release(target_image(candidate_row, cell_image), releases), config.upgrade_barriers):
+            logger.error("cellctl: the target of cell %s lies before a one-way barrier that its image is past; "
+                         "the rollout pauses with %s", upgrade_candidate, UPGRADE_BACKWARD_CROSSING)
+            await db.write_rollout(
+                connection,
+                {"paused": True, "error_code": UPGRADE_BACKWARD_CROSSING, "held_cell_id": upgrade_candidate},
+                only_if={"paused": False},
+            )
+            upgrade_candidate = None
+    crossing = {
+        row.cell_id: releases is None or crosses_forward(
+            _release(observations[row.cell_id].statefulset_previous_image or row.observed_image, releases),
+            _release(observations[row.cell_id].statefulset_upgrade_target or target_image(row, cell_image),
+                     releases),
+            config.upgrade_barriers,
+        )
+        for row in non_deleted_rows
+        if _active_hold(row, observations[row.cell_id]) == "upgrade"
+    }
+    if not fleet_unobserved:
+        await _rollout_alerts(cluster, cluster_config, non_deleted_rows, observations, rollout, now, memory)
 
     # D4 amendment: a hold, a dirty row or a maintenance start keeps the fast
     # cadence. A settled failure (identity conflict, init deadline) does not:
@@ -1615,6 +1881,7 @@ async def reconcile_once(
     )
     # add-cloud-media-store D8: each node runs a bounded number of exports at
     # once, counted from the exports that hold a slot (packing) at the pass start.
+    canary_id = owner_cell(non_deleted_rows).cell_id if non_deleted_rows else None
     packing_cells = await db.read_packing_export_cells(connection)
     export_slots = ExportSlots(config.export_concurrency_per_node, [
         _export_node(row, observations[row.cell_id]) for row in rows if row.cell_id in packing_cells])
@@ -1636,6 +1903,8 @@ async def reconcile_once(
                 start_upgrade=row.cell_id == upgrade_candidate,
                 start_backup=row.cell_id in backup_candidates,
                 start_relocation=row.cell_id in relocation_candidates,
+                crossing=crossing.get(row.cell_id, False),
+                canary=row.cell_id == canary_id,
                 is_render_digest_candidate=row.cell_id == render_digest_candidate,
                 refusal_parked=row.cell_id in parked,
                 memory=memory,
@@ -2353,6 +2622,8 @@ async def _reconcile_row(
     local_capacity: LocalCapacityObservation | None = None,
     backup_listing=None,
     export_slots: ExportSlots | None = None,
+    crossing: bool = False,
+    canary: bool = False,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
@@ -2589,6 +2860,8 @@ async def _reconcile_row(
         storage=cluster_config.storage,
         start_relocation=start_relocation,
         storage_room=storage_room,
+        crossing=crossing,
+        canary=canary,
     )
     local = cluster_config.storage.local
     guarded = local is not None and local.reservations and (
@@ -2693,8 +2966,11 @@ async def _reconcile_row(
     # crash between the two leaves the rollout paused and no other cell can
     # start the same image.
     pause_first = bool(decision.rollout_updates.get("paused"))
-    if pause_first:
-        await db.write_rollout(connection, decision.rollout_updates)
+    if pause_first and not await db.write_rollout(connection, decision.rollout_updates, only_if={"paused": False}):
+        # automate-cloud-releases D4: the first failure stays the held cell; this
+        # one's code goes to the log and to its row.
+        logger.warning("cellctl: cell %s failed with %s while the rollout was already paused; the held cell stays",
+                       row.cell_id, decision.rollout_updates.get("error_code"))
 
     if decision.delete_backup_job and observation.statefulset_hold_started_at is not None:
         # D4/D8: before the cell restarts. The Job's name derives from the
@@ -2855,6 +3131,9 @@ async def _reconcile_row(
             restored_snapshot=decision.restored_snapshot,
             backup_outcome=decision.backup_outcome,
             relocation_volume=decision.relocation_volume,
+            upgrade_target=decision.upgrade_target,
+            upgrade_phase=decision.upgrade_phase,
+            rollout_annotations=_rollout_annotation_items(observation),
             grow_storage_gib=decision.grow_storage_gib,
             backup_family_request=decision.backup_family_request,
             backup_family_size_bytes=family["sourceSizeBytes"] if family else None,

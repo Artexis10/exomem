@@ -33,7 +33,7 @@ from .capacity import (
     parse_budget_frame,
     quantity,
 )
-from .cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH
+from .cell_readiness import CELL_HEALTH_PORT, CELL_READINESS_PATH, CELL_TRAFFIC_HISTORY_PATH
 from .deletion_grant import DELETIONS_CONFIGMAP
 from .manifests import (
     BACKUP_FAMILY_ANNOTATION,
@@ -41,6 +41,7 @@ from .manifests import (
     BACKUP_OUTCOME_ANNOTATION,
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
+    CANDIDATE_SINCE_ANNOTATION,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     GROW_STORAGE_ANNOTATION,
@@ -60,6 +61,10 @@ from .manifests import (
     ROW_GENERATION_ANNOTATION,
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
+    UPGRADE_PHASE_ANNOTATION,
+    UPGRADE_TARGET_ANNOTATION,
+    UPGRADE_WINDOW_ANNOTATION,
+    UPGRADE_WINDOW_AT_ANNOTATION,
     cell_id_from_namespace,
     hold_job_name,
     namespace_name,
@@ -369,6 +374,27 @@ class ClusterClient:
             for cell_id, address in addresses.items()
         }
         return asyncio.run(_read_pages(urls, timeout=READINESS_TIMEOUT, max_bytes=READINESS_MAX_BYTES))
+
+    def read_cell_traffic_history(self, addresses: dict[str, str]) -> dict[str, bytes]:
+        """automate-cloud-releases D4: each cell's hourly counts, read from its
+        health-only port like its readiness, once per cell per UTC day. A cell
+        that does not answer in time is left out: an unread history, never an
+        empty one."""
+
+        urls = {
+            cell_id: f"http://{address}:{CELL_HEALTH_PORT}{CELL_TRAFFIC_HISTORY_PATH}"
+            for cell_id, address in addresses.items()
+        }
+        return asyncio.run(_read_pages(urls, timeout=READINESS_TIMEOUT, max_bytes=READINESS_MAX_BYTES))
+
+    def patch_statefulset_annotations(self, namespace: str, annotations: dict[str, str | None]) -> None:
+        """D4: set or remove (None) the window and candidate-since annotations on a
+        cell's StatefulSet metadata with a merge patch. It touches no pod template, so
+        no pod restarts, and a None removes the key whichever manager wrote it."""
+
+        self._apps.patch_namespaced_stateful_set(
+            "cell", namespace, {"metadata": {"annotations": annotations}}, field_manager=FIELD_MANAGER
+        )
 
     def observe_import_jobs(self, namespace: str, import_id: str):
         import json
@@ -690,6 +716,7 @@ class ClusterClient:
         target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
         backup_family_request = None
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
+        upgrade_target = upgrade_phase = upgrade_window = upgrade_window_at = candidate_since = None
         started_raw = None
         if statefulset is not None:
             containers = statefulset.spec.template.spec.containers
@@ -722,6 +749,11 @@ class ClusterClient:
             render_digest_applied_at = _parse_timestamp(annotations.get(RENDER_DIGEST_APPLIED_AT_ANNOTATION))
             row_generation_raw = annotations.get(ROW_GENERATION_ANNOTATION)
             row_generation = int(row_generation_raw) if row_generation_raw and row_generation_raw.isdigit() else None
+            upgrade_target = annotations.get(UPGRADE_TARGET_ANNOTATION) or None
+            upgrade_phase = annotations.get(UPGRADE_PHASE_ANNOTATION) or None
+            upgrade_window = annotations.get(UPGRADE_WINDOW_ANNOTATION) or None
+            upgrade_window_at = annotations.get(UPGRADE_WINDOW_AT_ANNOTATION) or None
+            candidate_since = _parse_timestamp(annotations.get(CANDIDATE_SINCE_ANNOTATION))
 
         pod_exists = len(pods) > 0
         live_pods = [pod for pod in pods if pod.metadata.deletion_timestamp is None]
@@ -827,6 +859,11 @@ class ClusterClient:
             statefulset_render_digest=render_digest,
             statefulset_render_digest_applied_at=render_digest_applied_at,
             statefulset_row_generation=row_generation,
+            statefulset_upgrade_target=upgrade_target,
+            statefulset_upgrade_phase=upgrade_phase,
+            statefulset_upgrade_window=upgrade_window,
+            statefulset_upgrade_window_at=upgrade_window_at,
+            statefulset_candidate_since=candidate_since,
             pod_exists=pod_exists,
             pod_ready=pod_ready,
             pod_terminating=pod_terminating,

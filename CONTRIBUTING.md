@@ -87,6 +87,29 @@ the CUDA index on Linux and Windows — multi-GB, and unusable without a GPU. Us
 `EXOMEM_EMBED_BACKEND=onnx` written into the service environment. It is the
 right default for any host without a GPU.
 
+## Upgrade barriers: a one-way or operator-step change adds its entry
+
+The Cloud release automation moves each release onto the cells without a person.
+It stops only at an entry in `infra/contracts/upgrade-barriers-v1.json`. A pull
+request that adds a one-way change or a change that needs an operator step must
+add its entry in the same pull request:
+
+- a one-way change cannot be undone by a rollback or a restore, such as a key
+  conversion or a migration of state outside the cell's volume;
+- an operator step is something a person must do before the upgrade, such as a
+  new secret to apply.
+
+Each entry names the first release on the far side (`version`), its `scope`
+(`platform` or `cell`), its `kind` (`one-way` or `operator-step`), the runbook
+section that states the step, and a one-line summary. Copy the file to
+`infra/helm/platform/files/upgrade-barriers-v1.json`; the chart test keeps the two
+equal. `tests/test_upgrade_barriers.py` checks the schema and that each runbook
+section exists. No tool detects a one-way change, so the author decides.
+
+Review checklist: for a change to cell state, keys, secrets or the control
+database, ask whether it is one-way or needs an operator step, and if so, find its
+barrier entry.
+
 ## The skill scaffold is hand-authored — keep it generic
 
 `src/exomem/_scaffold/_Schema/` (the skill shipped to new users via `init` /

@@ -44,6 +44,12 @@ def initial_image(row: CellRow, rollout: RolloutRow, cell_image: str | None) -> 
     return None, NO_GOOD_IMAGE
 
 
+def is_candidate(row: CellRow, observation: ClusterObservation, cell_image: str | None) -> bool:
+    """A serving cell whose image differs from its target."""
+
+    return _is_candidate(row, observation, cell_image)
+
+
 def _is_candidate(row: CellRow, observation: ClusterObservation, cell_image: str | None) -> bool:
     if row.desired_state not in ("running", "read_only"):
         return False
@@ -91,6 +97,7 @@ def select_upgrade_candidate(
     now: datetime,
     any_cell_already_upgrading: bool,
     refused: frozenset[str] = frozenset(),
+    due: frozenset[str] | None = None,
 ) -> str | None:
     """The next cell eligible to start an upgrade attempt this pass, or None.
 
@@ -102,6 +109,12 @@ def select_upgrade_candidate(
     picked in `rollout_priority` then `cell_id` order, and an ineligible one
     is skipped rather than waited for -- ordering among tenants protects
     nothing, and waiting on one broken tenant would hold the fleet back.
+
+    automate-cloud-releases D4: with upgrade windows on, `due` is the due set.
+    The canary is exempt and starts as soon as its target changes; any other
+    cell starts only when it is due, oldest `exomem.io/candidate-since` first,
+    so a cell that missed its window goes before newer candidates. `due` is
+    None with windows off, and the order is then the one before windows.
     """
 
     if any_cell_already_upgrading or rollout.paused or not rows:
@@ -123,10 +136,15 @@ def select_upgrade_candidate(
         and should_attempt_upgrade(
             row, rollout, observations[row.cell_id], cell_image, now=now, refused=row.cell_id in refused
         )
+        and (due is None or row.cell_id in due)
     ]
     if not eligible:
         return None
-    return min(eligible, key=lambda row: (row.rollout_priority, row.cell_id)).cell_id
+    if due is None:
+        return min(eligible, key=lambda row: (row.rollout_priority, row.cell_id)).cell_id
+    return min(
+        eligible, key=lambda row: (observations[row.cell_id].statefulset_candidate_since or now, row.cell_id)
+    ).cell_id
 
 
 def owner_cell(rows: list[CellRow]) -> CellRow:

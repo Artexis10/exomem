@@ -239,3 +239,27 @@ def alert_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", str(CONTRACT_ALERTS["pending_operation_warn_seconds"]))
     monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", str(CONTRACT_ALERTS["pvc_reserved_free_bytes"]))
     monkeypatch.setenv("CELLCTL_RECALL_LAG_WARN_SECONDS", str(CONTRACT_ALERTS["recall_lag_warn_seconds"]))
+    monkeypatch.setenv("CELLCTL_ROLLOUT_HELD_WARN_SECONDS", str(CONTRACT_ALERTS["rollout_held_warn_seconds"]))
+    monkeypatch.setenv("CELLCTL_ROLLOUT_STALLED_WARN_SECONDS", str(CONTRACT_ALERTS["rollout_stalled_warn_seconds"]))
+    monkeypatch.setenv("CELLCTL_CANARY_WAIT_WARN_SECONDS", str(CONTRACT_ALERTS["canary_wait_warn_seconds"]))
+
+
+# The chart's own defaults for cellctl.upgradeWindow.*, which main.build_reconcile_config
+# requires (the chart test proves the chart renders these names).
+UPGRADE_WINDOW_ENV = {
+    "CELLCTL_UPGRADE_WINDOW_ENABLED": "true",
+    "CELLCTL_UPGRADE_WINDOW_LOOKBACK_DAYS": "14",
+    "CELLCTL_UPGRADE_WINDOW_MIN_COVERAGE": "0.5",
+    "CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START": "5",
+    "CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_END": "2",
+    "CELLCTL_UPGRADE_WINDOW_IDLE_MINUTES": "5",
+    "CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES": "10",
+}
+
+
+@pytest.fixture(autouse=True)
+def upgrade_window_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name, value in UPGRADE_WINDOW_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CELLCTL_UPGRADE_BARRIERS", (
+        Path(__file__).resolve().parents[3] / "infra/contracts/upgrade-barriers-v1.json").read_text(encoding="utf-8"))

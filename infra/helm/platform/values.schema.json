@@ -90,7 +90,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "exportDeadlineMinutes", "exportPauseCopyFloorMiB", "exportConcurrencyPerNode", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "upgradeWindow", "exportDeadlineMinutes", "exportPauseCopyFloorMiB", "exportConcurrencyPerNode", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "accessRecord": {
           "type": "object", "additionalProperties": false,
@@ -242,6 +242,21 @@
         "b2BucketId": {"type": "string"},
         "b2Endpoint": {"type": "string"},
         "initDeadlineMinutes": {"type": "integer", "minimum": 1},
+        "upgradeWindow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "lookbackDays", "minCoverage", "defaultHourStart", "defaultHourEnd", "idleMinutes", "forceMinutes"],
+          "description": "automate-cloud-releases D4: each cell upgrades in its own quiet UTC hour. cellctl refuses to start without every value, and when the default range overlaps cells.backupWindow.",
+          "properties": {
+            "enabled": {"type": "boolean", "description": "false makes every eligible cell due at once, as before upgrade windows."},
+            "lookbackDays": {"type": "integer", "minimum": 1, "maximum": 28, "description": "Days of traffic history behind a window, clamped to the cell's reported retention."},
+            "minCoverage": {"type": "number", "minimum": 0, "maximum": 1, "description": "Fraction of the lookback that the cell must have observed before its window comes from history."},
+            "defaultHourStart": {"type": "integer", "minimum": 0, "maximum": 23, "description": "First UTC hour of the range that spreads the default hours of cells with too little history."},
+            "defaultHourEnd": {"type": "integer", "minimum": 0, "maximum": 23, "description": "End of that range, exclusive. It may wrap past midnight."},
+            "idleMinutes": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Minutes with nothing in flight and no request before a cell rolls inside its window."},
+            "forceMinutes": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Minutes before the window ends when a cell rolls even if busy."}
+          }
+        },
         "upgradeReadyDeadlineMinutes": {
           "type": "integer",
           "minimum": 5,
@@ -437,10 +452,35 @@
     "cloudGateway": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "marketplaceReviewerAccessEnabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs"],
+      "required": ["enabled", "marketplaceReviewerAccessEnabled", "image", "replicas", "hostname", "publicBaseUrl", "mcpPath", "cellProtocolVersion", "databaseSecretName", "databaseSecretKey", "controlPlaneKeySecretName", "controlPlaneKeySecretKey", "cellTokenKeySecretName", "trustedIngressSourceHeader", "trustedIngressSourceValue", "databaseEgressCidrs", "hold", "upstream"],
       "properties": {
         "enabled": {"type": "boolean"},
         "marketplaceReviewerAccessEnabled": {"type": "boolean"},
+        "hold": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["budgetSeconds", "intervalMs", "jitterMs", "retryAfterSeconds", "max", "maxPerTenant"],
+          "description": "automate-cloud-releases D5: how long the gateway holds a request while its cell refuses connections. A budget of 0 turns the hold off.",
+          "properties": {
+            "budgetSeconds": {"type": "integer", "minimum": 0, "maximum": 120, "description": "Seconds the gateway retries a refused connection before it answers 503 CELL_NOT_READY. 0 turns the hold off."},
+            "intervalMs": {"type": "integer", "minimum": 50, "maximum": 10000, "description": "Milliseconds between connect retries."},
+            "jitterMs": {"type": "integer", "minimum": 0, "maximum": 10000, "description": "Random jitter of up to this many milliseconds added to each retry interval."},
+            "retryAfterSeconds": {"type": "integer", "minimum": 1, "maximum": 300, "description": "Retry-After of the 503 answered when the budget runs out or a hold cap is full."},
+            "max": {"type": "integer", "minimum": 1, "maximum": 1024, "description": "Held requests at once across the gateway. Each buffers up to the 1 MiB prepared-body cap."},
+            "maxPerTenant": {"type": "integer", "minimum": 1, "maximum": 1024, "description": "Held requests at once for one tenant."}
+          }
+        },
+        "upstream": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["connectTimeoutMs", "timeoutSeconds", "idleSeconds"],
+          "description": "automate-cloud-releases D5: the gateway's timeouts on each call to a cell.",
+          "properties": {
+            "connectTimeoutMs": {"type": "integer", "minimum": 100, "maximum": 60000, "description": "Milliseconds one connect attempt to a cell may take."},
+            "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 3600, "description": "Seconds from the first forwarded byte to the cell's response headers before the gateway answers 504 CELL_TIMEOUT."},
+            "idleSeconds": {"type": "integer", "minimum": 1, "maximum": 7200, "description": "Seconds a streamed response may send no bytes before the gateway closes it. Keep it above the longest tool call."}
+          }
+        },
         "artifactTransportEnabled": {"type": "boolean"},
         "transferTools": {
           "type": "object",
