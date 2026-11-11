@@ -403,11 +403,13 @@ def test_a_caller_who_may_not_see_the_answer_gets_the_reply_of_a_vault_without_i
 
 
 def _write_as_the_service_does(vault: Path, rel: str, body: str) -> None:
-    """A committed service write: the file lands, then freshness announces it. The graph and the
-    link resolver catch up later, so they trail the live recall checkpoint until then."""
+    """A committed service write as the file watcher's batch publishes it: the file lands,
+    freshness announces the batch, and the resident link resolver is patched in the same batch.
+    The graph catches up later, so it trails the live recall checkpoint until then."""
     path = vault / rel
     path.write_text(body, encoding="utf-8")
     freshness.on_files_changed(vault, changed=[path])
+    find_module.on_resolver_files_changed(vault, [rel], [])
 
 
 @pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
@@ -438,35 +440,45 @@ def test_a_write_the_caller_may_not_see_leaves_its_marks_as_a_vault_without_that
     assert _marks(after_write)["Does the launch need a beta?"] == {"open": True}
 
 
-def test_deleting_a_namesake_the_caller_may_not_see_leaves_its_origin_as_it_was(
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_withheld_page_created_while_the_graph_trails_reads_as_unknown(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Pins the limit the in-place edit fix does not cover: a withheld page created while the
+    graph trails changes the link topology, so no resolver can show the rows' links as derived,
+    and the restricted read says its edges are unknown rather than serving them as they were."""
+    vault = _answer_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    created = f"{NOTES}/Patterns/Answer notes.md"
+    with principal.request_scope(_external()):
+        _write_as_the_service_does(
+            vault, created, PAGE.format(title="Answer notes", body="A new withheld page.")
+        )
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
+
+
+def test_a_lag_holding_a_deleted_page_reads_as_unknown(
     tmp_path: Path, request: pytest.FixtureRequest
 ) -> None:
-    """Catches a link re-read as the owner reads it after a withheld namesake is deleted. The claim
-    links `[[Survey]]`, which a visible and a withheld page share, so the caller reads it as a
-    link to the visible one. The graph trails the deletion, and a page that is gone reads as
-    visible, so the link would keep the owner's reading and the origin would change. The
-    vault-wide search leaves the verdict that proves the deleted page withheld."""
-    pages = {key: body for key, body in PAGES.items() if key != "Analysis"}
-    pages["Patterns/Survey"] = "## Claim\n\nThe private survey found the same."
-    pages["Analysis"] = PAGES["Analysis"].replace(f"[[{NOTES}/Survey]]", "[[Survey]]")
-    vault = _vault(tmp_path, pages, graph=False)
-    write_scope(vault)
-    write_rule(vault, ceiling=egress.LEVEL_NONE)
-    _reset_caches()
+    """Pins the deleted-path rule: a withheld page deleted while the graph trails is not one the
+    lag may keep. The graph's rows cannot be served as they stand, so the restricted read says
+    its edges are unknown rather than as a vault that still holds the page."""
+    vault = _answer_twin(tmp_path, withheld=True)
     _seed_live_recall(vault)
     request.getfixturevalue("warm_managed_cell")(vault)
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
-    filters = {"unit.dimension": {"$eq": "attribution"}}
     with principal.request_scope(_external()):
-        before = _search(vault, filters, deep=True, scope="vault")
-        path = vault / f"{NOTES}/Patterns/Survey.md"
+        # A first read leaves the published verdict that proves the page withheld for this caller.
+        _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True, scope="vault")
+        path = vault / f"{NOTES}/{WITHHELD_ANSWER}.md"
         path.unlink()
         freshness.on_files_changed(vault, deleted=[path])
-        after = _search(vault, filters, deep=True, scope="vault")
-
-    assert after == before
-    origin = {"by": "Research team", "from": [context_refs.vault_ref(f"{NOTES}/Survey.md")]}
-    assert _marks(after)["Exports come first on the roadmap."] == {"origin": origin}
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            _search(vault, {"unit.dimension": {"$eq": "uncertainty"}}, deep=True)
 
 
 def test_a_unit_in_two_requested_groups_is_in_full_in_the_first_and_a_ref_in_the_next(

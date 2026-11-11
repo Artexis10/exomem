@@ -2300,6 +2300,29 @@ def _dependency_changed_keys(
     return keys
 
 
+#: One resident-resolver topology fingerprint per vault, keyed by the checkpoint the
+#: resolver stands at: a patch restamps the checkpoint, so a stale entry never decides
+#: a read, and a lag's repeated restricted reads pay one hash.
+_RESIDENT_TOPOLOGY_DIGESTS: dict[Path, tuple[object, str]] = {}
+
+
+def _resident_topology_fingerprint(
+    vault_root: Path,
+    resolver: vault_module.WikilinkResolver,
+    checkpoint: freshness.RecallFreshnessCheckpoint | None,
+) -> str:
+    """The resident resolver's topology fingerprint, cached at its checkpoint."""
+    if checkpoint is None:
+        return _resolver_topology_fingerprint(resolver)
+    key = Path(vault_root)
+    cached = _RESIDENT_TOPOLOGY_DIGESTS.get(key)
+    if cached is not None and cached[0] == checkpoint:
+        return cached[1]
+    digest = _resolver_topology_fingerprint(resolver)
+    _RESIDENT_TOPOLOGY_DIGESTS[key] = (checkpoint, digest)
+    return digest
+
+
 def _resolver_topology_fingerprint(
     resolver: vault_module.WikilinkResolver,
 ) -> str:
@@ -3046,7 +3069,6 @@ class EpistemicGraphIndex:
         outcome_out: list[str] | None = None,
         refusal_out: list[str] | None = None,
         reader: Callable[[str], bool] | None = None,
-        reader_held_out: list[frozenset[str]] | None = None,
     ) -> sqlite3.Connection | None:
         """Open one validated read transaction without creating or migrating schema.
 
@@ -3060,9 +3082,8 @@ class EpistemicGraphIndex:
         by pages the caller may not see (`view_lag.recall_withheld_lag`), is as
         current as the live one would be, so a write it may not see never
         changes its read. Every other check still holds. The bridged delta is
-        the lineage proof the exact live checkpoint gives. Such a read appends
-        to ``reader_held_out`` the deleted pages that the caller's verdict held
-        withheld, which its view must still reject.
+        the lineage proof the exact live checkpoint gives. A lag that holds any
+        deleted path reads as unknown: no verdict proof is offered for it.
 
         Public readers require the stored graph projection to match the current
         event-maintained (or cold-walk) projection. Incremental maintenance may
@@ -3298,7 +3319,13 @@ class EpistemicGraphIndex:
                 )
             ):
                 reader_held = view_lag.recall_withheld_lag(
-                    self.vault_root, "vault", stored_checkpoint, reader
+                    self.vault_root,
+                    "vault",
+                    stored_checkpoint,
+                    reader,
+                    # A deleted page reads unknown, even one a verdict held
+                    # withheld: no proof is offered, so the lag refuses it.
+                    withheld_before=lambda _paths: frozenset(),
                 )
                 current = reader_held is not None
             # A checkpoint is an O(delta) proof only inside the exact process
@@ -3429,8 +3456,6 @@ class EpistemicGraphIndex:
         )):
             conn.close()
             return None
-        if reader_held is not None and reader_held_out is not None:
-            reader_held_out.append(reader_held)
         return conn
 
     def apply_adopted_residue(self, residue: Iterable[str]) -> bool:
@@ -9122,40 +9147,62 @@ class EpistemicGraphIndex:
 
     def _reader_resolver(
         self,
-        conn: sqlite3.Connection,
         request: Callable[[], vault_module.WikilinkResolver] | None,
-    ) -> vault_module.WikilinkResolver | None:
+    ) -> tuple[vault_module.WikilinkResolver, str | None, str | None] | None:
         """The link resolver a restricted reader's re-derivation reads the open snapshot with, or
-        None when none resolves as its rows were derived.
+        None when none resolves as its rows were derived, and the ``graph_meta`` pair it was
+        chosen against.
 
         That is the resident recall resolver at the rows' stored checkpoint, or one with the
-        topology the rows record. The resident one is borrowed, never built. Only when none fits
-        is one built: the request's own by `request`, or without one the graph view's own. Either
-        may refuse, as `find.recall_resolver_snapshot` does after a write the request did not see.
+        topology the rows record. The resident one is borrowed, never built. When it is, one is
+        built: the request's own by `request`, or without one the graph view's own. Either may
+        refuse, as `find.recall_resolver_snapshot` does after a write the request did not see.
+
+        The choice runs before the read transaction opens, so a cold build never holds a
+        registered reader. A resident resolver whose topology does not match the rows' decides
+        the read at once: a built resolver describes the same live vault, so hashing it would pay
+        a second fingerprint for the same answer.
         """
-        meta = dict(
-            conn.execute(
-                "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
-                (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
-            ).fetchall()
-        )
+        try:
+            probe = self._connect_existing(readonly=True)
+        except (RuntimeError, sqlite3.Error, OSError):
+            return None
+        try:
+            meta = dict(
+                probe.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
+                    (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
+                ).fetchall()
+            )
+        except sqlite3.Error:
+            return None
+        finally:
+            probe.close()
         topology = meta.get(_RESOLVER_TOPOLOGY_KEY)
         stored = _checkpoint_from_value(meta.get(_RECALL_CHECKPOINT_KEY))
         borrowed = find_module.borrow_recall_resolver(self.vault_root)
         if borrowed is not None:
             resident, checkpoint = borrowed
-            if (stored is not None and checkpoint == stored) or (
-                _resolver_topology_fingerprint(resident) == topology
-            ):
-                return resident
+            if stored is not None and checkpoint == stored:
+                return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
+            if _resident_topology_fingerprint(self.vault_root, resident, checkpoint) == topology:
+                return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
+            # A built resolver would describe the same live vault and hash to the same
+            # fingerprint: one topology hash decides this read.
+            return None
         try:
             built = (
-                request() if request is not None
+                request()
+                if request is not None
                 else find_module.recall_resolver_snapshot(self.vault_root)
             )
         except find_module.RetrievalIndexWarming:
             return None
-        return built if _resolver_topology_fingerprint(built) == topology else None
+        return (
+            (built, topology, meta.get(_RECALL_CHECKPOINT_KEY))
+            if _resolver_topology_fingerprint(built) == topology
+            else None
+        )
 
     def unit_edges(
         self,
@@ -9188,8 +9235,8 @@ class EpistemicGraphIndex:
         `reader` is a restricted caller's release decision (`egress.visible_page_filter`), None
         for the owner. It makes a write that caller may not see leave its read as it was: a
         sidecar that trails the live checkpoint only by such pages is read (`_open_read_snapshot`),
-        and the rows' links resolve as they were derived (`_reader_resolver`). Without such a
-        resolver the edges are temporarily unavailable.
+        and the rows' links resolve as they were derived (`_reader_resolver`, chosen before the
+        read transaction opens). Without such a resolver the edges are temporarily unavailable.
         """
         requested_keys = [str(k) for k in keys if k]
         if not requested_keys or (pages is not None and not pages):
@@ -9209,26 +9256,36 @@ class EpistemicGraphIndex:
             return UnitEdgeResult(status="temporarily_unavailable", reason="graph_index_disabled")
         if not self.path.exists():
             return UnitEdgeResult(status="warming")
-        held: list[frozenset[str]] = []
-        conn = self._open_read_snapshot(reader=reader, reader_held_out=held)
+        expected_meta: tuple[str | None, str | None] | None = None
+        if keep is None:
+            link_resolver = None
+        elif reader is None:
+            link_resolver = resolver() if resolver is not None else None
+        else:
+            decided = self._reader_resolver(resolver)
+            if decided is None:
+                return UnitEdgeResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
+            link_resolver, topology, checkpoint_value = decided
+            expected_meta = (topology, checkpoint_value)
+        conn = self._open_read_snapshot(reader=reader)
         if conn is None:
             return UnitEdgeResult(status="warming")
         try:
-            if held and keep is not None:
-                withheld, admitted = held[0], keep
-
-                def keep(path: str) -> bool:
-                    # A page that left the vault reads as visible; this caller's verdict
-                    # held it back.
-                    return path not in withheld and admitted(path)
-
-            if keep is None:
-                link_resolver = None
-            elif reader is None:
-                link_resolver = resolver() if resolver is not None else None
-            else:
-                link_resolver = self._reader_resolver(conn, resolver)
-                if link_resolver is None:
+            if expected_meta is not None:
+                # The resolver was chosen against a probe read of the sidecar; this
+                # transaction must be the same one it decided for.
+                meta = dict(
+                    conn.execute(
+                        "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
+                        (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
+                    ).fetchall()
+                )
+                if (
+                    meta.get(_RESOLVER_TOPOLOGY_KEY),
+                    meta.get(_RECALL_CHECKPOINT_KEY),
+                ) != expected_meta:
                     return UnitEdgeResult(
                         status="temporarily_unavailable", reason="resolver_unavailable"
                     )

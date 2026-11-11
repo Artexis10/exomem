@@ -8446,13 +8446,16 @@ def borrow_recall_resolver(
     """
     root = Path(vault_root)
     with _RESOLVER_LOCK:
+        checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
+    if checkpoint is not None:
+        resident = recall_resolver_snapshot_at_checkpoint(vault_root, checkpoint)
+        if resident is not None:
+            return resident.fork(), checkpoint
+    with _RESOLVER_LOCK:
         cached = _RECALL_RESOLVER_CACHE.get(root)
         if cached is None:
             return None
-        checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
-        if checkpoint is not None and cached[0] != _recall_checkpoint_identity(checkpoint):
-            checkpoint = None
-        return cached[1].fork(), checkpoint
+        return cached[1].fork(), None
 
 
 def prime_resolver_from_entries(
