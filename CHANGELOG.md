@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.172.0](https://github.com/Artexis10/exomem/compare/v0.171.0...v0.172.0) (2026-11-11)
+
+
+### Features
+
+* **benchmarks:** build slice 1 of the synthetic epistemic world ([#2739](https://github.com/Artexis10/exomem/issues/2739)) ([7bb4647](https://github.com/Artexis10/exomem/commit/7bb4647598985b47810896412b2dc92b470f3712))
+* **vault-store:** move, trash and recover binaries, folders and scene frames in store mode ([#2728](https://github.com/Artexis10/exomem/issues/2728)) ([2eace67](https://github.com/Artexis10/exomem/commit/2eace673681968858f93a8f2e4443c38179be8f5))
+
+
+### Bug Fixes
+
+* **service:** let the target release report whether it can serve the state ([#2748](https://github.com/Artexis10/exomem/issues/2748)) ([8e0249d](https://github.com/Artexis10/exomem/commit/8e0249dba014666f2c185ad1ebd4e1fd9f7cab9c))
+
+
+### Performance
+
+* **governance:** decide each page's container parents once per request in a content filter ([#2737](https://github.com/Artexis10/exomem/issues/2737)) ([a7703dd](https://github.com/Artexis10/exomem/commit/a7703dd798da6b344c9a66f91889a432cdb3a5f1))
+
 ## [0.171.0](https://github.com/Artexis10/exomem/compare/v0.170.0...v0.171.0) (2026-11-11)
 
 
