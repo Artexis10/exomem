@@ -37,7 +37,7 @@ from typing import Any
 from membench.ids import child_seed
 
 from .core import BOTH, Artefact, Statement, World
-from .keys import Key, KeyRefused, keys_digest, keys_record, write_keys
+from .keys import Key, KeyRefused, key_spec, keys_digest, keys_record, write_keys
 from .loader import Catalogue, Refusal
 from .manifest import dump
 from .pack import AttributeSchema
@@ -145,10 +145,11 @@ class Rendering:
             ],
         }
 
-    def write(self, plan: Plan, directory: Path) -> str:
+    def write(self, plan: Plan, directory: Path, projection_digest: str | None = None) -> str:
         """Write the world, its manifest with this rendering, one file for each document, the
-        probes' tasks and the keys of the probes into ``directory``. Returns the manifest's digest."""
-        digest = plan.write(directory, self.manifest())
+        probes' tasks and the keys of the probes into ``directory``. ``projection_digest`` is the
+        digest of the projection file that the manifest pins. Returns the manifest's digest."""
+        digest = plan.write(directory, self.manifest(), projection_digest)
         (directory / "artefacts").mkdir(exist_ok=True)
         for document in self.documents.values():
             (directory / "artefacts" / f"{document.artefact}.txt").write_text(
@@ -185,7 +186,7 @@ class _Item:
     stated: tuple[str, ...] = ()  # further anchors that the text holds at `stated` only
 
 
-class _Reader:
+class Reader:
     def __init__(self, plan: Plan, world: World):
         self.plan, self.world = plan, world
 
@@ -384,7 +385,7 @@ class _Renderer:
     def __init__(self, plan: Plan, catalogue: Catalogue, bank: Bank, keys: tuple[Key, ...]):
         self.plan, self.catalogue, self.bank = plan, catalogue, bank
         self.world = plan.world()
-        self.reader = _Reader(plan, self.world)
+        self.reader = Reader(plan, self.world)
         self.refusals: list[Refusal] = []
         self.thread_of = {
             step["id"]: thread.id
@@ -534,14 +535,10 @@ class _Renderer:
                 used.setdefault(thread, set()).update(documents[artefact.id].forms)
         probes = []
         for thread in self.plan.threads:
-            entry, recipe = (
-                self.catalogue.entries[thread.entry],
-                self.catalogue.recipes[thread.recipe],
-            )
-            specs = (recipe.get("twin") or {}).get("keys", {}) if entry.twin_of else recipe["keys"]
-            for form in entry.probes:
-                at = thread.slots[specs[form]["at"]]
-                subject, schema = self.subject(thread, specs[form], at)
+            for form in self.catalogue.entries[thread.entry].probes:
+                spec = key_spec(self.catalogue, thread, form)
+                at = thread.slots[spec["at"]]
+                subject, schema = self.subject(thread, spec, at)
                 fills = {"subject": subject} | ({} if schema is None else {"about": schema.label})
                 item = f"probe {thread.id} {form}"
                 pool = self.bank.eligible(f"probe.{form}", None, fills, {"about"})

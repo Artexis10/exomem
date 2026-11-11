@@ -99,6 +99,13 @@ def write_keys(plan: Plan, catalogue: Catalogue) -> tuple[Key, ...]:
     return tuple(keys)
 
 
+def key_spec(catalogue: Catalogue, thread: Thread, form: str) -> Mapping[str, Any]:
+    """The recipe's key parts for one probe form of a thread: the `twin` part for a twin entry."""
+    entry = catalogue.entries[thread.entry]
+    recipe = catalogue.recipes[thread.recipe]
+    return ((recipe.get("twin") or {}).get("keys", {}) if entry.twin_of else recipe["keys"])[form]
+
+
 def write_key(
     oracle: Oracle, thread: Thread, catalogue: Catalogue, form: str, *, twin: bool = False
 ) -> Key:
@@ -108,8 +115,7 @@ def write_key(
     which asserts and stands carries is then no error (the asserted-content rule of the recipes).
     A twin entry keys the recipe's `twin` part."""
     entry = catalogue.entries[thread.entry]
-    recipe = catalogue.recipes[thread.recipe]
-    spec = (recipe["twin"]["keys"] if entry.twin_of else recipe["keys"])[form]
+    spec = key_spec(catalogue, thread, form)
     at = thread.slots[spec["at"]]
     world = oracle.record.world
     prover = Prover(oracle)

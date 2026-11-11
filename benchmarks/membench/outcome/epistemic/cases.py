@@ -58,6 +58,11 @@ def readings() -> dict[str, str]:
     return _catalogue("attributes.yaml", "result_readings")
 
 
+def probe_forms() -> dict[str, dict]:
+    """Every form of probe, with how its result is read (``read_as``), from ``attributes.yaml``."""
+    return _catalogue("attributes.yaml", "probe_forms")
+
+
 def holds_store_name(text: str) -> bool:
     """Whether ``text`` holds a store name: the one rule that the mask, the case check and the report count share."""
     folded = text.casefold()

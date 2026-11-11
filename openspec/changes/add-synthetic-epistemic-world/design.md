@@ -225,7 +225,7 @@ The level and the bridge of every artefact go into the world's manifest, so a re
 - An **anchor** is a name, a value or a date of the statements that an artefact carries. The check reads tokens (`str.split` with the punctuation at the ends stripped) and finds each anchor as a run of tokens. A **trap value** is a trap or the premise of a key of the artefact's thread, which the artefact neither carries nor announces. Task 3.5 read the values of other statements about the same attribute instead. Task 3.6 replaced that proxy with the key-derived list. The check no longer sees a value that no key names as a trap, such as the answer in an earlier document. It now sees a trap that no statement about the attribute holds, such as a role trap, and it never reads another thread. The model-prose renderer of task 7.3 reuses the same check.
 - A probe's task names the thing and the attribute that its key reads, and carries no value. The projection adds the stale value of a `premise` probe (task 4.5).
 
-The manifest records, for each artefact, the level, the surface forms and a hash of the text. Its `projection_digest` stays `null`, because it is the digest of the projection file of decision 7 and no projection has written a world yet.
+The manifest records, for each artefact, the level, the surface forms and a hash of the text. Its `projection_digest` is `null` until a projection writes the world. Then it holds the SHA-256 of the projection file of decision 7 (task 4.5).
 
 **Model-written prose is optional and gated.** Templates are the default renderer and cost nothing. A model may rewrite an artefact for natural, messy prose. Then a check must pass in both directions:
 
@@ -280,7 +280,7 @@ A round plan declares each dial's value for each family before the round runs. N
 
 ### 7. Predictions are filed before a run
 
-`projections/exomem.yaml` states, per family, whether Exomem models it and what this design expects: pass, partial or fail. The file sits outside `benchmarks/membench/world/catalogue/`. A manifest pins the catalogue's digest and the projection's digest apart, so an edited prediction changes no world. The report prints each prediction beside its result.
+`benchmarks/membench/projections/exomem.yaml` states, per family, whether Exomem models it and what this design expects: pass, partial or fail. It also holds what f38 needs to play a project. The file sits outside `benchmarks/membench/world/catalogue/`, and outside this change, because task 9.2 archives the change. A manifest pins the catalogue's digest and the projection's digest apart, so an edited prediction changes no world. The report prints each prediction beside its result.
 
 The first register expects no family to pass. It expects 13 of 35 to fail: persistence, source reliability, calibration, propagation, scope, quantity, statistics, meaning, inference, causation, belief states, deception and machine sources. It expects the implied and propagated levels to fail in every family. These are readings of the shipped pack and the active specs. No run backs them.
 
@@ -361,6 +361,21 @@ The keys are in `keys.json` beside the manifest, in evaluator custody like the r
 - The prompt of `G` holds those files in session order, under a header that names no arm, store or memory product, and then the probe's task. It holds no task of an earlier session and no other file. A probe with an empty contest set reaches `G` as it reaches `N`.
 - `G` needs a contest set. The hand-written projects have none, so a run that asks for `G` on a project with a probe that lacks one is refused before any session starts, and `--arms` leaves `G` out by default.
 
+**What task 4.5 built.** `benchmarks/membench/outcome/epistemic/projection.py` turns a generated, rendered and keyed world into a project that f38 plays. Ten rulings fix the spec to the build.
+
+- **Sessions.** Session `n` is week `n` of the timeline, so a project has 12 sessions. Its files are the documents dated in that week, named by kind, date and a serial (`note/2025-02-10-1.txt`), so that no file name holds a thread or a step. Its task is one of the work tasks in `exomem.yaml`, drawn by a seeded choice. Until task 6.5 splits the work tasks with the banks, they sit in that file and name no value. The projection refuses a world where a work task holds a string of any key.
+- **Contest.** Each document of a key's contest set becomes a `{session, file}` entry, in session order. Every artefact of slice 1 is a document, so each has a file.
+- **A probe is asked in a free session.** The other threads and the backbone name the same people and things, so a planned week can hold a key string by chance. The suite's leak rule then refuses the probe. 22 of 24 seeds failed on that. The projection asks a probe in the first session, from its planned one on, whose files hold no string of its key, and records the planned session in the probe. The probe is the last moment of its thread and the thread's attributes are reserved, so the key reads the same later. A thread that binds an attribute with a validity window is asked in its planned session only. A world with a probe that no session can hold is refused as `no-free-session`, and names the probe. At the `stated` level 5 of 40 seeds refuse. The planner does not yet keep a probe's week free of its answer, which the architecture above says it should. That stays as debt.
+- **Words for a key.** An entity is its names that the probe's task does not use. A statement is the sentence that its document renders, so a warrant reading names its statements in the words that the actor sees. A set is its members, and a set within a set is in brackets. A bool, a set with more than one member and a none are no single value, so the key carries `value: null`. Every key has a rubric: the reading's own description from `attributes.yaml`, what it was asked of, and the answer. A reading of kind, modality, hedge or standing gives a property that an answer keeps, not a value that it states. It also leaves `value` null, because a kind word is ordinary text in the world's documents.
+- **Premise.** A premise probe's task takes one more line, from `exomem.yaml`, that states the stale state, unless the task holds it already.
+- **A probe in the mutation world.** A thread planted in the mutation world has `premise: null`. Its premise probe keeps the task that the renderer wrote and asks no premise. Nothing changed, so the right answer carries on with the one setting and reports no change. The probe is a false-alarm probe: its behaviours are `mutation_behaviours` in `exomem.yaml`, which is `over_flags`, in place of its entry's. A planted false premise (`absence.false-premise`) keeps its premise in the mutation world, because it names the event and not a stale state.
+- **Labels.** A probe of the form `stable` has the label `stable` and no change. Every other probe has the dimension of its family, and the id of its thread as its change. A family that ships no dimension keeps its own key as the label. f38's case check, judge and report never list the labels: the check compares a label with `stable`, and the report builds a row for each label that a probe holds. So a family key is accepted, and its row is description. Each probe also holds its `family`, for the report of task 4.6.
+- **Reading and behaviours.** A key's reading is the `read_as` of its probe form, so `abstain` and `unaided` are read as harm.
+- **Recall probes.** The slice 1 entries give three recall probes: `self.earlier-session`, `persistence.permanent` and the twin `currency.unchanged`. f38 asks four. The round of a development project plants the first recall entry that is no twin again, until the project holds `recall_probes` of them. It binds fresh things and adds no recipe.
+- **`projection_digest`.** A world's manifest pins the SHA-256 of `exomem.yaml`. The file moved from this change to `benchmarks/membench/projections/` for that, because task 9.2 archives the change.
+
+**What task 4.5 found.** The recipes `entities.owner-change` and `entities.role-change` bind an owner or a seat to any durable attribute, whose value domain is no person. The documents then read "the visitors allowed at once for a site is a person's name". A pack with an attribute for an owner and a seat would remove that. A scope probe's task names the thing and no context, although its key reads one. Arm `H` shows whether either defect makes a probe unsolvable.
+
 ### 11. The world's text is product-neutral, and the catalogue's shape is not
 
 **What is neutral.**
@@ -417,7 +432,7 @@ The keys are in `keys.json` beside the manifest, in evaluator custody like the r
 | `recipes.yaml` | 46 recipes: the 26 that slice 1 needs, and 20 for later slices. |
 | `lineage.yaml` | 36 sources, each with what this benchmark adopts and leaves, and how it was checked. |
 
-`projections/exomem.yaml` sits in this change, outside the catalogue directory, and holds the Exomem dimension and the filed prediction per family.
+`benchmarks/membench/projections/exomem.yaml` sits outside the catalogue directory, and holds the Exomem dimension and the filed prediction per family, and the text and settings of the f38 projection.
 
 An entry reads:
 

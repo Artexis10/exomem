@@ -212,18 +212,27 @@ class Plan:
                 announces=made,
             )
 
-    def write(self, directory: Path, rendering: Mapping[str, Any] | None = None) -> str:
+    def write(
+        self,
+        directory: Path,
+        rendering: Mapping[str, Any] | None = None,
+        projection_digest: str | None = None,
+    ) -> str:
         """Write the manifest and the shared world into ``directory``. Returns the manifest's digest."""
-        record = self.manifest(rendering)
+        record = self.manifest(rendering, projection_digest)
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "manifest.json").write_text(manifest.dump(record), encoding="utf-8")
         world = manifest.world_record(self.world())
         (directory / "world.json").write_text(manifest.dump(world), encoding="utf-8")
         return manifest.digest(record)
 
-    def manifest(self, rendering: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def manifest(
+        self, rendering: Mapping[str, Any] | None = None, projection_digest: str | None = None
+    ) -> dict[str, Any]:
         """Everything that fixes the world's bytes, and a hash of each artefact. ``rendering`` is the
-        manifest section of a renderer's output: the level and the surface form of each artefact."""
+        manifest section of a renderer's output: the level and the surface form of each artefact.
+        ``projection_digest`` is the digest of the projection file that the world is read through,
+        which stays `None` until a projection has written the world."""
         world = self.world()
         record = {
             "generator": manifest.GENERATOR_VERSION,
@@ -232,7 +241,7 @@ class Plan:
             "seed_commitment": manifest.digest(self.seed),
             "catalogue_digest": self.catalogue_digest,
             "pack": {"id": self.pack.id, "digest": self.pack.digest},
-            "projection_digest": None,  # the digest of the projection file; no projection has written this world yet
+            "projection_digest": projection_digest,
             "round": {
                 "entries": list(self.spec.entries),
                 "sessions": self.spec.sessions,
