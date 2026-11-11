@@ -762,6 +762,11 @@ async def test_a_pass_that_cannot_observe_a_cell_sends_no_rollout_transition(cel
 
 async def test_a_backward_move_needs_known_releases(cell_db: CellDatabase) -> None:
     # The image history read failing (the table missing) starts no attempt at all.
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await owner.execute("DROP TABLE exomem_cloud_image_history")
+    finally:
+        await owner.close()
     fleet = await Fleet.start(cell_db, config=ReconcileConfig(upgrade_barriers=ONE_WAY_CELL))
     try:
         await _set_cell_image(cell_db, IMAGE_B)

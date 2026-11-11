@@ -28,7 +28,7 @@ This change uses these names:
 
 A figure marked "est." is an estimate that no measurement confirms yet.
 
-The engineering primary-source roster was not consulted for this design, because the knowledge base that holds it was unreachable from the authoring session. The implementation reads its matching rows before task 1.1 starts (task 1.0).
+Task 1.0 read the engineering primary-source roster's pick-by-problem rows. No row covers retry budgets or rollout windows. The one row for deploy custody, "autonomy creates unacceptable blast radius" (Anthropic, "How we contain Claude"), asks for least privilege and bounded egress. D1's narrower deploy principal and D7's presence gate already follow it, so no row forces a design change.
 
 ## Goals / Non-Goals
 

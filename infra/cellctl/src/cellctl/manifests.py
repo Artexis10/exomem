@@ -123,7 +123,10 @@ JOB_KIND_LABEL = "exomem.io/cell-job"
 JOB_KIND_EXPORT = "export"
 JOB_KIND_EXPORT_PAUSE = "export-pause"
 JOB_KIND_EXPORT_PACK = "export-pack"
-NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE)
+# automate-cloud-releases D9: the kubelet pulls the image; the pod needs no
+# egress of its own.
+JOB_KIND_PREPARE = "prepare"
+NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE, JOB_KIND_PREPARE)
 JOB_EGRESS_POLICY = "job-egress"
 EXPORT_STAGING_DIR = "/staging"
 INIT_CONTAINER_NAME = "cell-init"
@@ -136,6 +139,8 @@ HOLD_ANNOTATION = "exomem.io/hold"
 HOLD_STARTED_ANNOTATION = "exomem.io/hold-started-at"
 PREVIOUS_IMAGE_ANNOTATION = "exomem.io/previous-image"
 PRE_UPGRADE_SNAPSHOT_ANNOTATION = "exomem.io/pre-upgrade-snapshot"
+# automate-cloud-releases D6: a local cell's pre-upgrade VolumeSnapshot name.
+PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION = "exomem.io/pre-upgrade-volume-snapshot"
 TARGET_APPLIED_ANNOTATION = "exomem.io/target-applied-at"
 RESTORED_SNAPSHOT_ANNOTATION = "exomem.io/restored-snapshot"
 # Not in D6's own annotation list: bookkeeping so the D6/D8 backoff can
@@ -311,6 +316,7 @@ class CellManifestSpec:
     hold_started_at: str | None = None
     previous_image: str | None = None
     pre_upgrade_snapshot: str | None = None
+    pre_upgrade_volume_snapshot: str | None = None
     target_applied_at: str | None = None
     restored_snapshot: str | None = None
     backup_outcome: str | None = None
@@ -1050,6 +1056,8 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
             annotations[PREVIOUS_IMAGE_ANNOTATION] = spec.previous_image
         if spec.pre_upgrade_snapshot:
             annotations[PRE_UPGRADE_SNAPSHOT_ANNOTATION] = spec.pre_upgrade_snapshot
+        if spec.pre_upgrade_volume_snapshot:
+            annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION] = spec.pre_upgrade_volume_snapshot
         if spec.target_applied_at:
             annotations[TARGET_APPLIED_ANNOTATION] = spec.target_applied_at
         if spec.restored_snapshot:
@@ -1280,6 +1288,16 @@ def snapshot_backup_name(base: str, cell_id: str, hold_started_at: str | None,
     return hold_job_name(base, hold_started_at)
 
 
+def clone_claim_name(volume_snapshot_name: str) -> str:
+    """automate-cloud-releases D6: the read-only clone claim an upgrade hold's
+    VolumeSnapshot feeds. The claim shares the snapshot's hold digest, so the
+    one name answers everywhere the pair is created, observed, mounted or
+    deleted."""
+
+    return (CLONE_CLAIM_NAME + volume_snapshot_name[len(SNAPSHOT_NAME):]
+            if volume_snapshot_name.startswith(f"{SNAPSHOT_NAME}-") else volume_snapshot_name)
+
+
 def _job_name_for_hold(spec: CellManifestSpec, base: str) -> str:
     # decide() only ever asks for a Job inside a hold, so a missing start
     # time is a caller bug; falling back to a bare name would bring back
@@ -1391,10 +1409,19 @@ CORDON_TOLERATION = {"key": "node.kubernetes.io/unschedulable", "operator": "Exi
 def _job_pod_spec(
     spec: CellManifestSpec, *, job_kind: str, command: list[str], data_read_only: bool, repo: str,
     claim_name: str | None = None, tolerate_cordon: bool = False,
+    snapshot_claim: str | None = None, scratch_dirs: bool = True,
 ) -> dict:
     placement = _dedicated_placement(spec)
     if tolerate_cordon and not placement:
         placement = {"tolerations": [dict(CORDON_TOLERATION)]}
+    volume_mounts = _job_volume_mounts(data_read_only=data_read_only)
+    volumes = _job_volumes(data_read_only=data_read_only, pvc_name=claim_name or spec.pvc_name)
+    if snapshot_claim is not None:
+        # automate-cloud-releases D6: the attempt's clone, mounted read-only
+        # beside the cell's read-write volume for a snapshot restore.
+        volumes.append({"name": "snapshot",
+                        "persistentVolumeClaim": {"claimName": snapshot_claim, "readOnly": True}})
+        volume_mounts.append({"name": "snapshot", "mountPath": "/snapshot", "readOnly": True})
     return {
         **placement,
         "restartPolicy": "Never",
@@ -1406,7 +1433,8 @@ def _job_pod_spec(
                 "image": spec.image,
                 "imagePullPolicy": "IfNotPresent",
                 "command": ["sh", "-c", "ulimit -c 0 && " +
-                            ("" if data_read_only else "mkdir -p /data/scratch/tmp /data/scratch/cache && ") +
+                            ("mkdir -p /data/scratch/tmp /data/scratch/cache && "
+                             if not data_read_only and scratch_dirs else "") +
                             " && ".join(command)],
                 "env": [({"name": entry["name"], "value": "/tmp"} if data_read_only and entry["name"] == "TMPDIR"
                          else {"name": entry["name"], "value": "/data/scratch/cache"}
@@ -1422,10 +1450,10 @@ def _job_pod_spec(
                     "runAsGroup": RUNTIME_GID,
                     **_container_security_context(),
                 },
-                "volumeMounts": _job_volume_mounts(data_read_only=data_read_only),
+                "volumeMounts": volume_mounts,
             }
         ],
-        "volumes": _job_volumes(data_read_only=data_read_only, pvc_name=claim_name or spec.pvc_name),
+        "volumes": volumes,
     }
 
 
@@ -1583,6 +1611,103 @@ def render_restore_job(
                 "spec": _job_pod_spec(
                     spec, job_kind=JOB_KIND_RESTORE, command=commands, data_read_only=False, repo=repo
                 ),
+            },
+        },
+    }
+
+
+def render_clone_restore_job(spec: CellManifestSpec, *, snapshot_claim: str) -> dict:
+    """automate-cloud-releases D6: restore from the attempt's own clone instead
+    of restic. The Job mounts the clone read-only at /snapshot beside the
+    cell's read-write volume at /data, then replaces the two backup paths
+    wholesale: files the target created under them go with the directories,
+    and the volume root -- including lost+found -- is never touched. It runs
+    as the runtime UID on the cell's node, which both claims pin it to. It
+    shares the restic restore's Job name and labels, so one restore hold
+    still has one Job and one observation."""
+
+    commands = [
+        # Empty each backed-up path and refill it from the clone: the
+        # directories themselves stay, so the runtime UID needs write
+        # permission under them, not on the volume root. Files the target
+        # created under them still go; the root, including lost+found, is
+        # never touched.
+        *[f"find {path} -mindepth 1 -delete" for path in BACKUP_PATHS],
+        *[f"cp -a /snapshot/{path.rsplit('/', 1)[-1]}/. {path}/" for path in BACKUP_PATHS],
+    ]
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": _job_name_for_hold(spec, RESTORE_JOB_NAME),
+            "namespace": spec.namespace,
+            "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTORE},
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 900,
+            "ttlSecondsAfterFinished": 300,
+            "template": {
+                "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTORE}},
+                "spec": _job_pod_spec(
+                    spec, job_kind=JOB_KIND_RESTORE, command=commands, data_read_only=False, repo="",
+                    snapshot_claim=snapshot_claim, scratch_dirs=False
+                ),
+            },
+        },
+    }
+
+
+def render_prepare_job(spec: CellManifestSpec, *, node: str, image: str) -> dict:
+    """automate-cloud-releases D9: one pull-only Job per node per target image,
+    started before the node's first upgrade window so the node's first attempt
+    finds the image already pulled. It runs `true` under the target image on
+    that node alone, holds no volume, finishes at once, and its TTL removes it.
+    The name derives from node and image, so re-applying it is a no-op and a
+    new target renders a new Job."""
+
+    name = "cell-prepare-" + hashlib.sha256(f"{node}|{image}".encode()).hexdigest()[:16]
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": name,
+            "namespace": spec.namespace,
+            "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_PREPARE},
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": 900,
+            # Outlasts every window hour plus a day: while the Job exists a
+            # re-apply is a no-op, so one Job really is one per node per
+            # target, not one per pass after a short TTL removes it.
+            "ttlSecondsAfterFinished": 93600,
+            "template": {
+                "metadata": {"labels": {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_PREPARE}},
+                "spec": {
+                    "nodeName": node,
+                    "restartPolicy": "Never",
+                    "automountServiceAccountToken": False,
+                    "securityContext": _pod_security_context(),
+                    "containers": [
+                        {
+                            "name": JOB_KIND_PREPARE,
+                            "image": image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "command": ["true"],
+                            "resources": {
+                                "requests": {"cpu": "10m", "memory": "16Mi"},
+                                "limits": {"cpu": "100m", "memory": "64Mi"},
+                            },
+                            "securityContext": {
+                                "runAsNonRoot": True,
+                                "runAsUser": RUNTIME_UID,
+                                "runAsGroup": RUNTIME_GID,
+                                **_container_security_context(),
+                            },
+                        }
+                    ],
+                },
             },
         },
     }

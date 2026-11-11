@@ -1,6 +1,6 @@
 ## 1. Phase 1: seamless switch, upgrade windows, release workflow and alerts (D1–D5, D8)
 
-- [ ] 1.0 Read the matching pick-by-problem rows of the engineering primary-source roster for retry budgets, rollout windows and deploy custody. Cite them in design.md. Verify: design.md cites each row, or records a design change that a row forces. It catches an implementation that repeats a design flaw the roster names.
+- [x] 1.0 Read the matching pick-by-problem rows of the engineering primary-source roster for retry budgets, rollout windows and deploy custody. Cite them in design.md. Verify: design.md cites each row, or records a design change that a row forces. It catches an implementation that repeats a design flaw the roster names.
 - [x] 1.1 Substrate (separate repository): add the gateway hold and the upstream timeouts to the cloud handler (D5).
   - Reuse the prepared-body reader of `cloud-artifacts.ts` and its 1 MiB cap for every request while the hold budget is above 0. Stream a larger body without a hold.
   - Size the reader's buffer from `content-length` when the header is present, with the 1 MiB cap as the bound.
@@ -102,7 +102,7 @@
   - an unreadable history keeps the cached window, which catches a window that jumps to the default on one failed read;
   - a missing chart value stops `cellctl` at start, which catches a deploy that silently runs without windows;
   - `cellctl.upgradeWindow.enabled: false` selects candidates as before this change, which catches a rollback switch that does nothing.
-- [ ] 1.9 After task 1.7 ships, add per-node concurrency after the canary (D4). Keep the fleet-wide block on any restore hold. Verify with reconcile tests:
+- [x] 1.9 After task 1.7 ships, add per-node concurrency after the canary (D4). Keep the fleet-wide block on any restore hold. Verify with reconcile tests:
   - with a concurrency of 1, two due cells on one node give one attempt, and a due cell on another node also starts, which catches a count that is fleet-wide or unbounded;
   - while the canary's image differs from its target (`desired_image` or `cell_image`), no other attempt starts on any node, which catches an image that reaches tenants before the canary;
   - a canary that is behind its target but not eligible (stopped, not Ready, refused or in backoff) blocks every tenant attempt, including a tenant with an older `candidate-since`, which catches a tenant that pins a new image before the canary ran it;
@@ -183,12 +183,14 @@
   - an hourly backup hold does not start while the upgrade hold keeps its clone, which catches a second clone request;
   - a missing snapshot falls back to the off-site backup. With neither, the row records `RESTORE_FAILED`, and no image starts. It catches a guess onto an unrestored volume;
   - a `cellctl` restart at each step resumes from the annotations, which catches an attempt that loses its restore point on restart.
-- [ ] 3.2 Drop `forget --prune` from the pre-upgrade backup of a cell without snapshot support, and keep its nightly prune. Verify: a test of `_backup_source` shows no retention for that cell's upgrade hold, and retention for its nightly backup. It catches a prune that holds restic's exclusive lock inside the stop.
-- [ ] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot`, the fallback order, and the forward-only hold's kept snapshot and clone. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
+
+  Note: the reconcile tests all pass; the K3s live-job bullet is added as `test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s` in test_k3s_integration.py and runs only in CI (RUN_CELLCTL_K3S_TEST), so the box stays open until CI runs it.
+- [x] 3.2 Drop `forget --prune` from the pre-upgrade backup of a cell without snapshot support, and keep its nightly prune. Verify: a test of `_backup_source` shows no retention for that cell's upgrade hold, and retention for its nightly backup. It catches a prune that holds restic's exclusive lock inside the stop.
+- [x] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot`, the fallback order, and the forward-only hold's kept snapshot and clone. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
 
 ## 4. Phase 3: platform upgrade command (D7)
 
-- [ ] 4.1 Make `cellctl` refuse to start when a table or column that it reads or writes is missing or unreadable, the image history included. Expose the same check for the command. Verify: a test against a schema without one column, and one without the read grant on the history table, stops the start and names the gap. It catches a controller that acts on half a schema.
+- [x] 4.1 Make `cellctl` refuse to start when a table or column that it reads or writes is missing or unreadable, the image history included. Expose the same check for the command. Verify: a test against a schema without one column, and one without the read grant on the history table, stops the start and names the gap. It catches a controller that acts on half a schema.
 - [ ] 4.2 Add `infra/scripts/platform_upgrade.py` with the machine review, the upgrade, the verify step, the platform Deployment record and the dispatch. Verify with tests on recorded tool output:
   - each failing review step stops the command before any change, which catches an upgrade that runs past a failed check;
   - a secret contract change with no barrier entry stops the command, which catches an operator-step release applied without its step;

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from .backup_window import DEFAULT_BACKUP_WINDOW, within_backup_window
 from .barriers import Barrier
 from .capacity import GIB, pool_takes
+from .manifests import SNAPSHOT_NAME, snapshot_backup_name
 from .rollout import current_image, target_image
 from .state import (
     BACKUP_FAILED,
@@ -101,6 +102,13 @@ class ReconcileConfig:
     backup_window: tuple[int, int] = DEFAULT_BACKUP_WINDOW
     # D8: at most this many backup holds run at once across the fleet.
     backup_concurrency: int = 1
+    # automate-cloud-releases D4: at most this many upgrade holds run at once
+    # on one node. Production reads it from the chart
+    # (cellctl.upgradeConcurrencyPerNode, via main.build_reconcile_config).
+    upgrade_concurrency_per_node: int = 1
+    # automate-cloud-releases D9: the pull-only prepare Job before a node's
+    # first upgrade window for a target. The chart's off switch disables it.
+    upgrade_prepare_enabled: bool = True
     # D6/D8: the backup-retry-after backoff, doubling from this floor up to
     # this ceiling, reset by a successful backup.
     backup_retry_initial_minutes: int = 15
@@ -291,7 +299,7 @@ def decide(
             row, rollout, observation, now, config, cell_image, changes_live, storage, storage_room
         )
     elif active_hold == "upgrade":
-        decision = _continue_upgrade(row, rollout, observation, now, config, cell_image, crossing, canary)
+        decision = _continue_upgrade(row, rollout, observation, now, config, cell_image, crossing, canary, storage)
     elif active_hold == "backup":
         decision = _continue_backup(row, observation, now, config)
     elif active_hold == "restore":
@@ -617,6 +625,7 @@ def _continue_upgrade(
     cell_image: str | None,
     crossing: bool = False,
     canary: bool = False,
+    storage: StorageConfig = DEFAULT_STORAGE,
 ) -> Decision:
     hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
     previous_image = observation.statefulset_previous_image or row.observed_image
@@ -642,13 +651,34 @@ def _continue_upgrade(
         return _forward_only_held(row, rollout, observation, now, cell_image, previous_image, read_only, hold,
                                   canary)
 
-    # D6 step 5: stall bound, independent of whether a backup is in progress.
-    if observation.statefulset_target_applied_at is None and (now - hold_started_at) > config.upgrade_stall_bound:
+    def end_attempt(**kwargs: object) -> Decision:
+        # automate-cloud-releases D6: an attempt that ends while its
+        # VolumeSnapshot or clone still exists removes them first and keeps
+        # the hold for the pass that observes them gone, so a clone never
+        # outlives its hold and the quota's second claim is free before the
+        # next hold asks for it.
+        if observation.snapshot_exists or observation.clone_exists:
+            return hold(
+                replicas=desired_replicas,
+                image=previous_image,
+                pre_upgrade_volume_snapshot=observation.statefulset_pre_upgrade_volume_snapshot,
+                pre_upgrade_snapshot=snapshot,
+                target_applied_at=observation.statefulset_target_applied_at,
+                delete_snapshot_backup=True,
+                delete_backup_job=True,
+                row_updates={"observed_state": "provisioning" if desired_replicas else "stopping"},
+            )
         return _restart_on_previous_image(
             row,
             previous_image=previous_image,
             desired_replicas=desired_replicas,
             read_only=read_only,
+            **kwargs,
+        )
+
+    # D6 step 5: stall bound, independent of whether a backup is in progress.
+    if observation.statefulset_target_applied_at is None and (now - hold_started_at) > config.upgrade_stall_bound:
+        return end_attempt(
             error_code=UPGRADE_STALLED,
             pause=True,
         )
@@ -660,14 +690,19 @@ def _continue_upgrade(
     # have moved past what the canary ran, and a new pinned attempt starts by the
     # rollout rules.
     if (rollout.paused and observation.statefulset_target_applied_at is None) or target is None:
-        return _restart_on_previous_image(
-            row,
-            previous_image=previous_image,
-            desired_replicas=desired_replicas,
-            read_only=read_only,
+        return end_attempt(
             error_code=None,
             delete_backup_job=True,
             pause=False,
+        )
+
+    # automate-cloud-releases D6: a cell on snapshot-capable local storage
+    # takes a VolumeSnapshot after the stop instead of running the stopped
+    # backup; its restore point and backup then run beside the attempt.
+    if storage.is_local(observation.pv_storage_class or observation.pvc_storage_class):
+        return _continue_upgrade_local(
+            row, rollout, observation, now, config, cell_image, crossing, hold_started_at,
+            previous_image, target, read_only, desired_replicas, hold
         )
 
     if snapshot is None:
@@ -805,6 +840,197 @@ def _continue_upgrade(
     )
 
 
+def _continue_upgrade_local(
+    row: CellRow,
+    rollout: RolloutRow,
+    observation: ClusterObservation,
+    now: datetime,
+    config: ReconcileConfig,
+    cell_image: str | None,
+    crossing: bool,
+    hold_started_at: datetime,
+    previous_image: str | None,
+    target: str | None,
+    read_only: bool,
+    desired_replicas: int,
+    hold,
+) -> Decision:
+    """automate-cloud-releases D6: a local cell's restore point is the
+    VolumeSnapshot taken after the stop. The target applies the moment the
+    snapshot is ready; the read-only clone and its restic backup Job run
+    beside it, and a backup failure never ends the attempt. The hold outlives
+    Ready until the Job ends, then removes the clone and the snapshot before
+    it clears, so the quota's second claim is free before any other hold --
+    the hourly one included -- can ask for it."""
+
+    vol_name = observation.statefulset_pre_upgrade_volume_snapshot
+    restic_id = observation.statefulset_pre_upgrade_snapshot
+    # Recorded once, then carried: the restic id the clone's backup Job
+    # reported, or its absence once that Job or its deadline is past.
+    recorded: dict[str, object] = {}
+    if restic_id is None and observation.backup_job_succeeded and _valid_snapshot_id(
+            observation.backup_job_snapshot_id):
+        restic_id = observation.backup_job_snapshot_id
+        recorded = {
+            "last_backup_at": observation.snapshot_created_at or now,
+            "last_backup_snapshot": restic_id,
+        }
+    job_over = observation.backup_job_succeeded or observation.backup_job_failed
+    backup_deadline_passed = (now - hold_started_at) > config.backup_deadline
+    backup_done = restic_id is not None or job_over or backup_deadline_passed
+
+    # The next clone-side step, while the backup is still possible: create the
+    # clone, wait for it to bind, then run the Job on it. A snapshot that is
+    # already gone cannot be cloned, so nothing more is asked.
+    backup_steps: dict[str, object] = {}
+    if not backup_done and observation.snapshot_exists and observation.snapshot_ready:
+        if not observation.clone_exists:
+            backup_steps["create_clone"] = True
+        elif observation.clone_bound and not observation.backup_job_running:
+            backup_steps["run_backup_job"] = True
+
+    def step(row_updates: dict[str, object], **fields: object) -> Decision:
+        updates = {**recorded, **row_updates}
+        if restic_id is not None:
+            fields.setdefault("pre_upgrade_snapshot", restic_id)
+            if recorded:
+                fields.setdefault("clear_backup_retry_after", True)
+        fields.setdefault("pre_upgrade_volume_snapshot", vol_name)
+        fields.setdefault("target_applied_at", observation.statefulset_target_applied_at)
+        return hold(row_updates=updates, **fields)
+
+    target_applied = observation.statefulset_image == target and (observation.statefulset_replicas or 0) == 1
+
+    # Steps 1-2: the VolumeSnapshot is taken only once the pod object is gone,
+    # when the node has flushed the volume. Its name goes in the annotation at
+    # once, so a restarted cellctl resumes the same restore point.
+    if vol_name is None:
+        if target_applied or observation.statefulset_target_applied_at is not None:
+            if restic_id is None:
+                # The annotation is gone after the target applied and the
+                # attempt recorded no off-site snapshot either: no restore
+                # point exists, so fail closed rather than label a
+                # post-upgrade capture as one.
+                return Decision(
+                    apply_manifests=True,
+                    replicas=0,
+                    read_only=read_only,
+                    image=target,
+                    hold_kind="restore",
+                    hold_started_at=now,
+                    previous_image=previous_image,
+                    row_updates={"hold_kind": "restore", "hold_started_at": now,
+                                 "observed_state": "stopping", "last_error_code": RESTORE_FAILED},
+                    rollout_updates={"paused": True, "error_code": RESTORE_FAILED,
+                                     "held_cell_id": row.cell_id},
+                )
+            # A hold that predates the VolumeSnapshot path continues on its
+            # restic restore point alone: no snapshot taken now could still be
+            # pre-upgrade state, so the readiness check below runs as before.
+        elif observation.pod_exists:
+            return hold(replicas=0, image=previous_image, row_updates={"observed_state": "stopping"})
+        return step(
+            {"observed_state": "stopping"},
+            replicas=0,
+            image=previous_image,
+            create_snapshot=True,
+            pre_upgrade_volume_snapshot=snapshot_backup_name(
+                SNAPSHOT_NAME, row.cell_id, hold_started_at.isoformat()),
+        )
+
+    if not target_applied:
+        if not observation.snapshot_exists:
+            if observation.pod_exists:
+                # A pod on the pre-target image still holds the volume.
+                return step({"observed_state": "stopping"}, replicas=0, image=previous_image)
+            # The recorded snapshot vanished before the target was applied:
+            # recreate it, since until the target lands every snapshot is
+            # still pre-upgrade state.
+            return step({"observed_state": "stopping"}, replicas=0, image=previous_image,
+                        create_snapshot=True)
+        if not observation.snapshot_ready:
+            return step({"observed_state": "stopping"}, replicas=0, image=previous_image)
+        # Step 3: the target applies at once, beside the clone's creation.
+        return step({"observed_state": "provisioning"}, replicas=1, image=target,
+                    target_applied_at=now, **backup_steps)
+
+    if not observation.pod_ready:
+        # Step 4/6: the readiness deadline runs from when the target was
+        # actually applied, as on the restic path.
+        deadline_anchor = observation.statefulset_target_applied_at or hold_started_at
+        if (now - deadline_anchor) > config.upgrade_ready_deadline and crossing:
+            # automate-cloud-releases D3: the forward-only hold keeps the
+            # attempt's whole restore point -- snapshot and clone included.
+            return step(
+                {"observed_state": "stopping", "last_error_code": UPGRADE_FORWARD_ONLY},
+                replicas=0,
+                image=target,
+                upgrade_phase=FORWARD_ONLY_HELD,
+                rollout_updates={"paused": True, "error_code": UPGRADE_FORWARD_ONLY,
+                                 "held_cell_id": row.cell_id},
+            )
+        if (now - deadline_anchor) > config.upgrade_ready_deadline:
+            if restic_id is None and vol_name is None:
+                # No restore point at all: never switch an unrestored volume
+                # toward an image; hold stopped and pause the rollout.
+                return Decision(
+                    apply_manifests=True,
+                    replicas=0,
+                    read_only=read_only,
+                    image=target,
+                    hold_kind="restore",
+                    hold_started_at=now,
+                    previous_image=previous_image,
+                    row_updates={"hold_kind": "restore", "hold_started_at": now,
+                                 "observed_state": "stopping", "last_error_code": RESTORE_FAILED},
+                    rollout_updates={"paused": True, "error_code": RESTORE_FAILED,
+                                     "held_cell_id": row.cell_id},
+                )
+            return Decision(
+                apply_manifests=True,
+                replicas=0,
+                read_only=read_only,
+                image=target,
+                hold_kind="restore",
+                hold_started_at=now,
+                previous_image=previous_image,
+                pre_upgrade_snapshot=restic_id,
+                pre_upgrade_volume_snapshot=vol_name,
+                row_updates={"hold_kind": "restore", "hold_started_at": now, "observed_state": "stopping"},
+                # H1: pause in the same decision that switches to restore, so
+                # no other cell can start the same known-bad image before
+                # the switch lands.
+                rollout_updates={
+                    "paused": True,
+                    "error_code": "UPGRADE_READINESS_TIMEOUT",
+                    "held_cell_id": row.cell_id,
+                },
+            )
+        return step({"observed_state": "provisioning"}, replicas=1, image=target, **backup_steps)
+
+    # Step 5: Ready. The hold stays until the backup Job ends; then the clone
+    # and the snapshot go before the hold clears.
+    if not backup_done or observation.snapshot_exists or observation.clone_exists:
+        fields: dict[str, object] = dict(backup_steps)
+        if backup_done:
+            fields["delete_snapshot_backup"] = True
+            fields["delete_backup_job"] = not job_over
+        return step({"observed_state": "provisioning"}, replicas=desired_replicas, image=target, **fields)
+
+    rollout_updates: dict[str, object] = {}
+    if target == cell_image and rollout.last_good_image != cell_image:
+        rollout_updates = {"last_good_image": cell_image}
+    return Decision(
+        apply_manifests=True,
+        replicas=desired_replicas,
+        read_only=read_only,
+        image=target,
+        hold_kind=None,
+        row_updates={"hold_kind": None, "hold_started_at": None, "last_error_code": None},
+        rollout_updates=rollout_updates,
+    )
+
+
 def _forward_only_held(
     row: CellRow,
     rollout: RolloutRow,
@@ -838,6 +1064,7 @@ def _forward_only_held(
             replicas=0,
             image=observation.statefulset_image,
             pre_upgrade_snapshot=observation.statefulset_pre_upgrade_snapshot,
+            pre_upgrade_volume_snapshot=observation.statefulset_pre_upgrade_volume_snapshot,
             target_applied_at=observation.statefulset_target_applied_at,
             upgrade_phase=FORWARD_ONLY_HELD,
             row_updates={"observed_state": "stopped"},
@@ -851,6 +1078,9 @@ def _forward_only_held(
         hold_started_at=now,
         previous_image=previous_image,
         upgrade_target=resumed_target,
+        # The quota admits one clone: the held attempt's snapshot and clone
+        # go before the new attempt asks for its own.
+        delete_snapshot_backup=True,
         row_updates={"hold_kind": "upgrade", "hold_started_at": now, "observed_state": "stopping",
                      "last_error_code": None},
     )
@@ -1123,10 +1353,32 @@ def _restore_step(
     hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
     previous_image = observation.statefulset_previous_image or row.observed_image
     snapshot = observation.statefulset_pre_upgrade_snapshot
+    # automate-cloud-releases D6: a local cell's attempt restores its clone
+    # first -- a Job mounts it read-only beside the volume and rewrites the
+    # backup's paths. The quota admits one clone, and the attempt's backup
+    # Job and this restore share it. The restic snapshot the clone's backup
+    # recorded is the fallback when the clone is already gone.
+    vol_snapshot = observation.statefulset_pre_upgrade_volume_snapshot
+    use_clone = vol_snapshot is not None and observation.clone_exists
+    restore_point = vol_snapshot if use_clone else snapshot
     read_only = row.desired_state == "read_only"
     desired_replicas = 0 if row.desired_state == "stopped" else 1
 
-    if snapshot is None:
+    def hold(**fields: object) -> Decision:
+        fields.setdefault("replicas", 0)
+        return Decision(
+            apply_manifests=True,
+            read_only=read_only,
+            image=previous_image,
+            hold_kind="restore",
+            hold_started_at=hold_started_at,
+            previous_image=previous_image,
+            pre_upgrade_snapshot=snapshot,
+            pre_upgrade_volume_snapshot=vol_snapshot,
+            **fields,
+        )
+
+    if restore_point is None:
         # D6 resume: a restore hold without a pre-upgrade snapshot cannot
         # arise through the normal procedure. Fail closed rather than guess
         # at another snapshot -- a wrong guess could lose data, a wrong
@@ -1149,94 +1401,60 @@ def _restore_step(
             ),
         )
 
-    already_restored = observation.statefulset_restored_snapshot == snapshot
+    already_restored = (observation.statefulset_restored_snapshot is not None
+                        and observation.statefulset_restored_snapshot in (vol_snapshot, snapshot))
     if not already_restored:
         # L1: wait for the previous/canary pod to fully release the RWO
         # volume before the restore Job runs, the same guard the backup path
         # already has -- pods on the same node can share an RWO volume, so a
         # restore next to a terminating pod would corrupt it.
         if observation.pod_uses_volume:
-            return Decision(
-                apply_manifests=True,
-                replicas=0,
-                read_only=read_only,
-                image=previous_image,
-                hold_kind="restore",
-                hold_started_at=hold_started_at,
-                previous_image=previous_image,
-                pre_upgrade_snapshot=snapshot,
-                row_updates={"observed_state": "stopping"},
-            )
+            return hold(row_updates={"observed_state": "stopping"})
         if observation.restore_job_failed:
-            return Decision(
-                apply_manifests=True,
-                replicas=0,
-                read_only=read_only,
-                image=previous_image,
-                hold_kind="restore",
-                hold_started_at=hold_started_at,
-                previous_image=previous_image,
-                pre_upgrade_snapshot=snapshot,
-                row_updates={"last_error_code": RESTORE_FAILED, "observed_state": "stopping"},
-            )
+            return hold(row_updates={"last_error_code": RESTORE_FAILED, "observed_state": "stopping"})
         if not observation.restore_job_succeeded:
-            return Decision(
-                apply_manifests=True,
-                replicas=0,
-                read_only=read_only,
-                image=previous_image,
-                hold_kind="restore",
-                hold_started_at=hold_started_at,
-                previous_image=previous_image,
-                pre_upgrade_snapshot=snapshot,
-                run_restore_job_snapshot=snapshot,
-                row_updates={"observed_state": "stopping"},
-            )
+            if (vol_snapshot is not None and not observation.clone_exists
+                    and observation.snapshot_exists and observation.snapshot_ready):
+                # The attempt's clone is gone (or was never made) while its
+                # snapshot is still there: remake the clone, wait for it to
+                # bind, and the next pass runs the clone restore. Only a
+                # missing snapshot falls through to the restic point.
+                return hold(create_clone=True, row_updates={"observed_state": "stopping"})
+            if use_clone:
+                if not observation.clone_bound:
+                    return hold(row_updates={"observed_state": "stopping"})
+                return hold(run_clone_restore_job=True, row_updates={"observed_state": "stopping"})
+            return hold(run_restore_job_snapshot=restore_point, row_updates={"observed_state": "stopping"})
         # L2: record that this snapshot has been restored so a Job removed
         # by its TTL is never re-run against an already-restored volume.
-        return Decision(
-            apply_manifests=True,
-            replicas=0,
-            read_only=read_only,
-            image=previous_image,
-            hold_kind="restore",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
-            pre_upgrade_snapshot=snapshot,
-            restored_snapshot=snapshot,
-            row_updates={"observed_state": "stopping"},
-        )
+        return hold(restored_snapshot=restore_point, row_updates={"observed_state": "stopping"})
 
     target_applied = (
         observation.statefulset_image == previous_image
         and (observation.statefulset_replicas or 0) == desired_replicas
     )
     if not target_applied:
-        return Decision(
-            apply_manifests=True,
+        return hold(
             replicas=desired_replicas,
-            read_only=read_only,
-            image=previous_image,
-            hold_kind="restore",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
-            pre_upgrade_snapshot=snapshot,
-            restored_snapshot=snapshot,
+            restored_snapshot=restore_point,
             row_updates={"observed_state": "provisioning" if desired_replicas > 0 else "stopping"},
         )
 
     if desired_replicas > 0 and not observation.pod_ready:
-        return Decision(
-            apply_manifests=True,
+        return hold(
             replicas=desired_replicas,
-            read_only=read_only,
-            image=previous_image,
-            hold_kind="restore",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
-            pre_upgrade_snapshot=snapshot,
-            restored_snapshot=snapshot,
+            restored_snapshot=restore_point,
             row_updates={"observed_state": "provisioning"},
+        )
+
+    if observation.snapshot_exists or observation.clone_exists:
+        # automate-cloud-releases D6: the attempt's clone and snapshot go
+        # while the hold still owns them, so a clone never outlives its hold.
+        return hold(
+            replicas=desired_replicas,
+            restored_snapshot=restore_point,
+            delete_snapshot_backup=True,
+            row_updates={"observed_state": "provisioning" if desired_replicas > 0 else "stopping"},
         )
 
     # D4: hold exits observe; they do not declare. The next routine pass

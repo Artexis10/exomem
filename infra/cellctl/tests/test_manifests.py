@@ -153,6 +153,10 @@ def test_job_pods_may_egress_only_to_443_and_dns() -> None:
     assert ports == {443, 53}
     dns_rule = next(r for r in egress_rules if 53 in {p["port"] for p in r["ports"]})
     assert dns_rule["to"][0]["podSelector"]["matchLabels"]["k8s-app"] == "kube-dns"
+    # The kubelet pulls the image, so the pull-only prepare Job is out of the
+    # egress policy, like the pack and the pause that hold the media key.
+    excluded = jobs["spec"]["podSelector"]["matchExpressions"][1]
+    assert "prepare" in excluded["values"]
 
 
 def test_job_egress_443_is_scoped_by_ipblock_except_not_unrestricted() -> None:

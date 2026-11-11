@@ -3347,6 +3347,127 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     _wait_for(lambda: delete_claim().returncode == 0, timeout=30, description="the claim delete once its volume is retained")
 
 
+# === automate-cloud-releases 3.1: the clone restore Job on real K3s ===
+
+
+def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sCluster) -> None:
+    """CI-only (the `k3s` fixture gates on RUN_CELLCTL_K3S_TEST): the restore
+    Job a readiness failure launches mounts the attempt's clone read-only and
+    replaces /data/vault and /data/host with its copies. A write the
+    pre-upgrade snapshot acknowledged therefore survives a forced restore,
+    files the target image created under those paths go with them, and a file
+    at the volume root is untouched. rancher.io/local-path stands in for the
+    TopoLVM pair: the Job mounts claims, not snapshots, so no snapshot
+    controller is needed to run the same manifest the reconcile loop renders."""
+
+    from cellctl.manifests import (
+        CellManifestSpec,
+        render_clone_restore_job,
+        render_namespace,
+    )
+
+    image = _import_image(k3s.name, _build_standin_image(IMAGE_DIR), repository=STANDIN_REPOSITORY)
+    spec = CellManifestSpec(
+        cell_id=_cell_id(),
+        image=image,
+        replicas=0,
+        read_only=False,
+        storage_class="local-path",
+        local_volume=True,
+        hold_started_at="2026-01-01T00:00:00+00:00",
+    )
+    namespace = spec.namespace
+    _apply_server_side(k3s.name, [render_namespace(spec)])
+
+    def claim(name: str) -> dict:
+        return {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "storageClassName": "local-path",
+                "resources": {"requests": {"storage": "64Mi"}},
+            },
+        }
+
+    clone_claim = "cell-clone-acknowledged"
+    _apply_server_side(k3s.name, [claim(spec.pvc_name), claim(clone_claim)])
+
+    def helper_job(name: str, command: str) -> dict:
+        return {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": name, "namespace": namespace},
+            "spec": {
+                "backoffLimit": 0,
+                "template": {
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [
+                            {
+                                "name": "helper",
+                                "image": image,
+                                "command": ["sh", "-c", command],
+                                "securityContext": {"runAsUser": 0, "runAsGroup": 0},
+                                "volumeMounts": [
+                                    {"name": "data", "mountPath": "/data"},
+                                    {"name": "clone", "mountPath": "/clone"},
+                                ],
+                            }
+                        ],
+                        "volumes": [
+                            {"name": "data", "persistentVolumeClaim": {"claimName": spec.pvc_name}},
+                            {"name": "clone", "persistentVolumeClaim": {"claimName": clone_claim}},
+                        ],
+                    }
+                },
+            },
+        }
+
+    def run_job(document: dict, description: str) -> None:
+        _kubectl(k3s.name, ["create", "--filename=-"], documents=[document])
+        name = document["metadata"]["name"]
+        _kubectl(
+            k3s.name,
+            [
+                "wait",
+                "--for=condition=complete",
+                f"job/{name}",
+                f"--namespace={namespace}",
+                "--timeout=120s",
+            ],
+        )
+
+    acknowledged = "k3s-acknowledged-write"
+    run_job(
+        helper_job(
+            "clone-restore-seed",
+            "mkdir -p /clone/vault /clone/host /data/vault /data/host && "
+            f"printf %s {acknowledged} > /clone/vault/ack && "
+            "printf %s keeper > /data/keeper && "
+            "printf %s target > /data/vault/created-by-target && "
+            "chown -R 10001:10001 /clone /data",
+        ),
+        "seeding the clone and the cell volume",
+    )
+
+    # The manifest reconcile renders for the attempt's clone restore; the
+    # forced failure that would have run it lives at the decision level, in
+    # test_upgrade_snapshot_restore.py.
+    run_job(render_clone_restore_job(spec, snapshot_claim=clone_claim), "the clone restore Job")
+
+    run_job(
+        helper_job(
+            "clone-restore-verify",
+            f'test "$(cat /data/vault/ack)" = {acknowledged} && '
+            "test ! -e /data/vault/created-by-target && "
+            'test "$(cat /data/keeper)" = keeper',
+        ),
+        "the acknowledged write and the volume root surviving the restore",
+    )
+
+
 def test_topolvm_node_agent_writes_only_its_own_node_and_volumes(k3s: K3sCluster) -> None:
     # TopoLVM's chart lets its node agent write every Node and LogicalVolume;
     # the platform's admission confines each agent's token to its own node.

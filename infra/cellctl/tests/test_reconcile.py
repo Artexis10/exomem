@@ -114,6 +114,13 @@ class FakeClusterGateway:
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
 
+    def delete_snapshot_backup(self, namespace: str, snapshot: str, claim: str) -> None:
+        self.events.append(("delete_snapshot_backup", namespace, snapshot, claim))
+        names = {snapshot, claim}
+        self.jobs[:] = [m for m in self.jobs if m["metadata"]["name"] not in names]
+        for kind, name in (("VolumeSnapshot", snapshot), ("PersistentVolumeClaim", claim)):
+            self.applied.pop((namespace, kind, name), None)
+
     def observe_export_job(self, namespace: str, export_id: str, *, step: str) -> ExportJob:
         return ExportJob()
 
@@ -1045,6 +1052,10 @@ async def test_an_init_deadline_failure_is_observed_every_pass_but_never_re_appl
         await connection.close()
 
 
+def _job_manifest(cluster: FakeClusterGateway, name: str) -> dict | None:
+    return next((m for m in cluster.jobs if m["metadata"]["name"] == name), None)
+
+
 def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **overrides: object) -> ClusterObservation:
     """What ClusterClient.observe() reports right after the last apply: the
     StatefulSet's own image, replicas and annotations read back, plus a pod
@@ -1059,6 +1070,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         HOLD_STARTED_ANNOTATION,
         MEDIA_EDGE_ACCESS_LABEL,
         PRE_UPGRADE_SNAPSHOT_ANNOTATION,
+        PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION,
         PREVIOUS_IMAGE_ANNOTATION,
         RENDER_DIGEST_ANNOTATION,
         RENDER_DIGEST_APPLIED_AT_ANNOTATION,
@@ -1091,6 +1103,42 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_hold_started_at=_parse_timestamp(annotations.get(HOLD_STARTED_ANNOTATION)),
         statefulset_previous_image=annotations.get(PREVIOUS_IMAGE_ANNOTATION),
         statefulset_pre_upgrade_snapshot=annotations.get(PRE_UPGRADE_SNAPSHOT_ANNOTATION),
+        statefulset_pre_upgrade_volume_snapshot=annotations.get(
+            PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION
+        ),
+        # ClusterClient's _snapshot_steps, keyed by the annotation's names:
+        # the objects exist once their manifests applied, and the fake
+        # reports them ready/bound at once.
+        # The snapshot and clone manifests go through run_job, so the fake
+        # holds them in `jobs`; it reports them ready and bound at once.
+        snapshot_exists=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(cluster, annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION])
+            is not None
+        ),
+        snapshot_ready=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(cluster, annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION])
+            is not None
+        ),
+        clone_exists=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(
+                cluster,
+                "cell-clone"
+                + annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION][len("cell-snapshot") :],
+            )
+            is not None
+        ),
+        clone_bound=(
+            annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) is not None
+            and _job_manifest(
+                cluster,
+                "cell-clone"
+                + annotations[PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION][len("cell-snapshot") :],
+            )
+            is not None
+        ),
         statefulset_target_applied_at=_parse_timestamp(annotations.get(TARGET_APPLIED_ANNOTATION)),
         statefulset_restored_snapshot=annotations.get(RESTORED_SNAPSHOT_ANNOTATION),
         # As ClusterClient.observe() reads them: the D6/D8 backup backoff.

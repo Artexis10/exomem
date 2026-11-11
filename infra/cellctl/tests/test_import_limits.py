@@ -84,6 +84,8 @@ def test_growth_deadline_setting_uses_minutes(monkeypatch):
     from cellctl.main import build_reconcile_config
 
     monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")
+    monkeypatch.setenv("CELLCTL_UPGRADE_CONCURRENCY_PER_NODE", "1")
+    monkeypatch.setenv("CELLCTL_UPGRADE_PREPARE_ENABLED", "true")
     monkeypatch.setenv("CELLCTL_IMPORT_GROWTH_DEADLINE_MINUTES", "75")
     assert build_reconcile_config().import_growth_deadline == timedelta(minutes=75)
 

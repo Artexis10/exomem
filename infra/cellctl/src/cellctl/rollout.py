@@ -147,6 +147,65 @@ def select_upgrade_candidate(
     ).cell_id
 
 
+def select_upgrade_candidates(
+    rows: list[CellRow],
+    observations: dict[str, ClusterObservation],
+    rollout: RolloutRow,
+    cell_image: str | None,
+    *,
+    now: datetime,
+    restore_active: bool,
+    upgrading_per_node: dict[str | None, int] | None = None,
+    concurrency_per_node: int = 1,
+    refused: frozenset[str] = frozenset(),
+    due: frozenset[str] | None = None,
+) -> set[str]:
+    """automate-cloud-releases D4: the cells that start an attempt this pass.
+    The canary rules are `select_upgrade_candidate`'s own: while the canary's
+    image differs from its target, the canary alone may start. Once it runs
+    the target, eligible cells start in the order that function defines,
+    filling each node's quota of `concurrency_per_node` upgrade holds. A
+    restore hold anywhere still blocks every start, fleet-wide."""
+
+    if restore_active or rollout.paused or not rows:
+        return set()
+
+    owner = owner_cell(rows)
+    owner_target = target_image(owner, cell_image)
+    if owner_target is not None and current_image(owner, observations[owner.cell_id]) != owner_target:
+        # The canary's own attempt occupies its node's quota too.
+        if (upgrading_per_node or {}).get(observations[owner.cell_id].pv_node, 0) >= concurrency_per_node:
+            return set()
+        if should_attempt_upgrade(
+            owner, rollout, observations[owner.cell_id], cell_image, now=now, refused=owner.cell_id in refused
+        ):
+            return {owner.cell_id}
+        return set()
+
+    eligible = [
+        row
+        for row in rows
+        if _is_candidate(row, observations[row.cell_id], cell_image)
+        and should_attempt_upgrade(
+            row, rollout, observations[row.cell_id], cell_image, now=now, refused=row.cell_id in refused
+        )
+        and (due is None or row.cell_id in due)
+    ]
+    if due is None:
+        eligible.sort(key=lambda row: (row.rollout_priority, row.cell_id))
+    else:
+        eligible.sort(key=lambda row: (observations[row.cell_id].statefulset_candidate_since or now,
+                                       row.cell_id))
+    counts = dict(upgrading_per_node or {})
+    chosen: set[str] = set()
+    for row in eligible:
+        node = observations[row.cell_id].pv_node
+        if counts.get(node, 0) < concurrency_per_node:
+            counts[node] = counts.get(node, 0) + 1
+            chosen.add(row.cell_id)
+    return chosen
+
+
 def owner_cell(rows: list[CellRow]) -> CellRow:
     """D6: the owner's cell -- the non-deleted row with the lowest
     `rollout_priority`. It goes first in a rollout and in a relocation."""

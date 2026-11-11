@@ -194,6 +194,17 @@ async def _create_cell_db(server: PostgresServer) -> str:
         await owner_connection.execute(TENANTS_STANDIN_SQL)
         for script in control_database_sql(FIXTURES):
             await owner_connection.execute(script)
+        # Stand-in for Substrate's image history (automate-cloud-releases D1,
+        # migration 0085) with cellctl's read grant, as _history_table in
+        # test_rollout_automation.py builds it. The fixture carries it because
+        # schema_check refuses to start on a schema that lacks the table.
+        await owner_connection.execute(
+            "CREATE TABLE IF NOT EXISTS exomem_cloud_image_history "
+            "(image text PRIMARY KEY, release_tag text, recorded_at timestamptz NOT NULL DEFAULT now())"
+        )
+        await owner_connection.execute(
+            "GRANT SELECT ON exomem_cloud_image_history TO exomem_cellctl"
+        )
     finally:
         await owner_connection.close()
     return name

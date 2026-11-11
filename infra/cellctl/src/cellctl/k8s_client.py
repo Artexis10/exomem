@@ -45,13 +45,15 @@ from .manifests import (
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     GROW_STORAGE_ANNOTATION,
-    HOLD_ANNOTATION,  # re-exported for reconcile.py convenience
+    HOLD_ANNOTATION,
+    # re-exported for reconcile.py convenience
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
     MEDIA_EDGE_ACCESS_LABEL,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
+    PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION,
     PREVIOUS_IMAGE_ANNOTATION,
     RELOCATION_ANNOTATION,
     RENDER_DIGEST_ANNOTATION,
@@ -66,6 +68,7 @@ from .manifests import (
     UPGRADE_WINDOW_ANNOTATION,
     UPGRADE_WINDOW_AT_ANNOTATION,
     cell_id_from_namespace,
+    clone_claim_name,
     hold_job_name,
     namespace_name,
     snapshot_backup_name,
@@ -713,6 +716,7 @@ class ClusterClient:
         statefulset_replicas = None
         update_revision = None
         hold_kind = hold_started_at = previous_image = pre_upgrade_snapshot = None
+        pre_upgrade_volume_snapshot = None
         target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
         backup_family_request = None
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
@@ -736,6 +740,9 @@ class ClusterClient:
             hold_started_at = _parse_timestamp(started_raw) if started_raw else None
             previous_image = annotations.get(PREVIOUS_IMAGE_ANNOTATION) or None
             pre_upgrade_snapshot = annotations.get(PRE_UPGRADE_SNAPSHOT_ANNOTATION) or None
+            pre_upgrade_volume_snapshot = (
+                annotations.get(PRE_UPGRADE_VOLUME_SNAPSHOT_ANNOTATION) or None
+            )
             target_applied_at = _parse_timestamp(annotations.get(TARGET_APPLIED_ANNOTATION))
             restored_snapshot = annotations.get(RESTORED_SNAPSHOT_ANNOTATION) or None
             backup_outcome = annotations.get(BACKUP_OUTCOME_ANNOTATION) or None
@@ -793,8 +800,14 @@ class ClusterClient:
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
         backup_media_census = backup_media_collection = None
         snapshot_steps: dict[str, bool] = {}
-        if backup_family_request or (started_raw and hold_kind == SNAPSHOT_BACKUP):
-            snapshot_steps = self._snapshot_steps(namespace, started_raw, backup_family_request)
+        if (
+            backup_family_request
+            or pre_upgrade_volume_snapshot
+            or (started_raw and hold_kind == SNAPSHOT_BACKUP)
+        ):
+            snapshot_steps = self._snapshot_steps(
+                namespace, started_raw, backup_family_request, pre_upgrade_volume_snapshot
+            )
         if started_raw:
             backup_name = hold_job_name(BACKUP_JOB_NAME, started_raw)
             backup_job = self._get_job(namespace, backup_name)
@@ -847,6 +860,7 @@ class ClusterClient:
             statefulset_hold_started_at=hold_started_at,
             statefulset_previous_image=previous_image,
             statefulset_pre_upgrade_snapshot=pre_upgrade_snapshot,
+            statefulset_pre_upgrade_volume_snapshot=pre_upgrade_volume_snapshot,
             statefulset_target_applied_at=target_applied_at,
             statefulset_restored_snapshot=restored_snapshot,
             statefulset_backup_outcome=backup_outcome,
@@ -886,23 +900,32 @@ class ClusterClient:
             **snapshot_steps,
         )
 
-    def _snapshot_steps(self, namespace: str, started_raw: str | None, family_raw: str | None = None) -> dict[str, object]:
+    def _snapshot_steps(self, namespace: str, started_raw: str | None, family_raw: str | None = None,
+                        volume_snapshot_name: str | None = None) -> dict[str, object]:
         """D3: the current hourly hold's snapshot and clone, by the names its
-        start gave them; an earlier hold's never answer."""
+        start gave them; an earlier hold's never answer. automate-cloud-releases
+        D6: an upgrade hold's pair answers instead by the VolumeSnapshot name its
+        annotation recorded, since a later hold's start would derive the wrong
+        names; the clone shares the snapshot's hold digest."""
 
         request = FamilyRequest.parse(family_raw) if family_raw else None
         cell_id = namespace.removeprefix(NAMESPACE_PREFIX)
+        if volume_snapshot_name is not None:
+            snapshot_name = volume_snapshot_name
+            clone_name = clone_claim_name(volume_snapshot_name)
+        else:
+            snapshot_name = snapshot_backup_name(SNAPSHOT_NAME, cell_id, started_raw, request)
+            clone_name = snapshot_backup_name(CLONE_CLAIM_NAME, cell_id, started_raw, request)
         try:
             snapshot = self._custom.get_namespaced_custom_object(
-                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", snapshot_backup_name(SNAPSHOT_NAME, cell_id, started_raw, request)
+                SNAPSHOT_GROUP, "v1", namespace, "volumesnapshots", snapshot_name
             )
         except ApiException as error:
             if not _not_found(error):
                 raise
             snapshot = None
         try:
-            clone = self._core.read_namespaced_persistent_volume_claim(
-                snapshot_backup_name(CLONE_CLAIM_NAME, cell_id, started_raw, request), namespace)
+            clone = self._core.read_namespaced_persistent_volume_claim(clone_name, namespace)
         except ApiException as error:
             if not _not_found(error):
                 raise

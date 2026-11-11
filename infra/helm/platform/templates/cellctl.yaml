@@ -319,6 +319,10 @@ spec:
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
             - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
               value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
+            - name: CELLCTL_UPGRADE_CONCURRENCY_PER_NODE
+              value: {{ .Values.cellctl.upgradeConcurrencyPerNode | quote }}
+            - name: CELLCTL_UPGRADE_PREPARE_ENABLED
+              value: {{ .Values.cellctl.upgradePrepareEnabled | quote }}
             # automate-cloud-releases D4: each cell's upgrade window.
             - name: CELLCTL_UPGRADE_WINDOW_ENABLED
               value: {{ .Values.cellctl.upgradeWindow.enabled | toString | quote }}

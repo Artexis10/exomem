@@ -1767,12 +1767,48 @@ def test_cellctl_is_given_the_upgrade_readiness_deadline_the_chart_sets(monkeypa
     from cellctl.decide import ReconcileConfig
     from cellctl.main import build_reconcile_config
 
+    env = _cellctl_env(_helm_template())
+    for env_name, value in env.items():
+        if value is not None and env_name.startswith("CELLCTL_"):
+            monkeypatch.setenv(env_name, value)
     name = "CELLCTL_UPGRADE_READY_DEADLINE_MINUTES"
-    monkeypatch.setenv(name, _cellctl_env(_helm_template())[name])
     assert build_reconcile_config().upgrade_ready_deadline == ReconcileConfig().upgrade_ready_deadline
 
     changed = _cellctl_env(_helm_template("--set", "cellctl.upgradeReadyDeadlineMinutes=45"))
     assert changed[name] == "45"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_given_the_per_node_concurrency_and_prepare_switch_the_chart_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # automate-cloud-releases D4/D9. Catches a value that the chart never
+    # renders, which would stop cellctl at its next deploy, and a name the two
+    # sides disagree on.
+    from cellctl.decide import ReconcileConfig
+    from cellctl.main import build_reconcile_config
+
+    env = _cellctl_env(_helm_template())
+    for name, value in env.items():
+        if value is not None and name.startswith("CELLCTL_"):
+            monkeypatch.setenv(name, value)
+
+    assert (
+        build_reconcile_config().upgrade_concurrency_per_node
+        == ReconcileConfig().upgrade_concurrency_per_node
+    )
+    assert build_reconcile_config().upgrade_prepare_enabled is True
+
+    changed = _cellctl_env(
+        _helm_template(
+            "--set",
+            "cellctl.upgradeConcurrencyPerNode=3",
+            "--set",
+            "cellctl.upgradePrepareEnabled=false",
+        )
+    )
+    assert changed["CELLCTL_UPGRADE_CONCURRENCY_PER_NODE"] == "3"
+    assert changed["CELLCTL_UPGRADE_PREPARE_ENABLED"] == "false"
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

@@ -201,6 +201,8 @@ cellctl:
   # cell, longer on a larger vault. A broken image keeps the canary cell down for the
   # whole deadline. The schema allows 5 to 120.
   upgradeReadyDeadlineMinutes: 30
+  upgradeConcurrencyPerNode: 1
+  upgradePrepareEnabled: true
   # automate-cloud-releases D4: each cell upgrades in its own quiet UTC hour,
   # computed from the cell's hourly traffic over lookbackDays. A cell that
   # observed less than minCoverage of the lookback takes a default hour that a
