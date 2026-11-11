@@ -39,20 +39,29 @@ GENERATION_KEY = "display_edges"
 UNKNOWN = "unknown"
 
 
+def graph_present(root: Path) -> bool:
+    """Whether the graph that the marks read is enabled and built for `root`.
+
+    A packet's cache key holds it. Edges read as unknown while the graph is absent stay unknown
+    until it appears, which changes the key; edges read as unknown while it is present are
+    transient, and their packet is not cached.
+    """
+    from . import epistemic_graph
+
+    return epistemic_graph.graph_enabled() and epistemic_graph.sidecar_path(root).exists()
+
+
 @dataclass(frozen=True, slots=True)
 class EdgeView:
     """Where and for whom a packet reads its units' edges.
 
     `visible` is the reader view that admitted the packet's units, or None when nothing is
     withheld from the caller. `purpose` is the declared purpose of the request, or None.
-    `snapshot` is the request's freshness snapshot, which builds a restricted caller's link
-    resolver; None builds one at the read.
     """
 
     root: Path
     visible: Callable[[str], bool] | None
     purpose: str | None
-    snapshot: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,17 +166,33 @@ def compile(
     return PacketMarks(marks, tuple(groups), units, edges, language, lookups.relations, named)
 
 
+class _NoResolver(Exception):
+    """No link resolver is resident for a restricted caller's edge read."""
+
+
 def _read_edges(
     view: EdgeView, lookups: epistemic_dimensions.DimensionMembership, *, pages: set[str]
 ) -> epistemic_dimensions.DimensionEdges:
     """One graph read of the edges that the displaying dimensions read, for `pages`, in the
-    caller's view under the request's declared purpose."""
-    from . import find
+    caller's view under the request's declared purpose.
+
+    Marks are optional enrichment, so a restricted caller's read builds no link resolver: it
+    borrows the one resident at the live checkpoint, as correction discovery does, and without
+    one the edges are unknown rather than the packet failing.
+    """
+    from . import find, freshness
     from .governance import principal
 
     def resolver():
-        snapshot = view.snapshot or find.FreshnessSnapshot(view.root)
-        return find._request_resolver(view.root, snapshot)()
+        checkpoint = freshness.live_recall_checkpoint(view.root, "vault")
+        borrowed = (
+            find.recall_resolver_snapshot_at_checkpoint(view.root, checkpoint)
+            if checkpoint is not None
+            else None
+        )
+        if borrowed is None:
+            raise _NoResolver
+        return borrowed
 
     behaviours = dimension_display.edge_behaviours(
         behaviour for display in lookups.display.values() for behaviour in display
@@ -178,14 +203,17 @@ def _read_edges(
         else contextlib.nullcontext()
     )
     with scope:
-        return epistemic_dimensions.read_edges(
-            view.root,
-            lookups,
-            pages=pages,
-            admission=view.visible,
-            resolver=resolver,
-            behaviours=behaviours,
-        )
+        try:
+            return epistemic_dimensions.read_edges(
+                view.root,
+                lookups,
+                pages=pages,
+                admission=view.visible,
+                resolver=resolver,
+                behaviours=behaviours,
+            )
+        except _NoResolver:
+            return epistemic_dimensions.DimensionEdges("unavailable")
 
 
 def chars(marks: Mapping[str, Any] | None) -> int:

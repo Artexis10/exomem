@@ -23,12 +23,14 @@ import pytest
 from exomem import (
     commands,
     epistemic_graph,
+    freshness,
     lexstore,
     working_set_index,
     working_set_marks,
     working_set_runtime,
 )
 from exomem import find as find_module
+from exomem import vault as vault_module
 
 pytestmark = pytest.mark.usefixtures("anchors_packet")  # marks ride on the anchors packet's units
 
@@ -212,6 +214,15 @@ def _withheld_answer_twin(tmp_path: Path, *, withheld: bool) -> Path:
     working_set_index.WorkingSetIndex(vault).rebuild()
     _reset_caches()
     working_set_runtime.reset_caches_for_tests()
+    # A restricted caller's marks borrow the link resolver resident at the live checkpoint, as a
+    # running service holds it; they never build one.
+    freshness.seed(
+        vault, "vault",
+        ((str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)),
+    )
+    find_module.recall_resolver_snapshot(
+        vault, expected_checkpoint=freshness.live_recall_checkpoint(vault, "vault")
+    )
     return vault
 
 
@@ -371,3 +382,21 @@ def test_unread_edges_mark_nothing_open_and_the_packet_says_they_are_unknown(
 
     assert "display_edges" not in caught_up["generation"]
     assert _units(caught_up)["Who owns orchard launch support?"]["display"] == {"open": True}
+
+
+def test_a_packet_compiled_while_the_graph_was_unreadable_is_not_served_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a packet compiled while a built graph could not be read that the cache goes on
+    serving, so its questions stay unmarked until the vault next changes."""
+    vault = _vault(tmp_path)
+    with monkeypatch.context() as busy:
+        busy.setattr(
+            epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", lambda *a, **k: None
+        )
+        assert _recall(vault)["generation"]["display_edges"] == "unknown"
+
+    readable = _recall(vault)
+
+    assert "display_edges" not in readable["generation"]
+    assert _units(readable)["Who owns orchard launch support?"]["display"] == {"open": True}

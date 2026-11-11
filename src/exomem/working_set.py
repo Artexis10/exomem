@@ -4458,13 +4458,13 @@ def _follow_up_packet(
 
 
 def _display_edges(
-    root: Path | str, visible: Callable[[str], bool] | None, purpose: str | None, snapshot: Any
+    root: Path | str, visible: Callable[[str], bool] | None, purpose: str | None
 ) -> working_set_marks.EdgeView:
     """Where a compiled packet reads its units' edges for their display marks: the reader view
     and declared purpose that admitted its units."""
     from . import working_set_marks
 
-    return working_set_marks.EdgeView(Path(root), visible, purpose, snapshot)
+    return working_set_marks.EdgeView(Path(root), visible, purpose)
 
 
 def _reader_view(root: Path, purpose: str | None):
@@ -4691,7 +4691,7 @@ def _compile_packet(
     if visible is not None:
         heat = working_set_heat.released_view(heat, visible)
     # The turn slice reads only a packet's anchors, so its compile reads no edges for marks.
-    display_edges = None if leads_only else _display_edges(root, visible, purpose, freshness_snapshot)
+    display_edges = None if leads_only else _display_edges(root, visible, purpose)
     # "Missing or stale profiles SHALL report their state": `current` (live
     # watcher, complete delta), `partial` (no watcher: governed activity only),
     # `seeded`, `behind` (a reconcile is pending) or `empty`. The session start

@@ -2831,6 +2831,7 @@ def serve(
         heat_digest=heat_digest,
         conventions_turn_hash=conventions_registry.turn_hash,
     )
+    graph_present = working_set_marks.graph_present(root)
     # The band depends on the audience under a governed policy, so one audience's
     # banded packet is never served to another (`working_set.band_audience_allowed`).
     cache_identity = (
@@ -2840,6 +2841,7 @@ def serve(
         index.token(),
         working_set.band_audience_allowed(root),
         leads_only,
+        graph_present,
     )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
@@ -2930,9 +2932,12 @@ def serve(
     if any(entry.get("reason") in {"lane_failed", "task_lookup_unavailable", "task_lookup_budget"}
            for entry in packet.get("missing", ())):
         return packet
-    # Edges the marks could not read are as transient: a cached copy would go on saying they are
-    # unknown after the graph caught up, since the graph is not in the cache key.
-    if packet["generation"].get(working_set_marks.GENERATION_KEY) == working_set_marks.UNKNOWN:
+    # Edges the marks could not read from a graph that exists are as transient: only whether the
+    # graph exists is in the key, so a cached copy would go on saying they are unknown.
+    if (
+        graph_present
+        and packet["generation"].get(working_set_marks.GENERATION_KEY) == working_set_marks.UNKNOWN
+    ):
         return packet
     # A carry that the request budget refused is this call's clock, not the vault's: a later call has its own.
     if working_set.ANCHORS_BUDGET_GAP in packet.get("missing", ()):
