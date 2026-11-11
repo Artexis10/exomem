@@ -255,7 +255,11 @@ def project(
         states = spec["value"].get("read") not in data["f38"]["property_readings"]
         one = states and _is_one(key.value)
         singles = _distinct(words.members(key.value, key.at, task)) if states else []
-        premise = None if key.premise is None else words.leaf(key.premise, key.at)
+        premise = (
+            words.leaf(key.premise, key.at)
+            if key.premise is not None and thread.variant == PLANTED
+            else None
+        )
         if premise is not None and not occurs(premise, task):
             task = f"{task} {data['f38']['premise_line'].format(premise=premise)}"
         if one and not singles:

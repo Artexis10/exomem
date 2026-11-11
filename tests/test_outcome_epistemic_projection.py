@@ -29,6 +29,7 @@ from benchmarks.membench.world import core
 from benchmarks.membench.world.core import Vocabulary
 from benchmarks.membench.world.keys import key_spec
 from benchmarks.membench.world.loader import load_catalogue
+from benchmarks.membench.world.mechanisms import Oracle
 from benchmarks.membench.world.pack import PACKS_DIR, load_pack
 from benchmarks.membench.world.planner import plan_world
 from benchmarks.membench.world.render import render
@@ -216,15 +217,31 @@ def test_a_premise_probe_states_its_premise_and_a_probe_in_the_mutation_world_ha
         assert cases.occurs(probe["key"]["premise"], probe["task"])  # the case check needs it
         assert probe["key"]["premise"] not in probe["key"]["traps"]
 
-    _, _, mutated = built(7, twins=1.0)
+    plan, rendering, mutated = built(7, twins=1.0)
     asking = [p for p in mutated["probes"] if p["probe_id"].endswith(".premise")]
     assert asking
     behaviours = DATA["f38"]["mutation_behaviours"]
     for probe in asking:
-        if probe["family"] == "absence":
-            continue  # the planted false premise names its event, in the mutation world too
         assert probe["key"]["premise"] is None and probe["key"]["behaviours"] == behaviours
         assert DATA["f38"]["premise_line"].split("{")[0] not in probe["task"]
+
+    # The false premise's event is recorded in the mutation world, so the probe shows the judge no
+    # premise; the event's carrier still reaches the contest set through the key's premise reading.
+    twin = next(p for p in asking if p["phenomenon"] == "absence.false-premise")
+    key = next(k for k in rendering.keys if f"{k.thread}.{k.form}" == twin["probe_id"])
+    assert key.premise is not None and key.contest
+    thread = plan.thread(key.thread)
+    world = plan.thread_world(thread, thread.variant)
+    oracle = Oracle(world, plan.validity())
+    premise = projection._Words(plan, rendering, DATA).bound(oracle).leaf(key.premise, key.at)
+    contest_texts = {
+        mutated["sessions"][ref["session"] - 1]["files"][ref["file"]]
+        for ref in twin["key"]["contest"]
+    }
+    assert contest_texts == {rendering.documents[a].text for a in key.contest}
+    assert any(cases.occurs(premise, text) for text in contest_texts), (
+        "the event's carrier left the contest set"
+    )
 
 
 def test_a_contest_entry_that_names_a_later_session_is_refused() -> None:
