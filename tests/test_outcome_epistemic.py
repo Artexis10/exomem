@@ -433,6 +433,10 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
     gates = built["dev_gates"]
     assert (gates["solvable"]["rate"], gates["solvable"]["meets"]) == (1.0, True)
     assert (gates["memory_needed"]["rate"], gates["memory_needed"]["meets"]) == (1.0, True)
+    assert gates["memory_needed"]["skipped_as_harm"] == []
+    assert built["description"]["harm_read_probes"]["P"]["rate"] is None, (
+        "no probe of this project is read as harm: unknown, not 0"
+    )
     assert "status: complete" in printed and "decision: description only" in printed
 
     # The solvable gate's prompt carries sessions 1 to the probe's, then the probe.
@@ -1030,6 +1034,78 @@ def test_harm_leaves_probe_windows_where_p_has_no_verdict_out_of_its_denominator
 
     assert (row["harmed"], row["solved_by_n"], row["dropped_p_unknown"]) == (1, 2, 2)
     assert row["rate"] == 0.5 and row["probes"] == ["a:a2 window 1"]
+
+
+def test_a_key_naming_the_harm_reading_loads_and_one_naming_an_unregistered_reading_is_refused_by_name():
+    """The reading is a registry value; a misspelt one would silently keep a probe on the position track."""
+    project = invented_project()
+    project["probes"][1]["key"]["reading"] = "harm"
+    project["probes"][2]["key"]["reading"] = "dread"
+
+    problems = cases.structure_problems(project)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("probe p-second: key.reading names 'dread'")
+
+
+def gate_probe(reading):
+    return {
+        "dimension": "stable",
+        "key": {"behaviours": [], **({"reading": reading} if reading else {})},
+    }
+
+
+def test_the_memory_needed_gate_skips_a_probe_whose_key_reads_it_as_harm():
+    """N answers an abstention probe correctly by design, so the gate must neither fail it nor count it."""
+    outcomes = [
+        outcome("N", "a", "abstain-1", 1, True),
+        outcome("N", "a", "change-1", 1, False),
+        outcome("N", "a", "change-2", 1, False),
+    ]
+    reads_harm = {
+        ("a", p): gate_probe(r)
+        for p, r in (("abstain-1", "harm"), ("change-1", None), ("change-2", None))
+    }
+    reads_position = {**reads_harm, ("a", "abstain-1"): gate_probe(None)}
+
+    skipped = report.dev_gates(outcomes, reads_harm)["memory_needed"]
+    counted = report.dev_gates(outcomes, reads_position)["memory_needed"]
+
+    assert (skipped["rate"], skipped["meets"], skipped["failing_probes"]) == (1.0, True, [])
+    assert skipped["skipped_as_harm"] == ["a:abstain-1"]
+    assert skipped["answers_judged"] == 2
+    assert (counted["meets"], counted["failing_probes"]) == (False, ["a:abstain-1"])
+    assert counted["skipped_as_harm"] == []
+
+
+def test_the_report_gives_a_probe_read_as_harm_as_harm_against_arm_n_per_arm():
+    """P loses an abstention that N gets right; F keeps it. A position probe that P loses is not in this reading."""
+    meta = {
+        ("a", "abstain-1"): gate_probe("harm"),
+        ("a", "abstain-2"): gate_probe("harm"),
+        ("a", "change-1"): gate_probe(None),
+    }
+    outcomes = [
+        outcome("N", "a", "abstain-1", 1, True),
+        outcome("N", "a", "abstain-2", 1, True),
+        outcome("N", "a", "change-1", 1, True),
+        outcome("P", "a", "abstain-1", 1, False),
+        outcome("P", "a", "abstain-2", 1, None),
+        outcome("P", "a", "change-1", 1, False),
+        outcome("F", "a", "abstain-1", 1, True),
+        outcome("F", "a", "abstain-2", 1, True),
+    ]
+
+    rows = report.harm_read_probes(outcomes, meta, ["N", "F", "P"])
+
+    assert set(rows) == {"F", "P"}, "harm is read against N, so N has no row"
+    assert (rows["P"]["harmed"], rows["P"]["solved_by_n"], rows["P"]["rate"]) == (1, 1, 1.0)
+    assert rows["P"]["probes"] == ["a:abstain-1 window 1"]
+    assert rows["P"]["dropped_p_unknown"] == 1, "P's missing verdict is unknown, not harm"
+    assert (rows["F"]["harmed"], rows["F"]["solved_by_n"], rows["F"]["rate"]) == (0, 2, 0.0)
+    assert report.harm_read_probes(outcomes, meta, ["F", "P"]) is None, (
+        "without arm N there is no reading"
+    )
 
 
 def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():

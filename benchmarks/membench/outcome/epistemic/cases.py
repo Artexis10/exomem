@@ -27,6 +27,9 @@ MIN_SUBSTRING_CHARS = 4
 #: The one behaviour that code names: the judge rates reliance on a trap as this, and ``judge.behaviours_asked``
 #: adds it to every change probe. The registry must hold it; every other behaviour is read from the registry.
 TRUSTS_STALE = "trusts_stale"
+#: The one reading that code acts on: a probe whose key names it is read as harm against arm N, which is expected to pass
+#: it, so the memory-needed gate skips it. ``attributes.yaml`` declares it in ``result_readings`` and code implements it.
+HARM = "harm"
 #: Top-level workspace names the harness owns: a scripted file there would collide with an arm's memory or instruction.
 RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
@@ -45,6 +48,11 @@ def _catalogue(name: str, field: str) -> dict:
 def behaviours() -> dict[str, dict]:
     """Every behaviour that the judge may rate, with its polarity and description, from ``behaviours.yaml``."""
     return _catalogue("behaviours.yaml", "behaviours")
+
+
+def readings() -> dict[str, str]:
+    """Every way that a probe's result is read, from ``result_readings`` in ``attributes.yaml``."""
+    return _catalogue("attributes.yaml", "result_readings")
 
 
 def holds_store_name(text: str) -> bool:
@@ -75,6 +83,11 @@ def read_split(root: Path) -> dict:
 
 def is_stable(probe: dict) -> bool:
     return probe["dimension"] == STABLE
+
+
+def is_harm(probe: dict) -> bool:
+    """Whether the probe's key reads it as harm; a key with no reading is read as a position, as every hand-written key is."""
+    return probe["key"].get("reading") == HARM
 
 
 def unsafe_paths(files: dict) -> list[str]:
@@ -196,6 +209,12 @@ def key_problems(name: str, key: dict, task: object) -> list[str]:
         elif key.get("trap"):
             problems.append(f"probe {name}: give key.traps or key.trap, not both")
     problems += premise_problems(name, key.get("premise"), task)
+    reading = key.get("reading")
+    if reading is not None and (not isinstance(reading, str) or reading not in readings()):
+        problems.append(
+            f"probe {name}: key.reading names {reading!r}, which the registry lacks "
+            f"(result_readings in attributes.yaml); use {list(readings())} or leave it out"
+        )
     if unknown := [b for b in key["behaviours"] if b not in behaviours()]:
         problems.append(
             f"probe {name}: key.behaviours names {unknown}, which the behaviour registry "

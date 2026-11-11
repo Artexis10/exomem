@@ -23,7 +23,7 @@ from ..faults import books
 from ..judging import stored_record
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
-from .cases import STORE_NAMES, behaviours, holds_store_name, is_stable
+from .cases import STORE_NAMES, behaviours, holds_store_name, is_harm, is_stable
 from .judge import HISTORY_ARM, behaviours_asked, scored
 
 BOOTSTRAP_SEED = 20261108
@@ -168,10 +168,11 @@ def behaviour_rates(outcomes: list[dict], meta: dict, arms: list[str]) -> dict:
     return rates
 
 
-def harm(outcomes: list[dict]) -> dict:
-    """Probe-windows that N answers correctly and P does not, out of those that N answers correctly and P answered.
+def harm(outcomes: list[dict], *, arm: str = "P", probes: str = "change and stable probes") -> dict:
+    """Probe-windows that N answers correctly and ``arm`` does not, out of those that N answers correctly and ``arm`` answered.
 
-    A probe-window where P has no verdict is unknown, not a loss: it leaves the denominator and is counted apart.
+    A probe-window where ``arm`` has no verdict is unknown, not a loss: it leaves the denominator and is counted apart.
+    ``probes`` says which probes ``outcomes`` hold.
     """
     verdicts = {
         (o["arm"], o["project"], o["probe_id"], o["window"]): o["verdict"]["correct"]
@@ -179,15 +180,31 @@ def harm(outcomes: list[dict]) -> dict:
         if o["verdict"] is not None
     }
     solved = sorted(k[1:] for k, ok in verdicts.items() if k[0] == "N" and ok)
-    known = [k for k in solved if ("P", *k) in verdicts]
-    harmed = [k for k in known if verdicts[("P", *k)] is False]
+    known = [k for k in solved if (arm, *k) in verdicts]
+    harmed = [k for k in known if verdicts[(arm, *k)] is False]
     return {
-        "scope": "probe-windows, change and stable probes, where N is correct and P has a verdict",
+        "scope": f"probe-windows, {probes}, where N is correct and {arm} has a verdict",
         "harmed": len(harmed),
         "solved_by_n": len(known),
-        "dropped_p_unknown": len(solved) - len(known),
+        f"dropped_{arm.lower()}_unknown": len(solved) - len(known),
         "rate": round(len(harmed) / len(known), 4) if known else None,
         "probes": [f"{p}:{probe} window {w}" for p, probe, w in harmed],
+    }
+
+
+def harm_read_probes(outcomes: list[dict], meta: dict, arms: list[str]) -> dict | None:
+    """Per arm other than N, the harm on the probes whose keys read them as harm; None when N did not play.
+
+    These probes have no floor, because N answers them correctly. An arm's reading is the share that N gets right
+    and the arm gets wrong. A run with no such probe gives each arm a rate of None: unknown, not 0.
+    """
+    if "N" not in arms:
+        return None
+    read_as_harm = [o for o in outcomes if is_harm(meta[(o["project"], o["probe_id"])])]
+    return {
+        arm: harm(read_as_harm, arm=arm, probes="probes whose key reads them as harm")
+        for arm in arms
+        if arm != "N"
     }
 
 
@@ -262,8 +279,12 @@ def gate_row(
     }
 
 
-def dev_gates(outcomes: list[dict]) -> dict:
-    """Solvable (arm N with the whole history) and memory needed (arm N without it), each with the probes that fail it."""
+def dev_gates(outcomes: list[dict], meta: dict) -> dict:
+    """Solvable (arm N with the whole history) and memory needed (arm N without it), each with the probes that fail it.
+
+    The memory-needed gate skips a probe whose key reads it as harm: N is expected to pass it, and the report
+    gives it as harm against N (``harm_read_probes``). The skipped probes are listed.
+    """
     result = {}
     for name, arm in (("solvable", HISTORY_ARM), ("memory_needed", "N")):
         rows = [o for o in outcomes if o["arm"] == arm]
@@ -273,6 +294,15 @@ def dev_gates(outcomes: list[dict]) -> dict:
             )
             result[name] = {"status": f"not run: {what}"}
             continue
+        skipped: list[str] = []
+        if name == "memory_needed":
+            harm_keys = {
+                (o["project"], o["probe_id"])
+                for o in rows
+                if is_harm(meta[(o["project"], o["probe_id"])])
+            }
+            skipped = sorted(f"{project}:{probe_id}" for project, probe_id in harm_keys)
+            rows = [o for o in rows if (o["project"], o["probe_id"]) not in harm_keys]
         judged = [o for o in rows if o["verdict"] is not None]
         correct = [o for o in judged if o["verdict"]["correct"]]
         unknown = len(rows) - len(judged)
@@ -288,9 +318,10 @@ def dev_gates(outcomes: list[dict]) -> dict:
         else:
             failing = sorted({f"{o['project']}:{o['probe_id']}" for o in correct})
             rate = 1 - len(correct) / len(judged) if judged else None
-            result[name] = gate_row(
-                rate, MEMORY_NEEDED_FLOOR, failing, len(judged), unknown, below=True
-            )
+            result[name] = {
+                **gate_row(rate, MEMORY_NEEDED_FLOOR, failing, len(judged), unknown, below=True),
+                "skipped_as_harm": skipped,
+            }
     return result
 
 
@@ -422,6 +453,7 @@ def build(
             },
             "behaviours": behaviour_rates(play, meta, arms),
             "harm": harm(play) if {"N", "P"} <= set(arms) else None,
+            "harm_read_probes": harm_read_probes(play, meta, arms),
             "answers_naming_a_store": {
                 "scope": f"share of the raw answers that contain any of {list(STORE_NAMES)}, case-folded; the judge read them masked",
                 "arms": store_mentions(play, arms),
@@ -446,7 +478,7 @@ def build(
         ],
     }
     if not heldout:
-        report["dev_gates"] = dev_gates(outcomes)
+        report["dev_gates"] = dev_gates(outcomes, meta)
         if logs.get(HISTORY_ARM):
             report["dev_gates"]["solvable"]["spent"] = usage_totals(logs[HISTORY_ARM])
     return report
@@ -484,5 +516,10 @@ def summary_lines(report: dict) -> list[str]:
             lines.append(
                 f"gate {name}: rate {gate['rate']} against {gate['floor']} "
                 f"({'meets' if gate['meets'] else 'below'}), failing probes {gate['failing_probes']}"
+                + (
+                    f", skipped as harm {gate['skipped_as_harm']}"
+                    if gate.get("skipped_as_harm")
+                    else ""
+                )
             )
     return lines

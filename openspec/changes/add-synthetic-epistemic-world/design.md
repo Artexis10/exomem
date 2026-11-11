@@ -347,6 +347,13 @@ The keys are in `keys.json` beside the manifest, in evaluator custody like the r
 3. **A key holds a list of traps.** A value that changed three times has two traps. A hand-written project's single trap reads as a list of one.
 4. **A key names its reading.** The memory-needed gate skips a probe that is read as harm.
 
+**What tasks 4.1 to 4.3 built.** Four rulings fix the spec to the build.
+
+- The judge's line for each behaviour is that behaviour's registry description, with one rule for yes, no and not applicable. The old wording of the six f38 behaviours is gone, because it lived in a code constant. The only behaviour name left in code is `trusts_stale`.
+- The report has a behaviour row for each registry behaviour that some probe of the case set asks, in registry order. The development project asks the first six, so its rows are those of the old constant. A case set that asks fewer than six gets fewer rows, not rows of zeros.
+- A key names its reading in `key.reading`, a value of `result_readings`. A key with no reading reads as a position. The report keeps its pooled `harm` figure and adds `harm_read_probes`, per arm, over the probes that their keys read as harm.
+- The paired differences and the decision still include a probe read as harm. Task 4.6 separates them. An item file that an older run pooled has the older key format, so a report on that run refuses until its judge directory is moved aside.
+
 ### 11. The world's text is product-neutral, and the catalogue's shape is not
 
 **What is neutral.**
