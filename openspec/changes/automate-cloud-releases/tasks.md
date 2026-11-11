@@ -126,14 +126,14 @@
   - a reconcile test: `cell_image` set back to a release before a one-way entry that a cell is past starts no attempt, keeps the cell serving, and pauses with `UPGRADE_BACKWARD_CROSSING`, which catches a withdrawal that moves cells back across a one-way change;
   - a reconcile test: the forward-only hold keeps the attempt's restore point while it lasts, which catches a hold that leaves a person no state to restore by hand;
   - a reconcile test: passes after the forward-only miss apply no target and keep 0 replicas, which catches a hold that restarts the failed target every deadline;
-  - a reconcile test: after a person clears the pause, one new attempt starts toward the current target, which catches a hold that no action can end.
+  - a reconcile test: after a person clears the pause, one new attempt starts toward the held cell's own image when set, else its pinned target, which catches a hold that no action can end.
 - [x] 1.11 Add the four rollout alerts to `cellctl` (D8). Add the three thresholds to the observability contract and the chart. Verify with tests:
   - each alert fires on its condition and resolves when the condition clears, which catches an alert that never fires or never resolves;
   - `UPGRADE_FORWARD_ONLY` fires `cloud-rollout-paused`, which catches a forward-only hold that nobody hears about;
   - a newer target keeps the earlier `candidate-since` time, which catches a stall that hides because releases arrive every 8 hours;
   - a pass that could not observe a cell sends no transition, which catches a blind pass that resolves a firing alert;
   - `cellctl` refuses to start without a threshold, which catches a deploy whose alerts are silently off.
-- [x] 1.12 Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
+- [ ] 1.12 (Code and tests merged in #2724; open until the `cloud-deploy` environment exists and its live checks run, an operator step.) Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
   - an unattested digest sets nothing, which catches a pushed image that reaches the fleet;
   - a `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER` answer ends the run as success with nothing set, which catches a red run on every merge after a withdrawal;
   - a paused rollout sets nothing, and the run fails with the pause's code, which catches automation that resumes a paused fleet;
@@ -145,7 +145,7 @@
   - the CI log of every recorded case holds no token, no cell ID and no tenant ID, which catches tenant identifiers in a public log;
   - a release run on `main` without a tag starts no run, which catches a run on every merge;
   - `actionlint` passes, and `gh api` shows that the environment's branch policy admits only `main`, which catches a token that a branch can reach.
-- [x] 1.13 Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
+- [ ] 1.13 (Runbook merged in #2724; open until the Substrate data-list entry and the rehearsal checks are done.) Update `docs/runbooks/cloud-platform-deploy.md` and the data list (D2, D3, D4, D8):
   - record the platform Deployment after each manual upgrade, with one `gh api` command, then dispatch `gh workflow run cloud-deploy.yml --ref main`;
   - record the first platform Deployment, with every barrier entry at or below the live release in `barriers_crossed`;
   - list `barriers_crossed` when an upgrade crosses a barrier;

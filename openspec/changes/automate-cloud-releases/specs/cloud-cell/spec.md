@@ -35,7 +35,7 @@ If readiness does not arrive, cellctl SHALL:
 - start the previous image;
 - pause the rollout, recording the error and the held cell.
 
-An attempt crosses a one-way barrier when a `one-way` `cell` entry of the barrier file lies between two releases. The first is the release of the image that the cell ran before the attempt. The second is the release of its pinned target. cellctl SHALL map each digest to its release through Substrate's image history. A previous image that maps to no release SHALL count as older than every entry. A target that maps to no release SHALL count as newer than every entry. When a crossing attempt misses readiness, cellctl SHALL instead pause the rollout and keep the cell stopped under its upgrade hold, recording `UPGRADE_FORWARD_ONLY`. It SHALL neither restore the cell nor start the previous image, and it SHALL NOT re-apply a target to the held cell. It SHALL keep the attempt's restore point until the hold ends. Only a person's clear of the pause SHALL end the hold, after which cellctl SHALL delete the held attempt's snapshot and clone, where they exist, and start one new attempt toward the current target.
+An attempt crosses a one-way barrier when a `one-way` `cell` entry of the barrier file lies between two releases. The first is the release of the image that the cell ran before the attempt. The second is the release of its pinned target. cellctl SHALL map each digest to its release through Substrate's image history. A previous image that maps to no release SHALL count as older than every entry. A target that maps to no release SHALL count as newer than every entry. When a crossing attempt misses readiness, cellctl SHALL instead pause the rollout and keep the cell stopped under its upgrade hold, recording `UPGRADE_FORWARD_ONLY`. It SHALL neither restore the cell nor start the previous image, and it SHALL NOT re-apply a target to the held cell. It SHALL keep the attempt's restore point until the hold ends. Only a person's clear of the pause SHALL end the hold, after which cellctl SHALL delete the held attempt's snapshot and clone, where they exist, and start one new attempt. A held tenant cell's attempt goes toward its own image when a person set one, else toward its pinned target; the canary's goes toward its current target.
 
 cellctl SHALL refuse an attempt whose target maps to a release before a `one-way` `cell` entry that the previous image is past. It SHALL then start nothing, keep the cell on its current image, and pause the rollout with `UPGRADE_BACKWARD_CROSSING`.
 
@@ -102,7 +102,7 @@ No candidate, lock, fixture or promotion artifact SHALL be required to release.
 
 - **WHEN** a cell is in the forward-only hold and further passes run
 - **THEN** cellctl applies no target to the cell, and the cell stays stopped
-- **AND** after a person clears the pause, cellctl starts one new attempt toward the current target
+- **AND** after a person clears the pause, cellctl starts one new attempt toward the cell's own image when set, else toward its pinned target
 - **AND** that attempt starts at once, even while the canary's image differs from its target
 - **AND** a tenant cell goes toward its own image when one is set, and otherwise retries its pinned target, so it never takes a `cell_image` the canary has not run unless a person set that image as the cell's own
 
