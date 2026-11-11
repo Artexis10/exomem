@@ -36,6 +36,11 @@ def canonical(value: Any) -> str:
     )
 
 
+def dump(value: Any) -> str:
+    """The same value as ``canonical``, indented for a person to read."""
+    return json.dumps(value, sort_keys=True, indent=1, default=_plain, ensure_ascii=False) + "\n"
+
+
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 

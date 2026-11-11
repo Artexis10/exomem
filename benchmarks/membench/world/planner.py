@@ -24,6 +24,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
 from random import Random
 from typing import Any
 
@@ -190,6 +191,15 @@ class Plan:
             statement = world.statements[made]
             kind = self.pack.artefact_kind(statement.kind)
             world.add_artefact(f"{made}.doc", statement.at, [made], kind, statement.by)
+
+    def write(self, directory: Path) -> str:
+        """Write the manifest and the shared world into ``directory``. Returns the manifest's digest."""
+        record = self.manifest()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "manifest.json").write_text(manifest.dump(record), encoding="utf-8")
+        world = manifest.world_record(self.world())
+        (directory / "world.json").write_text(manifest.dump(world), encoding="utf-8")
+        return manifest.digest(record)
 
     def manifest(self) -> dict[str, Any]:
         """Everything that fixes the world's bytes, and a hash of each artefact."""
