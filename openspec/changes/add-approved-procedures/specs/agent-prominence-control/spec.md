@@ -2,7 +2,7 @@
 
 ### Requirement: A user's correction of stored advice is durable, and advice turns recall
 
-The `balanced` and `maximal` capture contracts and the activation `capture_policy` block SHALL serve one sentence that makes stored advice the user says failed, or a claim the user corrects, durable, to be corrected under `proactive_capture`. Under `advisory` the agent offers the correction; under `silent` it makes it. The server instructions SHALL count advice on the user's own case as clear relevance for recall. The native MCP activation nudge SHALL ask the agent to call `recall_context` first for any task in, or advice on, the user's own projects and repositories. The agent decides what counts as a correction or an advice turn; no word list or detector SHALL decide it.
+The `balanced` and `maximal` capture contracts and the activation `capture_policy` block SHALL serve one sentence that makes stored advice the user says failed, or a claim the user corrects, durable, to be corrected under `proactive_capture`. Under `advisory` the agent offers the correction; under `silent` it makes it. The server instructions and the native MCP activation nudge SHALL count advice on the user's own case as clear relevance for recall. The nudge SHALL also ask the agent to call `recall_context` for a task in the user's own repository or project before it inspects that repository or project. The agent decides what counts as a correction or an advice turn; no word list or detector SHALL decide it.
 
 #### Scenario: A bootstrap-only client learns the correction rule
 - **WHEN** a client reads the `balanced` or `maximal` contract from bootstrap and never calls `recall_context`
