@@ -134,6 +134,12 @@ tests/test_membench_utility_runner.py
 tests/test_membench_utility_scenarios.py
 tests/test_membench_utility_scoring.py
 tests/test_membench_utility_world.py
+tests/test_membench_world_core.py
+tests/test_membench_world_keys.py
+tests/test_membench_world_loader.py
+tests/test_membench_world_mechanisms.py
+tests/test_membench_world_planner.py
+tests/test_membench_world_render.py
 tests/test_memory_loop_contract.py
 tests/test_memory_loop_decomposition.py
 tests/test_memory_loop_mixed_media.py
