@@ -27,7 +27,7 @@ The benchmark SHALL run four outcome suites as registered operational families: 
 ### Requirement: The epistemic task suite measures the whole memory loop
 Family f38 SHALL measure task outcome when the actor builds its own memory over a project's scripted work sessions while the project's knowledge changes.
 - The workspace SHALL reset before every session to that session's scripted files, identically in every arm, so that nothing from an earlier session survives except through the arm's memory.
-- A probe's task and files SHALL NOT contain its answer or its trap.
+- A probe's task and files SHALL NOT contain its answer or its trap. A premise probe is the one exception: its task SHALL contain the stale or false state that it presupposes. The key SHALL hold that state as its premise, apart from its traps, and the rule above SHALL still cover the key's value, its accepted phrasings and its traps.
 - Every change probe SHALL depend on one planted change and SHALL name one epistemic dimension key. Stable probes SHALL ask for facts that never change, so the report separates recall from currency.
 - A probe SHALL run from a copy of the arm's memory as the session's main task left it, and the runner SHALL discard the probe's memory writes.
 - The arms N, F, P and E SHALL differ only in the memory treatment. Arm F SHALL receive the product's learning instruction pointed at its folder, so the comparison is between stores.
@@ -60,9 +60,10 @@ Family f38 SHALL measure task outcome when the actor builds its own memory over 
 ### Requirement: The epistemic task suite gates its probes in development
 Before any held-out run, a development round on the dev project SHALL check every probe twice.
 - **Solvable:** arm N, given the full text of every earlier session's task and files in its prompt, SHALL solve at least 90% of probes. Each probe it fails SHALL be repaired or dropped.
-- **Memory needed:** arm N without that text SHALL fail at least 80% of probes. Each probe it passes SHALL be repaired or dropped.
+- **Memory needed:** arm N without that text SHALL fail at least 80% of probes. Each probe it passes SHALL be repaired or dropped. A probe whose key names its reading as harm is the one exception: an abstention probe, or a task that no stored memory bears on. Arm N is expected to pass such a probe. This gate SHALL skip it, and the report SHALL give it as harm against arm N.
 The report SHALL list both rates and every probe they removed.
 
 #### Scenario: A probe the bare actor can guess is removed
 - **WHEN** arm N without history answers a probe correctly in the dev round
+- **AND** the probe's key does not name its reading as harm
 - **THEN** the probe is repaired or dropped before the held-out split is frozen

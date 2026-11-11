@@ -31,8 +31,8 @@ T = TypeVar("T")
 # a point lookup, so the hint is what keeps the read off the body.
 _META_COLUMNS = "path, revision, sha256, size, mtime_ns, frontmatter_json"
 _META_FROM = "store_pages INDEXED BY store_pages_meta"
-#: The last code point sorts after every character: ``path < prefix + _AFTER`` ends a prefix range.
-_AFTER = "\U0010ffff"
+#: The last code point sorts after every character: ``path < prefix + AFTER`` ends a prefix range.
+AFTER = "\U0010ffff"
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +107,7 @@ class StoreSnapshot:
         select = f"SELECT {_META_COLUMNS} FROM {_META_FROM}"
         if prefix:
             rows = self.connection.execute(
-                f"{select} WHERE path >= ? AND path < ? ORDER BY path", (prefix, prefix + _AFTER)
+                f"{select} WHERE path >= ? AND path < ? ORDER BY path", (prefix, prefix + AFTER)
             )
         else:
             rows = self.connection.execute(f"{select} ORDER BY path")
@@ -127,7 +127,7 @@ class StoreSnapshot:
         while True:
             row = self.connection.execute(
                 "SELECT path FROM store_pages WHERE path >= ? AND path < ? ORDER BY path LIMIT 1",
-                (lower, prefix + _AFTER),
+                (lower, prefix + AFTER),
             ).fetchone()
             if row is None:
                 return
@@ -168,13 +168,38 @@ class StoreSnapshot:
         ).fetchone()
         return None if row is None else BinaryMeta(*row)
 
-    def holds_binaries_under(self, prefix: str) -> bool:
-        """Whether the store records a binary whose path starts with ``prefix``."""
-        row = self.connection.execute(
-            "SELECT 1 FROM store_binaries WHERE path >= ? AND path < ? LIMIT 1",
-            (prefix, prefix + _AFTER),
-        ).fetchone()
-        return row is not None
+    def binaries(self, prefix: str) -> Iterator[BinaryMeta]:
+        """The record of every binary whose path starts with ``prefix``, in path order."""
+        yield from (
+            BinaryMeta(*row)
+            for row in self.connection.execute(
+                "SELECT path, sha256, size, revision FROM store_binaries "
+                "WHERE path >= ? AND path < ? ORDER BY path",
+                (prefix, prefix + AFTER),
+            )
+        )
+
+    def holds_below(self, folder: str) -> bool:
+        """Whether the store holds a page or a binary record whose path is below ``folder``."""
+        prefix = f"{folder}/"
+        return (
+            next(self.pages(prefix), None) is not None
+            or next(self.binaries(prefix), None) is not None
+        )
+
+    def binary_records(self, rels: Iterable[str]) -> dict[str, BinaryMeta]:
+        """The record of each binary in ``rels`` that the store records, read in a few queries."""
+        wanted = list(dict.fromkeys(rels))
+        found: dict[str, BinaryMeta] = {}
+        for start in range(0, len(wanted), KEYS_PER_QUERY):
+            chunk = wanted[start : start + KEYS_PER_QUERY]
+            for row in self.connection.execute(
+                "SELECT path, sha256, size, revision FROM store_binaries "
+                f"WHERE path IN ({', '.join('?' * len(chunk))})",
+                chunk,
+            ):
+                found[row[0]] = BinaryMeta(*row)
+        return found
 
 
 @dataclass(frozen=True, slots=True)

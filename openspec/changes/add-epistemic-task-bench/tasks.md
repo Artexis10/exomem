@@ -13,6 +13,7 @@
 - [x] 3.1 Add the `epistemic` suite to `membench outcome`: lockstep scheduling, workspace reset per session, probes from a memory copy, and the case check.
 - [x] 3.2 Add the judge schema with the behaviours and the 20% re-judge. Add the parser cross-check once a case names a structured answer field.
 - [x] 3.3 Add the report: the paired probe bootstrap within projects, the three decisions, and the description rows that the design lists.
+- [ ] 3.4 Build the two exceptions that the delta states: a premise probe's task holds its premise, and the memory-needed gate skips a probe that is read as harm. `add-synthetic-epistemic-world` tasks 4.2 and 4.3 carry the work.
 
 ## 4. Dev round
 

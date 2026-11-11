@@ -175,7 +175,7 @@ The rule needs no list of digests. The phase-1 chart ships the barrier file, so 
 - keeps the attempt's restore point until the hold ends: its snapshot and clone, or its off-site backup. A person's manual restore then uses the attempt's own state (task 3.3).
 
 `cellctl` never re-applies a target for a cell in `forward-only-held`. The phase replaces today's rule that reads 0 replicas as "target not applied". The hold ends only by a person's action:
-- The person fixes forward: sets a fixed release as `cell_image` with the admin token, then clears the pause. Clearing the pause ends the hold. `cellctl` deletes the held attempt's snapshot and clone, because the quota admits one clone, and starts one new attempt toward the current target. That attempt is again a crossing attempt, so a second miss holds again and waits for a person.
+- The person fixes forward: sets a fixed release as `cell_image` with the admin token, sets the held cell's own image (`desired_image`) to the same release, then clears the pause. Clearing the pause ends the hold. `cellctl` deletes the held attempt's snapshot and clone, because the quota admits one clone, and starts one new attempt. A held tenant cell retries its pinned target, so without its own image the attempt repeats the target that missed. With it, the attempt pins the fixed release. That attempt is again a crossing attempt, so a second miss holds again and waits for a person. Once the cell is Ready, the person clears its own image, so that later releases reach it. The resumed attempt starts at once when the pause clears, even while the canary is behind its new target. The canary's attempt goes toward its current target. A tenant cell goes toward its own image when a person set one, and otherwise retries its pinned target, which the canary ran before the attempt began. A cell's own image overrides the canary-first rule, so a person who sets it can choose a release the canary has not run. The runbook tells that person to choose only a release the canary already runs.
 - Or the person restores the cell by hand with `docs/runbooks/cloud-operator-restore.md`, sets its `desired_image`, then clears the pause.
 
 After task 1.9 ships, several cells can be in the forward-only hold at once. One clear of the pause ends every such hold.
@@ -241,6 +241,7 @@ Further rules:
 
 **Pinned attempts.**
 - When an attempt starts, `cellctl` writes its target to the StatefulSet annotation `exomem.io/upgrade-target`. Every later pass of that attempt reads the pin and never recomputes the target. A new `cell_image` during an attempt therefore reaches that cell only through its next attempt.
+- An attempt that started before pinning existed has no pin. `cellctl` pins it on its first pass to the image that the cell applied, or ends it on the cell's current image when none applied.
 - When the rollout pauses, `cellctl` ends every attempt that has not applied its pinned target yet. It restarts that cell on its current image, clears the hold, and records nothing as a failure.
 - While paused, `cellctl` applies no target to any cell. An attempt that applied its target before the pause finishes its readiness wait. On a miss, its restore returns the cell to its previous image, or the forward-only hold keeps it stopped.
 - The first failure sets `held_cell_id`. A later concurrent failure keeps it, and records its own error on its cell's annotations and in the log.
@@ -503,6 +504,9 @@ These steps are not in this change's first phases.
 - **A default hour may be busy** for a new cell's tenant. It lasts until the cell observes enough of its lookback.
 - **Daylight saving** moves a local quiet hour by one UTC hour. The daily recompute follows it after the lookback.
 - **A forward-only failure** keeps the cell down until a person acts (D3).
+- **Open (task 1.14):** the origin proof and the artifact grant are signed once per request. Sign them per attempt before task 1.4 raises the hold budget above about 50 s.
+- **Open (task 1.15):** the cloud-rehearsal harness must send `release` with `cellImage`.
+- **Open (task 1.16):** the gateway's server-slot leave and retake around a hold has no test.
 - **A key rotation's restarts** follow the windows. The rotation's retire step waits for observed convergence, and an urgent re-render uses the runbook's bypass (D4).
 - **The held upgrade slot** stays taken for the off-site backup after Ready, about 30–90 s (est.) per attempt (D6).
 

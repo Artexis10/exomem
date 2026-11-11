@@ -33,6 +33,7 @@ from exomem import (
     media_processing,
     media_store,
     media_worker,
+    move_file,
     reserved_paths,
 )
 from exomem.collection_store import runtime
@@ -252,6 +253,33 @@ def test_evicting_and_restoring_an_original_is_no_outside_change(
 
     assert restored.imported == [] and named.imported == []
     assert media_state(vault, rel) == before
+
+
+def test_moving_an_evicted_original_fetches_it_first_and_the_media_store_still_knows_it(
+    vault, stored_original, original_thread
+):
+    """A move that strands an evicted original's record where the media store cannot find it, or
+    that the next sweep reads as an outside delete."""
+    rel = stored_original
+    folder, name = rel.rsplit("/", 1)
+    moved = f"{folder}-moved/{name}"
+    assert media_store.evict(vault, vault / rel)
+    results = []
+
+    original_thread.run(
+        lambda _writer: results.append(move_file.move_file(vault, old_path=rel, new_path=moved))
+    )
+
+    assert results[0].new_path == sidecar_of(moved)
+    assert (vault / moved).is_file()
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path IN (?, ?)", rel, moved) == [
+        (moved,)
+    ]
+    assert media_store.evict(vault, vault / moved)
+    assert store_media.managed(vault, moved) == media_store.SUPPRESS
+    swept = importer.Importer(vault, run=original_thread.run).sweep()
+    assert swept.removed == [] and swept.imported == []
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", moved) == [(moved,)]
 
 
 def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and_restored(
