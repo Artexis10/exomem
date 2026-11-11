@@ -33,7 +33,7 @@ from exomem import file_watcher, server_runtime
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
-from exomem.vault_store import importer, ownership, projector, read, verify, write
+from exomem.vault_store import importer, mode, ownership, projector, read, verify, write
 
 # The generated vault and the store fixtures are the sibling suites' own: pytest finds a fixture by
 # its name in this module, and an alias keeps a test's argument from shadowing an import.
@@ -599,6 +599,34 @@ def test_a_refused_refresh_of_a_new_file_is_asked_for_again(stored, writer):
 
     assert "Outside/Fresh.md" in again.refreshed
     assert rows(stored, "SELECT path FROM pages WHERE path = ?", "Outside/Fresh.md") != []
+
+
+def test_a_sweep_that_leaves_an_unowned_file_unjudged_records_no_freshness_for_unowned_rows(
+    stored, writer
+):
+    """A partial sweep that reads as complete: status dates the rows of the files that the store
+    does not own from a sweep that left one of those files with no rows."""
+    refusals = [write.NOT_OWNED]
+
+    def run(work):
+        if refusals:
+            raise OpError(refusals.pop(), "the store refused the refresh")
+        work(writer)
+
+    refusing = importer.Importer(stored, run=run)
+    fresh = stored / "Outside" / "Fresh.md"
+    fresh.parent.mkdir()
+    fresh.write_bytes(b"# Fresh\n\nA page that the harbour master added with no event.\n")
+
+    partial = refusing.sweep()
+
+    assert partial.unjudged == {"Outside/Fresh.md": write.NOT_OWNED}
+    assert mode.status(stored)["unowned_rows_as_of"] is None
+
+    complete = refusing.sweep()
+
+    assert complete.unjudged == {} and "Outside/Fresh.md" in complete.refreshed
+    assert mode.status(stored)["unowned_rows_as_of"] is not None
 
 
 def test_a_sweep_refreshes_a_new_markdown_file_that_no_event_named(stored, importing, tmp_path):

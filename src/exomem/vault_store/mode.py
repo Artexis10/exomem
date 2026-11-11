@@ -199,8 +199,8 @@ def status(vault_root: Path) -> dict:
     toward ``registry_target_revision`` (``rebuilding``) or have no record (``unknown``).
     ``registry_waiting_on_paths`` counts the overlay paths that the projector has not put on disk or
     that a person's edit holds: the job waits for each, so a held path keeps a vault ``rebuilding``.
-    ``unowned_rows_as_of`` is when the importer's last full sweep began to read the files that the
-    store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
+    ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
+    the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
     on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
     root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and

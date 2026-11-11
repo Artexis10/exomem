@@ -270,9 +270,13 @@ class Importer:
             missing = [rel for rel in known if rel not in seen and not _below_any(rel, skipped)]
             self._settle(filesystem, sorted({*differing, *missing}), {}, report)
             unowned_from = datetime.now(UTC).isoformat(timespec="seconds")
+            left_before = set(report.unjudged)
             self._sweep_unowned(filesystem, report)
             self._refresh_noted(report)
-            self._record_unowned_sweep(unowned_from, report.corpus_files)
+            if report.unjudged.keys() <= left_before:
+                # A sweep that left an unowned file unjudged leaves the record of the last complete
+                # one, which is still the oldest that any unowned row can be.
+                self._record_unowned_sweep(unowned_from, report.corpus_files)
             self._derive_media(report)
             report.media_attempted = media.recover(self._root)
         return report
@@ -803,8 +807,8 @@ class Importer:
     def _record_unowned_sweep(self, started: str, corpus_files: int) -> None:
         """Record that the rows of the files that the store does not own reflect them from ``started``.
 
-        Readers show it as how fresh those rows are (``read.readiness``). It is no derived row, so
-        the write moves no revision.
+        Readers show it as how fresh those rows are (``read.readiness``). Only a sweep that judged
+        every unowned file records it. It is no derived row, so the write moves no revision.
         """
 
         def work(writer: CollectionWriter) -> None:
