@@ -1,0 +1,98 @@
+# The Exomem projection of the catalogue. It sits outside `benchmarks/membench/world/catalogue/`, so that an edited
+# prediction changes no world's catalogue digest. The world, its prose and its keys never read it. A world's manifest
+# pins this file's digest as its `projection_digest`.
+#
+# The catalogue itself is not free of the product: `benchmarks/membench/world/catalogue/families.yaml` marks the twelve
+# families that mirror a shipped Exomem dimension, and `benchmarks/membench/world/catalogue/lineage.yaml` describes them.
+#
+# `dimension` is the shipped Exomem dimension key that a probe of the family carries when the
+# epistemic task suite (f38) plays a generated project. A family with no dimension has no shipped
+# dimension that answers its question.
+#
+# `models` says whether Exomem has a structure for the family today: yes, partial or no.
+# `predict` is the outcome this design expects from Exomem as shipped, before any run:
+#   pass     close to the gold-evidence ceiling;
+#   partial  above the plain-folder arm and well below the ceiling;
+#   fail     no better than the plain-folder arm.
+# Each prediction is a reading of the shipped vocabulary pack and the active specs on 2026-11-10.
+# No run backs any of them. A report prints the prediction beside the observed result, and a
+# wrong prediction in either direction is a finding. A family whose phenomena are all out of
+# scope has no row.
+schema_version: 2
+product: exomem
+read_on: 2026-11-10
+
+# What the epistemic task suite (f38) needs beyond a family's dimension, to play a generated project. The text is
+# data, because a person edits it and no code branches on it. Slots are `str.format` slots.
+f38:
+  # The catalogue stage whose entries make a development project.
+  stage: s1
+  # Recall probes in one project. A round plants a recall control again until its project holds this many.
+  recall_probes: 4
+  # The task of a session's main work. A session draws one by a seeded choice. No task names a value.
+  work_tasks:
+    - "Go through this week's files. Reply to whatever needs a reply and update whatever needs updating."
+    - "Read the new files in this folder and handle what they ask of you, one item at a time."
+    - "Work through the files that arrived this week. Do what each one needs and note anything you must come back to."
+    - "Take the files from this week and carry out the work that they set, starting with the oldest."
+    - "Look at what was filed this week, do the work that follows from it and keep a short record of what you did."
+    - "Read this week's files in order, act on the ones that need action and leave the rest as they are."
+  # A premise probe's task presupposes a stale or false state. The line is added when the task does not already hold it.
+  premise_line: "The earlier setting I mean is {premise}."
+  # The readings whose answer is a property that an answer keeps, such as the kind of a statement, and no value that
+  # an answer states. The key carries such an answer in its rubric and leaves `value` null, because a kind or a hedge
+  # is a word that ordinary documents hold, and the suite's leak rule would then refuse the probe.
+  property_readings: [kind_tag.kind, kind_tag.modality, kind_tag.hedge, state_fold.standing]
+  # The behaviours that a probe of a thread planted in the mutation world asks, in place of its entry's. Nothing changed
+  # there, so the right answer reports no change, and the judge looks for the false alarm only.
+  mutation_behaviours: [over_flags]
+  # Words for the answers that are no name or value.
+  words: {"true": "yes", "false": "no", "none": "none"}
+  # How a statement reads inside a rubric line: its sentence in quotes, so that its own full stops end nothing.
+  statement: '"{text}"'
+  # How the owner of an attribute and its label read together, as the bank's probe forms read them.
+  attribute: "{about} for {subject}"
+  # A reading's argument, such as the context that it was taken in, after what the reading was asked of.
+  qualifier: " ({argument}: {value})"
+  # The lines of a key's rubric, for an answer that is no single value. `description` is the reading's own
+  # description in `attributes.yaml`.
+  rubric:
+    answer: "The correct answer is the result of this reading. {description} For {of}: {value}."
+    fact: "This also holds. {description} For {of}: {value}."
+
+families:
+  currency: {dimension: currency, models: yes, predict: partial, why: "A stated replacement has a relation and a display mark. An implied or propagated update has no structure, so the agent must notice it unaided."}
+  order: {dimension: order, models: partial, predict: partial, why: "Event dates and order relations are shipped. A question about a past date has no query, and the store keeps no second time axis."}
+  persistence: {dimension: null, models: no, predict: fail, why: "No unit carries how long it stays valid. The product never ages a note by design, and a review date is a manual row."}
+  provenance: {dimension: provenance, models: yes, predict: partial, why: "Source, derivation and evidence relations are shipped. Nothing counts independent origins, so circular reporting reads as corroboration."}
+  attribution: {dimension: attribution, models: yes, predict: partial, why: "A unit can name whose claim it is. A report inside a report and a quoted view have no form."}
+  reliability: {dimension: null, models: no, predict: fail, why: "No source carries a standing or a track record. The behaviour depends on what the agent writes in prose."}
+  testimony: {dimension: attribution, models: partial, predict: partial, why: "The holder and the kind of a statement are recorded. The route by which a statement arrived has no vocabulary."}
+  kind: {dimension: kind, models: yes, predict: partial, why: "The shipped kinds separate a claim, a decision, a hypothesis and an assumption. Keeping the kind in later work depends on the agent."}
+  modality: {dimension: kind, models: yes, predict: partial, why: "Four modalities are shipped, and context never merges two of them. A conditional has no form."}
+  uncertainty: {dimension: uncertainty, models: yes, predict: partial, why: "Open questions, belief levels and an open mark are shipped. Ranges and lost hedges depend on the agent."}
+  calibration: {dimension: uncertainty, models: partial, predict: fail, why: "A belief keeps its holder, value and basis. Nothing resolves a forecast or scores a probability yet."}
+  correction: {dimension: correction, models: yes, predict: partial, why: "Verdicts, contradiction and replacement are shipped, and the planted wrong-note suite passed with the vault built for the agent. The whole loop is not measured yet."}
+  conflict: {dimension: argument, models: partial, predict: partial, why: "Contradiction is detected and queued. A disputed state of its own does not exist."}
+  argument: {dimension: argument, models: partial, predict: partial, why: "Support and contradiction relations are shipped. Undercutting, reinstatement and which arguments stand have no structure."}
+  propagation: {dimension: dependency, models: partial, predict: fail, why: "A dependency is an edge that the agent may write. Nothing follows the edge when its target changes, beyond one hop that the agent handles itself."}
+  identity: {dimension: identity, models: partial, predict: partial, why: "Aliases, entity pages and a duplicate relation are shipped. A merge, a split and a role against its holder have no structure."}
+  entities: {dimension: entities, models: yes, predict: partial, why: "Entity types and typed relations are shipped. A relation that changes over time relies on replacement of the page that states it."}
+  scope: {dimension: scope, models: partial, predict: fail, why: "One refinement relation is the whole scope vocabulary. No unit carries the context where it holds."}
+  quantity: {dimension: null, models: partial, predict: fail, why: "A unit can hold one quantity with its unit and error. Nothing converts units or computes across units."}
+  statistics: {dimension: null, models: no, predict: fail, why: "No structure records a sample, a denominator or a comparison basis."}
+  meaning: {dimension: null, models: no, predict: fail, why: "A definition is a kind. A definition that changes or differs by team has no structure."}
+  inference: {dimension: kind, models: partial, predict: fail, why: "A unit can name how its conclusion was reached. Nothing composes relations across pages, and membench lists that family as planned."}
+  causation: {dimension: dependency, models: partial, predict: fail, why: "Cause relations are shipped as edges. Nothing separates a cause from a correlation or answers a counterfactual."}
+  absence: {dimension: uncertainty, models: partial, predict: partial, why: "Abstention depends on the agent. A recorded negative and a missing record look the same to retrieval."}
+  belief: {dimension: attribution, models: partial, predict: fail, why: "Each holder's belief sits side by side. Nothing records who was told what, so a false belief cannot be derived."}
+  consensus: {dimension: attribution, models: partial, predict: partial, why: "Several holders' beliefs about one claim are kept and none replaces another. Shared origins are not counted."}
+  commitment: {dimension: null, models: partial, predict: partial, why: "Decisions, predictions with a check date and planning items are shipped. An overdue promise is not raised unless a check date was written."}
+  deception: {dimension: null, models: no, predict: fail, why: "The 2026-07-31 capability audit found no defence against instructions inside ingested content. This design did not check whether that has changed."}
+  disclosure: {dimension: null, models: yes, predict: partial, why: "Audience policy, withhold notices and receipts are shipped and tested. A withheld fact that two permitted facts reveal has no check."}
+  hygiene: {dimension: null, models: yes, predict: partial, why: "Audit, reconcile and duplicate handling are shipped. Whether the agent acts on their findings unprompted is not measured."}
+  self: {dimension: provenance, models: partial, predict: partial, why: "Pages keep their sources and dates. Which agent wrote a note is not a first-class fact."}
+  procedure: {dimension: kind, models: partial, predict: partial, why: "A procedure is a kind, and approved procedures are an active change. Finding a stored method without naming it is the activation gap."}
+  media: {dimension: null, models: partial, predict: partial, why: "The media pipeline is an opt-in extra. A profile without it reads unsupported."}
+  language: {dimension: null, models: partial, predict: partial, why: "Labels are multilingual. Retrieval across scripts depends on the embedding profile."}
+  machine: {dimension: attribution, models: partial, predict: fail, why: "A unit can name a model as the party that asserted it. A simulation, synthetic data and instrument drift have no structure."}

@@ -134,6 +134,12 @@ tests/test_membench_utility_runner.py
 tests/test_membench_utility_scenarios.py
 tests/test_membench_utility_scoring.py
 tests/test_membench_utility_world.py
+tests/test_membench_world_core.py
+tests/test_membench_world_keys.py
+tests/test_membench_world_loader.py
+tests/test_membench_world_mechanisms.py
+tests/test_membench_world_planner.py
+tests/test_membench_world_render.py
 tests/test_memory_loop_contract.py
 tests/test_memory_loop_decomposition.py
 tests/test_memory_loop_mixed_media.py
@@ -149,7 +155,10 @@ tests/test_memorybench_provider_sources.py
 tests/test_memorybench_recording_proxy.py
 tests/test_memorybench_setup.py
 tests/test_operator_site_cohort.py
+tests/test_outcome_billing.py
 tests/test_outcome_epistemic.py
+tests/test_outcome_epistemic_projection.py
+tests/test_outcome_epistemic_report.py
 tests/test_outcome_eval_harness.py
 tests/test_protocol_budget.py
 tests/test_protocol_canary.py

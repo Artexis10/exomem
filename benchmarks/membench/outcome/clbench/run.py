@@ -275,7 +275,9 @@ class ClaudeSession:
 
     def _exchange(self, text: str, log: QuestionLog, timeout: float) -> str | None:
         assert self._proc.stdin
-        message = {"type": "user", "message": {"role": "user", "content": text}}
+        # One text block: the form that the CLI and the credits launcher's stream protocol both accept.
+        content = [{"type": "text", "text": text}]
+        message = {"type": "user", "message": {"role": "user", "content": content}}
         self._proc.stdin.write(json.dumps(message) + "\n")
         self._proc.stdin.flush()
         deadline = time.monotonic() + timeout

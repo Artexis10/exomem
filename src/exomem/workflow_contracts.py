@@ -352,35 +352,17 @@ def migration_marker_path(vault_root: Path) -> Path:
 
 def ensure_migration_marker(vault_root: Path, *, review_required: bool = False) -> dict[str, Any]:
     """Create the semantic migration marker before changing a shipped scaffold."""
-    path = migration_marker_path(vault_root)
-    try:
-        source, _guard = _guarded_source(vault_root, path)
-    except FileNotFoundError:
-        source = None
-    except (OSError, UnicodeDecodeError, PathGuardError) as error:
-        raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
-    if source is not None:
-        try:
-            marker = _safe_load_mapping(source)
-        except yaml.YAMLError as error:
-            raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
-        if (
-            not isinstance(marker, dict)
-            or set(marker) != {"schema_version", "review_required"}
-            or type(marker["schema_version"]) is not int
-            or marker["schema_version"] != 1
-            or type(marker["review_required"]) is not bool
-        ):
-            raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
+    marker = _held_marker(vault_root)
+    if marker is not None:
         return marker
     review_required = review_required or _managed_scaffold_sentinel_exists(vault_root)
-    marker = {"schema_version": 1, "review_required": review_required}
+    path = migration_marker_path(vault_root)
     try:
         batch_atomic_write(
             [
                 PlannedWrite(
                     path=path,
-                    content=f"schema_version: 1\nreview_required: {'true' if review_required else 'false'}\n",
+                    content=_marker_text(review_required),
                     create_only=True,
                     guard=_absent_guard(vault_root, path),
                 )
@@ -389,7 +371,48 @@ def ensure_migration_marker(vault_root: Path, *, review_required: bool = False) 
         )
     except PathGuardError as error:
         raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
+    return {"schema_version": 1, "review_required": review_required}
+
+
+def new_migration_marker(vault_root: Path) -> str | None:
+    """The marker that ``ensure_migration_marker`` would create, or None when the vault holds one.
+
+    A writer that commits the marker with its own change, as the offline store-mode overlay does,
+    takes it from here.
+    """
+    if _held_marker(vault_root) is not None:
+        return None
+    return _marker_text(_managed_scaffold_sentinel_exists(vault_root))
+
+
+def _held_marker(vault_root: Path) -> dict[str, Any] | None:
+    """The migration marker that the vault holds, or None when it holds none.
+
+    A marker that cannot be read or is not the one known form raises INDETERMINATE.
+    """
+    try:
+        source, _guard = _guarded_source(vault_root, migration_marker_path(vault_root))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError, PathGuardError) as error:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
+    try:
+        marker = _safe_load_mapping(source)
+    except yaml.YAMLError as error:
+        raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE") from error
+    if (
+        not isinstance(marker, dict)
+        or set(marker) != {"schema_version", "review_required"}
+        or type(marker["schema_version"]) is not int
+        or marker["schema_version"] != 1
+        or type(marker["review_required"]) is not bool
+    ):
+        raise WorkflowContractError("WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE")
     return marker
+
+
+def _marker_text(review_required: bool) -> str:
+    return f"schema_version: 1\nreview_required: {'true' if review_required else 'false'}\n"
 
 
 def _managed_scaffold_sentinel_exists(vault_root: Path) -> bool:

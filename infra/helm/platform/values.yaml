@@ -24,7 +24,7 @@ scheduler:
       servesCloud: true
 
 observability:
-  contractSha256: dd3a90cef88308ca93c5af7409679e2f724f1b36f09b380f3ff9c4b6c5ff818c
+  contractSha256: 93fa58c5a1de22b5c202e82d302164920705b98451db0d61fde9806eed389db1
   alertDeliverySecretName: exomem-hosted-alert-delivery
   alertDeliverySecretKey: url
 
@@ -201,6 +201,23 @@ cellctl:
   # cell, longer on a larger vault. A broken image keeps the canary cell down for the
   # whole deadline. The schema allows 5 to 120.
   upgradeReadyDeadlineMinutes: 30
+  # automate-cloud-releases D4: each cell upgrades in its own quiet UTC hour,
+  # computed from the cell's hourly traffic over lookbackDays. A cell that
+  # observed less than minCoverage of the lookback takes a default hour that a
+  # SHA-256 of its cell ID picks from defaultHourStart up to defaultHourEnd
+  # (exclusive, may wrap past midnight). That range must not overlap
+  # cells.backupWindow, or cellctl refuses to start. Inside its window, a cell
+  # rolls once it has been idle idleMinutes, or when fewer than forceMinutes
+  # remain. The canary is exempt. enabled: false rolls every eligible cell at
+  # once, as before windows.
+  upgradeWindow:
+    enabled: true
+    lookbackDays: 14
+    minCoverage: 0.5
+    defaultHourStart: 5
+    defaultHourEnd: 2
+    idleMinutes: 5
+    forceMinutes: 10
   # C6 owner exports: the pause copies the cell's used bytes under the export
   # hold at no less than exportPauseCopyFloorMiB per second, or the export fails
   # and the cell starts again. The pack, upload and verify that follow, beside
@@ -424,6 +441,28 @@ cloudGateway:
   # and dedicated complimentary sample account are verified. Ordinary Cloud
   # accounts do not require this separate reviewer authority.
   marketplaceReviewerAccessEnabled: false
+  # automate-cloud-releases D5: while a cell refuses connections, as during its
+  # upgrade, the gateway retries a request whose body fits the 1 MiB prepared
+  # body, every intervalMs plus up to jitterMs, for budgetSeconds. It then
+  # answers 503 CELL_NOT_READY with Retry-After: retryAfterSeconds. Held
+  # requests count against max and maxPerTenant, not the in-flight caps.
+  # budgetSeconds: 0 turns the hold off; the first value follows the client
+  # timeout measurement.
+  hold:
+    budgetSeconds: 0
+    intervalMs: 500
+    jitterMs: 250
+    retryAfterSeconds: 5
+    max: 32
+    maxPerTenant: 8
+  # Each connect attempt ends after connectTimeoutMs. A cell that sends no
+  # response headers within timeoutSeconds gets 504 CELL_TIMEOUT; a streamed
+  # response idle for idleSeconds is closed. Keep idleSeconds above the
+  # longest tool call.
+  upstream:
+    connectTimeoutMs: 2000
+    timeoutSeconds: 300
+    idleSeconds: 600
   # Supplied by the reviewed Substrate gateway image release; never a mutable tag.
   image: ""
   replicas: 1

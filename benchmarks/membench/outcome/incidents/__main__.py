@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -46,6 +47,7 @@ from epistemic.journeys.f27_replay import (
 
 from membench.trackc.witness_join import parse_stream_json_transcript
 
+from .. import billing
 from ..faults import init_faults
 from ..isolation import (
     ACTOR_MODEL,
@@ -229,7 +231,12 @@ def run_unit(case: dict, arm: Path, root: Path, *, judge: Judge, **session) -> d
     seeded, done, record = play(case, arm, root, **session)
     transcript = parse_stream_json_transcript(done.stdout.splitlines())
     init = init_event(done.stdout)
-    record |= {"notional_usd": transcript.total_cost_usd, "model_reported": init.get("model")}
+    record |= {
+        "notional_usd": transcript.total_cost_usd,
+        "model_reported": init.get("model"),
+        "api_key_source": init.get("apiKeySource"),
+        "billing": billing.of_key_source(init.get("apiKeySource")),
+    }
     fault = fault_reason(done, transcript) or "; ".join(
         init_faults(init, model=session["model"], exomem=True)
     )
@@ -280,6 +287,8 @@ def main(argv: list[str] | None = None) -> None:
         ):
             raise SystemExit(f"--arm {name}: {path} holds no src/exomem and plugins/claude-code")
     cases = load_cases(args.case)
+    # Refuses a credits declaration without a key before the run directory or any session exists.
+    billing.require_billing_env(os.environ)
     try:
         run_root = refuse_unsafe_out_dir(args.run_root)
     except JourneySetupError as error:
@@ -292,6 +301,8 @@ def main(argv: list[str] | None = None) -> None:
     manifest = {
         "cli": envelope.version,
         "actor": {"model_requested": args.model, "max_turns": args.max_turns},
+        # The billing source every session of this run must report (``billing.py``).
+        "billing": billing.declared(),
         "judge": judge.spec.record(),
         "cases": [case["id"] for case in cases],
         "repeats": args.repeats,

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://exomem.dev/schemas/upgrade-barriers-v1.json",
+  "title": "Exomem Cloud upgrade barriers",
+  "description": "automate-cloud-releases D3: each release that is one-way or needs an operator step. The cloud-deploy workflow stops on an uncrossed entry, and cellctl holds a failed attempt across a one-way cell entry instead of restoring it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "barriers"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "barriers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version", "scope", "kind", "runbook", "summary"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$"},
+          "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "description": "The first release on the far side of the barrier."},
+          "scope": {"enum": ["platform", "cell"]},
+          "kind": {"enum": ["one-way", "operator-step"]},
+          "runbook": {"type": "string", "pattern": "^docs/runbooks/[a-z0-9-]+\\.md#[a-z0-9-]+$", "description": "A runbook path and the section that states the step."},
+          "summary": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

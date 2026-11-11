@@ -227,6 +227,34 @@ def _rels(vault_root: Path, paths: set[Any]) -> frozenset[str]:
     )
 
 
+def pending_only_withheld(
+    vault_root: Path,
+    visible: Callable[[str], bool],
+) -> bool:
+    """Whether every unrepaired external mark names only paths this caller may not see.
+
+    Decided the way `withheld_lag` decides paths: an unscoped mark is a statement
+    that the affected set is unknown, a mark that cannot be mapped to a decided
+    path counts as visible, and a mark on a page the caller may see could move its
+    read, so each reports the lag. A fault in the decision reports the lag too —
+    the marks then count as naming something the caller may see.
+    """
+    try:
+        if freshness.external_pending_unscoped(vault_root):
+            return False
+        paths = freshness.external_pending_paths(vault_root)
+        if len(paths) > MAX_DECIDED_PATHS:
+            return False
+        for path in paths:
+            rel = freshness.registry_rel(vault_root, path)
+            if rel is None or visible(rel):
+                return False
+        return True
+    except Exception as error:  # noqa: BLE001 - a lag that cannot be decided is reported, as in `withheld_lag`
+        _report_fault("pending_only_withheld", error)
+        return False
+
+
 def recall_lag_only_withheld(
     vault_root: Path,
     scope: str,

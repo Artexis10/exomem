@@ -1,0 +1,17 @@
+{
+  "acknowledged_on": null,
+  "affected_sections": [
+    "\u00a77 Amendments"
+  ],
+  "amended_on": "2026-11-11",
+  "artifact_type": "preregistration-amendment-receipt.v1",
+  "contract_path": "benchmarks/epistemic/PREREGISTRATION.md",
+  "contract_sha256": "328191167a3347c3a98340c46644381b87bbabe2780fb1927ae2089c7c13283d",
+  "effective_policy": "Applies after founder acknowledgment. Until then the rules of sequence 10 govern, and a run billed to Claude API credits is instrument evidence. After acknowledgment a held-out f35, f36 or f37 run may be billed to the Claude subscription or to Claude API credits and still decide, with the frozen actor and decision judge unchanged. The owner sees each decision run's cost estimate before it starts. Every result stays an internal diagnostic, never a published suite result.",
+  "parent_contract_sha256": "48dd0ff05afe0372e0d6c7650ea7afd332a70e22f04535e03457a0dba3939e60",
+  "ratifier": null,
+  "rationale": "Allow both billing sources for the sessions of the sequence-9 and sequence-10 outcome suites on the owner's 2026-11-11 ruling, and add no family. The subscription login and Claude API credits serve the same frozen models, so the subscription-only rule limited spend and was not a rule of method. A run declares its billing source; every actor session and Claude judge call records the source it reports; a session reporting another source than declared is a harness fault, and a credit balance that runs out stops the run as a rejected limit does. Claude judgement files written before billing was recorded read as subscription, marked inferred. Arms, scale, measures, judge models, fault rules otherwise, and loss bounds stand.",
+  "repository_revision": null,
+  "schema_version": 1,
+  "sequence": 11
+}

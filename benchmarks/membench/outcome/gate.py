@@ -17,6 +17,7 @@ from protocol.contracts import (
     working_amendment_receipts,
 )
 
+from . import billing
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL, REPO_ROOT
 from .judging import DECISION_JUDGE
 from .record import checkout_state
@@ -49,6 +50,10 @@ REQUIRED = {
 #: The amendment sequence this harness implements: it reads the decisions by that amendment's arms,
 #: scale and judge, so no run is a decision until that receipt is acknowledged.
 HARNESS_AMENDMENT = 10
+#: The sequence-11 billing amendment releases held-out runs and Claude judges paid
+#: from API credits as decision evidence. It releases no gate: a held-out run still
+#: waits on HARNESS_AMENDMENT.
+BILLING_AMENDMENT = 11
 LABEL = "internal diagnostic"
 
 
@@ -78,16 +83,25 @@ def frozen_digests(suite: str, repo_root: Path = REPO_ROOT) -> dict[str, str]:
     return frozen
 
 
-def harness_released(repo_root: Path = REPO_ROOT) -> bool:
-    """Whether the amendment this harness implements is acknowledged. Receipts that cannot be read say no."""
+def _amendment_acknowledged(sequence: int, repo_root: Path) -> bool:
     try:
         receipts = working_amendment_receipts(repo_root)
     except (ContractIdentityError, OSError):
         return False
     return any(
-        receipt.sequence == HARNESS_AMENDMENT and receipt.acknowledgment_status == "acknowledged"
+        receipt.sequence == sequence and receipt.acknowledgment_status == "acknowledged"
         for receipt in receipts
     )
+
+
+def harness_released(repo_root: Path = REPO_ROOT) -> bool:
+    """Whether the amendment this harness implements is acknowledged. Receipts that cannot be read say no."""
+    return _amendment_acknowledged(HARNESS_AMENDMENT, repo_root)
+
+
+def billing_released(repo_root: Path = REPO_ROOT) -> bool:
+    """Whether the billing amendment is acknowledged. Receipts that cannot be read say no."""
+    return _amendment_acknowledged(BILLING_AMENDMENT, repo_root)
 
 
 def heldout_gate(
@@ -124,11 +138,25 @@ def heldout_gate(
     return {"family": FAMILIES[suite], "verified_sha256": verified}
 
 
+def _decision_billing(declared: str | None, repo_root: Path) -> bool:
+    """Whether a billing declaration may stand behind decision evidence.
+
+    The subscription may decide under sequence 10 alone; credits may decide only once sequence 11
+    is acknowledged. A name outside ``billing.KEY_SOURCES``, or none at all, is never decision billing.
+    """
+    return (
+        declared == billing.DEFAULT
+        or declared in billing.KEY_SOURCES
+        and billing_released(repo_root)
+    )
+
+
 def evidence_of(report: dict, stored: dict, repo_root: Path = REPO_ROOT) -> str:
     """What a report is worth, from what the run recorded: ``instrument``, ``void``, ``incomplete`` or ``decision``.
 
     A decision report is a gated held-out run whose actor and judge are the frozen ones and whose
-    decision no harness fault voided and nothing leaves incomplete, while the harness's amendment is
+    decision no harness fault voided and nothing leaves incomplete, billed to the subscription or — once the
+    sequence-11 amendment is acknowledged — to API credits, while the harness's amendment is
     acknowledged. Anything else is instrument evidence, whatever the split says.
     """
     if stored["split"] != "heldout" or not stored.get("gate"):
@@ -137,8 +165,17 @@ def evidence_of(report: dict, stored: dict, repo_root: Path = REPO_ROOT) -> str:
         return "instrument"
     if report["actor"]["model_reported"] != [ACTOR_MODEL]:
         return "instrument"
+    # The preregistration pays decision runs from the subscription or, after sequence 11, from API credits.
+    if not _decision_billing(stored.get("billing", billing.DEFAULT), repo_root):
+        return "instrument"
     judge = report.get("judge")
     if judge is not None and (judge["backend"], judge["model"]) != DECISION_JUDGE:
+        return "instrument"
+    if (
+        judge is not None
+        and judge["backend"] == "claude"
+        and not _decision_billing(judge.get("billing"), repo_root)
+    ):
         return "instrument"
     status = report.get("decision", {}).get("status")
     if status in ("void", "incomplete"):

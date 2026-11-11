@@ -1,0 +1,180 @@
+{
+  "description": "Recorded API answers for infra/scripts/cloud_deploy.py, trimmed to the fields the script reads plus enough of the rest to keep their real shape. The cell and tenant IDs are invented and must never reach the log.",
+  "github_release_latest": {
+    "id": 260001,
+    "tag_name": "v0.171.0",
+    "name": "v0.171.0",
+    "draft": false,
+    "prerelease": false,
+    "html_url": "https://github.com/example-owner/example-repo/releases/tag/v0.171.0",
+    "published_at": "2026-11-10T09:00:00Z"
+  },
+  "github_platform_deployments": [
+    {
+      "id": 9003,
+      "ref": "v0.171.0",
+      "environment": "cloud-platform",
+      "task": "deploy",
+      "payload": {
+        "barriers_crossed": []
+      },
+      "created_at": "2026-11-10T18:00:00Z"
+    },
+    {
+      "id": 9002,
+      "ref": "v0.170.0",
+      "environment": "cloud-platform",
+      "task": "deploy",
+      "payload": {
+        "barriers_crossed": [
+          "secret-matrix-0.92.0",
+          "secret-matrix-0.94.0",
+          "secret-matrix-0.95.0",
+          "secret-matrix-0.104.0",
+          "secret-matrix-0.109.0",
+          "secret-matrix-0.112.0",
+          "secret-matrix-0.116.0",
+          "backup-key-conversion",
+          "secret-matrix-0.157.0"
+        ]
+      },
+      "created_at": "2026-11-09T18:00:00Z"
+    },
+    {
+      "id": 9001,
+      "ref": "v0.169.0",
+      "environment": "cloud-platform",
+      "task": "deploy",
+      "payload": "{}",
+      "created_at": "2026-11-08T18:00:00Z"
+    }
+  ],
+  "github_statuses_success": [
+    {
+      "id": 1,
+      "state": "success",
+      "environment": "cloud-platform",
+      "created_at": "2026-11-09T18:05:00Z"
+    }
+  ],
+  "github_statuses_failure": [
+    {
+      "id": 2,
+      "state": "failure",
+      "environment": "cloud-platform",
+      "created_at": "2026-11-08T18:05:00Z"
+    }
+  ],
+  "substrate_rollout_behind": {
+    "success": true,
+    "requestId": "req-0001",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "release": "v0.170.0",
+      "paused": false,
+      "error_code": null,
+      "canary_on_target": true,
+      "cells": {
+        "on_target": 41,
+        "behind_target": 0,
+        "held": 0
+      }
+    }
+  },
+  "substrate_rollout_paused": {
+    "success": true,
+    "requestId": "req-0002",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "release": "v0.170.0",
+      "paused": true,
+      "error_code": "UPGRADE_READINESS_TIMEOUT",
+      "canary_on_target": false,
+      "cells": {
+        "on_target": 40,
+        "behind_target": 0,
+        "held": 1
+      }
+    }
+  },
+  "substrate_rollout_canary_behind": {
+    "success": true,
+    "requestId": "req-0003",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "release": "v0.171.0",
+      "paused": false,
+      "error_code": null,
+      "canary_on_target": false,
+      "cells": {
+        "on_target": 1,
+        "behind_target": 40,
+        "held": 1
+      }
+    }
+  },
+  "substrate_rollout_canary_on_target": {
+    "success": true,
+    "requestId": "req-0004",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "release": "v0.171.0",
+      "paused": false,
+      "error_code": null,
+      "canary_on_target": true,
+      "cells": {
+        "on_target": 2,
+        "behind_target": 39,
+        "held": 0
+      }
+    }
+  },
+  "substrate_put_ok": {
+    "success": true,
+    "requestId": "req-0005",
+    "view": {
+      "cellImage": "ghcr.io/artexis10/exomem@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "cells": [
+        {
+          "cellId": "zq7xk2mfp4wn8rtd",
+          "tenantId": "6b1f0c9e-2d3a-4b5c-8e7f-0a1b2c3d4e5f",
+          "observedImage": "ghcr.io/artexis10/exomem@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ]
+    }
+  },
+  "substrate_error_image_seen": {
+    "success": false,
+    "error": {
+      "code": "CELL_IMAGE_SEEN",
+      "message": "This image was the cell image before.",
+      "requestId": "req-0006",
+      "retryable": false
+    }
+  },
+  "substrate_error_release_older": {
+    "success": false,
+    "error": {
+      "code": "CELL_RELEASE_OLDER",
+      "message": "This release is older than the current cell image's release.",
+      "requestId": "req-0007",
+      "retryable": false
+    }
+  },
+  "substrate_rollout_release_set_by_tag": {
+    "success": true,
+    "requestId": "req-0008",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "release": "v0.171.0",
+      "paused": false,
+      "error_code": null,
+      "canary_on_target": true,
+      "cells": {
+        "on_target": 41,
+        "behind_target": 0,
+        "held": 0
+      }
+    }
+  }
+}

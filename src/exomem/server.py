@@ -294,6 +294,14 @@ class ExomemFastMCP(FastMCP):
                 mcp_path=str(carrier_path).rstrip("/") or "/",
             )
         )
+        traffic = getattr(self, "_exomem_cell_traffic", None)
+        if traffic is not None:
+            # A Cloud cell counts each request to its MCP path (automate-cloud-releases D4).
+            from .cell_traffic import CountMcpRequests
+
+            middleware.insert(
+                0, ASGIMiddleware(CountMcpRequests, traffic=traffic, path=str(carrier_path).rstrip("/") or "/")
+            )
         kwargs["middleware"] = middleware
         activation = getattr(self, "_exomem_local_runtime_activation", None)
         if activation is not None:
@@ -838,6 +846,15 @@ def build_server(
             local_ingress=worker_socket is not None,
         )
     lifespan = runtime_resources.lifespan(runtime_activation.lifespan())
+    traffic = None
+    if cloud:
+        # automate-cloud-releases D4: the cell's hourly counts live in its state root,
+        # under its custody home (/data/host) and outside the vault, so no vault
+        # listing or export holds them.
+        from . import cell_traffic, state_paths
+
+        traffic = cell_traffic.CellTraffic(state_paths.state_store_root() / cell_traffic.FILE_NAME)
+        lifespan = cell_traffic.shutdown_lifespan(lifespan, traffic)
     health_listener = None
     health_port = cloud_cell.health_port() if cloud else None
     if health_port is not None:
@@ -866,9 +883,10 @@ def build_server(
         # configured for gateway upload handoffs adds only the private ticket
         # receiver (bridge-cloud-agent-uploads) and the gateway-proved
         # `/download` for exact originals.
-        readiness = register_health_routes(mcp, on_liveness=runtime_activation.start)
+        readiness = register_health_routes(mcp, on_liveness=runtime_activation.start, cell_traffic=traffic)
+        mcp._exomem_cell_traffic = traffic
         if health_listener is not None:
-            health_listener.serve(readiness)
+            health_listener.serve(readiness, traffic.history)
         from . import cloud_origin
 
         cloud_origin.validate_configuration()

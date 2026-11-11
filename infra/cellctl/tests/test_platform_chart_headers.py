@@ -617,6 +617,16 @@ GATEWAY_ENV = {
     "EXOMEM_MARKETPLACE_REVIEWER_ACCESS_ENABLED",
     "DATABASE_URL",
     "EXOMEM_GATEWAY_PORT",
+    # automate-cloud-releases D5: the hold and the upstream timeouts.
+    "EXOMEM_CLOUD_HOLD_BUDGET_SECONDS",
+    "EXOMEM_CLOUD_HOLD_INTERVAL_MS",
+    "EXOMEM_CLOUD_HOLD_JITTER_MS",
+    "EXOMEM_CLOUD_HOLD_RETRY_AFTER_SECONDS",
+    "EXOMEM_CLOUD_HOLD_MAX",
+    "EXOMEM_CLOUD_HOLD_MAX_PER_TENANT",
+    "EXOMEM_CLOUD_CONNECT_TIMEOUT_MS",
+    "EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS",
+    "EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS",
 }
 
 
@@ -669,6 +679,23 @@ def test_the_cloud_gateway_renders_exactly_the_substrate_gateway_env_contract() 
     )
     assert "secretKeyRef" in env["EXOMEM_CONTROL_PLANE_KEY"]["valueFrom"]
     assert "secretKeyRef" in env["DATABASE_URL"]["valueFrom"]
+    # automate-cloud-releases D5: each hold and timeout value reaches the gateway from
+    # its chart value; the hold ships off (budget 0) until the client timeouts are measured.
+    defaults = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))["cloudGateway"]
+    hold, upstream = defaults["hold"], defaults["upstream"]
+    assert {name: env[name]["value"] for name in GATEWAY_ENV if name.startswith(("EXOMEM_CLOUD_HOLD_",
+            "EXOMEM_CLOUD_CONNECT_", "EXOMEM_CLOUD_UPSTREAM_"))} == {
+        "EXOMEM_CLOUD_HOLD_BUDGET_SECONDS": str(hold["budgetSeconds"]),
+        "EXOMEM_CLOUD_HOLD_INTERVAL_MS": str(hold["intervalMs"]),
+        "EXOMEM_CLOUD_HOLD_JITTER_MS": str(hold["jitterMs"]),
+        "EXOMEM_CLOUD_HOLD_RETRY_AFTER_SECONDS": str(hold["retryAfterSeconds"]),
+        "EXOMEM_CLOUD_HOLD_MAX": str(hold["max"]),
+        "EXOMEM_CLOUD_HOLD_MAX_PER_TENANT": str(hold["maxPerTenant"]),
+        "EXOMEM_CLOUD_CONNECT_TIMEOUT_MS": str(upstream["connectTimeoutMs"]),
+        "EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS": str(upstream["timeoutSeconds"]),
+        "EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS": str(upstream["idleSeconds"]),
+    }
+    assert hold["budgetSeconds"] == 0
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1684,6 +1711,54 @@ def test_a_changed_contract_value_changes_what_cellctl_is_given(tmp_path: Path) 
     assert env["CELLCTL_PENDING_OPERATION_WARN_SECONDS"] == "1800"
     assert env["CELLCTL_PVC_RESERVED_FREE_BYTES"] == str(3 * 1024**3)
     assert env["CELLCTL_RECALL_LAG_WARN_SECONDS"] == "1200"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_chart_copy_of_the_barrier_file_equals_the_contract_and_reaches_cellctl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # automate-cloud-releases D3. Catches a barrier that cellctl never sees: a new entry
+    # in infra/contracts that the chart's copy lacks, or a copy cellctl is not given.
+    from cellctl.barriers import load_barriers
+
+    source = (REPO_ROOT / "infra/contracts/upgrade-barriers-v1.json").read_text(encoding="utf-8")
+    assert (PLATFORM_CHART / "files/upgrade-barriers-v1.json").read_text(encoding="utf-8") == source
+    rendered = _cellctl_env(_helm_template())["CELLCTL_UPGRADE_BARRIERS"]
+    assert load_barriers(rendered) == load_barriers(source)
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cellctl_is_given_the_upgrade_window_and_rollout_alert_values_the_chart_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # automate-cloud-releases D4/D8. Catches a value that the chart never renders,
+    # which would stop cellctl at its next deploy, and a name the two sides disagree on.
+    from datetime import timedelta
+
+    from cellctl.main import build_alert_thresholds, build_reconcile_config
+
+    alerts = json.loads((REPO_ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8"))["alerts"]
+    env = _cellctl_env(_helm_template("--set", "cellctl.upgradeWindow.idleMinutes=7",
+                                      "--set", "cellctl.upgradeWindow.enabled=false"))
+    for name, value in env.items():
+        if value is not None and name.startswith("CELLCTL_"):
+            monkeypatch.setenv(name, value)
+
+    window = build_reconcile_config().upgrade_window
+    thresholds = build_alert_thresholds()
+
+    assert (window.enabled, window.idle_minutes, window.lookback_days, window.min_coverage) == (False, 7, 14, 0.5)
+    assert (window.default_hour_start, window.default_hour_end, window.force_minutes) == (5, 2, 10)
+    assert thresholds.rollout_held_after == timedelta(seconds=alerts["rollout_held_warn_seconds"])
+    assert thresholds.rollout_stalled_after == timedelta(seconds=alerts["rollout_stalled_warn_seconds"])
+    assert thresholds.canary_wait_after == timedelta(seconds=alerts["canary_wait_warn_seconds"])
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_chart_refuses_a_missing_upgrade_window_value() -> None:
+    result = _helm_render("--set", "cellctl.upgradeWindow.forceMinutes=null")
+    assert result.returncode != 0
+    assert "forceMinutes" in result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

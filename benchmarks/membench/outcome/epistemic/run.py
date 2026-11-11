@@ -1,18 +1,20 @@
-"""Play f38 projects in lockstep across the arms ``N``, ``F``, ``P`` and ``E``.
+"""Play f38 projects in lockstep across the arms ``N``, ``G``, ``F``, ``P`` and ``E``.
 
 A project is a sequence of scripted work sessions. For session ``k`` every requested arm starts at
 once, and session ``k + 1`` starts only after every arm has finished session ``k`` and its probes, so
 no arm drifts in time from another. Each arm is a ``clbench`` arm without CL-Bench's per-task memory
 sentence:
 
-- ``N``: no memory.
+- ``N``: no memory and no history. It plays probes only: a session's main task cannot change what a later
+  call sees, because the workspace resets before every call.
+- ``G``: no memory, probes only, like ``N``. Its probe prompt holds the probe's contest set (``gold_prompt``).
 - ``F``: a ``memory/`` folder in the workspace. The product's learning instruction, pointed at that
   folder, sits in the workspace ``CLAUDE.md``.
 - ``P``: Exomem as its users get it: the shipped plugin, skills, hooks, instruction block and the
   learning instruction in the workspace ``CLAUDE.md``.
 - ``E``: ablation. Exomem over MCP alone, with no instruction.
 
-Before every session the workspace is replaced by that session's scripted files, so only the arm's
+Before every call the workspace is replaced by the scripted files of the probe's session, so only the arm's
 memory carries over. After an arm's main task, each of that session's probes runs as its own
 ``claude -p`` call from a snapshot of the arm's memory taken after the main task, and the snapshot is
 restored after each probe: a probe never writes to the memory that a later call reads.
@@ -46,14 +48,22 @@ from exomem.client_config import place_learning_instruction
 from exomem.prominence import LEARNING_INSTRUCTION
 
 from .. import record
-from ..clbench.run import ARMS, ClaudeActor, QuestionLog, single_turn
+from ..clbench.run import ARMS, ArmSpec, ClaudeActor, QuestionLog, single_turn
 from ..faults import LimitRejected, park, run_pool
 from ..isolation import copy_state, hook_env
 from ..workspace import sha256_of
 from . import layout
-from .cases import RESERVED_NAMES, refused
+from .cases import GOLD_ARM, RESERVED_NAMES, refused
 
-EPISTEMIC_ARMS = ("N", "F", "P", "E")
+#: The suite's arms. ``G`` is ``N`` with a different probe prompt, so it is not one of CL-Bench's arms.
+SPECS = {
+    "N": ARMS["N"],
+    GOLD_ARM: ArmSpec(GOLD_ARM, "none"),
+    "F": ARMS["F"],
+    "P": ARMS["P"],
+    "E": ARMS["E"],
+}
+EPISTEMIC_ARMS = tuple(SPECS)
 #: A main session does real work; a probe answers one question.
 MAIN_TIMEOUT_SECONDS = 1200.0
 PROBE_TIMEOUT_SECONDS = 600.0
@@ -85,6 +95,11 @@ FOLDER_REPLACEMENTS = (
 HISTORY_HEADER = (
     "Here is the record of the earlier work sessions on this project, oldest first. "
     "For each session it shows the task that session was given and the files it was given."
+)
+#: The header of arm G's prompt names no arm, store or memory product, and no task of an earlier session.
+GOLD_HEADER = (
+    "Here are documents from the earlier work on this project, oldest first. "
+    "Each one shows the session it was given in and its file name."
 )
 
 
@@ -312,6 +327,18 @@ def run_arms(arms: list[str], work: Callable[[str], object]) -> dict[str, object
     return results
 
 
+def probe_prompt(arm: str, project: dict, probe: dict) -> str:
+    """What ``arm`` is asked for ``probe``: the task alone, or for arm ``G`` the task after the contest set."""
+    return gold_prompt(project, probe) if arm == GOLD_ARM else probe["task"]
+
+
+def plays_sessions(spec: ArmSpec) -> bool:
+    """Whether an arm plays each session's main task. An arm with no memory plays probes only: a main task
+    carries nothing to a later call, since the workspace resets before every call, so it would cost a call
+    and change nothing that a probe sees."""
+    return spec.persists != "none"
+
+
 def play_arm_session(
     actor: EpistemicActor,
     session: dict,
@@ -319,11 +346,13 @@ def play_arm_session(
     snapshot: Path,
     stop: threading.Event,
     errors: list[dict],
+    prompt_of: Callable[[dict], str],
 ) -> dict | None:
     """One arm's session: the main task, then each probe from the memory the main task left.
 
-    Returns the first ``init`` event the arm's CLI sent. A harness fault that survived the retries
-    is appended to ``errors`` and sets ``stop``: no arm starts another call.
+    An arm with no memory skips the main task (``plays_sessions``). Returns the first ``init`` event the
+    arm's CLI sent. A harness fault that survived the retries is appended to ``errors`` and sets
+    ``stop``: no arm starts another call. ``prompt_of`` gives the prompt of a probe.
     """
     arm, number = actor.spec.arm_id, session["session"]
     if stop.is_set():
@@ -333,19 +362,22 @@ def play_arm_session(
         errors.append({"arm": arm, "session": number, "probe": probe, "faults": faults})
         stop.set()
 
-    main = play_call(
-        actor,
-        f"s{number:02d}",
-        session["task"],
-        session["files"],
-        timeout=MAIN_TIMEOUT_SECONDS,
-        snapshot=snapshot,
-    )
-    write_json(actor.arm_dir / "sessions" / f"s{number:02d}.json", main)
-    if main["log"]["harness_faults"]:
-        fail(None, main["log"]["harness_faults"])
-        return main["log"]["init"]
-    actor.snapshot(snapshot)
+    init = None
+    if plays_sessions(actor.spec):
+        main = play_call(
+            actor,
+            f"s{number:02d}",
+            session["task"],
+            session["files"],
+            timeout=MAIN_TIMEOUT_SECONDS,
+            snapshot=snapshot,
+        )
+        write_json(actor.arm_dir / "sessions" / f"s{number:02d}.json", main)
+        init = main["log"]["init"]
+        if main["log"]["harness_faults"]:
+            fail(None, main["log"]["harness_faults"])
+            return init
+        actor.snapshot(snapshot)
     for probe in probes:
         if stop.is_set():
             break
@@ -353,11 +385,12 @@ def play_arm_session(
         call = play_call(
             actor,
             f"s{number:02d}-{probe['probe_id']}",
-            probe["task"],
+            prompt_of(probe),
             files,
             timeout=PROBE_TIMEOUT_SECONDS,
             snapshot=snapshot,
         )
+        init = init or call["log"]["init"]
         write_json(
             actor.arm_dir / "probes" / f"{probe['probe_id']}.json",
             probe_record(probe, call, changed_files(files, read_tree(actor.work))),
@@ -367,7 +400,7 @@ def play_arm_session(
             break
         # The probe's writes end here: the next call reads the memory the main task left.
         actor.restore(snapshot)
-    return main["log"]["init"]
+    return init
 
 
 def arm_manifest(actor: EpistemicActor) -> dict:
@@ -407,7 +440,7 @@ def play_project(
     started = now()
     actors = {
         arm: EpistemicActor(
-            ARMS[arm],
+            SPECS[arm],
             project_dir / arm,
             model,
             effort,
@@ -425,7 +458,15 @@ def play_project(
 
     def guarded(session: dict, probes: list[dict], arm: str) -> dict | None:
         try:
-            return play_arm_session(actors[arm], session, probes, snapshots[arm], stop, errors)
+            return play_arm_session(
+                actors[arm],
+                session,
+                probes,
+                snapshots[arm],
+                stop,
+                errors,
+                partial(probe_prompt, arm, project),
+            )
         except LimitRejected:
             raise
         except Exception:  # noqa: BLE001 - one arm's crash invalidates the window and stays visible
@@ -566,6 +607,11 @@ def play_window(
 # --------------------------------------------------------------------------
 
 
+def file_blocks(files: dict[str, str]) -> list[str]:
+    """Scripted files as a prompt shows them, so that the two reference prompts differ only in what they select."""
+    return [f"--- file: {name} ---\n{text}" for name, text in files.items()]
+
+
 def history_prompt(project: dict, probe: dict) -> str:
     """The scripted task and files of sessions 1 to the probe's, then the probe's task, under a neutral header."""
     parts = [HISTORY_HEADER]
@@ -573,7 +619,38 @@ def history_prompt(project: dict, probe: dict) -> str:
         if session["session"] > probe["session"]:
             break
         parts.append(f"=== Session {session['session']} ===\nTask: {session['task']}")
-        parts += [f"--- file: {name} ---\n{text}" for name, text in session["files"].items()]
+        parts += file_blocks(session["files"])
+    parts.append(f"=== Your task now ===\n{probe['task']}")
+    return "\n\n".join(parts)
+
+
+def contest_files(project: dict, probe: dict) -> list[tuple[int, dict[str, str]]]:
+    """The files of the probe's contest set: ``(session, files)`` in session order, each session's files in its own order.
+
+    Nothing else of an earlier session is here: not its task and not another of its files.
+    """
+    wanted = {(ref["session"], ref["file"]) for ref in probe["key"]["contest"]}
+    found = []
+    for session in project["sessions"]:
+        held = {n: t for n, t in session["files"].items() if (session["session"], n) in wanted}
+        if held:
+            found.append((session["session"], held))
+    return found
+
+
+def gold_prompt(project: dict, probe: dict) -> str:
+    """Arm ``G``'s prompt: the probe's contest set in session order under a neutral header, then the probe's task.
+
+    A probe with an empty contest set gets its task alone, as arm ``N`` does: a line that said nothing
+    bears on the question would tell ``G`` more than the contest set holds.
+    """
+    held = contest_files(project, probe)
+    if not held:
+        return probe["task"]
+    parts = [GOLD_HEADER]
+    for number, files in held:
+        parts.append(f"=== Session {number} ===")
+        parts += file_blocks(files)
     parts.append(f"=== Your task now ===\n{probe['task']}")
     return "\n\n".join(parts)
 

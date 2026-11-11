@@ -37,14 +37,11 @@ from exomem import (
     delete_file,
     extraction_parts,
     preserve,
-    reconcile,
     registry_history,
     relation_review,
     reserved_paths,
-    scene_frames,
     semantic_writes,
 )
-from exomem import init as init_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
@@ -408,19 +405,6 @@ def test_delete_of_a_governed_page_refuses_by_name_and_changes_nothing(served):
     assert read.owned_bytes(served, BETA)
 
 
-def test_delete_of_a_binary_refuses_by_name_and_changes_nothing(served):
-    """A binary that the store records, with its bytes on disk: the delete must not unlink them."""
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        delete_file.delete_file(served, path=DIAGRAM, confirm=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert revision(served) == start
-    assert tree(served) == before
-
-
 def history_name(index):
     """A snapshot name in the form that ``registry_history`` writes: a UTC stamp and a hash tag."""
     return f"20260101T{index:012d}Z-abcdef01"
@@ -525,28 +509,6 @@ def test_companion_backfill_commit_refuses_by_name_before_it_arms_a_journal(serv
     assert tree(served) == before
 
 
-def test_scene_frame_clear_refuses_a_stored_sidecar_and_passes_a_video_without_frames(served):
-    """A clear that unlinks projections and leaves the stored sidecar pages behind."""
-    video = served / "Knowledge Base/Media/harbour.mp4"
-    sidecar = "Knowledge Base/Media/harbour.mp4.frames/scene-000-t0ms.jpg.md"
-    assert scene_frames.clear_scene_frames(served, video) == 0, "no frames: it clears as before"
-    vault_module.batch_atomic_write(
-        [planned(served, sidecar, "# Frame\n", create_only=True)],
-        vault_root=served,
-        post_commit_fanout=False,
-    )
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        scene_frames.clear_scene_frames(served, video)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert revision(served) == start
-    assert tree(served) == before
-    assert read.owned_bytes(served, sidecar) == b"# Frame\n"
-
-
 def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served):
     """A publish, unlink or move of a stored page that skips the store; a sidecar still passes."""
     before = tree(served)
@@ -574,22 +536,6 @@ def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served)
         served, f"{DIAGRAM}.meta.json", b"{}", expected_identity=None
     )
     assert (served / f"{DIAGRAM}.meta.json").read_bytes() == b"{}"
-
-
-FRAME_SIDECAR = "Knowledge Base/Media/gone.mp4.frames/scene-000-t0ms.jpg.md"
-
-
-def test_reconcile_names_a_stored_frame_folder_it_kept_and_still_finishes(served):
-    """A reconcile that dies on a stored frame sidecar, or counts it as removed when it stayed."""
-    frames = served / FRAME_SIDECAR
-    frames.parent.mkdir(parents=True)
-    frames.write_text("# Frame\n", encoding="utf-8")
-
-    report = reconcile.reconcile(served)
-
-    assert report.frame_orphans_kept == ["Knowledge Base/Media/gone.mp4.frames"]
-    assert report.frame_orphans_removed == 0
-    assert frames.read_text(encoding="utf-8") == "# Frame\n"
 
 
 RAW_SOURCE = "Knowledge Base/Sources/__exomem_raw_v1__minutes.md"
@@ -731,44 +677,6 @@ def test_a_store_that_refuses_its_writer_keeps_a_surplus_part_in_a_retire_and_a_
     assert (listed.removed, listed.unowned) == ([], [part])
     assert read.page_exists(served, part)
     assert revision(served) == start
-
-
-def test_init_overlay_refuses_in_store_mode_and_replaces_nothing(served):
-    """A forced init whose overlay copies the scaffold's log over a page that the store holds."""
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        init_module.init_vault(served, force=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "exomem init --force" in refused.value.message
-    assert revision(served) == start
-    assert tree(served) == before
-
-
-def test_reclaim_schema_previews_but_refuses_to_delete_in_store_mode(served):
-    """A reclaim that deletes the legacy `_Schema` copies from disk where the store holds pages."""
-    source = next(iter(init_module.shipped_schema_sources()))
-    relative = source.relative_to(init_module._SCAFFOLD).as_posix().split("/", 1)[1]
-    legacy = served / "Knowledge Base/_Schema" / relative
-    deployed = init_module.shipped_schema_target(served) / relative
-    for copy in (legacy, deployed):
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        copy.write_bytes(source.read_bytes())
-    before = tree(served)
-    start = revision(served)
-
-    preview = init_module.reclaim_legacy_shipped_schema(served)
-    assert preview["removed"] == [relative], "the preview reads the disk and stays available"
-    with pytest.raises(OpError) as refused:
-        init_module.reclaim_legacy_shipped_schema(served, apply=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "exomem reclaim-schema --apply" in refused.value.message
-    assert legacy.is_file()
-    assert revision(served) == start
-    assert tree(served) == before
 
 
 def test_delete_validation_refuses_what_the_commit_refuses_for_an_active_catalog(

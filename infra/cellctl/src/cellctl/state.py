@@ -73,6 +73,13 @@ NO_GOOD_IMAGE = "NO_GOOD_IMAGE"
 TARGET_REJECTED = "TARGET_REJECTED"
 UPGRADE_STALLED = "UPGRADE_STALLED"
 MANIFEST_IMMUTABLE = "MANIFEST_IMMUTABLE"
+# automate-cloud-releases D3: an attempt across a one-way `cell` barrier missed
+# readiness, so the cell stays stopped for a person; and a target that would move
+# a cell back across one was refused.
+UPGRADE_FORWARD_ONLY = "UPGRADE_FORWARD_ONLY"
+UPGRADE_BACKWARD_CROSSING = "UPGRADE_BACKWARD_CROSSING"
+# The upgrade hold's phase while a forward-only miss waits for a person.
+FORWARD_ONLY_HELD = "forward-only-held"
 # D4/D6: the rollout waits on an owner cell whose last apply was refused.
 CANARY_PARKED = "CANARY_PARKED"
 # move-cloud-cells-to-local-storage D4: a cell on a node confirmed stopped has
@@ -278,6 +285,14 @@ class ClusterObservation:
     statefulset_grow_storage_gib: int | None = None
     statefulset_render_digest_applied_at: datetime | None = None
     statefulset_row_generation: int | None = None
+    # automate-cloud-releases D4: the attempt's pinned target and its phase, and,
+    # outside any hold, the cell's upgrade window, the UTC day it was computed and
+    # when the cell first fell behind its target.
+    statefulset_upgrade_target: str | None = None
+    statefulset_upgrade_phase: str | None = None
+    statefulset_upgrade_window: str | None = None
+    statefulset_upgrade_window_at: str | None = None
+    statefulset_candidate_since: datetime | None = None
 
     pod_exists: bool = False
     pod_ready: bool = False
@@ -355,6 +370,9 @@ class Decision:
     pre_upgrade_snapshot: str | None = None
     target_applied_at: datetime | None = None
     restored_snapshot: str | None = None
+    # automate-cloud-releases D4/D3: the attempt's pinned target, and its phase.
+    upgrade_target: str | None = None
+    upgrade_phase: str | None = None
 
     # D6/D8 backup backoff (exomem.io/backup-retry-after): set to start a new
     # backoff, or clear_backup_retry_after=True to reset it on success. When
