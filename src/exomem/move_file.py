@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,7 @@ from .vault import (
     write_log_entry,
 )
 from .vault_store import availability as store_availability
+from .vault_store import ownership as store_ownership
 from .vault_store import read as store_read
 from .vault_store import targets as store_targets
 
@@ -182,29 +184,28 @@ def _held_rename(
     except OpError as error:
         raise MoveFileError(error.code, error.message) from error
     except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "CROSS_DEVICE":
-            raise MoveFileError(
-                "CROSS_DEVICE_MOVE",
-                "file moves require one filesystem",
-            ) from None
-        if error.code == "DESTINATION_EXISTS":
-            raise MoveFileError("DEST_EXISTS", "destination already exists") from None
-        if error.code == "PATH_VARIANT_EXISTS":
-            raise MoveFileError(
-                "PATH_VARIANT_EXISTS",
-                "a destination folder already exists in another case or Unicode form",
-            ) from None
-        if error.code in {
-            "CAPABILITY_UNAVAILABLE",
-            "IDENTITY_CHANGED",
-            "RESERVED_PATH",
-            "UNSAFE_PATH",
-        }:
-            raise MoveFileError(
-                "RESERVED_PATH",
-                "path is reserved for its owning subsystem",
-            ) from None
-        raise MoveFileError("MOVE_FAILED", "held file move was refused") from None
+        raise _rename_error(error) from None
+
+
+def _rename_error(error: reserved_paths.ReservedPathLeafError) -> MoveFileError:
+    """The move's error for a held rename that the filesystem refused."""
+    if error.code == "CROSS_DEVICE":
+        return MoveFileError("CROSS_DEVICE_MOVE", "file moves require one filesystem")
+    if error.code == "DESTINATION_EXISTS":
+        return MoveFileError("DEST_EXISTS", "destination already exists")
+    if error.code == "PATH_VARIANT_EXISTS":
+        return MoveFileError(
+            "PATH_VARIANT_EXISTS",
+            "a destination folder already exists in another case or Unicode form",
+        )
+    if error.code in {
+        "CAPABILITY_UNAVAILABLE",
+        "IDENTITY_CHANGED",
+        "RESERVED_PATH",
+        "UNSAFE_PATH",
+    }:
+        return MoveFileError("RESERVED_PATH", "path is reserved for its owning subsystem")
+    return MoveFileError("MOVE_FAILED", "held file move was refused")
 
 
 def _compose_transforms(first, second):
@@ -218,7 +219,9 @@ def _compose_transforms(first, second):
     return lambda text: second(first(text))
 
 
-def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
+def _paired_artifact(
+    vault_root: Path, rel: str, page_held: Callable[[str], bool] | None = None
+) -> tuple[str, str] | None:
     """Return `(page_rel, binary_rel)` when `rel` is half of a stored artifact.
 
     A captured artifact is two files — the bytes and the page that addresses
@@ -228,7 +231,9 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
     no longer there. So either half names the whole unit.
 
     Returns None for an ordinary page, which is the common case: a source page
-    whose stem happens to have no sibling file is not a pair.
+    whose stem happens to have no sibling file is not a pair. ``page_held`` says
+    whether a page exists; a store-mode vault answers it from the store, where a
+    page may have no file yet.
     """
     from .governance.raw_protection import marked
 
@@ -246,7 +251,8 @@ def _paired_artifact(vault_root: Path, rel: str) -> tuple[str, str] | None:
         present = (vault_root / binary_rel).is_file() or originals.evicted(vault_root, binary_rel)
         return (rel, binary_rel) if present else None
     page_rel = f"{rel}.md"
-    return (page_rel, rel) if (vault_root / page_rel).is_file() else None
+    held = (vault_root / page_rel).is_file() if page_held is None else page_held(page_rel)
+    return (page_rel, rel) if held else None
 
 
 def _repoint_artifact(old_binary: str, new_binary: str):
@@ -622,6 +628,15 @@ def _move_file_local(
             old_abs, old_rel = store_targets.resolve_existing(vault_root, old_path)
         except VaultPathError as e:
             raise MoveFileError(code=e.code, reason=e.reason) from e
+        if (
+            not old_abs.exists()
+            and store_ownership.classify(old_rel) is store_ownership.Ownership.BINARY
+            and originals.binding_for(vault_root) is not None
+        ):
+            # The store keeps an evicted original's record while the media store holds its bytes.
+            candidate = originals.original_state(vault_root, old_abs)
+            if candidate.state == "evicted":
+                stored_original = candidate
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
@@ -666,27 +681,34 @@ def _move_file_local(
     # renamed alongside it inside the same transaction.
     paired_binary: tuple[str, str] | None = None
     paired_parts: tuple[str, str] | None = None
+    # A raw-marked page's part pages that the store holds, with their hashes.
+    stored_parts: dict[str, str] = {}
     moved_parts: list[Path] = []
     reconcile_parts = False
     recovering_from_trash = trash_metadata.is_trash_path(old_rel) and not trash_metadata.is_trash_path(new_rel)
     # Recovery owns retirement of a Trash reference companion; it is not a page relocation.
-    pair = None if recovering_from_trash else _paired_artifact(vault_root, old_rel)
+    pair = (
+        None
+        if recovering_from_trash
+        else _paired_artifact(
+            vault_root,
+            old_rel,
+            None if store_writer is None else partial(store_targets.holds, vault_root),
+        )
+    )
     if store_writer is not None and not recovering_from_trash:
         # Recovery judges its own gaps. A move refuses before it reads more than the source.
-        stored_bytes = store_read.owned_bytes(vault_root, old_rel)
-        refusal = store_targets.page_only_form_gap(
-            vault_root, old_rel, stored_bytes, paired=pair is not None, destination=new_rel
-        )
+        refusal = store_targets.governed_gap(vault_root)
         if refusal is not None:
             raise store_availability.unrouted("move_file", refusal)
-        assert stored_bytes is not None  # resolve_existing found the page in this snapshot
+        stored_bytes = store_read.owned_bytes(vault_root, old_rel)
         store_targets.active_catalog_gap(
             vault_root,
             "move_file",
             error_class=MoveFileError,
             removals=(
                 catalog_publication.CatalogRemoval(
-                    old_rel, hashlib.sha256(stored_bytes).hexdigest()
+                    old_rel, None if stored_bytes is None else hashlib.sha256(stored_bytes).hexdigest()
                 ),
             ),
         )
@@ -712,7 +734,11 @@ def _move_file_local(
         collection_authority.refuse_view_paths(
             vault_root, (old_rel, new_rel, *paired_binary), MoveFileError
         )
-        if (vault_root / paired_binary[1]).exists() or originals.evicted(vault_root, paired_binary[1]):
+        if (
+            (vault_root / paired_binary[1]).exists()
+            or originals.evicted(vault_root, paired_binary[1])
+            or (store_writer is not None and store_targets.holds(vault_root, paired_binary[1]))
+        ):
             raise MoveFileError(
                 code="DEST_EXISTS",
                 reason=(
@@ -729,7 +755,24 @@ def _move_file_local(
         from . import extraction_parts
 
         old_folder = extraction_parts.folder_for(Path(old_rel))
-        if (vault_root / old_folder).is_dir():
+        if store_writer is not None and store_ownership.owns_folder(old_folder.as_posix()):
+            # A raw-marked page's parts are pages: the store moves them, and holds the destination.
+            new_folder = extraction_parts.folder_for(Path(new_rel)).as_posix()
+            with store_read.snapshot(vault_root) as view:
+                stored_parts = {meta.path: meta.sha256 for meta in view.pages(f"{old_folder.as_posix()}/")}
+                parts_taken = (
+                    next(view.pages(f"{new_folder}/"), None) is not None
+                    or next(view.binaries(f"{new_folder}/"), None) is not None
+                )
+            if stored_parts:
+                paired_parts = (old_folder.as_posix(), new_folder)
+                if parts_taken:
+                    raise MoveFileError(
+                        code="DEST_EXISTS",
+                        reason=f"destination already exists: {new_folder}. This op refuses to overwrite.",
+                    )
+                content_transform = _compose_transforms(content_transform, _repoint_parts(new_rel))
+        elif (vault_root / old_folder).is_dir():
             moved_parts = sorted(
                 old_folder / entry.name
                 for entry in (vault_root / old_folder).iterdir()
@@ -744,6 +787,7 @@ def _move_file_local(
             content_transform = _compose_transforms(content_transform, _repoint_parts(new_rel))
 
     if store_writer is not None:
+        store_targets.refuse_kind_change("move_file", old_rel, new_rel)
         # The store decides a page's destination: a file left there by a queued delete is no page.
         if reserved_paths.classify_logical(new_rel).blocked:
             raise MoveFileError(
@@ -1322,13 +1366,28 @@ def _move_file_local(
             ) -> None:
                 """Move the page and rewrite its linkers in one store transaction.
 
-                The projector renames the file afterwards. A changed source, a link gained since
-                the scan, or a taken destination refuses the whole commit with nothing changed.
+                The projector renames the file afterwards. The original that pairs with the page,
+                and a dot folder of its parts, are renamed on disk first and recorded by the same
+                commit; a raw-marked page's parts move in the store. A changed source, a link gained
+                since the scan, or a taken destination refuses the whole commit with nothing changed.
                 """
                 from .vault_store import batch as store_batch
-                from .vault_store.write import Expect, PageMove, StoreConflict
+                from .vault_store import binaries
+                from .vault_store.write import Expect, PageMove
 
                 bound_destination.recheck(vault_root)
+                entries: list[binaries.Entry] = []
+                if paired_binary is not None:
+                    entries.append(binaries.Entry(*paired_binary))
+                    _materialize_originals(vault_root, originals_context, paired_binary[0])
+                if paired_parts is not None and not stored_parts:
+                    entries.append(binaries.Entry(*paired_parts, folder=True))
+                with store_read.snapshot(vault_root) as view:
+                    relocation = binaries.plan(view, entries)
+                part_moves = {
+                    part: f"{paired_parts[1]}{part[len(paired_parts[0]):]}"
+                    for part in stored_parts
+                } if paired_parts is not None else {}
                 moved = store_batch.Lifecycle(
                     moves=(
                         PageMove(
@@ -1336,44 +1395,33 @@ def _move_file_local(
                             new_rel,
                             body=None if moved_source == source else moved_source.encode("utf-8"),
                         ),
+                        *(PageMove(part, moved_to) for part, moved_to in part_moves.items()),
                     ),
+                    binary_deletes=relocation.binary_deletes,
                     expect={
                         old_rel: Expect(
                             sha256=source_guard.expected_content_hash,
                             linked_from=None if stored_check is None else stored_check.bound,
                         ),
                         new_rel: Expect(absent=True),
+                        **{part: Expect(sha256=digest) for part, digest in stored_parts.items()},
+                        **{moved_to: Expect(absent=True) for moved_to in part_moves.values()},
+                        **relocation.expect(),
                     },
                 )
-                try:
-                    # The moved page is the move's one piece of work; its link rewrites earn nothing.
-                    with working_set_heat.primary_paths((new_rel,)):
-                        store_batch.commit_batch(
-                            store_writer,
-                            [*lifecycle_writes, *writes, *extra_writes],
-                            vault_root=vault_root,
-                            required_guards=required_guards,
-                            validate_prepared_bindings=_validate_prepared_bindings,
-                            lifecycle=moved,
-                        )
-                except StoreConflict as conflict:
-                    if conflict.path == old_rel:
-                        raise MoveFileError(
-                            code="SOURCE_CHANGED",
-                            reason=(
-                                "the source changed before publication; read it again and retry "
-                                f"({conflict.reason})."
-                            ),
-                        ) from conflict
-                    if conflict.path == new_rel:
-                        raise MoveFileError(
-                            code="DEST_EXISTS",
-                            reason=(
-                                f"destination already exists: {new_rel}. "
-                                f"This op refuses to overwrite — pick a different name."
-                            ),
-                        ) from conflict
-                    raise MoveFileError("MOVE_FAILED", "move could not be published") from conflict
+                # The moved page is the move's one piece of work; its link rewrites earn nothing.
+                with working_set_heat.primary_paths((new_rel,)):
+                    _commit_in_store(
+                        vault_root,
+                        store_writer,
+                        relocation,
+                        [*lifecycle_writes, *writes, *extra_writes],
+                        moved,
+                        sources={old_rel, *stored_parts, *relocation.recorded},
+                        destinations={new_rel, *part_moves.values(), *(e.dst for e in entries)},
+                        required_guards=required_guards,
+                        validate_prepared_bindings=_validate_prepared_bindings,
+                    )
 
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
             reading.close()
@@ -1432,70 +1480,92 @@ def _move_file_local(
         unsupported_rel = (
             old_rel if not old_rel.lower().endswith(".md") else new_rel
         )
-        try:
-            catalog_target = catalog_publication.prepare_catalog_membership_batch(
+        if store_writer is not None:
+            # The catalog gate ran above; the store form has no epoch and no held rename.
+            reading.close()
+            _move_binary_in_store(
                 vault_root,
-                writes=log_plan.writes,
-                removals=(
-                    catalog_publication.CatalogRemoval(
-                        unsupported_rel,
-                        None,
-                    ),
-                ),
-                now=int(time.time()),
+                store_writer,
+                old_rel=old_rel,
+                new_rel=new_rel,
+                writes=writes,
+                originals_context=originals_context,
+                validate_prepared_bindings=_validate_prepared_bindings,
             )
-        except catalog_publication.CatalogPublicationError as error:
-            raise MoveFileError(
-                code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
-                reason=str(error),
-            ) from error
-        if _validate_prepared_bindings is not None:
-            _validate_prepared_bindings()
-        _materialize_originals(vault_root, originals_context, old_rel)
-        move_epoch = graph_sync.prepare_rename_epoch(vault_root, [(old_rel, new_rel)])
-        try:
-            _held_rename(vault_root, old_rel, new_rel)
-        except BaseException:
-            if move_epoch is not None:
-                graph_sync.provision_rename_recovery(move_epoch)
-            raise
-        child_started = False
-        try:
-            if move_epoch is not None:
-                graph_sync.publish_rename_epoch(move_epoch)
-            if writes:
-                # Link rewrites are the move's bookkeeping, nobody's work.
-                with working_set_heat.primary_paths(()):
-                    child_started = True
-                    batch_atomic_write(
-                        writes, vault_root=vault_root,
-                        _validate_prepared_bindings=_validate_prepared_bindings,
-                    )
-        except Exception as e:
-            if _move_outcome_is_unproved(e, move_epoch, child_started):
+        else:
+            try:
+                catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                    vault_root,
+                    writes=log_plan.writes,
+                    removals=(
+                        catalog_publication.CatalogRemoval(
+                            unsupported_rel,
+                            None,
+                        ),
+                    ),
+                    now=int(time.time()),
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise MoveFileError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+                    reason=str(error),
+                ) from error
+            if _validate_prepared_bindings is not None:
+                _validate_prepared_bindings()
+            _materialize_originals(vault_root, originals_context, old_rel)
+            move_epoch = graph_sync.prepare_rename_epoch(vault_root, [(old_rel, new_rel)])
+            try:
+                _held_rename(vault_root, old_rel, new_rel)
+            except BaseException:
                 if move_epoch is not None:
                     graph_sync.provision_rename_recovery(move_epoch)
                 raise
-            log.exception(
-                "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
-            )
+            child_started = False
             try:
-                _held_rename(vault_root, new_rel, old_rel, rollback=True)
-            except MoveFileError as rollback_error:
                 if move_epoch is not None:
-                    graph_sync.provision_rename_recovery(move_epoch)
-                raise RuntimeError(
-                    f"move link rewrite failed ({e}); rename rollback also failed: "
-                    f"{rollback_error}"
-                ) from e
-            if move_epoch is not None:
-                graph_sync.restore_deletion_epoch(move_epoch)
-            raise
+                    graph_sync.publish_rename_epoch(move_epoch)
+                if writes:
+                    # Link rewrites are the move's bookkeeping, nobody's work.
+                    with working_set_heat.primary_paths(()):
+                        child_started = True
+                        batch_atomic_write(
+                            writes, vault_root=vault_root,
+                            _validate_prepared_bindings=_validate_prepared_bindings,
+                        )
+            except Exception as e:
+                if _move_outcome_is_unproved(e, move_epoch, child_started):
+                    if move_epoch is not None:
+                        graph_sync.provision_rename_recovery(move_epoch)
+                    raise
+                log.exception(
+                    "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
+                )
+                try:
+                    _held_rename(vault_root, new_rel, old_rel, rollback=True)
+                except MoveFileError as rollback_error:
+                    if move_epoch is not None:
+                        graph_sync.provision_rename_recovery(move_epoch)
+                    raise RuntimeError(
+                        f"move link rewrite failed ({e}); rename rollback also failed: "
+                        f"{rollback_error}"
+                    ) from e
+                if move_epoch is not None:
+                    graph_sync.restore_deletion_epoch(move_epoch)
+                raise
 
     if store_writer is not None:
         # The store transaction holds the move, its rows and its link rewrites; there is no file
         # fan-out, and the projector moves the files.
         from .vault_store import batch as store_batch
+        from .vault_store import media as store_media
+
+        moved_binary = paired_binary or (
+            None if store_ownership.is_markdown(old_rel) else (old_rel, new_rel)
+        )
+        if moved_binary is not None:
+            # The binary's media rows follow its new path; what file mode drops at the old one goes.
+            store_media.after_removal(vault_root, [moved_binary[0]])
+            store_media.derive(vault_root, [moved_binary[1]])
 
         log_warning = write_log_entry(
             vault_root,
@@ -1653,6 +1723,110 @@ def _move_file_local(
         # than the owner receives none.
         index=index_feedback if visible is None else None,
     )
+
+
+def _commit_in_store(
+    vault_root: Path,
+    writer,
+    relocation,
+    writes: list[PlannedWrite],
+    lifecycle,
+    *,
+    sources: set[str],
+    destinations: set[str],
+    required_guards=(),
+    validate_prepared_bindings: Callable[[], None] | None = None,
+) -> None:
+    """Rename what ``relocation`` moves, then commit ``writes`` and ``lifecycle`` in one store
+    transaction; a refusal renames everything back (``vault_store.binaries``).
+
+    A stale path among ``sources`` refuses with SOURCE_CHANGED and a taken one among
+    ``destinations`` with DEST_EXISTS, as file mode names them.
+    """
+    from .vault_store import batch as store_batch
+    from .vault_store import binaries
+    from .vault_store.write import StoreConflict
+
+    try:
+        with binaries.relocated(vault_root, relocation) as moved:
+            store_batch.commit_batch(
+                writer,
+                writes,
+                vault_root=vault_root,
+                required_guards=required_guards,
+                validate_prepared_bindings=validate_prepared_bindings,
+                lifecycle=dataclasses.replace(
+                    lifecycle, records=moved.records, refresh=moved.refresh
+                ),
+            )
+    except StoreConflict as conflict:
+        if conflict.path in sources:
+            raise MoveFileError(
+                code="SOURCE_CHANGED",
+                reason=(
+                    "the source changed before publication; read it again and retry "
+                    f"({conflict.reason})."
+                ),
+            ) from conflict
+        if conflict.path in destinations:
+            raise MoveFileError(
+                code="DEST_EXISTS",
+                reason=(
+                    f"destination already exists: {conflict.path}. "
+                    f"This op refuses to overwrite — pick a different name."
+                ),
+            ) from conflict
+        raise MoveFileError("MOVE_FAILED", "move could not be published") from conflict
+    except binaries.Stranded as error:
+        raise MoveFileError(
+            "MOVE_FAILED", f"move could not be published; {binaries.STRANDED}"
+        ) from error
+    except reserved_paths.ReservedPathLeafError as error:
+        raise _rename_error(error) from error
+
+
+def _move_binary_in_store(
+    vault_root: Path,
+    writer,
+    *,
+    old_rel: str,
+    new_rel: str,
+    writes: list[PlannedWrite],
+    originals_context: ExitStack,
+    validate_prepared_bindings: Callable[[], None] | None,
+) -> None:
+    """Move a binary that pairs with no page: rename it, then commit its record and the rewrites
+    of the pages that link to it in one store transaction, as file mode renames it and writes them.
+    """
+    from .vault_store import batch as store_batch
+    from .vault_store import binaries
+
+    # The bytes move with their record, so an evicted original is fetched first.
+    _materialize_originals(vault_root, originals_context, old_rel)
+    with store_read.snapshot(vault_root) as view:
+        relocation = binaries.plan(view, [binaries.Entry(old_rel, new_rel)])
+    try:
+        # Link rewrites are the move's bookkeeping, nobody's work.
+        with working_set_heat.primary_paths(()):
+            _commit_in_store(
+                vault_root,
+                writer,
+                relocation,
+                list(writes),
+                store_batch.Lifecycle(
+                    binary_deletes=relocation.binary_deletes, expect=relocation.expect()
+                ),
+                sources={old_rel},
+                destinations={new_rel},
+                validate_prepared_bindings=validate_prepared_bindings,
+            )
+    except PathGuardError as error:
+        raise MoveFileError(code=error.code, reason=error.reason) from error
+    except ContentHashMismatchError as error:
+        raise MoveFileError(
+            code="SOURCE_CHANGED",
+            reason="a linking page changed before publication; read it again and retry.",
+        ) from error
 
 
 def _move_outcome_is_unproved(

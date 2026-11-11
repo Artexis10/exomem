@@ -446,11 +446,14 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
     root = root if root is not None else vault / kb_dirname()
     if not root.is_dir():
         return
+    from .vault_store import read as store_read
+
     for sidecar in iter_kb_files(root):
         if sidecar.suffix.lower() != ".md":
             continue
+        rel = sidecar.relative_to(vault).as_posix()
         try:
-            raw = reserved_paths.read_generic_bytes(vault, sidecar.relative_to(vault).as_posix())
+            raw = reserved_paths.read_generic_bytes(vault, rel)
             fields, _body, _marker = parse_frontmatter(raw.data.decode("utf-8"), custody=True)
             relative = originals.bound_path(fields)
             if not isinstance(relative, str):
@@ -464,8 +467,13 @@ def bound_originals(vault: Path, *, root: Path | None = None) -> Iterator[Origin
             # A note or an original that is not a plain file (a symlink, a hard link or a reserved name) is
             # not a binding to trust. These are the leaf boundary's structural refusal codes; any other one,
             # such as a transient I/O refusal, reaches the caller, which must not miss a binding.
-            if error.code not in ("UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"):
-                raise
+            if error.code in ("UNSAFE_PATH", "RESERVED_PATH", "AMBIGUOUS_PATH"):
+                continue
+            # A store-mode file whose page the store moved or deleted is a projection the projector
+            # has not settled yet: it binds nothing, and the page binds at its new path.
+            if error.code == "MISSING" and store_read.serves(vault, rel):
+                continue
+            raise
 
 
 def _status_candidates(vault: Path, table: str, query: str, parameters: tuple[object, ...] = ()) -> tuple[list[sqlite3.Row], dict[str, object]]:

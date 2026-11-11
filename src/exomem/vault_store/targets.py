@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -88,9 +88,16 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
 
     A folder's pages share one walk of the disk, one read of the file index and one read of the
     graph rows, so the cost grows with the links and not with the pages times the vault.
+
+    The graph keeps no edge to a binary, which is no page. A binary's linking pages are the stored
+    pages whose recorded link targets name it (``epistemic_graph.dependent_paths``), each read
+    once; ``bound`` holds no source for it, so its commit binds no link gained after this read.
     """
+    from .. import epistemic_graph
+
     root = Path(vault_root)
     targets = list(dict.fromkeys(rels))
+    files = [rel for rel in targets if ownership.classify(rel) is not ownership.Ownership.PAGE]
     # A form names the pages that a link in that form reaches: two pages may share a basename.
     reached: dict[str, set[str]] = {}
     for rel in targets:
@@ -111,8 +118,11 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
     unimported: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     with read.snapshot(root) as view:
         sources = view.inbound_sources_many(targets)
+        naming = (
+            epistemic_graph.dependent_paths(view.connection, files, ()) if files else set()
+        )
         # One chunk of linking pages' bodies at a time: a folder's linkers may be thousands.
-        linkers = sorted(set().union(*sources.values()))
+        linkers = sorted(set().union(*sources.values()) | naming)
         found_in: dict[str, dict[str, list[vault.InboundLink]]] = {}
         for start in range(0, len(linkers), read.KEYS_PER_QUERY):
             for source, body in view.bodies(linkers[start : start + read.KEYS_PER_QUERY]).items():
@@ -122,6 +132,9 @@ def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundChe
                 links[rel].extend(
                     found_in[source].get(rel) or [vault.InboundLink(source, 0, "", "")]
                 )
+        for rel in files:
+            for source in sorted(naming & found_in.keys()):
+                links[rel].extend(found_in[source].get(rel, ()))
         indexed = view.held_pages(link.path for found in on_disk.values() for link in found)
         for rel, found in on_disk.items():
             links[rel].extend(link for link in found if link.path not in indexed)
@@ -186,11 +199,8 @@ def caller_is_owner(vault_root: Path) -> bool:
     return egress.file_mode_restricted_caller(vault_root, None) is None
 
 
-#: The reasons a page-only store form refuses, each named once for the page and the folder forms.
-_NOT_A_PAGE = "only a Markdown page is held by the store, and a file's bytes stay on disk"
+#: The reasons a store form refuses, each named once for the page and the folder forms.
 _GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
-_CARRIES_MORE = "its stored original or its part pages move with it, and they have no store form"
-_FILES_ON_DISK = "the folder holds files whose bytes stay on disk, and they have no store form"
 _LINKED = "the folder holds a symbolic link, which a folder write does not follow; remove it"
 _NOT_HELD = (
     "the folder holds a Markdown file that the store holds no page for, and moving the folder "
@@ -198,86 +208,60 @@ _NOT_HELD = (
 )
 
 
-def _carries_more(body: bytes | None) -> bool:
-    """Whether a page names an original or further parts that move with it.
+def governed_gap(vault_root: Path) -> str | None:
+    """Why a store-mode vault cannot delete, move or recover a file yet, or None when it can.
 
-    A page whose frontmatter does not parse names neither: the store form then moves its bytes.
+    A vault that declares a governance policy writes tombstones and receipts around a lifecycle
+    write, which the store form does not carry yet, so the writer refuses before it changes
+    anything.
     """
-    from .. import extraction_parts
-
-    try:
-        fm = {} if body is None else vault.parse_frontmatter(body.decode("utf-8"))[0]
-    except (UnicodeDecodeError, vault.FrontmatterError):
-        fm = {}
-    return "stored_object" in fm or extraction_parts.count_of(fm) > 1
-
-
-def page_only_form_gap(
-    vault_root: Path,
-    rel: str,
-    body: bytes | None,
-    *,
-    paired: bool = False,
-    destination: str | None = None,
-) -> str | None:
-    """Why a store-mode vault cannot move this file yet, or None when it has a store form.
-
-    The store form of a delete, a move or a recovery moves pages and nothing else. Each case below
-    has a file-mode step that moves something the store has no form for, so the writer refuses
-    before it changes anything. ``body`` is the page's exact bytes, or None for a file the store
-    holds no page for. ``paired`` says that the writer found an original that moves with the page;
-    ``destination`` is where a move puts it.
-    """
-    from .. import extraction_parts
     from ..governance import lifecycle
 
-    # `.md` fixes the page format; any other file is a binary whose bytes stay on disk.
-    if not all(path.lower().endswith(".md") for path in (rel, destination or rel)):
-        return _NOT_A_PAGE
-    if lifecycle.policy_governs_anything(vault_root):
-        return _GOVERNED
-    # The folder is a dot folder, on disk, except for a page marked raw, whose parts are pages.
-    parts_folder = extraction_parts.folder_for(Path(rel)).as_posix()
-    if (
-        paired
-        or _carries_more(body)
-        or (Path(vault_root) / parts_folder).is_dir()
-        or read.holds_folder(vault_root, parts_folder)
-    ):
-        return _CARRIES_MORE
-    return None
+    return _GOVERNED if lifecycle.policy_governs_anything(vault_root) else None
 
 
-def folder_form_gap(
+class FolderFiles(NamedTuple):
+    """What sits below a folder besides its stored pages: what a folder write renames on disk.
+
+    ``files`` are the binaries (recorded or not) and the files the store does not own; ``folders``
+    are folders the store owns nothing in (a dot folder of parts), renamed whole. ``recorded`` is
+    how many binary records the store holds below the folder, which the commit binds, and
+    ``file_count`` how many files the renames move, the ones inside ``folders`` included.
+    """
+
+    files: tuple[str, ...]
+    folders: tuple[str, ...]
+    recorded: int
+    file_count: int
+
+
+def folder_files(
     vault_root: Path,
+    view: read.StoreSnapshot,
     folder: str,
-    pages: Mapping[str, bytes],
+    pages: Collection[str],
     *,
+    operation: str,
     error_class: Callable[..., Exception],
-) -> str | None:
-    """Why a store-mode vault cannot move this folder of pages yet, or None when it has a store form.
+) -> FolderFiles:
+    """The files and folders below ``folder`` that move on disk beside its stored ``pages``.
 
-    ``pages`` maps every page that the store holds below ``folder`` to its exact bytes. The folder's
-    store form moves those pages and nothing else, so a folder that also holds a file whose bytes
-    stay on disk, or a page that carries its original or its part pages, refuses before anything
-    changes. The disk is listed by name once, and only names are read: a Markdown file there is a
-    stored page's projection, which moves with its page, or a file that the store holds no page
-    for. Such a file is a note that nothing has imported yet, or a page's old file that the
-    projector has not removed yet. It refuses, because the move would leave it behind while the
-    call reports the folder moved. A wrong refusal lasts until the importer or the projector runs.
-    A symbolic link below the folder raises ``error_class`` with RESERVED_PATH, as file mode's
-    folder read refuses one: neither form follows a link out of the folder or leaves it behind.
+    The binaries that the store records come from one range read of ``view``; the disk is listed
+    by name once, and only names are read. A Markdown file there is a stored page's projection,
+    which moves with its page, or a file that the store holds no page for: a note that nothing
+    has imported yet, or a page's old file that the projector has not removed yet. Moving the
+    folder would leave it behind while the call reports the folder moved, so it refuses as
+    ``operation``'s unrouted error; a wrong refusal lasts until the importer or the projector
+    runs. A symbolic link below the folder raises ``error_class`` with RESERVED_PATH, as file
+    mode's folder read refuses one: neither form follows a link out of the folder or leaves it
+    behind.
     """
-    from .. import extraction_parts
-    from ..governance import lifecycle
-
     root = Path(vault_root)
-    if lifecycle.policy_governs_anything(root):
-        return _GOVERNED
-    with read.snapshot(root) as view:
-        if view.holds_binaries_under(f"{folder}/"):
-            return _FILES_ON_DISK
-    notes: set[str] = set()
+    recorded = [meta.path for meta in view.binaries(f"{folder}/")]
+    files: set[str] = set(recorded)
+    folders: list[str] = []
+    unheld = False
+    inside = 0
     pending = [folder]
     while pending:
         current = pending.pop()
@@ -290,21 +274,20 @@ def folder_form_gap(
             if entry.is_symlink():
                 raise error_class(code="RESERVED_PATH", reason=_LINKED)
             if entry.is_dir(follow_symlinks=False):
-                pending.append(rel)
-            elif ownership.classify(rel) is not ownership.Ownership.PAGE:
-                return _FILES_ON_DISK
+                if ownership.owns_folder(rel):
+                    pending.append(rel)
+                else:
+                    folders.append(rel)
+                    inside += sum(len(names) for _dir, _dirs, names in os.walk(entry.path))
+            elif ownership.classify(rel) is ownership.Ownership.PAGE:
+                unheld = unheld or rel not in pages
             else:
-                notes.add(rel)
-    if not notes <= pages.keys():
-        return _NOT_HELD
-    # A raw-marked page's parts are pages in a sibling folder, which is then one of these folders.
-    held = {parent.as_posix() for rel in pages for parent in Path(rel).parents}
-    if any(
-        _carries_more(body) or extraction_parts.folder_for(Path(rel)).as_posix() in held
-        for rel, body in pages.items()
-    ):
-        return _CARRIES_MORE
-    return None
+                files.add(rel)
+    if unheld:
+        raise availability.unrouted(operation, _NOT_HELD)
+    return FolderFiles(
+        tuple(sorted(files)), tuple(sorted(folders)), len(recorded), len(files) + inside
+    )
 
 
 def active_catalog_gap(
@@ -364,6 +347,22 @@ def relative(vault_root: Path, path: str) -> str:
 
 #: Why a store-mode move refuses an end that the store does not own.
 _CROSSES = "a move between a path that the store holds and one it does not has no store form"
+#: Why a store-mode move refuses to change what kind of file the store holds at its ends.
+_KIND_CHANGES = (
+    "a move between a page's path and a binary's path has no store form: the store holds a "
+    "page's bytes, and a binary's stay on disk"
+)
+
+
+def refuse_kind_change(operation: str, source: str, destination: str) -> None:
+    """Refuse a store-mode move whose ends the store holds as different kinds of file.
+
+    A page moves in the store and a binary on disk, so neither form turns one into the other (a
+    schema overlay file taken to the trash, say). It reads nothing: a path's owner is a rule on
+    its name.
+    """
+    if ownership.classify(source) is not ownership.classify(destination):
+        raise availability.unrouted(operation, _KIND_CHANGES)
 
 
 def refuse_crossing(operation: str, rels: Iterable[str]) -> None:

@@ -166,14 +166,6 @@ class StoreSnapshot:
         ).fetchone()
         return None if row is None else BinaryMeta(*row)
 
-    def holds_binaries_under(self, prefix: str) -> bool:
-        """Whether the store records a binary whose path starts with ``prefix``."""
-        row = self.connection.execute(
-            "SELECT 1 FROM store_binaries WHERE path >= ? AND path < ? LIMIT 1",
-            (prefix, prefix + AFTER),
-        ).fetchone()
-        return row is not None
-
     def binaries(self, prefix: str) -> Iterator[BinaryMeta]:
         """The record of every binary whose path starts with ``prefix``, in path order."""
         yield from (

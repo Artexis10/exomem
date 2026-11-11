@@ -408,19 +408,6 @@ def test_delete_of_a_governed_page_refuses_by_name_and_changes_nothing(served):
     assert read.owned_bytes(served, BETA)
 
 
-def test_delete_of_a_binary_refuses_by_name_and_changes_nothing(served):
-    """A binary that the store records, with its bytes on disk: the delete must not unlink them."""
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        delete_file.delete_file(served, path=DIAGRAM, confirm=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert revision(served) == start
-    assert tree(served) == before
-
-
 def history_name(index):
     """A snapshot name in the form that ``registry_history`` writes: a UTC stamp and a hash tag."""
     return f"20260101T{index:012d}Z-abcdef01"
