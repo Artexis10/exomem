@@ -190,12 +190,8 @@ def _delete_file_local(
     stored_page = store_writer is not None and store_ownership.classify(
         rel_path
     ) is store_ownership.Ownership.PAGE
-    if store_writer is not None and not stored_page and not abs_path.exists():
-        # The store keeps an evicted original's record while the media store holds its bytes.
-        if originals.binding_for(vault_root) is not None:
-            candidate = originals.original_state(vault_root, abs_path)
-            if candidate.state == "evicted":
-                evicted_original = candidate
+    if store_writer is not None:
+        evicted_original = store_targets.evicted_original(vault_root, rel_path)
     try:
         # A stored page has no file to acquire; its spelling is checked when its bytes are read.
         if evicted_original is None and not stored_page:
@@ -910,16 +906,14 @@ def _trash_in_store(
                 "STALE_DELETE", f"delete source changed since it was read ({conflict.reason})"
             ) from conflict
         raise DeleteFileError("DELETE_FAILED", failed) from conflict
-    except binaries.Stranded as error:
-        raise DeleteFileError("DELETE_FAILED", f"{failed}; {binaries.STRANDED}") from error
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "CROSS_DEVICE":
-            raise DeleteFileError(
-                "CROSS_DEVICE_MOVE", "the trash is on another filesystem than the file"
-            ) from error
-        raise DeleteFileError("DELETE_FAILED", failed) from error
-    except (CreateOnlyConflict, PathGuardError, OSError) as error:
-        raise DeleteFileError("DELETE_FAILED", failed) from error
+    except (
+        binaries.Stranded,
+        reserved_paths.ReservedPathLeafError,
+        CreateOnlyConflict,
+        PathGuardError,
+        OSError,
+    ) as error:
+        raise DeleteFileError(*binaries.refusal(error, "DELETE_FAILED", failed)) from error
     if not page:
         from .media_store import forget_original
 

@@ -1950,12 +1950,8 @@ def _store_holds_below(vault_root: Path, rel: str) -> bool:
     """Whether a store-mode vault's store holds a page or a binary record below the folder ``rel``."""
     from .vault_store import read
 
-    prefix = f"{rel}/"
     with read.snapshot(vault_root) as view:
-        return (
-            next(view.pages(prefix), None) is not None
-            or next(view.binaries(prefix), None) is not None
-        )
+        return view.holds_below(rel)
 
 
 def publish_generic_bytes(

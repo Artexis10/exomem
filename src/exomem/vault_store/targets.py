@@ -220,6 +220,22 @@ def governed_gap(vault_root: Path) -> str | None:
     return _GOVERNED if lifecycle.policy_governs_anything(vault_root) else None
 
 
+def evicted_original(vault_root: Path, rel: str):
+    """The original at ``rel`` whose record the store keeps while the media store holds its bytes,
+    or None: a page, a binary on disk, or a vault with no originals binding."""
+    from .. import originals
+
+    root = Path(vault_root)
+    if (
+        ownership.classify(rel) is not ownership.Ownership.BINARY
+        or (root / rel).exists()
+        or originals.binding_for(root) is None
+    ):
+        return None
+    candidate = originals.original_state(root, root / rel)
+    return candidate if candidate.state == "evicted" else None
+
+
 class FolderFiles(NamedTuple):
     """What sits below a folder besides its stored pages: what a folder write renames on disk.
 

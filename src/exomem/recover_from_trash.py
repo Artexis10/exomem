@@ -1004,8 +1004,8 @@ def _recover_in_store(
                     reason="trash directory exceeds the bounded recovery census",
                 )
             stored = view.bodies(below)
-            records_below = next(view.binaries(f"{trash_rel}/"), None) is not None
-        if below or records_below or (root / trash_rel).is_dir():
+            held_below = view.holds_below(trash_rel)
+        if held_below or (root / trash_rel).is_dir():
             trash_kind = "directory"
         else:
             try:
@@ -1080,10 +1080,7 @@ def _recover_in_store(
             parts_back = extraction_parts.folder_for(Path(restore_rel)).as_posix()
             with store_read.snapshot(root) as view:
                 part_pages = list(view.pages(f"{parts}/"))
-                taken = (
-                    next(view.pages(f"{parts_back}/"), None) is not None
-                    or next(view.binaries(f"{parts_back}/"), None) is not None
-                )
+                taken = view.holds_below(parts_back)
             if part_pages or (root / parts).is_dir():
                 if taken or (root / parts_back).exists():
                     raise RecoverError(
@@ -1238,17 +1235,8 @@ def _recover_in_store(
             if conflict.path in taken_paths:
                 raise _destination_exists(restore_rel) from conflict
             raise RecoverError(code="RECOVER_FAILED", reason=failed) from conflict
-        except binaries.Stranded as error:
-            raise RecoverError(
-                code="RECOVER_FAILED", reason=f"{failed}; {binaries.STRANDED}"
-            ) from error
-        except reserved_paths.ReservedPathLeafError as error:
-            if error.code == "CROSS_DEVICE":
-                raise RecoverError(
-                    code="CROSS_DEVICE_MOVE",
-                    reason="the restore path is on another filesystem than the trash",
-                ) from error
-            raise RecoverError(code="RECOVER_FAILED", reason=failed) from error
+        except (binaries.Stranded, reserved_paths.ReservedPathLeafError) as error:
+            raise RecoverError(*binaries.refusal(error, "RECOVER_FAILED", failed)) from error
 
     semantic: dict | None = None
     if preflight is None:
@@ -1310,6 +1298,5 @@ def _restore_taken(vault_root: Path, trash_kind: str, restore_rel: str) -> bool:
         return (
             view.binary(restore_rel) is not None
             or (Path(vault_root) / restore_rel).is_file()
-            or next(view.children(restore_rel), None) is not None
-            or next(view.binaries(f"{restore_rel}/"), None) is not None
+            or view.holds_below(restore_rel)
         )
