@@ -37,7 +37,7 @@ from .. import (
 )
 from ..find_types import ParsedPage
 from ..semantic_index import SemanticParentIndexState
-from . import ownership
+from . import ownership, read
 
 if TYPE_CHECKING:
     from .write import StoreChange
@@ -100,6 +100,11 @@ class _Derivation:
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
         self.written, self.removed, self.refreshed = written, removed, refreshed
+        # A store that an older build set up has no link tables until the registry pass creates
+        # them and derives every page's rows (``rederive``), so a commit before then writes none.
+        self.links = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_links'"
+        ).fetchone() is not None
 
     # ------------------------------------------------------------------ sources
 
@@ -139,6 +144,8 @@ class _Derivation:
     def run(self) -> None:
         before = self._resolver_entries()
         derived = self._write_lexical_and_identity()
+        if self.links:
+            self._write_inbound()
         after_entries = {
             rel: title for rel, (title, in_resolver) in derived.items() if in_resolver
         }
@@ -206,6 +213,18 @@ class _Derivation:
                 rows is not None and in_vault,
             )
         return derived
+
+    def _write_inbound(self) -> None:
+        """Replace the inbound-link rows of each page that the commit gives bytes to or removes.
+
+        A page's link rows depend on its own bytes alone, so no dependent page is touched. The
+        index holds every page that the vault walk reaches, inside the Knowledge Base or not.
+        """
+        for rel in self.removed:
+            vault.replace_inbound_rows(self.tx, rel, None)
+        for rel in (*self.written, *self.refreshed):
+            found = self.source(rel) if read.walk_member(rel) else None
+            vault.replace_inbound_rows(self.tx, rel, None if found is None else found[0])
 
     def parse(self, rel: str, raw: bytes, mtime_ns: int) -> _Parsed:
         """The parsed page and its parent state, as file mode derives them from the same bytes."""

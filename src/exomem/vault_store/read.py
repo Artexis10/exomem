@@ -10,6 +10,7 @@ every other path.
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -24,6 +25,9 @@ from ..collection_store import connection, runtime
 from . import mode, ownership
 
 NOT_ACTIVE = "VAULT_STORE_NOT_ACTIVE"
+#: A reader of derived rows that this build adds, on a store that an older build set up and that no
+#: registry pass has given those rows yet (``rederive.OWNER_SCHEMA``).
+DERIVED_BEHIND = "VAULT_STORE_DERIVED_BEHIND"
 T = TypeVar("T")
 
 # One covering index serves every metadata read, so a point read of a page's hash never walks the
@@ -289,6 +293,19 @@ def walk_member(rel: str) -> bool:
     )
 
 
+def derived_behind():
+    """The refusal of a reader whose derived rows the store does not hold yet: never an empty answer."""
+    from ..cli_ops import OpError
+
+    return OpError(
+        DERIVED_BEHIND,
+        "This vault's store was set up by an older Exomem build, and its link rows are not derived "
+        "yet, so Exomem cannot say which pages link here.",
+        "Start the Exomem service: it derives the rows in the background. `exomem store-mode "
+        "status` shows `owner_schema` as current once they are done.",
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StoreReadiness:
     """How current the derived rows of one snapshot are: what a store reader serves and shows.
@@ -541,6 +558,72 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
                 reader.execute("ROLLBACK")
 
 
+class _Lend:
+    """The connection of a store snapshot, lent to a reader that treats it as its own and closes it.
+
+    The graph readers open a private connection, install a deadline handler or SQL functions on it,
+    and close it when they are done. Inside a request the lend is the request's own connection, so
+    ``close`` ends only what lends opened: when the last open lend of the snapshot closes, it clears
+    the progress handler and releases each SQL function registered through any of them (SQLite
+    keeps the name, and a later call fails), and outside a request it ends the pooled snapshot. A lend that a reader opens while another is open (a nested
+    read) leaves the outer reader's handler and functions in place. ``commit`` and ``rollback``
+    raise, because either would end the snapshot that the rest of the request reads. Everything
+    else delegates.
+    """
+
+    __slots__ = ("_view", "_scope")
+
+    def __init__(self, view: StoreSnapshot, scope: ExitStack) -> None:
+        self._view = view
+        self._scope: ExitStack | None = scope
+        view.memo["lends"] = view.memo.get("lends", 0) + 1
+
+    def __getattr__(self, name: str):
+        return getattr(self._view.connection, name)
+
+    def create_function(self, name: str, narg: int, func, **options) -> None:
+        self._view.connection.create_function(name, narg, func, **options)
+        self._view.memo.setdefault("lent_functions", set()).add((name, narg))
+
+    def commit(self) -> None:
+        raise sqlite3.ProgrammingError("a lent store snapshot cannot commit; it is read-only")
+
+    def rollback(self) -> None:
+        raise sqlite3.ProgrammingError("a lent store snapshot cannot roll back the request's view")
+
+    def close(self) -> None:
+        scope, self._scope = self._scope, None
+        if scope is None:
+            return
+        with scope:
+            memo = self._view.memo
+            memo["lends"] -= 1
+            if memo["lends"]:
+                return
+            # A deadline handler or a function left on a shared or pooled connection would outlive
+            # the read: it aborts the request's later reads and holds the reader's objects.
+            connection = self._view.connection
+            connection.set_progress_handler(None, 0)
+            for name, narg in memo.pop("lent_functions", ()):
+                connection.create_function(name, narg, None)
+
+
+def lend(vault_root: Path) -> _Lend | None:
+    """The connection of this request's snapshot (or of a pooled one), for a reader to close.
+
+    None when the records no longer say store mode: the caller reads as file mode does.
+    """
+    scope = ExitStack()
+    try:
+        view = scope.enter_context(snapshot(_as_path(vault_root)))
+    except connection.CollectionStoreError as error:
+        scope.close()
+        if error.code != NOT_ACTIVE:
+            raise
+        return None
+    return _Lend(view, scope)
+
+
 def current_revision(vault_root: Path) -> int:
     """The store revision now: it moves by one for each committed change and for each batch of the
     registry pass (``rederive.settle``), which changes derived rows without a page commit."""
@@ -622,6 +705,16 @@ def page_exists(vault_root: Path, rel: str) -> bool:
     except FileNotFoundError:
         return False
     return (root / rel).exists()
+
+
+def holds_file(vault_root: Path, rel: str) -> bool:
+    """``(root / rel).is_file()`` as the store sees it: for a path that the store serves, whether it
+    holds the page, with no look at the projection; for any other path, the disk's answer."""
+    root = _as_path(vault_root)
+    try:
+        return owned_meta(root, rel) is not None or (root / rel).is_file()
+    except FileNotFoundError:
+        return False
 
 
 def served_lookup(vault_root: Path) -> Callable[[str], bool | None]:

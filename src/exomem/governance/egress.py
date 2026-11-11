@@ -3224,6 +3224,8 @@ def guard_graph_context(
     (or an unresolved-but-expected principal) -> an empty, available-shaped
     neighborhood, since L0 must not even reveal that a neighborhood exists.
     """
+    from ..vault_store import read as store_read
+
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
@@ -3266,7 +3268,7 @@ def guard_graph_context(
                 continue
             for field_name in ("src_key", "dst_key"):
                 key = str(edge.get(field_name) or "")
-                if key.startswith("file:") and (vault_root / key[5:]).is_file():
+                if key.startswith("file:") and store_read.holds_file(vault_root, key[5:]):
                     candidate_paths.add(key[5:])
     withheld = {
         rel_path
@@ -8022,6 +8024,8 @@ def page_filter_over(
     vault_root: Path, keep: Callable[[str], bool], *, withheld: frozenset[str] | None = None
 ) -> Callable[[str], bool]:
     """`visible_page_filter` over a release decision `keep` that the caller already built."""
+    from ..vault_store import read as store_read
+
     root = Path(vault_root)
     offered = admission_of(keep)
     # Read as the filter is built: the pin's own filter is built before the set exists, and decides what it holds.
@@ -8048,12 +8052,12 @@ def page_filter_over(
             if tombstoned:
                 return False, False
             try:
-                return not (root / rel).is_file(), False
+                return not store_read.holds_file(root, rel), False
             except OSError:
                 return False, False
         if not tombstoned:
             try:
-                if not (root / rel).is_file():
+                if not store_read.holds_file(root, rel):
                     return True, False
             except OSError:
                 return False, False

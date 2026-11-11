@@ -49,6 +49,7 @@ from . import (
 )
 from . import find as find_module
 from . import vault as vault_module
+from .cli_ops import OpError
 from .find_types import Hit, ParsedPage, SemanticUnitHit
 
 #: The clock the deadline check reads, named so a test can substitute one.
@@ -289,12 +290,20 @@ def _load_parent_snapshot(
     """Read one parent once, then derive page and semantic state from those bytes."""
     if not recall_policy.is_recall_candidate(vault_root, vault_root / rel_path):
         return None
+    from .vault_store import read as store_read
+
     try:
         root = vault_root.resolve()
-        path = (root / rel_path).resolve()
-        path.relative_to(root)
-        content = path.read_bytes()
-        mtime = path.stat().st_mtime
+        # A stored page's bytes and time are the store's: its file may be absent, stale or a link.
+        stored = store_read.owned_page_at(vault_root, vault_root / rel_path)
+        if stored is not None:
+            path = root / rel_path
+            content, mtime = stored.body, stored.meta.mtime_ns / 1e9
+        else:
+            path = (root / rel_path).resolve()
+            path.relative_to(root)
+            content = path.read_bytes()
+            mtime = path.stat().st_mtime
         source = content.decode("utf-8")
     except (FileNotFoundError, OSError, UnicodeError, ValueError):
         return None
@@ -302,7 +311,10 @@ def _load_parent_snapshot(
     if page is None:
         return None
     try:
-        state = semantic_index.selected_parent_index_state(root, path, source=source)
+        # A stored page is named by its vault path, which nothing resolves through its projection.
+        state = semantic_index.selected_parent_index_state(
+            root, rel_path if stored is not None else path, source=source
+        )
     except (OSError, UnicodeError, ValueError):
         return None
     return page, state
@@ -617,11 +629,18 @@ def _neighborhood(
             ):
                 _touch(target, page.rel_path, "out")
         with egress.proven_withheld_scope(reuse=True):
-            inbound = (
-                vault_module.cached_inbound_wikilinks(vault_root, page.rel_path, **view)
-                if borrow
-                else vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view)
-            )
+            try:
+                inbound = (
+                    vault_module.cached_inbound_wikilinks(vault_root, page.rel_path, **view)
+                    if borrow
+                    else vault_module.find_inbound_wikilinks(vault_root, page.rel_path, **view)
+                )
+            except OpError as error:
+                from .vault_store import read as store_read
+
+                if error.code != store_read.DERIVED_BEHIND:
+                    raise
+                inbound = None  # a store whose link rows a pass has not derived yet: incomplete
         if inbound is None:
             if INBOUND_INCOMPLETE_TRUNCATION not in incomplete:
                 incomplete.append(INBOUND_INCOMPLETE_TRUNCATION)

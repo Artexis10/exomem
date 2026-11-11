@@ -2914,6 +2914,10 @@ class EpistemicGraphIndex:
         path. Admitting unexplained rows could disclose a withheld mutation.
         The canonical hold ends before query or source hydration starts.
         """
+        from .vault_store import mode as store_mode
+
+        if store_mode.store_mode_for_reads(self.vault_root):
+            return None  # a store publishes nothing: the caller's live path reads the snapshot
         publication = graph_read_publication.published(self.vault_root)
         if publication is None or not graph_enabled() or time.monotonic() >= deadline:
             return None
@@ -3125,6 +3129,15 @@ class EpistemicGraphIndex:
             if refusal_out is not None:
                 refusal_out.append("graph_disabled")
             return None
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        if store_mode.store_mode_for_reads(self.vault_root):
+            # Each commit derives its pages' graph rows in its own transaction, so the request's
+            # snapshot is current by construction: nothing below proves, defers or repairs it.
+            lent = store_read.lend(self.vault_root)
+            if lent is not None:
+                return lent
         if require_current_projection and freshness.external_pending(self.vault_root):
             if refusal_out is not None:
                 refusal_out.append("external_pending")
@@ -10483,8 +10496,12 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+        from .vault_store import mode as store_mode
+
         lag = None
-        if include_lag:
+        # A store-mode graph is unavailable only when it is disabled, and its rows have no sync
+        # queue to report: the tool attaches the registry notice instead.
+        if include_lag and not store_mode.store_mode_for_reads(Path(vault_root)):
             try:
                 lag = graph_lag(vault_root)
             except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
@@ -11128,6 +11145,18 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     proof. An unproven sidecar answers `("unproven",)`, a key of its own, since
     that request serves without the graph lane.
     """
+    from .collection_store import connection as store_connection
+    from .vault_store import mode as store_mode
+    from .vault_store import read as store_read
+
+    root = Path(vault_root)
+    if graph_enabled() and store_mode.store_mode_for_reads(root):
+        # Every commit and registry batch moves the store revision with the graph rows it writes.
+        try:
+            return ("store", store_read.current_revision(root))
+        except store_connection.CollectionStoreError as error:
+            if error.code != store_read.NOT_ACTIVE:
+                raise  # otherwise the records stopped saying store mode: the sidecar decides
     idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
     outcome: list[str] = []
     conn = idx._open_read_snapshot(outcome_out=outcome)
@@ -14213,14 +14242,23 @@ class GraphView:
         try:
             with preparation as prepared:
                 self._check()
-                raw = (
-                    prepared.source if prepared is not None
-                    else vault_module.read_bytes_without_pinning(
+                from .vault_store import read as store_read
+
+                # A stored page's bytes and time are the store's: its file may be absent or stale.
+                stored = None if prepared is not None else store_read.owned_page_at(
+                    self.vault_root, path
+                )
+                if prepared is not None:
+                    raw, mtime = prepared.source, path.stat().st_mtime
+                elif stored is not None:
+                    raw, mtime = stored.body.decode("utf-8"), stored.meta.mtime_ns / 1e9
+                else:
+                    raw = vault_module.read_bytes_without_pinning(
                         path, vault_root=self.vault_root
                     ).decode("utf-8")
-                )
+                    mtime = path.stat().st_mtime
                 page = find_module._parse_page(
-                    path, path.stat().st_mtime, self.vault_root,
+                    path, mtime, self.vault_root,
                     content=raw.encode("utf-8"), resolved_relative=rel_path,
                 )
                 if page is None:
@@ -14228,7 +14266,9 @@ class GraphView:
                         self._interrupt(rel_path, "selected_interpretation_unavailable")
                     return []
                 self._check()
-                state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
+                state = semantic_index.current_parent_index_state(
+                    self.vault_root, rel_path if stored is not None else path, source=raw
+                )
                 self._check()
                 edges = _structural_edges_for_page(
                     self.vault_root, page, state,
