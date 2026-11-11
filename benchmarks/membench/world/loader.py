@@ -98,6 +98,7 @@ class Catalogue:
     recipes: dict[str, Any]
     buildable: tuple[str, ...]
     lacking: dict[str, tuple[str, ...]]  # each non-buildable entry, with what it lacks
+    norms: dict[str, str]  # each registered norm, with its basis
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -570,7 +571,8 @@ class _Checker:
                 lacking[entry.id] = tuple(lacks)
             else:
                 buildable.append(entry.id)
-        return Catalogue(dict(self.entries), dict(recipes), tuple(buildable), lacking)
+        norms = {name: norm["basis"] for name, norm in self.raw["norms"].items()}
+        return Catalogue(dict(self.entries), dict(recipes), tuple(buildable), lacking, norms)
 
 
 def main(argv: list[str]) -> int:

@@ -324,6 +324,10 @@ class HolderLedger:
         """Who a content is the holder's. Of several statements of one content the holder is the one
         who stated it first; a statement that quotes a holder, or whose basis is `told`, passes on
         that holder's content."""
+        return self.trail(of, at, for_)[0]
+
+    def trail(self, of: str, at: date, for_: Any = None) -> tuple[str | None, tuple[str, ...]]:
+        """The holder of ``holder``, and the statements and tellings that lead to the holder."""
         rec, w = self.record, self.record.world
         if of in w.statements:
             return self._passed_on(w.statements[of], at, frozenset())
@@ -333,16 +337,18 @@ class HolderLedger:
             raise NotUnique(of, f"{len(contents)} contents are stated ({contents}); name one")
         wanted = contents[0] if for_ is None and contents else for_
         first = next((s for s in stated if rec.content(s, at) == wanted), None)
-        return self._passed_on(first, at, frozenset()) if first else None
+        return self._passed_on(first, at, frozenset()) if first else (None, ())
 
-    def _passed_on(self, s: Statement, at: date, seen: frozenset[str]) -> str:
+    def _passed_on(
+        self, s: Statement, at: date, seen: frozenset[str]
+    ) -> tuple[str, tuple[str, ...]]:
         rec, w = self.record, self.record.world
         if s.quoting is not None:
-            return s.quoting
+            return s.quoting, (s.id,)
         if s.basis != TOLD:
-            return s.by
+            return s.by, (s.id,)
         told = [
-            w.statements[t.item]
+            (w.statements[t.item], t)
             for t in w.tellings
             if t.holder == s.by
             and t.at <= s.at
@@ -353,7 +359,9 @@ class HolderLedger:
         ]
         if not told:
             raise NotUnique(s.id, "its basis is told and no telling of that content is recorded")
-        return self._passed_on(min(told, key=order), at, seen | {s.id})
+        source, telling = min(told, key=lambda pair: order(pair[0]))
+        holder, trail = self._passed_on(source, at, seen | {s.id})
+        return holder, (s.id, rec.op_id(telling), *trail)
 
 
 class IdentityMap:
@@ -362,7 +370,7 @@ class IdentityMap:
     def __init__(self, record: Record):
         self.record = record
 
-    def _survivor(self, entity: str, at: date) -> str:
+    def survivor(self, entity: str, at: date) -> str:
         merges = sorted(self.record.world.merges, key=order)
         seen = {entity}
         while True:
@@ -384,7 +392,7 @@ class IdentityMap:
 
     def referent(self, of: str, at: date) -> str | None:
         found = distinct(
-            self._survivor(e, at) for e in self.record.world.entities if of in self._held(e, at)
+            self.survivor(e, at) for e in self.record.world.entities if of in self._held(e, at)
         )
         if len(found) > 1:
             raise NotUnique(of, f"names {found} on {at}")
@@ -394,9 +402,9 @@ class IdentityMap:
         """Every name that the entity, or an entity merged into it, has held by a date, replaced
         names included."""
         w = self.record.world
-        target = self._survivor(of, at)
+        target = self.survivor(of, at)
         members = [
-            e for e in w.entities if self._survivor(e, at) == target and w.entities[e].start <= at
+            e for e in w.entities if self.survivor(e, at) == target and w.entities[e].start <= at
         ]
         return tuple(
             distinct(
@@ -594,12 +602,14 @@ class Oracle:
 
     def bearers(self, role: Any, at: date) -> list[Statement]:
         """The statements of the world that carry a role: a `state` or `correct` step gives the role
-        as its value or, for a holder, the role makes the statement. A rule carries no value."""
+        as its value or, for a holder, the role makes the statement; a statement id stands for that
+        statement. A rule carries no value. It reads the whole world that it is given, so a key is
+        read in one thread's own world (``Plan.pair``) and no statement of another thread bears."""
         w = self.record.world
         found = {
             s.id: s
             for s in w.statements.values()
-            if s.at <= at and s.rule is None and (s.value == role or s.by == role)
+            if s.at <= at and s.rule is None and role in (s.value, s.by, s.id)
         }
         for c in w.corrections:
             if c.at <= at and (c.value == role or c.by == role):

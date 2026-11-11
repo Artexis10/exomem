@@ -164,14 +164,24 @@ class Record:
         }
         return sorted(found.values(), key=order)
 
-    def governing(self, attribute: str, at: date) -> str | None:
-        """The holder that a stated rule makes the governing one of an attribute, if any."""
+    def governing_rule(self, attribute: str, at: date) -> Statement | None:
+        """The stated rule that makes one holder the governing one of an attribute, if any."""
         rules = [
             s
             for s in self.world.statements_about(attribute)
             if s.rule is not None and s.rule.shape == GOVERNS and self.alive(s, at)
         ]
-        return rules[-1].rule.value if rules else None
+        return rules[-1] if rules else None
+
+    def governing(self, attribute: str, at: date) -> str | None:
+        """The holder that a stated rule makes the governing one of an attribute, if any."""
+        rule = self.governing_rule(attribute, at)
+        return rule.rule.value if rule else None
+
+    def op_id(self, record: Any) -> str | None:
+        """The id of the operation that made a record (a correction, a naming, a telling...), which
+        the document that announces the operation is filed under."""
+        return next((i for i, (_, r) in self.world.operations.items() if r is record), None)
 
     def about(self, ref: str, at: date) -> list[Statement]:
         """The statements about an attribute, an event or an entity made by a date, in order."""
