@@ -449,14 +449,18 @@ def rejected_limit(event: Mapping) -> dict | None:
     """The account limit an event says has no room left, else None.
 
     Two shapes count. A ``rate_limit_event`` carries ``rate_limit_info`` whose status is ``rejected``:
-    the subscription limit. An ``assistant`` event whose ``message.error`` is ``billing_error``
-    reports a credit balance that cannot pay; the ``limit`` key says which kind it was.
+    the subscription limit. An ``assistant`` event whose ``error`` is ``billing_error`` reports a
+    credit balance that cannot pay; the ``limit`` key says which kind it was. The CLI emits the
+    error as a top-level sibling of ``message``; the nested shape is tolerated too.
     """
     info = event.get("rate_limit_info") if event.get("type") == "rate_limit_event" else None
     if isinstance(info, dict) and info.get("status") == "rejected":
         return info
-    message = event.get("message") if event.get("type") == "assistant" else None
-    if isinstance(message, dict) and message.get("error") == BILLING_ERROR:
+    if event.get("type") != "assistant":
+        return None
+    message = event.get("message")
+    nested = message.get("error") if isinstance(message, dict) else None
+    if event.get("error") == BILLING_ERROR or nested == BILLING_ERROR:
         return {"limit": "credits", "error": BILLING_ERROR}
     return None
 

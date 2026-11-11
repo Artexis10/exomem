@@ -712,7 +712,8 @@ def credits_cli(path: Path, launches: Path) -> Path:
     }
     limit = {
         "type": "assistant",
-        "message": {"role": "assistant", "error": "billing_error", "content": []},
+        "message": {"role": "assistant", "content": []},
+        "error": "billing_error",
     }
     error = {
         "type": "result",
