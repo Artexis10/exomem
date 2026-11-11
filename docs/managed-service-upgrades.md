@@ -726,14 +726,25 @@ before the upgrade, as "A release that changes the collection store's schema" in
 A worker records each optional state format that it uses in the vault's state
 manifest, for example the schema of a migrated collection store. The supervisor
 runs from the launcher venv, which a seamless upgrade does not replace. A
-supervisor whose release predates such a format cannot read the state
-manifest, so it cannot verify any upgrade target.
+supervisor whose release predates such a format cannot read the state manifest
+with its own catalogs.
 
-A supervisor that has this check reports the case under `upgrade_blocker` in
-`--status`. The staging operator then refuses before it stages a release, and
-the supervisor refuses an upgrade request with the same message. The message
-names the supervisor's release and the formats that it does not recognize. The
-current worker keeps serving.
+Serving is not orchestrating, and the two read the manifest differently. To
+start a worker, the supervisor asks the target interpreter for its own state
+verdict: the release that recorded the format can always read it, so a restart
+of the service starts the worker that wrote the state even when the launcher's
+release predates that format. A target that reports it cannot use the state is
+refused before it starts. A target too old to report a verdict falls back to
+the supervisor's own read; where that read also fails, the supervisor declares
+the migration and the worker's own state gate decides under the target's
+interpreter.
+
+Orchestrating an upgrade is stricter: the supervisor refuses before it stages
+a release. A supervisor that has this check reports the case under
+`upgrade_blocker` in `--status`. The staging operator then refuses before it
+stages a release, and the supervisor refuses an upgrade request with the same
+message. The message names the supervisor's release and the formats that it
+does not recognize. The current worker keeps serving.
 
 A supervisor without the check refuses the same upgrade with "target
 interpreter verification failed; current admission unchanged".

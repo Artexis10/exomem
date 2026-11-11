@@ -141,7 +141,10 @@ python:
     - "infra/cloud-rehearsal/src"
   # Called by name from outside the code: Textual event and action handlers (watch_*
   # included), watchdog file-event handlers, FastMCP middleware, pydantic model_config.
+  # vault_state_verdict is imported by name inside the managed inspect probe's
+  # -c script, which runs under the target interpreter, not under this process.
   ignore_names:
+    - "vault_state_verdict"
     - "on_mount"
     - "on_resize"
     - "on_screen_resume"
