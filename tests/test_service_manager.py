@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -844,11 +845,12 @@ def test_a_supervisor_that_predates_the_recorded_format_still_starts_the_worker(
 
 
 def test_a_candidate_refuses_state_its_own_release_cannot_read(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, caplog,
 ):
     """The verdict is the candidate's own: a rollback candidate that predates a
     recorded optional format refuses itself before the serving worker is
-    touched, even when the launcher's catalogs do know the format."""
+    touched, even when the launcher's catalogs do know the format. The
+    refusal carries the target's own reason to the journal."""
     from exomem import state_migration, state_paths
 
     module = _manager()
@@ -876,12 +878,55 @@ def test_a_candidate_refuses_state_its_own_release_cannot_read(
         serving.inspect = real.inspect
         serving.migration_required = real.migration_required
         target = {"python": sys.executable, "version": _release_of(sys.executable)}
-        result = await manager.upgrade(target)
+        with caplog.at_level(logging.WARNING, logger="exomem.service_manager"):
+            result = await manager.upgrade(target)
         assert not result["ok"], result
         assert "current admission unchanged" in result["error"], result
+        # The target's own reason reached the journal: the verdict path, not
+        # the launcher's own read, refused this candidate.
+        assert "does not recognize: sample-format-v9" in caplog.text
         assert serving.pid == 100
         assert serving.events == ingress.events == []
         assert manager.records.pending() is None
+
+    asyncio.run(scenario())
+
+
+def test_a_recorded_worker_that_reports_it_cannot_serve_stops_the_first_start(
+    tmp_path, monkeypatch,
+):
+    """The active target's own verdict refuses too: a recorded worker whose
+    release cannot serve the vault's state is not spawned, and the first
+    start stops with a failed status."""
+    from exomem import state_migration, state_paths
+
+    module = _manager()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_STATE_ROOT", str(tmp_path / "state"))
+    state_migration.require_vault_state_ready(vault)
+    # The vault records a format id no release here knows: the recorded
+    # worker's own verdict is refuse, and the supervisor does not spawn it.
+    manifest = state_migration._manifest_path(state_paths.vault_state_dir(vault))
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["descriptors"] = sorted([*payload["descriptors"], "sample-format-v9"])
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    async def scenario():
+        manager, ingress, serving, _ = _supervisor(tmp_path)
+        real = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=1)
+        serving.inspect = real.inspect
+        serving.migration_required = real.migration_required
+        serving.pid = 0
+        manager.initial_target = {
+            "python": sys.executable, "version": _release_of(sys.executable),
+        }
+        with pytest.raises(ValueError, match="does not recognize"):
+            await manager.start()
+        assert serving.pid == 0
+        assert serving.events == []
+        assert manager.phase == "unavailable"
 
     asyncio.run(scenario())
 

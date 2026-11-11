@@ -749,6 +749,10 @@ class Supervisor:
                     await self.ingress.detach_streams()
                     # Enrollment may have changed during standby warming or
                     # draining. Refuse before stopping the worker still serving.
+                    # A verdict-reporting target replays the verdict it computed
+                    # at inspect; state that changed since then is the worker's
+                    # own gate's to refuse, failing the upgrade past the stop
+                    # instead of refusing it here.
                     try:
                         migrate, reason = self._migration_declared(target)
                     except Exception:  # noqa: BLE001 - pre-stop refusal keeps the serving worker
@@ -1137,6 +1141,8 @@ def vault_state_verdict(vault: Path | str) -> dict[str, str]:
     the supervisor never interprets format ids itself. ``{"verdict": "serve"}``
     needs no migration, ``"migrate"`` runs the handoff's migrator step, and
     ``"refuse"`` means this release cannot use the recorded state at all.
+    It runs inside ``inspect``'s probe budget, so its reads stay the bounded
+    local ones below.
     """
     from . import state_migration
     from .collection_store import connection
