@@ -31,9 +31,6 @@ from exomem.find import DEFAULT_RANKING, Hit
         "decisions this week",
         "spending last month",
         "what changed this year",
-        "when did I switch to cloudflare",
-        "anything before the migration",
-        "results after the refactor",
         "the 2024 plan",
         "entry on 2026-05-04",
     ],
@@ -51,6 +48,12 @@ def test_is_temporal_query_true(query: str) -> None:
         "glucose stability and mental focus",
         "",
         "X3 rep progression tracking",
+        # relative connectives anchor to an event; they do not ask for recent notes
+        "when did I switch to cloudflare",
+        "anything before the migration",
+        "results after the refactor",
+        "latency since the upgrade",
+        "frozen until the audit",
     ],
 )
 def test_is_temporal_query_false(query: str) -> None:
@@ -205,6 +208,39 @@ def test_apply_temporal_boost_undated_keeps_score(tmp_path: Path) -> None:
     cfg = replace(DEFAULT_RANKING, temporal_boost=5.0)
     out = find_module._apply_temporal_boost(fused, tmp_path, "recent", cfg)
     assert out == [("Knowledge Base/nodate.md", 0.7)]  # mult 1.0
+
+
+def test_relative_connective_does_not_lift_recent_weak_matches(tmp_path: Path) -> None:
+    """A query that merely contains "after" must not trigger the newest-first lane.
+
+    Realistic failure: a query written from an older note's own words ("rose to
+    40 ms after idle reclamation") was classed temporal, and recently updated
+    pages with weak matches outvoted that note, the best match in the content
+    lanes. The pool needs many recent pages: each one's temporal vote is large
+    next to the old note's content votes only when the old note sits far down
+    the recency list.
+    """
+    find_module.clear_cache()
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir(parents=True)
+    pages = {
+        "idle-reclamation.md": (
+            "2020-01-01",
+            "Latency rose to 40 ms after idle reclamation of the worker pool.",
+        )
+    }
+    for i in range(30):
+        pages[f"weak-{i}.md"] = (
+            date.today().isoformat(),
+            f"Worker pool latency reclamation note {i} about lunch.",
+        )
+    for name, (updated, body) in pages.items():
+        (kb / name).write_text(
+            f"---\ntype: insight\nupdated: {updated}\n---\n# {Path(name).stem}\n{body}\n",
+            encoding="utf-8",
+        )
+    hits = find_module.find(tmp_path, query="worker pool latency after reclamation regression")
+    assert hits[0].path.endswith("idle-reclamation.md")
 
 
 # --------------------------------------------------------------------------- #
