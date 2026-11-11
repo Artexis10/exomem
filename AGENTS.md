@@ -10,6 +10,10 @@ Before connector diagnosis or service/index operations, read `docs/agent-guidanc
 
 Read `CONTRIBUTING.md` before committing: use the pinned project-local uv writer and run the public-artifact privacy gate. Keep runtime tests in temporary state.
 
+## CI load: the PR tier is the merge evidence
+
+`ci.yml` runs one fast tier per pull request — including a py3.13 changed-tests job — and the Full tier on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs ~800 runner-minutes across 147 jobs. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A Full-only failure that reaches `main` is fixed forward there.
+
 ## Delegated worker tasks
 
 When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief, first read `docs/agent-guidance/workers.md`. Its scope, verification and no-push rules apply to those delegated workers. The current orchestrator owns integration; Codex and Claude can both hold that role. Ordinary inline work follows the shared task-routing rules.
