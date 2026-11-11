@@ -7,7 +7,7 @@
   {
     "id": "F2",
     "expect": true,
-    "text": "The reply states no fact that the REFERENCE assigns to another subject (the wrong project, archive or contract), and no fact that the REFERENCE does not support. A fact about another subject that the reply clearly labels as belonging to that other subject does not fail this criterion."
+    "text": "The reply states no fact that contradicts the seed facts in the REFERENCE, no fact that the REFERENCE assigns to another subject (another project, archive or contract) unless the reply clearly labels it as that subject's, and no invented fact that appears nowhere in the REFERENCE."
   },
   {
     "id": "F3",
