@@ -233,7 +233,7 @@ case scores as `stale_trusted` and not `correct`. A LAB matter with no deliverab
 harness fault is the harness failing to run the product. The evidence is a CLI crash or a CLI that
 sends no `init` event before its timeout, an Exomem MCP server that is not `connected`, a lost
 transcript, a reported model other than the requested one, a credential source other than
-the one the run declared (see Billing), or a subscription limit that the CLI reports as rejected. Every session's `init` event is
+the one the run declared (see Billing), or an account limit that the CLI reports as rejected. Every session's `init` event is
 checked.
 
 1. The run retries a session with a harness fault, with the same inputs, at most twice. In
@@ -241,7 +241,9 @@ checked.
 2. In CL-Bench, a fault that survives voids the whole run index for every arm. The run skips the
    voided index's remaining cells.
 3. In LAB and planted, a fault that survives strikes the matter or case from every arm.
-4. A rejected subscription limit belongs to the account, so it stops the whole run at once, with
+4. A rejected limit belongs to the account — a subscription `rate_limit_event` whose status is
+   `rejected`, or a `billing_error` for a credit balance that cannot pay — so it stops the whole
+   run at once, with
    no retry and no further cell, matter or session. The command prints one line that says the run
    waits for room, and scores no loss. With `--jobs` above 1, a session already running ends when
    it meets the same rejection. The unit that hit the limit has no result, so the run is
@@ -310,9 +312,10 @@ refuses before its first session when the shell holds none. A credit run starts 
 - Faults. A session whose `init` event reports another `apiKeySource` than the declared one (`none` for
   `subscription`, `ANTHROPIC_API_KEY` for `credits`) is a harness fault. A source outside that
   closed set is a fault too. One run never mixes sources by accident.
-- Evidence. Credit runs are instrument evidence. Decision runs stay on the subscription as the
-  preregistration registers: a held-out run declared on credits, or judged on credits, never reads as
-  decision evidence.
+- Evidence. A credit run may read as decision evidence once the sequence-11 billing amendment is
+  acknowledged. Until then decision runs stay on the subscription as the preregistration
+  registers: a held-out run declared on credits, or judged on credits, reads as instrument
+  evidence.
 - Records. `outcome.json`, the incidents manifest and the f33 manifest store the declared source. Each
   arm manifest stores the reported `api_key_source` and its `billing` name beside the model. A session
   with no recorded source reads `unknown`.
