@@ -22,7 +22,7 @@ from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, ownership, rederive
-from .read import NOT_ACTIVE, inbound_sources_many
+from .read import NOT_ACTIVE
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -52,8 +52,9 @@ class Expect:
     match the stored page or binary record. ``projected`` says that the file on disk is the stored
     page: the projection manifest records the page's own revision, no projection intent is queued
     for the path and no outside change is held for it. ``linked_from`` names every page that may
-    link to the path: a link from a page outside it, in the graph rows at commit time, refuses the
-    commit. A delete reads its inbound links and commits on that reading through it.
+    link to the path: a link from a page outside it, in the inbound-link rows at commit time (the
+    rule that ``list_inbound_links`` and a move's rewrite use), refuses the commit. A delete reads
+    its inbound links and commits on that reading through it.
     """
 
     revision: int | None = None
@@ -391,8 +392,9 @@ def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
 
 def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
     """Raise ``StoreConflict`` for the first path that does not hold what ``expect`` says."""
-    # One graph read binds the linking pages of every path: a folder's delete binds hundreds.
-    linked = inbound_sources_many(
+    # One read of the inbound rows binds the linking pages of every path: a folder's delete binds
+    # hundreds.
+    linked = vault.store_inbound_wikilinks(
         tx, [rel for rel, want in expect.items() if want.linked_from is not None]
     )
     for rel, want in expect.items():
@@ -410,7 +412,7 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
         if want.projected and not _projected(tx, rel, *have):
             raise StoreConflict(rel, "its file on disk is not the stored page")
         if want.linked_from is not None:
-            gained = linked[rel] - want.linked_from
+            gained = {link.path for link in linked[rel]} - want.linked_from
             if gained:
                 # No name: the page that linked may be one the caller is not allowed to see.
                 raise StoreConflict(rel, "a page now links to it")

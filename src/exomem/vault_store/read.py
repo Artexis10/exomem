@@ -140,14 +140,6 @@ class StoreSnapshot:
             # "0" is the code point after "/", so every path below "name/" sorts before it.
             lower = prefix + name + ("0" if slash else "\x00")
 
-    def inbound_sources(self, rel: str) -> frozenset[str]:
-        """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from."""
-        return inbound_sources(self.connection, rel)
-
-    def inbound_sources_many(self, rels: Iterable[str]) -> dict[str, frozenset[str]]:
-        """``inbound_sources`` for each page in ``rels``, read in a few queries."""
-        return inbound_sources_many(self.connection, rels)
-
     def held_pages(self, rels: Iterable[str]) -> frozenset[str]:
         """The paths in ``rels`` that the store holds a page at, read in a few queries."""
         return frozenset(path for path, in self._each(rels, "path"))
@@ -240,41 +232,9 @@ def corpus_member(rel: str, scope: str) -> bool:
     return find_corpus.kb_walk_member(rel) if scope == "kb" else walk_member(rel)
 
 
-def inbound_sources(connection: Connection, rel: str) -> frozenset[str]:
-    """The pages other than ``rel`` that the graph rows hold a link to ``rel`` from.
-
-    A commit derives a page's graph rows in its own transaction, so these are current at the
-    revision that ``connection`` sees, which the projector's lag does not change. The page key's
-    ``file:`` prefix is how the graph names a page, as ``epistemic_graph`` writes it.
-    """
-    return inbound_sources_many(connection, (rel,))[rel]
-
-
 #: The most paths or page keys that one keyed store query binds. SQLite allows 32766 parameters;
 #: a smaller chunk keeps each statement short to prepare and each result small.
 KEYS_PER_QUERY = 500
-
-
-def inbound_sources_many(connection: Connection, rels: Iterable[str]) -> dict[str, frozenset[str]]:
-    """``inbound_sources`` for each page in ``rels``, in one query per 500 pages.
-
-    A writer that binds the linking pages of a whole folder would otherwise run one query for each
-    page. Every page in ``rels`` has an entry, empty when nothing links to it.
-    """
-    wanted = list(dict.fromkeys(rels))
-    found: dict[str, set[str]] = {rel: set() for rel in wanted}
-    for start in range(0, len(wanted), KEYS_PER_QUERY):
-        chunk = wanted[start : start + KEYS_PER_QUERY]
-        rows = connection.execute(
-            "SELECT dst_page_key, source_path FROM graph_edges"
-            f" WHERE dst_page_key IN ({', '.join('?' * len(chunk))})",
-            [f"file:{rel}" for rel in chunk],
-        )
-        for key, source in rows:
-            rel = key.removeprefix("file:")
-            if source != rel:
-                found[rel].add(source)
-    return {rel: frozenset(sources) for rel, sources in found.items()}
 
 
 def walk_member(rel: str) -> bool:
