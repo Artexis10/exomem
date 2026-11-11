@@ -58,8 +58,9 @@ from .cases import MIN_SUBSTRING_CHARS, STABLE, cases_dir, occurs, probe_forms
 
 #: The projection data: the dimension and the filed prediction of each family, and what f38 needs to play a project.
 PROJECTION_FILE = Path(__file__).resolve().parents[2] / "projections" / "exomem.yaml"
-#: The probe form that asks for a fact that never changes. ``attributes.yaml`` declares it, and f38 labels it ``stable``.
-RECALL_FORM = "stable"
+#: The trait of the probe form that asks for a fact that never changes. ``attributes.yaml`` declares it in
+#: ``probe_form_traits``, and f38 labels a probe of such a form ``stable``.
+RECALL_TRAIT = "recall"
 #: The one file under a document's kind that holds the text of a document with no kind.
 _UNKIND = "file"
 
@@ -86,8 +87,11 @@ def round_spec(catalogue: Catalogue, data: Mapping[str, Any], **dials: Any) -> R
     until the project holds the recall probes that ``data`` asks. No recipe is added: a thread of one recipe
     again binds fresh things, and the planner reserves them."""
     stage = data["f38"]["stage"]
+    forms = probe_forms()
     entries = [i for i in catalogue.buildable if catalogue.entries[i].stage == stage]
-    recall = [i for i in entries if RECALL_FORM in catalogue.entries[i].probes]
+    recall = [
+        i for i in entries if any(_is_recall(form, forms) for form in catalogue.entries[i].probes)
+    ]
     again = next((i for i in recall if catalogue.entries[i].twin_of is None), None)
     short = data["f38"]["recall_probes"] - len(recall)
     if short > 0:
@@ -304,7 +308,7 @@ def project(
             detail = f"a file of session {asked} holds a string of its key"
             refusals.append(Refusal("session-holds-key-string", about, detail))
             continue
-        stable = key.form == RECALL_FORM
+        stable = _is_recall(key.form, forms)
         probes.append(
             {
                 "probe_id": f"{thread.id}.{key.form}",
@@ -321,6 +325,12 @@ def project(
     if refusals:
         raise ProjectionRefused(refusals)
     return {"sessions": sessions, "probes": probes}
+
+
+def _is_recall(form: str, forms: Mapping[str, Any]) -> bool:
+    """Whether a probe form is the recall control: the ``recall`` trait that ``attributes.yaml`` declares."""
+    spec = forms.get(form)
+    return isinstance(spec, Mapping) and RECALL_TRAIT in (spec.get("traits") or ())
 
 
 def _is_one(value: Any) -> bool:

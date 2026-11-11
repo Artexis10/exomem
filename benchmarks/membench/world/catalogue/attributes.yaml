@@ -258,9 +258,13 @@ probe_forms:
   weigh: {read_as: position, description: "Ask for the state of a disagreement or the case on each side."}
   forecast: {read_as: position, description: "Ask for a probability or a belief level. A proper scoring rule scores it."}
   audit: {read_as: position, description: "Ask about the corpus itself, such as what changed or what is duplicated."}
-  stable: {read_as: position, description: "Ask for a fact that never changes. This is the recall control."}
+  stable: {read_as: position, traits: [recall], description: "Ask for a fact that never changes. This is the recall control."}
   abstain: {read_as: harm, description: "Ask a question whose warranted answer is that the corpus does not say. A no-memory arm gets it right."}
   unaided: {read_as: harm, description: "Give a task that no stored memory bears on. Its key is the no-memory arm's own result."}
+
+# What a probe form's `traits` may name: a closed set that code implements.
+probe_form_traits:
+  recall: "The probe asks for a fact that never changes; it is the recall control."
 
 # How a probe's result is read.
 result_readings:

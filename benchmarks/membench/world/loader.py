@@ -276,6 +276,10 @@ class _Checker:
             self.closed(
                 f"behaviour {name}", "polarity", behaviour.get("polarity"), "behaviour_polarities"
             )
+        for name, form in (self.attrs.get("probe_forms") or {}).items():
+            if isinstance(form, Mapping):
+                for value in _names(form.get("traits")):
+                    self.closed(f"probe form {name}", "trait", value, "probe_form_traits")
 
     # -- entries -------------------------------------------------------------------------------
 
