@@ -22,7 +22,7 @@ from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, ownership, rederive
-from .read import NOT_ACTIVE, inbound_sources
+from .read import NOT_ACTIVE, inbound_sources_many
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -105,12 +105,19 @@ class PageDelete:
 class PageMove:
     """A page's bytes moved to a path the store does not hold.
 
-    ``on_disk`` says that the file already moved there.
+    ``on_disk`` says that the file already moved there. ``body`` gives the page new bytes at its new
+    path, as a move that rewrites the page's own links does; the move is still one life that the
+    trail follows from the old path, and the projector writes the new bytes there.
     """
 
     src: str
     dst: str
     on_disk: bool = False
+    body: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.on_disk and self.body is not None:
+            raise ValueError("a file that already moved holds the stored bytes, not new ones")
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +391,10 @@ def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
 
 def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
     """Raise ``StoreConflict`` for the first path that does not hold what ``expect`` says."""
+    # One graph read binds the linking pages of every path: a folder's delete binds hundreds.
+    linked = inbound_sources_many(
+        tx, [rel for rel, want in expect.items() if want.linked_from is not None]
+    )
     for rel, want in expect.items():
         have = _stored(tx, rel)
         if want.absent:
@@ -399,7 +410,7 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
         if want.projected and not _projected(tx, rel, *have):
             raise StoreConflict(rel, "its file on disk is not the stored page")
         if want.linked_from is not None:
-            gained = inbound_sources(tx, rel) - want.linked_from
+            gained = linked[rel] - want.linked_from
             if gained:
                 # No name: the page that linked may be one the caller is not allowed to see.
                 raise StoreConflict(rel, "a page now links to it")
@@ -468,11 +479,11 @@ class _Trail:
         if queue:
             self.intents[rel] = ("delete", None)
 
-    def moved(self, move: PageMove, sha256: str) -> None:
+    def moved(self, move: PageMove, old_sha256: str, new_sha256: str) -> None:
         # Each side has its own row, so a read of either path's trail meets the move; the new path's
-        # row names the old path.
-        self.record(move.src, "move", sha256)
-        self.record(move.dst, "move", sha256, from_path=move.src)
+        # row names the old path. Each row holds the bytes that its path held or now holds.
+        self.record(move.src, "move", old_sha256)
+        self.record(move.dst, "move", new_sha256, from_path=move.src)
         self.deleted.append(move.src)
         self.written.append(move.dst)
         if not move.on_disk:
@@ -527,6 +538,14 @@ def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> 
     if _stored(tx, move.dst) is not None:
         raise StoreConflict(move.dst, "the store already holds it")
     *content, stored_revision = page
+    if move.body is not None:
+        content = [
+            move.body,
+            hashlib.sha256(move.body).hexdigest(),
+            len(move.body),
+            frontmatter_json(move.body),
+            time.time_ns(),
+        ]
     if move.on_disk:
         # The file kept its bytes and mtime through the rename, so it must have been the stored page.
         if not _projected(tx, move.src, stored_revision, page[1]):
@@ -547,7 +566,7 @@ def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> 
         # Nothing is left to project at either path; a queued intent at the destination named a file
         # that this rename replaced.
         _clear_queued(tx, move.src, move.dst)
-    audit.moved(move, page[1])
+    audit.moved(move, page[1], content[1])
 
 
 def _record_binary(tx: Connection, record: BinaryRecord, revision: int, audit: _Trail) -> None:

@@ -1411,6 +1411,12 @@ class PathGuard:
         return _store_guard(rel, _stored_sha256(Path(vault_root), rel))
 
     @classmethod
+    def of_stored(cls, target: str, sha256: str | None) -> PathGuard:
+        """Guard a stored page by the hash that the caller read in its own store snapshot, or by
+        its absence there when ``sha256`` is None: a folder's pages then cost no query each."""
+        return _store_guard("/".join(_safe_guard_target(target)), sha256)
+
+    @classmethod
     def capture(
         cls,
         vault_root: Path,
@@ -4091,6 +4097,11 @@ def _allowed_census_names(directory: Path, allowed_changes: Iterable[Path]) -> f
         if relative.parts:
             names.add(relative.parts[0])
     return frozenset(names)
+
+
+#: The most entries that one folder transition binds: the census of each folder that a directory
+#: recovery reads, and the pages that a store-mode folder trash or recovery moves in one transaction.
+DIRECTORY_TRANSITION_LIMIT = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -8295,12 +8306,27 @@ def find_inbound_wikilinks(
     )
 
 
-def find_inbound_wikilinks_many(vault_root: Path, targets: Iterable[str]) -> dict[str, list[InboundLink]]:
-    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them."""
+def find_inbound_wikilinks_many(
+    vault_root: Path, targets: Iterable[str], *, held: bool = False
+) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for several targets over one index read, as the owner sees them.
+
+    `held` says that the vault holds every target, as a store holds a page that may have no file
+    yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
+    does for one target, and the index answers which ones those are without a look at the disk.
+    """
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshots = {target: _snapshot_inbound(data, target) for target in targets}
-    return {target: _select_inbound_wikilinks(snapshot, target, None) for target, snapshot in snapshots.items()}
+    return {
+        target: _select_inbound_wikilinks(
+            snapshot,
+            target,
+            None,
+            target_has_no_file=held and target not in snapshot.sources,
+        )
+        for target, snapshot in snapshots.items()
+    }
 
 
 def cached_inbound_wikilinks(

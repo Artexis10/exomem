@@ -49,6 +49,7 @@ from . import (
 )
 from .kbdir import kb_prefix
 from .mutation_timings import MutationTimings, mutation_timing_span
+from .vault_store import read
 
 log = logging.getLogger(__name__)
 
@@ -3628,6 +3629,23 @@ def _move_evaluation_pairs(
     return tuple((pairs[path], path) for path in sorted(pairs))
 
 
+def _binds_bytes(guard: vault.PathGuard | None, sha256: str | None) -> bool:
+    """Whether ``guard`` binds the exact bytes with this hash, on disk or in the store."""
+    return (
+        guard is not None
+        and guard.leaf_policy in ("content", "store")
+        and guard.expected_content_hash is not None
+        and (sha256 is None or guard.expected_content_hash == sha256)
+    )
+
+
+def _binds_absence(guard: vault.PathGuard) -> bool:
+    """Whether ``guard`` binds an absent path, on disk or in the store."""
+    return guard.leaf_policy == "absent" or (
+        guard.leaf_policy == "store" and guard.expected_content_hash is None
+    )
+
+
 def preflight_move(
     vault_root: Path,
     *,
@@ -3654,10 +3672,9 @@ def preflight_move(
     rewrite_tuple = tuple(rewrites)
     if (
         source_guard.target != old_path
-        or source_guard.leaf_policy != "content"
-        or source_guard.expected_content_hash != vault.content_hash(source)
+        or not _binds_bytes(source_guard, vault.content_hash(source))
         or destination_guard.target != new_path
-        or destination_guard.leaf_policy != "absent"
+        or not _binds_absence(destination_guard)
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -3675,7 +3692,7 @@ def preflight_move(
             else "moved source is not the exact declared derivation of the move",
         )
     for write in rewrite_tuple:
-        if write.guard is None or write.guard.leaf_policy != "content":
+        if not _binds_bytes(write.guard, None):
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "move rewrite is not bound to exact source bytes",
@@ -3697,7 +3714,13 @@ def preflight_move(
         rel = write.path.relative_to(root).as_posix()
         before_rewrite = before_corpus.pages.get(rel)
         try:
-            before_source = write.path.read_bytes().decode("utf-8")
+            # A stored page is read from the store; its file may trail it.
+            before_bytes = (
+                read.owned_bytes(root, rel) if read.serves(root, rel) else write.path.read_bytes()
+            )
+            if before_bytes is None:
+                raise FileNotFoundError(rel)
+            before_source = before_bytes.decode("utf-8")
         except (OSError, UnicodeDecodeError) as error:
             raise SemanticWriteError(
                 "STALE_SEMANTIC_WRITE",
@@ -4056,7 +4079,7 @@ def preflight_recovery(
             "recovery contains duplicate restore paths",
         )
     root_destination = destination_root_guard or bound_entries[0].destination_guard
-    if root_destination.leaf_policy != "absent":
+    if not _binds_absence(root_destination):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
             "recovery root destination guard must bind absence",
@@ -4065,11 +4088,10 @@ def preflight_recovery(
     for item in bound_entries:
         if (
             item.source_guard.target != item.trash_path
-            or item.source_guard.leaf_policy != "content"
-            or item.source_guard.expected_content_hash != vault.content_hash(item.source)
+            or not _binds_bytes(item.source_guard, vault.content_hash(item.source))
             or item.destination_guard.target != item.restore_path
-            or item.destination_guard.leaf_policy != "absent"
-            or (item.sidecar_guard is not None and item.sidecar_guard.leaf_policy != "content")
+            or not _binds_absence(item.destination_guard)
+            or (item.sidecar_guard is not None and not _binds_bytes(item.sidecar_guard, None))
             or (item.sidecar_guard is None) != (item.sidecar_source is None)
             or (
                 item.restore_path != root_destination.target
@@ -4382,15 +4404,18 @@ def commit_recovery(
     root = Path(vault_root)
     try:
         with vault.vault_creation_lock(root, "semantic-creation"):
-            for census_guard in preflight.trash_census_guards:
-                census_guard.recheck(root)
-            if preflight.recovery_sidecar_guard is not None:
-                preflight.recovery_sidecar_guard.recheck(root)
-            for item in preflight.entries:
-                item.source_guard.recheck(root)
-                if item.sidecar_guard is not None:
-                    item.sidecar_guard.recheck(root)
-                item.destination_guard.recheck(root)
+            # In store mode each round of rechecks reads one snapshot, not one per guard; a file-mode
+            # vault binds nothing here.
+            with read.request_snapshot(root):
+                for census_guard in preflight.trash_census_guards:
+                    census_guard.recheck(root)
+                if preflight.recovery_sidecar_guard is not None:
+                    preflight.recovery_sidecar_guard.recheck(root)
+                for item in preflight.entries:
+                    item.source_guard.recheck(root)
+                    if item.sidecar_guard is not None:
+                        item.sidecar_guard.recheck(root)
+                    item.destination_guard.recheck(root)
             lifecycle_writes, required_guards, lifecycle_states = _plan_recovery_lifecycle(
                 root, preflight
             )
@@ -4405,21 +4430,28 @@ def commit_recovery(
                     ),
                 )
             destination_root_guard = preflight.destination_root_guard.prepare_and_bind_parents(root)
-            destination_root_guard.recheck(root)
-            destination_guards = tuple(
-                vault.PathGuard.capture(root, item.restore_path, leaf_policy="absent")
-                for item in preflight.entries
-            )
-            destination_root_guard.recheck(root)
-            for item, destination_guard in zip(preflight.entries, destination_guards, strict=True):
-                item.source_guard.recheck(root)
-                destination_guard.recheck(root)
-                if item.sidecar_guard is not None:
-                    item.sidecar_guard.recheck(root)
-            for census_guard in preflight.trash_census_guards:
-                census_guard.recheck(root)
-            if preflight.recovery_sidecar_guard is not None:
-                preflight.recovery_sidecar_guard.recheck(root)
+            with read.request_snapshot(root):
+                destination_root_guard.recheck(root)
+                destination_guards = tuple(
+                    # A restore path that the store serves is free when the store holds no page
+                    # there.
+                    vault.PathGuard.capture_store(root, item.restore_path)
+                    if read.serves(root, item.restore_path)
+                    else vault.PathGuard.capture(root, item.restore_path, leaf_policy="absent")
+                    for item in preflight.entries
+                )
+                destination_root_guard.recheck(root)
+                for item, destination_guard in zip(
+                    preflight.entries, destination_guards, strict=True
+                ):
+                    item.source_guard.recheck(root)
+                    destination_guard.recheck(root)
+                    if item.sidecar_guard is not None:
+                        item.sidecar_guard.recheck(root)
+                for census_guard in preflight.trash_census_guards:
+                    census_guard.recheck(root)
+                if preflight.recovery_sidecar_guard is not None:
+                    preflight.recovery_sidecar_guard.recheck(root)
             from . import extraction_parts
             from .governance import catalog_publication, graph_producer
 
@@ -4478,9 +4510,10 @@ def commit_recovery(
                     required_guards=(*required_guards, destination_root_guard),
                     semantic_states=batch_semantic_states,
                 )
-            destination_root_guard.recheck(root)
-            for destination_guard in destination_guards:
-                destination_guard.recheck(root)
+            with read.request_snapshot(root):
+                destination_root_guard.recheck(root)
+                for destination_guard in destination_guards:
+                    destination_guard.recheck(root)
             mutate()
             if catalog_target is not None:
                 if preflight.catalog_auxiliary_writes:

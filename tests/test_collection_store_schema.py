@@ -57,6 +57,8 @@ EXPECTED_TABLES = {
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
+    "item_references",
+    "item_reference_state",
     "store_mode",
     "store_mode_objects",
     "store_pages",
@@ -397,7 +399,7 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 16
+    assert schema.SCHEMA_VERSION == 17
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -501,7 +503,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["16", "9"])
+@pytest.mark.parametrize("revision", ["17", "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -516,12 +518,12 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 16
+        assert schema.schema_version(store.connection) == 17
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 16
+            assert schema.schema_version(reader) == 17
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("16",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("17",)]
 
 
 def test_a_schema_14_store_gains_the_empty_store_mode_tables_and_keeps_its_rows(tmp_path, monkeypatch):
@@ -575,7 +577,7 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
 
     with connection.open_writer(path, lease_check=_allow) as writer:
         conn = writer.connection
-        assert schema.schema_version(conn) == 16
+        assert schema.schema_version(conn) == 17
         assert conn.execute("SELECT * FROM store_projection_queue").fetchall() == [
             (pages[0][0], 1, "write", None, "t1")]
         with writer.transaction() as tx:
@@ -614,7 +616,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("16",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("17",)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 

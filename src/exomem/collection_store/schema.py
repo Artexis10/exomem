@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The first schema that the vault state manifest guards with an ID. Every release since the
@@ -120,6 +120,8 @@ TABLES = (
     "rollup_definitions",
     "rollup_buckets",
     "rollup_members",
+    "item_references",
+    "item_reference_state",
     *VAULT_STORE_TABLES,
 )
 _V1_APPEND_ONLY_TABLES = (
@@ -132,6 +134,10 @@ _V1_APPEND_ONLY_TABLES = (
 )
 APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats",
                       "store_audit")
+
+#: The declared-reference inverse index (schema 17). It derives from items, so the replica
+#: leaves it empty and warms a rebuilt state instead of trusting a copied one.
+DERIVED_INDEX_TABLES = ("item_references",)
 
 _TABLES_V1 = (
     """
@@ -1125,6 +1131,52 @@ class SchemaVersionError(RuntimeError):
         )
         self.found = found
         self.supported = supported
+
+
+def _migrate_to_17(conn: sqlite3.Connection) -> None:
+    """Index declared references for inverse expansion: match keys and warm state.
+
+    ``item_references`` holds one row per distinct ``match`` a source row's declared
+    values resolve to (``ref:`` + item_key for a canonical row ref, else the serialized
+    natural key); a value that names no row stores nothing. ``item_reference_state``
+    tracks each declaration's backfill: absent or ``ready=0`` means warming. The
+    migration seeds a ``ready=0, built_through=0`` state row for every declaration of
+    every current manifest; the backfill builds the rows.
+    """
+    conn.execute("""CREATE TABLE item_references(
+      collection_id TEXT NOT NULL,
+      field_path TEXT NOT NULL,
+      match TEXT NOT NULL,
+      row_id INTEGER NOT NULL,
+      PRIMARY KEY(collection_id, field_path, match, row_id)
+    ) WITHOUT ROWID, STRICT""")
+    conn.execute("CREATE INDEX item_references_by_row ON item_references(row_id)")
+    conn.execute("""CREATE TABLE item_reference_state(
+      collection_id TEXT NOT NULL,
+      field_path TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      built_through INTEGER NOT NULL,
+      ready INTEGER NOT NULL CHECK(ready IN (0, 1)),
+      PRIMARY KEY(collection_id, field_path)
+    ) STRICT""")
+    import json
+
+    from .. import structured_collections as collections
+    from .. import vault
+
+    for collection_id, text, schema_json in conn.execute(
+            "SELECT m.collection_id, m.manifest_text, m.schema_json FROM collection_manifests m "
+            "JOIN collections c ON c.collection_id=m.collection_id "
+            "AND c.manifest_version=m.manifest_version").fetchall():
+        data, _, _ = vault.parse_frontmatter(text, strict=True)
+        if "schema_version" not in data:
+            continue
+        item_schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
+        for declaration in collections.declared_references(item_schema):
+            conn.execute(
+                "INSERT INTO item_reference_state(collection_id, field_path, target_id,"
+                " built_through, ready) VALUES(?,?,?,0,0)",
+                (collection_id, declaration.dotted, declaration.collection))
 
 
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
