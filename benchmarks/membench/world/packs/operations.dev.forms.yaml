@@ -1,0 +1,148 @@
+# The surface forms of the operations pack for the `dev` split: the text patterns that the template
+# renderer fills. A form belongs to the split of the file that holds it, and no other split's file may
+# hold the same form id or the same text. It is data: `surface.py` reads it and refuses what it cannot
+# use. The text is invented and neutral.
+#
+# A form lists what it `serves`: `statement.<kind>`, `rule.<shape>`, `operation.<name>`, a wrapper
+# `qualifier.scope`, `qualifier.hedge.<word>` or `qualifier.basis.<value>`, or `probe.<form>`. A form
+# fits an item when it holds only slots that the item can fill, and every slot that the item fills only
+# some of the time. So a statement with a value gets a form with `{value}`, and a question gets a form
+# without it. A form holds `{subject}` so that the name of the thing is in the text.
+#
+# The level says how openly the text carries the statement. At `stated` the text says what the
+# statement is. At `paraphrased` it uses other words, and the renderer puts one of the pack's
+# paraphrases of an attribute in place of `{about}`. At `unmarked` it gives the content in a bare line
+# that carries no word of change. A withdrawal and a merger have no `unmarked` form: with no new
+# content to show, their only unmarked form would be an absence, which belongs to the `silent` level.
+#
+# A rule's `{scope}` is the context that the rule holds in. A statement's scope is a wrapper.
+schema_version: 1
+pack: operations
+split: dev
+describes: "Surface forms of the small software and operations team, for development worlds."
+
+frames:
+  note: {signed: "Note by {by}, {date}", unsigned: "Note, {date}"}
+  message: {signed: "Message from {by}, {date}", unsigned: "Message, {date}"}
+  log: {signed: "Log entry by {by}, {date}", unsigned: "Log entry, {date}"}
+
+forms:
+  # --- statements that give a value for an attribute ---
+  - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} confirms that the {about} for {subject} is {value}."}
+  - {id: fact-stated-2, serves: [statement.fact], level: stated, text: "For the record, {by} states that the {about} for {subject} is {value}."}
+  - {id: fact-paraphrased-1, serves: [statement.fact], level: paraphrased, text: "{by} mentions that {subject} has {about} of {value}."}
+  - {id: fact-paraphrased-2, serves: [statement.fact], level: paraphrased, text: "According to {by}, {subject} stands at {value} for {about}."}
+  - {id: fact-unmarked-1, serves: [statement.fact], level: unmarked, text: "{subject} - {about}: {value}"}
+  - {id: fact-unmarked-2, serves: [statement.fact], level: unmarked, text: "{about}, {subject}: {value}"}
+  - {id: decision-stated-1, serves: [statement.decision], level: stated, text: "{by} decides that the {about} for {subject} will be {value}."}
+  - {id: decision-stated-2, serves: [statement.decision], level: stated, text: "Decision by {by}: the {about} for {subject} is set to {value}."}
+  - {id: decision-paraphrased-1, serves: [statement.decision], level: paraphrased, text: "{by} has settled on {value} as the {about} for {subject}."}
+  - {id: decision-paraphrased-2, serves: [statement.decision], level: paraphrased, text: "{by} picks {value} for {about} on {subject}."}
+  - {id: decision-unmarked-1, serves: [statement.decision], level: unmarked, text: "{subject}: {about} {value}"}
+  - {id: decision-unmarked-2, serves: [statement.decision], level: unmarked, text: "{about} ({subject}) = {value}"}
+  - {id: observation-stated-1, serves: [statement.observation], level: stated, text: "{by} reports having seen {value} as the {about} for {subject}."}
+  - {id: observation-stated-2, serves: [statement.observation], level: stated, text: "Observed by {by}: the {about} for {subject} is {value}."}
+  - {id: observation-paraphrased-1, serves: [statement.observation], level: paraphrased, text: "{by} noticed {value} for {about} on {subject}."}
+  - {id: observation-paraphrased-2, serves: [statement.observation], level: paraphrased, text: "{by} saw that {subject} showed {value} for {about}."}
+  - {id: observation-unmarked-1, serves: [statement.observation], level: unmarked, text: "Seen on {subject}: {about} {value}"}
+  - {id: observation-unmarked-2, serves: [statement.observation], level: unmarked, text: "{subject} / {about} / {value}"}
+  - {id: result-stated-1, serves: [statement.result], level: stated, text: "{by} reports the result: the {about} for {subject} is {value}."}
+  - {id: result-stated-2, serves: [statement.result], level: stated, text: "Result of the check by {by}: the {about} for {subject} is {value}."}
+  - {id: result-paraphrased-1, serves: [statement.result], level: paraphrased, text: "{by} ran a check and got {value} for {about} on {subject}."}
+  - {id: result-paraphrased-2, serves: [statement.result], level: paraphrased, text: "The check by {by} gives {value} as {about} of {subject}."}
+  - {id: result-unmarked-1, serves: [statement.result], level: unmarked, text: "Check - {subject}, {about}: {value}"}
+  - {id: result-unmarked-2, serves: [statement.result], level: unmarked, text: "{subject} ({about}) -> {value}"}
+  - {id: assumption-stated-1, serves: [statement.assumption], level: stated, text: "{by} assumes that the {about} for {subject} is {value}, without checking."}
+  - {id: assumption-paraphrased-1, serves: [statement.assumption], level: paraphrased, text: "{by} is working on the footing that {subject} has {about} of {value}."}
+  - {id: assumption-unmarked-1, serves: [statement.assumption], level: unmarked, text: "Working figure - {subject}, {about}: {value}"}
+  - {id: hypothesis-stated-1, serves: [statement.hypothesis], level: stated, text: "{by} suggests that the {about} for {subject} may be {value}, which is still to be tested."}
+  - {id: hypothesis-paraphrased-1, serves: [statement.hypothesis], level: paraphrased, text: "{by} has a theory that {subject} has {about} of {value}."}
+  - {id: hypothesis-unmarked-1, serves: [statement.hypothesis], level: unmarked, text: "Theory - {subject}, {about}: {value}"}
+  - {id: opinion-stated-1, serves: [statement.opinion], level: stated, text: "{by} thinks that the {about} for {subject} should be {value}."}
+  - {id: opinion-paraphrased-1, serves: [statement.opinion], level: paraphrased, text: "{by} would prefer {value} for {about} on {subject}."}
+  - {id: opinion-unmarked-1, serves: [statement.opinion], level: unmarked, text: "{subject}: {about}, preferably {value}"}
+  - {id: plan-stated-1, serves: [statement.plan], level: stated, text: "{by} plans to make the {about} for {subject} {value}."}
+  - {id: plan-paraphrased-1, serves: [statement.plan], level: paraphrased, text: "{by} intends {value} for {about} on {subject}."}
+  - {id: plan-unmarked-1, serves: [statement.plan], level: unmarked, text: "To do - {subject}, {about}: {value}"}
+
+  # --- statements that give no value ---
+  - {id: question-stated-1, serves: [statement.question], level: stated, text: "{by} asks what the {about} for {subject} is."}
+  - {id: question-paraphrased-1, serves: [statement.question], level: paraphrased, text: "{by} wonders about {about} on {subject}."}
+  - {id: question-unmarked-1, serves: [statement.question], level: unmarked, text: "{subject} - {about}?"}
+  - {id: event-observation-stated-1, serves: [statement.observation], level: stated, text: "{by} observed that {subject} took place."}
+  - {id: event-observation-paraphrased-1, serves: [statement.observation], level: paraphrased, text: "{by} was around when {subject} happened."}
+  - {id: event-observation-unmarked-1, serves: [statement.observation], level: unmarked, text: "{subject}: seen by {by}"}
+
+  # --- rules ---
+  - {id: default-stated-1, serves: [rule.default], level: stated, text: "{by} sets the rule that within {scope} the {about} for {subject} is {value}, unless an exception is recorded."}
+  - {id: default-paraphrased-1, serves: [rule.default], level: paraphrased, text: "{by} says that {scope} normally has {value} as {about} for {subject}."}
+  - {id: default-unmarked-1, serves: [rule.default], level: unmarked, text: "In {scope}, {about} for {subject}: {value}."}
+  - {id: exception-stated-1, serves: [rule.exception], level: stated, text: "{by} records an exception: within {scope} the {about} for {subject} is {value}."}
+  - {id: exception-paraphrased-1, serves: [rule.exception], level: paraphrased, text: "{by} notes that {scope} differs, with {value} as {about} for {subject}."}
+  - {id: exception-unmarked-1, serves: [rule.exception], level: unmarked, text: "{scope} - {subject}, {about}: {value}"}
+  - {id: governs-stated-1, serves: [rule.governs], level: stated, text: "{by} rules that {value} governs the {about} for {subject}."}
+  - {id: governs-paraphrased-1, serves: [rule.governs], level: paraphrased, text: "{by} says that the entry kept by {value} settles {about} for {subject}."}
+  - {id: governs-unmarked-1, serves: [rule.governs], level: unmarked, text: "{about} for {subject}: kept by {value}"}
+
+  # --- operations: each is announced in a document of its own ---
+  - {id: correct-stated-1, serves: [operation.correct], level: stated, text: "{by} corrects the earlier entry on the {about} for {subject}: it said {old}, and it should say {value}."}
+  - {id: correct-paraphrased-1, serves: [operation.correct], level: paraphrased, text: "{by} fixes what was written about {about} for {subject}: not {old}, but {value}."}
+  - {id: correct-unmarked-1, serves: [operation.correct], level: unmarked, text: "{about} of {subject}: {value}"}
+  - {id: withdraw-stated-1, serves: [operation.withdraw], level: stated, text: "{by} withdraws the earlier statement that the {about} for {subject} is {old}."}
+  - {id: withdraw-paraphrased-1, serves: [operation.withdraw], level: paraphrased, text: "{by} no longer stands behind the claim of {old} for {about} on {subject}."}
+  - {id: rename-stated-1, serves: [operation.name], level: stated, text: "{former} has been renamed {name}."}
+  - {id: rename-paraphrased-1, serves: [operation.name], level: paraphrased, text: "What was called {former} now goes by {name}."}
+  - {id: rename-unmarked-1, serves: [operation.name], level: unmarked, text: "Directory entry: {former} / {name}"}
+  - {id: alias-stated-1, serves: [operation.name], level: stated, text: "{name} is a short name for {subject}."}
+  - {id: alias-paraphrased-1, serves: [operation.name], level: paraphrased, text: "People say {name} when they mean {subject}."}
+  - {id: alias-unmarked-1, serves: [operation.name], level: unmarked, text: "Directory entry: {subject} / {name}"}
+  - {id: merge-stated-1, serves: [operation.merge], level: stated, text: "{absorbed} and {subject} are the same thing, recorded from now on as {subject}."}
+  - {id: merge-paraphrased-1, serves: [operation.merge], level: paraphrased, text: "{absorbed} has been folded into {subject}."}
+  - {id: tell-stated-1, serves: [operation.tell], level: stated, text: "{by} told {holder} that the {about} for {subject} is {value}."}
+  - {id: tell-paraphrased-1, serves: [operation.tell], level: paraphrased, text: "{holder} heard from {by} that {subject} has {about} of {value}."}
+  - {id: tell-event-stated-1, serves: [operation.tell], level: stated, text: "{holder} was present when {subject} took place."}
+  - {id: tell-event-paraphrased-1, serves: [operation.tell], level: paraphrased, text: "{holder} was there for {subject}."}
+  - {id: restrict-stated-1, serves: [operation.restrict], level: stated, text: "{by} limits the {about} for {subject} to {audience}."}
+  - {id: restrict-paraphrased-1, serves: [operation.restrict], level: paraphrased, text: "{by} says only {audience} should see the {about} for {subject}."}
+  - {id: restrict-until-stated-1, serves: [operation.restrict], level: stated, text: "{by} limits the {about} for {subject} to {audience} until {until}."}
+  - {id: restrict-until-paraphrased-1, serves: [operation.restrict], level: paraphrased, text: "{by} lets only {audience} see {about} for {subject} up to {until}."}
+  - {id: delete-stated-1, serves: [operation.restrict], level: stated, text: "{by} asks for the {about} for {subject} to be deleted."}
+  - {id: delete-paraphrased-1, serves: [operation.restrict], level: paraphrased, text: "{by} wants the {about} for {subject} removed."}
+
+  # --- qualifiers: each wraps the sentence of the statement that carries it ---
+  - {id: scope-stated-1, serves: [qualifier.scope], level: stated, text: "{text} This holds for {scope} only."}
+  - {id: scope-paraphrased-1, serves: [qualifier.scope], level: paraphrased, text: "{text} That is for {scope}."}
+  - {id: scope-unmarked-1, serves: [qualifier.scope], level: unmarked, text: "{text} ({scope})"}
+  - {id: tentative-stated-1, serves: [qualifier.hedge.tentative], level: stated, text: "{text} {by} adds that this may be wrong."}
+  - {id: tentative-paraphrased-1, serves: [qualifier.hedge.tentative], level: paraphrased, text: "{text} {by} is not sure of this."}
+  - {id: tentative-unmarked-1, serves: [qualifier.hedge.tentative], level: unmarked, text: "{text} Tentatively."}
+  - {id: observed-stated-1, serves: [qualifier.basis.observed], level: stated, text: "{text} {by} saw this directly."}
+  - {id: observed-paraphrased-1, serves: [qualifier.basis.observed], level: paraphrased, text: "{text} This comes from first-hand sight."}
+  - {id: observed-unmarked-1, serves: [qualifier.basis.observed], level: unmarked, text: "{text} (seen directly)"}
+  - {id: told-stated-1, serves: [qualifier.basis.told], level: stated, text: "{text} {by} was told this by someone else."}
+  - {id: told-paraphrased-1, serves: [qualifier.basis.told], level: paraphrased, text: "{text} It was passed on to {by}."}
+  - {id: told-unmarked-1, serves: [qualifier.basis.told], level: unmarked, text: "{text} (passed on)"}
+  - {id: inferred-stated-1, serves: [qualifier.basis.inferred], level: stated, text: "{text} {by} worked this out from other facts."}
+  - {id: inferred-paraphrased-1, serves: [qualifier.basis.inferred], level: paraphrased, text: "{text} It follows from other facts, says {by}."}
+  - {id: inferred-unmarked-1, serves: [qualifier.basis.inferred], level: unmarked, text: "{text} (worked out)"}
+  - {id: computed-stated-1, serves: [qualifier.basis.computed], level: stated, text: "{text} {by} computed this from other values."}
+  - {id: computed-paraphrased-1, serves: [qualifier.basis.computed], level: paraphrased, text: "{text} The figure was calculated, per {by}."}
+  - {id: computed-unmarked-1, serves: [qualifier.basis.computed], level: unmarked, text: "{text} (calculated)"}
+
+  # --- probes: the task wording, which no artefact line may share ---
+  - {id: probe-state-1, serves: [probe.state], text: "What is the {about} for {subject} right now?"}
+  - {id: probe-state-2, serves: [probe.state], text: "Which thing is meant by {subject} today?"}
+  - {id: probe-act-1, serves: [probe.act], text: "Prepare the next step for {subject}, which depends on its {about}."}
+  - {id: probe-act-2, serves: [probe.act], text: "Prepare the next step that involves {subject}."}
+  - {id: probe-premise-1, serves: [probe.premise], text: "Carry on with {subject} on the basis of the earlier setting for {about}."}
+  - {id: probe-premise-2, serves: [probe.premise], text: "Carry on with {subject} as the earlier notes have it."}
+  - {id: probe-stable-1, serves: [probe.stable], text: "Remind me of the {about} for {subject}."}
+  - {id: probe-stable-2, serves: [probe.stable], text: "Remind me what {subject} is."}
+  - {id: probe-abstain-1, serves: [probe.abstain], text: "Is anything on file about the {about} for {subject}?"}
+  - {id: probe-abstain-2, serves: [probe.abstain], text: "Is anything on file about {subject}?"}
+  - {id: probe-weigh-1, serves: [probe.weigh], text: "Where does the case about {about} for {subject} stand?"}
+  - {id: probe-weigh-2, serves: [probe.weigh], text: "Where does the case about {subject} stand?"}
+  - {id: probe-trace-1, serves: [probe.trace], text: "What does the {about} for {subject} rest on?"}
+  - {id: probe-trace-2, serves: [probe.trace], text: "What does {subject} rest on?"}
+  - {id: probe-whose-1, serves: [probe.whose], text: "Who stands behind the {about} for {subject}?"}
+  - {id: probe-whose-2, serves: [probe.whose], text: "Who stands behind {subject}?"}
