@@ -851,7 +851,8 @@ def _trash_in_store(
     the store. The sidecar lands on disk inside the same rollback window. A page is bound to
     ``judged_hash``, the hash of the bytes whose frontmatter or preview the caller judged; a page
     that changed since, or a link from a page that the caller's inbound check did not see, refuses
-    the whole commit, and every rename is undone. A governed item keeps its tombstone and receipt
+    the whole commit, and every rename is undone. A binary with ``judged_hash`` (a previewed
+    trash) refuses when the bytes that moved are not the ones the preview hashed. A governed item keeps its tombstone and receipt
     around the commit (``vault_store.governed``). The log entry commits with the trash, and an
     active catalog publication, prepared before validation returned, publishes after the commit.
     """
@@ -899,6 +900,12 @@ def _trash_in_store(
     )
     try:
         with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
+            if not page and judged_hash is not None and any(
+                record.rel == trash_rel and record.sha256 != judged_hash for record in moved.records
+            ):
+                # The commit binds the store record, which a rewrite on disk leaves as it was, so
+                # the moved bytes answer to the preview here; raising renames them back.
+                raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
             writes = [
                 sidecar,
                 *_trash_companion(root, trash_rel, stored_original, moved.records),
