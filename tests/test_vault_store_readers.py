@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_activate_context_maps import _activate
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (
     ALPHA,
@@ -26,7 +27,7 @@ from test_vault_store_migration import (
     vault,  # noqa: F401
 )
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
-from test_vault_store_rederive import PROFILES, project, settle_to_the_end
+from test_vault_store_rederive import POLICY, PROFILES, commit_policy, project, settle_to_the_end
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import __main__ as cli
@@ -660,6 +661,39 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
 
     assert "lag" not in found and "notice" not in found
     assert find_lighthouse(stored) is False
+
+
+EXCLUDE_GENERATED = "excluded:\n  - Notes/Gen/\n"
+
+
+def task_leads(root):
+    """The paths that recall_context's task_context lane serves as leads for a turn about the
+    generated pages."""
+    packet = _activate(root, turn="the lantern at the lighthouse harbour", max_chars=8000)
+    return {lead["source_ref"] for lead in packet["task_context"]["candidates"]}
+
+
+@pytest.mark.timeout(300)
+def test_the_task_context_lane_serves_no_page_that_the_live_access_policy_excludes(
+    stored, writer  # noqa: F811
+):
+    """A store-mode lane that trusts rows derived under the previous access policy: before the
+    store records the policy change, and while its pass derives the pages again, it serves pages
+    that the policy now excludes as leads, where file mode declines the stale catalogue."""
+    for index in range(10):
+        write.commit(writer, put(*generated_page(index)))
+    project(writer, stored)
+    generated = {generated_page(index)[0] for index in range(10)}
+    assert generated <= task_leads(stored)
+
+    (stored / POLICY).write_text(EXCLUDE_GENERATED)
+    assert vault_store_mode.status(stored)["registry"] == "current"
+    assert task_leads(stored) & generated == set()
+
+    commit_policy(writer, stored, EXCLUDE_GENERATED)
+    project(writer, stored)
+    assert vault_store_mode.status(stored)["registry"] == "rebuilding"
+    assert task_leads(stored) & generated == set()
 
 
 ROOT_PAGE = "Harbour.md"

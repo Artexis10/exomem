@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -252,14 +253,9 @@ def access_tier(vault_root: Path, rel_path: str) -> str:
     append-only (Sources/Evidence) → read-write.
     """
     _fingerprint, cfg, fail_closed = _policy_state(vault_root)
-    if fail_closed:
-        # The policy file exists but has never been read successfully in this
-        # process. Falling back to the built-in defaults here would publish
-        # every `excluded` tree, so refuse the whole vault until a read lands.
+    if _excluded_under(cfg, fail_closed, rel_path):
         return TIER_EXCLUDED
     kb_rel = _kb_relative(rel_path)
-    if _matches(cfg["excluded"], kb_rel):
-        return TIER_EXCLUDED
     if _matches(cfg["readonly"], kb_rel):
         return TIER_READONLY
     head = kb_rel.split("/", 1)[0]
@@ -270,9 +266,31 @@ def access_tier(vault_root: Path, rel_path: str) -> str:
     return TIER_READ_WRITE
 
 
+def _excluded_under(cfg: dict[str, list[str]], fail_closed: bool, rel_path: str) -> bool:
+    """Whether one read of the policy puts `rel_path` in the `excluded` tier."""
+    if fail_closed:
+        # The policy file exists but has never been read successfully in this
+        # process. Falling back to the built-in defaults here would publish
+        # every `excluded` tree, so refuse the whole vault until a read lands.
+        return True
+    return _matches(cfg["excluded"], _kb_relative(rel_path))
+
+
 def is_indexable(vault_root: Path, rel_path: str) -> bool:
     """False only for `excluded` paths — everything else is searchable."""
     return access_tier(vault_root, rel_path) != TIER_EXCLUDED
+
+
+def indexable_filter(vault_root: Path) -> Callable[[str], bool] | None:
+    """`is_indexable` bound to one read of the live policy, for a caller that judges many paths.
+
+    None when that policy excludes nothing, so such a caller skips the check. Each call of
+    `is_indexable` stats the policy file; this predicate judges every path without a syscall.
+    """
+    _fingerprint, cfg, fail_closed = _policy_state(vault_root)
+    if not fail_closed and not cfg["excluded"]:
+        return None
+    return lambda rel_path: not _excluded_under(cfg, fail_closed, rel_path)
 
 
 def refuse_if_excluded(vault_root: Path, rel_path: str) -> bool:

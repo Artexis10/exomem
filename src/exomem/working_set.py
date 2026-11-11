@@ -1477,10 +1477,12 @@ def task_candidates(
     Each lane records a child span of `working_set.task_context`, so a slow recall names its stage.
     """
     from . import (
+        access,
         bm25,
         collection_claims,
         context_task,
         context_views,
+        find_corpus,
         find_types,
         lexstore,
         record_governance,
@@ -1490,12 +1492,17 @@ def task_candidates(
     entries = []
     with find_types.timing_span(timings, "working_set.task_context_entries"):
         page_visible = egress.release_walk_filter(vault_root, purpose=caller.purpose)
+        # A store-mode vault serves its rows as current at its snapshot, but rows derived before an
+        # access-policy change keep the pages that the policy now excludes until a pass reaches them.
+        # File mode's lanes decline that catalogue; here the live policy keeps them out of every lane.
+        indexable = access.indexable_filter(vault_root) if find_corpus.store_serves(vault_root) else None
         try:
             for position, entry in enumerate(catalogue.task_entries()):
                 if position and not position % request_budget.CHECKPOINT_EVERY:
                     budget_checkpoint("working_set.task_context_entries")
                 if (entry.path and context_views._admits(entry, caller.visible)
-                        and (page_visible is None or page_visible(entry.path))):
+                        and (page_visible is None or page_visible(entry.path))
+                        and (indexable is None or indexable(entry.path))):
                     entries.append(entry)
         except BudgetExhausted:
             # A prefix of the catalogue would quietly narrow the allowed set, so a stopped scan gives no lead.
