@@ -45,7 +45,7 @@
 - [ ] 4.5 Unrelated task: check that the agent does not apply a delivered procedure.
 - [ ] 4.6 Task outside Exomem: check that the agent finds and follows a matching procedure in a repository task.
 - [x] 4.7 Add a sentence to the native MCP activation nudge so a task in the user's own repository or project also starts initial activation before the agent inspects it. Keep the sentence on advice about the user's own case. Regenerate the plugin and Cloud hook copies.
-  - Evidence: claude-sonnet-5-5, 2026-11-11, scenario 4.6 passed 3 of 3 (was 0 of 2); the two 4.5 prompts and one plain coding question applied no procedure and did not call `recall_context`.
+  - Evidence: claude-sonnet-5-5, 2026-11-11, scenario 4.6 passed 3 of 3 (was 0 of 2); the two 4.5 prompts and one plain coding question applied no procedure and called no tool. The `reported-failed-advice` incident cases passed 3 of 3 on both the base and the changed checkout, with no unknown units.
 
 ## 5. Validate, merge, release and archive
 
