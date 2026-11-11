@@ -48,6 +48,7 @@ from exomem.governance.principal import owner_principal
 from exomem.governance.recovery import reconcile_governance_operations
 from exomem.governance.tool import GovernanceCrash, GovernanceError, op_govern_memory
 from exomem.vault_store import read
+from exomem.vault_store import write as store_write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -452,6 +453,31 @@ def test_a_backfill_planned_before_the_companion_changed_in_the_store_refuses_as
         vault_root=served,
         post_commit_fanout=False,
     )
+
+    with pytest.raises(GovernanceError) as stale:
+        backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=301.0)
+
+    assert stale.value.code == "STALE_COMPANION_BACKFILL"
+    assert b"governance_companion:" not in read.owned_bytes(served, SECRET_PAGE)
+
+
+def test_a_companion_that_changes_during_backfill_publication_refuses_as_stale(served, monkeypatch):
+    """A competing store commit between the batch's held check and its transaction lands as the
+    same stale refusal file mode gives, with the same reconcile before the refusal."""
+    payload = legacy_companion(served)
+    preview = backfill(served, "preview", payload, now=300.0)
+    real_commit = store_write.commit
+
+    def competing(writer, change):
+        store_write.commit = real_commit
+        vault_module.batch_atomic_write(
+            [planned(root=served, rel=SECRET_PAGE, text=SECRET_PAGE_TEXT + "\nEdited.\n")],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+        return real_commit(writer, change)
+
+    monkeypatch.setattr(store_write, "commit", competing)
 
     with pytest.raises(GovernanceError) as stale:
         backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=301.0)

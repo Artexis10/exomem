@@ -5440,8 +5440,8 @@ def _publish_backfilled_companion(
     A store-mode vault holds the companion page, so one store commit replaces it, bound to its
     stored hash; the journal, the receipt and the terminal around it are governance's own. A file
     is published in place, bound to its identity and hash. Either raises when the companion
-    changed since the plan read it: ``ContentHashMismatchError`` from the store, and
-    ``ReservedPathLeafError`` from the disk.
+    changed since the plan read it: ``ContentHashMismatchError`` and ``PathGuardError`` from the
+    store, and ``ReservedPathLeafError`` from the disk.
     """
     prior_sha256 = hashlib.sha256(plan.prior_bytes).hexdigest()
     from ..vault_store import availability as store_availability
@@ -5680,6 +5680,13 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
         raise GovernanceCrash("after_arming")
     try:
         _publish_backfilled_companion(vault_root, plan)
+    except vault.PathGuardError as error:
+        if error.code not in (vault.PATH_GUARD_CHANGED, vault.PATH_GUARD_CONTENT):
+            raise
+        reconcile_governance_operations(vault_root)
+        raise GovernanceError(
+            "STALE_COMPANION_BACKFILL", "companion changed during publication"
+        ) from error
     except (reserved_paths.ReservedPathLeafError, vault.ContentHashMismatchError) as error:
         reconcile_governance_operations(vault_root)
         raise GovernanceError(
