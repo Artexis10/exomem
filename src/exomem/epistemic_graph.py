@@ -9218,7 +9218,8 @@ class EpistemicGraphIndex:
                 withheld, admitted = held[0], keep
 
                 def keep(path: str) -> bool:
-                    # A page that left the vault reads as visible; this caller's verdict held it back.
+                    # A page that left the vault reads as visible; this caller's verdict
+                    # held it back.
                     return path not in withheld and admitted(path)
 
             if keep is None:
