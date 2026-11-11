@@ -634,3 +634,41 @@ def test_an_offline_overlay_and_schema_reclaim_commit_to_the_store_and_write_no_
     }
     assert written_pages == set(), "the projector, not the CLIs, writes the pages' files"
     assert (stored / legacy).read_bytes() == source.read_bytes(), "the projector removes it"
+
+
+def test_an_offline_overlay_writes_nothing_before_admission_and_commits_a_missing_marker(stored):
+    """An overlay that overwrites a file that a running service reads before the owner's route
+    refuses it, or that writes the migration marker or the activation manifest through the
+    service's path and refuses with a code the operator cannot act on."""
+    deployed = init_module.shipped_schema_target(stored) / "SKILL.md"
+    deployed.parent.mkdir(parents=True, exist_ok=True)
+    deployed.write_bytes(b"# The deployed skill, as the service reads it\n")
+    before = tree(stored)
+
+    with pytest.raises(Exception) as refused:
+        init_module.init_vault(stored, force=True)
+
+    assert getattr(refused.value, "code", None) == "SCHEMA_FENCE_OPERATOR_UNAVAILABLE"
+    assert tree(stored) == before
+    marker = "Knowledge Base/_Schema/workflow-contract-migration.yaml"
+    manifest = "Knowledge Base/_Schema/semantic-activation.yaml"
+    # A vault that lacks both, as the projector leaves it once it removes their files.
+    with connection.open_writer(connection.store_path(stored), lease_check=lambda: True) as handle:
+        write.commit(
+            CollectionWriter(stored, handle),
+            write.StoreChange(
+                write.Origin.GOVERNED,
+                "setup",
+                deletes=(write.PageDelete(marker), write.PageDelete(manifest)),
+            ),
+        )
+    for rel in (marker, manifest):
+        (stored / rel).unlink(missing_ok=True)
+
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        overlay = init_module.init_vault(stored, force=True)
+
+    assert read.owned_bytes(stored, marker) == b"schema_version: 1\nreview_required: true\n"
+    assert b"schema_version" in read.owned_bytes(stored, manifest)
+    assert manifest in overlay["created"]

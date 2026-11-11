@@ -142,13 +142,14 @@ def _store_mode(vault_root: Path) -> bool:
     return mode.store_mode_active(vault_root)
 
 
-def _commit_offline(vault_root: Path, operation: str, change_of) -> None:
+def _commit_offline(vault_root: Path, operation: str, change_of, then=None) -> None:
     """Commit ``change_of(view)`` to a store-mode vault as the offline owner, in one transaction.
 
     The CLIs that overlay or reclaim schema pages run with the service stopped, so they take the
     route that ``store-mode migrate`` and ``rollback`` take: the owner's lease, the operator
     credential and the store's one writer. ``change_of`` reads the store under that writer and
-    returns the change, or None when there is nothing to commit.
+    returns the change, or None when there is nothing to commit. ``then`` writes what the store
+    does not own, after the commit and still as the owner: nothing is written before admission.
     """
     from .collection_store import admission
     from .vault_store import read, write
@@ -158,22 +159,25 @@ def _commit_offline(vault_root: Path, operation: str, change_of) -> None:
             change = change_of(view)
         if change is not None:
             write.commit(writer, change)
+        if then is not None:
+            then()
 
     admission.store_mode_route(Path(vault_root).resolve(), operation, step)
 
 
-def _scaffold_plan(vault_root: Path) -> list[tuple[Path, Path]]:
-    """Each scaffold file and where an overlay puts it; folders are created on the way.
+def _scaffold_plan(vault_root: Path) -> tuple[list[Path], list[tuple[Path, Path]]]:
+    """The folders an overlay creates, and each scaffold file with where an overlay puts it.
 
-    The activation conventions are left out: the packaged ones are the base registry, not the
-    add/drop grammar accepted at this vault-owned override path, so even a force overlay leaves an
-    owner's override intact.
+    It writes nothing. The activation conventions are left out: the packaged ones are the base
+    registry, not the add/drop grammar accepted at this vault-owned override path, so even a force
+    overlay leaves an owner's override intact.
     """
     kb = vault_root / kb_dirname()
     # The product-owned markdown lands outside the note namespace; everything else -- index.md,
     # log.md, the typed tree, and the per-vault YAML registries that also live under `_Schema/` --
     # is the user's and stays in the Knowledge Base where they can see and edit it (#488).
     product_owned = {source.relative_to(_SCAFFOLD) for source in shipped_schema_sources()}
+    folders: list[Path] = []
     plan: list[tuple[Path, Path]] = []
     for src in sorted(_SCAFFOLD.rglob("*")):
         scaffold_rel = src.relative_to(_SCAFFOLD)
@@ -188,47 +192,43 @@ def _scaffold_plan(vault_root: Path) -> list[tuple[Path, Path]]:
             # Knowledge Base at all; its files carry their own `mkdir(parents=True)` at the new
             # location.
             if not any(str(candidate).startswith(str(scaffold_rel)) for candidate in product_owned):
-                dest.mkdir(parents=True, exist_ok=True)
+                folders.append(dest)
             continue
         plan.append((src, dest))
-    return plan
+    return folders, plan
 
 
 def _overlay_in_store(vault_root: Path) -> dict:
     """``init --force`` on a store-mode vault, as the offline owner.
 
-    The scaffold files that the store holds as pages are put in one commit wherever the store holds
-    different bytes or none, and the projector writes their files afterwards; nothing writes their
-    Markdown here. What the store does not own (the folders, the product-owned copies under the
-    dot folder) is written on disk as file mode writes it. An Entities index that exists is kept,
-    as file mode keeps it, and its counts are refreshed from the stored pages in the same commit.
+    Nothing is written before the owner's route admits the call. Then one commit puts each scaffold
+    page that the store holds differently or not at all, and the migration marker and activation
+    manifest that file mode would create when the vault lacks them; the projector writes their
+    files afterwards, and nothing writes their Markdown here. An Entities index that exists is
+    kept, as file mode keeps it, and its counts are refreshed from the stored pages in the same
+    commit. What the store does not own (the folders, the product-owned copies under the dot
+    folder) is written on disk after the commit, as file mode writes it.
     """
     from . import workflow_contracts
-    from .activation_manifest import ensure_manifest
-    from .vault_store import ownership, write
+    from .activation_manifest import manifest_path, new_manifest
+    from .vault_store import ownership, read, write
 
     kb = vault_root / kb_dirname()
-    workflow_contracts.ensure_migration_marker(vault_root)
-    created: list[str] = []
+    folders, files = _scaffold_plan(vault_root)
     pages: dict[str, Path] = {}
-    for src, dest in _scaffold_plan(vault_root):
+    copies: list[tuple[Path, Path]] = []
+    for src, dest in files:
         rel = dest.relative_to(vault_root).as_posix()
         if ownership.classify(rel) is ownership.Ownership.PAGE:
             pages[rel] = src
-            continue
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        created.append(rel)
-    for folder in _FOLDERS:
-        (kb / folder).mkdir(parents=True, exist_ok=True)
-    entity_registry = load_entity_types(vault_root)
-    if extension_registry_path(vault_root).is_file():
-        for definition in entity_registry.extensions.values():
-            if definition.status == "active":
-                (kb / "Entities" / definition.folder).mkdir(parents=True, exist_ok=True)
-    ensure_manifest(vault_root)
+        else:
+            copies.append((src, dest))
+    marker = workflow_contracts.migration_marker_path(vault_root).relative_to(vault_root).as_posix()
+    manifest = manifest_path(vault_root).relative_to(vault_root).as_posix()
     entity_index = f"{kb_dirname()}/Entities/index.md"
     entities = f"{kb_dirname()}/Entities/"
+    entity_registry = load_entity_types(vault_root)
+    created: list[str] = []
 
     def overlay(view) -> write.StoreChange | None:
         current = view.bodies(pages)
@@ -253,6 +253,15 @@ def _overlay_in_store(vault_root: Path) -> dict:
             if refreshed != text:
                 puts[entity_index] = refreshed.encode("utf-8")
         created.extend(sorted(puts))
+        # The marker comes first in file mode, before any scaffold change; here it is in the commit.
+        for rel, missing in (
+            (marker, workflow_contracts.new_migration_marker(vault_root)),
+            (manifest, new_manifest(vault_root)),
+        ):
+            if missing is not None:
+                puts[rel] = missing.encode("utf-8")
+        if manifest in puts:
+            created.append(manifest)
         if not puts:
             return None
         return write.StoreChange(
@@ -267,7 +276,23 @@ def _overlay_in_store(vault_root: Path) -> dict:
             },
         )
 
-    _commit_offline(vault_root, "exomem init --force", overlay)
+    def write_files() -> None:
+        for folder in folders:
+            folder.mkdir(parents=True, exist_ok=True)
+        for src, dest in copies:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            created.append(dest.relative_to(vault_root).as_posix())
+        for folder in _FOLDERS:
+            (kb / folder).mkdir(parents=True, exist_ok=True)
+        # The registry is a page: the store says whether the vault holds it, not its file.
+        registry = extension_registry_path(vault_root).relative_to(vault_root).as_posix()
+        if read.page_exists(vault_root, registry):
+            for definition in entity_registry.extensions.values():
+                if definition.status == "active":
+                    (kb / "Entities" / definition.folder).mkdir(parents=True, exist_ok=True)
+
+    _commit_offline(vault_root, "exomem init --force", overlay, then=write_files)
     return {"vault": str(vault_root), "kb": str(kb), "created": created}
 
 
@@ -303,7 +328,10 @@ def init_vault(
     from . import workflow_contracts
 
     workflow_contracts.ensure_migration_marker(vault_root)
-    for src, dest in _scaffold_plan(vault_root):
+    folders, files = _scaffold_plan(vault_root)
+    for folder in folders:
+        folder.mkdir(parents=True, exist_ok=True)
+    for src, dest in files:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and (not force or dest == kb / "Entities" / "index.md"):
             continue
