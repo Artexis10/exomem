@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.171.0](https://github.com/Artexis10/exomem/compare/v0.170.0...v0.171.0) (2026-11-11)
+
+
+### Features
+
+* **cloud:** purge a deleted cell's backups and media automatically ([#2658](https://github.com/Artexis10/exomem/issues/2658)) ([3ee42d3](https://github.com/Artexis10/exomem/commit/3ee42d31bbe3b96fbde108bbb8803b52cf0ff46e))
+* **cloud:** set each release's cell image with the cloud-deploy workflow ([#2724](https://github.com/Artexis10/exomem/issues/2724)) ([fe04fce](https://github.com/Artexis10/exomem/commit/fe04fcec5021c0f72f9bc83e41522d3ae36046e0))
+* **cloud:** upgrade windows, pinned attempts and rollout alerts for cells ([#2722](https://github.com/Artexis10/exomem/issues/2722)) ([36e51f3](https://github.com/Artexis10/exomem/commit/36e51f351b2f00d541db496ccc47adda5eb7d47b))
+* **collections:** list the rows that refer to each row through an inverse reference index ([#2695](https://github.com/Artexis10/exomem/issues/2695)) ([9688e74](https://github.com/Artexis10/exomem/commit/9688e74789f7449178eeed6eabe13a6441d3bb50))
+* **import:** import a folder by sending one archive over MCP ([#2710](https://github.com/Artexis10/exomem/issues/2710)) ([bf2220f](https://github.com/Artexis10/exomem/commit/bf2220f3a971a70dac198448b68cf6ee5f9e2887))
+* **language:** add belief units and the governed asserter, modality, event, quantity and inference keys ([#2642](https://github.com/Artexis10/exomem/issues/2642)) ([9937077](https://github.com/Artexis10/exomem/commit/99370776ae0880bcfc3e6196b0750f530ba9b584))
+* **language:** add epistemic dimensions as registry data, with a unit filter and report counts ([#2693](https://github.com/Artexis10/exomem/issues/2693)) ([cbc1238](https://github.com/Artexis10/exomem/commit/cbc12386e0efe86ae6c2bcdc3d22316875411ce2))
+* **language:** label kinds in any language and teach the language from the pack ([#2692](https://github.com/Artexis10/exomem/issues/2692)) ([f761f85](https://github.com/Artexis10/exomem/commit/f761f85903bfb37e82c4ffcffba72cf7e16b4314))
+* **language:** show a dimension's view in unit search and the context pack ([#2708](https://github.com/Artexis10/exomem/issues/2708)) ([3d33fab](https://github.com/Artexis10/exomem/commit/3d33fabd22416085b2f9eb31f038ade3fc8a5fbe))
+* **originals:** verify stored originals in the background and restore from a matching copy ([#2659](https://github.com/Artexis10/exomem/issues/2659)) ([d893dc6](https://github.com/Artexis10/exomem/commit/d893dc6460fd21f7f4515e17a5baf72806df68d5))
+* **query:** answer one question across collections through declared references ([#2669](https://github.com/Artexis10/exomem/issues/2669)) ([fb5c2f8](https://github.com/Artexis10/exomem/commit/fb5c2f89a8f18b615d97761efca9d6c670768111))
+* **read:** agents read and write body links as [[Title]] ([#2704](https://github.com/Artexis10/exomem/issues/2704)) ([54bf066](https://github.com/Artexis10/exomem/commit/54bf06623d8c634e7f376f6f4034573f7516ff14))
+* **search:** find values held only in a small preserved dataset ([#2678](https://github.com/Artexis10/exomem/issues/2678)) ([d671439](https://github.com/Artexis10/exomem/commit/d6714393af0745a2629876e9d1bb4235053cf9d3))
+* **spans:** count how often a span's thread waited, to tell GIL contention from one lock wait ([#2711](https://github.com/Artexis10/exomem/issues/2711)) ([96c5415](https://github.com/Artexis10/exomem/commit/96c5415b65bb4e43fbd9e6387f029688839391bf))
+* **tools:** name pages by title or short id in MCP calls and replies ([#2621](https://github.com/Artexis10/exomem/issues/2621)) ([b0015df](https://github.com/Artexis10/exomem/commit/b0015df34380b36bbf3b66cff2dd71582d619e9b))
+* **tools:** replace the agent tool surface with 23 typed tools and two doors ([#2677](https://github.com/Artexis10/exomem/issues/2677)) ([820b1c0](https://github.com/Artexis10/exomem/commit/820b1c0a6139dc64abbbd1766bdcc7fc9b9fd108))
+* **vault-store:** answer recall and governance reads from the store in store mode ([#2682](https://github.com/Artexis10/exomem/issues/2682)) ([ed02d62](https://github.com/Artexis10/exomem/commit/ed02d622db0979231606a3f6123bf927790bf2b4))
+* **vault-store:** derive media rows on the store thread and read media-store evictions as no outside change ([#2690](https://github.com/Artexis10/exomem/issues/2690)) ([3655faf](https://github.com/Artexis10/exomem/commit/3655faf3ca577bc4424047396765bd9dc03b4c74))
+* **vault-store:** import outside edits to a store-mode vault's files ([#2647](https://github.com/Artexis10/exomem/issues/2647)) ([d6e56a6](https://github.com/Artexis10/exomem/commit/d6e56a6dd74ebaae00805a73f5c3306acad6dcb3))
+* **vault-store:** move, recover and trash stored pages in one store transaction ([#2718](https://github.com/Artexis10/exomem/issues/2718)) ([3260ab6](https://github.com/Artexis10/exomem/commit/3260ab6dfde1d9a30d4fff3f77ad3a6f814357ed))
+* **vault-store:** order store-mode decisions and let the owner release a refused root ([#2686](https://github.com/Artexis10/exomem/issues/2686)) ([fa86069](https://github.com/Artexis10/exomem/commit/fa86069ec3d994ad2c96ee24709c7f5845904d81))
+* **vault-store:** read page bytes and registries from the store in store mode ([#2612](https://github.com/Artexis10/exomem/issues/2612)) ([357f63a](https://github.com/Artexis10/exomem/commit/357f63a0085d40ff8bb3dbca34e572740d606959))
+* **vault-store:** route deletes through the store and refuse the other bypass writers by name ([#2633](https://github.com/Artexis10/exomem/issues/2633)) ([cd32323](https://github.com/Artexis10/exomem/commit/cd32323195add8113f10334b855141cd3864bf4f))
+* **vault-store:** settle registry state in the background and mark a store-mode vault beside the vault ([#2648](https://github.com/Artexis10/exomem/issues/2648)) ([1479d04](https://github.com/Artexis10/exomem/commit/1479d04f0b4750d4a909b00c15a5e87f0975f4ba))
+
+
+### Bug Fixes
+
+* **activation:** give an activation no nearer deadline until the operator sets one ([#2685](https://github.com/Artexis10/exomem/issues/2685)) ([c4164f0](https://github.com/Artexis10/exomem/commit/c4164f0ac46d95cd4e5a5beb9e20ea74c45b0a0b))
+* **activation:** give each activation its own deadline and serve what it found when it arrives ([#2681](https://github.com/Artexis10/exomem/issues/2681)) ([0672eb4](https://github.com/Artexis10/exomem/commit/0672eb44de5165b09c4efec2c4abd237d6da2af2))
+* **activation:** leave task discovery its reserve inside the turn slice's deadline ([#2688](https://github.com/Artexis10/exomem/issues/2688)) ([7e67de8](https://github.com/Artexis10/exomem/commit/7e67de83ab7cc1a3cd0c300946e578bc4e4cbeda))
+* **adoption:** confirm a planned duplicate without the duplicate index ([#2649](https://github.com/Artexis10/exomem/issues/2649)) ([4a98900](https://github.com/Artexis10/exomem/commit/4a98900f2e99c565741876d30d9325a9e8814ead))
+* **bench:** move the MCP read latency gate and recall canary cases to the new tool surface ([#2705](https://github.com/Artexis10/exomem/issues/2705)) ([d132b2d](https://github.com/Artexis10/exomem/commit/d132b2d64fe4346678f18286c79f6e382b39a540))
+* **bench:** wait until a search is served before timing MCP reads ([#2702](https://github.com/Artexis10/exomem/issues/2702)) ([8566d52](https://github.com/Artexis10/exomem/commit/8566d521c5aabe719d5aaed84191d1765b875a7f))
+* **census:** stop refusing note writes while a held-filesystem probe runs ([#2654](https://github.com/Artexis10/exomem/issues/2654)) ([845aa3e](https://github.com/Artexis10/exomem/commit/845aa3e0211031399769e776adf9e06fc1d3b0eb))
+* **curation:** run each resume step instead of replaying the previous reply ([#2699](https://github.com/Artexis10/exomem/issues/2699)) ([87bb9e2](https://github.com/Artexis10/exomem/commit/87bb9e205ef42c1c1b5629190338cc5deb378566))
+* **episodes:** record and revise recaps in activated vaults ([#2713](https://github.com/Artexis10/exomem/issues/2713)) ([e814114](https://github.com/Artexis10/exomem/commit/e8141145b28efef1da1fa2d5f968596e12d2c075))
+* **export:** name the cause when a part upload is refused ([#2668](https://github.com/Artexis10/exomem/issues/2668)) ([e6cd5b5](https://github.com/Artexis10/exomem/commit/e6cd5b58c238cdfb3c53143b852c4887bd242a38))
+* **find:** stop the relations filter from revealing pages withheld from the caller ([#2703](https://github.com/Artexis10/exomem/issues/2703)) ([87761bf](https://github.com/Artexis10/exomem/commit/87761bff1a2162161362b9dc1e81e1b0580f734f))
+* **governance:** resolve a page title under the declared purpose ([#2716](https://github.com/Artexis10/exomem/issues/2716)) ([6ec2811](https://github.com/Artexis10/exomem/commit/6ec28115b47e6cef7dbe0246454d9847d6b1aef1))
+* **graph:** stop rebuilding a current graph for Records view rewrites, and cut rebuild writes ([#2676](https://github.com/Artexis10/exomem/issues/2676)) ([53375b1](https://github.com/Artexis10/exomem/commit/53375b1362ea0f8b7f7b935999048cb8fbb78e75))
+* **guidance:** correct a note when the user says its advice failed, and recall before advice ([#2641](https://github.com/Artexis10/exomem/issues/2641)) ([c560464](https://github.com/Artexis10/exomem/commit/c560464f2a6ac0b3c3006d224f6855ddb2a5cb94))
+* **import:** log one line, not a traceback, while the store refuses an import ([#2723](https://github.com/Artexis10/exomem/issues/2723)) ([a38b61b](https://github.com/Artexis10/exomem/commit/a38b61bcc31bca4e2888139e17719df24cdf4d8a))
+* **import:** pause an import batch when the writer coordinator is briefly unreachable ([#2687](https://github.com/Artexis10/exomem/issues/2687)) ([3505b11](https://github.com/Artexis10/exomem/commit/3505b11374e4743fbbd0f3eff3aeb5738d9f10db))
+* **import:** refuse in preview what start refuses, and let running jobs take turns ([#2646](https://github.com/Artexis10/exomem/issues/2646)) ([4487cce](https://github.com/Artexis10/exomem/commit/4487cce37743633febf1033d6e18a024e0e7aa94))
+* **imports:** lead import status with its message and restart the session backoff once the store answers ([#2680](https://github.com/Artexis10/exomem/issues/2680)) ([e4102bd](https://github.com/Artexis10/exomem/commit/e4102bd2109403f9fe47298c0a7cea1afad7d0d3))
+* **imports:** run an import job under its login, not one access token ([#2672](https://github.com/Artexis10/exomem/issues/2672)) ([be5b1be](https://github.com/Artexis10/exomem/commit/be5b1bec96ca616b487945889097cfc5a1ba2616))
+* **logging:** reopen the server log when another process rotates it ([#2663](https://github.com/Artexis10/exomem/issues/2663)) ([310f0cb](https://github.com/Artexis10/exomem/commit/310f0cb92e466b647b34beb85bde38b763e14922))
+* **media:** check export leftovers and report files changed in a landed window ([#2657](https://github.com/Artexis10/exomem/issues/2657)) ([83d6987](https://github.com/Artexis10/exomem/commit/83d6987d4e304d042aa6899f7bf7651298db9f77))
+* **media:** decode a JPEG saved under a raw extension instead of failing it ([#2662](https://github.com/Artexis10/exomem/issues/2662)) ([1145d9e](https://github.com/Artexis10/exomem/commit/1145d9e75a9e3500f35aaa37dc28ca07ad4cfc0d))
+* **media:** requeue a job parked for a missing module only once that module can be found ([#2660](https://github.com/Artexis10/exomem/issues/2660)) ([2a613e9](https://github.com/Artexis10/exomem/commit/2a613e92d1f157da28c76c19f515711d0b37811d))
+* **outcome:** run eval actors on API credits and record the billing source ([#2726](https://github.com/Artexis10/exomem/issues/2726)) ([339841e](https://github.com/Artexis10/exomem/commit/339841ef55dcacffd690886074459971c71fdfd0))
+* **pack:** decide the pack neighbourhood under the declared purpose ([#2712](https://github.com/Artexis10/exomem/issues/2712)) ([61193b9](https://github.com/Artexis10/exomem/commit/61193b929bc306a4796a8efcddaf3c27ac9fda8c))
+* **server:** freeze the startup heap before serving ([#2667](https://github.com/Artexis10/exomem/issues/2667)) ([44773d9](https://github.com/Artexis10/exomem/commit/44773d91126a8432dcad5b0a94221a0007938f35))
+* **vocabulary:** accept Source captures and their originals in activated vaults ([#2706](https://github.com/Artexis10/exomem/issues/2706)) ([b535db1](https://github.com/Artexis10/exomem/commit/b535db1a09aaa6eafcc3be64d678a89c02f06bb2))
+* **vocabulary:** harden the activated vocabulary gate ([#2715](https://github.com/Artexis10/exomem/issues/2715)) ([4f492af](https://github.com/Artexis10/exomem/commit/4f492afffe19365f135f4b3416f8ae3f9ead8c71))
+
+
+### Performance
+
+* **cli:** keep FastMCP, MCP and the auth-session store out of CLI start-up ([#2719](https://github.com/Artexis10/exomem/issues/2719)) ([bab5b46](https://github.com/Artexis10/exomem/commit/bab5b468c807514c01e2a64d8727de73da445020))
+* **due-state:** route a write's terms with one store request for the collections ([#2643](https://github.com/Artexis10/exomem/issues/2643)) ([ec831f7](https://github.com/Artexis10/exomem/commit/ec831f72530729239f1dd8e74bfa20c3026c70d9))
+* **lexstore:** check the request budget every 10,000 SQLite instructions, not every 1,000 ([#2714](https://github.com/Artexis10/exomem/issues/2714)) ([2dded22](https://github.com/Artexis10/exomem/commit/2dded225ada036b78197b46172df813cb510346f))
+
 ## [0.170.0](https://github.com/Artexis10/exomem/compare/v0.169.0...v0.170.0) (2026-11-09)
 
 

@@ -161,6 +161,18 @@ RENDER_DIGEST_APPLIED_AT_ANNOTATION = "exomem.io/render-digest-applied-at"
 # the live StatefulSet when this or the render digest differs from the row,
 # and such a pass never also records convergence.
 ROW_GENERATION_ANNOTATION = "exomem.io/row-generation"
+# automate-cloud-releases D4: an attempt's pinned target and its phase, inside the
+# upgrade hold.
+UPGRADE_TARGET_ANNOTATION = "exomem.io/upgrade-target"
+UPGRADE_PHASE_ANNOTATION = "exomem.io/upgrade-phase"
+# D4: the cell's upgrade window ("<hour> history" or "<hour> default"), its UTC
+# day, and when the cell first fell behind its target. They sit on the
+# StatefulSet's metadata, never its pod template, so writing them restarts no
+# pod, and the render digest leaves them out.
+UPGRADE_WINDOW_ANNOTATION = "exomem.io/upgrade-window"
+UPGRADE_WINDOW_AT_ANNOTATION = "exomem.io/upgrade-window-at"
+CANDIDATE_SINCE_ANNOTATION = "exomem.io/candidate-since"
+ROLLOUT_ANNOTATIONS = (UPGRADE_WINDOW_ANNOTATION, UPGRADE_WINDOW_AT_ANNOTATION, CANDIDATE_SINCE_ANNOTATION)
 
 
 def namespace_name(cell_id: str) -> str:
@@ -306,6 +318,12 @@ class CellManifestSpec:
     grow_storage_gib: int | None = None
     backup_family_request: str | None = None
     backup_family_size_bytes: int | None = None
+    upgrade_target: str | None = None
+    upgrade_phase: str | None = None
+    # D4: the window and candidate-since annotations, copied from the live
+    # object (or this pass's new values) into every render, because server-side
+    # apply drops an annotation its manager stops sending.
+    rollout_annotations: tuple[tuple[str, str], ...] = ()
 
     # D6/D8: the backup-retry-after backoff. Unlike the hold annotations
     # above, these must survive a hold ending, so render_statefulset writes
@@ -1040,6 +1058,11 @@ def render_statefulset(spec: CellManifestSpec) -> dict:
             annotations[BACKUP_OUTCOME_ANNOTATION] = spec.backup_outcome
         if spec.relocation_volume:
             annotations[RELOCATION_ANNOTATION] = spec.relocation_volume
+        if spec.upgrade_target:
+            annotations[UPGRADE_TARGET_ANNOTATION] = spec.upgrade_target
+        if spec.upgrade_phase:
+            annotations[UPGRADE_PHASE_ANNOTATION] = spec.upgrade_phase
+    annotations.update(spec.rollout_annotations)
 
     # D6/D8: the backup-retry-after backoff must survive a hold ending, so
     # it is written unconditionally rather than only inside the `if

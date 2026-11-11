@@ -42,4 +42,4 @@
 ## 6. Delivery
 
 - [x] 6.1 Give each closed state and cause value a one-line reason in code. Verify: the C6 gate passes, and the review names C4 as absent.
-- [ ] 6.2 After the release, sync the spec and archive this change with `openspec archive`. Verify: `openspec validate --all --strict` passes before and after.
+- [x] 6.2 After the release, sync the spec and archive this change with `openspec archive`. Verify: `openspec validate --all --strict` passes before and after. **Evidence:** merged as `d893dc646` (#2659), released in v0.171.0; archived by this closure, with strict validation passing before and after.

@@ -1,0 +1,10 @@
+# The hedges that a holder can put on a statement. A hedge is an open word, as a statement kind
+# is: adding one is a data change. Each word keeps its own meaning, and its description states
+# that meaning for the judge and for a surface bank. No code branches on a hedge, so a hedge
+# carries no closed attribute. `kind_tag.hedge` reads the word that a statement carries, and a
+# renderer carries it into the text. A statement without a hedge states its content without
+# doubt. An entry that grades sureness, such as `uncertainty.level-in-words`, adds its levels
+# here as further words.
+schema_version: 1
+hedges:
+  tentative: {description: "The holder gives the content and says that it may be wrong."}

@@ -21,7 +21,7 @@ phenomena:
   - {id: currency.temporary-override, stage: s2, says: "A temporary exception replaces a value for a stated period, and then the standing value returns."}
   - {id: currency.unchanged, stage: s1, twin_of: currency.value-update, probes: [stable], expect: [over_flags], says: "A fact is restated several times in new words and never changes."}
   # --- order ---
-  - {id: order.sequence, stage: s2, says: "Events must be put in the order they happened, not the order they were recorded.", from: [recon]}
+  - {id: order.sequence, stage: s2, probes: [state], says: "Events must be put in the order they happened, not the order they were recorded.", from: [recon]}
   - {id: order.as-of, stage: s2, says: "The question asks what held at a named past date.", from: [membench, veracium]}
   - {id: order.document-date-or-event-date, stage: s2, says: "A document carries its own date and describes an event of another date, and the question asks for one of the two.", from: [membench]}
   - {id: order.same-day, stage: s2, says: "Two records share a day, and only their recorded instants can order them.", from: [membench]}

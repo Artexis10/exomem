@@ -209,6 +209,7 @@ def register_health_routes(
     *,
     traffic_monitor=None,
     on_liveness: Callable[[], None] | None = None,
+    cell_traffic=None,
 ) -> Callable[[Request], Awaitable[JSONResponse]]:
     """Register the unauthenticated `/health` and `/health/ready` routes only.
 
@@ -216,7 +217,9 @@ def register_health_routes(
     cells (design D1.5), which register nothing else from this module: an
     Exomem Cloud cell registers only MCP, `/health` and `/health/ready`.
     Returns the `/health/ready` handler, which a Cloud cell also serves on its
-    health-only port (`cloud_health`).
+    health-only port (`cloud_health`). A Cloud cell passes its hourly counts
+    (`cell_traffic.CellTraffic`), and its `traffic` block then also reports the
+    MCP requests in flight and the newest request's age, never the history.
     """
     if traffic_monitor is None:
         traffic_monitor = runtime_readiness_module.get_silent_traffic_monitor()
@@ -387,6 +390,11 @@ def register_health_routes(
         # This probe's own counters, whichever proof answers it.
         if "traffic" in payload:
             payload["traffic"] = dict(traffic)
+        if cell_traffic is not None:
+            from . import cell_traffic as cell_traffic_module
+
+            payload["traffic"] = {**payload.get("traffic", {}), **cell_traffic.readiness_fields()}
+            cell_traffic_module.schedule_flush(cell_traffic)
         payload["proof_age_seconds"] = round(age, 3)
         status_code = 200 if payload["status"] == "ready" else 503
         return JSONResponse(

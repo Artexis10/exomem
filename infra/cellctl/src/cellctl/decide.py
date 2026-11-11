@@ -18,11 +18,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .backup_window import DEFAULT_BACKUP_WINDOW, within_backup_window
+from .barriers import Barrier
 from .capacity import GIB, pool_takes
 from .rollout import current_image, target_image
 from .state import (
     BACKUP_FAILED,
     BACKUP_OUTCOME_FAILED,
+    FORWARD_ONLY_HELD,
     GROWTH_AT_CAP,
     GROWTH_NO_ROOM,
     GROWTH_NOT_NEEDED,
@@ -35,6 +37,7 @@ from .state import (
     RELOCATION_NO_BACKUP,
     RESTORE_FAILED,
     SNAPSHOT_BACKUP,
+    UPGRADE_FORWARD_ONLY,
     UPGRADE_STALLED,
     VOLUME_MISSING,
     CellRow,
@@ -44,6 +47,7 @@ from .state import (
     row_hold_kind,
 )
 from .storage_config import DEFAULT_STORAGE, GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS, StorageConfig
+from .upgrade_window import WindowConfig
 
 _SNAPSHOT_ID_RE = re.compile(r"[0-9a-f]{64}")  # always fullmatch: `$` accepts a trailing newline
 
@@ -107,6 +111,12 @@ class ReconcileConfig:
     # move-cloud-cells-to-local-storage D4: relocations in flight at once,
     # after the owner's. Sized against the 4 h fleet RTO (design D4).
     relocation_concurrency: int = 4
+    # automate-cloud-releases D4: the upgrade windows (cellctl.upgradeWindow.*).
+    # main.py always builds it from the chart; None, or `enabled: false`, rolls
+    # every eligible cell at once, as before windows.
+    upgrade_window: WindowConfig | None = None
+    # D3: the chart's copy of the barrier file.
+    upgrade_barriers: tuple[Barrier, ...] = ()
 
 
 DEFAULT_RECONCILE_CONFIG = ReconcileConfig()
@@ -200,10 +210,15 @@ def decide(
     storage: StorageConfig = DEFAULT_STORAGE,
     start_relocation: bool = False,
     storage_room: StorageRoom | None = None,
+    crossing: bool = False,
+    canary: bool = False,
 ) -> Decision:
     """`refusal_parked` is reconcile.py's in-memory refusal park (D4): the
     row's last apply was refused for its current generation, render digest
-    and image, and its backoff has not passed."""
+    and image, and its backoff has not passed. `crossing` says that the
+    cell's upgrade attempt moves it across a one-way `cell` barrier
+    (automate-cloud-releases D3), so a readiness miss holds instead of restoring.
+    `canary` says that the row is the owner's cell, which goes first in a rollout."""
 
     if _identity_conflict(row, observation, storage):
         return Decision(
@@ -276,7 +291,7 @@ def decide(
             row, rollout, observation, now, config, cell_image, changes_live, storage, storage_room
         )
     elif active_hold == "upgrade":
-        decision = _continue_upgrade(row, rollout, observation, now, config, cell_image)
+        decision = _continue_upgrade(row, rollout, observation, now, config, cell_image, crossing, canary)
     elif active_hold == "backup":
         decision = _continue_backup(row, observation, now, config)
     elif active_hold == "restore":
@@ -538,6 +553,8 @@ def _start_upgrade(
     # D6 step 1: scale to 0 unconditionally to prepare for the pre-upgrade
     # backup, whatever the desired state -- unlike every later step in the
     # attempt, this one is not "the desired replicas", it is "stopped".
+    # automate-cloud-releases D4: the attempt pins its target here, and every
+    # later pass reads the pin, never cell_image.
     previous = current_image(row, observation)
     read_only = row.desired_state == "read_only"
     return Decision(
@@ -548,6 +565,7 @@ def _start_upgrade(
         hold_kind="upgrade",
         hold_started_at=now,
         previous_image=previous,
+        upgrade_target=target_image(row, cell_image),
         row_updates={
             "hold_kind": "upgrade",
             "hold_started_at": now,
@@ -562,7 +580,7 @@ def _restart_on_previous_image(
     previous_image: str | None,
     desired_replicas: int,
     read_only: bool,
-    error_code: str,
+    error_code: str | None,
     backup_retry_after: datetime | None = None,
     backup_retry_minutes: int | None = None,
     delete_backup_job: bool = False,
@@ -597,15 +615,32 @@ def _continue_upgrade(
     now: datetime,
     config: ReconcileConfig,
     cell_image: str | None,
+    crossing: bool = False,
+    canary: bool = False,
 ) -> Decision:
     hold_started_at = observation.statefulset_hold_started_at or row.hold_started_at or now
     previous_image = observation.statefulset_previous_image or row.observed_image
     # B1: the pre-upgrade snapshot is this attempt's own. A nightly snapshot
     # up to a day old must never stand in for it.
     snapshot = observation.statefulset_pre_upgrade_snapshot
-    target = target_image(row, cell_image)
+    # automate-cloud-releases D4: the attempt's pinned target, whatever cell_image
+    # became since it started.
+    # An attempt that a cellctl before the pin started carries none. Once its target is
+    # applied, the applied image is the target, and the attempt continues pinned to it.
+    target = observation.statefulset_upgrade_target
+    if target is None and observation.statefulset_target_applied_at is not None:
+        target = observation.statefulset_image
     read_only = row.desired_state == "read_only"
     desired_replicas = 0 if row.desired_state == "stopped" else 1
+
+    def hold(**fields: object) -> Decision:
+        return Decision(apply_manifests=True, read_only=read_only, hold_kind="upgrade",
+                        hold_started_at=hold_started_at, previous_image=previous_image,
+                        upgrade_target=target, **fields)
+
+    if observation.statefulset_upgrade_phase == FORWARD_ONLY_HELD:
+        return _forward_only_held(row, rollout, observation, now, cell_image, previous_image, read_only, hold,
+                                  canary)
 
     # D6 step 5: stall bound, independent of whether a backup is in progress.
     if observation.statefulset_target_applied_at is None and (now - hold_started_at) > config.upgrade_stall_bound:
@@ -616,6 +651,23 @@ def _continue_upgrade(
             read_only=read_only,
             error_code=UPGRADE_STALLED,
             pause=True,
+        )
+
+    # automate-cloud-releases D4: a pause ends every attempt that has not applied
+    # its pinned target. The cell restarts on its current image, and nothing is
+    # recorded as a failure: the rollout is paused for another cell's reason.
+    # An attempt with no pin and nothing applied ends the same way: cell_image may
+    # have moved past what the canary ran, and a new pinned attempt starts by the
+    # rollout rules.
+    if (rollout.paused and observation.statefulset_target_applied_at is None) or target is None:
+        return _restart_on_previous_image(
+            row,
+            previous_image=previous_image,
+            desired_replicas=desired_replicas,
+            read_only=read_only,
+            error_code=None,
+            delete_backup_job=True,
+            pause=False,
         )
 
     if snapshot is None:
@@ -650,14 +702,9 @@ def _continue_upgrade(
                 pause=False,
             )
         if observation.backup_job_succeeded and _valid_snapshot_id(observation.backup_job_snapshot_id):
-            return Decision(
-                apply_manifests=True,
+            return hold(
                 replicas=0,
-                read_only=read_only,
                 image=previous_image,
-                hold_kind="upgrade",
-                hold_started_at=hold_started_at,
-                previous_image=previous_image,
                 pre_upgrade_snapshot=observation.backup_job_snapshot_id,
                 clear_backup_retry_after=True,
                 # D6 step 2: a real backup, so it also records last_backup_*.
@@ -674,27 +721,8 @@ def _continue_upgrade(
         # would be mistaken for "still need to wait" and the StatefulSet
         # yanked back to replicas=0, forever. Found live in 3.10.
         if observation.pod_uses_volume:
-            return Decision(
-                apply_manifests=True,
-                replicas=0,
-                read_only=read_only,
-                image=previous_image,
-                hold_kind="upgrade",
-                hold_started_at=hold_started_at,
-                previous_image=previous_image,
-                row_updates={"observed_state": "stopping"},
-            )
-        return Decision(
-            apply_manifests=True,
-            replicas=0,
-            read_only=read_only,
-            image=previous_image,
-            hold_kind="upgrade",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
-            run_backup_job=True,
-            row_updates={"observed_state": "stopping"},
-        )
+            return hold(replicas=0, image=previous_image, row_updates={"observed_state": "stopping"})
+        return hold(replicas=0, image=previous_image, run_backup_job=True, row_updates={"observed_state": "stopping"})
 
     # Step 3: apply the target with 1 replica, whatever the desired state
     # (D4 "Holds honour the desired state"), so an attempt is never declared
@@ -703,14 +731,9 @@ def _continue_upgrade(
     # sees the apply's own result, only what the NEXT observation shows.
     target_applied = observation.statefulset_image == target and (observation.statefulset_replicas or 0) == 1
     if not target_applied:
-        return Decision(
-            apply_manifests=True,
+        return hold(
             replicas=1,
-            read_only=read_only,
             image=target,
-            hold_kind="upgrade",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
             pre_upgrade_snapshot=snapshot,
             target_applied_at=now,
             row_updates={"observed_state": "provisioning"},
@@ -721,6 +744,19 @@ def _continue_upgrade(
         # actually applied, not from the hold's start, because the backup
         # can take most of the backup deadline on its own.
         deadline_anchor = observation.statefulset_target_applied_at or hold_started_at
+        if (now - deadline_anchor) > config.upgrade_ready_deadline and crossing:
+            # automate-cloud-releases D3: the target may have changed state that
+            # the previous image cannot read, so the cell stays stopped under its
+            # upgrade hold, keeps the attempt's restore point, and waits for a person.
+            return hold(
+                replicas=0,
+                image=target,
+                pre_upgrade_snapshot=snapshot,
+                target_applied_at=observation.statefulset_target_applied_at,
+                upgrade_phase=FORWARD_ONLY_HELD,
+                row_updates={"observed_state": "stopping", "last_error_code": UPGRADE_FORWARD_ONLY},
+                rollout_updates={"paused": True, "error_code": UPGRADE_FORWARD_ONLY, "held_cell_id": row.cell_id},
+            )
         if (now - deadline_anchor) > config.upgrade_ready_deadline:
             return Decision(
                 apply_manifests=True,
@@ -741,14 +777,9 @@ def _continue_upgrade(
                     "held_cell_id": row.cell_id,
                 },
             )
-        return Decision(
-            apply_manifests=True,
+        return hold(
             replicas=1,
-            read_only=read_only,
             image=target,
-            hold_kind="upgrade",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
             pre_upgrade_snapshot=snapshot,
             target_applied_at=observation.statefulset_target_applied_at,
             row_updates={"observed_state": "provisioning"},
@@ -771,6 +802,57 @@ def _continue_upgrade(
         hold_kind=None,
         row_updates={"hold_kind": None, "hold_started_at": None, "last_error_code": None},
         rollout_updates=rollout_updates,
+    )
+
+
+def _forward_only_held(
+    row: CellRow,
+    rollout: RolloutRow,
+    observation: ClusterObservation,
+    now: datetime,
+    cell_image: str | None,
+    previous_image: str | None,
+    read_only: bool,
+    hold,
+    canary: bool,
+) -> Decision:
+    """automate-cloud-releases D3: the forward-only hold. While the rollout stays
+    paused, the cell stays stopped on its failed target, with the attempt's restore
+    point kept, and no target is applied again. Only a person's clear of the pause
+    ends it: one new attempt then starts. It keeps the pre-attempt image as its
+    previous image, so it crosses again and a second miss holds again.
+
+    The canary's new attempt goes toward its current target. Any other cell keeps the
+    canary-first rule: it goes toward its own desired_image when a person set one, and
+    otherwise retries its pinned target, which the canary ran before the attempt began.
+    It never takes a cell_image that the canary has not run. Waiting for the canary
+    instead would deadlock, because the held cell owns the only attempt slot."""
+
+    if canary:
+        resumed_target = target_image(row, cell_image)
+    else:
+        resumed_target = row.desired_image or observation.statefulset_upgrade_target or observation.statefulset_image
+
+    if rollout.paused:
+        return hold(
+            replicas=0,
+            image=observation.statefulset_image,
+            pre_upgrade_snapshot=observation.statefulset_pre_upgrade_snapshot,
+            target_applied_at=observation.statefulset_target_applied_at,
+            upgrade_phase=FORWARD_ONLY_HELD,
+            row_updates={"observed_state": "stopped"},
+        )
+    return Decision(
+        apply_manifests=True,
+        replicas=0,
+        read_only=read_only,
+        image=observation.statefulset_image,
+        hold_kind="upgrade",
+        hold_started_at=now,
+        previous_image=previous_image,
+        upgrade_target=resumed_target,
+        row_updates={"hold_kind": "upgrade", "hold_started_at": now, "observed_state": "stopping",
+                     "last_error_code": None},
     )
 
 

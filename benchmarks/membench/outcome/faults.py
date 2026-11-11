@@ -7,8 +7,8 @@ one voids a unit. The evidence is:
 
 - the CLI exited before it answered;
 - the CLI never sent an ``init`` event, or its transcript is missing or empty;
-- an ``init`` event shows a model other than the one requested (a fallback), an API key as the
-  credential source, or an Exomem server that is not ``connected``;
+- an ``init`` event shows a model other than the one requested (a fallback), a credential source
+  other than the one the run declared (``billing``), or an Exomem server that is not ``connected``;
 - the CLI reports the subscription limit as rejected (``LimitRejected``).
 
 The ``init`` event arrives on every user turn, so each one is checked, not only the first.
@@ -27,6 +27,8 @@ from collections.abc import Callable, Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from . import billing
+
 RETRIES = 2
 #: f35 held-out: the orderings of the decision schedule, in the order they are added (PREREGISTRATION
 #: section 7, sequence 10). The decision plays the first. It adds the next ones, in this order, only
@@ -36,8 +38,6 @@ HELDOUT_RUN_INDEXES = (1, 2, 3)
 REPLACEMENT_RUN = 4
 #: f36 and f37: more struck units than this voids the decision. f35 voids it at a second voided run.
 STRIKE_LIMIT = 2
-#: The credential source a subscription session reports. Any other value means the session used an API key.
-SUBSCRIPTION_KEY_SOURCE = "none"
 #: Where a run keeps the folder of a unit that started and never finished, once the unit is replayed.
 PARKED_DIR = "unfinished"
 
@@ -104,12 +104,19 @@ def replayed(run_dir: Path, unit: str) -> list[dict]:
 
 
 def init_faults(init: dict, *, model: str, exomem: bool) -> list[str]:
-    """What one ``init`` event shows about the session's own set-up."""
+    """What one ``init`` event shows about the session's own set-up.
+
+    The credential source must be the one the run declared (see ``billing``).
+    """
     faults = []
     if init.get("model") != model:
         faults.append(f"the CLI reported model {init.get('model')!r}, not the requested {model!r}")
-    if init.get("apiKeySource") != SUBSCRIPTION_KEY_SOURCE:
-        faults.append(f"the CLI reported credential source {init.get('apiKeySource')!r}")
+    declared = billing.declared()
+    if init.get("apiKeySource") != billing.KEY_SOURCES[declared]:
+        faults.append(
+            f"the CLI reported credential source {init.get('apiKeySource')!r}, "
+            f"not the declared {declared} ({billing.KEY_SOURCES[declared]!r})"
+        )
     if exomem:
         servers = {s.get("name"): s.get("status") for s in init.get("mcp_servers") or []}
         if servers.get("exomem") != "connected":

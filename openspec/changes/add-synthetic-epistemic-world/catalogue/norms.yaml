@@ -16,7 +16,7 @@ norms:
   audience-rule: {basis: stated, description: "A document states who may see a fact, or records a deletion request."}
   stated-volatility: {basis: stated, description: "A document states how long an observation of an attribute stays valid."}
   later-replaces: {basis: background, description: "A later asserted statement by the same holder about the same attribute replaces the earlier one."}
-  defeated-supports-nothing: {basis: background, description: "A withdrawn or defeated statement supports nothing while the withdrawal or the defeater stands."}
+  defeated-supports-nothing: {basis: background, description: "A withdrawn, replaced or defeated statement supports nothing while the withdrawal, the replacement or the defeater stands."}
   one-origin-one-support: {basis: background, description: "Statements that trace to one origin count as one support."}
   unsettled-stays-open: {basis: background, description: "A disagreement that no stated rule and no later record settles stays open."}
   kind-is-kept: {basis: background, description: "A statement keeps its kind, its modality and its hedge until another statement changes them."}

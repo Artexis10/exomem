@@ -3,7 +3,7 @@ schema_version: 2
 phenomena:
   # --- provenance ---
   - {id: provenance.primary-over-secondary, stage: s1, truth: [state_fold, warrant_graph], norms: [stated-precedence], probes: [state, act, trace], expect: [uses_current, cites_source], says: "Two sources disagree, and a stated rule names one of them as the primary record.", from: [f38]}
-  - {id: provenance.origin-recall, stage: s1, says: "The question asks which document a stored fact came from.", from: [f38, prov]}
+  - {id: provenance.origin-recall, stage: s1, probes: [trace], says: "The question asks which document a stored fact came from.", from: [f38, prov]}
   - {id: provenance.evidence-and-conclusion, stage: s2, says: "The raw record and the conclusion drawn from it stay two distinct things.", from: [esb]}
   - {id: provenance.chain, stage: s2, says: "A claim reached the record through several hands, and the chain is rebuilt in order.", from: [recon, prov]}
   - {id: provenance.transitive-citation, stage: s2, says: "One document cites a second, which cites a third, and the third is the support.", from: [membench]}

@@ -170,11 +170,17 @@ def test_the_cell_alert_thresholds_load_from_the_environment_the_chart_renders(m
     monkeypatch.setenv("CELLCTL_PENDING_OPERATION_WARN_SECONDS", "1234")
     monkeypatch.setenv("CELLCTL_PVC_RESERVED_FREE_BYTES", "2147483648")
     monkeypatch.setenv("CELLCTL_RECALL_LAG_WARN_SECONDS", "600")
+    monkeypatch.setenv("CELLCTL_ROLLOUT_HELD_WARN_SECONDS", "700")
+    monkeypatch.setenv("CELLCTL_ROLLOUT_STALLED_WARN_SECONDS", "800")
+    monkeypatch.setenv("CELLCTL_CANARY_WAIT_WARN_SECONDS", "900")
 
     assert main.build_cluster_config().alert_thresholds == AlertThresholds(
         unavailable_after=timedelta(seconds=1234),
         disk_free_floor_bytes=2 * 1024**3,
         recall_lag_after=timedelta(seconds=600),
+        rollout_held_after=timedelta(seconds=700),
+        rollout_stalled_after=timedelta(seconds=800),
+        canary_wait_after=timedelta(seconds=900),
     )
 
 
@@ -220,3 +226,40 @@ def test_unusable_retention_configuration_stays_evidence_without_blocking_startu
     _settings_env(monkeypatch, {})
     monkeypatch.setenv("CELLCTL_KEY_RETENTION_SOURCES", raw)
     assert main.build_cluster_config().key_retention_sources
+
+
+@pytest.mark.parametrize("name", [
+    "CELLCTL_UPGRADE_WINDOW_ENABLED", "CELLCTL_UPGRADE_WINDOW_LOOKBACK_DAYS", "CELLCTL_UPGRADE_WINDOW_MIN_COVERAGE",
+    "CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START", "CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_END",
+    "CELLCTL_UPGRADE_WINDOW_IDLE_MINUTES", "CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES", "CELLCTL_UPGRADE_BARRIERS",
+])
+def test_cellctl_refuses_to_start_without_an_upgrade_window_value(monkeypatch, name: str) -> None:
+    # automate-cloud-releases D4/D3: catches a deploy that silently runs without
+    # windows, or without the barriers that hold a one-way attempt.
+    monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")
+    main.build_reconcile_config()
+    monkeypatch.delenv(name)
+
+    with pytest.raises(ValueError, match=name):
+        main.build_reconcile_config()
+
+
+def test_cellctl_refuses_a_default_range_that_overlaps_the_backup_window(monkeypatch) -> None:
+    # Catches a configuration that rolls unmeasured cells during the stopped nightly backups.
+    monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")
+    monkeypatch.setenv("CELLCTL_BACKUP_WINDOW", "2-5")
+    monkeypatch.setenv("CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START", "4")
+
+    with pytest.raises(ValueError, match="backup window"):
+        main.build_reconcile_config()
+
+
+@pytest.mark.parametrize("name", [
+    "CELLCTL_ROLLOUT_HELD_WARN_SECONDS", "CELLCTL_ROLLOUT_STALLED_WARN_SECONDS", "CELLCTL_CANARY_WAIT_WARN_SECONDS",
+])
+def test_cellctl_refuses_to_start_without_a_rollout_alert_threshold(monkeypatch, name: str) -> None:
+    # automate-cloud-releases D8: catches a deploy whose rollout alerts are silently off.
+    monkeypatch.delenv(name)
+
+    with pytest.raises(ValueError, match=name):
+        main.build_alert_thresholds()

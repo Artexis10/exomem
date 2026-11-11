@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
-# The cell's health-only listener: `GET /health/ready` and nothing else, on the
-# port that the cell reads from CELL_HEALTH_PORT_ENV. cellctl derives every cell
-# bearer, so it reads readiness here and never on the cell port.
+# The cell's health-only listener: `GET /health/ready` and `GET
+# /health/traffic-history` and nothing else, on the port that the cell reads
+# from CELL_HEALTH_PORT_ENV. cellctl derives every cell bearer, so it reads
+# readiness and the hourly counts here and never on the cell port.
 CELL_HEALTH_PORT = 8766
 CELL_HEALTH_PORT_ENV = "EXOMEM_CLOUD_HEALTH_PORT"
 CELL_READINESS_PATH = "/health/ready"
+# automate-cloud-releases D4: the cell's hourly request counts and observed seconds.
+CELL_TRAFFIC_HISTORY_PATH = "/health/traffic-history"
 # `retrieval.state` values of that answer, a closed protocol set; any other value is unread.
 RECALL_READY = "ready"
 RECALL_LAGGING = "lagging"
@@ -82,3 +85,60 @@ def originals_verdict(body: bytes) -> bool | None:
     if isinstance(unresolved, bool) or not isinstance(unresolved, int) or unresolved < 0:
         return None
     return unresolved > 0
+
+
+def _payload(body: bytes) -> dict | None:
+    try:
+        payload = json.loads(body)
+    # RecursionError: a cell's answer is not trusted, and deep nesting must not take the pass down.
+    except (ValueError, RecursionError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _count(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def traffic_idle(body: bytes) -> tuple[int, float | None] | None:
+    """The readiness `traffic` block's `inflight` and `last_request_age_seconds`, or
+    None when either cannot be read. The age is None when the cell has handled no MCP
+    request since it started. The body is never logged."""
+
+    payload = _payload(body)
+    traffic = payload.get("traffic") if payload is not None else None
+    if not isinstance(traffic, dict) or not _count(traffic.get("inflight")) or "last_request_age_seconds" not in traffic:
+        return None
+    age = traffic["last_request_age_seconds"]
+    if age is None:
+        return traffic["inflight"], None
+    if isinstance(age, bool) or not isinstance(age, int | float) or (isinstance(age, float) and not math.isfinite(age)):
+        return None
+    return traffic["inflight"], float(age)
+
+
+def traffic_history(body: bytes) -> tuple[int, datetime, tuple[int, ...], tuple[int, ...]] | None:
+    """The `/health/traffic-history` answer as (retention_hours, first bucket's UTC hour,
+    request counts, observed seconds), or None when it cannot be read."""
+
+    payload = _payload(body)
+    if payload is None:
+        return None
+    retention = payload.get("retention_hours")
+    requests = payload.get("requests")
+    seconds = payload.get("observed_seconds")
+    first_raw = payload.get("first_hour")
+    if not (_count(retention) and retention > 0 and isinstance(requests, list) and isinstance(seconds, list)
+            and len(requests) == len(seconds) and isinstance(first_raw, str)):
+        return None
+    if not all(_count(value) for value in requests) or not all(_count(value) for value in seconds):
+        return None
+    try:
+        first = datetime.fromisoformat(first_raw.replace("Z", "+00:00"))
+        if first.tzinfo is None:
+            return None
+        first = first.astimezone(UTC)
+    # OverflowError: an offset that moves the last calendar hour past year 9999.
+    except (ValueError, OverflowError):
+        return None
+    return retention, first, tuple(requests), tuple(seconds)

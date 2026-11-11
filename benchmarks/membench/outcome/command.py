@@ -10,13 +10,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 
-from . import gate, record
+from . import billing, gate, record
 from .faults import HELDOUT_RUN_INDEXES, REPLACEMENT_RUN, LimitRejected, park, replayed, run_pool
 from .isolation import ACTOR_EFFORT, ACTOR_MODEL
 from .judging import DECISION_JUDGE, DEFAULT_MODELS, JudgeSpec, read_rows, write_sample
@@ -128,7 +129,10 @@ def write_record(run_dir: Path, entry: dict) -> dict:
     if path.exists():
         have = json.loads(path.read_text())
         record.require_same_run(
-            path, have, entry, ("suite", "split", "model", "effort", "limit", *record.IDENTITY_KEYS)
+            path,
+            have,
+            entry,
+            ("suite", "split", "model", "effort", "limit", "billing", *record.IDENTITY_KEYS),
         )
         order = suite_arms(entry["suite"])
         entry = {
@@ -363,6 +367,8 @@ def run_suite(
     indexes = (
         [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
     )
+    # Refuses a credits declaration without a key before the record or any session exists.
+    billing.require_billing_env(os.environ)
     run_dir = runs_dir() / run_id
     write_record(
         run_dir,
@@ -375,6 +381,8 @@ def run_suite(
             "limit": limit,
             "model": model,
             "effort": effort,
+            # The billing source every session of this run must report (``billing.py``).
+            "billing": billing.declared(),
             "gate": verdict,
             **record.checkout_state(),
             "cli": record.cli_version(),
@@ -481,7 +489,9 @@ def report_suite(
                     for entry in replayed(runs_dir() / run_id, "matter")
                 ]
             }
-    built["actor"] = record.run_identity(*(runs_dir() / r for r in run_ids))
+    run_dirs = [runs_dir() / r for r in run_ids]
+    built["actor"] = record.run_identity(*run_dirs)
+    built["billing"] = {"declared": stored.get("billing"), "observed": built["actor"]["billing"]}
     return built
 
 
@@ -513,7 +523,11 @@ def rejudge_sample(suite: str, run_id: str, primary: JudgeSpec, spec: JudgeSpec,
 
 def summary(report: dict) -> list[str]:
     """One line per paired measure and per arm's units, then the decision when the report has one."""
-    lines = []
+    # Billing leads: a run whose sessions were billed otherwise than declared changes how every figure reads.
+    stated = report.get("billing") or {}
+    lines = [billing.line(stated.get("declared"), stated.get("observed") or [])]
+    if inferred := billing.judge_line(report.get("judge")):
+        lines.append(inferred)
     if report.get("suite") == "epistemic":
         from .epistemic.report import summary_lines
 
@@ -626,7 +640,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
             f"add --judge {DECISION_JUDGE[0]}. Other judges serve development rounds only"
         )
     built = report_suite(args.suite, [args.run_id], spec, jobs=args.jobs)
-    built["run"] = {k: stored.get(k) for k in ("model", "effort", "arms", "seeds", "gate")}
+    built["run"] = {
+        k: stored.get(k) for k in ("model", "effort", "billing", "arms", "seeds", "gate")
+    }
     stamped = gate.stamp(built, stored)
     target = run_dir / (f"report-{spec.backend}.json" if spec else "report.json")
     target.write_text(json.dumps(stamped, indent=2))
@@ -662,7 +678,9 @@ def _cmd_panel(args: argparse.Namespace) -> int:
 
 def register(sub) -> None:
     """Add the ``outcome`` group to the ``membench`` command line."""
-    group = sub.add_parser("outcome", help="outcome evaluations on subscription actors")
+    group = sub.add_parser(
+        "outcome", help="outcome evaluations on subscription or API-credit actors"
+    )
     commands = group.add_subparsers(dest="outcome_command", required=True)
 
     p_fetch = commands.add_parser(

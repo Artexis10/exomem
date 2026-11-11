@@ -18,7 +18,7 @@ Three earlier lessons bind this design.
 **Goals:**
 
 - One catalogue that can hold hundreds of epistemic phenomena, with a structure that does not change as it grows.
-- Every key derived in code from a generated world, for every phenomenon the catalogue marks as computable.
+- Every key derived in code from the evidence layer of a generated world, for every phenomenon the catalogue marks as computable.
 - A world whose documents carry their statements implicitly and messily, with the truth still known.
 - A reading that shows how far each arm sits from a floor and a ceiling, and how often it raises a false alarm.
 - Slices that are each useful alone. The first one gives f38 a generated development project beside its hand-written one.
@@ -83,10 +83,10 @@ The oracle never reads the generator's own model of events. `causal_model` and `
 
 This is the shipped vocabulary's rule, applied to the benchmark: open words, closed behaviours.
 
-- **Open:** phenomena, families, behaviours, norms, statement kinds, recipes, domain packs, surface forms and bridges. Each is a YAML entry. Adding one is a data change.
-- **Closed:** truth mechanisms and their readings, world operations, rule shapes, role kinds, key parts, key classes, probe forms, implicitness levels, volatility classes, scorers and dials (`catalogue/attributes.yaml`). Code implements each member. Adding one is a code change and a schema change.
+- **Open:** phenomena, families, behaviours, norms, statement kinds, hedges, recipes, domain packs, surface forms and bridges. Each is a YAML entry. Adding one is a data change. An open word carries a closed attribute only where code reads one, as a statement kind carries its commitment.
+- **Closed:** every set in `catalogue/attributes.yaml`. These include truth mechanisms and their readings, world operations, rule shapes, role kinds, key parts, key classes, probe forms, statement bases, commitments, defeat modes, implicitness levels, volatility classes, scorers and dials. Code implements each member. Adding one is a code change and a schema change.
 
-Code never branches on a phenomenon id, a family key, a behaviour key or a norm key. A phenomenon is a composition of closed parts. The 512 entries need 13 pipeline mechanisms, 14 probe forms and 18 world operations.
+Code never branches on a phenomenon id, a family key, a behaviour key or a norm key. A phenomenon is a composition of closed parts. The 512 entries need 13 pipeline mechanisms, 14 probe forms and 16 world operations.
 
 **A recipe is data.** `catalogue/recipes.yaml` holds one recipe for each buildable phenomenon. A recipe holds no condition, no loop and no expression.
 
@@ -115,15 +115,21 @@ currency.reversal:
 
 **Several mechanisms apply in one fixed order.** 214 entries name two or three mechanisms. An entry lists them as a set, and `pipeline_order` fixes the order in which they apply. Each mechanism narrows or annotates the statements that the later ones read. The recipe then names the one reading that is the key. In `entities.who-to-ask`, a later statement uses an entity's short name. `identity_map` resolves that name first. `state_fold` then folds both statements about the duty, and the key is `state_fold.current`.
 
-**What the first recipes showed.** This change ships 21 worked recipes. They cover the nine realms and all 13 pipeline mechanisms, and seven of them belong to slice 1.
+**What the desk-check showed.** Slice 1 started with a desk-check, before any code. This change now ships 46 recipes: the 26 that slice 1 needs, and 20 for later slices, at least two in each realm. 21 came with the first catalogue, and the desk-check of 2026-11-11 wrote 25. A scratch check, which is no part of the repository, found that every recipe names only declared closed values.
 
-- The closed sets were drafted first. Writing the recipes then added four readings and three operation arguments, and removed one rule shape. It added no mechanism and no operation.
-- They use 12 of the 18 operations. The other six (`correct`, `end`, `merge`, `split`, `omit`, `remove`) serve entries that have no recipe yet.
-- Slice 1 starts with a desk-check, before any code: the 26 recipes that slice 1 needs, and 20 recipes for later slices across the nine realms. 21 of those 46 exist. Each unused operation must find a recipe there or leave the set.
+- **The falsifier did not fire.** No recipe of the 46 needed a new mechanism or a new operation. The limit was a quarter of them.
+- **One closed value was forced.** `correction.user-correction` and `self.earlier-session` need the holder whom the actor works for, so `user` is a ninth role kind. `deception.injected-instruction` now binds its owner to it. `uncertainty.hedged-claim` needs a word for the `hedge` argument. No code branches on a hedge, so `hedges.yaml` holds hedges as open words, as statement kinds are. A statement without a hedge states its content without doubt. The 25 recipes added no reading and no argument. The first 21 had added four readings and three operation arguments, and had removed one rule shape.
+- **Two operations left the set.** The recipes use 16 of the 18 operations. `omit` duplicated a `state` step that applies in one world only. `split` found no recipe among the 46, and it returns with the recipe of `identity.split`, as a code change and a schema change. `correct`, `end`, `merge` and `remove` each found a recipe.
+- **Five meanings were sharpened, with no new value.** A statement of a kind that commits its holder to nothing does not count for `corpus_closure.recorded`. A `correct` step replaces a statement's content for the whole period that it covers, and `state_fold.replaced` holds the content that it replaced. A replaced statement supports nothing, as a withdrawn or defeated one does. `kind_tag.kind` and `holder_ledger.holder` each say which of several statements decides.
+- **Every recipe now keys every probe form that its entry declares.** Five recipes left a form unkeyed: `order.sequence`, `argument.rebuttal` and `calibration.known-chance`, and the twin parts of `propagation.dependent-update` and `deception.injected-instruction`. Two of them gained a key, and three entries lost a form. Six of the new recipes also changed their entry's forms, where the family's default asks a question that the phenomenon does not raise: five dropped a form, and `uncertainty.hedged-claim` asks `act` in place of `abstain`.
+- **Six entries named the wrong norms.** Three propagation recipes rest on support edges and on no stated rule. `scope.one-client` rests on a scoped decision and on no stated rule. `quantity.missing-term` rests on a stated dependency that its entry did not name. `machine.gap-not-zero` rests on absence and volatility, and its family's default names neither.
+- **A role trap can be right in the mutation world.** A trap such as "done" is the content that the plant leaves unestablished. Where the phenomenon is left out, a result may assert that content, and then it is no error. Decision 3 therefore drops a role trap from the key of a thread planted in the mutation world, but only where a statement that asserts and stands carries the role there. A role that only a hypothesis or a defeated statement carries stays a trap. The mutation check keeps every role trap that a statement carries.
+- **Still unexercised.** No recipe keys the probe form `as_of`. No recipe uses the rule shapes `implies` and `volatility`, or the arguments `set.scope`, `restrict.until` and `copy.altered`. 18 of the 52 pipeline readings are never read. `identity.alias` has no `twin` part, so its twin entry `identity.homonym` has no key yet, and the loader names it. The desk-check removed operations only, as this decision asks.
+- **What it does not show.** No recipe has been planted, so no key has met the mutation, invariance and uniqueness checks. `identity.rename` and `identity.alias` key the referent of the new name. A task that needs a fact filed under the other name has no key yet, because a key cannot say which name the probe uses.
 
 - **Rejected: one template function per phenomenon.** That is membench today. It puts vocabulary in code and does not reach hundreds of entries.
 - **Rejected: a rule language in the catalogue.** Data that defines its own truth rules turns a vocabulary into a programming language. The epistemic-language design rejected the same move. A recipe with conditions would be that language under another name, so the recipe form has none.
-- **What would change this:** more than a quarter of the 46 desk-checked recipes needing a new mechanism or a new operation. Then the closed sets are wrong, and the catalogue's structure does not hold. The desk-check reports new readings and arguments beside that number.
+- **What would change this:** more than a quarter of the 46 desk-checked recipes needing a new mechanism or a new operation. Then the closed sets are wrong, and the catalogue's structure does not hold. The desk-check found none in 46. The first family of each later slice repeats the reading, because 26 of the 46 belong to slice 1.
 
 ### 3. One coherent world, with planted threads that do not interfere
 
@@ -135,8 +141,8 @@ A world has a backbone and threads.
 
 **Each thread has two worlds.** A recipe step may apply in the planted world only, or in the mutation world only. The mutation world is the thread with its phenomenon left out. It has three uses.
 
-- **The mutation check.** A probe depends on its plant when its value differs between the two worlds. It also does when it has a trap in the planted world and none in the mutation world. A probe that meets neither condition is refused. An abstention probe meets the first condition: its mutation world holds the statement that answers it.
-- **Twins at no authoring cost.** The `twins` dial sets the share of a family's threads that the planner plants in the mutation world. They ask the same probe forms, and the right answer reports no change, no conflict and no doubt.
+- **The mutation check.** A probe depends on its plant when its value differs between the two worlds. It also does when it has a trap in the planted world and none in the mutation world. The check reads each world's key under the carry rule of `recipes.yaml`: a role counts as a trap in a world where a statement of the thread carries it. It never drops a role trap by the rule for twins below, because a trap dropped there would hide a probe whose plant changes nothing. A probe that meets neither condition is refused. An abstention probe meets the first condition: its mutation world holds the statement that answers it.
+- **Twins at no authoring cost.** The `twins` dial sets the share of a family's threads that the planner plants in the mutation world. They ask the same probe forms, and the right answer reports none of the change, conflict or doubt that the phenomenon plants. A recipe's mutation world must therefore leave none of it: `uncertainty.competing-explanations` asserts its first explanation there. The key of such a thread keeps its reading traps. It drops a role trap only where a statement that carries the role asserts and stands there: its kind has the commitment `asserted`, and nothing withdraws, replaces or defeats it. That content is then no error. A role that only a proposed, reported or defeated statement carries stays a trap, because giving it as established stays wrong.
 - **Near-miss twins.** A declared twin entry may instead key a case that the plant does not touch. `scope.general-rule-applies` keeps the exception planted and asks about a case outside it.
 
 Compound threads, which combine two phenomena on purpose, come in slice 4 and declare both.
@@ -294,8 +300,8 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 
 **f38 changes in four places.** Its case check refuses what a generated project needs. Task 1.3 agrees these changes with the change that owns the suite.
 
-1. **Behaviours come from the registry.** f38's judge rates six behaviours from a code constant, and its case check refuses any other. The catalogue names 21, and 15 occur in slice 1. The judge and the case check will read `behaviours.yaml`, whose first six entries are f38's own. That retires the constant.
-2. **A premise is keyed apart from a trap.** A premise probe's task must presuppose the stale or false state. The key holds that state in `premise`. The case check requires the premise in the task, and applies the leak rule to the value, the accepted forms and the traps only.
+1. **Behaviours come from the registry.** f38's judge rates six behaviours from a code constant, and its case check refuses any other. The catalogue names 21, and 15 occur in slice 1. The judge and the case check will read `behaviours.yaml`, whose first six entries are f38's own. That retires the constant. The judge's schema for a probe holds only the behaviours that the probe's key names, plus `trusts_stale` on every probe that is not a stable probe. A stable probe keeps today's exclusion (`behaviours_asked` in `judge.py`), so task 4.1 changes no report. The schema requires every behaviour that it lists on every verdict, and the report reads only those.
+2. **A premise is keyed apart from a trap.** A premise probe's task must presuppose the stale or false state. The key holds that state in `premise`. The case check requires the premise in the task, and applies the leak rule to the value, the accepted forms and the traps only. The judge sees the premise beside the value and the traps, and rates an answer that relies on the premise as `trusts_stale`. f38's judge sees a value, accepted forms, a rubric and one trap today.
 3. **A key holds a list of traps.** A value that changed three times has two traps. A hand-written project's single trap reads as a list of one.
 4. **A key names its reading.** The memory-needed gate skips a probe that is read as harm.
 
@@ -345,13 +351,14 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 
 | File | Holds |
 |---|---|
-| `attributes.yaml` | The closed sets. They include 13 pipeline mechanisms with their readings, plus `run_record`, `judged` and `none`; 18 world operations; 9 rule shapes; 4 key classes; 14 probe forms; 7 implicitness levels; 5 volatility classes; 6 scorers; 8 dials. |
+| `attributes.yaml` | The closed sets. They include 13 pipeline mechanisms with their readings, plus `run_record`, `judged` and `none`; 16 world operations; 9 rule shapes; 9 role kinds; 4 key classes; 14 probe forms; 4 statement bases; 4 commitments; 2 defeat modes; 7 implicitness levels; 5 volatility classes; 6 scorers; 8 dials. |
 | `behaviours.yaml` | 21 behaviours that a judge rates, each wanted or unwanted. The first six are f38's. |
 | `norms.yaml` | 22 norms that a key may rest on: 6 stated and 16 background. |
 | `statement-kinds.yaml` | 20 kinds of statement, each with how far it commits its holder. |
+| `hedges.yaml` | 1 hedge, `tentative`. A hedge is an open word with no closed attribute. |
 | `families.yaml` | 9 realms and 36 families, each with its question and its default attributes. |
 | `phenomena/<realm>.yaml` | 512 entries. An entry states what differs from its family's defaults. |
-| `recipes.yaml` | 21 worked recipes. |
+| `recipes.yaml` | 46 recipes: the 26 that slice 1 needs, and 20 for later slices. |
 | `lineage.yaml` | 36 sources, each with what this benchmark adopts and leaves, and how it was checked. |
 
 `projections/exomem.yaml` sits beside the catalogue and holds the Exomem dimension and the filed prediction per family.
@@ -380,7 +387,7 @@ Size by family, counted on 2026-11-11 by loading every file in `catalogue/phenom
 
 By planned slice: 30 in slice 1, 242 in slice 2, 192 in slice 3, 41 in slice 4, and 7 declared out of scope. By key class: 473 computed, 29 on the rubric track, 3 run-relative and 7 out of scope.
 
-**The key classes are still a first assignment.** The first review moved 16 entries to the rubric track and 3 to the run-relative class, and removed 4. It reworded 50 entries. Some now have a document of the world state the rule that their key applies. Others now key an outcome of the world in place of a product's behaviour. An entry's class is confirmed when its recipe is written, and again when the full-history arm reads its probes on a development world.
+**The key classes are still a first assignment.** The first review moved 16 entries to the rubric track and 3 to the run-relative class, and removed 4. It reworded 50 entries. Some now have a document of the world state the rule that their key applies. Others now key an outcome of the world in place of a product's behaviour. An entry's class is confirmed when its recipe is written, and again when the full-history arm reads its probes on a development world. The desk-check read the 54 entries that the 46 recipes key, eight twins among them. In each, one reading fixes the answer, so none moved to the rubric track. `persistence.transient` keeps its class on one condition: the planner places the probe beyond the span of the attribute's volatility class.
 
 **A slice label is a plan, not a gate.** The loader computes which entries are buildable. An entry is buildable when it has a recipe and the generator implements every closed value that the entry and the recipe name. A round plan may name only buildable entries.
 
@@ -433,7 +440,7 @@ A world for one f38 project is small: 12 sessions, about 30 threads and a few hu
 | Mechanism | It reads | It derives |
 |---|---|---|
 | `corpus_closure` | The complete list of artefacts, authors, dates and copies. | Whether anything is recorded, what is missing under a stated rule, and what is filed twice. |
-| `identity_map` | Names, aliases, merges, splits and role holders over time. | The referent of a name at a date. |
+| `identity_map` | Names, aliases, merges and role holders over time. | The referent of a name at a date. |
 | `interval_order` | Event times with their recorded precision. | Four-valued order, overlap, duration, computed dates. |
 | `scope_lattice` | The contexts where each statement holds. | Whether a rule applies to the probe's case. |
 | `holder_ledger` | What each holder said, saw and was told, and when. | Whose claim it is, who knows it, what one holder thinks another believes. |
@@ -467,12 +474,14 @@ Rubric-track entries have no computed key. The oracle supplies the facts, a pred
 
 ## What the build costs
 
-No measurement backs the numbers in this section. The desk-check of slice 1 gives the first measured rate, and that rate replaces them.
+One number in this section comes from a timing: the rate at which a lane drafts recipes. No run file backs that timing, and no measurement backs the others.
 
-- **Recipes.** The 473 computed entries need 458 recipes, because the 15 twins use their base's recipe. 21 exist. The 29 rubric-track entries need rubric lines instead.
-- **Surface forms.** One form serves one pack, statement kind, level and artefact kind, in one split. Slice 1 writes the `dev` bank of one pack at three levels: about 200 forms, at eight kinds, three artefact kinds and three variants each. Each further pack, level and split is that work again.
-- **Bridges.** Each is written for one attribute of one pack, with the norm that makes it entail. The four deeper levels need them from slice 2.
-- **Effort.** A first guess for the catalogue beyond slice 1 is 60 to 80 lane-days. Nothing verifies it.
+- **Recipes.** The 473 computed entries need 458 recipes, because the 15 twins use their base's recipe. 46 exist. The 29 rubric-track entries need rubric lines instead.
+- **The drafting rate.** The desk-check of 2026-11-11 drafted 25 recipes in about 18 minutes, which is about 80 recipes an hour. The source is the drafting lane's own session clock. No run file records it, so the rate is unverified. That time holds the design of each recipe, the entry edits and a scratch check of closed values. It leaves out the reading of this design. It is one measurement, of one model lane, on recipes that mostly reuse the shapes of the first 21.
+- **What slowed the drafting.** Five things did, and none was the writing. An entry whose error is "cannot find it" needs a mutation world that changes a value, and the identity entries took the longest. A family's default probe forms did not fit six of the 25 entries. A family's default norms did not fit five. Three recipes needed a value that did not exist. A role trap needed a rule for the mutation world.
+- **What the rate does not cover.** At that rate, a draft of the 412 remaining recipes is about five lane-hours. A drafted recipe is not a working one: it must still plant in each pack and pass the mutation, invariance and uniqueness checks. No measurement backs the time for that, and task 6.3 records it for the first family of slice 2.
+- **Surface forms.** One form serves one pack, statement kind, level and artefact kind, in one split. Slice 1 writes the `dev` bank of one pack at three levels: about 200 forms, at eight kinds, three artefact kinds and three variants each. Each further pack, level and split is that work again. No measurement backs a rate for them.
+- **Bridges.** Each is written for one attribute of one pack, with the norm that makes it entail. The four deeper levels need them from slice 2. No measurement backs a rate for them.
 
 The claim that the other axes multiply the catalogue for free was wrong for surface forms and bridges, and this section replaces it.
 
@@ -504,7 +513,7 @@ MemoryAgentBench, LongMemEval and FrontierMemory stay outside calibration runs. 
 Each slice is useful alone. `tasks.md` gives each task's check.
 
 1. **Slice 1: one generated development project beside the hand-written one.**
-   - A desk-check comes first: 46 recipes as data, before any code. 26 serve slice 1, and 20 serve later slices across the nine realms.
+   - A desk-check came first, and it is done: 46 recipes as data, before any code. 26 serve slice 1, and 20 serve later slices across the nine realms.
    - Then the loader, the world core, one pack, the template renderer at three levels and the f38 projection with its four changes.
    - Seven mechanisms, each in its smallest form: `state_fold`, `kind_tag`, `holder_ledger`, `identity_map`, `scope_lattice` with one level of nesting, `warrant_graph` at one hop, and `corpus_closure` for whether anything is recorded. f38's 11 dimensions and its abstention behaviour need all seven.
    - The 30 entries marked `s1`: two change entries for each of f38's 11 dimensions, three twins, two recall controls, two absence entries and one task that no memory bears on.
@@ -518,7 +527,7 @@ Each slice is useful alone. `tasks.md` gives each task's check.
 - **The catalogue encodes the home system's view of knowledge.** Four in five entries are home-defined, and twelve families mirror the product's own dimensions. The lineage marks, the independent review and the per-group report show the risk and do not remove it.
 - **The oracle can be wrong.** A wrong mechanism or norm yields confident wrong keys at scale. The mutation and invariance checks catch a key that ignores its plant. The full-history arm catches a key that a careful reader of every session rejects. Neither catches an error that the oracle and that reader share.
 - **Most computed keys rest on a background norm.** 357 of 473 do. A norm that readers do not share turns a computed key into an opinion. The per-norm report is the instrument for that, and it needs development rounds to say anything.
-- **The recipe form may be too weak.** 21 recipes fit it. The desk-check of 46 is the test, and decision 2 names the result that would end the design.
+- **The recipe form may be too weak.** 46 recipes fit it with no new mechanism or operation. That is one recipe in ten, none has been planted, and 26 of them belong to slice 1. Decision 2 names the result that would end the design, and the first family of each later slice repeats the reading.
 - **Templates can be pattern-matched.** A product could learn the surface banks. Disjoint banks per split, a held-out pack, paraphrased probes and the optional model prose reduce it.
 - **The world can feel synthetic.** A tidy world understates difficulty. The profile and the packs carry the realism, and the first rounds will show where they fall short.
 - **Small rounds say little per family.** A 12-session project gives pooled readings only. Per-family readings need deeper rounds, which cost model calls.

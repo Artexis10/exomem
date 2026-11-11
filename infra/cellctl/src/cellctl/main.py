@@ -18,7 +18,8 @@ from kubernetes import client as k8s
 from kubernetes import config as k8s_config
 
 from .alerts import AlertThresholds
-from .backup_window import parse_backup_window
+from .backup_window import DEFAULT_BACKUP_WINDOW, parse_backup_window
+from .barriers import load_barriers
 from .capacity import CapacityConfig, SharedWorkerPolicy
 from .decide import ReconcileConfig
 from .k8s_client import ClusterClient
@@ -28,6 +29,7 @@ from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
+from .upgrade_window import WindowConfig, check_default_range
 
 # cellctl's own cell resources when CELLCTL_CELL_* is unset (the chart always
 # sets them); manifests.py owns the values.
@@ -115,7 +117,54 @@ def build_reconcile_config() -> ReconcileConfig:
             if amount <= 0:
                 raise ValueError(f"{variable} must be positive")
             kwargs[field] = timedelta(**{unit: amount})
+    kwargs["upgrade_window"] = build_upgrade_window(kwargs.get("backup_window", DEFAULT_BACKUP_WINDOW))
+    # automate-cloud-releases D3: the chart's copy of the barrier file. An entry cellctl
+    # cannot read stops it here, rather than letting an attempt cross it unseen.
+    kwargs["upgrade_barriers"] = load_barriers(_required_env("CELLCTL_UPGRADE_BARRIERS"))
     return ReconcileConfig(**kwargs)
+
+
+def _required_env(name: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        raise ValueError(f"{name} is required: the chart renders it")
+    return raw
+
+
+def _bounded_integer_env(name: str, low: int, high: int) -> int:
+    raw = _required_env(name)
+    if not (raw.isascii() and raw.isdecimal()) or not low <= int(raw) <= high:
+        raise ValueError(f"{name} must be a whole number from {low} to {high}, not {raw!r}")
+    return int(raw)
+
+
+def build_upgrade_window(backup_window: tuple[int, int]) -> WindowConfig:
+    """automate-cloud-releases D4: the chart's `cellctl.upgradeWindow.*` values. Every
+    one is required and bounded as the chart schema bounds it, and a default range that
+    overlaps the nightly backup window stops cellctl: those cells would roll during
+    stopped backups."""
+
+    enabled = _required_env("CELLCTL_UPGRADE_WINDOW_ENABLED")
+    if enabled not in ("true", "false"):
+        raise ValueError(f"CELLCTL_UPGRADE_WINDOW_ENABLED must be true or false, not {enabled!r}")
+    coverage_raw = _required_env("CELLCTL_UPGRADE_WINDOW_MIN_COVERAGE")
+    try:
+        coverage = float(coverage_raw)
+    except ValueError:
+        coverage = -1.0
+    if not 0.0 <= coverage <= 1.0:
+        raise ValueError(f"CELLCTL_UPGRADE_WINDOW_MIN_COVERAGE must be from 0 to 1, not {coverage_raw!r}")
+    config = WindowConfig(
+        enabled=enabled == "true",
+        lookback_days=_bounded_integer_env("CELLCTL_UPGRADE_WINDOW_LOOKBACK_DAYS", 1, 28),
+        min_coverage=coverage,
+        default_hour_start=_bounded_integer_env("CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START", 0, 23),
+        default_hour_end=_bounded_integer_env("CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_END", 0, 23),
+        idle_minutes=_bounded_integer_env("CELLCTL_UPGRADE_WINDOW_IDLE_MINUTES", 1, 30),
+        force_minutes=_bounded_integer_env("CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES", 1, 30),
+    )
+    check_default_range(config, backup_window)
+    return config
 
 
 def _retention_sources() -> tuple[object, ...]:
@@ -175,9 +224,11 @@ def _positive_integer_env(name: str) -> int:
 
 
 def build_alert_thresholds() -> AlertThresholds:
-    """The cell alerts' thresholds, which the chart renders from the observability
-    contract (`alerts.pending_operation_warn_seconds`, `alerts.pvc_reserved_free_bytes`,
-    `alerts.recall_lag_warn_seconds`). A missing or invalid value fails cellctl at
+    """The cell and rollout alerts' thresholds, which the chart renders from the
+    observability contract (`alerts.pending_operation_warn_seconds`,
+    `alerts.pvc_reserved_free_bytes`, `alerts.recall_lag_warn_seconds`,
+    `alerts.rollout_held_warn_seconds`, `alerts.rollout_stalled_warn_seconds`,
+    `alerts.canary_wait_warn_seconds`). A missing or invalid value fails cellctl at
     startup: with no default in code, the contract is the only place each number
     lives, and a guessed one would alert wrongly."""
 
@@ -185,6 +236,10 @@ def build_alert_thresholds() -> AlertThresholds:
         unavailable_after=timedelta(seconds=_positive_integer_env("CELLCTL_PENDING_OPERATION_WARN_SECONDS")),
         disk_free_floor_bytes=_positive_integer_env("CELLCTL_PVC_RESERVED_FREE_BYTES"),
         recall_lag_after=timedelta(seconds=_positive_integer_env("CELLCTL_RECALL_LAG_WARN_SECONDS")),
+        # automate-cloud-releases D8: the rollout alerts' thresholds, from the same contract.
+        rollout_held_after=timedelta(seconds=_positive_integer_env("CELLCTL_ROLLOUT_HELD_WARN_SECONDS")),
+        rollout_stalled_after=timedelta(seconds=_positive_integer_env("CELLCTL_ROLLOUT_STALLED_WARN_SECONDS")),
+        canary_wait_after=timedelta(seconds=_positive_integer_env("CELLCTL_CANARY_WAIT_WARN_SECONDS")),
     )
 
 

@@ -319,6 +319,25 @@ spec:
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
             - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
               value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
+            # automate-cloud-releases D4: each cell's upgrade window.
+            - name: CELLCTL_UPGRADE_WINDOW_ENABLED
+              value: {{ .Values.cellctl.upgradeWindow.enabled | toString | quote }}
+            - name: CELLCTL_UPGRADE_WINDOW_LOOKBACK_DAYS
+              value: {{ .Values.cellctl.upgradeWindow.lookbackDays | quote }}
+            - name: CELLCTL_UPGRADE_WINDOW_MIN_COVERAGE
+              value: {{ .Values.cellctl.upgradeWindow.minCoverage | toString | quote }}
+            - name: CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START
+              value: {{ .Values.cellctl.upgradeWindow.defaultHourStart | quote }}
+            - name: CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_END
+              value: {{ .Values.cellctl.upgradeWindow.defaultHourEnd | quote }}
+            - name: CELLCTL_UPGRADE_WINDOW_IDLE_MINUTES
+              value: {{ .Values.cellctl.upgradeWindow.idleMinutes | quote }}
+            - name: CELLCTL_UPGRADE_WINDOW_FORCE_MINUTES
+              value: {{ .Values.cellctl.upgradeWindow.forceMinutes | quote }}
+            # D3: the chart's copy of the barrier file (files/upgrade-barriers-v1.json),
+            # which the chart test keeps equal to infra/contracts.
+            - name: CELLCTL_UPGRADE_BARRIERS
+              value: {{ .Files.Get "files/upgrade-barriers-v1.json" | required "files/upgrade-barriers-v1.json is required" | quote }}
             - name: CELLCTL_EXPORT_DEADLINE_MINUTES
               value: {{ .Values.cellctl.exportDeadlineMinutes | quote }}
             - name: CELLCTL_EXPORT_PAUSE_COPY_FLOOR_MIB
@@ -344,6 +363,13 @@ spec:
               value: {{ int64 (required "observability contract alerts.pvc_reserved_free_bytes is required" $contractAlerts.pvc_reserved_free_bytes) | quote }}
             - name: CELLCTL_RECALL_LAG_WARN_SECONDS
               value: {{ int64 (required "observability contract alerts.recall_lag_warn_seconds is required" $contractAlerts.recall_lag_warn_seconds) | quote }}
+            # automate-cloud-releases D8: the rollout alerts' thresholds.
+            - name: CELLCTL_ROLLOUT_HELD_WARN_SECONDS
+              value: {{ int64 (required "observability contract alerts.rollout_held_warn_seconds is required" $contractAlerts.rollout_held_warn_seconds) | quote }}
+            - name: CELLCTL_ROLLOUT_STALLED_WARN_SECONDS
+              value: {{ int64 (required "observability contract alerts.rollout_stalled_warn_seconds is required" $contractAlerts.rollout_stalled_warn_seconds) | quote }}
+            - name: CELLCTL_CANARY_WAIT_WARN_SECONDS
+              value: {{ int64 (required "observability contract alerts.canary_wait_warn_seconds is required" $contractAlerts.canary_wait_warn_seconds) | quote }}
             # Shared cap and optional local classes (_cell-storage.tpl).
             - name: CELLCTL_KEY_RETENTION_SOURCES
               value: {{ .Values.cellctl.keyRetentionSources | toJson | quote }}
