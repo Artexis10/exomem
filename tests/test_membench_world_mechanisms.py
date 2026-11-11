@@ -1,7 +1,7 @@
 """The seven slice 1 mechanisms, each read through a real recipe of the catalogue.
 
-Each case builds the two worlds of a thread from the recipe's own steps and reads the recipe's own
-key through ``Oracle.read``. Three oracle checks of design.md decide:
+Each case lets the planner plant one real recipe and read the recipe's own key through
+``Oracle.read``, in the thread's own two worlds. Three oracle checks of design.md decide:
 
 * mutation: the key changes between the planted and the mutation world as the recipe says. A key
   depends on its plant when its value differs, or when it has a trap in the planted world and none
@@ -9,21 +9,21 @@ key through ``Oracle.read``. Three oracle checks of design.md decide:
 * invariance: a statement that the recipe calls irrelevant leaves the key unchanged.
 * uniqueness: the reading gives one answer, or the oracle refuses with ``NotUnique``.
 
-The two helpers ``thread`` and ``key`` stand in for the planner of task 3.4 and the key writer of
-task 3.6, which replace them.
+The planner binds each recipe's roles, so a case reads each value from the thread and never fixes it.
+``key`` stands in for the key writer of task 3.6, which replaces it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
 from datetime import date, timedelta
-from functools import partial
 from typing import Any
 
 import pytest
 from membench.clock import week_date
 from membench.oracle import lint_claim
 
+from benchmarks.membench.world import core
 from benchmarks.membench.world.core import Vocabulary, World
 from benchmarks.membench.world.loader import load_catalogue
 from benchmarks.membench.world.mechanisms import (
@@ -34,61 +34,54 @@ from benchmarks.membench.world.mechanisms import (
     NoWindow,
     Oracle,
 )
+from benchmarks.membench.world.pack import PACKS_DIR, load_pack
+from benchmarks.membench.world.planner import PLANTED, Plan, RoundSpec, Thread, plan_world
 from benchmarks.membench.world.record import NotUnique
 
 VOCABULARY = Vocabulary.load()
-RECIPES = load_catalogue().recipes
-
-# A step argument that holds a word, not a role, is never replaced by a binding.
-_WORDS = ("op", "id", "world", "kind", "basis", "shape", "mode", "hedge")
-
-
-def week(n: int) -> date:
-    return week_date(n)
+CATALOGUE = load_catalogue(implemented=core.implemented())
+PACK = load_pack(PACKS_DIR / "operations.yaml")
+SEED = 11
+# A value that no attribute of the pack takes, for a statement that must not match a role.
+OUTSIDE = -1
+DAY = timedelta(days=1)
 
 
-def new_world(
-    holders: tuple[str, ...] = (),
-    attributes: tuple[tuple[str, str], ...] = (),
-    contexts: tuple[tuple[str, str | None], ...] = (),
-) -> World:
-    world = World("w", VOCABULARY)
-    for holder in holders:
-        world.add_entity(holder, holder.title(), week(0), holder=True)
-    world.add_entity("office", "Harbour office", week(0))
-    for attribute, volatility in attributes:
-        world.add_attribute(attribute, "office", volatility)
-    for context, parent in contexts:
-        world.add_context(context, parent)
-    return world
+def plan_of(*entries: str) -> Plan:
+    return plan_world(RoundSpec(entries, twins=0), CATALOGUE, PACK, VOCABULARY, "dev", SEED)
 
 
-def thread(
-    recipe: str, roles: dict[str, Any], slots: dict[str, date], build: Callable[[], World]
-) -> tuple[Oracle, Oracle, dict[str, Any]]:
-    """The planted and the mutation world of a recipe, as oracles, and the binding that was used."""
-    pair = []
-    for in_world in ("planted", "mutation"):
-        world = build()
-        for step in RECIPES[recipe]["steps"]:
-            bound = {
-                name: roles.get(value, value)
-                if name not in _WORDS and isinstance(value, str)
-                else [roles.get(v, v) for v in value]
-                if isinstance(value, list)
-                else value
-                for name, value in step.items()
-            }
-            if "at" in step:
-                bound["at"] = slots[step["at"]]
-            world.apply(bound, in_world)
-        pair.append(Oracle(world, {"transient": timedelta(days=14)}))
-    return pair[0], pair[1], {"roles": roles, "slots": slots, "recipe": recipe}
+def plant(entry: str) -> tuple[Oracle, Oracle, Thread]:
+    """The planted and the mutation world of one thread, as oracles, and the thread."""
+    plan = plan_of(entry)
+    (thread,) = plan.threads
+    assert thread.variant == PLANTED and not plan.drops
+    planted, mutation = (Oracle(world, plan.validity()) for world in plan.pair(thread))
+    return planted, mutation, thread
+
+
+def bare_world() -> tuple[World, Plan]:
+    """A world that holds the backbone and no thread."""
+    plan = plan_of()
+    world = World(plan.name, VOCABULARY)
+    plan.backbone.declare(world)
+    return world, plan
+
+
+def holder_outside(oracle: Oracle, thread: Thread) -> str:
+    """A holder that no role of the thread binds."""
+    return next(h for h in oracle.record.world.holders() if h not in thread.roles.values())
+
+
+def attribute_outside(oracle: Oracle, thread: Thread) -> str:
+    """An attribute that no thread reserves."""
+    world = oracle.record.world
+    return next(a for a in sorted(world.attributes) if a not in thread.reserved)
 
 
 def key(
     oracle: Oracle,
-    binding: dict[str, Any],
+    thread: Thread,
     form: str,
     twin: bool = False,
     near_miss: bool = False,
@@ -99,24 +92,22 @@ def key(
     applies the asserted-content rule of a thread planted in the mutation world, and ``near_miss``
     reads the recipe's `twin` keys, which ask about a case that the plant does not touch.
     """
-    recipe = RECIPES[binding["recipe"]]
+    recipe = CATALOGUE.recipes[thread.recipe]
     spec = (recipe["twin"]["keys"] if near_miss else recipe["keys"])[form]
-    roles, at = binding["roles"], binding["slots"][spec["at"]]
+    at = thread.slots[spec["at"]]
 
     def part(p: dict[str, Any]) -> Any:
         if "role" in p:
-            return roles[p["role"]]
-        of = p["of"]
-        extra = {"where": roles[p["where"]]} if "where" in p else {}
-        of = [roles.get(i, i) for i in of] if isinstance(of, list) else roles.get(of, of)
-        return oracle.read(p["read"], of=of, at=at, **extra)
+            return thread.roles[p["role"]]
+        extra = {"where": thread.resolve(p["where"])} if "where" in p else {}
+        return oracle.read(p["read"], of=thread.resolve(p["of"]), at=at, **extra)
 
     value = part(spec["value"])
     traps: list[Any] = []
     for trap in spec.get("traps", []):
         if "role" in trap:
-            if oracle.role_trap(roles[trap["role"]], at, planted_in_mutation=twin):
-                traps.append(roles[trap["role"]])
+            if oracle.role_trap(thread.roles[trap["role"]], at, planted_in_mutation=twin):
+                traps.append(thread.roles[trap["role"]])
             continue
         answer = part(trap)
         traps += (
@@ -139,470 +130,387 @@ def spans_lint_clean(oracle: Oracle, attribute: str, at: date) -> bool:
 
 # -- state_fold -----------------------------------------------------------------------------------
 
-REVERSAL = {"owner": "lead", "item": "approvals", "old": 1, "new": 2}
-REVERSAL_SLOTS = {"before": week(1), "change": week(3), "probe": week(5)}
-
-
-def reversal_world() -> World:
-    return new_world(("lead", "clerk"), (("approvals", "durable"), ("headcount", "durable")))
-
 
 def test_state_fold_keys_of_a_reversal_depend_on_the_planted_change() -> None:
-    planted, mutation, binding = thread(
-        "currency.reversal", REVERSAL, REVERSAL_SLOTS, reversal_world
-    )
+    planted, mutation, t = plant("currency.reversal")
+    old, new = t.roles["old"], t.roles["new"]
 
-    assert key(planted, binding, "state") == (2, [1])
-    assert key(mutation, binding, "state") == (1, [])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
-    assert key(planted, binding, "premise")[0] == 2
+    assert key(planted, t, "state") == (new, [old])
+    assert key(mutation, t, "state") == (old, [])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
+    assert key(planted, t, "premise")[0] == new
 
 
 def test_state_fold_keeps_the_dates_of_a_reversal_in_its_history() -> None:
-    planted, _, _ = thread("currency.reversal", REVERSAL, REVERSAL_SLOTS, reversal_world)
+    planted, _, t = plant("currency.reversal")
 
-    assert planted.read("state_fold.history", of="approvals", at=week(5)) == (
-        (week(1), 1),
-        (week(3), 2),
+    assert planted.read("state_fold.history", of=t.roles["item"], at=t.slots["probe"]) == (
+        (t.slots["before"], t.roles["old"]),
+        (t.slots["change"], t.roles["new"]),
     )
 
 
 def test_state_fold_ignores_a_report_of_the_old_value_and_an_unrelated_statement() -> None:
-    planted, _, binding = thread("currency.reversal", REVERSAL, REVERSAL_SLOTS, reversal_world)
-    before = key(planted, binding, "state")
-
+    planted, _, t = plant("currency.reversal")
+    before = key(planted, t, "state")
     world = planted.record.world
-    world.op_state(
-        None, by="clerk", about="approvals", value=1, kind="report", quoting="lead", at=week(4)
-    )
-    world.op_state(None, by="clerk", about="headcount", value=9, kind="fact", at=week(4))
+    bystander, other = holder_outside(planted, t), attribute_outside(planted, t)
 
-    assert key(Oracle(world), binding, "state") == before
+    after_change = t.slots["change"] + DAY
+    world.op_state(
+        None,
+        by=bystander,
+        about=t.roles["item"],
+        value=t.roles["old"],
+        kind="report",
+        quoting=t.roles["owner"],
+        at=after_change,
+    )
+    world.op_state(None, by=bystander, about=other, value=OUTSIDE, kind="fact", at=after_change)
+
+    assert key(Oracle(world, {}), t, "state") == before
 
 
 def test_state_fold_refuses_a_current_value_when_two_holders_disagree_and_no_rule_governs() -> None:
-    planted, _, _ = thread("currency.reversal", REVERSAL, REVERSAL_SLOTS, reversal_world)
+    planted, _, t = plant("currency.reversal")
+    item, probe = t.roles["item"], t.slots["probe"]
     planted.record.world.op_state(
-        None, by="clerk", about="approvals", value=7, kind="fact", at=week(4)
+        None,
+        by=holder_outside(planted, t),
+        about=item,
+        value=OUTSIDE,
+        kind="fact",
+        at=t.slots["change"] + DAY,
     )
 
-    with pytest.raises(NotUnique, match="approvals"):
-        planted.read("state_fold.current", of="approvals", at=week(5))
-    assert planted.read("state_fold.standing", of="approvals", at=week(5)) == CONTESTED
+    with pytest.raises(NotUnique, match=re.escape(item)):
+        planted.read("state_fold.current", of=item, at=probe)
+    assert planted.read("state_fold.standing", of=item, at=probe) == CONTESTED
 
 
 def test_state_fold_lets_a_correction_replace_the_content_for_the_whole_period() -> None:
-    roles = {"clerk": "clerk", "user": "boss", "item": "approvals", "wrong": 1, "right": 2}
-    slots = {"before": week(1), "corrected": week(3), "probe": week(5)}
-    build = partial(new_world, ("clerk", "boss"), (("approvals", "durable"),))
-    planted, mutation, binding = thread("correction.user-correction", roles, slots, build)
+    planted, mutation, t = plant("correction.user-correction")
+    item, wrong, right = t.roles["item"], t.roles["wrong"], t.roles["right"]
 
-    assert key(planted, binding, "state") == (2, [1])
-    assert key(mutation, binding, "state") == (1, [])
-    assert planted.read("state_fold.history", of="approvals", at=week(5)) == ((week(1), 2),)
-    assert spans_lint_clean(planted, "approvals", week(5))
+    assert key(planted, t, "state") == (right, [wrong])
+    assert key(mutation, t, "state") == (wrong, [])
+    assert planted.read("state_fold.history", of=item, at=t.slots["probe"]) == (
+        (t.slots["before"], right),
+    )
+    assert spans_lint_clean(planted, item, t.slots["probe"])
 
 
 def test_state_fold_drops_a_claim_that_a_finding_defeats() -> None:
-    roles = {"author": "clerk", "checker": "lead", "item": "approvals", "claimed": 1, "actual": 2}
-    slots = {"before": week(1), "refuted": week(3), "probe": week(5)}
-    planted, mutation, binding = thread("correction.refuted-claim", roles, slots, reversal_world)
+    planted, mutation, t = plant("correction.refuted-claim")
 
-    assert key(planted, binding, "state") == (2, [1])
-    assert key(mutation, binding, "state") == (1, [])
-    assert spans_lint_clean(planted, "approvals", week(5))
+    assert key(planted, t, "state") == (t.roles["actual"], [t.roles["claimed"]])
+    assert key(mutation, t, "state") == (t.roles["claimed"], [])
+    assert spans_lint_clean(planted, t.roles["item"], t.slots["probe"])
 
 
 def test_state_fold_follows_the_holder_that_a_stated_rule_governs() -> None:
-    roles = {
-        "keeper": "lead",
-        "registry": "clerk",
-        "bystander": "intern",
-        "item": "approvals",
-        "official": 1,
-        "informal": 2,
-    }
-    slots = {"before": week(1), "entered": week(2), "noted": week(3), "probe": week(5)}
-    build = partial(new_world, ("lead", "clerk", "intern"), (("approvals", "durable"),))
-    planted, mutation, binding = thread("provenance.primary-over-secondary", roles, slots, build)
+    planted, mutation, t = plant("provenance.primary-over-secondary")
+    official, informal = t.roles["official"], t.roles["informal"]
 
-    assert key(planted, binding, "state") == (1, [2])
-    assert key(mutation, binding, "state") == (1, [])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
+    assert key(planted, t, "state") == (official, [informal])
+    assert key(mutation, t, "state") == (official, [])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
 
 
 def test_state_fold_reads_a_withdrawn_claim_as_withdrawn_with_its_value_replaced() -> None:
-    roles = {"author": "lead", "item": "approvals", "claimed": 1, "actual": 2}
-    slots = {"before": week(1), "withdrawal": week(3), "probe": week(5)}
-    planted, mutation, binding = thread("correction.retraction", roles, slots, reversal_world)
+    planted, mutation, t = plant("correction.retraction")
+    claimed = t.roles["claimed"]
 
-    assert key(planted, binding, "state") == (WITHDRAWN, [1])
-    assert key(mutation, binding, "state") == (SETTLED, [])
-    assert planted.read("state_fold.current", of="approvals", at=week(5)) is None
+    assert key(planted, t, "state") == (WITHDRAWN, [claimed])
+    assert key(mutation, t, "state") == (SETTLED, [])
+    assert planted.read("state_fold.current", of=t.roles["item"], at=t.slots["probe"]) is None
 
 
 def test_state_fold_reads_an_old_observation_of_a_transient_attribute_as_last_known() -> None:
-    roles = {"observer": "clerk", "item": "queue", "passing": 5}
-    slots = {"seen": week(1), "ended": week(2), "recent": week(9), "probe": week(10)}
-    build = partial(new_world, ("clerk",), (("queue", "transient"),))
-    planted, mutation, binding = thread("persistence.transient", roles, slots, build)
+    planted, mutation, t = plant("persistence.transient")
+    passing = t.roles["passing"]
 
-    assert key(planted, binding, "state") == (LAST_KNOWN, [5])
-    assert key(mutation, binding, "state") == (SETTLED, [5])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
+    assert key(planted, t, "state") == (LAST_KNOWN, [passing])
+    assert key(mutation, t, "state") == (SETTLED, [passing])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
 
 
 def test_state_fold_refuses_to_judge_a_stale_class_that_has_no_validity_window() -> None:
-    roles = {"observer": "clerk", "item": "queue", "passing": 5}
-    slots = {"seen": week(1), "ended": week(2), "recent": week(9), "probe": week(10)}
-    build = partial(new_world, ("clerk",), (("queue", "transient"),))
-    planted, _, _ = thread("persistence.transient", roles, slots, build)
+    planted, _, t = plant("persistence.transient")
 
     with pytest.raises(NoWindow, match="transient"):
-        Oracle(planted.record.world).read("state_fold.standing", of="queue", at=week(10))
+        Oracle(planted.record.world).read(
+            "state_fold.standing", of=t.roles["item"], at=t.slots["probe"]
+        )
 
 
 # -- kind_tag -------------------------------------------------------------------------------------
 
-PLAN = {"planner": "lead", "job": "migration", "done": "done"}
-PLAN_SLOTS = {"planned": week(1), "later": week(3), "probe": week(5)}
-
-
-def plan_world() -> World:
-    return new_world(("lead", "clerk"), (("migration", "durable"),))
-
 
 def test_kind_tag_keeps_a_plan_a_plan_until_an_outcome_is_recorded() -> None:
-    planted, mutation, binding = thread("kind.plan-not-done", PLAN, PLAN_SLOTS, plan_world)
+    planted, mutation, t = plant("kind.plan-not-done")
+    done = t.roles["done"]
 
-    assert key(planted, binding, "state") == ("plan", ["done"])
-    assert key(mutation, binding, "state") == ("result", ["done"])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
+    assert key(planted, t, "state") == ("plan", [done])
+    assert key(mutation, t, "state") == ("result", [done])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
 
 
 def test_kind_tag_of_a_thread_planted_in_the_mutation_world_drops_the_role_trap_that_stands() -> (
     None
 ):
-    _, mutation, binding = thread("kind.plan-not-done", PLAN, PLAN_SLOTS, plan_world)
+    _, mutation, t = plant("kind.plan-not-done")
 
-    assert key(mutation, binding, "state", twin=True) == ("result", [])
+    assert key(mutation, t, "state", twin=True) == ("result", [])
 
 
 def test_kind_tag_ignores_an_unrelated_statement() -> None:
-    planted, _, binding = thread("kind.plan-not-done", PLAN, PLAN_SLOTS, plan_world)
+    planted, _, t = plant("kind.plan-not-done")
     planted.record.world.op_state(
-        None, by="clerk", about="other", kind="result", value="done", at=week(4)
+        None,
+        by=t.roles["planner"],
+        about=attribute_outside(planted, t),
+        kind="result",
+        value=OUTSIDE,
+        at=t.slots["later"],
     )
 
-    assert key(Oracle(planted.record.world), binding, "state") == ("plan", ["done"])
+    assert key(Oracle(planted.record.world), t, "state") == ("plan", [t.roles["done"]])
 
 
 def test_kind_tag_lets_the_latest_asserting_statement_decide_over_a_later_proposal() -> None:
-    _, mutation, _ = thread("kind.plan-not-done", PLAN, PLAN_SLOTS, plan_world)
+    _, mutation, t = plant("kind.plan-not-done")
     mutation.record.world.op_state(
-        None, by="lead", about="migration", kind="plan", value="done", at=week(4)
+        None,
+        by=t.roles["planner"],
+        about=t.roles["job"],
+        kind="plan",
+        value=t.roles["done"],
+        at=t.slots["later"] + DAY,
     )
 
-    assert mutation.read("kind_tag.kind", of="migration", at=week(5)) == "result"
+    assert mutation.read("kind_tag.kind", of=t.roles["job"], at=t.slots["probe"]) == "result"
 
 
 def test_kind_tag_reads_the_hedge_that_a_statement_carries() -> None:
-    roles = {"speaker": "lead", "item": "approvals", "claimed": 3}
-    slots = {"said": week(1), "probe": week(5)}
-    planted, mutation, binding = thread("uncertainty.hedged-claim", roles, slots, reversal_world)
+    planted, mutation, t = plant("uncertainty.hedged-claim")
+    claimed = t.roles["claimed"]
 
-    assert key(planted, binding, "state") == ("tentative", [3])
-    assert key(mutation, binding, "state") == (None, [3])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
+    assert key(planted, t, "state") == ("tentative", [claimed])
+    assert key(mutation, t, "state") == (None, [claimed])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
 
 
 # -- holder_ledger --------------------------------------------------------------------------------
 
 
-def nested_report() -> tuple[Oracle, Oracle, dict[str, Any]]:
-    roles = {"speaker": "lead", "reporter": "clerk", "item": "approvals", "claimed": 3}
-    slots = {"told": week(1), "probe": week(5)}
-    return thread("attribution.nested-report", roles, slots, reversal_world)
-
-
 def test_holder_ledger_gives_a_quoted_report_back_to_the_holder_it_quotes() -> None:
-    planted, mutation, binding = nested_report()
+    planted, mutation, t = plant("attribution.nested-report")
+    speaker, reporter, claimed = t.roles["speaker"], t.roles["reporter"], t.roles["claimed"]
 
-    assert key(planted, binding, "whose") == ("lead", ["clerk"])
-    assert key(mutation, binding, "whose") == ("lead", [])
-    assert depends_on_plant(key(planted, binding, "whose"), key(mutation, binding, "whose"))
-    assert key(planted, binding, "act") == ((), [3])
-    assert key(mutation, binding, "act") == (("lead",), [3])
+    assert key(planted, t, "whose") == (speaker, [reporter])
+    assert key(mutation, t, "whose") == (speaker, [])
+    assert depends_on_plant(key(planted, t, "whose"), key(mutation, t, "whose"))
+    assert key(planted, t, "act") == ((), [claimed])
+    assert key(mutation, t, "act") == ((speaker,), [claimed])
 
 
 def test_holder_ledger_keeps_the_holder_when_an_unrelated_holder_speaks() -> None:
-    planted, _, binding = nested_report()
+    planted, _, t = plant("attribution.nested-report")
     planted.record.world.op_state(
-        None, by="clerk", about="headcount", value=3, kind="fact", at=week(2)
+        None,
+        by=t.roles["reporter"],
+        about=attribute_outside(planted, t),
+        value=OUTSIDE,
+        kind="fact",
+        at=t.slots["told"] + DAY,
     )
 
-    assert key(Oracle(planted.record.world), binding, "whose") == ("lead", ["clerk"])
+    assert key(Oracle(planted.record.world), t, "whose") == (
+        t.roles["speaker"],
+        [t.roles["reporter"]],
+    )
 
 
 def test_holder_ledger_follows_a_told_statement_back_to_the_person_who_said_it_first() -> None:
-    roles = {"person": "lead", "writer": "clerk", "item": "approvals", "view": 3}
-    slots = {"said": week(1), "restated": week(3), "probe": week(5)}
-    planted, mutation, binding = thread(
-        "attribution.restated-as-fact", roles, slots, reversal_world
-    )
+    planted, mutation, t = plant("attribution.restated-as-fact")
 
-    assert key(planted, binding, "whose") == ("lead", ["clerk"])
-    assert key(mutation, binding, "whose") == ("lead", [])
-    assert depends_on_plant(key(planted, binding, "whose"), key(mutation, binding, "whose"))
+    assert key(planted, t, "whose") == (t.roles["person"], [t.roles["writer"]])
+    assert key(mutation, t, "whose") == (t.roles["person"], [])
+    assert depends_on_plant(key(planted, t, "whose"), key(mutation, t, "whose"))
 
 
 def test_holder_ledger_refuses_a_told_statement_whose_telling_is_not_recorded() -> None:
-    world = reversal_world()
+    world, plan = bare_world()
+    (holder, *_), attribute = plan.backbone.holders(), sorted(plan.backbone.attributes)[0]
     world.op_state(
-        "note", by="clerk", about="approvals", value=3, kind="fact", basis="told", at=week(1)
+        "note", by=holder, about=attribute, value=3, kind="fact", basis="told", at=week_date(1)
     )
 
     with pytest.raises(NotUnique, match="note"):
-        Oracle(world).read("holder_ledger.holder", of="approvals", at=week(5))
+        Oracle(world).read("holder_ledger.holder", of=attribute, at=week_date(5))
 
 
 def test_holder_ledger_refuses_a_holder_of_an_attribute_that_carries_two_contents() -> None:
-    world = reversal_world()
-    world.op_state(None, by="lead", about="approvals", value=1, kind="fact", at=week(1))
-    world.op_state(None, by="clerk", about="approvals", value=2, kind="fact", at=week(2))
+    world, plan = bare_world()
+    (first, second, *_), attribute = plan.backbone.holders(), sorted(plan.backbone.attributes)[0]
+    world.op_state(None, by=first, about=attribute, value=1, kind="fact", at=week_date(1))
+    world.op_state(None, by=second, about=attribute, value=2, kind="fact", at=week_date(2))
 
-    with pytest.raises(NotUnique, match="approvals"):
-        Oracle(world).read("holder_ledger.holder", of="approvals", at=week(5))
-    assert Oracle(world).read("holder_ledger.holder", of="approvals", at=week(5), for_=2) == "clerk"
+    with pytest.raises(NotUnique, match=re.escape(attribute)):
+        Oracle(world).read("holder_ledger.holder", of=attribute, at=week_date(5))
+    assert (
+        Oracle(world).read("holder_ledger.holder", of=attribute, at=week_date(5), for_=2) == second
+    )
 
 
 # -- identity_map ---------------------------------------------------------------------------------
 
 
-def rename_world() -> World:
-    world = new_world()
-    world.add_entity("depot", "North depot", week(0))
-    world.add_entity("yard", "South yard", week(0))
-    return world
-
-
 def test_identity_map_gives_a_new_name_to_its_entity_only_after_the_rename() -> None:
-    roles = {"subject": "depot", "former": "North depot", "fresh": "Quay depot"}
-    slots = {"renamed": week(2), "probe": week(5)}
-    planted, mutation, binding = thread("identity.rename", roles, slots, rename_world)
+    planted, mutation, t = plant("identity.rename")
+    subject, former, fresh = t.roles["subject"], t.roles["former"], t.roles["fresh"]
+    probe = t.slots["probe"]
 
-    assert key(planted, binding, "state")[0] == "depot"
-    assert key(mutation, binding, "state")[0] is None
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
-    assert planted.read("identity_map.names", of="depot", at=week(5)) == (
-        "North depot",
-        "Quay depot",
-    )
-    assert planted.read("identity_map.referent", of="North depot", at=week(5)) is None
+    assert key(planted, t, "state")[0] == subject
+    assert key(mutation, t, "state")[0] is None
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
+    assert planted.read("identity_map.names", of=subject, at=probe) == (former, fresh)
+    assert planted.read("identity_map.referent", of=former, at=probe) is None
 
 
 def test_identity_map_sends_the_name_of_an_absorbed_entity_to_the_survivor() -> None:
-    roles = {"first": "depot", "second": "yard", "absorbed": "South yard", "joint": "Quay site"}
-    slots = {"merged": week(2), "probe": week(5)}
-    planted, mutation, binding = thread("identity.merge", roles, slots, rename_world)
+    planted, mutation, t = plant("identity.merge")
+    first, second = t.roles["first"], t.roles["second"]
+    probe = t.slots["probe"]
 
-    assert key(planted, binding, "state")[0] == "depot"
-    assert key(mutation, binding, "state")[0] == "yard"
-    assert planted.read("identity_map.names", of="depot", at=week(5)) == (
-        "North depot",
-        "Quay site",
-        "South yard",
+    assert key(planted, t, "state")[0] == first
+    assert key(mutation, t, "state")[0] == second
+    held = planted.read("identity_map.names", of=first, at=probe)
+    assert sorted(held) == sorted(
+        [
+            planted.record.world.entities[first].name,
+            t.roles["joint"],
+            t.roles["absorbed"],
+        ]
     )
 
 
 def test_identity_map_leaves_a_key_unchanged_when_another_entity_is_renamed() -> None:
-    roles = {"subject": "depot", "former": "North depot", "fresh": "Quay depot"}
-    slots = {"renamed": week(2), "probe": week(5)}
-    planted, _, binding = thread("identity.rename", roles, slots, rename_world)
-    planted.record.world.op_name(None, entity="yard", name="East yard", at=week(3))
+    planted, _, t = plant("identity.rename")
+    world = planted.record.world
+    other = next(e for e in world.entities.values() if not e.holder and e.id not in t.reserved)
+    world.op_name(None, entity=other.id, name="Unrelated name", at=t.slots["renamed"] + DAY)
 
-    assert key(Oracle(planted.record.world), binding, "state")[0] == "depot"
+    assert key(Oracle(world), t, "state")[0] == t.roles["subject"]
 
 
 def test_identity_map_refuses_a_name_that_two_entities_hold() -> None:
-    roles = {"subject": "depot", "short": "Quay"}
-    slots = {"coined": week(2), "probe": week(5)}
-    planted, _, _ = thread("identity.alias", roles, slots, rename_world)
-    planted.record.world.op_name(None, entity="yard", name="Quay", at=week(3))
+    planted, _, t = plant("identity.alias")
+    world = planted.record.world
+    other = next(e for e in world.entities.values() if not e.holder and e.id not in t.reserved)
+    world.op_name(None, entity=other.id, name=t.roles["short"], at=t.slots["coined"] + DAY)
 
-    with pytest.raises(NotUnique, match="Quay"):
-        planted.read("identity_map.referent", of="Quay", at=week(5))
+    with pytest.raises(NotUnique, match=re.escape(t.roles["short"])):
+        planted.read("identity_map.referent", of=t.roles["short"], at=t.slots["probe"])
 
 
 # -- scope_lattice --------------------------------------------------------------------------------
-
-SCOPES = (("everywhere", None), ("quay", "everywhere"), ("yard", "everywhere"))
-
-
-def scope_world() -> World:
-    return new_world(("lead",), (("limit", "durable"),), SCOPES)
-
-
-EXCEPTION_ROLES = {
-    "owner": "lead",
-    "item": "limit",
-    "usual": 10,
-    "special": 4,
-    "everywhere": "everywhere",
-    "here": "quay",
-    "there": "yard",
-}
-EXCEPTION_SLOTS = {"before": week(1), "probe": week(5)}
 
 
 def test_scope_lattice_lets_the_exception_decide_in_its_own_context_and_the_default_elsewhere() -> (
     None
 ):
-    planted, mutation, binding = thread(
-        "scope.exception", EXCEPTION_ROLES, EXCEPTION_SLOTS, scope_world
-    )
+    planted, mutation, t = plant("scope.exception")
+    usual, special = t.roles["usual"], t.roles["special"]
 
-    assert key(planted, binding, "state") == (4, [10])
-    assert key(mutation, binding, "state") == (10, [])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
+    assert key(planted, t, "state") == (special, [usual])
+    assert key(mutation, t, "state") == (usual, [])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
 
 
 def test_scope_lattice_keeps_the_default_for_a_case_that_the_exception_does_not_cover() -> None:
-    planted, _, binding = thread("scope.exception", EXCEPTION_ROLES, EXCEPTION_SLOTS, scope_world)
+    planted, _, t = plant("scope.exception")
 
-    assert key(planted, binding, "state", near_miss=True) == (10, [4])
+    assert key(planted, t, "state", near_miss=True) == (t.roles["usual"], [t.roles["special"]])
 
 
 def test_scope_lattice_keeps_the_key_when_a_decision_is_made_in_an_unrelated_context() -> None:
-    planted, _, binding = thread("scope.exception", EXCEPTION_ROLES, EXCEPTION_SLOTS, scope_world)
+    plan = plan_of("scope.exception")
+    (t,) = plan.threads
+    planted, _ = (Oracle(w, plan.validity()) for w in plan.pair(t))
+    siblings = plan.backbone.children_of(t.roles["everywhere"])
+    unrelated = next(c for c in siblings if c not in (t.roles["here"], t.roles["there"]))
     planted.record.world.op_state(
-        None, by="lead", about="limit", value=99, kind="decision", scope="yard", at=week(2)
+        None,
+        by=t.roles["owner"],
+        about=t.roles["item"],
+        value=OUTSIDE,
+        kind="decision",
+        scope=unrelated,
+        at=t.slots["before"] + DAY,
     )
 
-    assert key(Oracle(planted.record.world), binding, "state") == (4, [10])
+    assert key(Oracle(planted.record.world), t, "state") == (t.roles["special"], [t.roles["usual"]])
 
 
 def test_scope_lattice_holds_a_decision_in_its_own_context_and_not_beyond() -> None:
-    roles = {
-        "owner": "lead",
-        "item": "limit",
-        "special": 4,
-        "everywhere": "everywhere",
-        "here": "quay",
-        "there": "yard",
-    }
-    slots = {"before": week(1), "probe": week(5)}
-    planted, mutation, binding = thread("scope.one-client", roles, slots, scope_world)
+    planted, mutation, t = plant("scope.one-client")
+    special, probe = t.roles["special"], t.slots["probe"]
+    local, there = t.resolve("local"), t.roles["there"]
 
-    assert key(planted, binding, "act") == (None, [4])
-    assert key(mutation, binding, "act") == (4, [])
-    assert planted.read("scope_lattice.applies", of="local", at=week(5), where="yard") is False
-    assert mutation.read("scope_lattice.applies", of="local", at=week(5), where="yard") is True
+    assert key(planted, t, "act") == (None, [special])
+    assert key(mutation, t, "act") == (special, [])
+    assert planted.read("scope_lattice.applies", of=local, at=probe, where=there) is False
+    assert mutation.read("scope_lattice.applies", of=local, at=probe, where=there) is True
 
 
 # -- warrant_graph --------------------------------------------------------------------------------
 
 
-def plan_invalidated() -> tuple[Oracle, Oracle, dict[str, Any]]:
-    roles = {
-        "owner": "lead",
-        "planner": "clerk",
-        "base": "approvals",
-        "old": 1,
-        "new": 2,
-        "job": "release",
-        "intended": "ship",
-        "apart": "audit",
-        "kept": "later",
-    }
-    slots = {"before": week(1), "change": week(3), "probe": week(5)}
-    build = partial(
-        new_world,
-        ("lead", "clerk"),
-        (("approvals", "durable"), ("release", "durable"), ("audit", "durable")),
-    )
-    return thread("propagation.plan-invalidated", roles, slots, build)
-
-
 def test_warrant_graph_drops_a_plan_whose_only_support_was_replaced() -> None:
-    planted, mutation, binding = plan_invalidated()
+    planted, mutation, t = plant("propagation.plan-invalidated")
 
-    assert key(planted, binding, "state") == (False, ["scheme"])
-    assert key(mutation, binding, "state") == (True, [])
-    assert depends_on_plant(key(planted, binding, "state"), key(mutation, binding, "state"))
-    assert planted.read("warrant_graph.stands", of="aside", at=week(5)) is True
+    assert key(planted, t, "state") == (False, [t.resolve("scheme")])
+    assert key(mutation, t, "state") == (True, [])
+    assert depends_on_plant(key(planted, t, "state"), key(mutation, t, "state"))
+    assert planted.read("warrant_graph.stands", of=t.resolve("aside"), at=t.slots["probe"]) is True
 
 
 def test_warrant_graph_keeps_a_conclusion_that_has_another_support_when_one_is_withdrawn() -> None:
-    roles = {
-        "author": "lead",
-        "analyst": "clerk",
-        "first_sign": "gauge",
-        "seen_first": 1,
-        "second_sign": "meter",
-        "seen_second": 2,
-        "verdict": "approvals",
-        "held": 3,
-        "lone": "release",
-        "lost": 4,
-    }
-    slots = {"before": week(1), "change": week(3), "probe": week(5)}
-    build = partial(
-        new_world,
-        ("lead", "clerk"),
-        (
-            ("gauge", "durable"),
-            ("meter", "durable"),
-            ("approvals", "durable"),
-            ("release", "durable"),
-        ),
-    )
-    planted, mutation, binding = thread("propagation.independent-support", roles, slots, build)
+    planted, mutation, t = plant("propagation.independent-support")
+    probe = t.slots["probe"]
 
-    assert key(planted, binding, "act") == ((True, False), ["single"])
-    assert planted.read("warrant_graph.surviving", of="one", at=week(5)) == ("conclusion",)
-    assert planted.read("warrant_graph.fallen", of="one", at=week(5)) == ("single",)
-    assert key(mutation, binding, "act")[0] == (True, True)
-    assert key(mutation, binding, "impact")[0] == ()
+    assert key(planted, t, "act") == ((True, False), [t.resolve("single")])
+    assert planted.read("warrant_graph.surviving", of=t.resolve("one"), at=probe) == (
+        t.resolve("conclusion"),
+    )
+    assert planted.read("warrant_graph.fallen", of=t.resolve("one"), at=probe) == (
+        t.resolve("single"),
+    )
+    assert key(mutation, t, "act")[0] == (True, True)
+    assert key(mutation, t, "impact")[0] == ()
 
 
 def test_warrant_graph_lists_the_statements_for_a_claim_and_against_it() -> None:
-    roles = {
-        "proponent": "lead",
-        "opponent": "clerk",
-        "item": "approvals",
-        "claimed": 1,
-        "opposite": 2,
-        "sign": "gauge",
-        "seen": 5,
-    }
-    slots = {"before": week(1), "change": week(3), "probe": week(5)}
-    build = partial(new_world, ("lead", "clerk"), (("approvals", "durable"), ("gauge", "durable")))
-    planted, mutation, binding = thread("argument.rebuttal", roles, slots, build)
+    planted, mutation, t = plant("argument.rebuttal")
+    ground, counter = t.resolve("ground"), t.resolve("counter")
 
-    assert key(planted, binding, "weigh") == ((("ground",), ("counter",)), [1])
-    assert key(mutation, binding, "weigh")[0] == (("ground",), ())
-    assert key(planted, binding, "trace") == (("counter",), ["ground"])
+    assert key(planted, t, "weigh") == (((ground,), (counter,)), [t.roles["claimed"]])
+    assert key(mutation, t, "weigh")[0] == ((ground,), ())
+    assert key(planted, t, "trace") == ((counter,), [ground])
 
 
 def test_warrant_graph_counts_statements_that_trace_to_one_origin_as_one() -> None:
-    roles = {
-        "witness": "lead",
-        "relay": "clerk",
-        "echo": "intern",
-        "item": "approvals",
-        "claimed": 1,
-    }
-    slots = {"seen": week(1), "retold": week(3), "probe": week(5)}
-    build = partial(new_world, ("lead", "clerk", "intern"), (("approvals", "durable"),))
-    planted, mutation, binding = thread("provenance.circular-reporting", roles, slots, build)
+    planted, mutation, t = plant("provenance.circular-reporting")
+    witness, relay, echo = t.roles["witness"], t.roles["relay"], t.roles["echo"]
 
-    assert key(planted, binding, "trace")[0] == ("lead",)
-    assert key(mutation, binding, "trace")[0] == ("lead", "intern")
-    assert planted.read("holder_ledger.holders", of="approvals", at=week(5)) == (
-        "lead",
-        "clerk",
-        "intern",
+    assert key(planted, t, "trace")[0] == (witness,)
+    assert key(mutation, t, "trace")[0] == (witness, echo)
+    assert planted.read("holder_ledger.holders", of=t.roles["item"], at=t.slots["probe"]) == (
+        witness,
+        relay,
+        echo,
     )
 
 
@@ -610,30 +518,29 @@ def test_warrant_graph_counts_statements_that_trace_to_one_origin_as_one() -> No
 
 
 def test_corpus_closure_does_not_count_a_question_as_a_record() -> None:
-    roles = {"asker": "lead", "answerer": "clerk", "item": "approvals", "answer": 3}
-    slots = {"asked": week(1), "later": week(3), "probe": week(5)}
-    planted, mutation, binding = thread("uncertainty.open-question", roles, slots, reversal_world)
+    planted, mutation, t = plant("uncertainty.open-question")
 
-    assert key(planted, binding, "abstain")[0] is False
-    assert key(mutation, binding, "abstain")[0] is True
-    assert depends_on_plant(key(planted, binding, "abstain"), key(mutation, binding, "abstain"))
+    assert key(planted, t, "abstain")[0] is False
+    assert key(mutation, t, "abstain")[0] is True
+    assert depends_on_plant(key(planted, t, "abstain"), key(mutation, t, "abstain"))
 
 
 def test_corpus_closure_finds_nothing_recorded_for_a_value_that_only_the_world_holds() -> None:
-    roles = {"witness": "lead", "item": "approvals", "actual": 3}
-    slots = {"before": week(1), "probe": week(5)}
-    planted, mutation, binding = thread("absence.not-recorded", roles, slots, reversal_world)
+    planted, mutation, t = plant("absence.not-recorded")
 
-    assert key(planted, binding, "abstain")[0] is False
-    assert key(mutation, binding, "abstain")[0] is True
+    assert key(planted, t, "abstain")[0] is False
+    assert key(mutation, t, "abstain")[0] is True
 
 
 def test_corpus_closure_ignores_a_statement_about_another_subject() -> None:
-    roles = {"witness": "lead", "item": "approvals", "actual": 3}
-    slots = {"before": week(1), "probe": week(5)}
-    planted, _, binding = thread("absence.not-recorded", roles, slots, reversal_world)
+    planted, _, t = plant("absence.not-recorded")
     planted.record.world.op_state(
-        None, by="clerk", about="headcount", value=3, kind="fact", at=week(2)
+        None,
+        by=holder_outside(planted, t),
+        about=attribute_outside(planted, t),
+        value=OUTSIDE,
+        kind="fact",
+        at=t.slots["before"] + DAY,
     )
 
-    assert key(Oracle(planted.record.world), binding, "abstain")[0] is False
+    assert key(Oracle(planted.record.world), t, "abstain")[0] is False

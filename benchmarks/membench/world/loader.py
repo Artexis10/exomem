@@ -54,7 +54,9 @@ _CLOSED_ARGUMENT = {
     "volatility": "volatility_classes",
 }
 _REGISTRY_ARGUMENT = {"kind": "statement_kinds", "hedge": "hedges"}
-_SLOT_ARGUMENT = ("at", "until", "when")
+SLOT_ARGUMENTS = ("at", "until", "when")
+# The arguments that hold a word and never a reference to a role, a step or a slot.
+WORD_ARGUMENTS = (*_CLOSED_ARGUMENT, *_REGISTRY_ARGUMENT)
 _KEY_FIELD_AT = "at"
 
 
@@ -448,7 +450,7 @@ class _Checker:
     def check_references(
         self, item: str, arg: str, value: Any, known: set[str], slots: list[str]
     ) -> None:
-        pool, what = (set(slots), "slot") if arg in _SLOT_ARGUMENT else (known, "role or step id")
+        pool, what = (set(slots), "slot") if arg in SLOT_ARGUMENTS else (known, "role or step id")
         for ref in value if isinstance(value, list) else [value]:
             if not (isinstance(ref, str) and ref in pool):
                 self.refuse("unknown-reference", item, f"{arg} `{ref}` is no {what} of the recipe")

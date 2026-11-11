@@ -68,6 +68,9 @@ class Vocabulary:
     defeat_modes: frozenset[str]
     rule_shapes: frozenset[str]
     volatility_classes: frozenset[str]
+    splits: frozenset[str] = frozenset()
+    name_spaces: frozenset[str] = frozenset()
+    value_generators: frozenset[str] = frozenset()
 
     @classmethod
     def from_raw(
@@ -83,6 +86,9 @@ class Vocabulary:
             defeat_modes=frozenset(attributes["defeat_modes"]),
             rule_shapes=frozenset(attributes["rule_shapes"]),
             volatility_classes=frozenset(attributes["volatility_classes"]),
+            splits=frozenset(attributes.get("splits", ())),
+            name_spaces=frozenset(attributes.get("name_spaces", ())),
+            value_generators=frozenset(attributes.get("value_generators", ())),
         )
 
     @classmethod

@@ -4,7 +4,7 @@
 # words: adding one is a data change. The sets in this file are closed: code implements each member, so
 # adding one is a code change and a change to this file. Code branches only on these values. It
 # never branches on a phenomenon id, a family key, a behaviour key or a norm key.
-schema_version: 3
+schema_version: 4
 
 # How the oracle knows the answer. Each mechanism is one pure function over the evidence layer.
 # `readings` are the named results that a recipe may take as a key, a trap or a premise.
@@ -310,3 +310,24 @@ dials:
   composition: "The number of phenomena that one thread combines."
   history: "The number of sessions and pages in the world."
   margin: "How far apart the stated standing of two conflicting sources is."
+
+# The splits of the benchmark. A world belongs to one split, and the wordbank's names, a pack's surface
+# forms, bridges and work-task templates are each assigned to one split by a stable hash of their ids.
+splits:
+  train: "Public seed. Labelled spans for distilling the model-based sensors. Never scored."
+  dev: "Public seed. For iterating the generator, the harness and the product."
+  heldout: "Seed in evaluator custody. One decision, then the world is retired to `dev`."
+
+# The wordbank's name spaces. A domain pack gives each entity type one of them for its names.
+name_spaces:
+  person: "A first name and a last name composed from syllables."
+  org: "An organisation: a stem and a suffix."
+  project: "A project code name."
+  city: "A place name composed from two parts."
+  product: "A product or system name."
+  concept: "A named framework, charter or protocol."
+
+# How a domain pack draws a value for an attribute. Each generator takes the arguments given here.
+value_generators:
+  integer: "A whole number from `min` to `max`, both included."
+  choice: "One of the listed `from` values."
