@@ -467,6 +467,21 @@ def _pax_member(name: str, data: bytes, pax: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links, modes and FIFOs")
+def test_the_flush_tolerates_what_it_did_not_write(tmp_path: Path) -> None:
+    """A walked tree can hold entries the caller never wrote; the flush must not die on them."""
+    root = tmp_path / "tree"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.md").write_bytes(b"a")
+    readonly = root / "sub" / "b.md"
+    readonly.write_bytes(b"b")
+    readonly.chmod(0o400)
+    (root / "dangling").symlink_to("gone")
+    os.mkfifo(root / "pipe")
+
+    cloud_import.flush_to_disk(root)
+
+
 def test_a_leading_zero_block_does_not_hide_the_archive(tmp_path: Path) -> None:
     refused = _refusal(bytes(512) + _archive(_file("a.md")), tmp_path / "staging")
 

@@ -45,6 +45,7 @@ from .cloud_import import (
     unpack_stream,
 )
 from .governance.principal import OWNER_AUDIENCE, RequestPrincipal, request_scope
+from .governance.transaction import fsync_directory
 
 CHUNK_BYTES = 1024 * 1024
 
@@ -93,17 +94,6 @@ def _fsync_file(path: Path) -> None:
         os.fsync(stream.fileno())
 
 
-def _fsync_directory(path: Path) -> None:
-    """Flush a directory's entries, so a name created or moved into it survives a stop."""
-    if os.name == "nt":  # Windows cannot open a directory descriptor.
-        return
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _check_cell(data_root: Path, cell_id: str) -> None:
     from .cloud_cell import cloud_mode_enabled
 
@@ -130,7 +120,7 @@ def prepare(data_root: Path, import_id: str, cell_id: str) -> str:
             # `.import-keys` and `<import_id>` may have been created above; a lost name would leave the
             # ciphertext undecryptable, so each directory on the way is flushed too.
             for ancestor in (directory, directory.parent, data_root):
-                _fsync_directory(ancestor)
+                fsync_directory(ancestor)
         finally:
             temporary.unlink(missing_ok=True)
     result = subprocess.run(["age-keygen", "-y", str(identity)], check=True, capture_output=True)
@@ -272,7 +262,7 @@ def run_import(
                 folder = vault_root / Path(receipt["manifest"]).parent
                 flush_to_disk(folder)
                 for ancestor in folder.parents:
-                    _fsync_directory(ancestor)
+                    fsync_directory(ancestor)
                     if ancestor == vault_root:
                         break
             elif request.kind == "adopt":
@@ -304,14 +294,21 @@ def run_import(
                 # The adopted name and the `_Imports` name, when it was created above, land on disk;
                 # the staged bytes were already flushed by the unpack. The staging name's removal
                 # reaches the parent's flush as well.
-                _fsync_directory(destination.parent)
-                _fsync_directory(vault_root)
-                _fsync_directory(vault_root.parent)
+                fsync_directory(destination.parent)
+                fsync_directory(vault_root)
+                fsync_directory(vault_root.parent)
                 receipt[import_stage.MEMBERS_KEY] = members
             else:
                 _restore(vault_root, staging, request)
             receipt_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             _private_json(receipt_path, receipt)
+            # `cloud-imports` and the vault's state directory may be new: flush each name on the
+            # way, or a crash can drop the idempotency record the replay above depends on.
+            state_root = state_paths.state_store_root()
+            for ancestor in receipt_path.parent.parents:
+                fsync_directory(ancestor)
+                if ancestor == state_root or ancestor == ancestor.parent:
+                    break
             return public
         finally:
             if process.poll() is None:
@@ -369,9 +366,9 @@ def _restore(vault_root: Path, staging: Path, request: CloudImportRequest) -> No
             raise ArchiveRefused("IMPORT_STAGING_UNAVAILABLE", "restore_committed")
     # The renames' entries: `prior` gained the old vault and state, and the data root gained `prior`
     # and the restored `vault_root`. The trees' bytes were already flushed when staging was unpacked.
-    _fsync_directory(prior)
-    _fsync_directory(state.parent)
-    _fsync_directory(vault_root.parent)
+    fsync_directory(prior)
+    fsync_directory(state.parent)
+    fsync_directory(vault_root.parent)
 
 
 def _prove_restore_collections(staging: Path) -> None:

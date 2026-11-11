@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import tarfile
 from collections.abc import Callable, Iterator
@@ -143,12 +144,26 @@ def free_bytes(path: Path) -> int:
 
 
 def _fsync_file(path: str) -> None:
-    with open(path, "rb+") as staged:
-        os.fsync(staged.fileno())
+    # A walked tree can hold entries this call did not write. Only regular files are flushed, opened
+    # read-only (fsync needs no write access), never through a link, and without blocking on a
+    # swapped-in pipe. A gone or unreadable entry is settled already — os.sync never failed either.
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except (FileNotFoundError, PermissionError):
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _fsync_directory(path: str) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return
     try:
         os.fsync(fd)
     finally:
