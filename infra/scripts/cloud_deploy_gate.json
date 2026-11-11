@@ -1,0 +1,5 @@
+{
+  "description": "automate-cloud-releases D2: the chart and controller build inputs. A release that changes a matching path since the platform Deployment's release waits for a platform upgrade. Globs use fnmatch, where * also matches /.",
+  "include": ["infra/helm/platform/*", "infra/cellctl/*"],
+  "exclude": ["*.md", "infra/cellctl/tests/*"]
+}

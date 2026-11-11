@@ -1,0 +1,62 @@
+name: cloud-deploy
+
+# automate-cloud-releases D1: after a release, set its attested cell image as
+# Substrate's cell_image, when the platform carries the release and no upgrade
+# barrier stops it, then wait until the canary runs it. The logic and its tests
+# are in infra/scripts/cloud_deploy.py and tests/test_cloud_deploy.py.
+#
+# - It runs when release-please completes on a release tag (head_branch v*), and
+#   on a dispatch on main, which the platform upgrade ends with.
+# - The `cloud-deploy` environment holds EXOMEM_DEPLOY_TOKEN and the alert
+#   capability, and admits only main (docs/runbooks/cloud-platform-deploy.md).
+#   Without the token, the run does nothing and succeeds.
+# - It holds no cluster credential and calls Substrate over HTTPS only. The log
+#   is public, so the script prints only codes and counts.
+on:
+  workflow_run:
+    workflows: [release-please]
+    types: [completed]
+    branches: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: read
+  attestations: read
+  packages: read
+
+# One run at a time. GitHub replaces a pending run with a newer one, and each run
+# reads the newest release, so the collapse loses nothing.
+concurrency:
+  group: cloud-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Set the release's cell image
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: cloud-deploy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # The platform gate diffs the platform's release tag against this one.
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Install the registry lookup's one dependency
+        # The version uv.lock pins.
+        run: python3 -m pip install --user packaging==26.2
+      - name: Set the cell image and wait for the canary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXOMEM_DEPLOY_TOKEN: ${{ secrets.EXOMEM_DEPLOY_TOKEN }}
+          EXOMEM_CLOUD_DEPLOY_ALERT_URL: ${{ secrets.EXOMEM_CLOUD_DEPLOY_ALERT_URL }}
+          EXOMEM_SUBSTRATE_URL: ${{ vars.EXOMEM_SUBSTRATE_URL }}
+          CLOUD_DEPLOY_POLL_INTERVAL_SECONDS: ${{ vars.CLOUD_DEPLOY_POLL_INTERVAL_SECONDS }}
+          CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS: ${{ vars.CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS }}
+        run: python3 infra/scripts/cloud_deploy.py
