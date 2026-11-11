@@ -7,6 +7,9 @@ bootstrap over probes that resamples inside each project. A decision reads a hel
 valid windows per project, at least ``MIN_WINDOW_GAP_HOURS`` apart. Every other figure describes.
 Unknown, partial and failed values stay visible as such, never 0.
 
+A probe whose key reads it as harm (``key.reading``) has no floor: no pair and no decision reads it. The report
+gives it as harm against arm N, and ``readings.py`` reads each family, the lineage groups and the background norms.
+
 ``membench outcome report epistemic`` drives this module.
 """
 
@@ -14,7 +17,8 @@ from __future__ import annotations
 
 import json
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from recall_parity.scoring import DEFAULT_RESAMPLES
@@ -23,8 +27,10 @@ from ..faults import books
 from ..judging import stored_record
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
-from .cases import STORE_NAMES, holds_store_name, is_stable
-from .judge import BEHAVIOURS, HISTORY_ARM, behaviours_asked, scored
+from .cases import STORE_NAMES, behaviours, holds_store_name, is_harm, is_stable
+from .judge import HISTORY_ARM, behaviours_asked, scored
+from .projection import load_projection
+from .readings import background_norms, lineage_shares, section
 
 BOOTSTRAP_SEED = 20261108
 #: Agreement of a judge with its own second judgement on ``correct``, below which a run is incomplete. Final for the run.
@@ -63,8 +69,15 @@ def score_tables(outcomes: list[dict], arms: list[str]) -> dict[str, dict[Unit, 
 def paired_diffs(
     a: str, b: str, scores: dict, meta: dict, *, stable: bool
 ) -> tuple[list[Unit], list[float]]:
-    """The probes both arms scored (change probes, or stable ones) and ``a`` minus ``b`` on each."""
-    units = sorted(u for u in scores[a] if u in scores[b] and is_stable(meta[u]) == stable)
+    """The probes both arms scored (change probes, or stable ones) and ``a`` minus ``b`` on each.
+
+    A probe read as harm is in neither set: N answers it correctly, so it has no floor to be read from.
+    """
+    units = sorted(
+        u
+        for u in scores[a]
+        if u in scores[b] and is_stable(meta[u]) == stable and not is_harm(meta[u])
+    )
     return units, [
         mean(list(scores[a][u].values())) - mean(list(scores[b][u].values())) for u in units
     ]
@@ -148,9 +161,13 @@ def decide(
 
 
 def behaviour_rates(outcomes: list[dict], meta: dict, arms: list[str]) -> dict:
-    """Per arm and behaviour: the answers of the probes that ask for it, as yes, no and n/a with the rate of yes among yes and no."""
+    """Per arm and behaviour: the answers of the probes that ask for it, as yes, no and n/a with the rate of yes among yes and no.
+
+    A row exists for each registry behaviour that at least one probe of the case set asks, in registry order.
+    """
+    asked = {b for probe in meta.values() for b in behaviours_asked(probe)}
     rates: dict[str, dict] = {
-        arm: {b: {"yes": 0, "no": 0, "n/a": 0} for b in BEHAVIOURS} for arm in arms
+        arm: {b: {"yes": 0, "no": 0, "n/a": 0} for b in behaviours() if b in asked} for arm in arms
     }
     for o in outcomes:
         if o["arm"] not in rates or o["verdict"] is None or o["state"] == "unanswered":
@@ -164,10 +181,11 @@ def behaviour_rates(outcomes: list[dict], meta: dict, arms: list[str]) -> dict:
     return rates
 
 
-def harm(outcomes: list[dict]) -> dict:
-    """Probe-windows that N answers correctly and P does not, out of those that N answers correctly and P answered.
+def harm(outcomes: list[dict], *, arm: str = "P", probes: str = "change and stable probes") -> dict:
+    """Probe-windows that N answers correctly and ``arm`` does not, out of those that N answers correctly and ``arm`` answered.
 
-    A probe-window where P has no verdict is unknown, not a loss: it leaves the denominator and is counted apart.
+    A probe-window where ``arm`` has no verdict is unknown, not a loss: it leaves the denominator and is counted apart.
+    ``probes`` says which probes ``outcomes`` hold.
     """
     verdicts = {
         (o["arm"], o["project"], o["probe_id"], o["window"]): o["verdict"]["correct"]
@@ -175,15 +193,39 @@ def harm(outcomes: list[dict]) -> dict:
         if o["verdict"] is not None
     }
     solved = sorted(k[1:] for k, ok in verdicts.items() if k[0] == "N" and ok)
-    known = [k for k in solved if ("P", *k) in verdicts]
-    harmed = [k for k in known if verdicts[("P", *k)] is False]
+    known = [k for k in solved if (arm, *k) in verdicts]
+    harmed = [k for k in known if verdicts[(arm, *k)] is False]
     return {
-        "scope": "probe-windows, change and stable probes, where N is correct and P has a verdict",
+        "scope": f"probe-windows, {probes}, where N is correct and {arm} has a verdict",
         "harmed": len(harmed),
         "solved_by_n": len(known),
-        "dropped_p_unknown": len(solved) - len(known),
+        f"dropped_{arm.lower()}_unknown": len(solved) - len(known),
         "rate": round(len(harmed) / len(known), 4) if known else None,
         "probes": [f"{p}:{probe} window {w}" for p, probe, w in harmed],
+    }
+
+
+def harm_read_probes(
+    outcomes: list[dict], meta: dict, arms: list[str], units: Collection[Unit] | None = None
+) -> dict | None:
+    """Per arm other than N, the harm on the probes whose keys read them as harm; None when N did not play.
+
+    These probes have no floor, because N answers them correctly. An arm's reading is the share that N gets right
+    and the arm gets wrong. A run with no such probe gives each arm a rate of None: unknown, not 0.
+    ``units`` limits the probes to those of one group, such as a family.
+    """
+    if "N" not in arms:
+        return None
+    read_as_harm = [
+        o
+        for o in outcomes
+        if is_harm(meta[(o["project"], o["probe_id"])])
+        and (units is None or (o["project"], o["probe_id"]) in units)
+    ]
+    return {
+        arm: harm(read_as_harm, arm=arm, probes="probes whose key reads them as harm")
+        for arm in arms
+        if arm != "N"
     }
 
 
@@ -258,8 +300,12 @@ def gate_row(
     }
 
 
-def dev_gates(outcomes: list[dict]) -> dict:
-    """Solvable (arm N with the whole history) and memory needed (arm N without it), each with the probes that fail it."""
+def dev_gates(outcomes: list[dict], meta: dict) -> dict:
+    """Solvable (arm N with the whole history) and memory needed (arm N without it), each with the probes that fail it.
+
+    The memory-needed gate skips a probe whose key reads it as harm: N is expected to pass it, and the report
+    gives it as harm against N (``harm_read_probes``). The skipped probes are listed.
+    """
     result = {}
     for name, arm in (("solvable", HISTORY_ARM), ("memory_needed", "N")):
         rows = [o for o in outcomes if o["arm"] == arm]
@@ -269,6 +315,15 @@ def dev_gates(outcomes: list[dict]) -> dict:
             )
             result[name] = {"status": f"not run: {what}"}
             continue
+        skipped: list[str] = []
+        if name == "memory_needed":
+            harm_keys = {
+                (o["project"], o["probe_id"])
+                for o in rows
+                if is_harm(meta[(o["project"], o["probe_id"])])
+            }
+            skipped = sorted(f"{project}:{probe_id}" for project, probe_id in harm_keys)
+            rows = [o for o in rows if (o["project"], o["probe_id"]) not in harm_keys]
         judged = [o for o in rows if o["verdict"] is not None]
         correct = [o for o in judged if o["verdict"]["correct"]]
         unknown = len(rows) - len(judged)
@@ -284,9 +339,10 @@ def dev_gates(outcomes: list[dict]) -> dict:
         else:
             failing = sorted({f"{o['project']}:{o['probe_id']}" for o in correct})
             rate = 1 - len(correct) / len(judged) if judged else None
-            result[name] = gate_row(
-                rate, MEMORY_NEEDED_FLOOR, failing, len(judged), unknown, below=True
-            )
+            result[name] = {
+                **gate_row(rate, MEMORY_NEEDED_FLOOR, failing, len(judged), unknown, below=True),
+                "skipped_as_harm": skipped,
+            }
     return result
 
 
@@ -330,8 +386,13 @@ def build(
     arms: list[str],
     *,
     heldout: bool,
+    earlier: Sequence[dict] = (),
 ) -> dict:
-    """The unstamped report of an f38 run whose answers are judged under ``judge_run``."""
+    """The unstamped report of an f38 run whose answers are judged under ``judge_run``.
+
+    ``earlier`` holds the stored reports before this one, newest first: a family reads ``saturated`` only when its
+    gap to the ceiling stays inside the margin in this report and in the ones before it that the rule counts.
+    """
     outcomes, failed, again = scored(judge_run)
     states = layout.project_states(run_dir)
     counted = layout.counted_windows(states)
@@ -341,10 +402,16 @@ def build(
         for p in project["probes"]
     }
     scores = score_tables(outcomes, arms)
+    unit_scores = {
+        arm: {unit: mean(list(by_window.values())) for unit, by_window in table.items()}
+        for arm, table in scores.items()
+    }
     rows = {f"{a}-{b}": pair_row(a, b, scores, meta) for a, b in pairs}
     why = incomplete_reasons(failed, again, heldout=heldout, states=states, expected=list(projects))
     decision, gaps = decide(why, heldout=heldout, counted=counted, rows=rows)
     play = [o for o in outcomes if o["arm"] != HISTORY_ARM]
+    history = score_tables(outcomes, [HISTORY_ARM])[HISTORY_ARM]
+    history_scores = {unit: mean(list(by_window.values())) for unit, by_window in history.items()}
     stable_pairs = [(a, b) for a, b in pairs if a in arms and b in arms]
     p_gain = None
     if all(a in scores for a in ("P", "N")):
@@ -418,6 +485,24 @@ def build(
             },
             "behaviours": behaviour_rates(play, meta, arms),
             "harm": harm(play) if {"N", "P"} <= set(arms) else None,
+            "harm_read_probes": harm_read_probes(play, meta, arms),
+            "families": section(
+                meta=meta,
+                outcomes=play,
+                unit_scores=unit_scores,
+                arms=arms,
+                seed=BOOTSTRAP_SEED,
+                earlier=earlier,
+                projection=load_projection(),
+                harm_of=lambda units: harm_read_probes(play, meta, arms, set(units)),
+            ),
+            "lineage": lineage_shares(meta),
+            "background_norms": background_norms(
+                meta,
+                history_scores,
+                declared_share=SOLVABLE_FLOOR,
+                history_played=any(o["arm"] == HISTORY_ARM for o in outcomes),
+            ),
             "answers_naming_a_store": {
                 "scope": f"share of the raw answers that contain any of {list(STORE_NAMES)}, case-folded; the judge read them masked",
                 "arms": store_mentions(play, arms),
@@ -442,7 +527,7 @@ def build(
         ],
     }
     if not heldout:
-        report["dev_gates"] = dev_gates(outcomes)
+        report["dev_gates"] = dev_gates(outcomes, meta)
         if logs.get(HISTORY_ARM):
             report["dev_gates"]["solvable"]["spent"] = usage_totals(logs[HISTORY_ARM])
     return report
@@ -473,6 +558,7 @@ def summary_lines(report: dict) -> list[str]:
         lines.append(
             f"skipped {skipped['arm']} answer to {skipped['probe_id']} of {skipped['project']}: {skipped['reason']}"
         )
+    lines += family_lines(report["description"])
     for name, gate in report.get("dev_gates", {}).items():
         if "status" in gate:
             lines.append(f"gate {name}: {gate['status']}")
@@ -480,5 +566,39 @@ def summary_lines(report: dict) -> list[str]:
             lines.append(
                 f"gate {name}: rate {gate['rate']} against {gate['floor']} "
                 f"({'meets' if gate['meets'] else 'below'}), failing probes {gate['failing_probes']}"
+                + (
+                    f", skipped as harm {gate['skipped_as_harm']}"
+                    if gate.get("skipped_as_harm")
+                    else ""
+                )
             )
+    return lines
+
+
+def family_lines(description: dict) -> list[str]:
+    """The family readings, the contradicted predictions, the lineage groups and the norms below the declared share."""
+    if "families" not in description:
+        return []  # a report stored before task 4.6 holds none of these rows: print nothing, not a guess
+    families = description["families"]
+    by_reading = Counter(row["reading"] for row in families["rows"].values())
+    lines = [
+        f"pooled change probes read: {families['pooled']['reading']}",
+        "families by reading: " + ", ".join(f"{name} {n}" for name, n in by_reading.items()),
+    ]
+    for item in families["contradicted_predictions"]:
+        lines.append(
+            f"prediction contradicted: {item['family']} was filed as {item['predicted']} and reads "
+            f"{item['observed']}; read its {len(item['read_first'])} probes first"
+        )
+    lineage = description["lineage"]
+    if lineage["probes"]:
+        shares = ", ".join(
+            f"{key} {group['share']:.2f}"
+            for key, group in lineage["groups"].items()
+            if group["probes"]
+        )
+        lines.append(f"lineage shares of {lineage['probes']} probes: {shares or 'none'}")
+    below = description["background_norms"]["below_declared_share"]
+    if below:
+        lines.append(f"background norms that the full-history arm reaches too seldom: {below}")
     return lines

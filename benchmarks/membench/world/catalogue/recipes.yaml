@@ -30,8 +30,9 @@
 #
 # A `name` role that no `name` step gives in either world is a name that the entity already has.
 # A `name` role that a step gives in one world only names nothing in the other world. A `user`
-# role is the holder whom the actor works for, and no `holder` role binds to that holder. A holder
-# role may stand as the value of an attribute whose values are holders.
+# role is the holder whom the actor works for, and no `holder` role binds to that holder. An attribute
+# whose values are holders binds only to a role that sets `values: holder`, and a `value` role of that
+# attribute then draws a holder of the pack's entity type, so an owner or a seat is always a person.
 #
 # A key part is a reading, `{read: <mechanism>.<reading>, of: <role or step id>}`, or a role taken
 # as it is, `{role: <role>}`. A reading's mechanism must be one that the entry names. The
@@ -198,7 +199,7 @@ recipes:
     slots: [told, probe]
     steps:
       - {op: state, id: relayed, by: reporter, about: item, value: claimed, kind: report, basis: told, quoting: speaker, at: told, world: planted}
-      - {op: state, id: direct, by: speaker, about: item, value: claimed, kind: fact, basis: observed, at: told, world: mutation}
+      - {op: state, id: relayed, by: speaker, about: item, value: claimed, kind: fact, basis: observed, at: told, world: mutation}
     keys:
       whose: {at: probe, value: {read: holder_ledger.holder, of: relayed}, traps: [{role: reporter}]}
       act: {at: probe, value: {read: holder_ledger.holders, of: item}, traps: [{role: claimed}]}
@@ -542,9 +543,9 @@ recipes:
     needs:
       registrar: {is: holder}
       asset: {is: entity}
-      owner: {is: attribute, of: asset, volatility: durable}
-      earlier: {is: holder}
-      later: {is: holder, differs_from: earlier}
+      owner: {is: attribute, of: asset, volatility: durable, values: holder}
+      earlier: {is: value, of: owner}
+      later: {is: value, of: owner, differs_from: earlier}
     slots: [before, change, probe]
     steps:
       - {op: set, target: owner, value: earlier, at: before}
@@ -558,11 +559,11 @@ recipes:
     needs:
       lead: {is: holder}
       post: {is: entity}
-      seat: {is: attribute, of: post, volatility: durable}
+      seat: {is: attribute, of: post, volatility: durable, values: holder}
       next_post: {is: entity, differs_from: post}
-      next_seat: {is: attribute, of: next_post, volatility: durable}
-      mover: {is: holder}
-      successor: {is: holder, differs_from: mover}
+      next_seat: {is: attribute, of: next_post, volatility: durable, values: holder}
+      mover: {is: value, of: seat}
+      successor: {is: value, of: seat, differs_from: mover}
     slots: [before, change, probe]
     steps:
       - {op: set, target: seat, value: mover, at: before}

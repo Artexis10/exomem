@@ -1,0 +1,34 @@
+# How the epistemic task suite's report reads a family: the closed set of readings and the numbers that their rules read.
+#
+# The rules are decision 6 of `openspec/changes/add-synthetic-epistemic-world/design.md`, "A small count reads as a
+# small count". The numbers are its first values: "The numbers 20, 0.2, 0.05 and one in four are first values. The first
+# two development rounds may move them before any held-out world exists." A change to a number is a change to this file
+# and to nothing else. The file sits outside the catalogue and outside the Exomem projection, so an edited number changes
+# no world's catalogue digest and no filed prediction. The report prints this file's numbers beside every reading.
+schema_version: 1
+
+thresholds:
+  # A family reads `too few probes` when it has fewer position probes than this.
+  min_position_probes: 20
+  # The ceiling's lead over the floor (G minus N): its lower bound at or above this reads `room`, its upper bound below it
+  # reads `no room`.
+  room: 0.2
+  # The primary arm's gap to the ceiling (P minus G): its lower bound above this is one report at the ceiling.
+  saturation_margin: -0.05
+  # The reports in a row, this one included, whose P minus G lower bound is above the margin.
+  saturation_reports: 2
+
+# The readings, in the order that the report decides them. The first whose condition holds is the family's reading.
+readings:
+  not measured: "The round played no probe of this family. Never 0."
+  too few probes: "The family has fewer position probes than `min_position_probes`. Its raw counts are printed and no position, `no room` or `saturated` reading."
+  no room: "The upper bound of the interval of G minus N is below `room`. The floor already nearly reaches the ceiling, so no arm's position is printed."
+  saturated: "The lower bound of the interval of P minus G is above `saturation_margin` in `saturation_reports` reports in a row. The family becomes a regression check."
+  room: "The lower bound of the interval of G minus N is at least `room`. Each arm's position is printed."
+  room unclear: "The family has enough probes, and the interval of G minus N holds `room`, or there is no such interval."
+
+# How the report reads Exomem's filed outcome (`predict` in the projection) from the arms of one report.
+observed:
+  pass: "The lower bound of the interval of P minus G is above `saturation_margin`: the primary arm reads at the ceiling."
+  fail: "The primary arm is not at the ceiling, and the lower bound of the interval of P minus F is not above 0: no better than the plain folder."
+  partial: "The primary arm is not at the ceiling, and the lower bound of the interval of P minus F is above 0."

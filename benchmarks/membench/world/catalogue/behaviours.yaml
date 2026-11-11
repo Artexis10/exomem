@@ -7,7 +7,7 @@ behaviours:
   cites_source: {polarity: wanted, description: "The answer names where the fact came from."}
   keeps_attribution: {polarity: wanted, description: "The answer keeps a claim as its holder's claim."}
   abstains_when_unknown: {polarity: wanted, description: "The answer says that the corpus does not say."}
-  trusts_stale: {polarity: unwanted, description: "The answer relies on a replaced or withdrawn value."}
+  trusts_stale: {polarity: unwanted, description: "The answer relies on a replaced or withdrawn value, on a trap or on the premise; it is n/a when the key holds none of them."}
   keeps_kind: {polarity: wanted, description: "The answer keeps a plan, a hypothesis, an assumption or a norm as what it is."}
   keeps_scope: {polarity: wanted, description: "The answer applies a rule only where it holds."}
   resolves_identity: {polarity: wanted, description: "The answer treats two names of one thing as one thing."}
