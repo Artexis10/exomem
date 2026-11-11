@@ -23,8 +23,8 @@ from ..faults import books
 from ..judging import stored_record
 from ..stats import NOT_WORSE_BOUND, paired_interval, usage_totals
 from . import layout
-from .cases import STORE_NAMES, holds_store_name, is_stable
-from .judge import BEHAVIOURS, HISTORY_ARM, behaviours_asked, scored
+from .cases import STORE_NAMES, behaviours, holds_store_name, is_stable
+from .judge import HISTORY_ARM, behaviours_asked, scored
 
 BOOTSTRAP_SEED = 20261108
 #: Agreement of a judge with its own second judgement on ``correct``, below which a run is incomplete. Final for the run.
@@ -148,9 +148,13 @@ def decide(
 
 
 def behaviour_rates(outcomes: list[dict], meta: dict, arms: list[str]) -> dict:
-    """Per arm and behaviour: the answers of the probes that ask for it, as yes, no and n/a with the rate of yes among yes and no."""
+    """Per arm and behaviour: the answers of the probes that ask for it, as yes, no and n/a with the rate of yes among yes and no.
+
+    A row exists for each registry behaviour that at least one probe of the case set asks, in registry order.
+    """
+    asked = {b for probe in meta.values() for b in behaviours_asked(probe)}
     rates: dict[str, dict] = {
-        arm: {b: {"yes": 0, "no": 0, "n/a": 0} for b in BEHAVIOURS} for arm in arms
+        arm: {b: {"yes": 0, "no": 0, "n/a": 0} for b in behaviours() if b in asked} for arm in arms
     }
     for o in outcomes:
         if o["arm"] not in rates or o["verdict"] is None or o["state"] == "unanswered":

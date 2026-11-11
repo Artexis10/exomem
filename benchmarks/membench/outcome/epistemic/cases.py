@@ -8,10 +8,14 @@ from that digest, whose structure is wrong, or whose probe holds its own answer.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 from pathlib import Path
 
+import yaml
+
+from ...world.loader import CATALOGUE_DIR
 from ..workspace import sha256_of
 
 #: Where a project file sits under the run root.
@@ -20,15 +24,9 @@ CASES_DIR = ("cases", "epistemic")
 STABLE = "stable"
 #: A key string of this many characters or more is checked as a substring; a shorter one as a whole token.
 MIN_SUBSTRING_CHARS = 4
-#: The behaviours the judge rates yes, no or n/a. A key lists the ones its probe asks for; ``judge`` imports this tuple.
-BEHAVIOURS = (
-    "uses_current",
-    "flags_conflict",
-    "cites_source",
-    "keeps_attribution",
-    "abstains_when_unknown",
-    "trusts_stale",
-)
+#: The one behaviour that code names: the judge rates reliance on a trap as this, and ``judge.behaviours_asked``
+#: adds it to every change probe. The registry must hold it; every other behaviour is read from the registry.
+TRUSTS_STALE = "trusts_stale"
 #: Top-level workspace names the harness owns: a scripted file there would collide with an arm's memory or instruction.
 RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
@@ -36,6 +34,17 @@ RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: that holds one as a neutral mark, and the case check keeps them out of case text, so every masked token comes
 #: from an arm. The mask hides these names; it does not hide every hint of the arm.
 STORE_NAMES = ("memory/", "exomem")
+
+
+@functools.cache
+def _catalogue(name: str, field: str) -> dict:
+    """``field`` of one catalogue file, read once: the shipped registry is the only list that the suite reads."""
+    return yaml.safe_load((CATALOGUE_DIR / name).read_text(encoding="utf-8"))[field]
+
+
+def behaviours() -> dict[str, dict]:
+    """Every behaviour that the judge may rate, with its polarity and description, from ``behaviours.yaml``."""
+    return _catalogue("behaviours.yaml", "behaviours")
 
 
 def holds_store_name(text: str) -> bool:
@@ -165,9 +174,10 @@ def key_problems(name: str, key: dict) -> list[str]:
         problems.append(f"probe {name}: every key.accept item must be a string")
     if not isinstance(key.get("trap"), (str, type(None))):
         problems.append(f"probe {name}: key.trap must be a string or null")
-    if unknown := [b for b in key["behaviours"] if b not in BEHAVIOURS]:
+    if unknown := [b for b in key["behaviours"] if b not in behaviours()]:
         problems.append(
-            f"probe {name}: key.behaviours names {unknown}, which the judge does not rate; use {list(BEHAVIOURS)}"
+            f"probe {name}: key.behaviours names {unknown}, which the behaviour registry "
+            f"(behaviours.yaml) lacks; use {list(behaviours())}"
         )
     return problems
 

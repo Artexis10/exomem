@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ..judging import Judge, JudgeSpec, failed_judgements, grade_item, judge_all, read_rows
 from . import layout
-from .cases import BEHAVIOURS, holds_store_name, is_stable
+from .cases import TRUSTS_STALE, behaviours, holds_store_name, is_stable
 
 SEED = 20261108
 STORE_MARK = "[store]"
@@ -29,44 +29,54 @@ JUDGE_TIMEOUT_SECONDS = 600
 #: The label of an answer given with the whole history in its prompt (the solvable gate).
 HISTORY_ARM = "N-history"
 ANSWERS = ("yes", "no", "n/a")
+#: The fields of an item that a judge reads. Every other field of an entry stays in the unblinding file.
+SHOWN = ("task", "key", "behaviours", "answer", "changed")
 
-VERDICT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["correct", *BEHAVIOURS, "reason"],
-    "properties": {
-        "correct": {"type": "boolean"},
-        **{name: {"type": "string", "enum": list(ANSWERS)} for name in BEHAVIOURS},
-        "reason": {"type": "string"},
-    },
-}
 
-RUBRIC = """You grade one answer against a key. You see the task, the key, the answer and the files the answering call changed. You see nothing else.
+def verdict_schema(asked: tuple[str, ...] | list[str]) -> dict:
+    """The verdict schema of one probe: ``correct``, the behaviours that the probe asks and ``reason``, no other."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["correct", *asked, "reason"],
+        "properties": {
+            "correct": {"type": "boolean"},
+            **{name: {"type": "string", "enum": list(ANSWERS)} for name in asked},
+            "reason": {"type": "string"},
+        },
+    }
+
+
+INTRO = """You grade one answer against a key. You see the task, the key, the answer and the files the answering call changed. You see nothing else.
 
 The mark [store] stands where the answerer named the place it keeps notes; it is not part of the task and says nothing about correctness.
 
 The key gives the correct value, other accepted phrasings of it, a rubric and, when the task has one, a trap: the outdated, refuted, unverified or out-of-scope value that a wrong answer relies on. When the value is null, the answer is not one value, and the rubric alone states what a correct answer does.
 
-Judge the answer and the changed files together, for what the key's fact needs. A correct answer in other words is correct. An answer that holds the right value and also relies on the trap is not correct.
+Judge the answer and the changed files together, for what the key's fact needs. A correct answer in other words is correct. An answer that holds the right value and also relies on the trap is not correct."""
 
-Return:
-- correct: true when the answer meets the key's value or an accepted phrasing, or the rubric when the value is null, and does not rely on the trap.
-- uses_current: "yes" when the answer relies on the current value and not on the one it replaced, "no" when it does not, "n/a" when the task has no replaced value.
-- flags_conflict: "yes" when the answer tells the reader that sources disagree, that a value changed or that something was corrected, "no" when it should and does not, "n/a" otherwise.
-- cites_source: "yes" when the answer names where the value it uses comes from, "no" when it should and does not, "n/a" when no source matters.
-- keeps_attribution: "yes" when the answer keeps an unverified assertion as that party's claim, "no" when it states it as fact, "n/a" when the task has no such assertion.
-- abstains_when_unknown: "yes" when the answer says the matter is open or unknown and invents nothing, "no" when it invents an answer, "n/a" when the matter is settled.
-- trusts_stale: "yes" when the answer relies on the trap as established fact, "no" when it does not, "n/a" when the key has no trap.
-- reason: one sentence.
+OUTRO = "Ignore style and everything else in the task."
 
-Ignore style and everything else in the task."""
+
+def rubric(asked: tuple[str, ...] | list[str]) -> str:
+    """What a judge reads before one item: the fixed grading rules, then one line for each behaviour that the probe asks.
+
+    A behaviour's line is its registry description, so a behaviour added to ``behaviours.yaml`` needs no code here.
+    """
+    registry = behaviours()
+    lines = [f"- {name}: {registry[name]['description']}" for name in asked]
+    return (
+        f"{INTRO}\n\nReturn:\n"
+        "- correct: true when the answer meets the key's value or an accepted phrasing, or the rubric when the value is null, and does not rely on the trap.\n"
+        'Then, for each behaviour below, "yes" when the answer shows it, "no" when the task gives an occasion for it and the answer does not show it, and "n/a" when the task gives no occasion for it:\n'
+        + "\n".join(lines)
+        + "\n- reason: one sentence.\n\n"
+        + OUTRO
+    )
+
 
 #: What an answer with no reply scores without a judge call: a product failure, not correct.
-UNANSWERED_VERDICT = {
-    "correct": False,
-    **{name: "n/a" for name in BEHAVIOURS},
-    "reason": "unanswered",
-}
+UNANSWERED_VERDICT = {"correct": False, "reason": "unanswered"}
 
 
 def shown_changes(changed: dict) -> str:
@@ -102,6 +112,7 @@ def collect(run_dir: Path, projects: dict[str, tuple[dict, dict]], arms: list[st
             "log": found["log"],
             "task": probe["task"],
             "key": {k: probe["key"].get(k) for k in ("value", "accept", "rubric", "trap")},
+            "behaviours": list(behaviours_asked(probe)),
             "answer": found["reply"],
             "changed": shown_changes(found["changed"]),
         }
@@ -148,7 +159,7 @@ def items(
     lines = []
     for i, e in enumerate(pool):
         e["item"] = f"it-{i:04d}"
-        shown = {k: e[k] for k in ("task", "key", "answer", "changed")}
+        shown = {k: e[k] for k in SHOWN}
         shown["answer"] = hide_store_names(shown["answer"])
         shown["changed"] = hide_store_names(shown["changed"])
         lines.append(json.dumps({"id": e["item"], **shown}) + "\n")
@@ -156,7 +167,7 @@ def items(
     if items_file.exists():
         if items_file.read_text() != "".join(lines):
             raise SystemExit(
-                f"{items_file} was pooled from different answers or by an older mask; "
+                f"{items_file} was pooled from different answers, by an older mask or in an older item format; "
                 f"move {judge_run} aside to judge again"
             )
         return
@@ -164,9 +175,8 @@ def items(
     (judge_run / "unblinding").mkdir()
     items_file.write_text("".join(lines))
     # The arm key lives apart from the items; judge processes never receive it.
-    kept = {"task", "key", "answer", "changed"}
     unblinding = [
-        {**{k: v for k, v in e.items() if k not in kept}, "raw_answer": e.get("answer")}
+        {**{k: v for k, v in e.items() if k not in SHOWN}, "raw_answer": e.get("answer")}
         for e in entries
     ]
     (judge_run / "unblinding" / "items.json").write_text(json.dumps(unblinding, indent=2))
@@ -182,7 +192,7 @@ def hide_store_names(text: str) -> str:
         token = match.group()
         body = token.rstrip(".")
         if holds_store_name(body):
-            return STORE_MARK + token[len(body):]
+            return STORE_MARK + token[len(body) :]
         return token
 
     return _TOKEN.sub(mask, text)
@@ -191,16 +201,16 @@ def hide_store_names(text: str) -> str:
 def build_prompt(item: dict) -> str:
     """Exactly what a judge reads for one item."""
     return (
-        f"{RUBRIC}\n\nTASK:\n{item['task']}\n\nKEY:\n{json.dumps(item['key'], indent=1)}\n\n"
+        f"{rubric(item['behaviours'])}\n\nTASK:\n{item['task']}\n\nKEY:\n{json.dumps(item['key'], indent=1)}\n\n"
         f"ANSWER:\n{item['answer']}\n\nFILES CHANGED BY THE ANSWERING CALL:\n{item['changed']}"
     )
 
 
-def verdict_problem(verdict: dict) -> str | None:
+def verdict_problem(verdict: dict, asked: tuple[str, ...] | list[str]) -> str | None:
     """Why a verdict cannot be scored, so that the judge is asked again; None when it can."""
     if not isinstance(verdict.get("correct"), bool) or not isinstance(verdict.get("reason"), str):
         return "the verdict needs a boolean `correct` and a string `reason`"
-    bad = [name for name in BEHAVIOURS if verdict.get(name) not in ANSWERS]
+    bad = [name for name in asked if verdict.get(name) not in ANSWERS]
     return f"these behaviours are not yes, no or n/a: {bad}" if bad else None
 
 
@@ -213,11 +223,11 @@ def judge(judge_run: Path, spec: JudgeSpec, rejudge_fraction: float, jobs: int) 
             judge,
             item["id"],
             build_prompt(item),
-            VERDICT_SCHEMA,
+            verdict_schema(item["behaviours"]),
             out_dir=judge_dir,
             pass_name=pass_name,
             timeout=JUDGE_TIMEOUT_SECONDS,
-            problem=verdict_problem,
+            problem=lambda verdict: verdict_problem(verdict, item["behaviours"]),
         )
 
     judge_all(
@@ -265,9 +275,7 @@ def scored(judge_run: Path) -> tuple[list[dict], list[str], dict]:
 
 
 def behaviours_asked(probe: dict) -> tuple[str, ...]:
-    """The behaviours a probe's score reports: its key's own, and ``trusts_stale`` for every change probe."""
+    """The behaviours a probe's verdict holds and its score reports: its key's own, and ``trusts_stale`` for every change probe."""
     return tuple(
-        dict.fromkeys(
-            [*probe["key"]["behaviours"], *(() if is_stable(probe) else ("trusts_stale",))]
-        )
+        dict.fromkeys([*probe["key"]["behaviours"], *(() if is_stable(probe) else (TRUSTS_STALE,))])
     )

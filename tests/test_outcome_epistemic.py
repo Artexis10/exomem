@@ -459,6 +459,7 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
             "item": None,
             "task": "t",
             "key": {"value": "8443"},
+            "behaviours": ["uses_current"],
             "answer": "Port 8443, from my note in memory/web.md.",
             "changed": "memory/web.md\n+port 8443",
         },
@@ -468,6 +469,7 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
             "item": None,
             "task": "t",
             "key": {"value": "8443"},
+            "behaviours": ["uses_current"],
             "answer": "Port 8443, as Exomem recalled through mcp__exomem__recall_context.",
             "changed": "",
         },
@@ -681,6 +683,181 @@ def test_a_key_with_an_unknown_behaviour_or_a_non_string_accept_item_refuses_wit
     listing_trusts_stale["key"]["behaviours"] = ["trusts_stale"]
     assert epistemic_judge.behaviours_asked(listing_trusts_stale) == ("trusts_stale",), (
         "a change probe asks trusts_stale once even when its key lists it"
+    )
+
+
+def test_a_key_naming_a_registered_behaviour_beyond_the_first_six_passes_the_case_check():
+    """`keeps_scope` is in the registry and was never in the old code constant."""
+    project = invented_project()
+    project["probes"][1]["key"]["behaviours"] = ["uses_current", "keeps_scope"]
+
+    assert cases.structure_problems(project) == []
+
+
+def test_the_verdict_schema_of_a_probe_holds_its_keys_behaviours_and_trusts_stale_unless_it_is_stable():
+    """A change probe's judge rates what its key names and trusts_stale; a stable probe's judge rates what its key names."""
+    change = invented_project()["probes"][1]
+    change["key"]["behaviours"] = ["keeps_scope", "resolves_identity"]
+    stable = invented_project()["probes"][0]
+    stable["key"]["behaviours"] = ["keeps_order"]
+
+    change_schema = epistemic_judge.verdict_schema(epistemic_judge.behaviours_asked(change))
+    stable_schema = epistemic_judge.verdict_schema(epistemic_judge.behaviours_asked(stable))
+
+    assert set(change_schema["properties"]) == {
+        "correct",
+        "keeps_scope",
+        "resolves_identity",
+        "trusts_stale",
+        "reason",
+    }
+    assert set(change_schema["required"]) == set(change_schema["properties"])
+    assert set(stable_schema["properties"]) == {"correct", "keeps_order", "reason"}
+    assert stable_schema["additionalProperties"] is False
+
+
+def test_the_judge_gives_each_item_the_schema_of_its_own_probe_and_asks_again_when_an_asked_behaviour_is_missing(
+    tmp_path, monkeypatch
+):
+    """One pooled run holds probes that ask different behaviours: a fixed schema would make the judge rate the wrong ones."""
+    pooled = {
+        "task": "t",
+        "key": {"value": "v", "accept": [], "rubric": [], "traps": [], "premise": None},
+        "answer": "a",
+        "changed": "(no file changed)",
+    }
+    items = [
+        {"id": "it-0000", **pooled, "behaviours": ["keeps_scope", "trusts_stale"]},
+        {"id": "it-0001", **pooled, "behaviours": ["keeps_order"]},
+    ]
+    (tmp_path / "judge").mkdir()
+    (tmp_path / "judge" / "items.jsonl").write_text("".join(json.dumps(i) + "\n" for i in items))
+    asked = []
+
+    class Judge:
+        """Answers each item's first call without `keeps_scope`, as a judge that ignored its schema would."""
+
+        def call(self, prompt, schema, *, out, timeout):
+            asked.append((out.name, sorted(schema["required"])))
+            rated = {"correct": True, "reason": "r", "trusts_stale": "no", "keeps_order": "yes"}
+            if out.name.endswith(".0.codex-out.json"):
+                return SimpleNamespace(verdict=rated, cost_usd=0.0, model_reported=[], error="")
+            return SimpleNamespace(
+                verdict={**rated, "keeps_scope": "yes"}, cost_usd=0.0, model_reported=[], error=""
+            )
+
+    def judge_all(judge_dir, spec, pooled_items, grade, **options):
+        return [grade(item, Judge(), "verdicts") for item in pooled_items]
+
+    rows = []
+    monkeypatch.setattr(
+        epistemic_judge, "judge_all", lambda *a, **k: rows.extend(judge_all(*a, **k))
+    )
+    epistemic_judge.judge(tmp_path, None, 0.0, 1)
+
+    assert [r["verdict"] is not None for r in rows] == [True, True]
+    assert asked == [
+        ("it-0000.verdicts.0.codex-out.json", ["correct", "keeps_scope", "reason", "trusts_stale"]),
+        ("it-0000.verdicts.1.codex-out.json", ["correct", "keeps_scope", "reason", "trusts_stale"]),
+        ("it-0001.verdicts.0.codex-out.json", ["correct", "keeps_order", "reason"]),
+    ]
+    assert rows[0]["errors"] == ["these behaviours are not yes, no or n/a: ['keeps_scope']"]
+
+
+def test_the_judge_reads_the_description_of_each_behaviour_the_probe_asks_and_no_other():
+    """The prompt's behaviour lines come from the registry, so a new registry entry needs no code."""
+    registry = cases.behaviours()
+    prompt = epistemic_judge.build_prompt(
+        {
+            "task": "t",
+            "key": {"value": "v", "accept": [], "rubric": [], "traps": [], "premise": None},
+            "behaviours": ["keeps_scope", "trusts_stale"],
+            "answer": "a",
+            "changed": "(no file changed)",
+        }
+    )
+
+    assert registry["keeps_scope"]["description"] in prompt
+    assert registry["trusts_stale"]["description"] in prompt
+    assert registry["keeps_order"]["description"] not in prompt
+
+
+def test_the_report_rows_of_a_project_that_asks_the_first_six_behaviours_are_those_of_the_old_constant():
+    """Before the registry, every arm had a row for each of six behaviours. These counts are the old code's output on the same fixture."""
+
+    def asks(dimension, behaviours):
+        return {"dimension": dimension, "key": {"behaviours": behaviours}}
+
+    meta = {
+        ("a", "stable-1"): asks("stable", ["uses_current"]),
+        ("a", "attr-1"): asks("attribution", ["keeps_attribution", "cites_source"]),
+        ("a", "conf-1"): asks("conflict", ["flags_conflict", "cites_source"]),
+        ("a", "open-1"): asks("calibration", ["abstains_when_unknown"]),
+        ("a", "cur-1"): asks("supersession", ["uses_current", "flags_conflict"]),
+    }
+
+    def answer(arm, probe_id, state="answered", **verdict):
+        return {
+            "arm": arm,
+            "project": "a",
+            "probe_id": probe_id,
+            "window": 1,
+            "state": state,
+            "verdict": None if state == "unanswered" else {"correct": True, **verdict},
+        }
+
+    outcomes = [
+        answer("N", "stable-1", uses_current="yes", trusts_stale="n/a"),
+        answer("N", "attr-1", keeps_attribution="no", cites_source="no", trusts_stale="yes"),
+        answer("N", "conf-1", flags_conflict="no", cites_source="n/a", trusts_stale="no"),
+        answer("N", "open-1", abstains_when_unknown="no", trusts_stale="n/a"),
+        answer("N", "cur-1", uses_current="no", flags_conflict="no", trusts_stale="yes"),
+        answer("P", "stable-1", uses_current="yes", trusts_stale="n/a"),
+        answer("P", "attr-1", keeps_attribution="yes", cites_source="yes", trusts_stale="no"),
+        answer("P", "conf-1", flags_conflict="yes", cites_source="yes", trusts_stale="no"),
+        answer("P", "open-1", abstains_when_unknown="yes", trusts_stale="n/a"),
+        answer("P", "cur-1", uses_current="yes", flags_conflict="n/a", trusts_stale="no"),
+        answer("P", "cur-1", state="unanswered"),
+    ]
+
+    rates = report.behaviour_rates(outcomes, meta, ["N", "P"])
+
+    # arm -> behaviour -> [yes, no, n/a, rate], in the old constant's order.
+    old = {
+        "N": {
+            "uses_current": [1, 1, 0, 0.5],
+            "flags_conflict": [0, 2, 0, 0.0],
+            "cites_source": [0, 1, 1, 0.0],
+            "keeps_attribution": [0, 1, 0, 0.0],
+            "abstains_when_unknown": [0, 1, 0, 0.0],
+            "trusts_stale": [2, 1, 1, 0.6667],
+        },
+        "P": {
+            "uses_current": [2, 0, 0, 1.0],
+            "flags_conflict": [1, 0, 1, 1.0],
+            "cites_source": [2, 0, 0, 1.0],
+            "keeps_attribution": [1, 0, 0, 1.0],
+            "abstains_when_unknown": [1, 0, 0, 1.0],
+            "trusts_stale": [0, 3, 1, 0.0],
+        },
+    }
+    assert {
+        arm: {b: list(row.values()) for b, row in rows.items()} for arm, rows in rates.items()
+    } == old
+    assert [list(rows) for rows in rates.values()] == [list(old["N"]), list(old["P"])]
+
+
+def test_a_behaviour_that_no_probe_asks_has_no_report_row_and_one_that_a_probe_asks_has_one():
+    """The rows follow the case set: a registry behaviour that the set never asks is not a zero row."""
+    meta = {
+        ("a", "p1"): {"dimension": "stable", "key": {"behaviours": ["keeps_scope"]}},
+        ("a", "p2"): {"dimension": "stable", "key": {"behaviours": ["uses_current"]}},
+    }
+
+    rates = report.behaviour_rates([], meta, ["N"])
+
+    assert list(rates["N"]) == ["uses_current", "keeps_scope"], (
+        "registry order, asked behaviours only"
     )
 
 
