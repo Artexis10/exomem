@@ -13,8 +13,8 @@ change: the documents of the steps that apply in one world only. Every other doc
 document and the surface form.
 
 * *Anchors.* Every name, value and date of the statements that a document carries is in its text, and
-  no value that a statement about the same attribute states, and that the document does not itself
-  carry or announce, is in its text.
+  no trap or premise of its thread's keys, that the document does not itself carry or announce, is in
+  its text.
 * *Explicit forms.* A document below `stated` holds no sentence that a `stated` form gives for the
   same statement.
 * *Shared forms.* A probe's task is made from no form that an artefact of its thread uses.
@@ -37,6 +37,7 @@ from typing import Any
 from membench.ids import child_seed
 
 from .core import BOTH, Artefact, Statement, World
+from .keys import Key, KeyRefused, keys_digest, keys_record, write_keys
 from .loader import Catalogue, Refusal
 from .manifest import dump
 from .pack import AttributeSchema
@@ -120,6 +121,7 @@ class Rendering:
     bank: Bank
     documents: Mapping[str, Document]
     probes: tuple[Probe, ...] = field(default_factory=tuple)
+    keys: tuple[Key, ...] = field(default_factory=tuple)
 
     def manifest(self) -> dict[str, Any]:
         """The level and the surface forms of every document, and a hash of every text."""
@@ -130,6 +132,7 @@ class Rendering:
                 {"id": d.artefact, "level": d.level, "forms": list(d.forms), "hash": _hash(d.text)}
                 for d in sorted(self.documents.values(), key=lambda d: d.artefact)
             ],
+            "keys": {"count": len(self.keys), "digest": keys_digest(self.keys)},
             "probes": [
                 {
                     "thread": p.thread,
@@ -143,8 +146,8 @@ class Rendering:
         }
 
     def write(self, plan: Plan, directory: Path) -> str:
-        """Write the world, its manifest with this rendering, one file for each document, and the
-        probes' tasks into ``directory``. Returns the manifest's digest."""
+        """Write the world, its manifest with this rendering, one file for each document, the
+        probes' tasks and the keys of the probes into ``directory``. Returns the manifest's digest."""
         digest = plan.write(directory, self.manifest())
         (directory / "artefacts").mkdir(exist_ok=True)
         for document in self.documents.values():
@@ -155,6 +158,7 @@ class Rendering:
             {"thread": p.thread, "form": p.form, "at": p.at, "task": p.text} for p in self.probes
         ]
         (directory / "probes.json").write_text(dump(tasks), encoding="utf-8")
+        (directory / "keys.json").write_text(dump(keys_record(self.keys)), encoding="utf-8")
         return digest
 
 
@@ -377,11 +381,25 @@ def _source(artefact: Artefact) -> str | None:
 
 
 class _Renderer:
-    def __init__(self, plan: Plan, catalogue: Catalogue, bank: Bank):
+    def __init__(self, plan: Plan, catalogue: Catalogue, bank: Bank, keys: tuple[Key, ...]):
         self.plan, self.catalogue, self.bank = plan, catalogue, bank
         self.world = plan.world()
         self.reader = _Reader(plan, self.world)
         self.refusals: list[Refusal] = []
+        self.thread_of = {
+            step["id"]: thread.id
+            for thread in plan.threads
+            for step in thread.steps
+            if "id" in step
+        }
+        # What a document of a thread must not hold: the traps and the premises of its keys. A trap
+        # that is the id of a statement or an operation is no text, and no document can hold it.
+        self.stale: dict[str, set[Any]] = {}
+        for key in keys:
+            held = (*key.traps, *(() if key.premise is None else (key.premise,)))
+            self.stale.setdefault(key.thread, set()).update(
+                v for v in held if v not in self.world.statements and v not in self.world.operations
+            )
 
     def pick(self, pool: Collection[Form], label: str) -> Form:
         ordered = sorted(pool, key=lambda f: f.id)
@@ -427,16 +445,15 @@ class _Renderer:
                 found.append((form.id, form.text.format(**fills)))
         return found
 
-    def forbidden(self, item: _Item, anchors: Collection[str]) -> set[str]:
-        """The values that other statements about the item's attribute state, and the item does not."""
-        if item.about is None:
-            return set()
-        others = {
-            self.reader.text(s.rule.value if s.rule is not None else s.value, s.at)
-            for s in self.world.statements_about(item.about)
-            if (s.rule.value if s.rule is not None else s.value) is not None
-        }
-        return others - item.allowed - set(anchors)
+    def forbidden(
+        self, artefact: Artefact, items: list[_Item], anchors: Collection[str]
+    ) -> set[str]:
+        """The traps and the premises of the artefact's thread, as text, that its statements do not
+        give as content and its anchors do not show."""
+        thread = self.thread_of.get(_source(artefact) or "", "")
+        allowed = {value for item in items for value in item.allowed}
+        stale = {self.reader.text(value, artefact.at) for value in self.stale.get(thread, ())}
+        return stale - allowed - set(anchors)
 
     def document(self, artefact: Artefact, level: str) -> tuple[Document, list[_Item]]:
         if artefact.copy_of is not None:
@@ -460,7 +477,7 @@ class _Renderer:
             anchors |= {a for i in items for a in i.stated}
         if artefact.by is not None:
             anchors.add(self.reader.text(artefact.by, artefact.at))
-        forbidden = {v for i in items for v in self.forbidden(i, anchors)}
+        forbidden = self.forbidden(artefact, items, anchors)
         for problem in anchor_problems(document.text, anchors, forbidden):
             self.refuse("anchor", artefact.id, f"{problem}; forms {list(document.forms)}")
         if document.level == STATED:
@@ -511,15 +528,9 @@ class _Renderer:
         return " and ".join(n for n, _ in names), None
 
     def probes(self, documents: Mapping[str, Document]) -> list[Probe]:
-        thread_of = {
-            step["id"]: thread.id
-            for thread in self.plan.threads
-            for step in thread.steps
-            if "id" in step
-        }
         used: dict[str, set[str]] = {}
         for artefact in self.world.artefacts.values():
-            if artefact.id in documents and (thread := thread_of.get(_source(artefact) or "")):
+            if artefact.id in documents and (thread := self.thread_of.get(_source(artefact) or "")):
                 used.setdefault(thread, set()).update(documents[artefact.id].forms)
         probes = []
         for thread in self.plan.threads:
@@ -527,10 +538,10 @@ class _Renderer:
                 self.catalogue.entries[thread.entry],
                 self.catalogue.recipes[thread.recipe],
             )
-            keys = (recipe.get("twin") or {}).get("keys", {}) if entry.twin_of else recipe["keys"]
+            specs = (recipe.get("twin") or {}).get("keys", {}) if entry.twin_of else recipe["keys"]
             for form in entry.probes:
-                at = thread.slots[keys[form]["at"]]
-                subject, schema = self.subject(thread, keys[form], at)
+                at = thread.slots[specs[form]["at"]]
+                subject, schema = self.subject(thread, specs[form], at)
                 fills = {"subject": subject} | ({} if schema is None else {"about": schema.label})
                 item = f"probe {thread.id} {form}"
                 pool = self.bank.eligible(f"probe.{form}", None, fills, {"about"})
@@ -574,9 +585,13 @@ def render(plan: Plan, catalogue: Catalogue, bank: Bank, level: str) -> Renderin
         )
     if refusals:
         raise RenderRefused(refusals)
-    renderer = _Renderer(plan, catalogue, bank)
+    try:
+        keys = write_keys(plan, catalogue)
+    except KeyRefused as unkeyed:
+        raise RenderRefused(unkeyed.refusals) from unkeyed
+    renderer = _Renderer(plan, catalogue, bank, keys)
     documents = renderer.documents(level)
     probes = renderer.probes(documents)
     if renderer.refusals:
         raise RenderRefused(renderer.refusals)
-    return Rendering(level, bank, documents, tuple(probes))
+    return Rendering(level, bank, documents, tuple(probes), keys)

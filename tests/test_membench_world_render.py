@@ -2,8 +2,8 @@
 
 The first case is the workflow: render the seed-7 development world at each level, check that the
 level changes the text and never the key, that no document below `stated` holds an explicit form, that
-no probe shares a surface form with its thread's documents, and that the written world passes the
-privacy gate. The next shows that each operation has a document that says what it did. The rest break
+no probe shares a surface form with its thread's documents, and that the written world and its keys
+pass the privacy gate. The next shows that each operation has a document that says what it did. The rest break
 one rule each: an anchor that is missing, an explicit form below `stated`, a probe that shares a form,
 a bank of another split, and a bank file that the loader refuses.
 """
@@ -22,8 +22,8 @@ from membench.generate import _lint_vocabulary
 
 from benchmarks.membench.world import core
 from benchmarks.membench.world.core import Vocabulary
+from benchmarks.membench.world.keys import write_keys
 from benchmarks.membench.world.loader import load_catalogue
-from benchmarks.membench.world.mechanisms import Oracle
 from benchmarks.membench.world.pack import PACKS_DIR, load_pack
 from benchmarks.membench.world.planner import PLANTED, RoundSpec, Thread, plan_world
 from benchmarks.membench.world.render import RenderRefused, anchor_problems, holds, render
@@ -67,25 +67,15 @@ def test_each_level_changes_the_text_of_the_planted_change_and_never_the_key(
     rendered = {level: render(PLAN, CATALOGUE, BANK, level) for level in LEVELS}
     stated = rendered[STATED]
     thread = next(t for t in PLAN.threads if t.entry == "currency.reversal")
-    item, new, probe_day = thread.roles["item"], thread.roles["new"], thread.slots["probe"]
+    new = thread.roles["new"]
+    key = next(k for k in stated.keys if k.thread == thread.id and k.form == "state")
+    assert key.value == new and key.proof
 
-    def key_and_proof() -> tuple[Any, set[str]]:
-        planted, _ = PLAN.pair(thread)
-        oracle = Oracle(planted, PLAN.validity())
-        key = (
-            oracle.read("state_fold.current", of=item, at=probe_day),
-            oracle.read("state_fold.replaced", of=item, at=probe_day),
-        )
-        proof = {a.id for s in oracle.bearers(new, probe_day) for a in planted.carriers(s.id)}
-        return key, proof
-
-    key, proof = key_and_proof()
-    assert key[0] == new and proof
     for level, rendering in rendered.items():
-        assert key_and_proof() == (key, proof)
+        assert rendering.keys == write_keys(PLAN, CATALOGUE) == stated.keys  # no level moves a key
         assert set(rendering.documents) == set(stated.documents)
         # The document that carries the answer still shows it, at every level.
-        for artefact in proof:
+        for artefact in key.proof:
             assert holds(rendering.documents[artefact].text, str(new)), (level, artefact)
 
     # Below `stated`, the documents of the planted change differ from their `stated` text, and
@@ -199,11 +189,12 @@ def test_each_operation_is_announced_in_a_document_that_says_what_it_did() -> No
         },
         {"op": "merge", "id": "x.merge", "entities": [first, second], "at": d[3]},
     )
+    # A thread whose key reads the attribute and nothing else, so that its own steps need no recipe.
     extra = Thread(
         "x",
-        "currency.reversal",
-        "currency.reversal",
-        "currency",
+        "persistence.permanent",
+        "persistence.permanent",
+        "persistence",
         PLANTED,
         {"item": attribute},
         {"probe": d[3]},
