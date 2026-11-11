@@ -664,6 +664,12 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
 
 
 EXCLUDE_GENERATED = "excluded:\n  - Notes/Gen/\n"
+#: An entity outside the excluded folder whose links put generated pages in its neighbourhood.
+GUILD = "Knowledge Base/Entities/Organizations/Lantern Guild.md"
+GUILD_TEXT = (
+    b"---\ntitle: Lantern Guild\ntype: entity\nentity_type: organization\n---\n# Lantern Guild\n\n"
+    b"The guild tends the harbour lanterns: [[Page-0000]] [[Page-0001]] [[Page-0002]].\n"
+)
 
 
 def task_leads(root):
@@ -673,27 +679,54 @@ def task_leads(root):
     return {lead["source_ref"] for lead in packet["task_context"]["candidates"]}
 
 
+def note_pages(root):
+    """The pages that a find with a type filter and no query serves: it ranks the recall rows that
+    the catalogue proves, without a per-page access check."""
+    return {hit.path for hit in find_module.find(root, query="", types=["note"], limit=50)}
+
+
+def guild_lane_pages(root):
+    """The paths that recall_context's role lanes serve for a turn that names the guild, read from
+    the anchors packet, which runs those lanes on the turn."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+        packet = _activate(
+            root, turn="the Lantern Guild and the lantern at the lighthouse harbour", max_chars=8000
+        )
+    return {item["ref"] for key in ("units", "pointers") for item in packet[key]}
+
+
 @pytest.mark.timeout(300)
-def test_the_task_context_lane_serves_no_page_that_the_live_access_policy_excludes(
+def test_no_reader_serves_a_page_that_the_live_access_policy_excludes_before_its_rows_follow(
     stored, writer  # noqa: F811
 ):
-    """A store-mode lane that trusts rows derived under the previous access policy: before the
-    store records the policy change, and while its pass derives the pages again, it serves pages
-    that the policy now excludes as leads, where file mode declines the stale catalogue."""
+    """A store-mode reader that trusts rows derived under the previous access policy, before the
+    store records the policy change and while its pass derives the pages again: a find with a type
+    filter fails as warming, the task_context lane serves pages that the policy now excludes as
+    leads, and an anchor's role lanes serve its excluded neighbours."""
     for index in range(10):
         write.commit(writer, put(*generated_page(index)))
+    write.commit(writer, put(GUILD, GUILD_TEXT))
     project(writer, stored)
     generated = {generated_page(index)[0] for index in range(10)}
+    assert generated <= note_pages(stored)
     assert generated <= task_leads(stored)
+    assert {generated_page(index)[0] for index in range(3)} <= guild_lane_pages(stored)
 
     (stored / POLICY).write_text(EXCLUDE_GENERATED)
     assert vault_store_mode.status(stored)["registry"] == "current"
+    notes = note_pages(stored)
+    assert ALPHA in notes and notes & generated == set()
     assert task_leads(stored) & generated == set()
+    assert guild_lane_pages(stored) & generated == set()
 
     commit_policy(writer, stored, EXCLUDE_GENERATED)
     project(writer, stored)
     assert vault_store_mode.status(stored)["registry"] == "rebuilding"
+    notes = note_pages(stored)
+    assert ALPHA in notes and notes & generated == set()
     assert task_leads(stored) & generated == set()
+    assert guild_lane_pages(stored) & generated == set()
 
 
 ROOT_PAGE = "Harbour.md"

@@ -3405,6 +3405,9 @@ class _AdmittedRecallRows:
     emitted_parents: Mapping[str, str | None]
     carry_candidates: tuple[str, ...]
     outside_carry: tuple[str, ...]
+    #: Whether the live access policy withheld a row of the scope that the snapshot still holds
+    #: (store mode, until a pass re-derives the rows after a policy change).
+    withheld: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -10807,11 +10810,14 @@ class LexicalStore:
             # Checked only where configuration allows catalogue ranking: its
             # statistics count every page row, raw material and pages outside
             # the scope included. Stops at the first withheld row.
-            context.complete = context.catalogue_ranking and (
+            finding_holds = context.catalogue_ranking and (
                 len(context.admitted_paths) == len(candidates)
                 and all(context.visible(path) for path in rows.outside_carry)
             )
-            if context.catalogue_ranking and not context.complete:
+            # Rows that the live access policy withholds still count in the catalogue's statistics
+            # and would rank, so such a snapshot ranks on admission. That is no configuration fault.
+            context.complete = finding_holds and not rows.withheld
+            if context.catalogue_ranking and not finding_holds:
                 # Configuration said nothing can be withheld and this snapshot
                 # found a withheld row: rank on admission and say so, by code.
                 log.warning("carry ranking %s", CATALOGUE_RANKING_CONTRACT_VIOLATION)
@@ -12241,8 +12247,21 @@ class LexicalStore:
     def _snapshot_recall_rows(
         self, conn: sqlite3.Connection, scope: str, snapshot: tuple,
     ) -> _AdmittedRecallRows:
-        """Reuse structural paths only after the caller proves its connection's snapshot."""
+        """Reuse structural paths only after the caller proves its connection's snapshot.
+
+        A store-mode vault's rows follow the access policy of the commit or pass that derived them,
+        and its snapshot carries no policy identity. After a change to `_access.yaml` its rows keep
+        the pages that the policy now excludes until a pass re-derives them. Here the live policy
+        withholds those rows, and its fingerprint keys the cache, so no reader of these rows (the
+        recall projection, the resolver, a request's admitted set) serves one in that window.
+        """
+        indexable = None
         key = (scope, *snapshot)
+        if self._reads_store():
+            from . import access
+
+            fingerprint, indexable = access.indexable_filter(self.vault_root)
+            key = (*key, fingerprint)
         with self._term_frequency_cache_lock:
             rows = self._admitted_recall_rows.get(key)
             if rows is not None:
@@ -12269,8 +12288,12 @@ class LexicalStore:
                         # Columns 3 and 4 are `in_vault` and `in_kb`; column 5 is "not raw material".
                         for name, flag in (("vault", 3), ("kb", 4)):
                             entries, parents, candidates, outside = [], {}, [], []
+                            withheld = False
                             for row in fetched:
                                 path, in_scope = str(row[0]), row[flag]
+                                if in_scope == 1 and indexable is not None and not indexable(path):
+                                    withheld = True
+                                    continue
                                 if in_scope == 1:
                                     entries.append((path, row[1]))
                                     parents[path] = row[2]
@@ -12278,12 +12301,13 @@ class LexicalStore:
                             filled[name] = _AdmittedRecallRows(
                                 tuple(entries), frozenset(path for path, _title in entries),
                                 MappingProxyType(parents), tuple(candidates), tuple(outside),
+                                withheld,
                             )
                         rows = filled["vault" if scope == "vault" else "kb"]
                         measured["rows"] = len(rows.entries)
                     with self._term_frequency_cache_lock:
                         self._admitted_recall_rows[key] = rows
-                        self._admitted_recall_rows.setdefault((other, *snapshot), filled[other])
+                        self._admitted_recall_rows.setdefault((other, *key[1:]), filled[other])
                         while len(self._admitted_recall_rows) > _ADMITTED_RECALL_ROWS_MAX:
                             self._admitted_recall_rows.popitem(last=False)
                 return rows

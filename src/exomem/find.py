@@ -707,8 +707,11 @@ class FreshnessSnapshot:
 
         The checkpoint binds the policy version and access fingerprint that
         admitted each row, so a member needs no per-request symlink and access
-        re-proof to be ranked or counted. Hydrating a hit still re-proves it
-        (`_resolve_page`). A scope that came from the live registry proves nothing here.
+        re-proof to be ranked or counted. A store-mode vault's rows can lag a
+        change of access policy, so there the live policy filters them where
+        they are read (`LexicalStore._snapshot_recall_rows`). Hydrating a hit still
+        re-proves it (`_resolve_page`). A scope that came from the live registry
+        proves nothing here.
         """
         projected = self.recall_paths(scope)
         return projected if scope in self._catalogue_scopes else frozenset()
@@ -835,8 +838,11 @@ class FreshnessSnapshot:
     def _load_store_recall_projection(self, scope: str) -> None:
         """The recall projection of a store-mode vault: its derived page rows at the snapshot.
 
-        Each commit derives its pages' rows under the recall policy, so the rows in the scope are
-        the admitted set, read once per revision (``LexicalStore.recall_admitted_paths``).
+        Each commit derives its pages' rows under the recall policy. The access policy can change
+        before a pass re-derives them, so the live policy withholds the rows that it excludes.
+        The rows left in the scope are the admitted set, read once per revision and access policy
+        (``LexicalStore.recall_admitted_paths``). They follow the live access policy, as the
+        checkpoint's own access fingerprint does.
         """
         from . import lexstore
         from .vault_store import read

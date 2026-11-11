@@ -281,16 +281,17 @@ def is_indexable(vault_root: Path, rel_path: str) -> bool:
     return access_tier(vault_root, rel_path) != TIER_EXCLUDED
 
 
-def indexable_filter(vault_root: Path) -> Callable[[str], bool] | None:
-    """`is_indexable` bound to one read of the live policy, for a caller that judges many paths.
+def indexable_filter(vault_root: Path) -> tuple[str, Callable[[str], bool] | None]:
+    """`is_indexable` bound to one read of the live policy, with that read's fingerprint.
 
-    None when that policy excludes nothing, so such a caller skips the check. Each call of
-    `is_indexable` stats the policy file; this predicate judges every path without a syscall.
+    For a caller that judges many paths, or caches what it judged under the fingerprint. The
+    predicate is None when that policy excludes nothing, so such a caller skips the check. Each
+    call of `is_indexable` stats the policy file; this predicate judges every path without a syscall.
     """
-    _fingerprint, cfg, fail_closed = _policy_state(vault_root)
+    fingerprint, cfg, fail_closed = _policy_state(vault_root)
     if not fail_closed and not cfg["excluded"]:
-        return None
-    return lambda rel_path: not _excluded_under(cfg, fail_closed, rel_path)
+        return fingerprint, None
+    return fingerprint, lambda rel_path: not _excluded_under(cfg, fail_closed, rel_path)
 
 
 def refuse_if_excluded(vault_root: Path, rel_path: str) -> bool:
