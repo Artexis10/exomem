@@ -70,6 +70,14 @@ The generator builds a world in three layers, and text comes after all three.
 - **Rejected: text first, keys extracted afterwards.** An audit that the Veracium paper cites found 6.4% of one benchmark's answer keys corrupt. STALE's scenarios are model-written and judge-validated, so their truth is asserted, not constructed.
 - **What would change this:** the full-history arm disagreeing with the keys on more than one probe in ten in a family. Then that family's norms are wrong, or its entries belong on the rubric track.
 
+**How the world core reads its records.** Five rulings from task 3.2 fix the spec to the build.
+
+- "Sums that add up" is no slice 1 invariant. It belongs with slice 2's `quantity_calc`.
+- A `draw` records that the target event occurred at its date. `chance_model.rate` reads it.
+- A `merge` keeps the first listed entity as the survivor.
+- A statement id that a `copy.artefact` or a `cause` step names stands for the one artefact that carries it.
+- "One holder per role" means one value per attribute and scope at a time (`one-value-at-a-time`).
+
 **Every norm that a key rests on is registered.** Statements alone do not fix a key. The oracle also applies norms, such as that a holder's later statement replaces that holder's earlier one. `benchmarks/membench/world/catalogue/norms.yaml` lists all 22, and the oracle applies no other.
 
 - A **stated** norm appears in a document of the world, and the proof trace holds that document. Which record governs a fact is always a stated norm. So is every causal rule, every chance and every claim that a list is complete.
@@ -412,7 +420,7 @@ catalogue + domain pack + profile + seed
 1. **Load.** The catalogue loader validates every closed value and every reference, and lists the buildable entries. An unknown value stops the load with the entry's id.
 2. **Backbone.** The domain pack and the profile build entities, routines and stable facts. Names come from the wordbank's partition for the split.
 3. **Plan.** The planner draws threads for the round's families and binds each recipe's roles. It decides which threads take the mutation world, reserves attributes, and places slots and probes on the session timeline. A probe never shares a session with an artefact that holds its answer.
-4. **World and evidence.** Recipes run as world operations. A validator checks the world's invariants: times in order, one holder per role at a time unless stated, sums that add up.
+4. **World and evidence.** Recipes run as world operations. A validator checks the world's invariants: times in order, and one value per attribute and scope at a time unless stated.
 5. **Oracle.** The entry's mechanisms run in pipeline order at each probe's date. The oracle evaluates the recipe's readings and writes the key, the proof trace and the contest set. It checks that each key is unique.
 6. **Render.** Each statement gets a surface form at the round's implicitness level. The anchor check runs on every artefact.
 7. **Project.** Each projection writes its output and its parity report.
