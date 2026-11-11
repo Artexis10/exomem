@@ -1,7 +1,8 @@
 # original-fixity Specification
 
 ## Purpose
-Exomem re-reads every stored original in the background and compares it with the SHA-256 recorded when it was written. When an original no longer matches, Exomem restores it from a copy whose hash still matches, and it reports the counts to the vault owner and to Cloud readiness. A damaged, edited or missing original is found while a clean copy still exists, not when someone next opens it.
+
+Exomem re-reads stored originals in a budgeted background cycle and compares each with the SHA-256 recorded when it was written; an original evicted from local Cloud storage is not read. When a binary original no longer matches and a copy whose hash still matches exists, Exomem restores the original from that copy; it never repairs a text original or a missing original by itself, and it marks an original with no matching copy as corrupt. It reports the counts to the vault owner and to Cloud readiness, so damage is found while a clean copy still exists, not when someone next opens the original.
 
 ## Requirements
 
