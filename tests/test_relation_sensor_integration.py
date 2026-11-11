@@ -205,6 +205,28 @@ def test_producer_bounds_pages_per_tick(tmp_path: Path, monkeypatch) -> None:
     )
 
 
+def test_worker_order_follows_source_pages(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    for index in range(3):
+        fx.write(
+            vault,
+            f"{fx.KB}/Notes/Insights/extra-{index}.md",
+            sf.note(f"Extra {index}", "2026-05-10", f"Extra fact {index}.",
+                    links="See [[Notes/Insights/seal-wear]] and [[Notes/Insights/seal-wear-winter]]."),
+        )
+    fx.publish_graph(vault)
+    from exomem import dreamer
+
+    dreamer.run_once(vault, budget=sf.BIG)
+    jobs = _jobs(vault)
+    assert len({j.scope_key for j in jobs}) > 1
+    # Jobs drain page by page in path order, as the queue lists sources.
+    sources = [j.scope_key for j in jobs]
+    assert sources == sorted(sources)
+
+
 def test_edited_page_resubmits_and_stale_rows_drop(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     _active(monkeypatch)

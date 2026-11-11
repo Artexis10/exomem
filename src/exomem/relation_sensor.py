@@ -410,7 +410,12 @@ def page_scope(
         vault_root,
         token,
         (
-            sensed_model.OwnedRequest(request_key=key, request=request, order_key=key)
+            # The worker drains jobs in order-key order. Keying by source path
+            # senses pages in the order the relation queue presents them,
+            # rather than in request-hash order.
+            sensed_model.OwnedRequest(
+                request_key=key, request=request, order_key=f"{source.rel_path}\n{key}"
+            )
             for key, request, _row in requests
         ),
         relation_rows=(row for _key, _request, row in requests),
