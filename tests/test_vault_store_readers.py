@@ -10,10 +10,14 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from test_activate_context_maps import _activate
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import (
     ALPHA,
@@ -23,25 +27,37 @@ from test_vault_store_migration import (
     vault,  # noqa: F401
 )
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
+from test_vault_store_rederive import POLICY, PROFILES, commit_policy, project, settle_to_the_end
+from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import __main__ as cli
 from exomem import (
+    activation_conventions,
+    bm25,
     commands,
+    context_roles,
     document_containers,
+    epistemic_graph,
     get_page,
     lexstore,
     list_directory,
+    memory_refs,
     project_keys,
+    reconcile,
     reserved_paths,
     warmup,
+    working_set,
+    working_set_runtime,
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.collection_store import connection
-from exomem.find_types import Hit
+from exomem.collection_store.writer import CollectionWriter
+from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, request_scope
-from exomem.vault_store import ownership, write
+from exomem.vault_store import importer, ownership, read, write
+from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
 pytestmark = pytest.mark.skipif(
@@ -155,7 +171,9 @@ def test_find_get_page_and_listing_answer_from_the_store_when_every_projected_fi
     assert not (diagnosed.get("warming") or {}).get("components")
     assert diagnosed["timings"]["profile"]["lexical_lanes"] == {
         "corpus": "store",
-        "catalogue": "bypassed",
+        "catalogue": "store",
+        "registry": "current",
+        "unowned_rows_as_of": None,
     }
     assert len(before["listing"]) == GENERATED
     assert len(before["corpus"]) >= GENERATED + 2
@@ -191,11 +209,14 @@ EXTERNAL = RequestPrincipal(audience_id="external", surface="mcp")
 
 
 UNIT = "\n- [constraint] The lantern stays lit until dawn. ^lit\n"
+#: A unit whose category the shipped role registry projects as a method (`recall_context`).
+METHOD = "\n- [technique] Trim the lantern wick before dusk. ^wick\n"
 
 
 def derived_row_answers(root):
     """What each catalogue reader of find answers, as plain data: keyword, browse, a category
-    filter, the unit lane and the vault scope."""
+    filter, the unit lane, the vault scope, the hybrid ranks and the BM25 scores, in order; and
+    what recall_context's text and method lanes answer, with their scores."""
 
     def found(**keywords):
         hits = find_module.find(
@@ -203,7 +224,33 @@ def derived_row_answers(root):
         )
         return [(getattr(hit, "path", None) or hit.parent_path) for hit in hits]
 
+    hybrid = find_module.find(root, query="lighthouse lantern", limit=50, graph=False, rerank=False)
+    anchors = [
+        SimpleNamespace(path=generated_page(index)[0], title=f"Page {index}")
+        for index in range(GENERATED)
+    ]
+    text, text_state = working_set_runtime.lexical_evidence(
+        root, "the lantern at the lighthouse", anchors, limit=50
+    )
+    catalogue = lexstore.get_store(root)
+    published = catalogue.published_recall_checkpoint("kb")
+    methods = working_set.search_method_units(
+        root,
+        bm25.token_units("trim the wick", query=True),
+        50,
+        categories=working_set.method_unit_categories(root),
+        allowed=set(catalogue.recall_admitted_paths("kb", published)),
+        fresh=published.triple,
+        checkpoint=published,
+    )
     return {
+        "recall text": (text_state, [(hit.path, hit.bm25_rank) for hit in text]),
+        "recall methods": (
+            methods.readiness.status,
+            [(hit.parent_path, hit.unit_ref, hit.lexical_score) for hit in methods.value or ()],
+        ),
+        "hybrid": [(hit.path, hit.bm25_rank, hit.keyword_rank, hit.vector_rank) for hit in hybrid],
+        "bm25": lexstore.search_bm25(root, "lighthouse lantern", 50),
         "keyword": found(query="lantern"),
         "keyword and type": found(query="lighthouse", types=["note"]),
         "browse": found(query="", types=["note"]),
@@ -221,15 +268,17 @@ def test_each_catalogue_reader_answers_from_the_store_as_it_answers_in_file_mode
 ):
     """A reader that still takes the sidecar that files built, or the projected file, for the
     store's rows: it refuses, answers empty or serves the poison, where file mode answers the same
-    bytes."""
+    bytes; or one that ranks the store with another scorer, which moves the order and the scores."""
     for index in range(GENERATED):
         rel, body = generated_page(index)
         (vault / rel).parent.mkdir(parents=True, exist_ok=True)
-        (vault / rel).write_bytes(body + UNIT.encode() if index % 5 == 0 else body)
+        extra = {0: UNIT, 1: METHOD}.get(index % 5, "")
+        (vault / rel).write_bytes(body + extra.encode())
     build_indexes(vault)
     find_module.clear_cache()
     in_file_mode = derived_row_answers(vault)
     assert all(in_file_mode.values()), "each reader must have something to answer"
+    assert in_file_mode["recall text"][1] and in_file_mode["recall methods"][1]
     assert migrate_apply(vault) == 0
 
     damage_every_owned_projection(vault, damage)
@@ -311,6 +360,8 @@ def test_a_store_vault_reads_the_store_corpus_for_its_lexical_lanes_with_the_cat
     assert asked["timings"]["profile"]["lexical_lanes"] == {
         "corpus": "store",
         "catalogue": "bypassed",
+        "registry": "current",
+        "unowned_rows_as_of": None,
     }
 
 
@@ -373,6 +424,476 @@ def test_a_recall_tool_call_reads_one_store_snapshot_however_many_pages_it_reads
     many = snapshots_for_one_call(60)
 
     assert (few, many) == (1, 1)
+
+
+#: When set, the no-scan test writes each recall reader's median cold and warm milliseconds to this
+#: file: the drill that tasks.md 3.2 records, run with ``EXOMEM_READERS_DRILL_PAGES`` at scale.
+DRILL_REPORT = os.environ.get("EXOMEM_READERS_DRILL_REPORT")
+DRILL_REPEATS = int(os.environ.get("EXOMEM_READERS_DRILL_REPEATS", "5"))
+
+#: The recall calls that the drill times, at the tool entry, as an agent makes them.
+RECALL_CALLS = {
+    "find hybrid": {"tool": "op_find", "query": "lighthouse", "graph": False, "rerank": False},
+    "find keyword": {
+        "tool": "op_find", "query": "lighthouse", "mode": "keyword", "graph": False, "rerank": False
+    },
+    "find browse": {"tool": "op_find", "query": "", "types": ["note"], "graph": False},
+    "ask_memory": {"tool": "op_ask_memory", "query": "lighthouse"},
+}
+
+
+def commit_generated(writer, pages):  # noqa: F811
+    """Commit the generated pages, 200 to a commit, as an import batch commits them."""
+    for start in range(0, pages, 200):
+        puts = tuple(
+            write.PagePut(*generated_page(index)) for index in range(start, min(pages, start + 200))
+        )
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "drill", puts=puts))
+
+
+def recall(root, name):
+    call = dict(RECALL_CALLS[name])
+    answer = getattr(commands, call.pop("tool"))(root, limit=15, **call)
+    return answer["hits"] if isinstance(answer, dict) else answer
+
+
+def drill_figures(root):
+    """The median cold and warm milliseconds of each recall call: cold after ``clear_cache``."""
+    import statistics
+    import time
+
+    figures = {}
+    for name in RECALL_CALLS:
+        cold, warm = [], []
+        for _ in range(DRILL_REPEATS):
+            find_module.clear_cache()
+            for times in (cold, warm):
+                started = time.perf_counter()
+                recall(root, name)
+                times.append((time.perf_counter() - started) * 1000)
+        figures[name] = {
+            "cold_ms": round(statistics.median(cold)),
+            "warm_ms": round(statistics.median(warm)),
+        }
+    return figures
+
+
+@pytest.mark.timeout(1800)
+def test_a_store_mode_recall_call_parses_its_hits_and_lists_no_corpus(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """The scan rung: a recall call that lists or parses every stored page costs about a
+    millisecond a page, so a 10,000-page vault answers in seconds; and a cache that keys on the
+    lexical rows that the migration copied keeps serving a page after a commit deletes it."""
+    commit_generated(writer, GENERATED)
+    if DRILL_REPORT:
+        figures = drill_figures(stored)
+        Path(DRILL_REPORT).write_text(json.dumps({"pages": GENERATED, **figures}, indent=2))
+    parsed, listed = [], []
+    real_parse = find_module.find_corpus.parse_page
+    real_pages = read.StoreSnapshot.pages
+
+    def parsing(*arguments, **keywords):
+        parsed.append(1)
+        return real_parse(*arguments, **keywords)
+
+    def listing(view, prefix=""):
+        if not prefix:
+            listed.append(1)
+        return real_pages(view, prefix)
+
+    monkeypatch.setattr(find_module.find_corpus, "parse_page", parsing)
+    monkeypatch.setattr(find_module, "_parse_page", parsing)
+    monkeypatch.setattr(read.StoreSnapshot, "pages", listing)
+
+    for name in ("find hybrid", "find keyword", "find browse"):
+        find_module.clear_cache()
+        parsed.clear()
+        hits = recall(stored, name)
+        assert hits, name
+        # The release gate fetches a pool of candidates and keeps ``limit`` of them; the pool
+        # depends on the limit, never on how many pages the store holds.
+        assert len(parsed) <= egress.pool_limit(15), name
+    assert listed == []
+
+    gone = next(
+        hit["path"]
+        for hit in recall(stored, "find keyword")
+        if hit["path"].startswith("Knowledge Base/Notes/Gen/")
+    )
+    write.commit(
+        writer,
+        write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(gone),)),
+    )
+    assert gone not in [hit["path"] for hit in recall(stored, "find keyword")]
+
+
+IDENTIFIED = "Knowledge Base/Notes/Gen/Identified.md"
+IDENTITY = "0f5c3a52-7d1e-4b8a-9c1f-2a6e4d8b0c11"
+#: When set, the index test writes each statement's ``EXPLAIN QUERY PLAN`` to this file: the plans
+#: that tasks.md 3.2 records, run with ``EXOMEM_READERS_DRILL_PAGES`` at scale.
+PLAN_REPORT = os.environ.get("EXOMEM_READERS_PLAN_REPORT")
+#: The store's settings tables hold one row per setting, never one per page, so reading all of
+#: them costs the same at any vault size.
+SETTINGS_TABLES = {"meta", "store_meta", "store_mode"}
+
+
+def full_reads(reader, sql):
+    """The stored tables that ``sql`` reads from end to end, from its SQLite bytecode.
+
+    A cursor that ``OpenRead`` opens on a table or an index and that ``Rewind`` or ``Last`` then
+    starts at one end walks every row; an indexed lookup seeks instead. SQLite's opcode names are
+    its documented, closed instruction set.
+    """
+    tables = {
+        root: table
+        for root, table in reader.execute(
+            "SELECT rootpage, tbl_name FROM sqlite_schema WHERE rootpage > 0"
+        )
+    }
+    code = reader.execute(f"EXPLAIN {sql}").fetchall()
+    opened = {cursor: tables.get(root) for _addr, op, cursor, root, *_rest in code if op == "OpenRead"}
+    return {
+        opened[cursor]
+        for _addr, op, cursor, *_rest in code
+        if op in ("Rewind", "Last") and cursor in opened
+    } - SETTINGS_TABLES
+
+
+@pytest.mark.timeout(1800)
+def test_a_store_mode_reader_finds_its_rows_through_an_index_once_its_admitted_set_is_read(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A dropped index, or a reader that adds a predicate no index covers, makes a 10,000-page
+    vault answer in seconds and fails no other test: each answer is still correct."""
+    commit_generated(writer, GENERATED)
+    write.commit(
+        writer,
+        put(
+            IDENTIFIED,
+            f"---\ntitle: I\ntype: note\nexomem_id: {IDENTITY}\n---\n# I\n{UNIT}".encode(),
+        ),
+    )
+
+    def read_through_each_reader():
+        for name in ("find hybrid", "find keyword", "find browse"):
+            assert recall(stored, name), name
+        assert commands.op_ask_memory(stored, query="lighthouse", limit=15, graph=False)["hits"]
+        assert find_module.find(stored, query="", categories=["constraint"], limit=15, graph=False)
+        assert find_module.find(
+            stored, query="lantern", result_level="unit", limit=15, graph=False
+        )
+        identified = memory_refs.resolve_identifier_read_only(
+            stored, memory_refs.REF_PREFIX + IDENTITY
+        )
+        assert identified == IDENTIFIED
+        assert memory_refs.ReferenceIndex(stored).refs_for_paths([IDENTIFIED])[IDENTIFIED]
+
+    # The first pass reads each scope's admitted set, once per store revision, as file mode does.
+    find_module.clear_cache()
+    read_through_each_reader()
+    find_module.reset_page_and_result_caches()
+    statements = []
+    real = connection.store_reader
+
+    @contextlib.contextmanager
+    def tracing(*arguments, **keywords):
+        with real(*arguments, **keywords) as reader:
+            reader.set_trace_callback(statements.append)
+            try:
+                yield reader
+            finally:
+                reader.set_trace_callback(None)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(connection, "store_reader", tracing)
+        read_through_each_reader()
+
+    selects = sorted({sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))})
+    assert selects, "the readers must have read the store"
+    with contextlib.closing(connection.open_reader(connection.store_path(stored))) as reader:
+        if PLAN_REPORT:
+            plans = {
+                sql: [row[-1] for row in reader.execute(f"EXPLAIN QUERY PLAN {sql}")]
+                for sql in selects
+            }
+            Path(PLAN_REPORT).write_text(json.dumps({"pages": GENERATED, "plans": plans}, indent=1))
+        scans = {sql: found for sql in selects if (found := full_reads(reader, sql))}
+    assert scans == {}
+
+
+def find_lighthouse(root):
+    """A keyword find, with the timings that say whether the result cache answered it."""
+    timings = FindTimings()
+    find_module.find(root, query="lighthouse", mode="keyword", limit=15, timings=timings)
+    return timings.cache.get("hit") is True
+
+
+@pytest.mark.timeout(300)
+def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_stored_pages(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A reader that refuses for a pass that ends in seconds, one that serves rows derived under
+    the previous schema without saying so, or one that keeps serving an answer cached during the
+    pass after the pass has derived the rows again."""
+    repairs = []
+    for seam in ("_schedule_repair", "request_repair", "_schedule_runtime_catalog_repair"):
+        monkeypatch.setattr(
+            lexstore, seam, lambda *args, _seam=seam, **kwargs: repairs.append(_seam)
+        )
+    write.commit(writer, put(PROFILES, b"profiles: {}\n"))
+    find_module.clear_cache()
+
+    found = commands.op_find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+    asked = commands.op_ask_memory(stored, query="lighthouse", limit=15, graph=False)
+
+    assert found["hits"] and asked["hits"]
+    assert "warming" not in found and "warming" not in asked
+    assert found["lag"]["registry"] == "rebuilding"
+    assert found["lag"]["revision"] < found["lag"]["target"] == read.current_revision(stored)
+    assert found["notice"] in asked["notice"]
+    assert (find_lighthouse(stored), find_lighthouse(stored)) == (False, True)
+    assert repairs == []
+
+    project(writer, stored)
+    settle_to_the_end(stored, writer)
+    found = commands.op_find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
+
+    assert "lag" not in found and "notice" not in found
+    assert find_lighthouse(stored) is False
+
+
+EXCLUDE_GENERATED = "excluded:\n  - Notes/Gen/\n"
+#: An entity outside the excluded folder whose links put generated pages in its neighbourhood.
+GUILD = "Knowledge Base/Entities/Organizations/Lantern Guild.md"
+GUILD_TEXT = (
+    b"---\ntitle: Lantern Guild\ntype: entity\nentity_type: organization\n---\n# Lantern Guild\n\n"
+    b"The guild tends the harbour lanterns: [[Page-0000]] [[Page-0001]] [[Page-0002]].\n"
+)
+
+
+def task_leads(root):
+    """The paths that recall_context's task_context lane serves as leads for a turn about the
+    generated pages."""
+    packet = _activate(root, turn="the lantern at the lighthouse harbour", max_chars=8000)
+    return {lead["source_ref"] for lead in packet["task_context"]["candidates"]}
+
+
+def note_pages(root):
+    """The pages that a find with a type filter and no query serves: it ranks the recall rows that
+    the catalogue proves, without a per-page access check."""
+    return {hit.path for hit in find_module.find(root, query="", types=["note"], limit=50)}
+
+
+def guild_lane_pages(root):
+    """The paths that recall_context's role lanes serve for a turn that names the guild, read from
+    the anchors packet, which runs those lanes on the turn."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+        packet = _activate(
+            root, turn="the Lantern Guild and the lantern at the lighthouse harbour", max_chars=8000
+        )
+    return {item["ref"] for key in ("units", "pointers") for item in packet[key]}
+
+
+@pytest.mark.timeout(300)
+def test_no_reader_serves_a_page_that_the_live_access_policy_excludes_before_its_rows_follow(
+    stored, writer  # noqa: F811
+):
+    """A store-mode reader that trusts rows derived under the previous access policy, before the
+    store records the policy change and while its pass derives the pages again: a find with a type
+    filter fails as warming, the task_context lane serves pages that the policy now excludes as
+    leads, and an anchor's role lanes serve its excluded neighbours."""
+    for index in range(10):
+        write.commit(writer, put(*generated_page(index)))
+    write.commit(writer, put(GUILD, GUILD_TEXT))
+    project(writer, stored)
+    generated = {generated_page(index)[0] for index in range(10)}
+    assert generated <= note_pages(stored)
+    assert generated <= task_leads(stored)
+    assert {generated_page(index)[0] for index in range(3)} <= guild_lane_pages(stored)
+
+    (stored / POLICY).write_text(EXCLUDE_GENERATED)
+    assert vault_store_mode.status(stored)["registry"] == "current"
+    notes = note_pages(stored)
+    assert ALPHA in notes and notes & generated == set()
+    assert task_leads(stored) & generated == set()
+    assert guild_lane_pages(stored) & generated == set()
+
+    commit_policy(writer, stored, EXCLUDE_GENERATED)
+    project(writer, stored)
+    assert vault_store_mode.status(stored)["registry"] == "rebuilding"
+    notes = note_pages(stored)
+    assert ALPHA in notes and notes & generated == set()
+    assert task_leads(stored) & generated == set()
+    assert guild_lane_pages(stored) & generated == set()
+
+
+ROOT_PAGE = "Harbour.md"
+RECORD = "Knowledge Base/Records/Work/Tide Ledger.md"
+RECORD_ID = "6b1d2e48-3c7a-4f59-8e20-9a4c5d7f1b36"
+#: A one-shot process: no importer runs in it, and no memo of this test's process reaches it. It
+#: prints its answer as the last line of its output.
+ONE_SHOT = """
+import json, sys
+from pathlib import Path
+from exomem import find, memory_refs
+from exomem.find_types import FindTimings
+from exomem.governance.principal import library_scope
+
+root, record = Path(sys.argv[1]), sys.argv[2]
+timings = FindTimings()
+with library_scope():
+    hits = find.find(root, query="cormorant", scope="vault", limit=15, graph=False, timings=timings)
+    refs = memory_refs.ReferenceIndex(root).refs_for_paths([record])
+paths = sorted(hit.path for hit in hits)
+print(json.dumps({"paths": paths, "refs": refs, "lanes": timings.profile.get("lexical_lanes")}))
+"""
+
+
+def outside_page(title, text, exomem_id=None):
+    identity = f"exomem_id: {exomem_id}\n" if exomem_id else ""
+    return f"---\ntitle: {title}\ntype: note\n{identity}---\n# {title}\n\n{text}\n".encode()
+
+
+@pytest.mark.timeout(300)
+def test_a_file_that_the_store_does_not_own_is_answered_from_the_rows_that_its_sweep_wrote(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A reader that still sends the files that the store does not own to the file-mode sidecars,
+    or an importer that gives a raw Records item no identity row, so that an outside edit is found
+    only after a rebuild and a duplicate check misses the item."""
+    importing = importer.Importer(stored, run=lambda work: work(writer))
+    (stored / ROOT_PAGE).write_bytes(outside_page("Harbour", "The pilot boards at the breakwater."))
+    (stored / RECORD).write_bytes(
+        outside_page("Tide Ledger", "The harbour master logs each tide.", RECORD_ID)
+    )
+    assert importing.sweep().refreshed == [ROOT_PAGE, RECORD]
+    (stored / ROOT_PAGE).write_bytes(outside_page("Harbour", "The pilot boards at the cormorant."))
+    (stored / RECORD).write_bytes(
+        outside_page("Tide Ledger", "The harbour master counts each cormorant.", RECORD_ID)
+    )
+    assert importing.import_paths([ROOT_PAGE, RECORD]).refreshed == [ROOT_PAGE, RECORD]
+
+    def file_mode_route(*_args, **_kwargs):
+        raise AssertionError("a store-mode reader opened the reference sidecar or read the files")
+
+    monkeypatch.setattr(memory_refs.ReferenceIndex, "_connect", file_mode_route)
+    monkeypatch.setattr(memory_refs, "_scan_pages", file_mode_route)
+    find_module.clear_cache()
+    timings = FindTimings()
+
+    found = find_module.find(
+        stored, query="cormorant", scope="vault", limit=15, graph=False, timings=timings
+    )
+    refs = memory_refs.ReferenceIndex(stored).refs_for_paths([RECORD])
+    owner = memory_refs.resolve_identifier_read_only(stored, memory_refs.REF_PREFIX + RECORD_ID)
+    swept_at = vault_store_mode.status(stored)["unowned_rows_as_of"]
+    one_shot = subprocess.run(
+        [sys.executable, "-c", ONE_SHOT, str(stored), RECORD],
+        capture_output=True, text=True, check=True, timeout=120,
+    )
+
+    assert ROOT_PAGE in {hit.path for hit in found}
+    assert refs == {RECORD: memory_refs.REF_PREFIX + RECORD_ID}
+    assert owner == RECORD
+    assert swept_at is not None
+    assert timings.profile["lexical_lanes"]["unowned_rows_as_of"] == swept_at
+    assert json.loads(one_shot.stdout.splitlines()[-1]) == {
+        "paths": sorted(hit.path for hit in found),
+        "refs": refs,
+        "lanes": timings.profile["lexical_lanes"],
+    }
+
+    write.commit(writer, put(IDENTIFIED, outside_page("Identified", "A second holder.", RECORD_ID)))
+    with pytest.raises(memory_refs.ReferenceError) as resolved:
+        memory_refs.resolve_identifier_read_only(stored, memory_refs.REF_PREFIX + RECORD_ID)
+    holders = [
+        issue["path"]
+        for issue in memory_refs.scan_issues(stored)
+        if issue["kind"] == "duplicate" and issue["value"] == RECORD_ID
+    ]
+
+    assert resolved.value.code == "AMBIGUOUS_REFERENCE"
+    assert holders == [IDENTIFIED, RECORD]
+
+
+CLAIMED = "Knowledge Base/Notes/Gen/Claimed.md"
+
+
+@pytest.mark.timeout(300)
+def test_a_container_claim_is_read_from_the_stored_page_though_a_file_mode_read_remembered_none(
+    vault, monkeypatch  # noqa: F811
+):
+    """A claim check that trusts what a file-mode read remembered of the projected file: the file
+    never changed, so the memo says "no claim" for a page whose stored bytes now make one."""
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 50_000_000)
+    plain = b"---\ntitle: C\ntype: note\n---\n# C\n\nNo claim yet.\n"
+    (vault / CLAIMED).parent.mkdir(parents=True, exist_ok=True)
+    (vault / CLAIMED).write_bytes(plain)
+    build_indexes(vault)
+    time.sleep(0.1)  # past the shortened racy window, so the read is remembered
+    document_containers.clear_unclaimed_notes()
+    assert document_containers.parent_binding_for_path(vault, CLAIMED) is None
+    assert document_containers._remembered_unclaimed(vault, CLAIMED), "the read was remembered"
+
+    assert migrate_apply(vault) == 0
+    claim = b"---\ntitle: C\ntype: note\ncontainer_member: {version: 2}\n---\n# C\n\nA claim.\n"
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        write.commit(CollectionWriter(vault, handle), put(CLAIMED, claim))
+
+    assert (vault / CLAIMED).read_bytes() == plain, "no projection ran: the remembered file stays"
+    assert egress.content_permits(vault, CLAIMED, EXTERNAL) is False
+
+
+@pytest.mark.parametrize(
+    ("registry", "loader", "entries"),
+    (
+        (context_roles, "load_roles", "roles: {}\n"),
+        (activation_conventions, "load_conventions", ""),
+    ),
+    ids=("context roles", "activation conventions"),
+)
+def test_a_registry_override_is_read_from_the_stored_page_when_its_file_is_gone(
+    stored, writer, registry, loader, entries  # noqa: F811
+):
+    """A loader that reads the override's file: in store mode that file is a projection that may
+    lag or be absent, so the owner's override silently falls back to the shipped registry."""
+    path = registry.override_path(stored)
+    body = f"schema_version: {registry.SCHEMA_VERSION}\n{entries}".encode()
+    write.commit(writer, put(path.relative_to(stored).as_posix(), body))
+    path.unlink(missing_ok=True)
+    registry.clear_cache()
+
+    assert getattr(registry, loader)(stored).source == "vault"
+
+
+@pytest.mark.timeout(300)
+def test_a_governed_write_and_a_reconcile_in_store_mode_start_no_file_mode_repair(
+    served, monkeypatch  # noqa: F811
+):
+    """A store-mode write or reconcile that re-enters the file-mode repair ladder: it rebuilds, from
+    the projected files, a catalogue, graph or reference sidecar that no store-mode reader reads."""
+    repairs = []
+    for owner, seam in (
+        (lexstore, "_schedule_runtime_catalog_repair"),
+        (epistemic_graph, "schedule_background_rebuild"),
+        (memory_refs, "request_rebuild"),
+    ):
+        monkeypatch.setattr(owner, seam, lambda *args, _seam=seam, **kwargs: repairs.append(_seam))
+
+    created = commands.op_remember(
+        served,
+        title="Cormorant count",
+        status="draft",
+        content="## Observations\n\n- [finding] The cormorants roost on the breakwater.\n",
+        summary="A count for the test rig.",
+    )["path"]
+    reconcile.reconcile(served)
+
+    assert read.owned_bytes(served, created)
+    assert repairs == []
+    assert lexstore.get_store(served)._stranded_scopes == set()
 
 
 def test_a_store_page_tagged_into_a_restricted_scope_is_withheld_whatever_its_projected_file_says(
@@ -559,11 +1080,11 @@ def test_a_note_type_overlay_that_only_the_store_holds_reaches_the_registry_load
     )
 
     write.commit(writer, put(rel, document))
-    served = registry.load(note_types.SPEC, stored)
+    loaded = registry.load(note_types.SPEC, stored)
 
-    assert "harbour-log" in served.entries
+    assert "harbour-log" in loaded.entries
     assert "harbour-log" not in pack.entries
-    assert served.content_hash != pack.content_hash
+    assert loaded.content_hash != pack.content_hash
     assert vault_module.read_bytes_without_pinning(stored / rel, stored) == document
 
 

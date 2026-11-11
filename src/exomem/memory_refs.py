@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 from urllib.parse import unquote
 
 from . import call_spans, foreground_priority, reserved_paths, state_paths
@@ -581,6 +581,10 @@ class ReferenceIndex:
         normalized = normalize_id(exomem_id)
         if normalized is None:
             raise ReferenceError("INVALID_REFERENCE", f"invalid memory id: {exomem_id!r}")
+        stored = _store_identity_owners(self.vault_root, [normalized])
+        if stored is not None:
+            # A store commit is visible at its acknowledgement: no pending custody, no scan.
+            return _one_owner(normalized, list(stored[normalized]))
         if not self.available():
             try:
                 self.rebuild_all()
@@ -593,22 +597,7 @@ class ReferenceIndex:
             rows = self._paths_for_id(normalized)
         if not rows:
             rows = self._scan_paths_for_id(normalized)
-        rows = _apply_pending_identity(self.vault_root, normalized, rows)
-        if len(rows) > 1:
-            # A COUNT, never the paths. Merging or duplicating identities is
-            # what manufactures a collision, so a caller can manufacture one
-            # and read the colliding vault paths straight out of this message
-            # — for pages it may hold no release decision over. The count is
-            # what an owner needs to know a repair is due; the paths are
-            # reachable through the governed surfaces that resolve an audience
-            # (`backfill_ids(dry_run=True)`, `issues()`).
-            raise ReferenceError(
-                "AMBIGUOUS_REFERENCE",
-                f"memory id {normalized} appears in {len(rows)} pages",
-            )
-        if not rows:
-            raise ReferenceError("REFERENCE_NOT_FOUND", f"memory id not found: {normalized}")
-        return rows[0]
+        return _one_owner(normalized, _apply_pending_identity(self.vault_root, normalized, rows))
 
     def _paths_for_id(self, exomem_id: str) -> list[str]:
         conn = self._connect()
@@ -687,23 +676,17 @@ class ReferenceIndex:
     ) -> dict[str, str | None]:
         """One bounded batch: at most `REFS_QUERY_CHUNK` paths, already cleaned.
 
-        In store mode the store's identity rows answer for each page that the store owns: they are
-        written with the page, so no sidecar is read or rebuilt and no file is read to fill a miss.
-        A page that the store does not own keeps the sidecar's route below.
+        In store mode the store's identity rows answer for every path: a commit writes an owned
+        page's row with the page, and the importer writes the row of a file that the store does not
+        own. No sidecar is read or rebuilt and no file is read to fill a miss, and the duplicate
+        check spans every row the store holds.
         """
-        from .vault_store import mode, ownership, read
-
-        if not mode.store_mode_for_reads(self.vault_root):
-            return self._refs_for_paths_from_sidecar(wanted, recall_reader=recall_reader)
-        owned = [p for p in wanted if ownership.classify(p) is ownership.Ownership.PAGE]
-        resolved: dict[str, str | None] = {}
-        if owned:
-            with read.snapshot(self.vault_root) as view:
-                resolved, _indexed = self._refs_from_connection(view.connection, owned)
-        rest = [path for path in wanted if path not in resolved]
-        if rest:
-            resolved.update(self._refs_for_paths_from_sidecar(rest, recall_reader=recall_reader))
-        return resolved
+        found = _from_store_identities(
+            self.vault_root, lambda conn: self._refs_from_connection(conn, wanted)[0]
+        )
+        if found is not None:
+            return found
+        return self._refs_for_paths_from_sidecar(wanted, recall_reader=recall_reader)
 
     def _refs_for_paths_from_sidecar(
         self, wanted: list[str], *, recall_reader: bool = False
@@ -834,33 +817,16 @@ class ReferenceIndex:
         )
 
     def issues(self) -> list[dict[str, str]]:
+        stored = _from_store_identities(self.vault_root, _identity_issues)
+        if stored is not None:
+            return stored
         if not self.available():
             return scan_issues(self.vault_root)
         conn = self._connect()
         try:
-            malformed = conn.execute(
-                "SELECT raw_id, path FROM identities "
-                "WHERE status = 'malformed' ORDER BY raw_id, path"
-            ).fetchall()
-            duplicate_ids = _duplicate_ids(conn)
-            duplicate_rows: list[tuple[str, str]] = []
-            for exomem_id in duplicate_ids:
-                paths = conn.execute(
-                    "SELECT path FROM identities WHERE exomem_id = ? ORDER BY path",
-                    (exomem_id,),
-                ).fetchall()
-                duplicate_rows.extend((exomem_id, str(row[0])) for row in paths)
+            return _identity_issues(conn)
         finally:
             conn.close()
-        issues = [
-            {"kind": "duplicate", "value": value, "path": path}
-            for value, path in duplicate_rows
-        ]
-        issues.extend(
-            {"kind": "malformed", "value": str(value), "path": str(path)}
-            for value, path in malformed
-        )
-        return sorted(issues, key=lambda item: (item["kind"], item["value"], item["path"]))
 
 
 def _apply_pending_identity(
@@ -1166,6 +1132,12 @@ def _reference_owners_read_only(
     if not wanted and not _optional:
         return _ReferenceOwners(root.resolve(), {}, None)
 
+    # A store-mode vault's identity rows answer every id with one indexed lookup per chunk: the work
+    # depends on the batch's size, and the rows are current at the store's snapshot.
+    stored = _store_identity_owners(root, wanted) if wanted else None
+    if stored is not None:
+        return _ReferenceOwners(root.resolve(), stored, None)
+
     # Lazy: `semantic_contract` imports this module.
     from . import semantic_contract
 
@@ -1282,22 +1254,15 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
     if raw.lower().startswith(REF_PREFIX):
         if memory_id is None:
             raise ReferenceError("INVALID_REFERENCE", f"invalid memory reference: {raw!r}")
+        stored = _store_identity_owners(Path(vault_root), [memory_id])
+        if stored is not None:
+            return _one_owner(memory_id, list(stored[memory_id]))
         rows = _apply_pending_identity(
             Path(vault_root),
             memory_id,
             ReferenceIndex(vault_root)._scan_paths_for_id(memory_id),
         )
-        if len(rows) > 1:
-            # Content-free, for the reason given at `ReferenceIndex.resolve`.
-            raise ReferenceError(
-                "AMBIGUOUS_REFERENCE",
-                f"memory id {memory_id} appears in {len(rows)} pages",
-            )
-        if not rows:
-            raise ReferenceError(
-                "REFERENCE_NOT_FOUND", f"memory id not found: {memory_id}"
-            )
-        return rows[0]
+        return _one_owner(memory_id, rows)
     for prefix in ("exomem://vault/", "exomem://source/"):
         if raw.lower().startswith(prefix):
             decoded = unquote(raw[len(prefix) :])
@@ -1532,7 +1497,14 @@ def delete_after_remove(vault_root: Path, paths: list[str]) -> bool:
 
 
 def scan_issues(vault_root: Path) -> list[dict[str, str]]:
-    """Read identity problems from Markdown without creating the sidecar."""
+    """Read identity problems from Markdown without creating the sidecar.
+
+    A store-mode vault reads them from the store's identity rows, which each commit derives from
+    the page's bytes: the same rows a scan would build, with no walk.
+    """
+    stored = _from_store_identities(vault_root, _identity_issues)
+    if stored is not None:
+        return stored
     entries = _scan_pages(vault_root)
     by_id: dict[str, list[str]] = {}
     issues: list[dict[str, str]] = []
@@ -1551,7 +1523,15 @@ def scan_issues(vault_root: Path) -> list[dict[str, str]]:
 
 
 def drift(vault_root: Path) -> list[dict[str, str]]:
-    """Compare the derived sidecar to Markdown without mutating either."""
+    """Compare the derived sidecar to Markdown without mutating either.
+
+    A store-mode vault has none: no reader consults the sidecar, and each commit derives a page's
+    identity row with its bytes, so there is nothing to compare and reconcile rebuilds nothing.
+    """
+    from .vault_store import mode
+
+    if mode.store_mode_for_reads(Path(vault_root)):
+        return []
     index = ReferenceIndex(vault_root)
     current = {
         row[0]: (row[1], row[2], row[3], row[4])
@@ -1590,6 +1570,94 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         if current[path] != indexed[path]:
             findings.append({"path": path, "reason": "stale identity in reference sidecar"})
     return findings
+
+
+_T = TypeVar("_T")
+
+
+def _one_owner(exomem_id: str, rows: list[str]) -> str:
+    """The one page that holds ``exomem_id``, or the error that says why there is not one."""
+    if len(rows) > 1:
+        # A COUNT, never the paths. Merging or duplicating identities is
+        # what manufactures a collision, so a caller can manufacture one
+        # and read the colliding vault paths straight out of this message
+        # — for pages it may hold no release decision over. The count is
+        # what an owner needs to know a repair is due; the paths are
+        # reachable through the governed surfaces that resolve an audience
+        # (`backfill_ids(dry_run=True)`, `issues()`).
+        raise ReferenceError(
+            "AMBIGUOUS_REFERENCE",
+            f"memory id {exomem_id} appears in {len(rows)} pages",
+        )
+    if not rows:
+        raise ReferenceError("REFERENCE_NOT_FOUND", f"memory id not found: {exomem_id}")
+    return rows[0]
+
+
+def _from_store_identities(
+    vault_root: Path, query: Callable[[sqlite3.Connection], _T]
+) -> _T | None:
+    """``query`` on the store's identity rows at this request's snapshot; None outside store mode.
+
+    The store holds one identity row per Knowledge Base page, owned or not, with the sidecar's
+    columns (``create_identity_schema``), so the sidecar's statements read it unchanged.
+    """
+    from .collection_store import connection
+    from .vault_store import mode, read
+
+    root = Path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return None
+    try:
+        with read.snapshot(root) as view:
+            return query(view.connection)
+    except connection.CollectionStoreError as error:
+        if error.code != read.NOT_ACTIVE:
+            raise
+        return None  # the records stopped saying store mode: the files answer
+
+
+def _store_identity_owners(
+    vault_root: Path, ids: Iterable[str]
+) -> dict[str, tuple[str, ...]] | None:
+    """Every page that holds each normalized id, from the store; None outside store mode."""
+    wanted = list(dict.fromkeys(ids))
+
+    def owners(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
+        found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
+        for start in range(0, len(wanted), REFS_QUERY_CHUNK):
+            chunk = wanted[start : start + REFS_QUERY_CHUNK]
+            for exomem_id, path in conn.execute(
+                "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
+                f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)}) "
+                "ORDER BY exomem_id, path",
+                chunk,
+            ):
+                found[str(exomem_id)].append(str(path))
+        return {identifier: tuple(paths) for identifier, paths in found.items()}
+
+    return _from_store_identities(vault_root, owners)
+
+
+def _identity_issues(conn: sqlite3.Connection) -> list[dict[str, str]]:
+    """The duplicate and malformed identities that the rows of ``conn`` hold, in one read each."""
+    malformed = conn.execute(
+        "SELECT raw_id, path FROM identities WHERE status = 'malformed' ORDER BY raw_id, path"
+    ).fetchall()
+    duplicates = conn.execute(
+        "SELECT exomem_id, path FROM identities WHERE exomem_id IN ("
+        "SELECT exomem_id FROM identities WHERE status = 'valid' "
+        "GROUP BY exomem_id HAVING COUNT(*) > 1) ORDER BY exomem_id, path"
+    ).fetchall()
+    issues = [
+        {"kind": "duplicate", "value": str(value), "path": str(path)}
+        for value, path in duplicates
+    ]
+    issues.extend(
+        {"kind": "malformed", "value": str(value), "path": str(path)}
+        for value, path in malformed
+    )
+    return sorted(issues, key=lambda item: (item["kind"], item["value"], item["path"]))
 
 
 def _duplicate_ids(conn: sqlite3.Connection) -> list[str]:
@@ -1634,10 +1702,10 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
         ).as_posix()
     except (OSError, ValueError):
         return None
-    return rel if _is_scanned_page(rel) else None
+    return rel if is_scanned_page(rel) else None
 
 
-def _is_scanned_page(rel: str) -> bool:
+def is_scanned_page(rel: str) -> bool:
     """Whether the reference scan reads this path: a Markdown page in the Knowledge Base."""
     prefix = f"{kb_dirname()}/"
     if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
@@ -1724,7 +1792,7 @@ def identity_row(
     bytes are not text. ``vault_root`` names the vault whose scan rule applies; today that rule
     depends on configuration only.
     """
-    row = _identity_from_bytes(rel, raw) if _is_scanned_page(rel) else None
+    row = _identity_from_bytes(rel, raw) if is_scanned_page(rel) else None
     return None if row is None or row[4] == _UNREADABLE else row
 
 

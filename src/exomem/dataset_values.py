@@ -23,6 +23,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import unicodedata
 from collections.abc import Callable, Collection, Iterable
@@ -34,6 +35,7 @@ from . import (
     access,
     bm25,
     capabilities,
+    find_policy,
     find_results,
     query_data,
     reserved_paths,
@@ -47,7 +49,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 STORE_NAME = ".dataset-values.sqlite"
 BUSY_TIMEOUT_SECONDS = 1.0
 #: Datasets indexed per request. A vault holding many unindexed datasets (the first search
@@ -61,6 +63,24 @@ LANE = "dataset_values"
 #: one, and at most this long, so a sentence is not read as one code.
 COMPACT_MIN_CHARS = 6
 COMPACT_MAX_CHARS = 64
+#: A part of a record is one object subtree; larger subtrees are too coarse to say the words
+#: belong together.
+MAX_PART_FIELDS = 40
+#: A record matches when its best part explains at least this share of the query's weight.
+MIN_COVERAGE = 0.5
+#: Below this many indexed datasets a word's frequency says nothing, so the noise gate stays off.
+NOISE_GATE_MIN_DATASETS = 40
+#: Above it, a match whose words together occur in more than this fraction of the datasets is
+#: diagnostic noise, not a lookup.
+NOISE_GATE_FRACTION = 0.02
+#: The fraction never gates below this many datasets.
+NOISE_GATE_MIN_COUNT = 3
+#: Value hits share a result with page hits; this keeps them a small share of it.
+MAX_VALUE_HITS = 3
+#: A value passage names the match and its neighbourhood, not the whole record.
+MAX_VALUE_PASSAGE_CHARS = 600
+#: Records read per search before per-field checks; bound on a query held by common words.
+MAX_CANDIDATE_RECORDS = 500
 #: The suffixes a dataset card path can end in: the original's suffix, fixed by
 #: `query_data`, plus `.md`.
 _CARD_SUFFIXES = tuple(f"{suffix}.md" for suffix in query_data.ALLOWED_SUFFIXES)
@@ -71,16 +91,16 @@ def next_action_line(reads_rows: str) -> str:
     return f"[A rendering of this dataset's values. {reads_rows} reads its exact rows.]"
 
 
-# Why two indexes, and why values only. A field path is in every record of a dataset, so a
-# query of column names would match every dataset that has those columns and crowd the page
-# hits. `value_terms` keeps the field paths and the values in two columns: a record matches
-# when every query word is in the record and at least one is in a value. A query of field
-# words alone finds nothing here, and "bank IBAN" finds a record whose value is "bank" and
-# whose key is `iban`. `value_compact` is a trigram index over the values alone, each with
-# everything but letters and digits removed: an account number is often stored in groups
-# ("EE81 7700 ...") and asked for without them, or the reverse, and only a substring match
-# over the compact form joins the two. Both indexes are bounded by the 64 KiB rendering.
-_DATA_TABLES = ("datasets", "records", "value_terms", "value_compact")
+# Why two indexes, and why a row per field. `value_fields` keeps each field's path and value
+# in two columns of one FTS5 row: a record matches when one small subtree of it holds the
+# query's distinctive words and at least one is in a value, so the match needs field
+# granularity. A query of field words alone finds nothing here, and "bank IBAN" finds a
+# record whose value is "bank" and whose key is `iban`. `value_compact` is a trigram index
+# over the values alone, each with everything but letters and digits removed: an account
+# number is often stored in groups ("EE81 7700 ...") and asked for without them, or the
+# reverse, and only a substring match over the compact form joins the two. Both indexes are
+# bounded by the 64 KiB rendering.
+_DATA_TABLES = ("datasets", "records", "fields", "value_fields", "value_compact")
 _META_TABLE = "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
 _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS datasets (
@@ -94,7 +114,14 @@ _SCHEMA = (
         record_no INTEGER NOT NULL
     )""",
     "CREATE INDEX IF NOT EXISTS records_by_dataset ON records (original_path)",
-    "CREATE VIRTUAL TABLE IF NOT EXISTS value_terms USING fts5(paths, words, {tokenize})",
+    """CREATE TABLE IF NOT EXISTS fields (
+        id INTEGER PRIMARY KEY,
+        record_id INTEGER NOT NULL,
+        field_no INTEGER NOT NULL,
+        path TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS fields_by_record ON fields (record_id)",
+    "CREATE VIRTUAL TABLE IF NOT EXISTS value_fields USING fts5(paths, words, {tokenize})",
     "CREATE VIRTUAL TABLE IF NOT EXISTS value_compact USING fts5(compact, tokenize='trigram case_sensitive 1')",
 )
 
@@ -199,7 +226,9 @@ def _open(path: Path) -> sqlite3.Connection:
         if dict(conn.execute("SELECT key, value FROM meta")) == _meta():  # another process rebuilt it
             conn.execute("COMMIT")
             return conn
-        for table in _DATA_TABLES:
+        # value_terms was the schema-2 token index; a rebuild must not leave its
+        # stale raw-value rows behind.
+        for table in (*_DATA_TABLES, "value_terms"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")  # noqa: S608 - closed table names above
         conn.execute("DELETE FROM meta")
         for statement in schema:
@@ -227,9 +256,11 @@ def _connect(vault_root: Path) -> sqlite3.Connection:
 
 
 def _delete_dataset(conn: sqlite3.Connection, original: str) -> None:
-    ids = "SELECT id FROM records WHERE original_path = ?"
-    conn.execute(f"DELETE FROM value_terms WHERE rowid IN ({ids})", (original,))  # noqa: S608
-    conn.execute(f"DELETE FROM value_compact WHERE rowid IN ({ids})", (original,))  # noqa: S608
+    records = "SELECT id FROM records WHERE original_path = ?"
+    fields = f"SELECT id FROM fields WHERE record_id IN ({records})"
+    conn.execute(f"DELETE FROM value_fields WHERE rowid IN ({fields})", (original,))  # noqa: S608
+    conn.execute(f"DELETE FROM fields WHERE record_id IN ({records})", (original,))  # noqa: S608
+    conn.execute(f"DELETE FROM value_compact WHERE rowid IN ({records})", (original,))  # noqa: S608
     conn.execute("DELETE FROM records WHERE original_path = ?", (original,))
     conn.execute("DELETE FROM datasets WHERE original_path = ?", (original,))
 
@@ -246,9 +277,17 @@ def _store(conn: sqlite3.Connection, card: Card, rendering: source_inspection.Va
             row = conn.execute(
                 "INSERT INTO records (original_path, record_no) VALUES (?, ?)", (card.original, number)
             ).lastrowid
-            paths = " ".join(bm25.tokenize(" ".join(path for path, _ in record.fields)))
-            words = " ".join(bm25.tokenize(" ".join(value for _, value in record.fields)))
-            conn.execute("INSERT INTO value_terms (rowid, paths, words) VALUES (?, ?, ?)", (row, paths, words))
+            for field_no, (path, value) in enumerate(record.fields):
+                field_id = conn.execute(
+                    "INSERT INTO fields (record_id, field_no, path) VALUES (?, ?, ?)",
+                    (row, field_no, path),
+                ).lastrowid
+                paths = " ".join(bm25.tokenize(path))
+                words = " ".join(bm25.tokenize(value))
+                conn.execute(
+                    "INSERT INTO value_fields (rowid, paths, words) VALUES (?, ?, ?)",
+                    (field_id, paths, words),
+                )
             compact = " ".join(filter(None, (_compact(value) for _, value in record.fields)))
             conn.execute("INSERT INTO value_compact (rowid, compact) VALUES (?, ?)", (row, compact))
         conn.execute("COMMIT")
@@ -387,73 +426,329 @@ def _reconcile(
 # ------------------------------------------------------------------ matching
 
 
-def _match(conn: sqlite3.Connection, needles: _Needles, allowed: Collection[str], limit: int) -> list[tuple[str, int]]:
-    """`(original, record number)` per dataset, word matches in bm25 order then compact-only ones."""
+def _content_groups(query: str) -> list[tuple[str, ...]]:
+    """One tuple of stems per content word of `query`, in query order.
+
+    The split is `find_policy`'s, the same one page search uses. A group flagged as a
+    function word is not required, and one-character stems without a digit are dropped, so
+    "Brightwater's" leaves `brightwater` and "IBAN of Acme" leaves no `of`. A group left
+    empty is dropped.
+    """
+    groups = []
+    for stems, is_function, _required in find_policy.query_word_stem_groups(query):
+        if is_function:
+            continue
+        kept = tuple(stem for stem in stems if len(stem) > 1 or stem.isdigit())
+        if kept:
+            groups.append(kept)
+    return list(dict.fromkeys(groups))
+
+
+def _group_expression(group: tuple[str, ...], *, value_only: bool = False) -> str:
+    """An FTS5 expression for one `value_fields` row holding every stem of `group`.
+
+    With `value_only` every stem must be in the value; otherwise each stem may sit in the
+    field's path or in its value.
+    """
+    stems = " AND ".join(_phrase(stem) for stem in group)
+    if value_only:
+        return f"words : ({stems})"
+    return f"({stems})"
+
+
+def _prefixes(path: str) -> list[str]:
+    """`""` and each ancestor prefix of a dotted field path, never the path itself."""
+    parts = path.split(".")
+    return [".".join(parts[:i]) for i in range(len(parts))]
+
+
+@dataclass(frozen=True, slots=True)
+class _Match:
+    """A dataset's best record: how its passage is built and how it sorts against others."""
+
+    record_no: int
+    coverage: float
+    part_size: int
+    #: The part prefix a word match scored with; None on a compact match, whose part is the
+    #: one field holding the run.
+    prefix: str | None
+    #: The groups the part holds, in query order; empty on a compact match.
+    groups: tuple[tuple[str, ...], ...]
+    compact: bool
+
+
+def _match(
+    conn: sqlite3.Connection,
+    groups: list[tuple[str, ...]],
+    needles: _Needles,
+    allowed: Collection[str],
+) -> dict[str, _Match]:
+    """`original -> its best record's match`, over the indexed datasets in `allowed`."""
     scoped = "AND r.original_path IN (SELECT value FROM json_each(?))"
     allowed_json = json.dumps(sorted(allowed))
-    found: dict[str, int] = {}
-    lanes = []
-    if needles.terms:
-        # Every word is in the record, and at least one is in a value, not only in a field path.
-        every = " AND ".join(_phrase(term) for term in needles.terms)
-        some = " OR ".join(_phrase(term) for term in needles.terms)
-        lanes.append(("value_terms", f"{every} AND words : ({some})"))
-    if needles.compact is not None:
-        lanes.append(("value_compact", _phrase(needles.compact)))
-    for table, expression in lanes:
+    n = len(allowed)
+    matches: dict[str, _Match] = {}
+    if groups:
+        df_cache: dict[tuple[str, ...], int] = {}
+
+        def df(group: tuple[str, ...]) -> int:
+            """Datasets with a field holding `group`; counted in SQL, not shipped as rows."""
+            if group not in df_cache:
+                df_cache[group] = conn.execute(
+                    "SELECT COUNT(DISTINCT r.original_path) FROM value_fields "
+                    "JOIN fields f ON f.id = value_fields.rowid "
+                    "JOIN records r ON r.id = f.record_id "
+                    f"WHERE value_fields MATCH ? {scoped}",
+                    (_group_expression(group), allowed_json),
+                ).fetchone()[0]
+            return df_cache[group]
+
+        # A word weighs more the fewer datasets hold it, so a name that is not on file
+        # outweighs every word that is.
+        weight = {group: math.log(1 + n / (df(group) + 1)) for group in groups}
+        total = sum(weight.values())
+        # A group holding a digit is required in the part: a number is exact, so an account
+        # number that differs in one group never matches by its other groups.
+        required = {
+            group for group in groups if any(any(char.isdigit() for char in stem) for stem in group)
+        }
+        gated = n >= NOISE_GATE_MIN_DATASETS
+        combo_limit = max(NOISE_GATE_MIN_COUNT, NOISE_GATE_FRACTION * n)
+        combo_cache: dict[frozenset[tuple[str, ...]], int] = {}
+
+        def combo(found: tuple[tuple[str, ...], ...]) -> int:
+            """Datasets with a record holding all `found` groups; cached per request."""
+            key = frozenset(found)
+            if key not in combo_cache:
+                # A record holds the set when it holds each group; intersect in SQL so a
+                # common group never ships its rows to Python.
+                holding = " INTERSECT ".join(
+                    "SELECT f.record_id FROM value_fields "
+                    "JOIN fields f ON f.id = value_fields.rowid "
+                    "JOIN records r ON r.id = f.record_id "
+                    f"WHERE value_fields MATCH ? {scoped}"
+                    for _ in key
+                )
+                params = tuple(
+                    param
+                    for group in key
+                    for param in (_group_expression(group), allowed_json)
+                )
+                combo_cache[key] = conn.execute(
+                    "SELECT COUNT(DISTINCT r2.original_path) FROM records r2 "
+                    f"WHERE r2.id IN ({holding})",
+                    params,
+                ).fetchone()[0]
+            return combo_cache[key]
+
+        # Candidate records come from the heaviest groups: a record without one of the
+        # groups whose weight is more than half the total cannot reach the coverage floor.
+        picked, picked_weight = [], 0.0
+        for group in sorted(groups, key=lambda group: -weight[group]):
+            picked.append(group)
+            picked_weight += weight[group]
+            if picked_weight > total / 2:
+                break
         rows = conn.execute(
-            f"SELECT r.original_path, r.record_no FROM {table} JOIN records r ON r.id = {table}.rowid "  # noqa: S608
-            f"WHERE {table} MATCH ? {scoped} ORDER BY {table}.rank LIMIT ?",
-            (expression, allowed_json, MAX_ROWS_PER_QUERY),
+            "SELECT f.record_id, r.original_path, r.record_no FROM value_fields "
+            "JOIN fields f ON f.id = value_fields.rowid "
+            "JOIN records r ON r.id = f.record_id "
+            f"WHERE value_fields MATCH ? {scoped} ORDER BY value_fields.rank",
+            (" OR ".join(_group_expression(group) for group in picked), allowed_json),
         )
-        for original, number in rows:
-            found.setdefault(original, number)
-    return list(found.items())[:limit]
+        candidates: dict[int, tuple[str, int]] = {}
+        for record_id, original, record_no in rows:
+            if len(candidates) >= MAX_CANDIDATE_RECORDS:
+                break
+            candidates.setdefault(record_id, (original, record_no))
+        if candidates:
+            ids_json = json.dumps(sorted(candidates))
+            # `held[record][group]` is the fields of the record holding the group anywhere;
+            # `held_value` restricts that to the value column.
+            held: dict[int, dict[tuple[str, ...], set[int]]] = {}
+            held_value: dict[int, dict[tuple[str, ...], set[int]]] = {}
+            # A compound word counts as touching a value when the field holding it also
+            # holds one of its stems in the value, so a multi-stem group also gets the
+            # looser map: group present anywhere AND a stem in the value, same row.
+            # The digit rule keeps `held_value`.
+            held_value_any: dict[int, dict[tuple[str, ...], set[int]]] = {}
+            for group in groups:
+                variants = ((False, held, False), (True, held_value, False))
+                if len(group) > 1:
+                    variants += ((True, held_value_any, True),)
+                for value_only, into, loose in variants:
+                    if loose:
+                        stems = " OR ".join(_phrase(stem) for stem in group)
+                        expression = (
+                            _group_expression(group) + f" AND words : ({stems})"
+                        )
+                    else:
+                        expression = _group_expression(group, value_only=value_only)
+                    for record_id, field_no in conn.execute(
+                        "SELECT f.record_id, f.field_no FROM value_fields "
+                        "JOIN fields f ON f.id = value_fields.rowid "
+                        "WHERE value_fields MATCH ? "
+                        "AND f.record_id IN (SELECT value FROM json_each(?))",
+                        (expression, ids_json),
+                    ):
+                        into.setdefault(record_id, {}).setdefault(group, set()).add(field_no)
+            record_fields: dict[int, list[tuple[int, str]]] = {}
+            for record_id, field_no, path in conn.execute(
+                "SELECT f.record_id, f.field_no, f.path FROM fields f "
+                "WHERE f.record_id IN (SELECT value FROM json_each(?)) ORDER BY f.field_no",
+                (ids_json,),
+            ):
+                record_fields.setdefault(record_id, []).append((field_no, path))
+
+            for record_id, (original, record_no) in candidates.items():
+                fields = dict(record_fields.get(record_id, ()))
+                # A part is every field under one prefix; gather its members and size once.
+                members: dict[str, set[int]] = {}
+                for field_no, path in fields.items():
+                    for prefix in _prefixes(path):
+                        members.setdefault(prefix, set()).add(field_no)
+                parts = {
+                    prefix
+                    for group_fields in held.get(record_id, {}).values()
+                    for field_no in group_fields
+                    for prefix in _prefixes(fields[field_no])
+                }
+                best = None
+                for prefix in sorted(parts):
+                    part_fields = members[prefix]
+                    if len(part_fields) > MAX_PART_FIELDS:
+                        continue
+                    record_held = held.get(record_id, {})
+                    found = [
+                        group
+                        for group in groups
+                        if record_held.get(group, frozenset()) & part_fields
+                    ]
+                    # A number is exact: its groups must sit together in one field's
+                    # value, so a field that only shares a group by name never counts.
+                    digit_fields = part_fields
+                    for group in required:
+                        digit_fields = digit_fields & held_value.get(record_id, {}).get(
+                            group, frozenset()
+                        )
+                    if required and not digit_fields:
+                        continue
+                    value_held = held_value.get(record_id, {})
+                    value_any = held_value_any.get(record_id, {})
+                    if not any(
+                        (value_any if len(group) > 1 else value_held)
+                        .get(group, frozenset())
+                        & part_fields
+                        for group in found
+                    ):
+                        continue
+                    if gated and combo(tuple(found)) > combo_limit:
+                        continue
+                    coverage = sum(weight[group] for group in found) / total
+                    if best is None or (coverage, -len(part_fields)) > best[0]:
+                        best = ((coverage, -len(part_fields)), prefix, tuple(found))
+                if best is None or best[0][0] < MIN_COVERAGE:
+                    continue
+                (coverage, neg_size), prefix, found = best
+                match = _Match(record_no, coverage, -neg_size, prefix, found, compact=False)
+                current = matches.get(original)
+                if current is None or (coverage, neg_size) > (
+                    current.coverage,
+                    -current.part_size,
+                ):
+                    matches[original] = match
+    if needles.compact is not None:
+        rows = conn.execute(
+            "SELECT r.original_path, r.record_no FROM value_compact "
+            "JOIN records r ON r.id = value_compact.rowid "
+            f"WHERE value_compact MATCH ? {scoped} ORDER BY value_compact.rank LIMIT ?",
+            (_phrase(needles.compact), allowed_json, MAX_ROWS_PER_QUERY),
+        )
+        for original, record_no in rows:
+            if original not in matches:
+                matches[original] = _Match(record_no, 1.0, 1, None, (), compact=True)
+    return matches
 
 
-def _best_field(record: source_inspection.ValueRecord, needles: _Needles) -> int:
-    """The index of the field whose value holds most of the query, the first on a tie."""
-    wanted = set(needles.terms)
+def _match_lines(
+    record: source_inspection.ValueRecord, match: _Match, needles: _Needles
+) -> list[int]:
+    """Field indices of the chosen part that hold a found group, in record order."""
+    if match.prefix is None:
+        needle = needles.compact or ""
+        return [
+            index for index, (_, value) in enumerate(record.fields) if needle in _compact(value)
+        ][:1]
+    stems = [set(bm25.tokenize(path)) | set(bm25.tokenize(value)) for path, value in record.fields]
+    return [
+        index
+        for index, (path, _) in enumerate(record.fields)
+        if (match.prefix == "" or path.startswith(match.prefix + "."))
+        and any(all(stem in stems[index] for stem in group) for group in match.groups)
+    ]
 
-    def score(index: int) -> int:
-        value = record.fields[index][1]
-        words = len(wanted.intersection(bm25.tokenize(value)))
-        return words + (len(wanted) + 1 if needles.compact and needles.compact in _compact(value) else 0)
 
-    return max(range(len(record.fields)), key=lambda index: (score(index), -index))
+def _window(lines: list[str], shown: list[int]) -> str:
+    """The `shown` lines and what follows them, whole lines within `MAX_VALUE_PASSAGE_CHARS`.
 
-
-def _window(lines: list[str], focus: int) -> str:
-    """Whole lines around `lines[focus]`, within `MAX_PASSAGE_CHARS`, in their order."""
-    from . import find_parts
-
-    budget = find_parts.MAX_PASSAGE_CHARS
-    lines = [*lines[:focus], lines[focus][:budget], *lines[focus + 1 :]]
-    low = high = focus
-    used = len(lines[focus])
+    A single first line longer than the budget is cut to it. After the shown lines, the
+    remaining budget fills with the lines directly after shown lines, nearest first. A gap
+    between two shown lines is marked with one "…" line.
+    """
+    budget = MAX_VALUE_PASSAGE_CHARS
+    keep = [shown[0]]
+    used = min(len(lines[shown[0]]), budget)
+    for index in shown[1:]:
+        if used + len(lines[index]) + 1 <= budget:
+            keep.append(index)
+            used += len(lines[index]) + 1
+    kept = set(keep)
+    distance = 1
     while True:
-        before = low > 0 and used + len(lines[low - 1]) + 1 <= budget
-        if before:
-            low -= 1
-            used += len(lines[low]) + 1
-        after = high + 1 < len(lines) and used + len(lines[high + 1]) + 1 <= budget
-        if after:
-            high += 1
-            used += len(lines[high]) + 1
-        if not (before or after):
-            return "\n".join(lines[low : high + 1])
+        added = False
+        for index in sorted(kept):
+            candidate = index + distance
+            if (
+                candidate < len(lines)
+                and candidate not in kept
+                and used + len(lines[candidate]) + 1 <= budget
+            ):
+                kept.add(candidate)
+                used += len(lines[candidate]) + 1
+                added = True
+        if not added:
+            break
+        distance += 1
+
+    def emit(ordered: list[int]) -> str:
+        parts = [lines[ordered[0]][:budget]]
+        previous = ordered[0]
+        for index in ordered[1:]:
+            if index > previous + 1:
+                parts.append("\u2026")
+            parts.append(lines[index])
+            previous = index
+        return "\n".join(parts)
+
+    ordered = sorted(kept)
+    while len(ordered) > 1 and len(emit(ordered)) > budget:
+        # Gap markers were not counted; drop later lines, shown included, until they fit.
+        ordered.pop()
+    return emit(ordered)
 
 
-def _hit(vault_root: Path, card: Card, record_no: int, needles: _Needles) -> Hit | None:
+def _hit(vault_root: Path, card: Card, match: _Match, needles: _Needles) -> Hit | None:
     from .find_types import Hit
 
     rendering = _rendering_of(vault_root, card)
-    if rendering is None or record_no >= len(rendering.records):
+    if rendering is None or match.record_no >= len(rendering.records):
         return None
-    record = rendering.records[record_no]
-    focus = _best_field(record, needles)
+    record = rendering.records[match.record_no]
     lines = record.lines()
-    passage = [_window(lines, focus)]
+    shown = _match_lines(record, match, needles)
+    if not shown:
+        return None
+    passage = [_window(lines, shown)]
     # Spelled for the surface serving this search: the tool that reads the rows differs by surface.
     reads_rows = capabilities.active_call_text("query_dataset", {"path": card.original})
     if rendering.truncated:
@@ -467,7 +762,7 @@ def _hit(vault_root: Path, card: Card, record_no: int, needles: _Needles) -> Hit
         scope=page.scope,
         title=page.title,
         updated=page.updated,
-        excerpt=find_results.collapse("\n".join(lines[focus:]))[: find_results.EXCERPT_MAX_LEN],
+        excerpt=find_results.collapse("\n".join(lines[shown[0] :]))[: find_results.EXCERPT_MAX_LEN],
         outside_kb=not card.original.startswith(kb_prefix()),
         # No `matched_part`, offset or length: they would point a page read into a rendering
         # that no tool serves. The passage ends in the call that does read the rows.
@@ -489,13 +784,17 @@ def search(
 ) -> Lane:
     """Value hits for `query` over the datasets this request may see, best first.
 
-    A record matches when every word of the query is in it and at least one is in a value, or
-    when a query that holds a digit has its letters and digits as a run inside one value. A
-    query of field names alone, or with a filler word that no record holds, finds nothing here
-    and reaches the dataset, if at all, through its card.
+    A record matches when one small part of it holds the query's distinctive words and at
+    least one is in a value, or when a query that holds a digit has its letters and digits
+    as a run inside one value. A query of field names alone, or of words so common that
+    many datasets hold them together, finds nothing here and reaches the dataset, if at
+    all, through its card.
     """
     needles = _needles(query)
     if needles is None:
+        return Lane()
+    groups = _content_groups(query)
+    if not groups and needles.compact is None:
         return Lane()
     from .lexstore import fts5_available
 
@@ -508,14 +807,30 @@ def search(
         conn = _connect(vault_root)
         try:
             indexed, unindexed = _reconcile(conn, vault_root, cards, projected, prefix)
-            matches = _match(conn, needles, indexed, limit)
+            matches = _match(conn, groups, needles, indexed)
         finally:
             conn.close()
     except (sqlite3.Error, OSError) as error:
         log.warning("dataset value search unavailable: %s", error)
         return Lane(failed=(LANE,))
+
+    def updated(original: str) -> str:
+        return str(cards[original].page.updated or "")
+
+    word = [entry for entry in matches.items() if not entry[1].compact]
+    compact_only = [entry for entry in matches.items() if entry[1].compact]
+    # Ties on coverage and part size go to the newest card, then to the path. The stable
+    # sorts run least-significant key first.
+    word.sort(key=lambda entry: entry[0])
+    word.sort(key=lambda entry: updated(entry[0]), reverse=True)
+    word.sort(key=lambda entry: (-entry[1].coverage, entry[1].part_size))
+    compact_only.sort(key=lambda entry: entry[0])
+    compact_only.sort(key=lambda entry: updated(entry[0]), reverse=True)
+    ordered = (word + compact_only)[: max(0, min(limit, MAX_VALUE_HITS))]
     hits = [
-        hit for original, number in matches if (hit := _hit(vault_root, cards[original], number, needles)) is not None
+        hit
+        for original, match in ordered
+        if (hit := _hit(vault_root, cards[original], match, needles)) is not None
     ]
     return Lane(hits, warming=(LANE,) if unindexed else ())
 

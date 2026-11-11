@@ -87,6 +87,9 @@ API_KEY_VARIABLES: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN
 #: billing errors, and a refused request, are the harness's setup.
 _FAULT_ERRORS = {"rate_limit": "rate_limit", "server_error": "transport", "unknown": "transport"}
 _ABORT_ERRORS = frozenset({"authentication_failed", "billing_error", "invalid_request"})
+#: The Agent SDK's assistant-message error for a credit balance that cannot pay. A run whose
+#: actor meets it stops at once, like a rejected subscription limit: no retries, no scored loss.
+BILLING_ERROR = "billing_error"
 
 #: The fault kind of a server that never answered the client's handshake.
 SERVER_START = "server_start"
@@ -443,9 +446,23 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def rejected_limit(event: Mapping) -> dict | None:
-    """The ``rate_limit_info`` of a ``rate_limit_event`` that reports the subscription limit as rejected, else None."""
+    """The account limit an event says has no room left, else None.
+
+    Two shapes count. A ``rate_limit_event`` carries ``rate_limit_info`` whose status is ``rejected``:
+    the subscription limit. An ``assistant`` event whose ``error`` is ``billing_error`` reports a
+    credit balance that cannot pay; the ``limit`` key says which kind it was. The CLI emits the
+    error as a top-level sibling of ``message``; the nested shape is tolerated too.
+    """
     info = event.get("rate_limit_info") if event.get("type") == "rate_limit_event" else None
-    return info if isinstance(info, dict) and info.get("status") == "rejected" else None
+    if isinstance(info, dict) and info.get("status") == "rejected":
+        return info
+    if event.get("type") != "assistant":
+        return None
+    message = event.get("message")
+    nested = message.get("error") if isinstance(message, dict) else None
+    if event.get("error") == BILLING_ERROR or nested == BILLING_ERROR:
+        return {"limit": "credits", "error": BILLING_ERROR}
+    return None
 
 
 def hook_push(event: Mapping) -> str:
