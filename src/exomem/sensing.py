@@ -782,7 +782,11 @@ def rederive(
     except (TypeError, ValueError):
         return None
     if hasattr(mapping, "apply_vectors"):
-        return mapping.apply_vectors(reading_vectors, columns=columns)
+        # Only a variable-column map takes the reading's columns; a fixed-column
+        # map's apply_vectors keeps its one-argument shape.
+        if fixed_columns is None:
+            return mapping.apply_vectors(reading_vectors, columns=columns)
+        return mapping.apply_vectors(reading_vectors)
     return mapping.apply(reading_vectors.get("ab"), reading_vectors.get("ba"))
 
 
