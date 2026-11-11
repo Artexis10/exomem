@@ -178,12 +178,15 @@ def group_row(
     threshold = rules()["thresholds"]
     kinds = {u: probe_kind(meta[u]) for u in units}
     position = [u for u in units if kinds[u] == "position"]
+    keyed = sum((meta[u].get("key") or {}).get("value") is not None for u in units)
     row: dict[str, Any] = {
         "probes": {
             "played": len(units),
             "position": len(position),
             "harm": sum(k == "harm" for k in kinds.values()),
             "stable": sum(k == "stable" for k in kinds.values()),
+            "value_keyed": keyed,
+            "rubric_only": len(units) - keyed,
         }
     }
     if not units:

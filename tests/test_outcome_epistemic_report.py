@@ -96,7 +96,15 @@ def test_a_family_of_three_probes_reads_too_few_probes_and_prints_no_position() 
     row = read_families(meta, outcomes, scores)["rows"]["currency"]
 
     assert row["reading"] == "too few probes"
-    assert row["probes"] == {"played": 3, "position": 3, "harm": 0, "stable": 0, "in_case_set": 3}
+    assert row["probes"] == {
+        "played": 3,
+        "position": 3,
+        "harm": 0,
+        "stable": 0,
+        "value_keyed": 0,
+        "rubric_only": 3,
+        "in_case_set": 3,
+    }
     for printed in ("positions", "ceiling_lead", "saturation"):
         assert printed not in row, f"a family with three probes printed {printed}"
     # The filed prediction sits beside a result that cannot be read yet: unknown, not agreed or contradicted.

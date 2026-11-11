@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from benchmarks.membench.outcome.epistemic import cases, projection
+from benchmarks.membench.outcome.epistemic import cases, projection, readings
 from benchmarks.membench.world import core
 from benchmarks.membench.world.core import Vocabulary
 from benchmarks.membench.world.keys import key_spec
@@ -270,3 +270,42 @@ def test_every_probe_names_its_phenomenon_and_the_family_that_the_phenomenon_bel
     entries = CATALOGUE.entries
     assert {p["phenomenon"] for p in record["probes"]} <= set(entries)
     assert all(entries[p["phenomenon"]].family == p["family"] for p in record["probes"])
+
+
+def test_the_report_counts_each_familys_value_keyed_and_rubric_only_probes() -> None:
+    """A `value: null` key is scored by its rubric alone; the family rows say how many of each a run played."""
+    _, _, record = built(7, twins=1.0)
+    meta = {("world", p["probe_id"]): p for p in record["probes"]}
+    outcomes = [
+        {
+            "project": "world",
+            "probe_id": p["probe_id"],
+            "arm": "P",
+            "window": 1,
+            "state": "answered",
+            "verdict": {"correct": True, "over_flags": "no"},
+        }
+        for p in record["probes"]
+    ]
+    families = readings.section(
+        meta=meta,
+        outcomes=outcomes,
+        unit_scores={},
+        arms=["P"],
+        seed=1,
+        earlier=(),
+        projection=DATA,
+        harm_of=lambda units: None,
+    )
+    keyed = sum(p["key"]["value"] is not None for p in record["probes"])
+    assert 0 < keyed < len(record["probes"])
+    assert families["pooled"]["probes"]["value_keyed"] == keyed
+    assert families["pooled"]["probes"]["rubric_only"] == len(record["probes"]) - keyed
+    for family, row in families["rows"].items():
+        played = [p for p in record["probes"] if p["family"] == family]
+        assert row["probes"]["value_keyed"] == sum(p["key"]["value"] is not None for p in played), (
+            family
+        )
+        assert (
+            row["probes"]["value_keyed"] + row["probes"]["rubric_only"] == row["probes"]["played"]
+        )
