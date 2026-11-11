@@ -133,7 +133,7 @@
   - a newer target keeps the earlier `candidate-since` time, which catches a stall that hides because releases arrive every 8 hours;
   - a pass that could not observe a cell sends no transition, which catches a blind pass that resolves a firing alert;
   - `cellctl` refuses to start without a threshold, which catches a deploy whose alerts are silently off.
-- [ ] 1.12 (Code and tests merged in #2724; open until the `cloud-deploy` environment exists and its live checks run, an operator step.) Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
+- [x] 1.12 Add `.github/workflows/cloud-deploy.yml` and the `cloud-deploy` environment (D1, D2, D3). Put the logic in a script with unit tests on recorded API answers: release lookup, attestation check, rollout view, pause check, platform gate, barrier check, `PUT`, poll and alert transitions. Keep the gate's globs in one configuration file. Verify:
   - an unattested digest sets nothing, which catches a pushed image that reaches the fleet;
   - a `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER` answer ends the run as success with nothing set, which catches a red run on every merge after a withdrawal;
   - a paused rollout sets nothing, and the run fails with the pause's code, which catches automation that resumes a paused fleet;
