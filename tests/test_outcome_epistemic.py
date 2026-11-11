@@ -40,6 +40,8 @@ def _subscription_run(monkeypatch):
 pytestmark = pytest.mark.reads_repository_docs
 
 ARMS = ["N", "F", "P", "E"]
+#: The arms that play each session's main task. N has no memory, so it plays probes only.
+SESSION_ARMS = ["F", "P", "E"]
 #: The session each scripted call belongs to.
 SESSION_OF = {
     "task s1": 1,
@@ -80,6 +82,8 @@ prompt = content if isinstance(content, str) else "".join(block["text"] for bloc
 tags = re.findall(r"\[(task|probe) ([\w-]+)\]", prompt)
 kind, tag = tags[-1]
 call = f"{kind} {tag}"
+with LEDGER.with_name("prompts.jsonl").open("a") as fh:
+    fh.write(json.dumps({"arm": arm, "call": call, "prompt": prompt}) + "\n")
 
 
 def log(event):
@@ -320,7 +324,7 @@ def played(tmp_path_factory):
 def test_arms_start_a_session_together_and_the_next_only_after_every_arm_finished(played):
     """An arm that raced ahead would meet the provider at another hour than the arm it is compared with."""
     rows = [r for r in played.rows if r["arm"] in ARMS]
-    for arm in ARMS:
+    for arm in SESSION_ARMS:
         order = [r["call"] for r in rows if r["arm"] == arm and r["event"] == "start"]
         assert order == [
             "task s1",
@@ -350,13 +354,15 @@ def test_arms_start_a_session_together_and_the_next_only_after_every_arm_finishe
 def test_the_workspace_resets_each_session_but_the_folder_arm_keeps_its_memory(played):
     """Files an arm left behind must not carry into the next session; only its memory may."""
     run_dir = played.run_dir
-    for arm in ARMS:
+    for arm in SESSION_ARMS:
         third = call_record(run_dir, arm, "sessions", "s03")["reply"]
         assert "files=['notes.txt']" in third, f"{arm} saw files of an earlier session: {third}"
+    # N's probe sees the files of its own session only, and no memory.
+    first = call_record(run_dir, "N", "probes", "p-first")["reply"]
+    assert "files=['notes.txt', 'question.txt']" in first and "memory=[]" in first
     folder = call_record(run_dir, "F", "sessions", "s03")["reply"]
     # F's note-taker kept alpha and beta; the memory folder survived two workspace resets.
     assert "memory=['alpha', 'beta']" in folder
-    assert "memory=[]" in call_record(run_dir, "N", "sessions", "s03")["reply"]
     assert (
         "memory=['alpha', 'beta', 'gamma']" in call_record(run_dir, "P", "sessions", "s03")["reply"]
     )
@@ -369,24 +375,171 @@ def test_what_a_probe_writes_is_discarded_before_the_next_call(played):
     """A probe that wrote to memory would hand its own answer to the probe after it."""
     run_dir = played.run_dir
     for arm in ARMS:
-        replies = [
-            call_record(run_dir, arm, kind, name)["reply"]
-            for kind, name in (
-                ("sessions", "s03"),
-                ("probes", "p-first"),
-                ("probes", "p-second"),
-            )
-        ]
+        calls = [("probes", "p-first"), ("probes", "p-second")]
+        if arm in SESSION_ARMS:
+            calls.insert(0, ("sessions", "s03"))
+        replies = [call_record(run_dir, arm, kind, name)["reply"] for kind, name in calls]
         assert not any("PROBE-NOTE" in reply for reply in replies), (
             f"{arm} read a probe's memory write"
         )
-        assert "probe-p-first.scratch" not in replies[2], f"{arm} kept a probe's workspace file"
+        assert "probe-p-first.scratch" not in replies[-1], f"{arm} kept a probe's workspace file"
     notes = played.run_dir / "window-1" / "proj-a" / "F" / "work" / "memory" / "notes.txt"
     assert "PROBE-NOTE" not in notes.read_text()
     # What the probe changed is kept for the judge, though the next call never sees it.
     assert call_record(run_dir, "F", "probes", "p-first")["changed"]["files"] == [
         "probe-p-first.scratch"
     ]
+
+
+# --------------------------------------------------------------------------
+# The reference arms: N plays probes only, and G reads the probe's contest set.
+# --------------------------------------------------------------------------
+
+
+def contest_project() -> dict:
+    """Three sessions. The budget changed in session 2; each earlier session also holds a file that bears on no probe."""
+    budget = probe(
+        "p-budget",
+        3,
+        "[probe p-budget] What is the budget now?",
+        "55 units",
+        dimension="supersession",
+        change_id="ch1",
+    )
+    # Listed out of session order: the prompt orders the documents, not the key.
+    budget["key"]["contest"] = [
+        {"session": 2, "file": "update.txt"},
+        {"session": 1, "file": "brief.txt"},
+    ]
+    budget["key"]["trap"] = "40 units"
+    quiet = probe(
+        "p-quiet", 3, "[probe p-quiet] Who runs the weekly sync?", "Ines", dimension="stable"
+    )
+    quiet["key"]["contest"] = []
+    return {
+        "sessions": [
+            {
+                "session": 1,
+                "task": "[task s1] Tidy the notes.",
+                "files": {
+                    "other.txt": "Unrelated lunch order.",
+                    "brief.txt": "Budget is 40 units.",
+                },
+            },
+            {
+                "session": 2,
+                "task": "[task s2] Tidy the notes.",
+                "files": {
+                    "chatter.txt": "Weather talk.",
+                    "update.txt": "Budget raised to 55 units.",
+                },
+            },
+            {
+                "session": 3,
+                "task": "[task s3] Tidy the notes.",
+                "files": {"today.txt": "Nothing new."},
+            },
+        ],
+        "probes": [budget, quiet],
+    }
+
+
+def prompts_by_call(ledger: Path) -> dict[tuple[str, str], str]:
+    rows = [json.loads(line) for line in ledger.with_name("prompts.jsonl").read_text().splitlines()]
+    return {(r["arm"], r["call"]): r["prompt"] for r in rows}
+
+
+def test_the_gold_arm_reads_the_contest_set_in_session_order_and_nothing_else_of_earlier_sessions(
+    scratch, monkeypatch
+):
+    """A ceiling that also saw the unrelated files or the session tasks would be a second full-history arm."""
+    write_case_set(scratch.root, {"proj-a": contest_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    run_dir = play("r3", arms=["N", "G", "F"])
+
+    prompts = prompts_by_call(ledger)
+    task = "[probe p-budget] What is the budget now?"
+    gold = prompts[("G", "probe p-budget")]
+    assert gold.index("Budget is 40 units.") < gold.index("Budget raised to 55 units.")
+    for left_out in ("Unrelated lunch order", "Weather talk", "Tidy the notes", "[task s"):
+        assert left_out not in gold, (
+            f"G's prompt holds {left_out!r}, which is not in the contest set"
+        )
+    header = epistemic_run.GOLD_HEADER
+    assert gold.startswith(header) and gold.endswith(task)
+    assert not cases.holds_store_name(header)
+    assert not any(word in header.casefold() for word in ("gold", "contest", "evidence", "memory"))
+    # A probe with an empty contest set reaches G as it reaches N: the task alone.
+    assert prompts[("G", "probe p-quiet")] == "[probe p-quiet] Who runs the weekly sync?"
+    # The other arms' prompts are the probe's task, as before.
+    assert prompts[("N", "probe p-budget")] == task == prompts[("F", "probe p-budget")]
+    assert not (run_dir / "window-1" / "proj-a" / "G" / "sessions").exists()
+
+
+def test_arm_n_makes_no_session_call_and_still_answers_every_probe(scratch, monkeypatch):
+    """N has no memory, so a session call would cost money and change nothing a probe sees."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    run_dir = play("r4", arms=["N", "F"])
+
+    calls = [r["call"] for r in ledger_rows(ledger) if r["arm"] == "N" and r["event"] == "start"]
+    assert calls == ["probe p-early", "probe p-first", "probe p-second"]
+    n_folder = run_dir / "window-1" / "proj-a" / "N"
+    assert not (n_folder / "sessions").exists()
+    for probe_id in ("p-early", "p-first", "p-second"):
+        assert call_record(run_dir, "N", "probes", probe_id)["reply"], probe_id
+    state = json.loads((run_dir / "window-1" / "proj-a" / "state.json").read_text())
+    assert state["status"] == "complete" and state["sessions_played"] == 3
+
+
+def test_arm_g_refuses_a_project_whose_probe_has_no_contest_set_before_any_session_starts(
+    scratch, monkeypatch
+):
+    """A hand-written project has no contest set, and G would read it as N does while the report called it the ceiling."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    with pytest.raises(SystemExit) as refusal:
+        play("r5", arms=["N", "G"])
+
+    assert "p-early" in str(refusal.value) and "key.contest" in str(refusal.value)
+    assert not ledger.exists(), "no session started"
+    assert not (scratch.root / "runs" / "r5").exists(), "a refused case set leaves no run behind"
+
+
+def test_a_default_run_leaves_arm_g_out_so_a_project_with_no_contest_set_still_plays(
+    scratch, monkeypatch
+):
+    """Without --arms the suite plays its arms; G needs a contest set, so adding it must not break that default."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    play("r6")
+
+    assert {r["arm"] for r in ledger_rows(ledger)} == set(ARMS)
+
+
+def test_a_contest_reference_to_a_missing_file_or_a_later_session_is_named_by_probe():
+    """A reference that matched no file would drop out of G's prompt, and G would read less than the key says."""
+    project = contest_project()
+    project["probes"][0]["key"]["contest"] = [
+        {"session": 1, "file": "no-such-file.txt"},
+        {"session": 4, "file": "today.txt"},
+        {"session": 3, "file": "today.txt"},
+    ]
+
+    problems = cases.structure_problems(project)
+
+    assert len(problems) == 2
+    assert all("probe p-budget: key.contest" in problem for problem in problems)
+    assert "no-such-file.txt" in problems[0] and "session 4" in problems[1]
+    assert cases.structure_problems(contest_project()) == []
 
 
 # --------------------------------------------------------------------------

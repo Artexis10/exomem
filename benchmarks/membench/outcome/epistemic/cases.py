@@ -30,6 +30,9 @@ TRUSTS_STALE = "trusts_stale"
 #: The one reading that code acts on: a probe whose key names it is read as harm against arm N, which is expected to pass
 #: it, so the memory-needed gate skips it. ``attributes.yaml`` declares it in ``result_readings`` and code implements it.
 HARM = "harm"
+#: The one arm that reads a key's contest set: it has no memory and sees the scripted files that ``key.contest`` names.
+#: Its code is named here because the case check and the scheduler both act on it; the arm table is in ``run.py``.
+GOLD_ARM = "G"
 #: Top-level workspace names the harness owns: a scripted file there would collide with an arm's memory or instruction.
 RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: The names the harness itself introduces for a memory store: the folder it gives arm F and the product's name.
@@ -117,6 +120,9 @@ def structure_problems(project: dict) -> list[str]:
             )
         elif bad := unsafe_paths(s["files"]):
             problems.append(f"session {s['session']} has unsafe or reserved file paths: {bad}")
+    files_of_session = {
+        s.get("session"): s["files"] for s in sessions if isinstance(s.get("files"), dict)
+    }
     seen: set[str] = set()
     for p in probes:
         name = p.get("probe_id")
@@ -139,6 +145,7 @@ def structure_problems(project: dict) -> list[str]:
             )
         else:
             problems += key_problems(name, key, p.get("task"))
+            problems += contest_problems(name, p, files_of_session)
         # A probe that is neither stable nor tied to a change would silently drop out of every statistic.
         if (p.get("change_id") is None) != (p.get("dimension") == STABLE):
             problems.append(
@@ -221,6 +228,55 @@ def key_problems(name: str, key: dict, task: object) -> list[str]:
             f"(behaviours.yaml) lacks; use {list(behaviours())}"
         )
     return problems
+
+
+def contest_problems(name: str, probe: dict, files_of_session: dict[int, dict]) -> list[str]:
+    """What is wrong with ``key.contest``: each entry names a scripted file of the probe's session or an earlier one.
+
+    ``key.contest`` is optional here: a hand-written project has none, and only arm G needs it
+    (``require_contest_sets``). A file that the project does not hold would drop out of G's prompt unseen.
+    """
+    contest = probe["key"].get("contest")
+    if contest is None:
+        return []
+    shape = (
+        isinstance(contest, list)
+        and all(isinstance(ref, dict) and set(ref) == {"session", "file"} for ref in contest)
+        and all(isinstance(ref["session"], int) and isinstance(ref["file"], str) for ref in contest)
+    )
+    if not shape:
+        return [
+            f"probe {name}: key.contest must be a list of objects with a `session` number and a `file` name"
+        ]
+    return [
+        f"probe {name}: key.contest names file {ref['file']!r} of session {ref['session']}, "
+        "which is not a scripted file of the probe's session or an earlier one"
+        for ref in contest
+        if ref["session"] > probe["session"]
+        or ref["file"] not in files_of_session.get(ref["session"], {})
+    ]
+
+
+def require_contest_sets(projects: dict[str, tuple[dict, dict]], arms: list[str]) -> None:
+    """Refuse arm G on a project with a probe that has no contest set, before any session starts.
+
+    G is the ceiling: it reads what the key's author says bears on the probe. A probe without that
+    would reach G as it reaches N, and a ceiling that equals the floor on some probes reads as no room
+    for a reason the case set hides. A case set that holds no contest set (the hand-written projects)
+    plays the other arms.
+    """
+    if GOLD_ARM not in arms:
+        return
+    lacking = [
+        f"{name}: {', '.join(p['probe_id'] for p in project['probes'] if 'contest' not in p['key'])}"
+        for name, (project, _) in projects.items()
+        if any("contest" not in p["key"] for p in project["probes"])
+    ]
+    if lacking:
+        raise refused(
+            f"arm {GOLD_ARM} reads each probe's contest set (`key.contest`), and these probes have none: "
+            f"{'; '.join(lacking)}. Add a contest set to each, or leave {GOLD_ARM} out of --arms"
+        )
 
 
 def premise_problems(name: str, premise: object, task: object) -> list[str]:

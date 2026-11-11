@@ -340,7 +340,13 @@ def run_suite(
         raise refuse("the panel plays its fixed slice of development cases: no --seeds or --limit")
     known = suite_arms(suite)
     decides = DECISION_ARMS if split == "heldout" and suite == "clbench" else known
-    requested = arms or list(decides)
+    default = decides
+    if suite == "epistemic":
+        from .epistemic.cases import GOLD_ARM
+
+        # G reads a key's contest set, which the hand-written projects lack: it plays only when asked for.
+        default = tuple(a for a in known if a != GOLD_ARM)
+    requested = arms or list(default)
     if set(requested) - set(known):
         raise refuse(f"--arms takes {', '.join(known)} for {suite}, not {','.join(requested)}")
     if set(requested) - set(decides):
@@ -361,9 +367,10 @@ def run_suite(
     verdict = passed_gate(suite, split)
     if suite == "epistemic":
         # The case check runs before the record or any session: a refused case set leaves no run behind.
-        from .epistemic.cases import load_split
+        from .epistemic.cases import load_split, require_contest_sets
 
         projects = load_split(RUN_ROOT, split, project)
+        require_contest_sets(projects, arms)
     indexes = (
         [i for i in clbench_indexes(split, seeds) if i is not None] if suite == "clbench" else []
     )
@@ -697,7 +704,10 @@ def register(sub) -> None:
         default="dev",
         help="dev is an instrument run; heldout is a decision run and passes the gate first",
     )
-    p_run.add_argument("--arms", help="comma-separated arm codes; default all of the suite's arms")
+    p_run.add_argument(
+        "--arms",
+        help="comma-separated arm codes; default all of the suite's arms, except epistemic's G",
+    )
     p_run.add_argument(
         "--seeds",
         help="CL-Bench only: comma-separated run indexes. A held-out run plays 1; 1,2 and 1,2,3 add orderings in order",

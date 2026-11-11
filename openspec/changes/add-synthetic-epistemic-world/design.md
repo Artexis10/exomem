@@ -354,6 +354,13 @@ The keys are in `keys.json` beside the manifest, in evaluator custody like the r
 - A key names its reading in `key.reading`, a value of `result_readings`. A key with no reading reads as a position. The report keeps its pooled `harm` figure and adds `harm_read_probes`, per arm, over the probes that their keys read as harm.
 - The paired differences and the decision still include a probe read as harm. Task 4.6 separates them. An item file that an older run pooled has the older key format, so a report on that run refuses until its judge directory is moved aside.
 
+**What task 4.4 built.** Four rulings fix the spec to the build.
+
+- Arm `G` is arm `N` with another probe prompt. Both have no memory and play probes only: a main task cannot change what a later call sees, because the workspace resets before every call. Arm `H` stays the `--history full` run until task 5.1.
+- A key names its contest set in `key.contest`: a list of entries, each with a `session` and a `file`, that name a scripted file of the probe's session or an earlier one. The case check refuses an entry that names no such file. Task 4.5 places each artefact of a generated key's contest set in a session file and writes the entries. An artefact that is not a file has no place yet.
+- The prompt of `G` holds those files in session order, under a header that names no arm, store or memory product, and then the probe's task. It holds no task of an earlier session and no other file. A probe with an empty contest set reaches `G` as it reaches `N`.
+- `G` needs a contest set. The hand-written projects have none, so a run that asks for `G` on a project with a probe that lacks one is refused before any session starts, and `--arms` leaves `G` out by default.
+
 ### 11. The world's text is product-neutral, and the catalogue's shape is not
 
 **What is neutral.**
