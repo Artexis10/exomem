@@ -604,11 +604,14 @@ class AdmittedParents:
         allowed: Callable[[str], bool],
         interpretations: Interpretations,
         admitted: dict[str, bool] | None = None,
+        allowed_many: Callable[[list[str]], Mapping[str, bool]] | None = None,
     ) -> None:
         self.interpretations = interpretations
         self.unavailable: set[str] = set()
         self._load = load
         self._allowed = allowed
+        #: ``allowed`` for many pages in one pass, so a prefetch decides them with one store read.
+        self._allowed_many = allowed_many
         #: Admission verdicts per page. A caller that already checked pages by
         #: the same rule shares its map, so no page is checked twice.
         self._admitted = admitted if admitted is not None else {}
@@ -628,10 +631,18 @@ class AdmittedParents:
             self._stored[path] = summary
 
     def prefetch(self, paths: Iterable[str]) -> None:
+        asked = {str(path) for path in paths if path}
+        if self._allowed_many is not None:
+            unknown = [
+                path for path in asked
+                if path not in self._admitted and path not in self._parents
+                and path not in self._stored
+            ]
+            if len(unknown) > 1:
+                self._admitted.update(self._allowed_many(unknown))
         wanted = sorted({
-            str(path) for path in paths
-            if path and path not in self._parents and path not in self._stored
-            and self.allowed(str(path))
+            path for path in asked
+            if path not in self._parents and path not in self._stored and self.allowed(path)
         })
         if wanted:
             self._stored.update(dict.fromkeys(wanted))

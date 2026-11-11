@@ -359,6 +359,17 @@ def iter_admitted_relative(vault_root: Path, paths: Iterable[Path]) -> Iterator[
             yield path, rel
 
 
+def admitted_among(vault_root: Path, rels: Iterable[str]) -> frozenset[str]:
+    """The vault-relative paths among ``rels`` that `is_recall_candidate` admits, decided in one
+    pass: the pages that the store serves take one keyed store read, not one read each."""
+    root = Path(vault_root)
+    wanted = list(dict.fromkeys(rels))
+    from .vault_store import read
+
+    held = read.held_lookup(root, wanted)
+    return frozenset(rel for rel in wanted if _admitted_relative(root, root / rel, None, held))
+
+
 def _held_pages(root: Path) -> Callable[[str], bool | None]:
     """One pass's answer to "does the store hold this page?", so a pass makes one query."""
     from .vault_store import read

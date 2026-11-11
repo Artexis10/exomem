@@ -13695,10 +13695,19 @@ class GraphView:
         self.seed_keep = seed_keep if seed_keep is not None else keep
         self._unit_parents: dict[str, tuple[list[str], bool]] = {}
         self.interpretations = interpretations or semantic_index.Interpretations(vault_root)
+
+        def admitted_many(rel_paths: list[str]) -> dict[str, bool]:
+            admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
+            return {
+                rel_path: rel_path in admitted_paths and (keep is None or keep(rel_path))
+                for rel_path in rel_paths
+            }
+
         self.parents = semantic_index.AdmittedParents(
             self._summaries,
             allowed=lambda rel_path: _recall_path_allowed(self.vault_root, rel_path)
             and (keep is None or keep(rel_path)),
+            allowed_many=admitted_many,
             interpretations=self.interpretations,
             admitted=admitted,
         )

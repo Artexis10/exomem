@@ -692,6 +692,21 @@ def served_lookup(vault_root: Path) -> Callable[[str], bool | None]:
     return lambda rel: rel in held if ownership.classify(rel) is page else None
 
 
+def held_lookup(vault_root: Path, rels: Iterable[str]) -> Callable[[str], bool | None]:
+    """``served_lookup`` for the paths ``rels`` alone: a few keyed reads, not a read of every page.
+
+    The lookup answers None for a path that the store does not serve, and whether the store holds
+    each served path in ``rels``.
+    """
+    root = _as_path(vault_root)
+    if not mode.store_mode_for_reads(root):
+        return _not_served
+    page = ownership.Ownership.PAGE
+    with snapshot(root) as view:
+        held = view.held_pages(rel for rel in rels if ownership.classify(rel) is page)
+    return lambda rel: rel in held if ownership.classify(rel) is page else None
+
+
 def _not_served(_rel: str) -> None:
     return None
 
