@@ -36,6 +36,7 @@ from cellctl.manifests import (
     render_restore_job,
 )
 
+from . import platform as platform_mod
 from . import substrate as substrate_mod
 from .build import BuiltImages
 from .http import Resolver
@@ -318,13 +319,19 @@ class Context:
         return keys
 
     def set_backup_window(self, window: str) -> None:
-        """A chart value change: cellctl's Deployment env, rolled with Recreate."""
+        """A chart value change: cellctl's Deployment env, rolled with Recreate. The
+        upgradeWindow default range moves with it in the same update — cellctl
+        refuses to start while the two overlap."""
 
+        upgrade_start, upgrade_end = platform_mod.upgrade_default_range(window)
         self.report.overlays.append(
             f"cellctl Deployment: CELLCTL_BACKUP_WINDOW={window} at step 11 (the chart value cells.backupWindow, "
             "changed so a nightly backup falls inside the run)"
         )
-        self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, f"CELLCTL_BACKUP_WINDOW={window}")
+        self.kubectl("set", "env", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE,
+                     f"CELLCTL_BACKUP_WINDOW={window}",
+                     f"CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_START={upgrade_start}",
+                     f"CELLCTL_UPGRADE_WINDOW_DEFAULT_HOUR_END={upgrade_end}")
         self.kubectl("rollout", "status", "deployment/cellctl", "--namespace", CLOUD_NAMESPACE, "--timeout=180s")
 
     async def backup(self, cell_id: str) -> str:
