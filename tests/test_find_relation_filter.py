@@ -467,6 +467,105 @@ def test_a_restricted_caller_gets_the_reply_of_a_vault_that_never_had_the_withhe
     assert _hit_paths(replies[0])
 
 
+def _write_as_the_service_does(vault: Path, rel: str, body: str) -> None:
+    """A write and its freshness signal, without the graph drain that folds it in."""
+    from exomem import freshness
+
+    path = vault / rel
+    path.write_text(body, encoding="utf-8")
+    freshness.on_files_changed(vault, changed=[path])
+    find_module.on_resolver_files_changed(vault, [rel], [])
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_write_the_caller_may_not_see_leaves_its_relation_reply_as_it_was(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches the withheld-edit flip the relation filter shared with the dimension marks: an
+    edit to a page the caller may not see, while the graph trails, must leave the restricted
+    reply as it was, not demote it to warming — a one-bit signal that a hidden write happened."""
+    from test_activate_context_request_path import _seed_live_recall
+
+    vault = _release_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    page = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
+    rewritten = page.format(
+        title="Old roadmap",
+        body=f"## Relations\n\n- supports [[{REVIEW[:-3]}]]\n\nNow with a note.",
+    )
+
+    before = _search_as("external", vault, {"relations": ["supports"]})
+    _write_as_the_service_does(vault, OLD_ROADMAP, rewritten)
+    after = _search_as("external", vault, {"relations": ["supports"]})
+
+    assert after == before
+    assert _hit_paths(after)
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_withheld_page_created_while_the_graph_trails_leaves_the_relation_read_warming(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Pins the limit the in-place edit fix does not cover: a withheld page created while the
+    graph trails changes the link topology, so no resolver can show the rows' links as derived
+    and the restricted relation read stays warming rather than serve them as they were."""
+    from test_activate_context_request_path import _seed_live_recall
+
+    vault = _release_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    page = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
+
+    _search_as("external", vault, {"relations": ["supports"]})
+    _write_as_the_service_does(
+        vault, f"{PATTERNS}/New notes.md", page.format(title="New notes", body="A new withheld page.")
+    )
+    with pytest.raises(RetrievalIndexWarming):
+        _search_as("external", vault, {"relations": ["supports"]})
+
+
+@pytest.mark.parametrize("served", [False, True], ids=["scan", "served"])
+def test_a_watcher_batch_repairing_a_withheld_edit_leaves_the_relation_reply_unchanged(
+    tmp_path: Path, request: pytest.FixtureRequest, served: bool
+) -> None:
+    """Catches the pending-window leak: a withheld page edited inside a watcher batch arms the
+    read barrier and a pending mark for the repair window, and the restricted relation reply
+    still must not demote while it does — the batch names only a page the caller may not see."""
+    from test_activate_context_request_path import _seed_live_recall
+
+    from exomem import freshness
+
+    vault = _release_twin(tmp_path, withheld=True)
+    _seed_live_recall(vault)
+    if served:
+        request.getfixturevalue("warm_managed_cell")(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    page = "---\ntype: insight\n---\n# {title}\n\n{body}\n"
+    rewritten = page.format(
+        title="Old roadmap",
+        body=f"## Relations\n\n- supports [[{REVIEW[:-3]}]]\n\nNow with a note.",
+    )
+
+    before = _search_as("external", vault, {"relations": ["supports"]})
+    withheld_path = vault / OLD_ROADMAP
+    _write_as_the_service_does(vault, OLD_ROADMAP, rewritten)
+    index.suspend_reads()
+    epoch = freshness.mark_external_pending(vault, paths=[withheld_path])
+    try:
+        after = _search_as("external", vault, {"relations": ["supports"]})
+    finally:
+        freshness.clear_external_pending(vault, through=epoch)
+
+    assert after == before
+    assert _hit_paths(after)
+
+
 # The anchor is the page the rule withholds, so the answer is the pages around it.
 _PURPOSE_SEARCHES = {
     **_PAGE_LEVEL_SEARCHES,

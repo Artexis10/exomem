@@ -9,7 +9,7 @@ one voids a unit. The evidence is:
 - the CLI never sent an ``init`` event, or its transcript is missing or empty;
 - an ``init`` event shows a model other than the one requested (a fallback), a credential source
   other than the one the run declared (``billing``), or an Exomem server that is not ``connected``;
-- the CLI reports the subscription limit as rejected (``LimitRejected``).
+- the CLI reports a rejected subscription limit or exhausted credits (``LimitRejected``).
 
 The ``init`` event arrives on every user turn, so each one is checked, not only the first.
 A harness fault is retried with the same inputs at most ``RETRIES`` times; a retry is not a repeat.
@@ -53,7 +53,7 @@ class LimitRejected(RuntimeError):
 
     def __init__(self, info: dict):
         if info.get("limit") == "credits":
-            message = "the credit balance ran out (billing_error)"
+            message = "credit funds exhausted (billing_error); funding required"
         else:
             message = f"the subscription limit was rejected (resetsAt {info.get('resetsAt')})"
         super().__init__(message)
