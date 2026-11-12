@@ -2866,6 +2866,12 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_review "
             "ON graph_edges(source_path, origin, relation_type, dst_key, source_anchor)"
         )
+        # Sensed retypes bind an exact bullet anchor and target. The relation
+        # review index cannot seek that pair without an inferred relation key.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_anchor "
+            "ON graph_edges(source_path, origin, source_anchor, dst_page_key)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_unregistered "
             "ON graph_edges(registry_status, raw_relation, source_path, source_anchor)"
@@ -9758,35 +9764,10 @@ class EpistemicGraphIndex:
             # query never runs (the projection read is not a graph query).
             from . import relation_sensor
 
-            sensed_by_key = relation_sensor.sensed_rows_for(self.vault_root, selected)
-            retype_edge_rows: dict[str, list[tuple[str, str, str, str]]] = {
-                rel: [] for rel in selected
-            }
-            try:
-                for row in (
-                    conn.execute(
-                        "SELECT source_path, dst_page_key, raw_relation, source_anchor, metadata "
-                        "FROM graph_edges WHERE origin='markdown_relation' "
-                        f"AND source_path IN ({placeholders})",
-                        tuple(selected),
-                    ).fetchall()
-                    if sensed_by_key
-                    else []
-                ):
-                    source, dst, raw_relation, anchor, metadata = row
-                    canonical = _core_relation(
-                        selected_registries[str(source)], str(raw_relation or "")
-                    )
-                    if canonical is None:
-                        continue
-                    registry = selected_registries[str(source)]
-                    if canonical != registry.link_key and not registry.is_generic(canonical):
-                        continue
-                    retype_edge_rows[str(source)].append(
-                        (str(dst), canonical, str(anchor or ""), str(metadata or "{}"))
-                    )
-            except sqlite3.Error:
-                retype_edge_rows = {rel: [] for rel in selected}
+            sensed_by_key = relation_sensor.sensed_rows_for(self.vault_root, selected, graph=conn)
+            retype_by_source = relation_sensor.retype_candidates_many(
+                conn, selected_registries, sensed_by_key
+            )
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
                 "status": "warming",
@@ -9860,27 +9841,8 @@ class EpistemicGraphIndex:
         }
         # relation.type readings: relation verdicts only. Empty when sensing is
         # off, unadmitted or unprojected, and the queue is byte-identical.
-        for source, rows in retype_edge_rows.items():
-            for dst, canonical, anchor, metadata in rows:
-                target_rel = _page_rel(str(dst or "").removeprefix("file:"))
-                key = relation_sensor.request_key(source, target_rel, anchor)
-                row = sensed_by_key.get(key)
-                if row is None or str(row.get("verdict") or "") in ("none", "abstain"):
-                    continue
-                try:
-                    raw_line = str(_json(metadata).get("line") or "")
-                except Exception:  # noqa: BLE001
-                    raw_line = ""
-                methods[source]["retype"].append(
-                    {
-                        "from": source,
-                        "to": target_rel,
-                        "relation_type": canonical,
-                        "method": "retype",
-                        "evidence": {"line": raw_line, "anchor": anchor},
-                        "_sensed": row,
-                    }
-                )
+        for source, candidates in retype_by_source.items():
+            methods[source]["retype"].extend(candidates)
         for row in wiki_and_authored_rows[:branch_cap]:
             (
                 kind,

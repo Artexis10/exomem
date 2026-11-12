@@ -815,17 +815,20 @@ def _retype_candidates(
     Method `retype`: they join the candidate set only while the projection
     holds a relation verdict for the pair.
     """
-    from . import relation_sensor
+    from . import relation_sensor, sensing_llm
 
-    rows = relation_sensor.sensed_rows_for(vault_root, [page.rel_path])
-    if not rows:
+    if not sensing_llm.active_instruments():
         return []
+
     connection = snapshot
     if connection is None:
         connection = epistemic_graph_module.EpistemicGraphIndex(vault_root)._open_read_snapshot()
     if connection is None:
         return []
     try:
+        rows = relation_sensor.sensed_rows_for(vault_root, [page.rel_path], graph=connection)
+        if not rows:
+            return []
         return relation_sensor.retype_candidates(
             connection,
             page.rel_path,
@@ -1373,24 +1376,27 @@ def _require_offered(
 
 
 def _sensed_for_candidate(
-    vault_root: Path, candidate: dict[str, Any]
+    vault_root: Path, candidate: dict[str, Any], page: Any, fit: RelationFit
 ) -> dict[str, Any] | None:
     """The current relation verdict for a candidate, or None.
 
-    `retype` candidates carry their row; a wikilink candidate's is found by
-    its source and target, since the anchor is not part of the candidate.
+    Re-read the projection against both current page hashes and the current
+    menu; a candidate's earlier snapshot never supplies acceptance authority.
     """
     from . import relation_sensor
 
-    row = candidate.get("_sensed")
-    if isinstance(row, dict):
-        return row
     source = str(candidate.get("from") or "")
     target = str(candidate.get("to") or "")
     if not source or not target:
         return None
     kind = "retype" if candidate.get("method") == "retype" else "wikilink"
-    return relation_sensor.sensed_for_candidate(vault_root, source, target, kind=kind)
+    row = relation_sensor.sensed_for_candidate(vault_root, source, target, kind=kind)
+    if row is None:
+        return None
+    # A current page pair can still have a changed registry menu. Only the
+    # exact offered menu may carry its prior reading into an accept.
+    options = _candidate_options(candidate, page, fit, sensed=True)
+    return row if relation_sensor.proposal(row, options) is not None else None
 
 
 def accept(
@@ -1454,7 +1460,8 @@ def accept(
             "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
             f"exists; refresh the queue and inspect {ref} again"
         )
-    sensed = _sensed_for_candidate(vault_root, candidate)
+    fit = RelationFit(vault_root)
+    sensed = _sensed_for_candidate(vault_root, candidate, page, fit)
     proposed = None if sensed is None else str(sensed.get("verdict") or "")
     reading_id = None if sensed is None else str(sensed.get("reading_id") or "")
     # The proposal is shown, never chosen: the agent names its relation as
@@ -1464,7 +1471,6 @@ def accept(
     if bind_page_hash:
         expected_hash = _page_content_hash(page)
     store = review_state_module.ReviewStateStore(vault_root)
-    fit = RelationFit(vault_root)
     reason = _enriched = None
     if str(candidate.get("method") or "") != "retype":
         # A retype candidate IS an authored plain-link/generic bullet; the

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from exomem import sensing, sensing_llm, sensor_worker
+from exomem import relation_sensor, sensing, sensing_llm, sensor_worker
 
 MENU = [
     {"key": "supports", "label": "supports", "definition": "A gives evidence for B"},
@@ -59,7 +61,7 @@ class StubRuntime:
         return [0.0] * 200
 
     def letter_token_ids(self, letters):
-        return [self.ids[l] for l in letters]
+        return [self.ids[letter] for letter in letters]
 
 
 def _instrument(runtime=None):
@@ -144,6 +146,16 @@ def test_input_too_long_abstains_without_truncation() -> None:
     assert reading.vectors is None
 
 
+def test_larger_runtime_cannot_expand_the_question_context_limit() -> None:
+    runtime = StubRuntime(context=4096)
+    inst = _instrument(runtime)
+    request = _request(source="x" * 900, target="y" * 900, link="z" * 300)
+    [result] = inst.judge_requests([request])
+    assert sensing_llm.CONTEXT_TOKENS < len(runtime.rendered[0]) < runtime.context_tokens
+    assert result["vectors"] is None
+    assert result["abstain_reason"] == "input_too_long"
+
+
 def test_env_named_model_is_ignored() -> None:
     with pytest.raises(sensing_llm.Refused) as err:
         sensing_llm.admit(env={"EXOMEM_SENSOR_MODEL": "/tmp/evil.gguf"})
@@ -155,6 +167,19 @@ def test_empty_registry_refuses_named_reason() -> None:
     with pytest.raises(sensing_llm.Refused) as err:
         sensing_llm.admit()
     assert err.value.reason == "no-admitted-sensor-model"
+
+
+def test_link_display_preserves_code_and_renders_aliases_and_fragments() -> None:
+    text = (
+        "See [[Notes/target#Details|the alias]] and [[Notes/second#Details]].\n"
+        "`[[Notes/literal|code]]` and \\[[Notes/escaped|literal]].\n"
+        "```\n[[Notes/example|fenced]]\n```"
+    )
+    assert relation_sensor.link_line(text.splitlines(), 1) == "See the alias and second."
+    assert relation_sensor._plain(text) == (
+        "See the alias and second. `[[Notes/literal|code]]` and "
+        "\\[[Notes/escaped|literal]]. ``` [[Notes/example|fenced]] ```"
+    )
 
 
 def _evidence(**kw) -> sensing_llm.AdmissionEvidence:
@@ -185,21 +210,86 @@ def test_evidence_bar() -> None:
         propose_min=0.5,
     ) == "evidence-pin-mismatch"
     assert sensing_llm.evidence_check(
-        pin, _evidence(pin_id=pin.pin_id, precision=0.68),
+        pin, _evidence(pin_id=pin.pin_id, judged_true=20),
         label_map_version="relation-type-v1", propose_min=0.5,
     ) == "precision-below-bar"
     assert sensing_llm.evidence_check(
-        pin, _evidence(pin_id=pin.pin_id, wilson_low=0.60),
+        pin, _evidence(pin_id=pin.pin_id, proposals=10, judged_true=9),
         label_map_version="relation-type-v1", propose_min=0.5,
     ) == "wilson-below-bar"
     assert sensing_llm.evidence_check(
-        pin, _evidence(pin_id=pin.pin_id, yield_fraction=0.10),
+        pin, _evidence(pin_id=pin.pin_id, cases=200),
         label_map_version="relation-type-v1", propose_min=0.5,
     ) == "yield-below-bar"
     assert sensing_llm.evidence_check(
         pin, _evidence(pin_id=pin.pin_id, propose_min=0.7),
         label_map_version="relation-type-v1", propose_min=0.5,
     ) == "evidence-map-mismatch"
+
+
+@pytest.mark.parametrize("invalid", [
+    {"cases": 0},
+    {"proposals": 101},
+    {"judged_true": 31},
+    {"judged_true": -1},
+    {"cases": True},
+    {"proposals": 30.5},
+    {"precision": float("nan")},
+    {"wilson_low": float("inf")},
+    {"yield_fraction": -0.2},
+    {"cpu_s_per_case": float("nan")},
+    {"private_mib": -1},
+])
+def test_malformed_evidence_never_loads_a_pin(monkeypatch, invalid) -> None:
+    pin = sensing_llm.SensorModelPin(
+        model="stub/sensor", revision="1", weights_sha256="0" * 64,
+        runtime="stub", runtime_version="1", label_token_map="x" * 64,
+    )
+    raw = _evidence(pin_id=pin.pin_id).as_dict()
+    raw.update({"yield" if key == "yield_fraction" else key: value for key, value in invalid.items()})
+    evidence = sensing_llm.AdmissionEvidence.from_dict(raw)
+    monkeypatch.setattr(sensing_llm, "SENSOR_MODEL_PINS", (pin,))
+    monkeypatch.setattr(sensing_llm, "ADMISSION_EVIDENCE", {pin.pin_id: evidence})
+    loaded = []
+    with pytest.raises(sensing_llm.Refused) as err:
+        sensing_llm.admit(runtimes={"stub": lambda p: loaded.append(p)})
+    assert err.value.reason == "evidence-invalid"
+    assert loaded == []
+
+
+def test_admission_uses_counts_instead_of_claimed_precision(monkeypatch) -> None:
+    pin = sensing_llm.SensorModelPin(
+        model="stub/sensor", revision="1", weights_sha256="0" * 64,
+        runtime="stub", runtime_version="1", label_token_map="x" * 64,
+    )
+    raw = _evidence(pin_id=pin.pin_id).as_dict()
+    raw["judged_true"] = 3
+    evidence = sensing_llm.AdmissionEvidence.from_dict(raw)
+    monkeypatch.setattr(sensing_llm, "SENSOR_MODEL_PINS", (pin,))
+    monkeypatch.setattr(sensing_llm, "ADMISSION_EVIDENCE", {pin.pin_id: evidence})
+    with pytest.raises(sensing_llm.Refused) as err:
+        sensing_llm.admit()
+    assert err.value.reason == "precision-below-bar"
+
+
+def test_reported_admission_metrics_follow_counts() -> None:
+    evidence = _evidence(precision=0.1, wilson_low=0.1, yield_fraction=0.1)
+    reported = evidence.as_dict()
+    assert reported["precision"] == 27 / 30
+    assert reported["yield"] == 27 / 100
+    assert reported["wilson_low"] == pytest.approx(0.7437891742)
+
+
+def test_changed_letter_token_map_cannot_reuse_admission_evidence() -> None:
+    original = sensing_llm.SensorModelPin(
+        model="stub/sensor", revision="1", weights_sha256="0" * 64,
+        runtime="stub", runtime_version="1", label_token_map="x" * 64,
+    )
+    changed = replace(original, label_token_map="y" * 64)
+    evidence = _evidence(pin_id=original.pin_id)
+    assert sensing_llm.evidence_check(
+        changed, evidence, label_map_version="relation-type-v1", propose_min=0.5,
+    ) == "evidence-pin-mismatch"
 
 
 def test_menu_change_new_reading_and_unrelated_edit_same_id() -> None:

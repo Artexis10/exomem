@@ -1,3 +1,7 @@
+## Purpose
+
+Define the disabled relation-sensor pipeline, its measured model admission contract, bounded scheduling, and governed acceptance of proposed relations.
+
 ## ADDED Requirements
 
 ### Requirement: One pinned sensor model answers multiple-choice questions
@@ -101,6 +105,17 @@ No reading SHALL write to the vault. Only the agent's `connect_memory(operation=
 - **WHEN** the agent accepts the proposed relation for a plain-link bullet with the page hash the queue returned
 - **THEN** the bullet line is replaced by one typed bullet to the same target
 - **AND** a page edited since the queue read refuses the accept as drift
+
+#### Scenario: A target changes after sensing
+
+- **WHEN** a target page changes while the source page stays unchanged
+- **THEN** the prior reading no longer annotates that pair in the current graph snapshot
+- **AND** governed acceptance cannot use the prior reading to widen its offered menu
+
+#### Scenario: A previously admitted instrument disappears
+
+- **WHEN** the active sensor-model set becomes empty before another Dreamer tick
+- **THEN** existing projection rows add no proposal to the queue or acceptance result
 
 #### Scenario: The agent may choose another option
 

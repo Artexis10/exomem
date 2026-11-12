@@ -53,7 +53,9 @@ log = logging.getLogger(__name__)
 #: re-sensing. 5 adds `relation_sensed`, the relation.type projection.
 #: 6 adds `relation_pages` (the producer's per-page hash table) and makes
 #: relation_sensed rows pending-at-submission with incremental verdict fills.
-SCHEMA_VERSION = 6
+#: 7 binds each relation reading to both published page hashes; stale target
+#: content must not leave a proposal current while its source stays unchanged.
+SCHEMA_VERSION = 7
 FILENAME = "projection.sqlite"
 # This internal namespace belongs to the fixed unit-proposer queue protocol.
 _PAIR_JOB_SCOPE = ("pair-proposer", "units-v1")
@@ -147,7 +149,8 @@ _TABLES = (
     "CREATE TABLE IF NOT EXISTS relation_sensed ("
     "request_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, target_path TEXT NOT NULL, "
     "anchor TEXT, kind TEXT NOT NULL, reading_id TEXT, instrument_id TEXT, "
-    "verdict TEXT, p REAL, menu_digest TEXT NOT NULL, input_key TEXT NOT NULL)",
+    "verdict TEXT, p REAL, menu_digest TEXT NOT NULL, input_key TEXT NOT NULL, "
+    "source_hash TEXT NOT NULL, target_hash TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS relation_sensed_source ON relation_sensed(source_path)",
     # The relation producer's per-page hash table and its tick cursor.
     "CREATE TABLE IF NOT EXISTS relation_pages ("
@@ -1713,7 +1716,10 @@ def submit_scope(
         if relation_rows is not None:
             for row in relation_rows:
                 conn.execute(
-                    "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO relation_sensed "
+                    "(request_key, source_path, target_path, anchor, kind, reading_id, "
+                    "instrument_id, verdict, p, menu_digest, input_key, source_hash, target_hash) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         str(row["request_key"]),
                         str(row["source_path"]),
@@ -1726,6 +1732,8 @@ def submit_scope(
                         None,
                         str(row["menu_digest"]),
                         str(row["input_key"]),
+                        str(row["source_hash"]),
+                        str(row["target_hash"]),
                     ),
                 )
         conn.execute(

@@ -19,15 +19,15 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from statistics import NormalDist
 from typing import Any, Protocol, runtime_checkable
 
 from . import sensing
 
 TEMPLATE_VERSION = "relation-type-v1"
 
-#: `relation.type`'s fixed context window: the smallest power of two holding
-#: the longest admitted input (measured longest 1,447 tokens).
+#: Configured `relation.type` context limit; each admitted pin must prove fit.
 CONTEXT_TOKENS = 2048
 
 NONE_COLUMN = "none"
@@ -164,7 +164,8 @@ class SensorModelPin:
     @property
     def pin_id(self) -> str:
         payload = json.dumps(
-            [self.model, self.revision, self.weights_sha256, self.runtime, self.runtime_version],
+            [self.model, self.revision, self.weights_sha256, self.runtime, self.runtime_version,
+             self.label_token_map],
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -203,9 +204,9 @@ class AdmissionEvidence:
             pin_id=str(raw["pin_id"]),
             label_map_version=str(raw["label_map_version"]),
             propose_min=float(raw["propose_min"]),
-            cases=int(raw["cases"]),
-            proposals=int(raw["proposals"]),
-            judged_true=int(raw["judged_true"]),
+            cases=raw["cases"],
+            proposals=raw["proposals"],
+            judged_true=raw["judged_true"],
             precision=float(raw["precision"]),
             wilson_low=float(raw["wilson_low"]),
             yield_fraction=float(raw["yield"]),
@@ -215,6 +216,7 @@ class AdmissionEvidence:
         )
 
     def as_dict(self) -> dict[str, Any]:
+        precision, wilson_low, yield_fraction = self.metrics()
         return {
             "evidence_id": self.evidence_id,
             "pin_id": self.pin_id,
@@ -223,13 +225,30 @@ class AdmissionEvidence:
             "cases": self.cases,
             "proposals": self.proposals,
             "judged_true": self.judged_true,
-            "precision": self.precision,
-            "wilson_low": self.wilson_low,
-            "yield": self.yield_fraction,
+            "precision": precision,
+            "wilson_low": wilson_low,
+            "yield": yield_fraction,
             "cpu_s_per_case": self.cpu_s_per_case,
             "private_mib": self.private_mib,
             "file_mib": self.file_mib,
         }
+
+    def metrics(self) -> tuple[float, float, float]:
+        """Precision, Wilson 95% lower bound and yield derived from valid counts."""
+        if (
+            any(type(count) is not int for count in (self.cases, self.proposals, self.judged_true))
+            or not 0 <= self.judged_true <= self.proposals <= self.cases
+            or self.proposals == 0
+        ):
+            raise ValueError("admission evidence needs consistent integer counts and proposals")
+        precision = self.judged_true / self.proposals
+        z = NormalDist().inv_cdf(0.975)
+        n = self.proposals
+        wilson_low = (
+            precision + z * z / (2 * n)
+            - z * math.sqrt(precision * (1 - precision) / n + z * z / (4 * n * n))
+        ) / (1 + z * z / n)
+        return precision, wilson_low, self.judged_true / self.cases
 
 
 #: The admission bar for `relation.type` (design D6).
@@ -248,20 +267,6 @@ ADMISSION_EVIDENCE: dict[str, AdmissionEvidence] = {}
 #: The env var an operator might expect to name a model with. It is read only
 #: to be reported as ignored on the diagnostic surface; it never adds a pin.
 ENV_MODEL = "EXOMEM_SENSOR_MODEL"
-
-REFUSAL_REASONS = frozenset(  # nosemgrep: ep-word-set -- closed refusal codes this module emits, like sensing.ABSTAIN_REASONS
-    {
-        "no-admitted-sensor-model",
-        "evidence-missing",
-        "evidence-pin-mismatch",
-        "evidence-map-mismatch",
-        "precision-below-bar",
-        "wilson-below-bar",
-        "yield-below-bar",
-        "runtime-unavailable",
-        "label-token-map-mismatch",
-    }
-)
 
 #: Runtime adapters keyed by `SensorModelPin.runtime`: the one seam through
 #: which a pinned model's LetterRuntime is constructed. Empty in this build —
@@ -287,11 +292,27 @@ def evidence_check(
         return "evidence-pin-mismatch"
     if evidence.label_map_version != label_map_version or evidence.propose_min != propose_min:
         return "evidence-map-mismatch"
-    if evidence.precision < PRECISION_MIN:
+    if (
+        any(
+            not math.isfinite(value) or not 0 <= value <= 1
+            for value in (evidence.precision, evidence.wilson_low, evidence.yield_fraction)
+        )
+        or any(
+            not math.isfinite(value) or value < 0
+            for value in (evidence.cpu_s_per_case, evidence.private_mib, evidence.file_mib)
+        )
+    ):
+        return "evidence-invalid"
+    # Admission uses the counts, never rounded or contradictory summary fields.
+    try:
+        precision, wilson_low, yield_fraction = evidence.metrics()
+    except ValueError:
+        return "evidence-invalid"
+    if precision < PRECISION_MIN:
         return "precision-below-bar"
-    if evidence.wilson_low < WILSON_LOW_MIN:
+    if wilson_low < WILSON_LOW_MIN:
         return "wilson-below-bar"
-    if evidence.yield_fraction < YIELD_MIN:
+    if yield_fraction < YIELD_MIN:
         return "yield-below-bar"
     return None
 
@@ -383,19 +404,8 @@ def active_instruments() -> dict[str, sensing.InstrumentIdentity]:
 
 def instrument_identity(pin: SensorModelPin, runtime: LetterRuntime, letters: Sequence[str]) -> sensing.InstrumentIdentity:
     """The instrument identity for an admitted pin: binds template and letter-token map."""
-    entry = sensing.QUESTIONS[sensing.RELATION_TYPE]
-    label_token_map = _label_token_map_digest(runtime, letters)
-    return sensing.InstrumentIdentity(
-        model=pin.model,
-        revision=pin.revision,
-        weights_sha256=pin.weights_sha256,
-        runtime=pin.runtime,
-        runtime_version=pin.runtime_version,
-        template_version=entry.template_version,
-        label_map_version=entry.label_map_version,
-        fixture_set=entry.fixture_set,
-        placement="local-cpu",
-        label_token_map=label_token_map,
+    return replace(
+        pin_identity(pin), label_token_map=_label_token_map_digest(runtime, letters)
     )
 
 
@@ -438,7 +448,7 @@ class SensorModelInstrument:
             system, user = render_relation_type(request)
             rendered = self._runtime.render_chat(system, user)
             token_ids = self._runtime.tokenize(rendered)
-            if len(token_ids) > int(self._runtime.context_tokens):
+            if len(token_ids) > min(CONTEXT_TOKENS, int(self._runtime.context_tokens)):
                 out.append({"vectors": None, "columns": columns, "abstain_reason": "input_too_long"})
                 continue
             logits = [float(value) for value in self._runtime.last_logits(token_ids)]

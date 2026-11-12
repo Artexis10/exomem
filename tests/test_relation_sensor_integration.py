@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import dreamer_fixture as fx
@@ -11,6 +12,7 @@ import pytest
 import sensing_fixture as sf
 
 from exomem import (
+    cli_ops,
     commands,
     epistemic_graph,
     freshness,
@@ -206,6 +208,169 @@ def test_producer_bounds_pages_per_tick(tmp_path: Path, monkeypatch) -> None:
     )
 
 
+def _append_graph_rows(conn, table, changes) -> None:
+    cursor = conn.execute(f"SELECT * FROM {table} LIMIT 1")
+    template = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
+    conn.executemany(
+        f"INSERT INTO {table} ({','.join(template)}) VALUES ({','.join('?' for _ in template)})",
+        (tuple((template | change).values()) for change in changes),
+    )
+
+
+def test_high_degree_page_fills_after_specific_pairs_and_keeps_bullet_evidence(tmp_path: Path, record_property) -> None:
+    vault = sf.build(tmp_path)
+    snapshot = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    conn = sqlite3.connect(":memory:")
+    snapshot.backup(conn)
+    snapshot.close()
+    targets = [f"{fx.KB}/Notes/Insights/target-{index:04d}.md" for index in range(514)]
+    _append_graph_rows(conn, "graph_nodes", (
+        {"node_key": f"file:{target}", "kind": "file", "path": target}
+        for target in targets
+    ))
+    conn.execute("DELETE FROM graph_edges WHERE source_path=?", (sf.WINTER,))
+    edges = []
+    for index, target in enumerate(targets[:512]):
+        edges.append({
+            "edge_key": f"wiki-{index}", "src_key": f"file:{sf.WINTER}",
+            "source_path": sf.WINTER, "dst_key": f"file:{target}",
+            "dst_page_key": f"file:{target}", "origin": "wikilink",
+            "review_evidence": json.dumps({"internal": {"occurrence": index, "line": 1}}),
+        })
+        if index < 504:
+            edges.append({
+                "edge_key": f"typed-{index}", "src_key": f"file:{sf.WINTER}",
+                "source_path": sf.WINTER, "dst_key": f"file:{target}",
+                "dst_page_key": f"file:{target}", "origin": "markdown_relation",
+                "raw_relation": "typed_alias", "source_anchor": f"line-{index + 1}",
+            })
+    bullets = ["- untyped_alias [[target-0512]]", "- relates_to [[target-0513]]"]
+    for index, target in enumerate(targets[512:]):
+        edges.append({
+            "edge_key": f"bullet-{index}", "src_key": f"file:{sf.WINTER}",
+            "source_path": sf.WINTER, "dst_key": f"file:{target}",
+            "dst_page_key": f"file:{target}", "origin": "markdown_relation",
+            "raw_relation": "untyped_alias" if index == 0 else "relates_to",
+            "source_anchor": f"line-{600 - index}", "metadata": json.dumps({"line": bullets[index]}),
+        })
+    _append_graph_rows(conn, "graph_edges", edges)
+    registry = replace(
+        relation_registry.core_registry(),
+        aliases={"untyped_alias": "links_to", "typed_alias": "vault.reference"},
+        extensions={"vault.reference": relation_registry.RelationDefinition(
+            key="vault.reference", parent="links_to", description="A specific authored reference.",
+            family=relation_registry.core_registry().core["links_to"].family,
+        )},
+    )
+    source = relation_sensor._file_node(conn, sf.WINTER)
+    statements = []
+    conn.set_trace_callback(statements.append)
+    links = relation_sensor.plain_links(conn, registry, source)
+    assert [link.target for link in links] == targets[504:512]
+    assert len(statements) <= 2, "candidate selection must not query once per outgoing link"
+
+    conn.set_trace_callback(None)
+    conn.execute("DELETE FROM graph_edges WHERE edge_key IN ('wiki-508', 'wiki-509', 'wiki-510', 'wiki-511')")
+    links = relation_sensor.plain_links(conn, registry, source)
+    assert [link.target for link in links] == [*targets[504:508], targets[513], targets[512]]
+    assert [(link.anchor, link.bullet) for link in links[4:]] == [
+        ("line-599", bullets[1]), ("line-600", bullets[0]),
+    ]
+    rows = {
+        relation_sensor.request_key(sf.WINTER, link.target, link.anchor): {
+            "source_path": sf.WINTER, "target_path": link.target, "anchor": link.anchor,
+            "kind": "retype", "verdict": "supports",
+        }
+        for link in links[4:]
+    }
+    statements.clear()
+    progress = []
+    conn.set_trace_callback(statements.append)
+    conn.set_progress_handler(lambda: progress.append(1) or 0, 1)
+    candidates = relation_sensor.retype_candidates_many(conn, {sf.WINTER: registry}, rows)
+    conn.set_progress_handler(None, 0)
+    assert len(statements) == 1, "the queue must fetch all selected bullets in one query"
+    assert {item["to"]: item["evidence"]["line"] for item in candidates[sf.WINTER]} == {
+        targets[512]: bullets[0], targets[513]: bullets[1],
+    }
+    conn.set_trace_callback(None)
+    record_property("retype_query_plan", [
+        row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + statements[0])
+    ])
+    indexed_steps = len(progress)
+    record_property("indexed_retype_graph_vm_steps", indexed_steps)
+    assert indexed_steps <= 500, "two exact anchors must not visit every authored bullet"
+
+    # An older read-only publication can lack the additive index until its writer initializes.
+    conn.execute("DROP INDEX idx_graph_edges_relation_anchor")
+    progress.clear()
+    conn.set_progress_handler(lambda: progress.append(1) or 0, 1)
+    assert relation_sensor.retype_candidates_many(conn, {sf.WINTER: registry}, rows) == candidates
+    conn.set_progress_handler(None, 0)
+    record_property("unindexed_retype_graph_vm_steps", len(progress))
+    assert len(progress) > indexed_steps
+    conn.close()
+
+
+def test_producer_selection_work_stays_bounded_at_50000_graph_nodes(tmp_path: Path, monkeypatch, record_property) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    for index in range(8):
+        fx.write(vault, f"{fx.KB}/Notes/Insights/extra-{index}.md", sf.note(
+            f"Extra {index}", "2026-05-10", f"Extra fact {index}.",
+            links="See [[Notes/Insights/seal-wear]].",
+        ))
+    fx.publish_graph(vault)
+    sf.settle(vault)
+    snapshot = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    conn = sqlite3.connect(":memory:")
+    snapshot.backup(conn)
+    snapshot.close()
+
+    def measured_tick():
+        statements = []
+        progress = []
+        conn.set_trace_callback(statements.append)
+        conn.set_progress_handler(lambda: progress.append(1) or 0, 100)
+        try:
+            result = relation_sensor.produce(vault, conn, cursor="", changed=[])
+        finally:
+            conn.set_progress_handler(None, 0)
+            conn.set_trace_callback(None)
+        return result, statements, len(progress) * 100
+
+    small, small_statements, small_work = measured_tick()
+    node_count = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
+    paths = [f"{fx.KB}/Notes/Insights/zz-generated-{index:05d}.md" for index in range(50_000 - node_count)]
+    _append_graph_rows(conn, "graph_nodes", (
+        {"node_key": f"file:{path}", "kind": "file", "path": path} for path in paths
+    ))
+    _append_graph_rows(conn, "graph_edges", (
+        {"edge_key": f"generated-{index}", "src_key": f"file:{path}",
+         "source_path": path, "origin": "wikilink"}
+        for index, path in enumerate(paths)
+    ))
+    assert conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0] == 50_000
+    large, large_statements, large_work = measured_tick()
+    cursor_sql = next(sql for sql in large_statements if sql.startswith("SELECT path FROM graph_nodes"))
+    for name, sql in (
+        ("cursor_plan", cursor_sql),
+        ("unforced_cursor_plan", cursor_sql.replace(" INDEXED BY idx_graph_nodes_path", "")),
+    ):
+        record_property(name, [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)])
+    record_property("small_graph_vm_steps", small_work)
+    record_property("large_graph_vm_steps", large_work)
+    record_property("small_graph_queries", len(small_statements))
+    record_property("large_graph_queries", len(large_statements))
+    assert len(large["pages"]) == relation_sensor.PAGES_PER_TICK
+    assert large["pages"] == small["pages"]
+    assert large["submitted"] == small["submitted"] > 0
+    assert len(large_statements) == len(small_statements)
+    assert large_work <= small_work * 1.2 + 500, (small_work, large_work)
+    conn.close()
+
+
 def test_worker_order_follows_source_pages(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     _active(monkeypatch)
@@ -345,9 +510,9 @@ def test_ingest_cursor_walks_starved_rows(tmp_path: Path, monkeypatch) -> None:
     for index in range(300):
         key = f"k{index:04d}"
         rows.append((key, "s.md", f"t{index}.md", "a", "wikilink", None, None, None, None,
-                     "d" * 64, f"input-{index}"))
+                     "d" * 64, f"input-{index}", "source-hash", "target-hash"))
     conn.executemany(
-        "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
+        "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.close()
 
     # Readings exist only for the last 25 rows.
@@ -481,6 +646,70 @@ def test_accept_a_different_offered_option(tmp_path: Path, monkeypatch) -> None:
     assert result.get("sensed", {}).get("relation") == proposal or proposal in json.dumps(result)
 
 
+def test_inactive_instrument_hides_persisted_proposal_before_next_tick(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    group, item = _sensed_items(vault)[0]
+    before = (vault / item["from"]).read_text(encoding="utf-8")
+    assert relation_sensor.sensed_rows_for(vault, [item["from"]])
+
+    monkeypatch.setattr(sensing_llm, "active_instruments", lambda: {})
+    assert _sensed_items(vault) == []
+    assert relation_sensor.sensed_rows_for(vault, [item["from"]]) == {}
+    with pytest.raises(Exception, match="VOCABULARY_APPLICATION_INVALID|REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED"):
+        _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
+    assert (vault / item["from"]).read_text(encoding="utf-8") == before
+
+
+def test_target_edit_hides_old_reading_without_resensing_source(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    group, item = next((g, i) for g, i in _sensed_items(vault) if i["to"] == sf.SEAL)
+    before = (vault / item["from"]).read_text(encoding="utf-8")
+    old_rows = _rows(vault)
+    fx.edit(vault, sf.SEAL, (vault / sf.SEAL).read_text(encoding="utf-8").replace(
+        sf.SEAL_TEXT, "Seal wear stays constant after a dry start.",
+    ))
+    fx.publish_graph(vault)
+    _warm(vault, monkeypatch)
+    assert _rows(vault) == old_rows, "the reading stays persisted until a later sensor tick"
+    assert relation_sensor.sensed_for_candidate(vault, item["from"], sf.SEAL) is None
+    assert not any(i["to"] == sf.SEAL for _, i in _sensed_items(vault))
+    with pytest.raises(Exception, match="VOCABULARY_APPLICATION_INVALID|REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED"):
+        _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
+    assert (vault / item["from"]).read_text(encoding="utf-8") == before
+
+
+def test_changed_registry_menu_cannot_widen_a_stale_accept(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    _warm(vault, monkeypatch)
+    group, item = _sensed_items(vault)[0]
+    before = (vault / item["from"]).read_text(encoding="utf-8")
+    fx.write(vault, f"{fx.KB}/_Schema/relation-registry.yaml", (
+        "schema_version: 1\nextensions:\n  vault.applies_to:\n"
+        "    parent: relates_to\n    description: Applies within the linked note's conditions.\n"
+        "    direction: directed\n"
+    ))
+    fx.publish_graph(vault)
+    _warm(vault, monkeypatch)
+    assert _sensed_items(vault) == []
+    with pytest.raises(Exception, match="VOCABULARY_APPLICATION_INVALID|REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED"):
+        _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
+    assert (vault / item["from"]).read_text(encoding="utf-8") == before
+
+
 def test_no_requested_relation_never_writes_the_proposal(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     _active(monkeypatch)
@@ -493,7 +722,7 @@ def test_no_requested_relation_never_writes_the_proposal(tmp_path: Path, monkeyp
     before = (vault / item["from"]).read_text(encoding="utf-8")
     try:
         result = _accept(vault, group, item)
-    except Exception as exc:
+    except (ValueError, cli_ops.OpError) as exc:
         result = {"error": str(exc)}
     after = (vault / item["from"]).read_text(encoding="utf-8")
     if result.get("accepted"):
@@ -548,9 +777,8 @@ def test_retype_accept_replaces_one_line(tmp_path: Path, monkeypatch) -> None:
     new_line = f"- {proposal} [[Knowledge Base/Notes/Insights/seal-wear]]"
     # The governed edit also re-stamps `updated:`; everything else is the
     # one-line replacement.
-    norm = lambda text: "\n".join(
-        line for line in text.splitlines() if not line.startswith("updated:")
-    )
+    def norm(text):
+        return "\n".join(line for line in text.splitlines() if not line.startswith("updated:"))
     assert norm(after) == norm(before).replace(
         "- links_to [[Notes/Insights/seal-wear]]", new_line
     )

@@ -14,10 +14,10 @@ Its design (D1) names a generative instrument for later slices, and a `relation.
 
 The relation review queue (`relation_queue`) already lists plain links as candidates: body wikilinks, plain-link bullets and generic bullets. It offers the admissible registry relations for each ordered pair (`relation_options.ranked_options`), refuses a new generic edge, and writes only through the agent's governed accept. It does not say which relation fits.
 
-A measured spike on a disposable copy of a real vault (about 13,600 pages and 11,000 plain links) compared small local models with a frontier ceiling on the same cases. The results are under Measured. In short:
-
-- Off-the-shelf small instruct models choose a fitting relation far less often than the frontier model, and their confidence does not separate right picks from wrong ones.
-- A small model distilled on frontier picks improves sharply, and its confidence does separate. It runs on one CPU thread in a Cloud cell's memory.
+Historical experiment reports describe small-model relation typing and distillation on disposable vault copies.
+The complete cases, outputs and measurement receipts are unavailable; the reports do not qualify a model for admission.
+This change delivers the disabled pipeline with an empty pin registry and no concrete model runtime.
+The Measured section distinguishes reported observations from reproducible evidence.
 
 ## Goals and non-goals
 
@@ -45,7 +45,7 @@ A generative question's template renders a chat prompt. Vault text goes only ins
 
 The instrument identity also binds the template version and the label-token map: the token id of each letter in the pinned tokenizer.
 
-- **Runtime.** The instrument drives a narrow runtime interface: tokenize a rendered prompt, evaluate it, and return the last position's logits. This change ships that interface and no concrete runtime. The first pin brings its runtime and dependency, under the rule that weights load file-backed and read-only, so all workers on a node share one copy (`ship-models-as-shared-onnx`, D1). Private memory is then the context cache and compute buffers. The context window is fixed per question at the smallest power of two that holds its longest admitted input; for `relation.type` that is 2,048 tokens.
+- **Runtime.** The instrument drives a narrow runtime interface: tokenize a rendered prompt, evaluate it, and return the last position's logits. This change ships that interface and no concrete runtime. The first pin brings its runtime and dependency, under the rule that weights load file-backed and read-only, so all workers on a node share one copy (`ship-models-as-shared-onnx`, D1). Private memory is then the context cache and compute buffers. The `relation.type` context limit is 2,048 tokens. A future pin must prove its admitted input sizes; longer inputs abstain.
 - **One thread, one case.** The worker evaluates one case at a time on one thread, as the NLI instrument does. Its existing hourly CPU-seconds and judgement budgets bound the cost.
 - **Shared prefix.** Requests from one source page share the prompt prefix up to the end of the source excerpt. The instrument may keep that prefix's cache across consecutive requests from one page. Each request still produces the same vector as a cold evaluation, within rounding.
 
@@ -89,9 +89,9 @@ The sensed tick gains a bounded `relation.type` producer. It never loads a model
 
   A pair that already has a specific authored relation is skipped.
 - **Order.** Pages whose graph `source_hash` changed since the producer last saw them come first. A persisted cursor then walks the remaining pages in path order, so every page is reached once per pass.
-- **Bounds.** At most `PAGES_PER_TICK` source pages and `LINKS_PER_PAGE` links per page per tick. These are constants of the producer, not settings.
+- **Bounds.** At most `PAGES_PER_TICK` source pages and `LINKS_PER_PAGE` links per page per tick. These are constants of the producer, not settings. Cursor queries use the maintained path index. Exact retype lookups use a shared graph index over source path, origin, source anchor and target page; that index adds per-edge storage and maintenance cost.
 - **Submission.** One replaceable scope per source page, with one owned request per link. The stable request key is the source path, the target path and the link's occurrence anchor. A changed page replaces its scope atomically, so stale requests are removed.
-- **Ingestion.** The tick follows the ledger and writes one projection row per current link: request key, reading id, verdict, top key and probability, and the menu digest. A row whose inputs no longer match the current page is dropped.
+- **Ingestion.** The tick follows the ledger and writes one projection row per current link: request key, reading id, verdict, top key and probability, and the menu digest. Each row binds the published source and target hashes. Queue reads compare both hashes in the graph snapshot and require an active instrument, so a changed target cannot leave an old proposal current. A changed menu also suppresses the prior proposal before acceptance.
 
 ### D4. Delivery through the relation review queue
 
@@ -129,56 +129,62 @@ A pinned sensor model ships with the product, so its weights must not encode any
 
 ## Measured
 
-The spike ran on a disposable copy of a real vault, on a shared 16-core desktop. Nothing from it is in the repository.
+### Evidence status
 
-**Sets.** Two cohorts, each split by source page into a dev set and a held-out set:
+Historical reports describe one held-out run for private-trained students and another for synthetic-trained students.
+The complete cases, arm outputs, raw judgments, timing rows, model artifacts and original model E2E receipts are unavailable.
+Preserved scripts and aggregate reports cannot reconstruct those artifacts or verify the recorded paired confidence intervals.
+The cross-family judgment therefore remains unrun, and no model is admitted.
 
-- *Plain links* (production-shaped): 100 dev and 100 held-out body wikilinks and plain-link bullets, one per source page.
-- *Authored relations*: 100 dev and 120 held-out authored specific relations, shown with the relation statements removed.
+The reports describe 100 plain-link cases and 120 authored-relation cases for the private-trained students.
+They describe a different cohort of 150 plain-link cases and 100 authored-relation cases for the synthetic-trained students.
+These cohorts do not support a paired comparison between private and synthetic training.
+The original thresholds remain frozen; these used sets are not fresh held-out data for another experiment.
 
-The training set holds 5,021 links from 2,066 other source pages. No page that appears in a dev or held-out case, as source or target, appears in training.
+### Historical aggregates, not admission evidence
 
-**Reference and judge.** The frontier ceiling is Claude Opus, given the same prompt through a JSON schema whose answer is an enum of the case's letters. Every specific proposal from every arm is judged blind: "does SOURCE relation TARGET hold?" On dev the judge is Opus. That judge is the students' teacher's family, so dev numbers are calibration. The held-out judge is a model from another family.
+The following counts come from preserved reports, not a fresh read of raw judgments.
+The judge shared the teacher's model family, so these are secondary calibration results.
+Precision means judged-true proposals divided by proposals; true yield means judged-true proposals divided by all cases.
+Proposal coverage is a separate measure: proposals divided by all cases.
 
-**Students.** Qwen3 0.6B and Qwen3 1.7B, each fine-tuned with LoRA (rank 32, all linear layers) on the Opus pick for each training link. The loss is cross-entropy over the case's letters at the answer position, with half of the menus shuffled. Each student runs as a Q4_K_M GGUF through llama.cpp on one CPU thread.
-
-**Dev results, plain links** (judged precision, with yield = judged-true proposals per case):
-
-| Arm | Threshold | Precision | Wilson 95% | Yield |
+| Reported plain-link cohort | Arm | Frozen threshold | Reported true / proposals | Reported true yield |
 |---|---|---|---|---|
-| Opus (ceiling, self-judged) | none | 0.84 (49/58) | 0.73–0.92 | 0.49 |
-| Haiku | none | 0.52 (36/69) | 0.41–0.64 | 0.36 |
-| Qwen3 4B Instruct, not tuned | none | 0.33 (27/83) | 0.23–0.43 | 0.27 |
-| Qwen3 1.7B, not tuned | none | 0.24 (12/50) | 0.14–0.37 | 0.12 |
-| 0.6B student, 2,300 labels | none | 0.46 (19/41) | 0.32–0.61 | 0.19 |
-| 0.6B student, 5,021 labels | p ≥ 0.6 | 0.63 (22/35) | 0.46–0.77 | 0.22 |
-| 1.7B student, 5,021 labels | p ≥ 0.4 | 0.75 (21/28) | 0.57–0.87 | 0.21 |
+| Private-trained held-out, 100 cases | Frontier ceiling | none | 45 / 64 | 45% |
+| Private-trained held-out, 100 cases | 0.6B student | p >= 0.6 | 16 / 30 | 16% |
+| Private-trained held-out, 100 cases | 1.7B student | p >= 0.4 | 17 / 24 | 17% |
+| Synthetic-trained held-out, 150 cases | Frontier ceiling | none | 62 / 82 | 41% |
+| Synthetic-trained held-out, 150 cases | 0.6B student | p >= 0.4 | 15 / 30 | 10% |
+| Synthetic-trained held-out, 150 cases | 1.7B student | p >= 0.0 | 12 / 26 | 8% |
 
-On the authored cohort at the same thresholds, the 1.7B student reaches 0.83 (25/30, Wilson 0.66–0.93, yield 0.25) and the 0.6B student 0.76 (28/37, Wilson 0.60–0.87, yield 0.28). Opus reaches 0.76 (56/74) there without a threshold.
+None of these reported student results meets D6's true-yield floor.
+The reports do not establish equivalence to the frontier ceiling or a causal benefit from synthetic training or label batching.
+The old scorer could omit missing judgments or arm rows; these aggregates cannot resolve that limitation.
+A resumed evaluation must account for every frozen case and every missing output before computing a score.
 
-Confidence thresholds did not help the untuned models: at every cut, Qwen3 4B stayed between 0.24 and 0.31 on the authored set. They do help the students. Doubling the training labels raised the 0.6B student's precision at equal yield from 0.46 to 0.63. Each student's threshold was fixed on dev before the held-out run.
+### Resource claims remain unverified
 
-**Held-out results** (one run, thresholds as fixed on dev; judged by Opus, a secondary judge from the teacher's family; the cross-family judgement is pending):
+Reports list process CPU times of 13–16 seconds per link for the 0.6B student and 31–38 seconds for the 1.7B student.
+Host contention does not make process CPU time a guaranteed upper bound.
+The memory fields came from resident anonymous and file-backed pages; they do not establish private allocation or shared weight cost.
+The raw timing rows and model artifacts are unavailable, so these reports prove neither Cloud-cell headroom nor backlog completion time.
+A future pin needs a measured CPU and memory result under the deployed limits, including the cell's other resident work.
 
-| Set | Arm | Precision | Wilson 95% | Yield | Paired yield minus Opus, 95% CI |
-|---|---|---|---|---|---|
-| Plain links | Opus | 0.70 (45/64) | 0.58–0.80 | 0.45 | |
-| Plain links | 0.6B student, p ≥ 0.6 | 0.53 (16/30) | 0.36–0.70 | 0.16 | −0.29 [−0.38, −0.20] |
-| Plain links | 1.7B student, p ≥ 0.4 | 0.71 (17/24) | 0.51–0.85 | 0.17 | −0.28 [−0.36, −0.19] |
-| Authored | Opus | 0.84 (78/93) | 0.75–0.90 | 0.65 | |
-| Authored | 0.6B student, p ≥ 0.6 | 0.78 (25/32) | 0.61–0.89 | 0.21 | −0.44 [−0.53, −0.35] |
-| Authored | 1.7B student, p ≥ 0.4 | 0.83 (19/23) | 0.63–0.93 | 0.16 | −0.49 [−0.58, −0.40] |
+### Pipeline acceptance and remaining model work
 
-No arm meets the admission bar (D6) on held-out plain links, Opus included. The 1.7B student matches Opus's precision there at under half of its yield.
+Deterministic integration checks exercise Dreamer submission, worker readings, queue proposals and governed acceptance on disposable synthetic state.
+They verify pipeline behavior with a controlled instrument, not learned-model accuracy.
+The historical real-model E2E pass remains reported, with its original receipts unavailable.
 
-**Cost.** Each link is one evaluation of a prompt of about 900 tokens (longest 1,447), so a 2,048-token context holds every case. Measured on one thread at that context, on a shared host whose load average ran from 14 to 34 on 16 cores, so the CPU times are upper bounds:
+`tests/test_relation_sensor_integration.py::test_producer_selection_work_stays_bounded_at_50000_graph_nodes` exercises the real producer against the maintained graph schema.
+It records 66 graph queries at both corpus sizes and approximately 2,900 versus 2,600 SQLite VM steps, sampled every 100 steps.
+The high-degree retype check records 98 VM steps with the exact-anchor index and 6,153 without it, returning identical candidates.
+These checks measure deterministic query work, not model quality or end-to-end request latency.
 
-| Model | CPU s per link (median) | Private memory | File-backed weights |
-|---|---|---|---|
-| 0.6B Q4_K_M | 13–16 | 584 MiB | 391 MiB |
-| 1.7B Q4_K_M | 31–38 | 1,017 MiB | 1,064 MiB |
-
-A Cloud cell has 2 CPUs and 3 GiB, and a busy owner cell's working set is about 1.6 GiB. The 0.6B student fits beside it with room to spare. The 1.7B student leaves about 0.4 GiB. Under the worker's 300 CPU-seconds per hour, the 0.6B student types about 20 links per hour. The first pass over 11,000 plain links then takes about three weeks, and new links keep up.
+The full usable-model objective remains open under `add-sensed-epistemic-model` task 9.1.
+It includes exact artifact recovery, or a separately specified fresh experiment if recovery fails, and independent cross-family judgment.
+Any future pin also needs shareable training data, applicable provider terms and its own admission evidence.
+This change enables no model, sends no vault text to a provider, and changes no production sensing setting.
 
 ## Risks and trade-offs
 

@@ -85,6 +85,7 @@
 ## 9. Later slices (specified here, built later)
 
 - [ ] 9.1 Slice 2: `mention.same_referent` (same, different, abstain) on an open-weight instruct model chosen by a CPU fixture spike. Compare quantized dense and mixture-of-experts candidates by measured question quality, CPU latency, and memory cost per node. Parameter count alone does not bound the candidates. The generative template runtime has delimited slots and label-token logits, never sampled text (R1). Local GPU placement comes only after `detect-co-tenant-gpu-pressure` ships (R5).
+  - Delivery boundary: `add-relation-sensor` ships the disabled pipeline without a model. Task 9.1 retains the usable-model objective, independent cross-family judgment, measured deployed resource cost and admission evidence. Historical experiment artifacts are unavailable; reported aggregates do not close those obligations.
 - [ ] 9.2 Slice 3:
   - Tensions on active or recent work become sensed upkeep families (`upkeep_sensed_*`) under the existing carrier caps and S6. They never touch structural families.
   - The relation writer cites the reading id (R2).

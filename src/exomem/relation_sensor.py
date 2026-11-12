@@ -5,9 +5,9 @@ published graph rows only: body wikilinks (origin `wikilink`, the same indexed
 evidence the queue's `wikilink` method reads) and authored relation bullets
 whose relation is the registry's plain link or generic (origin
 `markdown_relation`). A pair that already carries a specific authored relation
-is skipped. The tick never loads a model and never runs a Markdown parser:
-page text is read as raw bytes and cut by line, and relation-statement lines
-come from the graph's own recorded anchors, never from a word match.
+is skipped. The tick never loads a model. It parses only selected pages for
+their excerpts; relation-statement lines come from graph anchors. Queue reads
+use graph rows and never parse page text.
 
 Each source page is one replaceable scope (owner `relation-sensor`), one owned
 request per link, keyed by source path, target path and occurrence anchor.
@@ -21,7 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import sqlite3
 import unicodedata
 from collections.abc import Mapping, Sequence
@@ -31,16 +30,17 @@ from typing import Any
 
 import yaml
 
+from . import epistemic_graph as epistemic_graph_module
 from . import (
-    epistemic_graph as epistemic_graph_module,
+    markdown_regions,
     relation_queue,
     relation_registry,
-    semantic_contract as semantic_contract_module,
     sensed_model,
     sensing,
     sensing_llm,
-    vault as vault_module,
 )
+from . import semantic_contract as semantic_contract_module
+from . import vault as vault_module
 
 log = logging.getLogger(__name__)
 
@@ -49,15 +49,11 @@ OWNER = "relation-sensor"
 #: Bounds per sensed tick; constants of the producer, never settings.
 PAGES_PER_TICK = 8
 LINKS_PER_PAGE = 8
-MENU_LIMIT = 12
 #: How many pending or superseded rows one tick re-projects.
 INGEST_BATCH = 256
 
 _EXCERPT_CHARS = 900
 _LINK_CHARS = 300
-
-_WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]")
-_SPACE = re.compile(r"\s+")
 
 #: The canonical Relations section heading, the same literal the governed
 #: write uses (`relation_queue.accept`'s `heading="Relations"`).
@@ -127,10 +123,19 @@ def _kind(fit: relation_queue.RelationFit, page: _GraphPage) -> Any:
 
 
 def _plain(text: str) -> str:
-    rendered = _WIKILINK.sub(
-        lambda m: (m.group(2) or m.group(1).rsplit("/", 1)[-1]).strip(), text
-    )
-    return _SPACE.sub(" ", rendered).strip()
+    # Shared vault grammar owns wikilink tokens; CommonMark owns code spans.
+    code = markdown_regions.code_spans(text)
+    pieces: list[str] = []
+    end = 0
+    for match in vault_module.iter_body_wikilinks(text):
+        if not markdown_regions.outside(text, match.start(), code):
+            continue
+        name, _bar, alias = match.group(0)[2:-2].partition("|")
+        target, _hash, _fragment = name.partition("#")
+        pieces.extend((text[end:match.start()], (alias or target.rsplit("/", 1)[-1]).strip()))
+        end = match.end()
+    pieces.append(text[end:])
+    return " ".join("".join(pieces).split())
 
 
 def _page_raw(vault_root: Path, rel_path: str, expected_hash: str) -> str | None:
@@ -256,52 +261,75 @@ def request_key(source: str, target: str, anchor: str) -> str:
     ).hexdigest()[:32]
 
 
+def _is_plain(registry: relation_registry.RelationRegistry, key: str) -> bool:
+    definition = registry.definition(key)
+    # A refinement of the core plain link still carries a specific authored meaning.
+    return registry.is_generic(key) or (
+        definition is not None and definition.core and registry.has(key, "plain_link")
+    )
+
+
 def plain_links(
     conn: sqlite3.Connection,
     registry: relation_registry.RelationRegistry,
     source: _GraphPage,
 ) -> list[_Link]:
-    """A page's plain-link cohort from published rows, queue order."""
+    """At most LINKS_PER_PAGE candidates, suppressed in SQL before the limit."""
     links: list[_Link] = []
-    seen_targets: set[str] = set()
-    rows = conn.execute(
-        "SELECT d.path, e.review_evidence FROM graph_edges e "
-        "JOIN graph_nodes d ON d.node_key = e.dst_key AND d.kind = 'file' "
-        "WHERE e.origin = 'wikilink' AND e.source_path = ? "
-        "ORDER BY COALESCE(CAST(json_extract(e.review_evidence, "
-        "'$.internal.occurrence') AS INTEGER), e.rowid), d.path, e.rowid",
-        (source.rel_path,),
-    ).fetchall()
-    specific: set[str] = set()
-    bullets: list[tuple[int, str, str, str]] = []  # line, canonical, target, raw
-    for dst_page_key, raw_relation, anchor, metadata in conn.execute(
-        "SELECT dst_page_key, raw_relation, source_anchor, metadata FROM graph_edges "
-        "WHERE origin='markdown_relation' AND src_key=('file:' || ?)",
-        (source.rel_path,),
-    ):
-        target = str(dst_page_key or "").removeprefix("file:")
-        resolved = registry.resolve(str(raw_relation or ""))
-        canonical = resolved.canonical
-        if canonical is None:
-            continue
-        anchor_text = str(anchor or "")
-        number = int(anchor_text[5:]) if anchor_text.startswith("line-") else 0
-        raw_line = ""
-        try:
-            raw_line = str(json.loads(str(metadata or "{}")).get("line") or "")
-        except (ValueError, TypeError):
-            pass
-        if canonical == registry.link_key or registry.is_generic(canonical):
-            bullets.append((number, canonical, target, raw_line))
-        elif registry.is_specific(canonical):
-            specific.add(target)
+    plain = sorted(
+        key for key in registry.keys
+        if _is_plain(registry, key)
+    )
+    marks = ",".join("?" for _ in plain)
+    # Resolve authored labels once per selected page, including registry aliases.
+    authored = (
+        "WITH authored AS MATERIALIZED (SELECT dst_page_key, raw_relation, "
+        "source_anchor, metadata, exomem_sensor_relation(raw_relation) AS canonical "
+        "FROM graph_edges WHERE source_path=? AND src_key=('file:' || ?) "
+        "AND origin='markdown_relation') "
+    )
+    conn.create_function(
+        "exomem_sensor_relation", 1,
+        lambda raw: registry.resolve(str(raw or "")).canonical,
+    )
+    try:
+        rows = conn.execute(
+            authored + "SELECT d.path, e.review_evidence FROM graph_edges e "
+            "JOIN graph_nodes d ON d.node_key=e.dst_key AND d.kind='file' "
+            "WHERE e.origin='wikilink' AND e.source_path=? "
+            "AND e.dst_key NOT IN (SELECT dst_page_key FROM authored "
+            f"WHERE canonical IS NOT NULL AND canonical NOT IN ({marks})) "
+            "ORDER BY COALESCE(CAST(json_extract(e.review_evidence, "
+            "'$.internal.occurrence') AS INTEGER), e.rowid), d.path, e.rowid LIMIT ?",
+            (source.rel_path, source.rel_path, source.rel_path, *plain, LINKS_PER_PAGE),
+        ).fetchall()
+        bullets = []
+        if len(rows) < LINKS_PER_PAGE:
+            bullets = conn.execute(
+                authored + ", ranked AS (SELECT *, "
+                "CAST(substr(source_anchor, 6) AS INTEGER) AS line, "
+                "ROW_NUMBER() OVER (PARTITION BY dst_page_key ORDER BY "
+                "CAST(substr(source_anchor, 6) AS INTEGER), canonical, "
+                "COALESCE(json_extract(metadata, '$.line'), '')) AS rank "
+                f"FROM authored WHERE canonical IN ({marks}) "
+                "AND dst_page_key NOT IN (SELECT dst_page_key FROM authored "
+                f"WHERE canonical IS NOT NULL AND canonical NOT IN ({marks})) "
+                "AND dst_page_key NOT IN (SELECT dst_key FROM graph_edges "
+                "WHERE source_path=? AND origin='wikilink')) "
+                "SELECT line, canonical, dst_page_key, metadata FROM ranked "
+                "WHERE rank=1 ORDER BY line, canonical, dst_page_key, "
+                "COALESCE(json_extract(metadata, '$.line'), '') LIMIT ?",
+                (source.rel_path, source.rel_path, *plain, *plain, source.rel_path,
+                 LINKS_PER_PAGE - len(rows)),
+            ).fetchall()
+    finally:
+        conn.create_function("exomem_sensor_relation", 1, None)
     for target, raw_evidence in rows:
         try:
             internal = json.loads(str(raw_evidence or "{}")).get("internal") or {}
         except (ValueError, TypeError):
             internal = {}
         target = str(target)
-        seen_targets.add(target)
         links.append(
             _Link(
                 "wikilink",
@@ -311,13 +339,12 @@ def plain_links(
                 registry.link_key,
             )
         )
-    for number, canonical, target, raw_line in sorted(bullets):
-        if target in seen_targets:
-            continue
-        seen_targets.add(target)
+    for number, canonical, target_key, metadata in bullets:
+        target = str(target_key).removeprefix("file:")
+        raw_line = str(json.loads(str(metadata or "{}")).get("line") or "")
         links.append(_Link("retype", target, f"line-{number}", None, canonical,
                            bullet=raw_line))
-    return [link for link in links if link.target not in specific]
+    return links
 
 
 def _slot(unit_ref: str, path: str, slot: str, extractor: str, text: str,
@@ -388,6 +415,8 @@ def build_requests(
             "kind": link.kind,
             "menu_digest": sensing.text_sha256(menu_text),
             "input_key": request.input_key,
+            "source_hash": source.source_hash,
+            "target_hash": target.source_hash,
         }
         out.append((key, request, row))
     return out
@@ -448,8 +477,10 @@ def produce(
     chosen.extend(str(path) for path in changed[:remaining])
     remaining -= len(chosen)
     if remaining > 0:
+        # The path index lets the cursor stop at the page limit without sorting the corpus.
         rows = graph.execute(
-            "SELECT path FROM graph_nodes WHERE kind='file' AND path > ? "
+            "SELECT path FROM graph_nodes INDEXED BY idx_graph_nodes_path "
+            "WHERE kind='file' AND path > ? "
             "ORDER BY path LIMIT ?",
             (cursor, remaining),
         ).fetchall()
@@ -459,7 +490,8 @@ def produce(
         remaining -= len(rows)
         if wrapped and remaining > 0:
             rows = graph.execute(
-                "SELECT path FROM graph_nodes WHERE kind='file' AND path <= ? "
+                "SELECT path FROM graph_nodes INDEXED BY idx_graph_nodes_path "
+                "WHERE kind='file' AND path <= ? "
                 "ORDER BY path LIMIT ?",
                 (cursor, remaining),
             ).fetchall()
@@ -490,7 +522,8 @@ def produce(
     # covered the whole table wraps so the next pass starts at the first path.
     last = chosen[-1]
     tail = graph.execute(
-        "SELECT 1 FROM graph_nodes WHERE kind='file' AND path > ? LIMIT 1", (last,)
+        "SELECT 1 FROM graph_nodes INDEXED BY idx_graph_nodes_path "
+        "WHERE kind='file' AND path > ? LIMIT 1", (last,)
     ).fetchone()
     return {
         "submitted": submitted,
@@ -516,15 +549,15 @@ def ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> int:
     cursor = str(sensed_model._get_meta(conn, "relation_ingest_cursor") or "")
     rows = conn.execute(
         "SELECT request_key, input_key, instrument_id FROM relation_sensed "
-        "WHERE (verdict IS NULL OR instrument_id NOT IN (%s)) "
-        "AND request_key > ? ORDER BY request_key LIMIT ?" % inactive,
+        f"WHERE (verdict IS NULL OR instrument_id NOT IN ({inactive})) "
+        "AND request_key > ? ORDER BY request_key LIMIT ?",
         (*active, cursor, INGEST_BATCH),
     ).fetchall()
     if not rows:
         rows = conn.execute(
             "SELECT request_key, input_key, instrument_id FROM relation_sensed "
-            "WHERE (verdict IS NULL OR instrument_id NOT IN (%s)) "
-            "ORDER BY request_key LIMIT ?" % inactive,
+            f"WHERE (verdict IS NULL OR instrument_id NOT IN ({inactive})) "
+            "ORDER BY request_key LIMIT ?",
             (*active, INGEST_BATCH),
         ).fetchall()
     if rows:
@@ -576,29 +609,53 @@ def ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> int:
 
 
 def sensed_rows_for(
-    vault_root: Path, sources: Sequence[str]
+    vault_root: Path, sources: Sequence[str], *, graph: sqlite3.Connection | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """`request_key -> row` of current relation verdicts for the given sources."""
-    if not sources:
+    """Current rows: each replaceable source scope holds at most LINKS_PER_PAGE.
+
+    One graph lookup binds every returned row to its source and target hashes.
+    """
+    active = sensing_llm.active_instruments()
+    if not sources or not active:
         return {}
     conn = sensed_model.open_readonly(vault_root)
     if conn is None:
         return {}
+    source_marks = ",".join("?" for _ in sources)
+    instrument_marks = ",".join("?" for _ in active)
     try:
         try:
             rows = conn.execute(
                 "SELECT request_key, source_path, target_path, anchor, kind, "
-                "reading_id, instrument_id, verdict, p, menu_digest "
-                "FROM relation_sensed WHERE source_path IN (%s)"
-                % ",".join("?" for _ in sources),
-                tuple(str(s) for s in sources),
+                "reading_id, instrument_id, verdict, p, menu_digest, source_hash, target_hash "
+                f"FROM relation_sensed WHERE source_path IN ({source_marks}) "
+                f"AND instrument_id IN ({instrument_marks})",
+                (*map(str, sources), *active),
             ).fetchall()
         except sqlite3.Error:
             return {}
     finally:
         conn.close()
+    if not rows:
+        return {}
+    owned_graph = graph is None
+    if owned_graph:
+        graph = epistemic_graph_module.EpistemicGraphIndex(vault_root)._open_read_snapshot()
+    if graph is None:
+        return {}
+    try:
+        paths = sorted({str(row[index]) for row in rows for index in (1, 2)})
+        path_marks = ",".join("?" for _ in paths)
+        hashes = dict(graph.execute(
+            "SELECT path, source_hash FROM graph_nodes INDEXED BY idx_graph_nodes_path "
+            f"WHERE kind='file' AND path IN ({path_marks})", paths,
+        ).fetchall())
+    finally:
+        if owned_graph:
+            graph.close()
     return {
         str(key): {
+            "request_key": key,
             "source_path": src,
             "target_path": tgt,
             "anchor": anchor,
@@ -608,52 +665,33 @@ def sensed_rows_for(
             "verdict": verdict,
             "p": p,
             "menu_digest": digest,
+            "source_hash": source_hash,
+            "target_hash": target_hash,
         }
-        for key, src, tgt, anchor, kind, rid, iid, verdict, p, digest in rows
+        for key, src, tgt, anchor, kind, rid, iid, verdict, p, digest, source_hash, target_hash in rows
+        if hashes.get(src) == source_hash and hashes.get(tgt) == target_hash
     }
 
 
 def sensed_for_candidate(
-    vault_root: Path, source: str, target: str, kind: str | None = None
+    vault_root: Path, source: str, target: str, kind: str | None = None,
+    *, graph: sqlite3.Connection | None = None,
 ) -> dict[str, Any] | None:
-    """One source+target's current verdict row, without reading the table."""
-    conn = sensed_model.open_readonly(vault_root)
-    if conn is None:
-        return None
-    try:
-        try:
-            rows = conn.execute(
-                "SELECT request_key, source_path, target_path, anchor, kind, "
-                "reading_id, instrument_id, verdict, p, menu_digest "
-                "FROM relation_sensed WHERE source_path=? AND target_path=?",
-                (str(source), str(target)),
-            ).fetchall()
-        except sqlite3.Error:
-            return None
-    finally:
-        conn.close()
-    if kind is not None:
-        rows = [row for row in rows if str(row[4]) == kind]
+    """One current verdict from the source's bounded, hash-checked scope."""
+    rows = [
+        row for row in sensed_rows_for(vault_root, [source], graph=graph).values()
+        if row["target_path"] == target and (kind is None or row["kind"] == kind)
+    ]
     if len(rows) != 1:
         return None
-    key, src, tgt, anchor, k, rid, iid, verdict, p, digest = rows[0]
-    return {
-        "request_key": key,
-        "source_path": src,
-        "target_path": tgt,
-        "anchor": anchor,
-        "kind": k,
-        "reading_id": rid,
-        "instrument_id": iid,
-        "verdict": verdict,
-        "p": p,
-        "menu_digest": digest,
-    }
+    return rows[0]
 
 
 def proposal(row: Mapping[str, Any], options: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     """The queue's `sensed` block for a verdict row, gated on the live menu."""
     verdict = str(row.get("verdict") or "")
+    if row.get("instrument_id") not in sensing_llm.active_instruments():
+        return None
     if verdict in ("none", "abstain"):
         return None
     digest = hashlib.sha256(
@@ -681,25 +719,41 @@ def retype_candidates(
     registry: relation_registry.RelationRegistry,
     rows: Mapping[str, Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Authored plain-link/generic bullets with a current relation verdict.
+    """Authored plain-link/generic bullets with a current relation verdict."""
+    return retype_candidates_many(conn, {source_path: registry}, rows).get(source_path, [])
 
-    New candidates, method `retype`, only while their reading is a relation
-    verdict; evidence names the exact bullet line. `rows` is the caller's
-    `sensed_rows_for` result for this source.
+
+def retype_candidates_many(
+    conn: sqlite3.Connection,
+    registries: Mapping[str, relation_registry.RelationRegistry],
+    rows: Mapping[str, Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """One bounded query for fresh retype rows, retaining exact bullet evidence.
+
+    Each producer scope contributes at most LINKS_PER_PAGE requested anchors.
     """
-    if not rows:
-        return []
-    out: list[dict[str, Any]] = []
-    for dst_page_key, raw_relation, anchor, metadata in conn.execute(
-        "SELECT dst_page_key, raw_relation, source_anchor, metadata FROM graph_edges "
-        "WHERE origin='markdown_relation' AND src_key=('file:' || ?)",
-        (source_path,),
+    out: dict[str, list[dict[str, Any]]] = {source: [] for source in registries}
+    requested = [
+        (str(row["source_path"]), f"file:{row['target_path']}", str(row.get("anchor") or ""))
+        for row in rows.values()
+        if row.get("source_path") in registries and row.get("kind") == "retype"
+        and row.get("verdict") and row["verdict"] not in ("none", "abstain")
+    ]
+    if not requested:
+        return out
+    requested_marks = ",".join("(?,?,?)" for _ in requested)
+    for source_path, dst_page_key, raw_relation, anchor, metadata in conn.execute(
+        f"WITH requested(source_path, target_key, anchor) AS (VALUES {requested_marks}) "
+        "SELECT e.source_path, e.dst_page_key, e.raw_relation, e.source_anchor, e.metadata "
+        "FROM requested r JOIN graph_edges e ON e.source_path=r.source_path "
+        "AND e.dst_page_key=r.target_key AND e.source_anchor=r.anchor "
+        "WHERE e.origin='markdown_relation' AND e.src_key=('file:' || r.source_path)",
+        [value for pair in requested for value in pair],
     ):
+        registry = registries[source_path]
         resolved = registry.resolve(str(raw_relation or ""))
         canonical = resolved.canonical
-        if canonical is None or not (
-            canonical == registry.link_key or registry.is_generic(canonical)
-        ):
+        if canonical is None or not _is_plain(registry, canonical):
             continue
         anchor_text = str(anchor or "")
         target = str(dst_page_key or "").removeprefix("file:")
@@ -720,5 +774,5 @@ def retype_candidates(
             "evidence": {"line": raw_line, "anchor": anchor_text},
             "_sensed": row,
         }
-        out.append(candidate)
+        out[source_path].append(candidate)
     return out
