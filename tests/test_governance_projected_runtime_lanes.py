@@ -707,6 +707,46 @@ def test_hybrid_retention_drops_weak_bm25_only_projection(tmp_path):
     assert [hit.path for hit in result.hits] == [strong.item_identity]
 
 
+def _lexical_hit(variant, score=1.0):
+    return projected_retrieval.ProjectedLexicalHit(
+        item_identity=variant.item_identity,
+        projection_variant_id=variant.projection_variant_id,
+        decision_level=variant.decision_level,
+        score=score,
+        search_fields=dict(variant.search_fields),
+        snippet="",
+    )
+
+
+def test_projected_bm25_gate_keeps_majority_hit_with_live_vector_lane():
+    """A live vector lane does not reimpose every-word presence on BM25-only hits.
+
+    The projected gate mirrors the public seam: a strict word majority plus
+    one content word. The target holds a majority including content words
+    but lacks the phrasing word "after"; under the retired contract it was
+    dropped whenever the vector lane produced any hit at all, and the
+    half-covered item still drops. The lane hits are constructed directly
+    because the projected index returns every measured variant — a
+    vector-silent BM25-only candidate cannot be built through
+    find_projected_hits.
+    """
+    target = _variant(
+        "Knowledge Base/target.md", "7" * 64, "the drift index measured 41.3 points"
+    )
+    half = _variant("Knowledge Base/half.md", "8" * 64, "the drift index")
+    other = _variant("Knowledge Base/other.md", "9" * 64, "unrelated greenhouse notes")
+    lane_hits = {
+        "vector": (_lexical_hit(other),),
+        "bm25": (_lexical_hit(target), _lexical_hit(half)),
+    }
+
+    retained = projection_runtime._retain_projected_bm25_hits(
+        lane_hits, "what did the drift index measure after"
+    )
+
+    assert [hit.item_identity for hit in retained] == [target.item_identity]
+
+
 def test_hybrid_retention_reads_cjk_runs_and_accent_folded_words(tmp_path):
     tower = _variant("Knowledge Base/tower.md", "5" * 64, "東京タワーの高さは三百メートル")
     weather = _variant("Knowledge Base/weather.md", "6" * 64, "東京の天気")
