@@ -25,6 +25,8 @@ from exomem import (
     epistemic_graph,
     freshness,
     lexstore,
+    request_budget,
+    working_set,
     working_set_index,
     working_set_marks,
     working_set_runtime,
@@ -467,3 +469,57 @@ def test_a_profile_says_when_its_edges_are_unknown_and_only_then(
 
     assert "display_edges" not in read
     assert read["generation"] != unread["generation"]
+
+
+def test_an_exhausted_request_budget_leaves_the_packet_unmarked_not_abstained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marks stage is optional: when the request's budget refuses it at the boundary the
+    packet serves without marks — the budget names the skipped stage — rather than abstaining."""
+    vault = _vault(tmp_path)
+    assert any("display" in unit for unit in _recall(vault)["units"])
+
+    real_exhausted = working_set.budget_exhausted
+
+    def exhausted(stage: str, **kwargs) -> bool:
+        if stage != "working_set.marks":
+            return real_exhausted(stage, **kwargs)
+        budget = request_budget.current()
+        if budget is not None:
+            budget.note_skipped(stage)
+        return True
+
+    monkeypatch.setattr(working_set, "budget_exhausted", exhausted)
+    working_set_runtime.reset_caches_for_tests()
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=60))
+    try:
+        packet = _recall(vault)
+    finally:
+        request_budget.reset_current(token)
+
+    assert packet["abstained"] is False
+    assert packet["units"], packet
+    assert all("display" not in unit for unit in packet["units"])
+    assert "display_edges" not in packet["generation"]
+    assert packet["request_budget"]["skipped"] == ["working_set.marks"]
+
+
+def test_a_budget_truncated_marks_read_leaves_the_packet_unmarked_not_abstained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marks stage may also expire mid-read: a checkpoint it crosses truncates the read to
+    an unmarked packet rather than propagating the exhaustion into an abstention."""
+    vault = _vault(tmp_path)
+    real_checkpoint = working_set.budget_checkpoint
+
+    def checkpoint(stage: str):
+        if stage == "working_set.marks":
+            raise working_set.BudgetExhausted(stage)
+        return real_checkpoint(stage)
+
+    monkeypatch.setattr(working_set, "budget_checkpoint", checkpoint)
+    packet = _recall(vault)
+
+    assert packet["abstained"] is False
+    assert packet["units"], packet
+    assert all("display" not in unit for unit in packet["units"])

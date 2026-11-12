@@ -677,14 +677,22 @@ def build_packet(
         qualified_sources=frozenset((key[0], key[1]) for key in outgoing_pointers),
     )
     packet_marks = None
-    if display_edges is not None:
+    if display_edges is not None and not budget_exhausted("working_set.marks"):
         from . import working_set_marks
 
-        packet_marks = working_set_marks.compile(
-            [item for item in ordered if not _redundant_superseded(item, present_paths)],
-            display_edges,
-            status_basis=status_basis,
-        )
+        try:
+            # Marks are optional enrichment: they run on a deadline that keeps the guard's
+            # stage reserve, and a read the budget truncates leaves the packet unmarked —
+            # the budget names the truncation — rather than abstaining it.
+            with request_budget.leaving(request_budget.ACTIVATION_STAGE_RESERVE_SECONDS):
+                packet_marks = working_set_marks.compile(
+                    [item for item in ordered if not _redundant_superseded(item, present_paths)],
+                    display_edges,
+                    status_basis=status_basis,
+                    checkpoint=lambda: budget_checkpoint("working_set.marks"),
+                )
+        except BudgetExhausted:
+            pass
 
     def _unit_of(item: LaneItem) -> dict[str, Any]:
         unit = _served_unit(item)

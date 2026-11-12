@@ -111,12 +111,21 @@ class PacketMarks:
 
 
 def compile(
-    items: Sequence[LaneItem], view: EdgeView, *, status_basis: Basis
+    items: Sequence[LaneItem],
+    view: EdgeView,
+    *,
+    status_basis: Basis,
+    checkpoint: Callable[[], None] | None = None,
 ) -> PacketMarks | None:
     """The marks of `items`, a packet's candidates in packet order, read in `view`.
 
     None when no item is a selected unit or no dimension names a display behaviour: the packet
     then reads no edges and carries no mark.
+
+    `checkpoint` is the request's deadline probe (`working_set.budget_checkpoint`): called once
+    before the registries load and once before the edge read, the two unbounded steps, so an
+    expiring budget leaves the packet unmarked instead of running into the next stage's
+    reserve.
     """
     from . import find, relation_registry, semantic_language_registry
     from .vocabulary.registry import PUBLIC_INSTANCE
@@ -124,6 +133,8 @@ def compile(
     hits = {item.ref: item.unit_hit for item in items if item.unit_hit is not None and item.ref}
     if not hits:
         return None
+    if checkpoint is not None:
+        checkpoint()
     language = semantic_language_registry.load_registry(view.root)
     displaying = [
         key
@@ -132,6 +143,8 @@ def compile(
     ]
     if not displaying:
         return None
+    if checkpoint is not None:
+        checkpoint()
     lookups = epistemic_dimensions.membership(
         language, relation_registry.load_registry(view.root), only=displaying
     )
