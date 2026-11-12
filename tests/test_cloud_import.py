@@ -457,6 +457,22 @@ def test_success_is_flushed_to_disk_before_it_is_reported(
     assert len(flushed) == flushed_before  # a refusal writes nothing, so nothing is flushed
 
 
+def test_an_unsupported_timestamp_does_not_refuse_a_valid_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows can lack no-follow timestamp updates; imported bytes must still land."""
+
+    def unsupported(*args, **kwargs) -> None:
+        raise NotImplementedError("utime: follow_symlinks unavailable on this platform")
+
+    monkeypatch.setattr(os, "utime", unsupported)
+    staging = tmp_path / "staging"
+    result = _unpack(_archive(_file("note.md", b"note\n")), staging)
+
+    assert result.files == 1
+    assert (staging / "note.md").read_bytes() == b"note\n"
+
+
 def _pax_member(name: str, data: bytes, pax: dict[str, str]) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:

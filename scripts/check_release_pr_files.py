@@ -27,8 +27,8 @@ from pathlib import Path
 _MANIFEST = ".release-please-manifest.json"
 #: Files release-please itself writes besides the configured extra files.
 _RELEASE_PLEASE_FILES = frozenset({_MANIFEST, "CHANGELOG.md"})
-#: The directory that release-please.yml's sync-cloud-artifacts job commits.
-_REGENERATED_CLOUD_PACKAGES = "plugins/cloud/generated/"
+#: The directories that release-please.yml's sync-cloud-artifacts job commits.
+_REGENERATED_PACKAGES = ("plugins/cloud/generated/", "plugins/claude-code/")
 #: release-please's generic updater rewrites only lines that carry this marker.
 _VERSION_MARKER = "x-release-please-version"
 
@@ -76,7 +76,7 @@ def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
         problems.append(f"{_MANIFEST}: the release PR does not change it")
     for file in files:
         for path in filter(None, (file["filename"], file.get("previous_filename"))):
-            if not (path in managed or path.startswith(_REGENERATED_CLOUD_PACKAGES)):
+            if not (path in managed or path.startswith(_REGENERATED_PACKAGES)):
                 problems.append(f"{path}: release-please does not manage this file")
         if file["filename"] not in generic:
             continue

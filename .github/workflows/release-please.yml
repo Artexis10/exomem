@@ -111,6 +111,11 @@ jobs:
       - name: Regenerate current Cloud packages for the source release
         run: uv run --frozen python scripts/cloud-plugin.py build
 
+      # The Claude Code plugin tree is committed too, and its skill text pins the
+      # release it was synced from; a version bump leaves it stale without this.
+      - name: Resync the Claude Code plugin for the source release
+        run: uv run --frozen exomem package-skills --plugin-root plugins/claude-code
+
       - name: Commit the resync onto the release PR
         run: |
           if git diff --quiet; then
@@ -119,8 +124,8 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add plugins/cloud/generated
-          git commit -m "chore(cloud): regenerate Cloud packages for the release"
+          git add plugins/cloud/generated plugins/claude-code
+          git commit -m "chore(cloud): regenerate Cloud packages and plugin for the release"
           git push
 
   # Every run finds the release it serves and checks which of its artifacts are
@@ -1099,3 +1104,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: python3 .release-tools/infra/scripts/release_recovery.py finish-images --tag "$TAG" --directory image-evidence
+
+  deploy-cells:
+    # automate-cloud-releases D1: start cloud-deploy on main once the tag's images
+    # and attestations are published. A dispatch is the only start that works:
+    # this run began from a github.token dispatch, so its completion fires no
+    # workflow_run. cloud-deploy reads the newest release itself.
+    needs: [plan, publish-image]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.dry_run != 'true' && needs.publish-image.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch cloud-deploy on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cloud-deploy.yml --ref main --repo "$GITHUB_REPOSITORY"

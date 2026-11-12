@@ -268,20 +268,24 @@ def test_the_gate_globs_select_the_chart_and_controller_build_inputs() -> None:
     ]
 
 
-def test_the_workflow_runs_only_after_a_release_tag_and_only_main_holds_its_token() -> None:
-    # Catches a run on every merge to main, and a deploy token that a branch can reach.
+def test_the_release_tag_run_dispatches_the_workflow_on_main_only() -> None:
+    # Catches a release that publishes and never deploys (v0.172.0-v0.174.0: the tag
+    # run's completion fired no workflow_run), and a deploy token that a branch can reach.
     workflow = yaml.safe_load((ROOT / ".github/workflows/cloud-deploy.yml").read_text(encoding="utf-8"))
     triggers = workflow[True]  # YAML 1.1 reads the `on` key as true.
     (job,) = workflow["jobs"].values()
+    release = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text(encoding="utf-8"))
+    dispatch = release["jobs"]["deploy-cells"]
 
-    assert triggers["workflow_run"] == {"workflows": ["release-please"], "types": ["completed"],
-                                        "branches": ["v*"]}
-    assert triggers["workflow_dispatch"] is None
-    assert "github.event.workflow_run.conclusion == 'success'" in job["if"]
-    assert "github.ref == 'refs/heads/main'" in job["if"]
+    assert triggers == {"workflow_dispatch": None}
+    assert job["if"] == "github.ref == 'refs/heads/main'"
     assert job["environment"] == "cloud-deploy"
     assert workflow["concurrency"] == {"group": "cloud-deploy", "cancel-in-progress": False}
     assert set(workflow["permissions"].values()) == {"read"}
+    assert "publish-image" in dispatch["needs"]
+    assert "needs.publish-image.result == 'success'" in dispatch["if"]
+    assert "needs.plan.outputs.dry_run != 'true'" in dispatch["if"]
+    assert dispatch["steps"][-1]["run"].startswith("gh workflow run cloud-deploy.yml --ref main")
 
 
 @pytest.mark.reads_repository_docs

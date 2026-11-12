@@ -49,4 +49,5 @@ This delivery adds pointer text to the design of each change below. It ticks no 
 - **Contracts:** `infra/contracts/upgrade-barriers-v1.json`, and four alert thresholds in the observability contract.
 - **CI:** the `cloud-deploy` workflow, and the `cloud-deploy` and `cloud-platform` GitHub environments.
 - **Scripts and runbooks:** the platform upgrade command, and updates to `docs/runbooks/cloud-platform-deploy.md`.
-- **Not changed:** the release workflow, unless task 2.1 shows that its tag run starts no `workflow_run`; then it gains one dispatch step. Also not changed: the D6 canary rule and its restore-based rollback, the Ready deadline, and the presence gate on a full chart upgrade.
+- **Changed in the release workflow:** one last job in its tag run dispatches `cloud-deploy` on `main`, because the tag run's completion starts no `workflow_run`.
+- **Not changed:** the D6 canary rule and its restore-based rollback, the Ready deadline, and the presence gate on a full chart upgrade.
