@@ -135,13 +135,7 @@ class _Derivation:
         return found[0]
 
     def target_exists(self, rel: str) -> bool:
-        if ownership.classify(rel) is ownership.Ownership.PAGE:
-            if self.tx.execute(
-                "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
-            ).fetchone():
-                return True
-            # No row: the disk decides, as it does for a path the store does not own.
-        return (self.root / rel).exists()
+        return read.link_target_exists(self.tx, self.root, rel)
 
     # ------------------------------------------------------------------ run
 

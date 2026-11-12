@@ -9285,7 +9285,30 @@ class EpistemicGraphIndex:
         sidecar that trails the live checkpoint only by such pages is read (`_open_read_snapshot`),
         and the rows' links resolve as they were derived (`_reader_resolver`, chosen before the
         read transaction opens). Without such a resolver the edges are temporarily unavailable.
+
+        In store mode the rows and the resolver read one store snapshot (`request_snapshot`, which
+        joins the request's own). Its rows are current at its revision, so there is no lag to
+        bridge, and the request's resolver is the one at that revision: a resolver of another
+        revision is another `find.recall_resolver_snapshot` identity.
         """
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        if not store_mode.store_mode_for_reads(self.vault_root):
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=False)
+        with store_read.request_snapshot(self.vault_root):
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=True)
+
+    def _unit_edges(
+        self,
+        keys: Iterable[str],
+        pages: Collection[str] | None,
+        keep: Callable[[str], bool] | None,
+        resolver: Callable[[], vault_module.WikilinkResolver] | None,
+        reader: Callable[[str], bool] | None,
+        *,
+        stored: bool,
+    ) -> UnitEdgeResult:
         requested_keys = [str(k) for k in keys if k]
         if not requested_keys or (pages is not None and not pages):
             return UnitEdgeResult(status="available")
@@ -9309,6 +9332,19 @@ class EpistemicGraphIndex:
             link_resolver = None
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
+        elif stored:
+            # The sidecar's lag bridge (`_reader_resolver`) has nothing to bridge here: the
+            # snapshot's own resolver fits its rows.
+            try:
+                link_resolver = (
+                    resolver()
+                    if resolver is not None
+                    else find_module.recall_resolver_snapshot(self.vault_root)
+                )
+            except find_module.RetrievalIndexWarming:
+                return UnitEdgeResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
         else:
             decided = self._reader_resolver(resolver)
             if decided is None:
@@ -14440,11 +14476,19 @@ class GraphView:
         try:
             with preparation as prepared:
                 self._check()
+                from .vault_store import mode as store_mode
                 from .vault_store import read as store_read
 
                 # A stored page's bytes and time are the store's: its file may be absent or stale.
                 stored = None if prepared is not None else store_read.owned_page_at(
                     self.vault_root, path
+                )
+                # A link lands as the store's commit derived it (`link_target_exists`), read from
+                # the snapshot that holds these rows; file mode asks the files.
+                target_exists = (
+                    (lambda rel: store_read.link_target_exists(self.conn, self.vault_root, rel))
+                    if store_mode.store_mode_for_reads(self.vault_root)
+                    else None
                 )
                 if prepared is not None:
                     raw, mtime = prepared.source, path.stat().st_mtime
@@ -14474,6 +14518,7 @@ class GraphView:
                     resolver=self._shared_resolver(), visible=self.keep,
                     check=self._check if bounded else None,
                     landing=self._snapshot_landing if bounded else None,
+                    target_exists=target_exists,
                 )
                 evidence = {}
                 rows = []

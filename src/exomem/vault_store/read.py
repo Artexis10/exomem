@@ -708,6 +708,20 @@ def holds_file(vault_root: Path, rel: str) -> bool:
         return False
 
 
+def link_target_exists(reader: Connection, vault_root: Path, rel: str) -> bool:
+    """Whether a typed link to ``rel`` lands on a page, as a commit derives the graph rows: the
+    store's page when ``reader``'s snapshot holds one at that page path, else the file.
+
+    A page path the store holds no row for is a file like any unowned one, as ``derive`` reads its
+    bytes. A graph reader that re-derives a page's links asks here, so they land as its rows did.
+    """
+    if ownership.classify(rel) is ownership.Ownership.PAGE and reader.execute(
+        "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
+    ).fetchone():
+        return True
+    return (_as_path(vault_root) / rel).exists()
+
+
 def served_lookup(vault_root: Path) -> Callable[[str], bool | None]:
     """``owned_meta``'s question for one pass over many paths: one query, not one per path.
 

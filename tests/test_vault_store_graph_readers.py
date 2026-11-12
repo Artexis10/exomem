@@ -75,10 +75,41 @@ PAGES = {
 }
 
 
-def write_pages(root):
-    for rel, text in PAGES.items():
+LAMP = f"{INSIGHTS}/Lamp Analysis.md"
+#: Units for the dimension reads, apart from the lantern claim's graph: an attributed claim derived
+#: from a survey (`attribution`, whose display reads that origin edge) and a claim that supports it
+#: (`argument`). A withheld third `Tide` makes the lantern claim's `[[Tide]]` resolve differently
+#: for the external caller, so that caller's reads re-derive the claim's edges in its own view.
+UNIT_PAGES = {
+    LAMP: (
+        "---\ntitle: Lamp Analysis\ntype: insight\n---\n# Lamp Analysis\n\n"
+        "## Claim\n- id: oil\n- asserted_by: Keeper team\n"
+        "- relations: derived_from: [[Lamp Survey]]\n\nThe lighthouse lamp burns oil.\n\n"
+        "## Claim\n- relations: supports: [[#oil]]\n\nThe lamp room smells of oil.\n"
+    ),
+    f"{INSIGHTS}/Lamp Survey.md": (
+        "---\ntitle: Lamp Survey\ntype: insight\n---\n# Lamp Survey\n\n"
+        "## Claim\n\nThe keepers counted the oil casks.\n"
+    ),
+    "Knowledge Base/Notes/Hidden/Tide.md": (
+        "---\ntitle: Tide\ntype: note\ntags: [secret]\n---\n# Tide\n\nA withheld tide note.\n"
+    ),
+}
+
+
+def write_pages(root, pages=PAGES):
+    for rel, text in pages.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text)
+
+
+def dimension_read(root, dimension):
+    """A unit search filtered by `dimension`, with the marks its group's display sets."""
+    answer = commands.op_ask_memory(
+        root, query="", mode="keyword", scope="kb-only", result_level="unit",
+        filters={"unit.dimension": {"$eq": dimension}}, limit=15,
+    )
+    return {"hits": answer["hits"], "groups": answer.get("dimension_groups")}
 
 
 def inbound(root, target):
@@ -110,6 +141,9 @@ def graph_answers(root):
             hit.path for hit in find.find(root, query="", relation_of=CLAIM, limit=15)
         ],
         "inbound": {rel: inbound(root, rel) for rel in (*PAGES, "Knowledge Base/Notes/Alpha.md")},
+        # Membership needs the typed edges; the attribution group's origin mark reads them.
+        "argument": dimension_read(root, "argument"),
+        "attribution": dimension_read(root, "attribution"),
     }
 
 
@@ -130,11 +164,15 @@ def test_each_graph_reader_answers_from_the_store_as_it_answers_in_file_mode(
     snapshot, drops the restricted caller's filter, or stats a stored page's file per read."""
     restrict_external(vault, 'tags: ["secret"]')
     write_pages(vault)
+    write_pages(vault, UNIT_PAGES)
     build_indexes(vault)
     find.clear_cache()
     in_file_mode = answers_for_both_callers(vault)
     owner, external = in_file_mode["owner"], in_file_mode["external"]
     assert owner["supports"] and owner["context"]["edges"] and owner["ask"]
+    for caller in (owner, external):
+        assert "Lamp Analysis" in {hit["parent_title"] for hit in caller["argument"]["hits"]}
+        assert any(hit.get("display") for hit in caller["attribution"]["hits"])
     assert {row[0] for row in owner["inbound"][CLAIM][1]} == {EVIDENCE, SECRET, OUTSIDE}
     assert SECRET not in {row[0] for row in external["inbound"][CLAIM][1]}
     assert migrate_apply(vault) == 0
@@ -153,6 +191,7 @@ def test_each_graph_reader_answers_from_the_store_as_it_answers_in_file_mode(
         (vaults, "_build_inbound_index"),
         (find, "schedule_inbound_rebuild"),
         (lexstore, "_schedule_repair"),
+        (epistemic_graph, "_sqlite_connect_owned"),
     ):
         monkeypatch.setattr(
             owner_module, name, lambda *a, _name=name, **k: machinery.append(_name)
