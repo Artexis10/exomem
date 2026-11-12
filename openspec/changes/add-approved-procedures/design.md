@@ -96,6 +96,14 @@ The ledger can also roll back by deletion. Deleting a `revoke` file, or restorin
 
 The approve result shows what changed in the page since the last version approved for that ref, taken from the page's retained history. It says when that version is not recoverable. The owner then sees what the endorsement newly covers.
 
+### Proof environment
+
+Persistent host memory can hide a missing Exomem read. Controlled behavioural proof therefore uses a fresh Claude Code or Codex conversation. Disable persistent memory generation and use. Exclude personal instruction files, saved harness context and unrelated installed hooks, plugins and MCP servers. Keep the Exomem components under test, the native model scaffold and native permission controls.
+
+Record the effective configuration, instruction provenance, source turns, Exomem tool calls and raw answers. Reusing an approved profile or warm fixture is allowed when those records verify context isolation. A failed isolation check leaves the affected result unverified; it does not change ordinary users' access.
+
+Verify public tool discovery and the packaged contract on the installed release. Track client action-cache refresh as separate compatibility work. Memory or background guidance from a chat application cannot supply behavioural acceptance evidence. Historical observations retain their original scope and establish isolation only when their records show it.
+
 ## Controls
 
 - **An unreadable entry returns `unapproved` for its ref.** It prevents an agent from treating an unendorsed or revoked procedure as endorsed. When it fires wrongly, one ref reads as reference and its content stays readable. The owner pays until a re-approval or a `quarantine`, and the cost stays bounded to that ref. Authority is the one place where fail-closed is right, because an unexpected entry means something is wrong.
@@ -106,7 +114,7 @@ The approve result shows what changed in the page since the last version approve
 ## Risks and trade-offs
 
 - **Server-made rewrites mark approval stale.** A link rewrite or an `updated:` stamp changes bytes. We accept this and show `stale` to the owner. Excluding such fields from the version would make the version depend on which bytes the server may touch.
-- **The tool surface changes.** The new tool changes the surface digest. Release needs the ChatGPT schema refresh, the schema budget bump and regenerated capabilities documentation.
+- **The tool surface changes.** The new tool changes the surface digest. Release needs the schema budget update, regenerated capabilities documentation and native discovery verification. Client action caches may need a separate refresh; their state does not prove procedure behaviour.
 - **A model may call approve on injected text.** The hostile real-model run decides this, with a shell-capable agent and with host prompts on. If deciding agents call `approve_procedure`, run the CLI or write a ledger file on injected text, remove the tool from MCP and from the generated CLI. Approval then goes through the terminal UI only, `exomem tui`, which requires a terminal. That route stops an agent that acts by tool call or by accident. It does not stop an agent that reads the key and writes an entry by hand, which is the boundary above. The ledger, the verdict and the delivery stay as specified.
 - **Ledger growth.** The ledger grows by one file per owner action, so no compaction is planned. The verdict reads the entry files of the refs that a request names.
 - **Store mode.** The open change `make-vault-store-canonical` makes a SQLite store canonical for pages and projects Markdown from it. The entry files are not pages. That change needs a store-mode rule for these non-page reserved files, so that they stay plain files that the projector neither imports as pages nor overwrites. Until that rule exists, the ledger is file-backed in both modes.
