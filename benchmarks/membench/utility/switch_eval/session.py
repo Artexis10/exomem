@@ -83,10 +83,10 @@ STRUCK = "struck"
 API_KEY_VARIABLES: tuple[str, ...] = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 #: Assistant ``error`` kinds the CLI documents. A rate limit, a server error or
-#: an unknown error is the provider's or the transport's; authentication and
-#: billing errors, and a refused request, are the harness's setup.
+#: an unknown error is the provider's or the transport's; authentication
+#: errors and a refused request are the harness's setup.
 _FAULT_ERRORS = {"rate_limit": "rate_limit", "server_error": "transport", "unknown": "transport"}
-_ABORT_ERRORS = frozenset({"authentication_failed", "billing_error", "invalid_request"})
+_ABORT_ERRORS = frozenset({"authentication_failed", "invalid_request"})
 #: The Agent SDK's assistant-message error for a credit balance that cannot pay. A run whose
 #: actor meets it stops at once, like a rejected subscription limit: no retries, no scored loss.
 BILLING_ERROR = "billing_error"
@@ -136,7 +136,7 @@ class RunAborted(RuntimeError):
 
 
 class RunPaused(RuntimeError):
-    """A spent quota; the run resumes later with unchanged inputs."""
+    """An account limit; resume with unchanged inputs after quota resets or credits are funded."""
 
 
 @dataclass(frozen=True)
@@ -510,7 +510,7 @@ def classify(
     if quota is not None:
         return AttemptResult(
             QUOTA,
-            "quota",
+            BILLING_ERROR if quota.get("limit") == "credits" else "quota",
             json.dumps(quota),
             resets_at=quota.get("resetsAt"),
             turns=list(turn_records),
@@ -1108,9 +1108,12 @@ def run_session(inputs: SessionInputs, session_dir: Path, execute: Executor) -> 
         with open(log_path, "a", encoding="utf-8") as log:
             log.write(json.dumps(entry, sort_keys=True) + "\n")
         if result.outcome == QUOTA:
-            raise RunPaused(
-                f"session {inputs.planned.session_id}: quota spent (resets at {result.resets_at})"
+            message = (
+                "credit funds exhausted; funding required before resuming"
+                if result.kind == BILLING_ERROR
+                else f"quota spent (resets at {result.resets_at})"
             )
+            raise RunPaused(f"session {inputs.planned.session_id}: {message}")
         if result.outcome == ABORT:
             raise RunAborted(f"session {inputs.planned.session_id}: {result.kind}: {result.detail}")
         if result.outcome == HARNESS_FAULT and faults + 1 <= protocol.HARNESS_FAULT_RETRIES:
