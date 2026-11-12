@@ -189,13 +189,13 @@
 ## 4. Phase 3: platform upgrade command (D7)
 
 - [ ] 4.1 Make `cellctl` refuse to start when a table or column that it reads or writes is missing or unreadable, the image history included. Expose the same check for the command. Verify: a test against a schema without one column, and one without the read grant on the history table, stops the start and names the gap. It catches a controller that acts on half a schema.
-- [ ] 4.2 Add `infra/scripts/platform_upgrade.py` with the machine review, the upgrade, the verify step, the platform Deployment record and the dispatch. Verify with tests on recorded tool output:
+- [x] 4.2 Add `infra/scripts/platform_upgrade.py` with the machine review, the upgrade, the verify step, the platform Deployment record and the dispatch. Verify with tests on recorded tool output:
   - each failing review step stops the command before any change, which catches an upgrade that runs past a failed check;
   - a secret contract change with no barrier entry stops the command, which catches an operator-step release applied without its step;
   - a crossed one-way barrier removes `--atomic`, and every other upgrade keeps it, which catches a Helm rollback across a one-way change;
   - a success dispatches `cloud-deploy` with `--ref main`, which catches a platform upgrade after which cells never move;
   - a failed upgrade records `failure`, no `success` and no dispatch, which catches cells that move onto a failed platform.
-- [ ] 4.3 Replace the runbook's manual upgrade steps with the command, and keep the manual steps as the fallback. Verify: an upgrade with the command on the rehearsal cluster records the platform Deployment, and the `cloud-deploy` workflow then runs. It catches a command whose record or dispatch the live GitHub settings refuse.
+- [ ] 4.3 (Runbook merged here; open until the rehearsal upgrade runs the command.) Replace the runbook's manual upgrade steps with the command, and keep the manual steps as the fallback. Verify: an upgrade with the command on the rehearsal cluster records the platform Deployment, and the `cloud-deploy` workflow then runs. It catches a command whose record or dispatch the live GitHub settings refuse.
 
 ## 5. Later phase: deploy tier and prepare Job (D7, D9)
 

@@ -201,63 +201,34 @@ infra/scripts/apply_active_sops_secrets.py \
 
 ## Render and upgrade the release
 
-Helm loads the chart's own `values.yaml` as the defaults, so pass only the private values file.
-Do not add `--values infra/helm/platform/values.yaml`. That second pass turns the default
-`cellStorage.local.maxCellGib: null` into a deleted key, and the schema then refuses the render with
-`missing property 'maxCellGib'`.
+### Upgrade with the command
 
-### Review the release
-
-Run these steps before every upgrade. `EXOMEM_UPGRADE_DIR` is a private directory outside the repository.
-A render holds the private values, so keep it out of tickets and chat.
+`infra/scripts/platform_upgrade.py` runs the review, the upgrade, the verify, the platform
+Deployment record and the `cloud-deploy` dispatch as one command (automate-cloud-releases D7).
+Each review step stops the command before anything changes. `EXOMEM_UPGRADE_DIR` is a private
+directory outside the repository; the command keeps the tag's checkout, the render and the
+dry run there. A render holds the private values, so keep it out of tickets and chat.
 
 ```bash
 : "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
 : "${EXOMEM_UPGRADE_DIR:?set a private upgrade directory outside the repository}"
+: "${EXOMEM_CELLCTL_DSN:?set the control database DSN for the schema check}"
 umask 077
+uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
+  --crossed <barrier-id>   # repeat for each barrier the upgrade crosses, after its runbook step
 ```
 
-1. Build the chart dependencies. The script registers each chart repository, then runs `helm dependency build`.
+- The command reads the live release's tag from the Helm release description it writes on every
+  upgrade (`platform-v<tag>`). A platform it has not upgraded yet needs `--from <tag>` once.
+- A `platform` barrier between the live release and the tag needs its runbook step done first,
+  then `--crossed <id>`; a `one-way` barrier removes `--atomic` for that upgrade.
+- A secret-contract change with no barrier entry stops the command and names the omission.
+- On success it records the platform Deployment and dispatches `cloud-deploy`; on a failed
+  upgrade it records `failure` and dispatches nothing.
 
-   ```bash
-   uv run --frozen python infra/scripts/helm_dependencies.py infra/helm/platform
-   ```
-
-   Expect one archive in `infra/helm/platform/charts/` for each dependency in `Chart.yaml`.
-   A missing archive stops every render, even for a dependency that is off.
-2. Render the new release without the cluster. `--no-hooks` leaves out the hook objects, which `helm get manifest` never holds.
-
-   ```bash
-   helm template exomem-platform infra/helm/platform --namespace exomem-platform --no-hooks \
-     --values "$EXOMEM_PLATFORM_VALUES" > "$EXOMEM_UPGRADE_DIR/new.yaml"
-   ```
-
-   Expect no error. A schema error names the key to change.
-3. Save the manifest of the live release.
-
-   ```bash
-   helm get manifest exomem-platform --namespace exomem-platform > "$EXOMEM_UPGRADE_DIR/live.yaml"
-   ```
-
-4. Compare the two manifests. Name each added, removed or changed object, and each workload whose pod template changes.
-
-   ```bash
-   diff -u "$EXOMEM_UPGRADE_DIR/live.yaml" "$EXOMEM_UPGRADE_DIR/new.yaml"
-   ```
-
-   Expect only changes that the release should make. `helm template` cannot read the cluster, so its render can add
-   the scheduler's state ConfigMaps that the live release omits. Accept only those extra objects.
-5. Run a server-side dry run of the upgrade. It prints the whole render, so write the output to the private directory.
-
-   ```bash
-   helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
-     --values "$EXOMEM_PLATFORM_VALUES" --dry-run=server > "$EXOMEM_UPGRADE_DIR/dry-run.yaml"
-   ```
-
-   Expect no error. A `lookup` check or an ownership conflict names the object.
-
-Expected result: the render has no error, the diff holds only the changes that the release should make,
-and the dry run ends without an error.
+Expected result: the command prints `recorded the platform Deployment for <tag>` and
+`dispatched cloud-deploy.yml on main`, and the next `cloud-deploy` run ends with
+`cloud-deploy: CANARY_ON_TARGET` or `cloud-deploy: CELL_IMAGE_CURRENT`.
 
 ### Cross the backup key conversion
 
@@ -360,7 +331,70 @@ Expected result: after a rollback, the count is 0, the copy is gone and the old 
 change there, find the cause and start again from "Before the upgrade".
 After a fix forward, the upgrade ends without an error.
 
-### Upgrade the release
+### Manual fallback
+
+Use these steps when the command cannot run or a review step needs a hand check. An upgrade
+that crosses 0.147.0 also needs "Cross the backup key conversion" above, whichever path runs it.
+
+Helm loads the chart's own `values.yaml` as the defaults, so pass only the private values file.
+Do not add `--values infra/helm/platform/values.yaml`. That second pass turns the default
+`cellStorage.local.maxCellGib: null` into a deleted key, and the schema then refuses the render with
+`missing property 'maxCellGib'`.
+
+#### Review the release
+
+Run these steps before every upgrade. `EXOMEM_UPGRADE_DIR` is a private directory outside the repository.
+A render holds the private values, so keep it out of tickets and chat.
+
+```bash
+: "${EXOMEM_PLATFORM_VALUES:?set the reviewed private platform values path}"
+: "${EXOMEM_UPGRADE_DIR:?set a private upgrade directory outside the repository}"
+umask 077
+```
+
+1. Build the chart dependencies. The script registers each chart repository, then runs `helm dependency build`.
+
+   ```bash
+   uv run --frozen python infra/scripts/helm_dependencies.py infra/helm/platform
+   ```
+
+   Expect one archive in `infra/helm/platform/charts/` for each dependency in `Chart.yaml`.
+   A missing archive stops every render, even for a dependency that is off.
+2. Render the new release without the cluster. `--no-hooks` leaves out the hook objects, which `helm get manifest` never holds.
+
+   ```bash
+   helm template exomem-platform infra/helm/platform --namespace exomem-platform --no-hooks \
+     --values "$EXOMEM_PLATFORM_VALUES" > "$EXOMEM_UPGRADE_DIR/new.yaml"
+   ```
+
+   Expect no error. A schema error names the key to change.
+3. Save the manifest of the live release.
+
+   ```bash
+   helm get manifest exomem-platform --namespace exomem-platform > "$EXOMEM_UPGRADE_DIR/live.yaml"
+   ```
+
+4. Compare the two manifests. Name each added, removed or changed object, and each workload whose pod template changes.
+
+   ```bash
+   diff -u "$EXOMEM_UPGRADE_DIR/live.yaml" "$EXOMEM_UPGRADE_DIR/new.yaml"
+   ```
+
+   Expect only changes that the release should make. `helm template` cannot read the cluster, so its render can add
+   the scheduler's state ConfigMaps that the live release omits. Accept only those extra objects.
+5. Run a server-side dry run of the upgrade. It prints the whole render, so write the output to the private directory.
+
+   ```bash
+   helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
+     --values "$EXOMEM_PLATFORM_VALUES" --dry-run=server > "$EXOMEM_UPGRADE_DIR/dry-run.yaml"
+   ```
+
+   Expect no error. A `lookup` check or an ownership conflict names the object.
+
+Expected result: the render has no error, the diff holds only the changes that the release should make,
+and the dry run ends without an error.
+
+#### Upgrade the release
 
 1. Apply the namespaces.
 
@@ -403,7 +437,7 @@ runs the pause with the cell's own image. Until the rollout reaches a cell,
 each export of that cell fails with `EXPORT_FAILED`. The owner retries it
 after the rollout.
 
-## Verify
+#### Verify
 
 ```bash
 kubectl -n exomem-cloud wait --for=condition=Available deployment/cellctl --timeout=180s
@@ -416,7 +450,7 @@ kubectl get storageclass exomem-cloud-encrypted
 
 Both scheduler CronJobs must print `suspend=false` while Cloud is enabled.
 
-## Record the platform Deployment
+#### Record the platform Deployment
 
 The `cloud-deploy` workflow sets a release's cell image only when the platform runs that release's chart and
 controller. A GitHub Deployment in the `cloud-platform` environment records which release the platform runs.
