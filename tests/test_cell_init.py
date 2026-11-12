@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import cell_init, state_migration
+from exomem import cell_init, package_skills, state_migration
 from exomem.__main__ import _cell_init_main
 from exomem.governance import store as governance_store
 from exomem.kbdir import kb_dirname
@@ -138,19 +138,20 @@ def test_cell_init_atomic_vault_init_survives_a_crash_during_scaffold_copy(
     over a truncated vault (the pre-fix partial-vault cases) -- design D3.2.
     """
     vault = tmp_path / "vault"
-    real_copy2 = shutil.copy2
+    # Every scaffold file is copied through this one function.
+    real_copy = package_skills.copy_shipped_file
     calls = {"n": 0}
 
-    def flaky_copy2(src, dst, *args, **kwargs):
+    def flaky_copy(src, dst):
         calls["n"] += 1
         if calls["n"] > crash_after:
             raise RuntimeError("simulated crash during scaffold copy")
-        return real_copy2(src, dst, *args, **kwargs)
+        return real_copy(src, dst)
 
-    monkeypatch.setattr(shutil, "copy2", flaky_copy2)
+    monkeypatch.setattr(package_skills, "copy_shipped_file", flaky_copy)
     with pytest.raises(cell_init.CellInitError, match="CELL_INIT_VAULT_FAILED"):
         cell_init.run_cell_init(vault)
-    monkeypatch.setattr(shutil, "copy2", real_copy2)
+    monkeypatch.setattr(package_skills, "copy_shipped_file", real_copy)
 
     # Neither wedged (FileExistsError) nor a partial vault: a clean re-run
     # must produce a complete one.
