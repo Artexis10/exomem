@@ -1,13 +1,13 @@
 ## 1. Provider facts (D2, D4, D5)
 
-- [ ] 1.1 On a disposable bucket with Object Lock in compliance mode, with sandbox credentials that the operator authorizes, check five points:
+- [x] 1.1 On a disposable bucket with Object Lock in compliance mode, with sandbox credentials that the operator authorizes, check five points:
   - † a key limited to the bucket and a prefix, with only `listFiles` and `writeFiles`, hides a locked current version;
   - † the lifecycle rule deletes a hidden locked version only after its lock lapses, and deletes it then; record the delay after the due day;
   - † the provider does or does not let a key delete a hide marker in the locked bucket;
   - † an expired key does or does not appear in the key listing;
   - † a key with only `listFiles` sees the `start` entries of unfinished large files.
 
-  Verify: the results are recorded in design.md, and each point marked † in this change is confirmed or corrected.
+  Verify: the results are recorded in design.md, and each point marked † in this change is confirmed or corrected. (2026-11-09 to 2026-11-12, disposable bucket in the cell-data account, deleted afterwards. The lifecycle point is confirmed in part: the provider refuses to delete a locked version, and the hidden version was gone after the lapse. The read while still locked was lost.)
 
 ## 2. Substrate (D1, D4)
 
