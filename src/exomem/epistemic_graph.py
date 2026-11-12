@@ -9473,6 +9473,8 @@ class EpistemicGraphIndex:
                 "AND ids.exomem_id = n.exomem_id) END, n.page_type, n.tags_json, n.metadata "
                 "FROM graph_nodes n WHERE n.kind = 'file' ORDER BY n.path"
             ).fetchall()
+            # Retain these already-read endpoints for menus; no extra query or page read.
+            menu_rows = {str(row[0]): row for row in rows}
             rows = [
                 row for row in rows
                 if activation.structurally_eligible(
@@ -9766,7 +9768,7 @@ class EpistemicGraphIndex:
             retype_by_source = relation_sensor.retype_candidates_many(
                 conn, selected_registries, sensed_by_key
             )
-            # File keys uniquely address menu endpoints; a kind filter makes SQLite scan the corpus.
+            # Only bounded candidate endpoints need their structural frontmatter decoded.
             menu_paths = set(selected)
             menu_paths.update(str(row[2]) for row in wiki_and_authored_rows[:branch_cap])
             for candidate_rows in (
@@ -9778,14 +9780,9 @@ class EpistemicGraphIndex:
                 for candidates in retype_by_source.values() for candidate in candidates
             )
             menu_pages = {
-                str(row[0]): relation_sensor._page_from_row(row)
-                for row in conn.execute(
-                    "SELECT path, title, page_type, metadata, source_hash FROM graph_nodes "
-                    "WHERE node_key IN "
-                    "(SELECT 'file:' || value FROM json_each(?))",
-                    (json.dumps(sorted(menu_paths)),),
-                ).fetchall()
-                if _recall_path_allowed(self.vault_root, str(row[0]))
+                path: relation_sensor._page_from_row((row[0], row[1], row[6], row[8], row[2]))
+                for path in menu_paths if (row := menu_rows.get(path)) is not None
+                and _recall_path_allowed(self.vault_root, path)
             }
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
