@@ -48,7 +48,12 @@ def answers_of(stage_b: Sequence[Path], stage_c: Sequence[Path]) -> list[tuple[d
     for row in read_rows(stage_c, identity=session_score.run_identity)[0]:
         replies = row.get("replies") or []
         if row["error"] is None and replies and replies[-1]:
-            found.append(({"stage": "C", "client_mode": row.get("client_mode"), **{k: row[k] for k in ("scenario", "arm", "model", "repeat")}}, row["scenario"], replies[-1]))
+            reply = replies[-1]
+            stream = row.get("stream")
+            if isinstance(stream, str) and Path(stream).is_absolute():
+                # The recorded runtime directory encodes the arm; keep it out of the blind view.
+                reply = reply.replace(str(Path(stream).parent), "<session-workdir>")
+            found.append(({"stage": "C", "client_mode": row.get("client_mode"), **{k: row[k] for k in ("scenario", "arm", "model", "repeat")}}, row["scenario"], reply))
     return found
 
 
