@@ -167,10 +167,10 @@ def load_cases(selector: str, case_dir: Path | None = None) -> list[Case]:
 # --------------------------------------------------------------------------
 
 
-def pinned_env(arm: Arm, work: Path, case: Case) -> dict[str, str]:
+def pinned_env(arm: Arm, work: Path, case: Case, activation_packet: str | None = None) -> dict[str, str]:
     """The arm's interpreter path and a state tree under `work`: a real vault or service state is never reachable."""
     state = work / "state"
-    return worker_env(arm, work / "scratch") | {
+    return worker_env(arm, work / "scratch", activation_packet) | {
         "EXOMEM_VAULT_PATH": str(work / "vault"),
         "EXOMEM_STATE_ROOT": str(state),
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(state / "lease"),
@@ -716,6 +716,7 @@ def run_session(
     credits: CreditsRun | None = None,
     ready_graph: bool = False,
     hook_inject: str = DEFAULT_HOOK_INJECT,
+    activation_packet: str | None = None,
 ) -> dict:
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
@@ -723,7 +724,7 @@ def run_session(
     shutil.rmtree(work, ignore_errors=True)
     for name in ("cwd", "hook-home", "logs", "scratch"):
         (work / name).mkdir(parents=True)
-    env = pinned_env(arm, work, case)
+    env = pinned_env(arm, work, case, activation_packet)
     files = stage_agent_files(arm, work, env, client_mode)
     argv = agent_argv(executable, files, model, credits)
     row: dict = {
@@ -733,6 +734,7 @@ def run_session(
         "arm": arm.label,
         "client_mode": client_mode,
         "hook_inject": hook_inject,
+        **({"activation_packet": activation_packet} if activation_packet is not None else {}),
         **transport_metadata(credits),
         "argv": argv,
         "settings": json.loads(files["settings"].read_text(encoding="utf-8")),
@@ -808,6 +810,7 @@ def run_all(
     credits: CreditsRun | None = None,
     ready_graph: bool = False,
     hook_inject: str = DEFAULT_HOOK_INJECT,
+    activation_packet: str | None = None,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
     if hooked and client_mode == "tool-only":
@@ -847,6 +850,7 @@ def run_all(
                         credits=credits,
                         ready_graph=ready_graph,
                         hook_inject=hook_inject,
+                        activation_packet=activation_packet,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
@@ -869,6 +873,7 @@ def dry_run(
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
     ready_graph: bool = False,
+    activation_packet: str | None = None,
 ) -> list[str]:
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
@@ -880,7 +885,7 @@ def dry_run(
     shutil.rmtree(work, ignore_errors=True)
     for name in ("hook-home", "logs", "scratch"):
         (work / name).mkdir(parents=True)
-    env = pinned_env(arm, work, case)
+    env = pinned_env(arm, work, case, activation_packet)
     try:
         seed_vault(case, arm, work, env, ready_graph)
         stage_agent_files(arm, work, env, client_mode)

@@ -1,0 +1,11 @@
+{
+  "id": "f09-code-ok",
+  "title": "A short acknowledgement after a repository parser review",
+  "suite": "session-close",
+  "seed": "fu-repository",
+  "engagement": "balanced",
+  "turns": [
+    "I am reviewing a parser fix in my Alderframe CLI repository. The fix handles an empty argument list without changing public argument names. Check the saved repository guidance and tell me the two relevant checks. This is a review only; no edit or delivery is requested.",
+    "ok"
+  ]
+}

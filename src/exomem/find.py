@@ -4928,7 +4928,8 @@ def _resolve_relation_filter(
         anchor=relation_of,
         direction=relation_direction,
         keep=view,
-        resolver=_request_resolver(vault_root, snapshot)() if view is not None else None,
+        resolver=_request_resolver(vault_root, snapshot) if view is not None else None,
+        reader=egress.visible_page_filter(vault_root) if view is not None else None,
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
@@ -7943,7 +7944,8 @@ def _outbound_wikilink_paths(
 
 
 _RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
-_RECALL_RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
+# The publication token names the exact maps, including checkpointless builds and in-place patches.
+_RECALL_RESOLVER_CACHE: dict[Path, tuple[tuple, object, object]] = {}
 # The writer resolver has the same event-stream contract as the projected
 # resolver: it may advance only from the exact broad checkpoint that built it.
 _RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
@@ -8432,7 +8434,7 @@ def recall_resolver_snapshot(
             # graph rebuild performs its stronger direct before/after proof
             # around sidecar publication.
             if _RECALL_RESOLVER_GENERATIONS.get(root) == generation:
-                _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+                _RECALL_RESOLVER_CACHE[root] = (identity, resolver, object())
                 if checkpoint is not None:
                     _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
                 else:
@@ -8481,13 +8483,13 @@ def recall_resolver_snapshot_at_checkpoint(
 
 def borrow_recall_resolver(
     vault_root: Path,
-) -> tuple[WikilinkResolver, freshness.RecallFreshnessCheckpoint | None] | None:
-    """A copy of the resident recall resolver and the live checkpoint it stands at, or None when
+) -> tuple[WikilinkResolver, freshness.RecallFreshnessCheckpoint | None, object] | None:
+    """A copy of the resident recall resolver, its checkpoint and publication token, or None when
     none is resident. Never builds.
 
     The checkpoint is None when the resolver was built from a direct disk proof. The caller proves
     that the copy fits what it reads. The copy is taken under the lock, because a publisher patches
-    the resident resolver in place.
+    the resident resolver in place. The token identifies the exact maps copied under that lock.
     """
     root = Path(vault_root)
     with _RESOLVER_LOCK:
@@ -8499,8 +8501,8 @@ def borrow_recall_resolver(
             checkpoint is not None
             and cached[0] == _recall_checkpoint_identity(checkpoint)
         ):
-            return cached[1].fork(), checkpoint
-        return cached[1].fork(), None
+            return cached[1].fork(), checkpoint, cached[2]
+        return cached[1].fork(), None, cached[2]
 
 
 def prime_resolver_from_entries(
@@ -8770,7 +8772,7 @@ def on_resolver_files_changed(
         return
     from . import vault as vault_module
 
-    cached_identity, projected = projected_cached
+    cached_identity, projected, _publication = projected_cached
     checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
 
     # A supplied event batch can be incomplete or arrive out of order. Advance
@@ -8866,6 +8868,7 @@ def on_resolver_files_changed(
             _RECALL_RESOLVER_CACHE[root] = (
                 _recall_checkpoint_identity(delta.to),
                 projected,
+                object(),
             )
             _RECALL_RESOLVER_CHECKPOINTS[root] = delta.to
     except Exception:  # noqa: BLE001 - a partial resolver must never publish.

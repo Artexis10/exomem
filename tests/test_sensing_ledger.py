@@ -73,6 +73,29 @@ def test_append_is_idempotent_and_lookups_are_by_content(tmp_path: Path) -> None
     conn.close()
 
 
+def test_batch_lookup_keeps_content_groups_and_instrument_filter(tmp_path: Path) -> None:
+    ledger = sensing_ledger.Ledger(tmp_path / "vault")
+    conn = ledger.connect()
+    first = reading("A holds.", "A does not hold.")
+    other = dataclasses.replace(IDENTITY, revision="1")
+    same_content = reading("A holds.", "A does not hold.", identity=other)
+    second = reading("B holds.", "B does not hold.")
+    ledger.append(conn, [first, same_content, second])
+    queries = []
+    conn.set_trace_callback(queries.append)
+    found = sensing_ledger.by_input_keys(
+        conn, sensing.PAIR_RELATION, [first.input_key, second.input_key, "missing"],
+        instrument_ids=[IDENTITY.instrument_id],
+    )
+    conn.set_trace_callback(None)
+    assert len(queries) == 1
+    assert [row.reading_id for row in found[first.input_key]] == [first.reading_id]
+    assert [row.reading_id for row in found[second.input_key]] == [second.reading_id]
+    assert found["missing"] == []
+    assert [row.reading_id for row in sensing_ledger.by_input_key(conn, sensing.PAIR_RELATION, first.input_key)] == sorted([first.reading_id, same_content.reading_id])
+    conn.close()
+
+
 def test_updates_and_deletes_are_refused(tmp_path: Path) -> None:
     ledger = sensing_ledger.Ledger(tmp_path / "vault")
     conn = ledger.connect()

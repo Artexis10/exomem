@@ -37,7 +37,7 @@ import math
 import sqlite3
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,11 +47,9 @@ from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
 
-#: 2 added each page's content hash and each pair's instrument key, so a request
-#: can tell a projection that no longer describes the live page. 3 caps each
-#: page pair instead of each page, and is rebuilt from the ledger without
-#: re-sensing.
-SCHEMA_VERSION = 4
+#: Rebuild this disposable projection for relation rows bound to both page hashes.
+#: The append-only ledger stays untouched and supplies prior readings on reseed.
+SCHEMA_VERSION = 7
 FILENAME = "projection.sqlite"
 # This internal namespace belongs to the fixed unit-proposer queue protocol.
 _PAIR_JOB_SCOPE = ("pair-proposer", "units-v1")
@@ -140,6 +138,14 @@ _TABLES = (
     "PRIMARY KEY(owner, scope_key, request_key))",
     "CREATE INDEX IF NOT EXISTS sense_jobs_order ON sense_jobs(priority, order_key, owner, scope_key, request_key)",
     "CREATE INDEX IF NOT EXISTS sense_jobs_input ON sense_jobs(question_type, input_key)",
+    # relation.type's projected verdicts, one row per requested link. Rows are
+    # New inputs land pending (verdict NULL); unchanged inputs keep their verdicts.
+    "CREATE TABLE IF NOT EXISTS relation_sensed ("
+    "request_key TEXT PRIMARY KEY, source_path TEXT NOT NULL, target_path TEXT NOT NULL, "
+    "anchor TEXT, kind TEXT NOT NULL, reading_id TEXT, instrument_id TEXT, "
+    "verdict TEXT, p REAL, menu_digest TEXT NOT NULL, input_key TEXT NOT NULL, "
+    "source_hash TEXT NOT NULL, target_hash TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS relation_sensed_source ON relation_sensed(source_path)",
 )
 
 
@@ -170,6 +176,10 @@ def active_instruments(
     means no reading is consumed, so the status degrades to absence.
     """
     sensing.question(question_type)
+    if question_type == sensing.RELATION_TYPE:
+        from . import sensing_llm
+
+        return sensing_llm.active_instruments()
     if question_type != sensing.PAIR_RELATION:
         return {}
     from . import sensing_nli
@@ -1027,7 +1037,7 @@ def run_tick(
         _follow_active(store, conn, ledger, active, label_map_version, report, halt)
         _ingest(store, conn, ledger, active, label_map_version, report, halt)
         cosine = _follow_cosine(vault_root, store, conn)
-        _follow_pages(
+        rel_changed, rel_removed = _follow_pages(
             vault_root,
             store,
             conn,
@@ -1041,8 +1051,24 @@ def run_tick(
             cosine,
         )
         _follow_seeding(store, conn, seen)
-        with store.write(conn):
-            _retire_satisfied(conn, ledger)
+        # Submissions use their own producer connection; the tables they leave
+        # are applied inside the write transaction below. Without an admitted
+        # instrument neither the relation producer nor verdict ingestion runs.
+        from . import sensing_llm
+
+        if sensing_llm.active_instruments():
+            if halt() is None:
+                with store.write(conn):
+                    _relation_ingest(conn, ledger)
+            relation_result = _relation_producer(
+                vault_root, conn, rel_changed, report, halt
+            )
+            with store.write(conn):
+                _relation_bookkeeping(conn, rel_removed, relation_result)
+                _retire_satisfied(conn, ledger)
+        else:
+            with store.write(conn):
+                _retire_satisfied(conn, ledger)
     except Exception:  # noqa: BLE001 - sensing never fails a dreamer tick
         log.warning("sensed model: tick failed", exc_info=True)
         report.stop = "error"
@@ -1052,6 +1078,70 @@ def run_tick(
         if conn is not None:
             conn.close()
     return report
+
+
+def _relation_producer(
+    vault_root: Path,
+    proj: sqlite3.Connection,
+    changed: Sequence[str],
+    report: TickReport,
+    halt: Callable[[], str | None],
+) -> dict[str, Any]:
+    """Submit bounded `relation.type` scopes from published graph rows.
+
+    Returns the visited pages and the new cursor for the write transaction.
+    Silent while no relation.type instrument is admitted,
+    and never shares its failure with the pair pipeline.
+    """
+    try:
+        from . import epistemic_graph, relation_sensor, sensing_llm
+
+        if not sensing_llm.active_instruments():
+            return {"submitted": 0, "pages": [], "cursor": None}
+        stop = halt()
+        if stop is not None:
+            report.stop = stop
+            return {"submitted": 0, "pages": [], "cursor": None}
+        if _get_meta(proj, "seeding") is not None:
+            return {"submitted": 0, "pages": [], "cursor": None}
+        cursor = str(_get_meta(proj, "relation_cursor") or "")
+        graph = epistemic_graph.EpistemicGraphIndex(vault_root)._open_read_snapshot()
+        if graph is None:
+            return {"submitted": 0, "pages": [], "cursor": None}
+        try:
+            result = relation_sensor.produce(
+                vault_root, graph, cursor=cursor, changed=changed, halt=halt
+            )
+            report.processed += len(result.get("pages") or [])
+            if result.get("stop") is not None:
+                report.stop = result["stop"]
+            return result
+        finally:
+            graph.close()
+    except Exception:  # noqa: BLE001 - a producer failure never breaks the tick
+        log.debug("relation sensor: producer failed", exc_info=True)
+        return {"submitted": 0, "pages": [], "cursor": None}
+
+
+def _relation_bookkeeping(
+    conn: sqlite3.Connection, removed: Sequence[str], result: Mapping[str, Any]
+) -> None:
+    """Remove departed sources and apply the relation producer's cursor."""
+    departed = tuple(removed[:PAGES_PER_TICK])
+    if departed:
+        marks = ",".join("?" for _ in departed)
+        conn.execute(f"DELETE FROM relation_sensed WHERE source_path IN ({marks})", departed)
+    if result.get("cursor") is not None:
+        _set_meta(conn, "relation_cursor", result["cursor"])
+
+
+def _relation_ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> None:
+    try:
+        from . import relation_sensor
+
+        relation_sensor.ingest(conn, ledger)
+    except Exception:  # noqa: BLE001 - a projection failure never breaks the tick
+        log.debug("relation sensor: ingest failed", exc_info=True)
 
 
 def _follow_ledger(store, conn, ledger) -> None:
@@ -1066,6 +1156,10 @@ def _follow_ledger(store, conn, ledger) -> None:
         return
     with store.write(conn):
         _set_meta(conn, "ledger_genesis", genesis)
+        conn.execute(
+            "UPDATE relation_sensed SET verdict=NULL, p=NULL, reading_id=NULL, instrument_id=NULL"
+        )
+        _set_meta(conn, "relation_ingest_cursor", "")
         # The full reprojection reads the whole new ledger, so ingestion resumes
         # after the rows it has seen.
         _set_meta(conn, "ledger_seq", 0 if ledger is None else sensing_ledger.max_seq(ledger))
@@ -1224,23 +1318,24 @@ _BUDGET_STOPS = frozenset({"pages", "cpu", "wall"})
 
 def _follow_pages(
     vault_root, store, conn, ledger, active, label_map_version, seen, report, halt, now, cosine
-) -> None:
+) -> tuple[list[str], list[str]]:
+    """The pair pass; returns the tick's changed and removed paths."""
     fingerprint, theta = cosine
     known = {str(path): (None if sig is None else str(sig)) for path, sig in conn.execute("SELECT path, sig FROM pages")}
     changed = sorted(path for path, sig in seen.items() if known.get(path, "\0") != sig)
     removed = sorted(path for path in known if path not in seen)
     if not changed and not removed:
-        return
+        return (changed, removed)
     from . import dreamer_families
 
     ctx = dreamer_families.Context(vault_root=Path(vault_root), store=None, conn=None, now=now)
     try:
         store_key = str(store.path)
-        for rel in removed:
+        for rel in removed[:PAGES_PER_TICK]:
             stop = halt()
             if stop is not None:
                 report.stop = stop
-                return
+                return (changed, removed)
             with store.write(conn):
                 _drop_page(conn, rel, store_key)
             report.processed += 1
@@ -1251,7 +1346,7 @@ def _follow_pages(
             if stop is not None:
                 report.stop = stop
                 if stop not in _BUDGET_STOPS:
-                    return
+                    return (changed, removed)
                 break
             try:
                 graph = ctx.graph()
@@ -1271,7 +1366,7 @@ def _follow_pages(
             stop = halt()
             if stop is not None and stop not in _BUDGET_STOPS:
                 report.stop = stop
-                return
+                return (changed, removed)
             with store.write(conn):
                 if facts is None:
                     _drop_page(conn, rel, store_key)
@@ -1292,6 +1387,7 @@ def _follow_pages(
             applied[rel] = vectors
     finally:
         ctx.close()
+    return (changed, removed)
 
 
 def _own_vectors(facts: PageFacts | None, vectors: Mapping[str, Any]) -> dict[str, Any]:
@@ -1581,10 +1677,12 @@ def submit_scope(
     requests: Iterable[OwnedRequest],
     *,
     complete: bool = True,
+    relation_rows: Iterable[Mapping[str, Any]] | None = None,
 ) -> Submission:
     if not isinstance(token, ScopeToken):
         return token
     jobs = tuple(requests)
+    relation_rows = None if relation_rows is None else tuple(relation_rows)
     try:
         conn = _producer_connection(vault_root)
     except QueueUnavailable as error:
@@ -1605,8 +1703,48 @@ def submit_scope(
                 "DELETE FROM sense_jobs WHERE owner=? AND scope_key=?",
                 (token.owner, token.scope_key),
             )
+            # Only absent requests leave the scope; unchanged inputs keep their verdicts.
+            if relation_rows is not None:
+                keys = tuple(str(row["request_key"]) for row in relation_rows)
+                marks = ",".join("?" for _ in keys)
+                absent = f" AND request_key NOT IN ({marks})" if keys else ""
+                conn.execute(
+                    "DELETE FROM relation_sensed WHERE source_path=?" + absent,
+                    (token.scope_key, *keys),
+                )
         for job in jobs:
             _put_job(conn, token.owner, token.scope_key, job)
+        if relation_rows is not None:
+            for row in relation_rows:
+                conn.execute(
+                    "INSERT INTO relation_sensed "
+                    "(request_key, source_path, target_path, anchor, kind, reading_id, "
+                    "instrument_id, verdict, p, menu_digest, input_key, source_hash, target_hash) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(request_key) DO UPDATE SET "
+                    "source_path=excluded.source_path, target_path=excluded.target_path, "
+                    "anchor=excluded.anchor, kind=excluded.kind, menu_digest=excluded.menu_digest, "
+                    "source_hash=excluded.source_hash, target_hash=excluded.target_hash, "
+                    "reading_id=CASE WHEN relation_sensed.input_key=excluded.input_key THEN relation_sensed.reading_id END, "
+                    "instrument_id=CASE WHEN relation_sensed.input_key=excluded.input_key THEN relation_sensed.instrument_id END, "
+                    "verdict=CASE WHEN relation_sensed.input_key=excluded.input_key THEN relation_sensed.verdict END, "
+                    "p=CASE WHEN relation_sensed.input_key=excluded.input_key THEN relation_sensed.p END, "
+                    "input_key=excluded.input_key",
+                    (
+                        str(row["request_key"]),
+                        str(row["source_path"]),
+                        str(row["target_path"]),
+                        row.get("anchor"),
+                        str(row["kind"]),
+                        None,
+                        None,
+                        None,
+                        None,
+                        str(row["menu_digest"]),
+                        str(row["input_key"]),
+                        str(row["source_hash"]),
+                        str(row["target_hash"]),
+                    ),
+                )
         conn.execute(
             "INSERT OR REPLACE INTO sense_scopes VALUES(?,?,?,?)",
             (token.owner, token.scope_key, revision + 1, int(token.invocation)),
@@ -1712,11 +1850,13 @@ def queued_pairs(conn: sqlite3.Connection, limit: int) -> list[QueuedPair]:
 
 def _question_active(question_type: str) -> dict[str, sensing.InstrumentIdentity]:
     # Preserve the established no-argument injection seam for pair.relation.
-    return (
-        active_instruments()
-        if question_type == sensing.PAIR_RELATION
-        else active_instruments(question_type)
-    )
+    if question_type == sensing.PAIR_RELATION:
+        return active_instruments()
+    if question_type == sensing.RELATION_TYPE:
+        from . import sensing_llm
+
+        return sensing_llm.active_instruments()
+    return active_instruments(question_type)
 
 
 def _retire_satisfied(

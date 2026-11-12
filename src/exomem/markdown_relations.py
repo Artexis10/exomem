@@ -30,12 +30,25 @@ _LEGACY_RE = re.compile(
     re.IGNORECASE,
 )
 _BULLET_RE = re.compile(r"^\s*[-*+]\s+")
+_LIST_PARSER = MarkdownIt("commonmark")
 
 
 def bullet_marker_length(line: str) -> int:
     """The characters before a bullet's first word: indent, marker and spacing; 0 for a non-bullet."""
-    match = _BULLET_RE.match(line)
-    return match.end() if match else 0
+    tokens = _LIST_PARSER.parse(line)
+    if not tokens or tokens[0].type not in ("bullet_list_open", "ordered_list_open"):
+        return 0
+    content = next((token.content for token in tokens if token.type == "inline"), None)
+    return max(0, line.find(content)) if content else 0
+
+
+def retype_relation(line: str, relation_type: str) -> str:
+    """Replace only a parsed relation token, retaining the authored link and spacing."""
+    match = _LEGACY_RE.match(line)
+    if match is None:
+        raise ValueError("the authored line is not a relation bullet")
+    start, end = match.span("rel")
+    return line[:start] + relation_type + line[end:]
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,11 @@
+{
+  "id": "f14-code-initial-recall",
+  "title": "A fresh owned repository task activates and reads its matching method",
+  "suite": "session-close",
+  "seed": "fu-repository",
+  "engagement": "balanced",
+  "turns": [
+    "I am working in my Alderframe CLI repository on the empty-argument parser bug. The proposed patch preserves every public argument name. What should I check before moving this fix toward delivery?",
+    "Give me the first two checks."
+  ]
+}
