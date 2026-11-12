@@ -5823,6 +5823,12 @@ def _disposition_finding(
 ) -> ContractFinding | None:
     if disposition.satisfied or not page.eligible_compiled:
         return None
+    # Parameter names follow the closed public/grouped tool signatures.
+    decision_arguments = (
+        "unlinked_reason explaining your bounded review decision"
+        if capabilities.current_tool_shape() == "public"
+        else 'relation_disposition="reviewed_none" and relation_review_reason'
+    )
     return ContractFinding(
         code=(
             "RELATION_DISPOSITION_STALE"
@@ -5846,7 +5852,7 @@ def _disposition_finding(
                 f"Link a related page (even with {relation_registry.link_relation_key()}), or "
                 "re-issue the same "
                 f"{'edit' if existing else 'creation'} with "
-                "relation_disposition=\"reviewed_none\" and relation_review_reason."
+                f"{decision_arguments}."
             )
         ),
         governed_element_identity=("relations", "disposition"),

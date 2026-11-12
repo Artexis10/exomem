@@ -7,6 +7,7 @@ import pytest
 
 from exomem import (
     activation_manifest,
+    capabilities,
     freshness,
     memory_refs,
     memory_schema,
@@ -743,7 +744,8 @@ def test_unit_coverage_and_relation_disposition_are_independent(tmp_path: Path) 
     assert "RELATION_DISPOSITION_MISSING" in codes
 
 
-def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tool_shape", ["grouped", "public"])
+def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path, tool_shape: str) -> None:
     after = _state(
         tmp_path,
         "Knowledge Base/Notes/Insights/unit-only.md",
@@ -752,12 +754,17 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
             body="## Observations\n\n- [constraint] Preserve the invariant.\n",
         ),
     )
-    result = _evaluate(
-        before=after,
-        after=after,
-        before_corpus=_corpus(tmp_path, after),
-        after_corpus=_corpus(tmp_path, after),
+    surface = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True,
+        product_commands=(), tool_shape=tool_shape,
     )
+    with capabilities.active_surface(surface):
+        result = _evaluate(
+            before=after,
+            after=after,
+            before_corpus=_corpus(tmp_path, after),
+            after_corpus=_corpus(tmp_path, after),
+        )
 
     codes = {item.code for item in result.blocking_findings}
     assert "RELATION_DISPOSITION_MISSING" in codes
@@ -766,9 +773,14 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path) -> 
     assert "draft_id" not in finding.remediation
     assert "draft_hash" not in finding.remediation
     assert "draft_token" not in finding.remediation
-    assert 'relation_disposition="reviewed_none"' in finding.remediation
     assert "re-issue the same edit" in finding.remediation
-    assert "relation_review_reason" in finding.remediation
+    if tool_shape == "public":
+        assert "unlinked_reason" in finding.remediation
+        assert "relation_disposition=" not in finding.remediation
+        assert "relation_review_reason" not in finding.remediation
+    else:
+        assert 'relation_disposition="reviewed_none"' in finding.remediation
+        assert "relation_review_reason" in finding.remediation
 
 
 def test_legacy_edit_reports_identity_backfill_before_review_replay(tmp_path: Path) -> None:
