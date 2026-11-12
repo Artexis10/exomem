@@ -1199,46 +1199,67 @@ def _belief_unit(root: Path):
     return next(unit for unit in state.document.units if unit.kind == "belief")
 
 
-def test_a_prose_only_belief_update_names_the_assesses_relation_it_drops(tmp_path: Path) -> None:
-    """Catches a belief that silently loses its claim: the update replaces `relations`."""
+def test_a_prose_only_belief_update_refuses_to_drop_its_assessed_claim(tmp_path: Path) -> None:
+    """A belief must keep its assessed claim when an update replaces its relations."""
     page = _write_belief_page(tmp_path)
     unit = _belief_unit(tmp_path)
+    before = page.read_bytes()
 
-    with request_scope(owner_principal(surface="cli")):
-        result = commands.op_observe_memory(
+    with request_scope(owner_principal(surface="cli")), pytest.raises(
+        ValueError, match="SEMANTIC_CONTRACT_BLOCKED"
+    ) as refusal:
+        commands.op_observe_memory(
             tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
             kind="belief", category="belief", content="Dana thinks the release mostly holds.",
         )
 
-    assert result["relations_dropped"] == [{"kind": "assesses", "target": "[[Observe]]"}]
-    assert "assesses: [[Observe]]" in result["outcome"]
-    assert "send them again in `relations`, with the unit's `kind`" in result["outcome"]
-    warnings = [item["code"] for item in result["semantic"]["contract_result"]["warnings"]]
-    assert "missing_rich_assessed_claim" in warnings
+    assert "missing_rich_assessed_claim" in str(refusal.value)
+    assert "Add `- relations: assesses: <the claim>`" in str(refusal.value)
+    assert page.read_bytes() == before
 
 
-def test_the_dropped_relation_outcome_names_a_route_the_public_tools_can_call(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("tool_shape", "route", "unavailable_route"),
+    [
+        (
+            "grouped", "send them again in `relations`, with the unit's `kind`",
+            "write them back",
+        ),
+        (
+            "public", "write them back on the unit's `relations:` line in the page body with edit_note",
+            "`relations`, with",
+        ),
+    ],
+)
+def test_the_dropped_relation_outcome_names_a_route_the_active_tools_can_call(
+    tmp_path: Path, tool_shape: str, route: str, unavailable_route: str,
 ) -> None:
     """Catches a hint that sends an agent to `relations` where the edit tool has no such field."""
-    page = _write_belief_page(tmp_path)
-    unit = _belief_unit(tmp_path)
+    _write_belief_page(tmp_path)
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Claim\n- relations: contradicts: [[Other]]\n\nThe release holds.\n\n"
+        "## Relations\n\n- links_to [[Other]]\n"
+    ))
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    unit = next(unit for unit in state.document.units if unit.kind == "claim")
     descriptor = capabilities.ActiveSurfaceDescriptor(
         surface="mcp", profile="test", tier2_enabled=False,
-        product_commands=("edit_note",), tool_shape="public",
+        product_commands=("edit_note",), tool_shape=tool_shape,
     )
 
     with capabilities.active_surface(descriptor), request_scope(owner_principal(surface="cli")):
         result = commands.op_observe_memory(
             tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
-            kind="belief", category="belief", content="Dana thinks the release mostly holds.",
+            kind="claim", category="claim", content="The release mostly holds.",
         )
 
-    route = "write them back on the unit's `relations:` line in the page body with edit_note"
+    assert result["relations_dropped"] == [{"kind": "contradicts", "target": "[[Other]]"}]
+    assert "contradicts: [[Other]]" in result["outcome"]
     assert route in result["outcome"]
-    assert "`relations`, with" not in result["outcome"]
+    assert unavailable_route not in result["outcome"]
+    assert "- relations: contradicts:" not in page.read_text(encoding="utf-8")
 
 
 def test_a_belief_update_that_resends_its_relations_reports_nothing_dropped(tmp_path: Path) -> None:
@@ -1307,16 +1328,21 @@ def test_the_hosted_update_summary_carries_the_dropped_relation(tmp_path: Path) 
     """Catches the sentence living in the raw result while the surface the agent reads omits it."""
     from exomem import writer_lease
 
-    page = _write_belief_page(tmp_path)
-    unit = _belief_unit(tmp_path)
+    _write_belief_page(tmp_path)
+    page = _write_page(tmp_path, source=_page_source(
+        "# Observe\n\n## Claim\n- relations: contradicts: [[Other]]\n\nThe release holds.\n\n"
+        "## Relations\n\n- links_to [[Other]]\n"
+    ))
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    unit = next(unit for unit in state.document.units if unit.kind == "claim")
     command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "observe_memory")
 
     with request_scope(owner_principal(surface="cli")):
         result = writer_lease.invoke_command(
             command, tmp_path, path=PAGE, operation="update", unit_ref=unit.unit_ref,
             expected_fingerprint=unit.fingerprint, expected_hash=_page_hash(page),
-            kind="belief", category="belief", content="Dana thinks the release mostly holds.",
+            kind="claim", category="claim", content="The release mostly holds.",
         )
 
     assert result["user_summary"].startswith("Updated")
-    assert "drops 1 relation the unit had (assesses: [[Observe]])" in result["user_summary"]
+    assert "drops 1 relation the unit had (contradicts: [[Other]])" in result["user_summary"]
