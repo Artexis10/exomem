@@ -36,13 +36,23 @@ from typing import Any
 
 from membench.ids import child_seed
 
-from .core import BOTH, Artefact, Statement, World
+from .core import (
+    BOTH,
+    Artefact,
+    ContextParentRef,
+    RelationRef,
+    Statement,
+    World,
+    document_ref,
+    relation_form,
+)
 from .keys import Key, KeyRefused, key_spec, keys_digest, keys_record, write_keys
 from .loader import Catalogue, Refusal
 from .manifest import dump
 from .pack import AttributeSchema
 from .planner import Plan, Thread
 from .surface import LEVELS, PARAPHRASED, STATED, Bank, Form
+from .validator import check_relation_refs
 
 
 class RenderRefused(Exception):
@@ -189,6 +199,18 @@ class _Item:
 class Reader:
     def __init__(self, plan: Plan, world: World):
         self.plan, self.world = plan, world
+        self.relations = world.relation_facts()
+        check_relation_refs(
+            world,
+            ((a.id, ref) for a in world.artefacts.values() for ref in a.relations),
+            self.relations,
+        )
+        self.originals = {
+            ref: artefact.id
+            for artefact in world.artefacts.values()
+            if artefact.copy_of is None
+            for ref in artefact.carries
+        }
 
     def name(self, ref: Any, at: date) -> str | None:
         """The name of an entity at a date, of an event or of a context, or ``None`` if ``ref`` is none."""
@@ -266,6 +288,27 @@ class Reader:
             tuple(anchors),
             allowed,
             s.about,
+        )
+
+    def relation(self, ref: RelationRef, at: date, document: str) -> _Item:
+        record = self.relations[ref]
+        if isinstance(ref, ContextParentRef):
+            fills = {"child": self.text(record.id, at), "parent": self.text(record.parent, at)}
+        else:
+            fills = {
+                "source": document_ref(self.originals[ref.source]),
+                "target": document_ref(self.originals[ref.target]),
+            }
+        return _Item(
+            document,
+            f"relation.{relation_form(ref)}",
+            fills,
+            frozenset(fills),
+            None,
+            (),
+            tuple(fills.values()),
+            frozenset(),
+            None,
         )
 
     def operation(self, ref: str) -> _Item:
@@ -463,16 +506,27 @@ class _Renderer:
             items = [self.reader.operation(artefact.announces)]
         else:
             items = [self.reader.statement(self.world.statements[s]) for s in artefact.carries]
+        items += [self.reader.relation(ref, artefact.at, artefact.id) for ref in artefact.relations]
         author = None if artefact.by is None else self.reader.text(artefact.by, artefact.at)
         frame = self.bank.frames[artefact.kind or ""]
         head = (frame.unsigned if author is None else frame.signed).format(
             by=author, date=artefact.at.isoformat()
         )
+        head += " " + document_ref(artefact.id)
         lines = tuple(self.line(item, level) for item in items)
         text = "\n".join([head, *(line.text for line in lines)]) + "\n"
         return Document(artefact.id, level, lines, text), items
 
     def check(self, artefact: Artefact, document: Document, items: list[_Item]) -> None:
+        if artefact.relations and (
+            len(document.lines) != len(items)
+            or any(line.text not in document.text.splitlines() for line in document.lines)
+        ):
+            self.refuse(
+                "source-coverage",
+                artefact.id,
+                "restore the relation sentence in its source document",
+            )
         anchors = {artefact.at.isoformat(), *(a for i in items for a in i.anchors)}
         if document.level == STATED:
             anchors |= {a for i in items for a in i.stated}

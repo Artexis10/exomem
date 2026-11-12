@@ -32,13 +32,25 @@ The checks read closed values only: commitments, volatility classes and rule sha
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import date
 from typing import Any
 
 from membench.clock import EPOCH
 
-from .core import ASSERTED, CHANCE, PERMANENT, REPORTED, Statement, World
+from .core import (
+    ASSERTED,
+    CHANCE,
+    PERMANENT,
+    REPORTED,
+    Context,
+    ContextParentRef,
+    Edge,
+    EdgeRef,
+    RelationRef,
+    Statement,
+    World,
+)
 from .loader import Refusal
 
 
@@ -53,6 +65,50 @@ class WorldInvalid(Exception):
 def check(world: World) -> None:
     """Raise ``WorldInvalid`` unless the world is sound."""
     refusals = validate(world)
+    if refusals:
+        raise WorldInvalid(refusals)
+
+
+def check_relation_refs(
+    world: World,
+    refs: Iterable[tuple[str, RelationRef]],
+    facts: Mapping[RelationRef, Context | Edge],
+) -> None:
+    """Check only the supplied new payloads against one canonical fact index."""
+    refusals = []
+    for item, ref in refs:
+        if isinstance(ref, ContextParentRef) and isinstance(ref.child, str):
+            known = ref in facts and world.contexts[ref.child].parent in world.contexts
+            expected = "a context with a recorded parent"
+        elif (
+            isinstance(ref, EdgeRef)
+            and isinstance(ref.source, str)
+            and isinstance(ref.target, str)
+            and (ref.mode is None or isinstance(ref.mode, str))
+        ):
+            # Defeat modes are the existing closed source-schema values, not open relation vocabulary.
+            if ref.mode is not None and ref.mode not in world.vocabulary.defeat_modes:
+                refusals.append(
+                    Refusal(
+                        "undeclared-value",
+                        item,
+                        f"use a declared defeat mode instead of `{ref.mode}`",
+                    )
+                )
+                continue
+            known = (
+                ref in facts and ref.source in world.statements and ref.target in world.statements
+            )
+            expected = "a recorded edge with existing statement endpoints and its recorded mode"
+        else:
+            refusals.append(
+                Refusal(
+                    "invalid-value", item, "use a typed relation reference with string endpoint ids"
+                )
+            )
+            continue
+        if not known:
+            refusals.append(Refusal("unknown-reference", item, f"replace `{ref}` with {expected}"))
     if refusals:
         raise WorldInvalid(refusals)
 
@@ -88,6 +144,7 @@ class _Validator:
             self.merges,
             self.names,
             self.artefacts,
+            self.relations,
             self.causes_and_draws,
             self.epoch,
         ):
@@ -357,6 +414,16 @@ class _Validator:
                     f"remove {r.artefact}",
                     f"dated {r.at}, before `{source.id}` on {source.at}",
                 )
+
+    def relations(self) -> None:
+        try:
+            check_relation_refs(
+                self.w,
+                ((a.id, ref) for a in self.w.artefacts.values() for ref in a.relations),
+                self.w.relation_facts(),
+            )
+        except WorldInvalid as invalid:
+            self.refusals.extend(invalid.refusals)
 
     def causes_and_draws(self) -> None:
         w = self.w

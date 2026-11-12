@@ -70,6 +70,8 @@ The generator builds a world in three layers, and text comes after all three.
 - **Rejected: text first, keys extracted afterwards.** An audit that the Veracium paper cites found 6.4% of one benchmark's answer keys corrupt. STALE's scenarios are model-written and judge-validated, so their truth is asserted, not constructed.
 - **What would change this:** the full-history arm disagreeing with the keys on more than one probe in ten in a family. Then that family's norms are wrong, or its entries belong on the rubric track.
 
+**Source relations are evidence too.** An artefact may hold typed references to canonical context parents and support or defeat edges. These references add no graph, event or warranted conclusion. Edge snapshots publish when both endpoint statements exist, at the later endpoint date. Static directory snapshots publish in the first source session and claim no membership start date. Filing them consumes no operation sequence and changes no recipe binding.
+
 **How the world core reads its records.** Five rulings from task 3.2 fix the spec to the build.
 
 - "Sums that add up" is no slice 1 invariant. It belongs with slice 2's `quantity_calc`.
@@ -214,6 +216,10 @@ Real difficulty lives in statements that nobody marks. The design plants them wi
 - **The full-history arm audits every bridge** on development worlds. A bridge whose probes that arm fails is unfair, and the pack drops it.
 - **Probes use their own surface forms.** No probe shares wording with the artefact that answers it. An audit of membench found the opposite defect: a renderer that phrased facts in the question's vocabulary.
 
+**Relation snapshots preserve implicitness.** A relation sentence shows opaque references to its original documents and the relation wording only. It repeats no endpoint value, subject, author or date. Each original document header receives its unique opaque reference; its statement sentences, author and date stay unchanged. Directory sentences name only the child and parent. They prescribe no action or oracle conclusion. The pack declares document kinds and natural wording. Support and context-parent forms are closed protocol values; defeat modes come from the source schema.
+
+The renderer checks source coverage as well as anchors. Removing a relation sentence fails coverage even when its references or names remain. The manifest hashes resolved canonical facts, carrier text and provenance. An evidence repair advances the generator version and preserves prior generated worlds.
+
 The level and the bridge of every artefact go into the world's manifest, so a report can split results by level.
 
 **How the template renderer reads these rules.** Eight rulings from task 3.5 fix the spec to the build.
@@ -340,6 +346,10 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 - A premise is one stale state or none. A premise that reads several stale states is refused as `premise-not-one`, because a task presupposes one of them. Task 4.5 decides what a premise probe of a thread with no premise asks. A thread's own key reads its premise in the mutation world too, so the premise's carriers still join the contest set; what the probe shows the judge is task 4.5's call.
 - A key that is not unique, that reads a reading no mechanism builds, or that breaks a rule above is refused by name, with its thread and form. The writer lists every refusal, and a world with a refused key does not render. Values and traps that are statements stay statement ids. Task 4.5 names them for the judge.
 
+**Evidence closure follows sources.** Proof and contest traces follow actual source edges from their statements and the reading's subjects. They include contrary and ended links, both original endpoint documents, and dated corrections, withdrawals and replacements. Context closure follows ancestor chains from source scopes and the requested context, including an unmentioned sibling branch. Each trace excludes records after its reading date or probe date. It uses no winning-path filter, answer wording or key value to choose relations. Indexes are built once per thread world; closure visits only selected connected evidence and ancestor chains.
+
+The existing projection places these documents in the ordinary session files. Its file allocation and the G and H prompt builders stay unchanged. A model-free inventory checks canonical relation, rendered sentence, session file and both reconstructed reference prompts for dropped sources. Semantic keys, accepted forms, traps, premises, facts, norms and rubrics remain equal when evidence references expand. A removed relation sentence, a reversed endpoint date, a missing sibling context or a future source must fail the relevant check.
+
 The keys are in `keys.json` beside the manifest, in evaluator custody like the rest of the key. The manifest's `rendering` section holds their count and digest.
 
 **f38 changes in four places.** Its case check refuses what a generated project needs. Task 1.3 agrees these changes with the change that owns the suite.
@@ -430,6 +440,22 @@ The keys are in `keys.json` beside the manifest, in evaluator custody like the r
 - A development round uses a fresh world, so a repair is checked on the cases that exposed it and judged on new ones.
 - Every paid run states its cost and the question it answers before it starts. The f38 estimate of $20 to $25 for a full development round is unverified, and this design repeats it only as that.
 - Floor and ceiling results are not reused across time windows. A provider's behaviour moved within hours on 2026-11-08, so all arms of a decision run in lockstep.
+
+## Successor amendments
+
+### 1. Restore source evidence, premise and task-date contracts
+
+The successor uses the relation snapshots and source closure of decisions 1, 5 and 10. It preserves prior worlds, tasks, answers and verdicts. Source checks establish coverage and semantic key equality; fresh actors alone establish gate acceptance.
+
+Both registered premise surface forms now ask for ordinary follow-up work. The projection inserts the source-derived stale value as a presupposition, without commanding the actor to use an earlier setting. A mutation probe with no premise stays neutral. This replaces two of two premise surface patterns; no key value or trap changes.
+
+One frame in projection data gives every generated task the rendered probe's simulated date. Relative time in the task refers to that date. The projection requires the rendered date to equal the key date. Each arm and the judge receive the same task; no separate clock instruction or wall clock enters their prompts.
+
+The shared `trusts_stale` description covers only listed traps and the listed premise. Selecting either as an input to proposed work counts as reliance, even when called provisional. Merely reporting a person's claim or assumption does not count. This adds no verification requirement for other uncertain values and changes no score field.
+
+The successor round omits `scope.one-client` from its declared entries. Both of its probe forms (`act` and `state`) are retired from that round: two of two forms, or 100% of that entry's forms. Their null answer allows correct abstention without memory, so they do not supply the required position challenge. The catalogue entry, oracle meanings and global readings remain unchanged. `scope.exception` retains the required scope coverage. The round packet records each exposed failure's repair or removal before fresh outputs.
+
+The 90% full-history gate, 80% position gate, arms, scoring fields and spending rules remain unchanged. A fresh round needs its own cost estimate. This amendment authorizes no replay, rejudgment or reinterpretation of prior results.
 
 ## The catalogue
 

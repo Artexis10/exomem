@@ -321,3 +321,115 @@ def test_write_project_refuses_a_root_whose_case_set_names_another_project(
         projection.write_project(tmp_path, "project-other", record)
     split = json.loads(cases.cases_dir(tmp_path).joinpath("SPLIT.json").read_text())
     assert split["dev"] == [summary["project"]]
+
+
+def test_required_relation_sources_reach_sessions_and_both_reference_prompts_without_drops() -> (
+    None
+):
+    """A formal relation is useful only when G and H can read its sentence and original endpoints."""
+    from benchmarks.membench.outcome.epistemic.run import gold_prompt, history_prompt
+    from benchmarks.membench.world.keys import write_keys
+
+    plan, rendering, project = built(7)
+    world = plan.world()
+    probes = probes_of(project)
+    keys = {(k.thread, k.form): k for k in write_keys(plan, CATALOGUE)}
+    assert len(
+        {d.text.splitlines()[0].rsplit(" ", 1)[-1] for d in rendering.documents.values()}
+    ) == len(rendering.documents)
+    expected = world.relation_facts()
+    carried = {ref: a for a in world.artefacts.values() for ref in a.relations}
+    assert carried.keys() == expected.keys()
+    files, place = projection._files(world.artefacts.values(), rendering.documents)
+    for artefact in carried.values():
+        document = rendering.documents[artefact.id]
+        session, filename = place[artefact.id]
+        assert files[session][filename] == document.text
+        assert project["sessions"][session - 1]["files"][filename] == document.text
+        for probe in project["probes"]:
+            if probe["session"] >= session:
+                assert document.lines[0].text in history_prompt(project, probe)
+    for thread in plan.threads:
+        for probe in (p for p in project["probes"] if p["probe_id"].startswith(f"{thread.id}.")):
+            key = keys[thread.id, probe["probe_id"].removeprefix(f"{thread.id}.")]
+            prompt = gold_prompt(project, probe)
+            for artefact_id in key.contest:
+                assert rendering.documents[artefact_id].text in prompt
+                artefact = world.artefacts[artefact_id]
+                assert artefact.at <= key.at
+                for ref in artefact.relations:
+                    if isinstance(ref, core.EdgeRef):
+                        for endpoint in (ref.source, ref.target):
+                            assert f"{endpoint}.doc" in key.contest
+                            assert rendering.documents[f"{endpoint}.doc"].text in prompt
+            # These source relations all belong to this recipe, independently of its winning paths.
+            for edge in plan.thread_world(thread, thread.variant).edges:
+                if max(world.statements[s].at for s in (edge.source, edge.target)) <= key.at:
+                    ref = core.EdgeRef(edge.source, edge.target, edge.mode)
+                    assert carried[ref].id in key.contest
+    assert probes
+
+
+def test_the_simulated_probe_date_frame_is_data_owned_and_shared_by_arms_and_judge() -> None:
+    """A relative-time task must carry one world date unchanged through every reference view."""
+    from benchmarks.membench.outcome.epistemic import judge, run
+
+    plan, rendering, _ = built(7)
+    data = copy.deepcopy(DATA)
+    data["f38"]["task_frame"] = "Simulation date: {date}. Relative time uses this date.\n\n{task}"
+    project = projection.project(plan, rendering, CATALOGUE, data)
+    by_probe = {(p.thread, p.form): p for p in rendering.probes}
+    for key in rendering.keys:
+        probe = probes_of(project)[f"{key.thread}.{key.form}"]
+        source = by_probe[key.thread, key.form]
+        frame = data["f38"]["task_frame"].format(date=source.at.isoformat(), task="")
+        assert source.at == key.at and probe["task"].startswith(frame)
+        assert source.text in probe["task"]
+        for arm in ("N", "G", "F", "P", "E"):
+            assert probe["task"] in run.probe_prompt(arm, project, probe)
+        assert probe["task"] in run.history_prompt(project, probe)
+        item = {
+            "task": probe["task"],
+            "key": judge.shown_key(probe["key"]),
+            "behaviours": judge.behaviours_asked(probe),
+            "answer": "",
+            "changed": "",
+        }
+        prompt = judge.build_prompt(item)
+        assert prompt.count(frame) == 1 and probe["task"] in prompt
+        if cases.TRUSTS_STALE in item["behaviours"]:
+            assert cases.behaviours()[cases.TRUSTS_STALE]["description"] in prompt
+
+
+def test_a_probe_date_mismatch_is_refused_before_a_task_can_use_the_wrong_clock() -> None:
+    """A task framed on another day cannot be scored against this key's date."""
+    from datetime import timedelta
+
+    plan, rendering, _ = built(7)
+    original = rendering.probes[0]
+    moved = dataclasses.replace(original, at=original.at + timedelta(days=7))
+    changed = dataclasses.replace(rendering, probes=(moved, *rendering.probes[1:]))
+    with pytest.raises(projection.ProjectionRefused) as refused:
+        projection.project(plan, changed, CATALOGUE, DATA)
+    assert "probe-date-mismatch" in {r.code for r in refused.value.refusals}
+
+
+def test_scope_exception_keeps_required_coverage_when_a_successor_round_omits_the_null_scope_entry() -> (
+    None
+):
+    """Dropping the abstention-shaped entry must leave scope tasks that need their source evidence."""
+    spec = projection.round_spec(CATALOGUE, DATA)
+    successor = dataclasses.replace(
+        spec, entries=tuple(e for e in spec.entries if e != "scope.one-client")
+    )
+    plan = plan_world(successor, CATALOGUE, PACK, VOCABULARY, "dev", 7)
+    rendering = render(plan, CATALOGUE, BANK, "stated")
+    project = projection.project(plan, rendering, CATALOGUE, DATA)
+    assert all(p["phenomenon"] != "scope.one-client" for p in project["probes"])
+    retained = [p for p in project["probes"] if p["phenomenon"] == "scope.exception"]
+    assert len(retained) >= 2 and all(
+        p["dimension"] == "scope" and p["change_id"] for p in retained
+    )
+    assert all(p["key"]["value"] is not None for p in retained)
+    assert cases.structure_problems(project) == []
+    assert cases.check_probes(project)[0] == []

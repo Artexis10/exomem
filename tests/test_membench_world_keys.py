@@ -153,10 +153,10 @@ def test_the_contest_set_of_a_plan_whose_basis_was_replaced_holds_the_replaced_b
     plan, thread, key = keyed("propagation.plan-invalidated", "state")
 
     # The key names no value of the replaced basis, so no trap points at it: the statement that the
-    # norms defeat puts it in the contest set, and the proof trace does not hold it.
+    # norms defeat puts it in the contest set. Its support link also needs both original endpoints.
     assert key.value is False
     assert carriers(plan, thread, "basis") <= set(key.contest)
-    assert not carriers(plan, thread, "basis") & set(key.proof)
+    assert carriers(plan, thread, "basis") <= set(key.proof)
 
 
 def test_a_twin_has_no_stale_state_to_presuppose() -> None:
@@ -249,3 +249,68 @@ def test_a_value_that_two_holders_leave_open_is_refused_by_name() -> None:
         write_key(Oracle(world, plan.validity()), thread, CATALOGUE, "state")
     assert [r.code for r in refused.value.refusals] == ["not-unique"]
     assert thread.id in str(refused.value)
+
+
+def test_graph_evidence_keeps_ended_links_both_endpoints_and_excludes_future_sources() -> None:
+    """G must see why a withdrawn basis once supported a conclusion, without future evidence."""
+    from benchmarks.membench.world.proof import Prover, artefacts
+
+    plan, thread, _ = keyed("propagation.plan-invalidated", "state")
+    world = plan.thread_world(thread, thread.variant)
+    basis, conclusion = (thread.step_ids[s] for s in ("basis", "scheme"))
+    at = thread.slots["probe"]
+    future = "later-record"
+    world.op_state(
+        future,
+        by=thread.roles["owner"],
+        about=world.statements[basis].about,
+        value="later",
+        kind="fact",
+        at=at + timedelta(days=7),
+    )
+    world.add_artefact(f"{future}.doc", at + timedelta(days=7), (future,), "note")
+    world.op_support(None, **{"from": future, "to": conclusion})
+    ref = core.EdgeRef(future, conclusion, None)
+    world.add_artefact("later-link", at + timedelta(days=7), kind="register", relations=(ref,))
+    refs = Prover(Oracle(world, plan.validity())).expand((conclusion,), at=at)
+    docs = artefacts(world, refs, at=at)
+    assert {f"{basis}.doc", f"{conclusion}.doc"} <= set(docs)
+    relation_docs = [world.artefacts[d] for d in docs if world.artefacts[d].relations]
+    assert any(core.EdgeRef(basis, conclusion, None) in a.relations for a in relation_docs)
+    assert f"{future}.doc" not in docs and "later-link" not in docs
+    assert all(world.artefacts[d].at <= at for d in docs)
+
+
+def test_scope_evidence_includes_the_requested_unmentioned_sibling_and_ancestor_chain() -> None:
+    """G needs the requested directory branch even when only its sibling occurs in statements."""
+    plan, thread, key = keyed("scope.general-rule-applies", "state")
+    from benchmarks.membench.world.keys import key_spec
+
+    world = plan.thread_world(thread, thread.variant)
+    requested = thread.resolve(key_spec(CATALOGUE, thread, "state")["value"]["where"])
+    assert requested not in {s.scope for s in world.statements.values()}
+    needed = set()
+    child = requested
+    while world.contexts[child].parent is not None:
+        needed.add(core.ContextParentRef(child))
+        child = world.contexts[child].parent
+    selected = {ref for a in key.contest for ref in world.artefacts[a].relations}
+    assert needed and needed <= selected
+
+
+def test_a_past_reading_does_not_reopen_its_trace_at_the_later_probe_date() -> None:
+    """A later replacement must not leak into G's evidence for a reading of an earlier date."""
+    plan, thread, _ = keyed("currency.reversal", "state")
+    recipe = CATALOGUE.recipes[thread.recipe]
+    state = recipe["keys"]["state"]
+    historical = {**state, "value": {**state["value"], "when": "before"}, "traps": []}
+    catalogue = dataclasses.replace(
+        CATALOGUE,
+        recipes={**CATALOGUE.recipes, thread.recipe: {**recipe, "keys": {"state": historical}}},
+    )
+    world = plan.thread_world(thread, thread.variant)
+    key = write_key(Oracle(world, plan.validity()), thread, catalogue, "state")
+    assert key.value == thread.roles["old"]
+    assert carriers(plan, thread, "first") <= set(key.contest)
+    assert not carriers(plan, thread, "second") & set(key.contest)
+    assert all(world.artefacts[a].at <= thread.slots["before"] for a in key.contest)

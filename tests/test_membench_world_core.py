@@ -353,3 +353,50 @@ def test_no_module_of_the_world_package_imports_the_product() -> None:
             )
             offenders += [f"{path.name}: {n}" for n in names if n.split(".")[0] == "exomem"]
     assert offenders == []
+
+
+def test_a_context_snapshot_refuses_a_context_with_no_canonical_parent_before_hashing() -> None:
+    from benchmarks.membench.world.core import ContextParentRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = sound_world()
+    world.add_artefact("directory", week_date(1), relations=(ContextParentRef("everywhere"),))
+    assert ("unknown-reference", "directory") in faults(world)
+    with pytest.raises(WorldInvalid, match="recorded parent"):
+        artefact_hashes(world)
+
+
+def test_an_edge_snapshot_refuses_unrecorded_links_before_rendering_or_hashing() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.manifest import artefact_hashes
+    from benchmarks.membench.world.render import Reader
+
+    world = sound_world()
+    for ref in ("first", "second"):
+        world.op_state(ref, by="lead", about="approvals", kind="fact", at=week_date(1), value=1)
+    world.add_artefact("register", week_date(1), relations=(EdgeRef("first", "second", None),))
+    assert ("unknown-reference", "register") in faults(world)
+    with pytest.raises(WorldInvalid, match="recorded edge"):
+        artefact_hashes(world)
+    with pytest.raises(WorldInvalid, match="recorded edge"):
+        Reader(None, world)
+
+
+def test_a_snapshot_with_an_unsupported_defeat_mode_names_the_schema_error() -> None:
+    from benchmarks.membench.world.core import EdgeRef
+
+    world = sound_world()
+    world.add_artefact(
+        "register", week_date(1), relations=(EdgeRef("first", "second", "invented"),)
+    )
+    assert ("undeclared-value", "register") in faults(world)
+
+
+def test_an_untyped_relation_payload_has_an_actionable_error_instead_of_a_lookup_failure() -> None:
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = sound_world()
+    world.add_artefact("directory", week_date(1), relations=({"child": "quay"},))
+    assert ("invalid-value", "directory") in faults(world)
+    with pytest.raises(WorldInvalid, match="typed relation reference"):
+        artefact_hashes(world)

@@ -9,6 +9,7 @@ splits hold, and a pack that names something undeclared.
 from __future__ import annotations
 
 import copy
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -309,3 +310,68 @@ def test_a_pack_attribute_whose_values_are_drawn_from_things_that_make_no_statem
 
     with pytest.raises(PackRefused, match="attribute owner.*service"):
         pack_without(edit)
+
+
+@pytest.mark.parametrize("later", ["basis", "scheme"])
+def test_a_relation_snapshot_waits_for_both_endpoints_without_changing_the_operation_order(
+    later: str,
+) -> None:
+    """Recipe call order cannot publish a relation before either of its source statements exists."""
+    from benchmarks.membench.world.core import EdgeRef
+    from benchmarks.membench.world.planner import build_world
+
+    planned = plan("propagation.plan-invalidated", twins=0)
+    (thread,) = planned.threads
+    steps = tuple(
+        {**step, "at": thread.slots["change"]} if step.get("id") == thread.step_ids[later] else step
+        for step in thread.steps
+    )
+    thread = dataclasses.replace(thread, steps=steps)
+    world = build_world(planned.name, VOCABULARY, planned.backbone, PACK, (thread,), {}, ())
+    ref = EdgeRef(thread.step_ids["basis"], thread.step_ids["scheme"], None)
+    (carrier,) = (a for a in world.artefacts.values() if ref in a.relations)
+    assert carrier.at == thread.slots["change"] and carrier.by is None
+    ordinary = core.World(planned.name, VOCABULARY)
+    planned.backbone.declare(ordinary)
+    ordinary.apply_all(thread.steps, thread.variant)
+    assert world.statements == ordinary.statements and world.operations == ordinary.operations
+
+
+def test_a_snapshot_hash_pins_the_resolved_parent_not_only_its_child_reference() -> None:
+    """Changing a canonical parent must invalidate a carrier hash whose typed reference is unchanged."""
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = plan("scope.exception", twins=0).world()
+    carrier = next(
+        a
+        for a in world.artefacts.values()
+        if a.relations and isinstance(a.relations[0], core.ContextParentRef)
+    )
+    (ref,) = carrier.relations
+    before = {a["id"]: a["hash"] for a in artefact_hashes(world)}[carrier.id]
+    context = world.contexts[ref.child]
+    parent = next(
+        c.id for c in world.contexts.values() if c.parent is None and c.id != context.parent
+    )
+    world.contexts[ref.child] = dataclasses.replace(context, parent=parent)
+    after = {a["id"]: a["hash"] for a in artefact_hashes(world)}[carrier.id]
+    assert carrier.relations == (ref,) and before != after
+
+
+def test_an_edge_snapshot_hash_pins_its_original_endpoint_provenance() -> None:
+    """An unchanged edge reference must not hide a changed author on its original source."""
+    from benchmarks.membench.world.manifest import artefact_hashes
+
+    world = plan("propagation.plan-invalidated", twins=0).world()
+    carrier = next(
+        a
+        for a in world.artefacts.values()
+        if a.relations and isinstance(a.relations[0], core.EdgeRef)
+    )
+    (ref,) = carrier.relations
+    before = {a["id"]: a["hash"] for a in artefact_hashes(world)}[carrier.id]
+    statement = world.statements[ref.source]
+    author = next(h for h in world.holders() if h != statement.by)
+    world.statements[ref.source] = dataclasses.replace(statement, by=author)
+    after = {a["id"]: a["hash"] for a in artefact_hashes(world)}[carrier.id]
+    assert carrier.relations == (ref,) and before != after

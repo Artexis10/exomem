@@ -321,3 +321,62 @@ def test_the_loader_refuses_a_form_that_serves_nothing_a_repeated_text_and_an_un
         ("duplicate-pattern", "form decision-stated-1"),
         ("undeclared-value", "form result-stated-1"),
     }
+
+
+def test_relation_snapshots_preserve_original_text_and_never_repeat_endpoint_content() -> None:
+    """Relation evidence must not restate an implicit statement at the stated level."""
+    from membench.ids import sentinel, stable_id
+
+    from exomem.markdown_relations import parse_markdown_relations
+    from exomem.semantic_units import parse_semantic_units
+
+    rendering = render(PLAN, CATALOGUE, BANK, "unmarked")
+    world = PLAN.world()
+    for artefact in world.artefacts.values():
+        document = rendering.documents[artefact.id]
+        assert sentinel(stable_id("DOC", artefact.id)) in document.text.splitlines()[0]
+        units = parse_semantic_units(document.text, path="source.txt")
+        relations = parse_markdown_relations(document.text)
+        assert not units.units and not units.errors
+        assert not relations.relations and not relations.errors
+        for ref in artefact.relations:
+            assert artefact.by is None and document.level == STATED
+            if isinstance(ref, core.EdgeRef):
+                assert artefact.at == max(world.statements[s].at for s in (ref.source, ref.target))
+                assert document.lines[0].text == next(
+                    f.text for f in BANK.forms if f.id == document.forms[0]
+                ).format(
+                    source=sentinel(stable_id("DOC", f"{ref.source}.doc")),
+                    target=sentinel(stable_id("DOC", f"{ref.target}.doc")),
+                )
+                for endpoint in (ref.source, ref.target):
+                    original = rendering.documents[f"{endpoint}.doc"]
+                    assert original.lines[0].text not in document.text
+            else:
+                assert artefact.at == week_date(1)
+                assert PLAN.backbone.context_names[ref.child] in document.lines[0].text
+                assert (
+                    PLAN.backbone.context_names[world.contexts[ref.child].parent]
+                    in document.lines[0].text
+                )
+
+
+def test_a_removed_relation_sentence_fails_source_coverage_even_when_references_remain(
+    monkeypatch: Any,
+) -> None:
+    """Opaque refs alone do not convey support, defeat or context containment."""
+    from benchmarks.membench.world.render import _Renderer
+
+    original = _Renderer.document
+
+    def omit(self: Any, artefact: Any, level: str) -> Any:
+        document, items = original(self, artefact, level)
+        if artefact.relations:
+            anchors = " ".join(a for item in items for a in item.anchors)
+            document = dataclasses.replace(
+                document, text=document.text.splitlines()[0] + "\n" + anchors + "\n"
+            )
+        return document, items
+
+    monkeypatch.setattr(_Renderer, "document", omit)
+    assert "source-coverage" in refused_codes(BANK, level=STATED)

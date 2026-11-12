@@ -34,11 +34,22 @@ from random import Random
 from typing import Any
 
 from membench.clock import week_date, week_of
-from membench.ids import child_seed
+from membench.ids import child_seed, stable_id
 
 from . import manifest
 from .backbone import Backbone, build_backbone
-from .core import BOTH, MUTATION, PLANTED, STEP_FIELDS, Vocabulary, World
+from .core import (
+    BOTH,
+    MUTATION,
+    PLANTED,
+    STEP_FIELDS,
+    ContextParentRef,
+    EdgeRef,
+    Vocabulary,
+    World,
+    document_ref,
+    relation_form,
+)
 from .keys import KeyRefused, write_key
 from .loader import SLOT_ARGUMENTS, WORD_ARGUMENTS, Catalogue, Refusal
 from .mechanisms import Oracle
@@ -274,6 +285,24 @@ def build_world(
                 kind=pack.fact_kind,
                 at=fact.at,
             ),
+        )
+    # A snapshot publishes an existing relation; it does not invent an operation or consume seq.
+    for context in world.contexts.values():
+        if context.parent is not None:
+            ref = ContextParentRef(context.id)
+            world.add_artefact(
+                f"{world.name}.{stable_id('REL', context.id, context.parent)}",
+                week_date(1),
+                kind=pack.relation_kinds.get(relation_form(ref), pack.artefact_default),
+                relations=(ref,),
+            )
+    for edge in dict.fromkeys(world.edges):
+        ref = EdgeRef(edge.source, edge.target, edge.mode)
+        world.add_artefact(
+            f"{world.name}.{stable_id('REL', edge.source, edge.target, str(edge.mode))}",
+            max(world.statements[edge.source].at, world.statements[edge.target].at),
+            kind=pack.relation_kinds.get(relation_form(ref), pack.artefact_default),
+            relations=(ref,),
         )
     return world
 
@@ -637,6 +666,17 @@ class _Planner:
                     *(steps[r] for r in refs if isinstance(r, str) and r in steps),
                 ):
                     named[week_of(step["at"])] |= self.things(source)
+        for artefact in world.artefacts.values():
+            named[week_of(artefact.at)].add(document_ref(artefact.id))
+            for ref in artefact.relations:
+                if isinstance(ref, ContextParentRef):
+                    context = world.contexts[ref.child]
+                    named[week_of(artefact.at)] |= self.things((context.id, context.parent))
+                else:
+                    # Edge snapshots show opaque document references, never endpoint content.
+                    named[week_of(artefact.at)] |= {
+                        document_ref(f"{r}.doc") for r in (ref.source, ref.target)
+                    }
         oracle = Oracle(world, validity(self.pack))
         asked: dict[int, set[str]] = defaultdict(set)
         for form in self.catalogue.entries[thread.entry].probes:
