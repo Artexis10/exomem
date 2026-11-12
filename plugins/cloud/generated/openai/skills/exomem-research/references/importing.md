@@ -13,7 +13,7 @@ Check that the command's runner and `age` are on `PATH` before starting it.
 Use their official instructions for the current platform when either is missing. Cloud imports need no local vault or Exomem service.
 
 An unversioned `uvx` command can reuse a cached or installed CLI. Refreshing the connector or plugin does not update it.
-After a CLI fix ships, retry the returned command with its prefix pinned to the release that carries the fix. This package's release is `uvx exomem@0.174.0`.
+After a CLI fix ships, retry the returned command with its prefix pinned to the release that carries the fix. This package's release is `uvx exomem@0.175.0`.
 Keep its endpoints, other arguments and existing checkpoint. [uv's tool-version guidance](https://docs.astral.sh/uv/concepts/tools/#tool-versions) explains pinned tool versions.
 
 The CLI opens its own browser sign-in, even when the MCP connector is already authenticated.
