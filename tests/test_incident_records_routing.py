@@ -38,6 +38,12 @@ _INCIDENT_CLAIMS = (
     "  terms: [context compiler, activation, capture, records, evidence, routing, retrieval]\n"
 )
 _INCIDENT_MATCH = "  match:\n    type: [failure]\n    project: [widget-app]\n"
+# A note that names its project only in frontmatter and shares one claim word:
+# predicates carry the route, not coverage.
+_EXOMEM_CLAIMS = (
+    _INCIDENT_CLAIMS.replace("widget-app", "exomem")
+    + "  match:\n    type: [failure]\n    project: [exomem]\n"
+)
 
 
 def _incident_manifest(*, claims: str = _INCIDENT_CLAIMS + _INCIDENT_MATCH) -> str:
@@ -798,7 +804,9 @@ def test_compact_terminal_drops_a_malformed_disposition(change: dict) -> None:
 # --- End to end: a real write, then the returned payload through governance --
 
 
-def _incident_vault(vault: Path, monkeypatch: pytest.MonkeyPatch, level: str) -> str:
+def _incident_vault(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, level: str, *, claims: str | None = None
+) -> str:
     """A vault with the incident collection, reconciled; returns an Evidence path."""
     from exomem import commands
 
@@ -807,7 +815,7 @@ def _incident_vault(vault: Path, monkeypatch: pytest.MonkeyPatch, level: str) ->
         vault,
         action="create",
         manifest_path=INCIDENTS,
-        manifest_text=_incident_manifest(),
+        manifest_text=_incident_manifest(claims=claims or _INCIDENT_CLAIMS + _INCIDENT_MATCH),
         why="track widget incidents",
     )
     due_state.reconcile(vault)
@@ -822,16 +830,26 @@ def _incident_vault(vault: Path, monkeypatch: pytest.MonkeyPatch, level: str) ->
     return str(evidence["path"])
 
 
-def _remember_failure(vault: Path, evidence: str, body: str, slug: str) -> dict:
+def _remember_failure(
+    vault: Path,
+    evidence: str,
+    body: str,
+    slug: str,
+    *,
+    project: str = "widget-app",
+    title: str = "Widget panel froze on load",
+    tags: list[str] | None = None,
+    unit_tag: str | None = None,
+) -> dict:
     from exomem import commands
 
     arguments = {
-        "content": f"## Observations\n\n- [failure] {body} #widget-app ^{slug}\n",
-        "title": "Widget panel froze on load",
+        "content": f"## Observations\n\n- [failure] {body} #{unit_tag or project} ^{slug}\n",
+        "title": title,
         "slug": slug,
         "note_type": "failure",
-        "projects": ["widget-app"],
-        "tags": ["widget-app", "failure"],
+        "projects": [project],
+        "tags": tags if tags is not None else [project, "failure"],
         "sources": [evidence],
     }
     validation = commands.op_remember(vault, validate_only=True, **arguments)
@@ -918,6 +936,61 @@ def test_a_failure_note_is_filed_through_the_returned_payload(
     _path, first_ref = _created(written)
     _path, second_ref = _created(again)
     assert _sources_of(vault, appended["item_key"]) == [first_ref, second_ref]
+
+
+def test_a_routed_failure_note_stays_coverage_visible_under_a_partial_census(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A census that degrades the claims row must not zero the coverage answer.
+
+    The note names its project only in frontmatter and shares one claim word, so
+    `match` predicates carry the route; a later claims read that meets ambiguous
+    items flips the row's `complete` flag without touching that route.
+    """
+    from exomem import commands
+
+    evidence = _incident_vault(vault, monkeypatch, "maximal", claims=_EXOMEM_CLAIMS)
+    written = _remember_failure(
+        vault,
+        evidence,
+        "Desktop sync hung on the old kernel",
+        "desktop-sync-hung",
+        project="exomem",
+        title="Desktop sync hung on the old kernel",
+        tags=["incident", "desktop"],
+        unit_tag="incident",
+    )
+    routing = _raw_routing(written)
+    assert routing is not None
+    assert routing["collection"] == INCIDENTS
+    assert routing["strength"] == "strong"
+    assert routing["matched_predicates"] == ["project:exomem", "type:failure"]
+    _path, ref = _created(written)
+
+    entries = (vault / INCIDENTS).parent / "Entries"
+    entries.mkdir(exist_ok=True)
+    for name in ("alpha", "beta"):
+        (entries / f"{name}.md").write_text(
+            "---\n"
+            "type: record\n"
+            "collection_id: 21111111-1111-4111-8111-111111111111\n"
+            "schema_version: 1\n"
+            "incident: The same incident logged twice\n"
+            "observed_on: 2026-09-20\n"
+            "sources: []\n"
+            "---\n",
+            encoding="utf-8",
+        )
+    due_state.reconcile(vault)
+    assert due_state.load(vault)["claims"][INCIDENTS]["complete"] is False
+
+    coverage = commands.op_record_memory(
+        vault, action="inspect", collection=INCIDENTS
+    )["coverage"]
+
+    assert ref in [*coverage["unreflected_refs"], *coverage["pending_refs"]]
+    assert coverage["unreflected"] + coverage["pending"] == 1
+    assert coverage["state"] == "unknown"
 
 
 def test_editing_a_filed_note_at_maximal_neither_files_nor_recurs(
