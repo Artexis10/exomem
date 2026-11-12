@@ -5,6 +5,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.175.0](https://github.com/Artexis10/exomem/compare/v0.174.0...v0.175.0) (2026-11-12)
+
+
+### Features
+
+* **cloud:** one-command platform upgrade, and release tags start cell rollout ([#2760](https://github.com/Artexis10/exomem/issues/2760)) ([9eec48b](https://github.com/Artexis10/exomem/commit/9eec48b8cf8437d1cc3a010059afafeafa92268f))
+* **vault-store:** tombstone, receipt and publish governed writes around a store-mode commit ([#2742](https://github.com/Artexis10/exomem/issues/2742)) ([33417c0](https://github.com/Artexis10/exomem/commit/33417c0f872d69a40685263784c5f18d97fe3a98))
+
+
+### Bug Fixes
+
+* **cloud:** pin shipped skill install lines to the release they ship ([#2768](https://github.com/Artexis10/exomem/issues/2768)) ([cc22bd3](https://github.com/Artexis10/exomem/commit/cc22bd33bfdbb50ff4b4ca49c99ec6d648d81205))
+* **find:** corroborate BM25-only candidates by word majority, not lane absence ([#2762](https://github.com/Artexis10/exomem/issues/2762)) ([3e6d41e](https://github.com/Artexis10/exomem/commit/3e6d41eb835397053f820d62758cfda31ba2a5eb))
+* **records:** report unreflected observations under a partial claims census ([#2769](https://github.com/Artexis10/exomem/issues/2769)) ([f447ce9](https://github.com/Artexis10/exomem/commit/f447ce9b995a6955a8a223f7e2efd76a85355d47))
+* restore Windows import durability and bound warm sweep CPU ([#2773](https://github.com/Artexis10/exomem/issues/2773)) ([6597852](https://github.com/Artexis10/exomem/commit/659785217869b07aec92ec82bd227da9a2f75a04))
+
+## [0.174.0](https://github.com/Artexis10/exomem/compare/v0.173.0...v0.174.0) (2026-11-11)
+
+
+### Features
+
+* **hooks:** let the agent judge short follow-up turns in MCP mode ([#2733](https://github.com/Artexis10/exomem/issues/2733)) ([c5ef04a](https://github.com/Artexis10/exomem/commit/c5ef04a7a998fce5a71da78537692721778eda31))
+
+
+### Bug Fixes
+
+* **cloud:** fsync the written files, never the host's os.sync ([#2754](https://github.com/Artexis10/exomem/issues/2754)) ([9019564](https://github.com/Artexis10/exomem/commit/901956425f7a0525d60ce80328a86927959246da))
+* **hooks:** ask for recall before a task in the user's own repository ([#2729](https://github.com/Artexis10/exomem/issues/2729)) ([7f30eb9](https://github.com/Artexis10/exomem/commit/7f30eb9e5eda3ae946c45f07922d2f75c4291582))
+* **search:** stop treating relative time words as a request for recent notes ([#2740](https://github.com/Artexis10/exomem/issues/2740)) ([3b0701b](https://github.com/Artexis10/exomem/commit/3b0701b0ba9049bc622ffcf61d424c13fd06d974))
+
+## [0.173.0](https://github.com/Artexis10/exomem/compare/v0.172.0...v0.173.0) (2026-11-11)
+
+
+### Features
+
+* **vault-store:** answer store-mode readers with SQL over the store ([#2727](https://github.com/Artexis10/exomem/issues/2727)) ([8ce4cd1](https://github.com/Artexis10/exomem/commit/8ce4cd172f0d79b2d5bcb82e2bd69915ed5a455e))
+
+
+### Bug Fixes
+
+* **dimensions:** keep a restricted caller's edge read unchanged by writes it may not see ([#2736](https://github.com/Artexis10/exomem/issues/2736)) ([1d4e971](https://github.com/Artexis10/exomem/commit/1d4e971ce775c2126c0c351a5ccd38d323731307))
+* **search:** match dataset values by their distinctive words ([#2745](https://github.com/Artexis10/exomem/issues/2745)) ([9fddcc6](https://github.com/Artexis10/exomem/commit/9fddcc6e26e594486b4ae1f1fff97d001f9f257d))
+
+## [0.172.0](https://github.com/Artexis10/exomem/compare/v0.171.0...v0.172.0) (2026-11-11)
+
+
+### Features
+
+* **benchmarks:** build slice 1 of the synthetic epistemic world ([#2739](https://github.com/Artexis10/exomem/issues/2739)) ([7bb4647](https://github.com/Artexis10/exomem/commit/7bb4647598985b47810896412b2dc92b470f3712))
+* **vault-store:** move, trash and recover binaries, folders and scene frames in store mode ([#2728](https://github.com/Artexis10/exomem/issues/2728)) ([2eace67](https://github.com/Artexis10/exomem/commit/2eace673681968858f93a8f2e4443c38179be8f5))
+
+
+### Bug Fixes
+
+* **service:** let the target release report whether it can serve the state ([#2748](https://github.com/Artexis10/exomem/issues/2748)) ([8e0249d](https://github.com/Artexis10/exomem/commit/8e0249dba014666f2c185ad1ebd4e1fd9f7cab9c))
+
+
+### Performance
+
+* **governance:** decide each page's container parents once per request in a content filter ([#2737](https://github.com/Artexis10/exomem/issues/2737)) ([a7703dd](https://github.com/Artexis10/exomem/commit/a7703dd798da6b344c9a66f91889a432cdb3a5f1))
+
 ## [0.171.0](https://github.com/Artexis10/exomem/compare/v0.170.0...v0.171.0) (2026-11-11)
 
 

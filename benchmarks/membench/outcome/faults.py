@@ -9,7 +9,7 @@ one voids a unit. The evidence is:
 - the CLI never sent an ``init`` event, or its transcript is missing or empty;
 - an ``init`` event shows a model other than the one requested (a fallback), a credential source
   other than the one the run declared (``billing``), or an Exomem server that is not ``connected``;
-- the CLI reports the subscription limit as rejected (``LimitRejected``).
+- the CLI reports a rejected subscription limit or exhausted credits (``LimitRejected``).
 
 The ``init`` event arrives on every user turn, so each one is checked, not only the first.
 A harness fault is retried with the same inputs at most ``RETRIES`` times; a retry is not a repeat.
@@ -43,15 +43,20 @@ PARKED_DIR = "unfinished"
 
 
 class LimitRejected(RuntimeError):
-    """The CLI reported the subscription limit as rejected: stop the run, retry nothing.
+    """The CLI reported an account limit as rejected: stop the run, retry nothing.
 
     The limit is the account's, not the unit's, so every later session fails the same way and a
-    failure scored as a loss would charge it to the arm that ran last. ``info`` is the event's
-    ``rate_limit_info``; its ``resetsAt`` says when there is room again.
+    failure scored as a loss would charge it to the arm that ran last. ``info`` names the limit:
+    a ``rate_limit_info`` whose ``resetsAt`` says when the subscription has room again, or a
+    ``billing_error`` for a credit balance that cannot pay.
     """
 
     def __init__(self, info: dict):
-        super().__init__(f"the subscription limit was rejected (resetsAt {info.get('resetsAt')})")
+        if info.get("limit") == "credits":
+            message = "credit funds exhausted (billing_error); funding required"
+        else:
+            message = f"the subscription limit was rejected (resetsAt {info.get('resetsAt')})"
+        super().__init__(message)
         self.info = info
 
 

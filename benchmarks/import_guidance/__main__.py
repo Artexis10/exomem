@@ -24,6 +24,7 @@ from import_guidance import (  # noqa: E402
     store_report,
 )
 from import_guidance.recording import (  # noqa: E402
+    ACTIVATION_PACKETS,
     graph_states,
     load_recording,
     parse_arm,
@@ -42,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument(
+        "--activation-packet", choices=ACTIVATION_PACKETS,
+        help="explicit packet profile for recording workers and session-close servers; unset keeps the product default",
+    )
+    run.add_argument(
         "--repeat-offset",
         type=int,
         default=0,
@@ -58,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         help="session-close only: build each seeded vault's relation graph before the session, as a live vault has it "
         "(the arm's own reconcile, then wait until its recall_context reports the graph available)",
     )
+    run.add_argument("--hook-inject", choices=session_close.HOOK_INJECTS, help="session-close only: the retrieve hook's inject mode for every arm of the run (default mcp; working_set also turns on the hook's CLI rung)")
     run.add_argument("--credits-account", help="session-close only: select the maintained credits launcher account")
     run.add_argument("--credits-budget-usd", type=float, help="maximum requested for each capture or fresh process; requires account and reason")
     run.add_argument("--credits-reason", help="the maintained credits launcher's reason; requires account and budget")
@@ -238,6 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.client_mode is not None and args.suite != session_close.SUITE:
         raise SystemExit("--client-mode applies to the session-close suite only")
     args.client_mode = args.client_mode or session_close.DEFAULT_CLIENT_MODE
+    if args.hook_inject is not None and args.suite != session_close.SUITE:
+        raise SystemExit("--hook-inject applies to the session-close suite only")
+    args.hook_inject = args.hook_inject or session_close.DEFAULT_HOOK_INJECT
     if args.case_dir is not None and args.suite != session_close.SUITE:
         raise SystemExit("--case-dir applies to the session-close suite only")
     if args.ready_graph and args.suite != session_close.SUITE:
@@ -254,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="ig-dry-") as scratch:
             for scenario in scenarios:
                 for arm in arms or [None]:
-                    problems = runner.dry_run(scenario, Path(scratch), arm)
+                    problems = runner.dry_run(scenario, Path(scratch), arm, activation_packet=args.activation_packet)
                     label = f"{arm.label}: " if arm else ""
                     print(
                         f"{label}{scenario.id}: "
@@ -294,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         out=args.out,
         arms=arms,
         repeat_offset=args.repeat_offset,
+        activation_packet=args.activation_packet,
     )
     print(runner.summary_table(rows))
     return 0
@@ -315,6 +325,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
                         hooked=args.hook_turn,
                         client_mode=args.client_mode,
                         ready_graph=args.ready_graph,
+                        activation_packet=args.activation_packet,
                     )
                     print(f"{arm.label}: {case.id}: {'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}")
                     failed += bool(problems)
@@ -330,6 +341,8 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         client_mode=args.client_mode,
         credits=args.credits,
         ready_graph=args.ready_graph,
+        hook_inject=args.hook_inject,
+        activation_packet=args.activation_packet,
     )
     return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 

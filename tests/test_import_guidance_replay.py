@@ -195,49 +195,49 @@ def test_a_seeded_session_vault_is_readied_without_writing_a_page_or_touching_th
     assert readied_pages == seeded_pages and seed_unchanged
 
 
-def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_beyond_the_seed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("activation_packet", ["maps", "anchors"])
+def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_beyond_the_seed(tmp_path: Path, activation_packet: str) -> None:
     """Catches a recorder that serves the graph warming for a seeded vault: both arms would then serve no relation
     mark, and the comparison would measure nothing."""
     seed = shelf_seed(tmp_path)
     baseline, _ = seed_a_vault(tmp_path, "baseline", ready_graph=False)
+    case = session_close.Case("shelf", "t", seed, "balanced", ("When does the tool shelf close?",), tmp_path / "case.json", None)
+    generated = replay_cases.scenario_for(case, {"reference": "", "deterministic": {}}, [])
     plan = tmp_path / "plan.json"
-    plan.write_text(
-        json.dumps(
-            {
-                "ready_graph": True,
-                "steps": [{"as": "context", "tool": "recall_context", "arguments": {"turn": "When does the tool shelf close?"}}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    plan.write_text(json.dumps(generated["record"]), encoding="utf-8")
     scratch = tmp_path / "record"
     scratch.mkdir()
     done = subprocess.run(  # noqa: S603
         [sys.executable, str(recording.WORKER), str(plan), str(ROOT), str(tmp_path / "out.json"), str(seed)],
-        cwd=scratch, env=recording.worker_env(Arm("test", ROOT), scratch), capture_output=True, text=True, timeout=300,
+        cwd=scratch, env=recording.worker_env(Arm("test", ROOT), scratch, activation_packet=activation_packet), capture_output=True, text=True, timeout=300,
     )
     assert done.returncode == 0, done.stderr[-400:]
     recorded = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
     assert recorded["ready"]["graph"] == "available"
-    assert recorded["shapes"]["context"]["map"]["membership_graph"] == "available"
+    if activation_packet == "maps":
+        assert recorded["shapes"]["context"]["map"]["membership_graph"] == "available"
+    else:
+        assert "map" not in recorded["shapes"]["context"]
+        assert "anchors" in recorded["shapes"]["context"]
+        assert recorded["shapes"]["context"]["continuity"]
     vault = next(scratch.glob("ig-record-*/vault"))
     pages, seed_unchanged = pages_and_seed_bytes(vault, seed)
     baseline_pages, _ = pages_and_seed_bytes(baseline, seed)
     assert pages == baseline_pages and seed_unchanged
 
 
-def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes() -> None:
+def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes(tmp_path: Path) -> None:
     """Catches a vault that is never ready being recorded anyway, or failing with a message that hides the state."""
     seen = []
 
-    def stays_warming(tool: str, arguments: dict) -> dict:
-        seen.append(tool)
-        return {"error": {"code": "COLD"}} if len(seen) == 1 else {"map": {"membership_graph": "warming"}}
+    def stays_unavailable() -> str:
+        seen.append(True)
+        return "unproven" if len(seen) == 1 else "unavailable"
 
-    with pytest.raises(SystemExit, match="warming"):
-        session_seed.wait_for_graph(stays_warming, seconds=0.05, interval=0.02)
-    steps = iter([{"map": {"membership_graph": "warming"}}, {"map": {"membership_graph": "available"}}])
-    assert session_seed.wait_for_graph(lambda tool, arguments: next(steps), seconds=5, interval=0.01) == "available"
+    with pytest.raises(SystemExit, match="unavailable"):
+        session_seed.wait_for_graph(tmp_path, availability=stays_unavailable, seconds=0.05, interval=0.02)
+    steps = iter(["unproven", "unavailable", "available"])
+    assert session_seed.wait_for_graph(tmp_path, availability=lambda: next(steps), seconds=5, interval=0.01) == "available"
 
 
 def test_the_warm_read_records_once_two_successive_replies_agree_and_fails_by_name_when_none_do_within_the_bound() -> None:
@@ -245,9 +245,16 @@ def test_the_warm_read_records_once_two_successive_replies_agree_and_fails_by_na
     index settles after the second read and so fails a recording that a short wait would have made."""
     from import_guidance.record_worker import warmed_reply
 
-    settling = iter([{"slice": []}, {"slice": ["a"]}, {"slice": ["a", "b"], "id": 1}, {"slice": ["a", "b"], "id": 2}])
-    reply = warmed_reply(lambda tool, arguments: next(settling), "recall_context", {}, {"seconds": 0.001, "ignore": ["id"]})
-    assert reply == {"slice": ["a", "b"], "id": 2}
+    case = session_close.Case("probe", "t", Path("seed"), "balanced", ("A request",), Path("case.json"), None)
+    warm = replay_cases.scenario_for(case, {"reference": "", "deterministic": {}}, [])["record"]["steps"][-1]["warm"]
+    settling = iter([{"slice": []}, {"slice": ["a"], "continuity": "first"}, {"slice": ["a", "b"], "continuity": "second"}, {"slice": ["a", "b"], "continuity": "third"}])
+
+    def read(tool, arguments):
+        assert arguments == {}, "warm reads must not feed earlier continuity into the next call"
+        return next(settling)
+
+    reply = warmed_reply(read, "recall_context", {}, {**warm, "seconds": 0.001})
+    assert reply == {"slice": ["a", "b"], "continuity": "third"}
 
     counter = itertools.count()
     with pytest.raises(SystemExit, match=r"recall_context still changed between two reads 0.001s apart: the index is not warm \(polled for 0.05s\)"):
@@ -292,6 +299,29 @@ def test_a_recording_from_another_commit_or_an_uncommitted_change_of_the_arm_is_
     head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     assert len(uncommitted) == 1 and "-dirty-" in uncommitted[0] and uncommitted[0].endswith("delete it to record again")
     assert len(committed) == 1 and f"the checkout is now at {head};" in committed[0]
+
+
+
+def test_a_new_untracked_product_file_changes_the_arm_state_and_a_run_folder_does_not(tmp_path: Path) -> None:
+    """Catches a recording reused after a dev-round repair added an uncommitted scaffold file: the seeded vault holds
+    the new file, but the recorded replies came from the vault without it."""
+    arm_root = tmp_path / "arm"
+    (arm_root / "src").mkdir(parents=True)
+    git = ["git", "-C", str(arm_root), "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false"]
+    (arm_root / "src" / "reply.py").write_text("REPLY = 'first'\n", encoding="utf-8")
+    for command in (["init", "-q"], ["add", "src/reply.py"], ["commit", "-q", "--no-verify", "-m", "first"]):
+        subprocess.run([*git, *command], check=True)
+    clean = recording.checkout_sha(arm_root)
+
+    (arm_root / "runs").mkdir()
+    (arm_root / "runs" / "runs.jsonl").write_text("{}\n", encoding="utf-8")
+    assert recording.checkout_sha(arm_root) == clean
+
+    (arm_root / "src" / "new-registry.yaml").write_text("kinds: {}\n", encoding="utf-8")
+    added = recording.checkout_sha(arm_root)
+    assert "-dirty-" in added
+    (arm_root / "src" / "new-registry.yaml").write_text("kinds: {claim: {}}\n", encoding="utf-8")
+    assert recording.checkout_sha(arm_root) not in (clean, added)
 
 
 # Case folders, scenarios and the answer checks.
@@ -504,6 +534,20 @@ def test_an_answer_rerun_after_judge_prepare_does_not_inherit_the_judgment_of_th
     rerun = rows.pop(("c2", "cand"))
     assert rerun["verdict"] == checks.UNKNOWN and "changed after judge-prepare" in rerun["criteria"][0]["detail"]
     assert {row["verdict"] for row in rows.values()} == {checks.PASS}
+
+
+
+def test_a_judge_import_given_none_of_the_prepared_runs_is_refused_and_names_the_run_files(tmp_path: Path) -> None:
+    """Catches an import that forgot --stage-b: every judgment would read unknown with a reason that asks to judge
+    again, and the report would show a batch that was judged in full as unjudged."""
+    scenarios = [invented_scenario(f"c{n}") for n in range(5)]
+    out = tmp_path / "batch"
+    runs = ten_stage_b_runs(tmp_path)
+    judge_batch.prepare([runs], [], scenarios, out=out)
+    judgments = judge_batch_as(out, lambda run: True)
+    with pytest.raises(SystemExit, match="--stage-b and --stage-c"):
+        judge_batch.import_judgments(judgments, out=out, stage_b=[], stage_c=[], scenarios=scenarios)
+    assert not (out / "judged.json").exists()
 
 
 FAKE_JUDGE = """#!{python}
@@ -742,3 +786,27 @@ def test_the_replay_stages_the_arms_prompt_hook_in_mcp_mode_under_an_isolated_ho
     assert fake.env["EXOMEM_RETRIEVE_INJECT"] == "mcp" and fake.env["EXOMEM_PROMINENCE"] == "balanced"
     assert Path(fake.env["EXOMEM_HOOK_HOME"]).is_relative_to(tmp_path / "run")
     assert fake.judge_calls == 0 and row["hook_invocations"] == 1 and row["final_text"] == "Sails at 07:15."
+
+
+def test_a_reply_cannot_reveal_its_arm_through_its_runtime_directory(tmp_path: Path) -> None:
+    """A quoted working directory must not unblind a stage-C answer or break its judgment join."""
+    work = tmp_path / "model-quokka" / "arm-zeta" / "c0"
+    answer = f"Sails at 07:15. My working directory is {work}/cwd."
+    runs = write_rows(tmp_path / "runs.jsonl", [{
+        "scenario": "c0", "arm": "arm-zeta", "model": "model-quokka", "repeat": 0,
+        "client_mode": "plugin", "error": None, "replies": [answer],
+        "stream": str(work / "stream.jsonl"),
+    }])
+    out = tmp_path / "batch"
+    scenarios = [invented_scenario("c0")]
+    judge_batch.prepare([], [runs], scenarios, out=out)
+
+    views = (out / "judge-views.jsonl").read_text()
+    assert "arm-zeta" not in views and "model-quokka" not in views
+    assert "Sails at 07:15." in views and "<session-workdir>/cwd" in views
+    assert answer in runs.read_text()
+    summary = judge_batch.import_judgments(
+        judge_batch_as(out, lambda run: True), out=out,
+        stage_b=[], stage_c=[runs], scenarios=scenarios,
+    )
+    assert summary["agreement"] == 1.0

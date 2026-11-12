@@ -1,5 +1,9 @@
 # Import guidance probe
 
+`run --activation-packet {maps,anchors}` pins the packet profile for replay recording workers and full session-close servers, including dry runs.
+The harness records an explicit profile in recordings and run rows. A recording made with another profile must be recorded again.
+Without this option, outside `EXOMEM_*` settings remain scrubbed and the product chooses its default profile.
+
 This probe shows whether a real headless agent follows the Cloud import tool text (the `inspect_memory` and `manage_memory` doors plus the Cloud transfer tools) when a scripted server returns the states that text describes. Scenario files in `scenarios/` script the replies, and `status_shape.py` builds every `imports.status` reply with the product's own window code. The `observe_transfer`, `transfer_memory` and run-step replies have no in-repo source and are unverified, and the probe serves four tools (two doors and two Cloud tools), so it tests the text, not tool selection. Deterministic checks read the call log and a judge reads the agent's words; a run error, an unconnected server or an unreadable judge answer is `unknown`. Run `PYTHONPATH=benchmarks python -m import_guidance run --model <m> [--judge-model <m>] --repeats N --scenario <id|all> --out <dir outside every repository>` from the repository root, or add `--dry-run` to start no model. To add a case, copy a scenario file, script its replies, list its `checks` and `criteria` with the values they expect, and run `--dry-run`; each failure found later becomes a permanent case.
 
 ## Write-narration suite
@@ -53,6 +57,8 @@ The [official hook setting](https://code.claude.com/docs/en/settings-reference#d
 Capture and fresh rows retain `client_mode`, the actual argv, supplied settings, hook starts and completed invocation counts. Work directories include the mode. Native identity, scored rows, denominators and paired intervals keep modes separate; historical rows without a mode mean plugin. Blind judge views expose neither mode nor actor identity.
 
 The native Claude route remains the default. For the maintained credits launcher, supply `--credits-account`, `--credits-budget-usd` and `--credits-reason` together. These options apply only to session-close. Empty account or reason values and nonpositive or nonfinite budgets fail before executable discovery.
+
+`--hook-inject {mcp,working_set}` (session-close only, default `mcp`) pins the retrieve hook's inject mode for every arm of a run. It is recorded as `hook_inject` in each `runs.jsonl` row and named in the `session-score` report. `working_set` also turns on the hook's CLI rung against the arm's pinned vault, points the hook away from any live service's `service.env`, and zeroes the hook's length, control-prompt and cooldown gates, as `mcp` mode does. Run each mode into its own `--out` folder. `outcome.json` belongs to the membench outcome command and is not written here.
 
 The adapter resolves `harness` on PATH without a shell. It uses `claude-credits run --stream-json` with the existing `--budget` option; the launcher owns framing, model and session flags. The remaining actor flags preserve strict MCP access, tool restrictions, settings, hook events and the selected client mode.
 
@@ -137,9 +143,19 @@ Run these steps from the repository root:
 What the suite does:
 
 - The recorder lays the arm's scaffold, copies the seed over it with `session_seed.py`, and makes the scenario's calls. It never runs `settle_graph` on a seeded vault, because that step writes throwaway pages that `recall_context` could serve.
-- A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown. A live vault has one, because its writes build it. The scenario property `ready_graph` (the writer sets it) and the session-close flag `--ready-graph` both run `session_seed.reconcile` and `session_seed.wait_for_graph`. The first runs the arm's own `exomem maintain --reconcile` before any server of the run starts. It writes no page of the seed. It rewrites the count rows of the three `index.md` files. The second reads the arm's own `recall_context` until `map.membership_graph` is `available`. After 120 seconds it stops and names the state that it saw. The recording keeps `ready` with the state and the seconds, and a session row keeps the same in `ready`. The runner refuses an old recording of such a scenario that has no `ready`: delete it and record again.
+- A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown.
+  A live vault has one, because its writes build it.
+  The scenario property `ready_graph` (the writer sets it) and the session-close flag `--ready-graph` run `session_seed.reconcile` and `session_seed.wait_for_graph`.
+  The first runs the arm's own `exomem maintain --reconcile` before any server of the run starts.
+  It writes no page of the seed. It rewrites the count rows of the three `index.md` files.
+  The second uses the arm's `EpistemicGraphIndex(vault).availability_state(prove=True)` and proceeds only when it reports `available`.
+  This readiness check works with either activation packet. Recall capture and warm reads keep the selected packet.
+  After 120 seconds the check stops and names the state that it saw.
+  The recording keeps `ready` with the state and the seconds, and a session row keeps the same in `ready`.
+  The runner refuses an old recording of such a scenario that has no `ready`: delete it and record again.
 - The runner reuses a recording only while the arm's checkout is in the state that it was recorded from: the same HEAD and the same diff of tracked files against HEAD. Otherwise it stops, names both states and says to delete the recording. `replay-report` names every product state of each arm's runs, and flags an arm whose runs came from more than one.
 - The first read of a seeded vault is cold: the index is not ready, and the reply holds no context. The `recall_context` step therefore has a `warm` key. The recorder discards the first read. It then reads every `WARM_SECONDS` (`replay_cases.py`) until two successive reads agree apart from the listed fields, and records the later read. When no two successive reads agree within `WARM_WITHIN_SECONDS` (`record_worker.py`), the recording fails and names the tool.
+  Protocol F11 excludes per-call `served_context_id` and `continuity` metadata from this comparison. The actor receives the complete final reply, including its continuity token.
 - The runner writes the arm's `UserPromptSubmit` hook declaration into the agent's settings. It sets `EXOMEM_RETRIEVE_INJECT=mcp`, the case's engagement and a hook home inside the run folder. Session-close uses the same code (`plugin_hooks` and `hook_env`). The row records `hook_invocations` for information only.
 - `answer_has_all_of` needs one spelling from each group in the answer. `answer_in_order` needs the first matches of the groups in the listed order. Both match case-insensitively on the whole text.
 - An answer passes when every judged criterion holds and every deterministic check of the case passes. `replay-report --criteria` can name a subset of the criteria. A run error, a missing judgment and a missing arm are `unknown`. Every written scenario also carries `only_scripted_tools`: a run in which the agent used a tool outside the script did not measure the replayed context, so the report counts it as `unknown` (its own line, "Runs where the agent used a tool outside the script") and leaves it out of the paired difference, the reply length and the disagreement list.
@@ -152,3 +168,14 @@ Limits:
 - The graph state is read from the `map` block of the reply. A reply without a `map` block, or an arm that does not report the state, stops the recording with a message that names what it saw.
 - Whether `-p` mode emits hook responses under `--include-hook-events` is unverified. The report counts runs with and without them and does not gate on the count.
 - The judge model is in the same family as the agents.
+
+## Follow-up suite
+
+Cases `f09` through `f14` cover repository dialogue: short acknowledgements, merge and release requests, a standalone rename, and initial retrieval of a matching method. The shell-free MCP runner measures retrieval decisions and replies. It does not execute repository delivery. The seeded methods are unapproved references; these cases do not prove approval signatures or native Codex hook behavior. Count tool calls by each stream's `result` boundaries when checking repeated recall.
+
+
+This family measures recall on short follow-up turns: a carried subject ("and the deadline?"), a subject switch ("and for Harbor?"), a continuation after an agent proposal ("do that", "continue") and an acknowledgement ("ok, thanks"). It lives in `scenarios/follow-up/` and uses the session-close format, with its own seeds, keys and `rubric.json`.
+
+- Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.
+- The scorer's capture judge never reads replies, so `session-score` yields only the deterministic page checks (the session must change no page). Reply quality is judged by the replay batch: run `PYTHONPATH=benchmarks python -m import_guidance.followup_judge_scenarios --case-dir <cases> --out <judge dir>`, then `judge-prepare --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>` and, once the judge returns lines, `judge-import --judgments <file> --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>`.
+- `answer-keys/<id>.json` is the session-close key; `answer-keys/<id>.marks.json` carries the same reference for the judge batch. The criteria F1 to F3 apply to the final reply only.

@@ -20,6 +20,12 @@ def week_date(week: int, day: int = 0) -> date:
     return EPOCH + timedelta(weeks=week, days=day)
 
 
+def week_of(day: date) -> int:
+    """The simulated week that a date falls in: the inverse of ``week_date``."""
+
+    return (day - EPOCH).days // 7
+
+
 def week_iso(week: int, day: int = 0) -> str:
     return week_date(week, day).isoformat()
 

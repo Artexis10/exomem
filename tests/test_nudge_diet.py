@@ -44,6 +44,8 @@ CEILINGS = {
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
     "retrieval reminder": (retrieve.REMINDER, 332),
     "retrieval pointer": (retrieve.REMINDER_POINTER, 160),
+    # 1091 in use at balanced; sent on every substantive MCP-mode turn, so growth costs every turn.
+    "mcp activation": (retrieve._MCP_ACTIVATION, 1150),
 }
 
 

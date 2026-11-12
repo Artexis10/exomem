@@ -967,68 +967,74 @@ def test_every_request_shape_attributes_its_time(
     _seed_kb(vault, rel, "Integration Attrib", project="project-alpha")
     _warm(vault, warm_managed_cell)
 
-    measured: dict[str, tuple[float, float]] = {}
-    diagnostics: dict[str, Any] = {}
-    for shape, kwargs in sorted(_SHAPES.items()):
-        # A breach seen twice in CI left most of a request outside every stage, with no
-        # cause. Collector pauses and the request thread's CPU time tell a collection
-        # (CPU spent collecting) from a descheduled thread (wall time with little CPU).
-        pause = {"started": 0.0, "ms": 0.0, "collections": 0}
+    # Measure under the heap the server keeps: it freezes its startup objects.
+    gc.collect()
+    gc.freeze()
+    try:
+        measured: dict[str, tuple[float, float]] = {}
+        diagnostics: dict[str, Any] = {}
+        for shape, kwargs in sorted(_SHAPES.items()):
+            # A breach seen twice in CI left most of a request outside every stage, with no
+            # cause. Collector pauses and the request thread's CPU time tell a collection
+            # (CPU spent collecting) from a descheduled thread (wall time with little CPU).
+            pause = {"started": 0.0, "ms": 0.0, "collections": 0}
 
-        def collector(phase: str, _info: dict, pause: dict = pause) -> None:
-            if phase == "start":
-                pause["started"] = time.perf_counter()
-            else:
-                pause["ms"] += (time.perf_counter() - pause["started"]) * 1000.0
-                pause["collections"] += 1
+            def collector(phase: str, _info: dict, pause: dict = pause) -> None:
+                if phase == "start":
+                    pause["started"] = time.perf_counter()
+                else:
+                    pause["ms"] += (time.perf_counter() - pause["started"]) * 1000.0
+                    pause["collections"] += 1
 
-        gc.callbacks.append(collector)
-        cpu = time.thread_time()
-        try:
-            timings = _recall(vault, **kwargs)["timings"]
-        finally:
-            gc.callbacks.remove(collector)
-        measured[shape] = (float(timings["total_ms"]), float(timings["unattributed_ms"]))
-        diagnostics[shape] = {
-            **timings,
-            "request_thread_cpu_ms": round((time.thread_time() - cpu) * 1000.0, 1),
-            "gc_pause_ms": round(pause["ms"], 1),
-            "gc_collections": pause["collections"],
+            gc.callbacks.append(collector)
+            cpu = time.thread_time()
+            try:
+                timings = _recall(vault, **kwargs)["timings"]
+            finally:
+                gc.callbacks.remove(collector)
+            measured[shape] = (float(timings["total_ms"]), float(timings["unattributed_ms"]))
+            diagnostics[shape] = {
+                **timings,
+                "request_thread_cpu_ms": round((time.thread_time() - cpu) * 1000.0, 1),
+                "gc_pause_ms": round(pause["ms"], 1),
+                "gc_collections": pause["collections"],
+            }
+
+        table = ", ".join(
+            f"{shape} unattributed={unattributed:.1f}/total={total:.1f}"
+            f"={100 * unattributed / total if total else 0:.1f}%"
+            f" [{'ratio' if total >= gate.KEYWORD_P50_MS else 'flat'}]"
+            for shape, (total, unattributed) in measured.items()
+        )
+        breaching = sorted(
+            shape
+            for shape, (total, unattributed) in measured.items()
+            if unattributed > _attribution_allowance(total) + 1e-6
+        )
+        assert not breaching, (
+            f"shapes over the attribution bound: {breaching} ({table}); diagnostics="
+            + json.dumps({shape: diagnostics[shape] for shape in breaching}, sort_keys=True)
+        )
+
+        # The regime each shape actually reaches, measured rather than asserted.
+        # Most of them take the fallback, so the fallback is what this file's bound
+        # mostly IS, and a cap that the common case relies on has to be sized
+        # against the quantity rather than against the contract's arithmetic at a
+        # scale nothing here reaches. This is the assertion that makes 8 ms a cap
+        # near the measurement: whatever regime a shape fell into, its absolute
+        # unattributed time is inside it.
+        over_cap = {
+            shape: round(unattributed, 2)
+            for shape, (_total, unattributed) in measured.items()
+            if unattributed > _FLAT_ATTRIBUTION_ALLOWANCE_MS
         }
-
-    table = ", ".join(
-        f"{shape} unattributed={unattributed:.1f}/total={total:.1f}"
-        f"={100 * unattributed / total if total else 0:.1f}%"
-        f" [{'ratio' if total >= gate.KEYWORD_P50_MS else 'flat'}]"
-        for shape, (total, unattributed) in measured.items()
-    )
-    breaching = sorted(
-        shape
-        for shape, (total, unattributed) in measured.items()
-        if unattributed > _attribution_allowance(total) + 1e-6
-    )
-    assert not breaching, (
-        f"shapes over the attribution bound: {breaching} ({table}); diagnostics="
-        + json.dumps({shape: diagnostics[shape] for shape in breaching}, sort_keys=True)
-    )
-
-    # The regime each shape actually reaches, measured rather than asserted.
-    # Most of them take the fallback, so the fallback is what this file's bound
-    # mostly IS, and a cap that the common case relies on has to be sized
-    # against the quantity rather than against the contract's arithmetic at a
-    # scale nothing here reaches. This is the assertion that makes 8 ms a cap
-    # near the measurement: whatever regime a shape fell into, its absolute
-    # unattributed time is inside it.
-    over_cap = {
-        shape: round(unattributed, 2)
-        for shape, (_total, unattributed) in measured.items()
-        if unattributed > _FLAT_ATTRIBUTION_ALLOWANCE_MS
-    }
-    assert not over_cap, (
-        f"shapes over the absolute attribution cap of {_FLAT_ATTRIBUTION_ALLOWANCE_MS} ms: "
-        f"{over_cap} ({table}); diagnostics="
-        + json.dumps({shape: diagnostics[shape] for shape in over_cap}, sort_keys=True)
-    )
+        assert not over_cap, (
+            f"shapes over the absolute attribution cap of {_FLAT_ATTRIBUTION_ALLOWANCE_MS} ms: "
+            f"{over_cap} ({table}); diagnostics="
+            + json.dumps({shape: diagnostics[shape] for shape in over_cap}, sort_keys=True)
+        )
+    finally:
+        gc.unfreeze()
 
 
 def test_every_stage_of_every_shape_carries_a_source(

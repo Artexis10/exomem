@@ -78,6 +78,11 @@ A recipe SHALL name its roles, an order of time slots, a list of world operation
 - **WHEN** a recipe's key names a reading of a mechanism that its phenomenon does not list
 - **THEN** the loader refuses the recipe and names the reading
 
+#### Scenario: A key reads a step that one world lacks
+
+- **WHEN** a recipe's key reads a step that exists only in the planted world or only in the mutation world, and the key applies in both
+- **THEN** the loader refuses the recipe and names the step and the world that lacks it
+
 #### Scenario: A recipe leaves a declared probe form unkeyed
 
 - **WHEN** a phenomenon declares a probe form and its recipe holds no key for that form

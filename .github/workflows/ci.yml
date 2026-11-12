@@ -472,6 +472,7 @@ jobs:
           uv run --frozen --python 3.13 python -m pytest -q
           tests/test_held_fs_contract.py
           tests/test_held_fs_windows.py
+          tests/test_cloud_import.py::test_success_is_flushed_to_disk_before_it_is_reported
           tests/test_reserved_admin_paths.py
           tests/test_mutation_concurrency.py
           tests/test_windows_idempotency_trust.py

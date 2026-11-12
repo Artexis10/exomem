@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -34,6 +35,47 @@ def _assert_contract(text: str) -> None:
     assert concise in normalized
     assert f"exomem-semantic-authoring:v{contract.version}" in normalized
     assert contract.content_digest in normalized
+
+
+def test_release_version_reads_pyproject() -> None:
+    """The pin source is the tree's own version, so committed artifacts are stable."""
+    expected = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert package_module.release_version() == expected
+
+
+def test_every_packaged_skill_pins_install_lines_to_the_release(tmp_path: Path) -> None:
+    """Web uploads face the same mutable-source review as directory submissions.
+
+    No archive may carry a floating tag, an unversioned install, or an unfilled
+    placeholder; the scaffold writes `<exomem-release>` and the payload fills
+    the release being built.
+    """
+    release = package_module.release_version()
+    report = package_module.package_skills(tmp_path)
+
+    for item in report["archives"]:
+        with zipfile.ZipFile(item["path"]) as archive:
+            text = "\n".join(
+                archive.read(name).decode("utf-8")
+                for name in archive.namelist()
+                if name.endswith(".md")
+            )
+        assert package_module.RELEASE_PLACEHOLDER not in text
+        assert "exomem@latest" not in text
+        assert "pip install exomem)" not in text
+        assert f"uvx exomem@{release}" in text
+        assert f"exomem=={release}" in text
+
+
+def test_scaffold_never_hardcodes_a_release_pin() -> None:
+    """Pins stay a placeholder in the source; the build owns the version."""
+    scaffold = Path(package_module.__file__).parent / "_scaffold" / "_Schema"
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in scaffold.rglob("*.md")
+    )
+    assert "exomem@latest" not in text
+    assert "pip install exomem)" not in text
+    assert package_module.RELEASE_PLACEHOLDER in text
 
 
 def test_packages_every_skill_not_just_the_core_one(tmp_path: Path) -> None:

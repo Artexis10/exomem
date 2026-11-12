@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from exomem import install_skill as install_module
-from exomem import semantic_authoring
+from exomem import package_skills, semantic_authoring
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 EXPECTED_WORKFLOW_SKILLS = [
@@ -177,9 +177,11 @@ def test_install_skills_lands_the_full_set_in_both_clients(
         skills = tmp_path / client / "skills"
         assert (skills / "exomem" / "SKILL.md").is_file()
         # A router without its references installs successfully but cannot work.
+        # Installed copies differ from the scaffold only in the release pin.
         for source in (install_module._SKILL_SRC / "references").glob("*.md"):
             installed = skills / "exomem" / "references" / source.name
-            assert installed.read_bytes() == source.read_bytes()
+            expected = package_skills.render_shipped_markdown(source.read_text(encoding="utf-8"))
+            assert installed.read_bytes() == expected.encode("utf-8")
         for name in EXPECTED_WORKFLOW_SKILLS:
             assert (skills / name / "SKILL.md").is_file(), f"{name} missing for {client}"
 

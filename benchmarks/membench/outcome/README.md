@@ -33,8 +33,10 @@ protocol, so no number here may be quoted as a CL-Bench or LAB result.
   governance keeps the agent from trusting the stale value.
 - **epistemic** is the epistemic task bench (family f38, dev only until its amendment registers
   it). The actor works through a scripted project of several sessions, and probes then ask what
-  the memory should now hold. Arm `N` has no memory. Arm `F` keeps a `memory/` folder and gets the
-  product's learning instruction, pointed at the folder. Arm `P` is Exomem as its users get it:
+  the memory should now hold. Arm `N` has no memory and plays probes only. Arm `G` has no memory
+  either, plays probes only and reads each probe's contest set in its prompt. Arm `F` keeps a
+  `memory/` folder and gets the product's learning instruction, pointed at the folder. Arm `P` is
+  Exomem as its users get it:
   the plugin, the skills, the hooks, the instruction block and the learning instruction. Arm `E`
   is an ablation: Exomem over MCP alone, with no instruction. No arm gets a per-task memory
   sentence. The suite answers whether Exomem beats a folder on facts that change, and whether it
@@ -59,15 +61,32 @@ one session and carries a task, files, and a key: the value, the accepted phrasi
 behaviours it scores and the trap. A probe of the dimension `stable` asks for a fact that never
 changes. Every other probe is a change probe and names its `change_id`.
 
+A key may also carry `contest`: a list of `{"session": n, "file": name}` entries, each naming a
+scripted file of the probe's session or an earlier one. Only arm `G` reads it. The hand-written
+projects have none, so `--arms` leaves `G` out by default and a run that asks for `G` on a project
+with a probe that has no `contest` is refused before any session starts.
+
+A generated development project comes from the synthetic world. `projection.generate(root, seed)` in
+`epistemic/projection.py` writes the world with its keys under `root/world` and the project under
+`root/cases/epistemic`, with the `SPLIT.json` that names it as the dev project. Its sessions are the
+weeks of the world's timeline. A probe also holds its `family`. It is asked in the session of its
+date, which the planner keeps free of the key's things. Its label is the
+dimension of its family in `benchmarks/membench/projections/exomem.yaml`, or the family's own key when
+the product ships no dimension. The report builds a row for each label, so a family key is a row of
+description. The project goes under a temporary root, never into the repository.
+
 How a window plays:
 
 1. The command plays one project in lockstep. Every arm starts session `k` together. Session
-   `k + 1` starts only after every arm finished session `k` and its probes.
+   `k + 1` starts only after every arm finished session `k` and its probes. Arms `N` and `G` play
+   no main task: they have no memory, so the task would change nothing that a later call sees.
 2. Before each session the workspace holds only that session's scripted files. Arm `F` keeps its
    `memory/` folder. Arms `P` and `E` keep their vault and state.
 3. After an arm's main task, each probe of that session runs as its own `claude -p` call. It
    starts from a snapshot of the memory taken after the main task. The harness restores the
-   snapshot after every probe, so a probe never writes into memory that a later call reads.
+   snapshot after every probe, so a probe never writes into memory that a later call reads. The
+   prompt of arm `G` holds the files of the probe's `contest` in session order, under a neutral
+   header, and then the probe's task. It holds no other file and no task of an earlier session.
 4. A harness fault that survives its retries invalidates that project's window for every arm. The
    project stops and `state.json` records the error. A product failure (a timeout, a wrong
    answer) stays scored.
@@ -111,6 +130,24 @@ with fewer than two valid windows makes the decision `incomplete` and names the 
 probes, and arm `N` without it fails at least 80%. Each gate lists the probes that fail it. The
 description rows include the share of answers per arm that name a memory store (`memory/` or the
 product name), because the blind judge reads the answer text.
+
+A probe whose key reads it as harm (`key.reading`) has no floor, so no pair, decision or position reads it.
+The report gives each such probe as harm against `N`.
+
+The report reads each family of the catalogue from the probes that carry it (`description.families`; the
+rules and numbers are in `epistemic/readings.yaml`, and design.md decision 6 explains them). A family reads
+`not measured` when no probe of it played, `too few probes` under 20 position probes, `no room` when the
+ceiling `G` does not clearly lead the floor `N`, `room` when it does, `room unclear` between the two, and
+`saturated` when `P` stays at `G` in two reports in a row. Name the earlier report with `--earlier-report
+PATH`, newest first; without one, no family reads `saturated`. A family that reads `room` prints each arm's
+position, (arm − `N`) / (`G` − `N`), with its paired differences. Each family row also gives its harm, its
+false-alarm rate (the answers on which the judge finds `over_flags`, among the probes that ask for it) and
+the filed prediction beside the outcome that the arms give. The report lists each contradicted prediction
+with the probes to read first. `description.lineage` gives the share of probes per lineage group, and
+`description.background_norms` the keys that rest on each background norm and the share that the full-history
+arm reaches. These rows need a project that carries `family` and `phenomenon` on each probe, as a generated
+project does; a hand-written project has neither, so every family reads `not measured` and its lineage is
+unknown.
 
 A held-out epistemic run refuses today: f38 is not registered in the preregistration, so no gate
 can pass it.
@@ -196,7 +233,7 @@ case scores as `stale_trusted` and not `correct`. A LAB matter with no deliverab
 harness fault is the harness failing to run the product. The evidence is a CLI crash or a CLI that
 sends no `init` event before its timeout, an Exomem MCP server that is not `connected`, a lost
 transcript, a reported model other than the requested one, a credential source other than
-the one the run declared (see Billing), or a subscription limit that the CLI reports as rejected. Every session's `init` event is
+the one the run declared (see Billing), or an account limit that the CLI reports as rejected. Every session's `init` event is
 checked.
 
 1. The run retries a session with a harness fault, with the same inputs, at most twice. In
@@ -204,9 +241,12 @@ checked.
 2. In CL-Bench, a fault that survives voids the whole run index for every arm. The run skips the
    voided index's remaining cells.
 3. In LAB and planted, a fault that survives strikes the matter or case from every arm.
-4. A rejected subscription limit belongs to the account, so it stops the whole run at once, with
+4. A rejected limit belongs to the account — a subscription `rate_limit_event` whose status is
+   `rejected`, or a `billing_error` for a credit balance that cannot pay — so it stops the whole
+   run at once, with
    no retry and no further cell, matter or session. The command prints one line that says the run
-   waits for room, and scores no loss. With `--jobs` above 1, a session already running ends when
+   waits for room, and scores no loss. Exhausted credits require funding before resuming; they have no reset time.
+   With `--jobs` above 1, a session already running ends when
    it meets the same rejection. The unit that hit the limit has no result, so the run is
    incomplete (rule 6).
 5. A held-out report says the decision is void after a second voided CL-Bench run, or after more
@@ -259,6 +299,9 @@ Run them from the repository root with `PYTHONPATH=benchmarks:src`, as `python -
 6. Run a decision: `membench outcome run lab --split heldout --run-id h1`.
 
 A run spends subscription quota or API credits. State the cost before starting one.
+Optionally add `--estimated-cost-usd 2.50` to record your estimate in `outcome.json` and print it before actors launch.
+The value must be finite and nonnegative. It is an owner estimate, not an automatic calculation or approval gate.
+A resume keeps the estimate unless you supply a replacement. The run's billing declaration remains unchanged.
 
 ## Billing
 
@@ -273,9 +316,10 @@ refuses before its first session when the shell holds none. A credit run starts 
 - Faults. A session whose `init` event reports another `apiKeySource` than the declared one (`none` for
   `subscription`, `ANTHROPIC_API_KEY` for `credits`) is a harness fault. A source outside that
   closed set is a fault too. One run never mixes sources by accident.
-- Evidence. Credit runs are instrument evidence. Decision runs stay on the subscription as the
-  preregistration registers: a held-out run declared on credits, or judged on credits, never reads as
-  decision evidence.
+- Evidence. A credit run may read as decision evidence once the sequence-11 billing amendment is
+  acknowledged. Until then decision runs stay on the subscription as the preregistration
+  registers: a held-out run declared on credits, or judged on credits, reads as instrument
+  evidence.
 - Records. `outcome.json`, the incidents manifest and the f33 manifest store the declared source. Each
   arm manifest stores the reported `api_key_source` and its `billing` name beside the model. A session
   with no recorded source reads `unknown`.

@@ -429,7 +429,6 @@ def test_explicit_mode_preserves_untrusted_config_refusal(tmp_path, unsafe):
 @pytest.mark.parametrize(
     "input_change",
     [
-        {"prompt": "ok"},
         {"hook_event_name": "TaskNotification"},
         {"prompt": "Check adapter decisions", "type": "task_notification"},
     ],
@@ -444,6 +443,17 @@ def test_mcp_keeps_task_control_silent(monkeypatch, capsys, input_change):
     monkeypatch.setattr(retrieve.sys, "stdin", io.StringIO(json.dumps(data)))
     assert retrieve.main() == 0
     assert capsys.readouterr().out == ""
+
+
+def test_mcp_sends_the_reminder_on_a_short_acknowledgement(monkeypatch, capsys):
+    # "thanks" matches the control regex and is not referential, so the old
+    # default would have skipped it; the MCP default must not.
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
+    data = {"prompt": "thanks", "session_id": "s"}
+    monkeypatch.setattr(retrieve.sys, "stdin", io.StringIO(json.dumps(data)))
+    assert retrieve.main() == 0
+    context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+    assert "[Exomem native MCP activation]" in context
 
 
 @pytest.mark.parametrize(
@@ -981,3 +991,23 @@ def test_activation_token_reader_refuses_group_readable_anchor_binding(monkeypat
     monkeypatch.setenv("EXOMEM_HOOK_HOME", str(tmp_path))
     monkeypatch.setenv("EXOMEM_HOOK_CLIENT", "codex")
     assert retrieve._read_activation_token("s") == ""
+
+
+@pytest.mark.parametrize("level,has_repo_task", [("light", False), ("balanced", True)])
+def test_repository_task_sentence_follows_the_level(monkeypatch, capsys, level, has_repo_task):
+    """Catches a later edit that folds the sentence back into the shared text.
+
+    The copy-sync tests stay green once the copies are regenerated, so only this
+    pins `light` to the advice sentence without the repository-task sentence.
+    """
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "mcp")
+    monkeypatch.setenv("EXOMEM_PROMINENCE", level)
+    monkeypatch.setattr(
+        retrieve.sys,
+        "stdin",
+        io.StringIO(json.dumps({"prompt": "prepare a release of this repository", "session_id": "s"})),
+    )
+    assert retrieve.main() == 0
+    out = capsys.readouterr().out
+    assert "Advice on the user's own case needs that initial activation" in out
+    assert ("A task in the user's own repository or project" in out) is has_repo_task

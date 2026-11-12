@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
-from . import originals, vault_portability
+from . import cloud_import, originals, vault_portability
 from .cloud_export import (
     EXPORT_FAILED,
     EXPORT_MEDIA_UNREACHABLE,
@@ -199,8 +199,10 @@ def pause(vault: Path, staging: Path, *, export_id: str, cell_id: str, media_mod
         "v": PLAN_VERSION, "export_id": export_id, "cell_id": cell_id, "armed_requirement": armed_requirement,
         "members": members, "evicted": evicted,
     })
-    # The pack reads staging from another pod, possibly after the claim moved to another node.
-    os.sync()
+    # The pack reads staging from another pod, possibly after the claim moved to another node. Only
+    # this claim's files: `os.sync` would wait on every filesystem the host mounts.
+    cloud_import.flush_to_disk(export_dir)
+    _sync_directory(staging)
     return PauseResult(len(members), member_bytes, len(evicted), sum(entry["size"] for entry in evicted), planned)
 
 

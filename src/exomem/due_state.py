@@ -1572,7 +1572,6 @@ def _observation_coverage(
         or not isinstance(claim_row, Mapping)
         or manifest is None
         or claim_row.get("manifest_hash") != manifest.manifest_version.hash
-        or claim_row.get("complete") is not True
         or not isinstance(pages, Mapping)
         or not authorize_path(manifest_path)
     ):
@@ -1611,7 +1610,9 @@ def _observation_coverage(
             else:
                 open_refs.add(reference)
     return {
-        "complete": True,
+        # A partial claims census degrades derived claims, not the observations
+        # the projection already tracks: `complete` flags it, the lists answer.
+        "complete": claim_row.get("complete") is True,
         "unreflected": sorted(open_refs),
         "pending": sorted(pending_refs),
     }

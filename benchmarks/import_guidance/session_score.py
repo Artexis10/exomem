@@ -37,7 +37,13 @@ from jsonschema import Draft202012Validator
 
 from . import checks, judge, runner
 from .report import read_rows
-from .session_close import DEFAULT_CLIENT_MODE, Case, client_mode_error, load_cases
+from .session_close import (
+    DEFAULT_CLIENT_MODE,
+    DEFAULT_HOOK_INJECT,
+    Case,
+    client_mode_error,
+    load_cases,
+)
 from .store_report import paired_interval
 
 KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages"}
@@ -584,8 +590,10 @@ def build_report(scored: list[dict], *, baseline: str, candidate: str) -> str:
             f"| {mode} | {model} | {case} | {arm} | {len(rows)} | {verdicts.count(checks.PASS)} | "
             f"{verdicts.count(checks.FAIL)} | {verdicts.count(checks.UNKNOWN)} |"
         )
+    injects = sorted({row.get("hook_inject", DEFAULT_HOOK_INJECT) for row in selected})
     lines += [
         "",
+        f"Retrieve hook inject mode: {', '.join(injects)}.",
         "Each measure reports passes/known runs, unknown runs and inapplicable runs separately.",
         "Canonical correctness covers cases that owe an update; restraint covers cases that owe no update.",
         "For recap production, pass means a recap exists; production on a forbidden case is unwanted.",

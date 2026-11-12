@@ -67,6 +67,9 @@ RECAP_FOLDER = "Sources/Episodes/"
 GENERATED_PAGES = ("index.md", "log.md")
 WARMING_MARK = "RETRIEVAL_INDEX_WARMING"
 HOOK_EVENTS = ("Stop", "UserPromptSubmit")
+#: The retrieve hook's inject modes a run may pin: the hook's own documented values, one for every arm of a run.
+HOOK_INJECTS = ("mcp", "working_set")
+DEFAULT_HOOK_INJECT = "mcp"
 SKILL_FILES = ("SKILL.md", "references/engagement.md")
 
 
@@ -93,6 +96,10 @@ class CreditsRun:
             raise ValueError("--credits-account and --credits-reason must not be empty")
         if not math.isfinite(self.budget_usd) or self.budget_usd <= 0:
             raise ValueError("--credits-budget-usd must be positive and finite")
+
+
+def hook_inject_error(inject: str) -> str | None:
+    return None if inject in HOOK_INJECTS else f"--hook-inject must be one of {HOOK_INJECTS}, not {inject!r}"
 
 
 def transport_metadata(credits: CreditsRun | None) -> dict:
@@ -160,10 +167,10 @@ def load_cases(selector: str, case_dir: Path | None = None) -> list[Case]:
 # --------------------------------------------------------------------------
 
 
-def pinned_env(arm: Arm, work: Path, case: Case) -> dict[str, str]:
+def pinned_env(arm: Arm, work: Path, case: Case, activation_packet: str | None = None) -> dict[str, str]:
     """The arm's interpreter path and a state tree under `work`: a real vault or service state is never reachable."""
     state = work / "state"
-    return worker_env(arm, work / "scratch") | {
+    return worker_env(arm, work / "scratch", activation_packet) | {
         "EXOMEM_VAULT_PATH": str(work / "vault"),
         "EXOMEM_STATE_ROOT": str(state),
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(state / "lease"),
@@ -321,16 +328,31 @@ def plugin_hooks(root: Path, events: tuple[str, ...] = HOOK_EVENTS) -> dict:
     return json.loads(json.dumps({e: declared[e] for e in events}).replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)))
 
 
-def hook_env(work: Path, engagement: str) -> dict[str, str]:
-    """The pins the hooks read: native MCP activation, the case's engagement, and state under `work`, so a hook
-    never reaches a real vault or service."""
+def hook_env(work: Path, engagement: str, inject: str = DEFAULT_HOOK_INJECT) -> dict[str, str]:
+    """The pins the hooks read: the inject mode (native MCP activation by default), the case's engagement, and state
+    under `work`, so a hook never reaches a real vault or service. `working_set` has no REST server to reach here, so
+    it also turns on the hook's CLI rung, the one transport the isolated actor home may use."""
     return {
         "EXOMEM_PROMINENCE": engagement,
         "EXOMEM_HOOK_HOME": str(work / "hook-home"),
         "EXOMEM_HOOK_CLIENT": "claude",
-        "EXOMEM_RETRIEVE_INJECT": "mcp",
+        "EXOMEM_RETRIEVE_INJECT": inject,
         "EXOMEM_CONFIG_PATH": str(work / "exomem-config.json"),
-    }
+    } | (
+        # The hook's REST rung reads the user's `service.env` for a key and port; a file that does not exist leaves the
+        # CLI rung, run against the pinned vault, as the only transport and keeps a live service out of the run.
+        # The length, control-prompt and cooldown gates run before any fetch and drop a short follow-up; mcp mode
+        # zeroes the first two, so `working_set` does the same and the arms differ in the mode alone.
+        {
+            "EXOMEM_RETRIEVE_INJECT_CLI": "1",
+            "EXOMEM_SERVICE_ENV": str(work / "no-service.env"),
+            "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS": "0",
+            "EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS": "0",
+            "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC": "0",
+        }
+        if inject == "working_set"
+        else {}
+    )
 
 
 def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict[str, Path]:
@@ -376,12 +398,15 @@ def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: Cr
             *shared, "--model", model, "--no-session-persistence"]
 
 
-def agent_env(work: Path, case: Case) -> dict[str, str]:
+def agent_env(work: Path, case: Case, inject: str = DEFAULT_HOOK_INJECT, pinned: dict[str, str] | None = None) -> dict[str, str]:
     """The f27 floor (HOME kept for the login) without the parent's `EXOMEM_*`, then the pins the hooks read: they
-    keep their state under `work` and never reach a real vault or service."""
+    keep their state under `work` and never reach a real vault or service. In `working_set` mode the hook runs the
+    `exomem` CLI itself, so it also gets the arm's vault pins and source path from `pinned` (`pinned_env`); without
+    them the CLI finds no vault, the rung fails and the hook injects nothing."""
     floor, _removed = environment_floor(os.environ)
     floor = {k: v for k, v in floor.items() if not k.startswith("EXOMEM_")}
-    return floor | hook_env(work, case.engagement)
+    cli = {k: v for k, v in (pinned or {}).items() if k.startswith("EXOMEM_") or k == "PYTHONPATH"} if inject == "working_set" else {}
+    return floor | cli | hook_env(work, case.engagement, inject)
 
 
 def user_message(text: str) -> str:
@@ -630,7 +655,7 @@ def session_result(done: SimpleNamespace, expected_turns: int, client_mode: str 
     return result
 
 
-def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE, credits: CreditsRun | None = None) -> dict:
+def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE, credits: CreditsRun | None = None, hook_inject: str = DEFAULT_HOOK_INJECT) -> dict:
     """A new actor and server on capture's state, with only the independently supplied question."""
     fresh = work / "fresh"
     stream = fresh / "stream.jsonl"
@@ -660,7 +685,7 @@ def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Pa
         done = drive_session(
             row["argv"],
             fresh / "cwd",
-            agent_env(fresh, case) | {"EXOMEM_CONFIG_PATH": env["EXOMEM_CONFIG_PATH"]},
+            agent_env(fresh, case, hook_inject, env) | {"EXOMEM_CONFIG_PATH": env["EXOMEM_CONFIG_PATH"]},
             (case.recall_turn,),
             stream,
         )
@@ -690,6 +715,8 @@ def run_session(
     client_mode: str = DEFAULT_CLIENT_MODE,
     credits: CreditsRun | None = None,
     ready_graph: bool = False,
+    hook_inject: str = DEFAULT_HOOK_INJECT,
+    activation_packet: str | None = None,
 ) -> dict:
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
@@ -697,7 +724,7 @@ def run_session(
     shutil.rmtree(work, ignore_errors=True)
     for name in ("cwd", "hook-home", "logs", "scratch"):
         (work / name).mkdir(parents=True)
-    env = pinned_env(arm, work, case)
+    env = pinned_env(arm, work, case, activation_packet)
     files = stage_agent_files(arm, work, env, client_mode)
     argv = agent_argv(executable, files, model, credits)
     row: dict = {
@@ -706,6 +733,8 @@ def run_session(
         "model": model,
         "arm": arm.label,
         "client_mode": client_mode,
+        "hook_inject": hook_inject,
+        **({"activation_packet": activation_packet} if activation_packet is not None else {}),
         **transport_metadata(credits),
         "argv": argv,
         "settings": json.loads(files["settings"].read_text(encoding="utf-8")),
@@ -730,7 +759,7 @@ def run_session(
         done = drive_session(
             argv,
             work / "cwd",
-            agent_env(work, case),
+            agent_env(work, case, hook_inject, env),
             case.turns,
             work / "stream.jsonl",
             hook_turn=(lambda session_id: hook_ask(arm, session_id)) if hooked else None,
@@ -744,7 +773,7 @@ def run_session(
             observed=diff_vault(before, after),
         )
         if case.recall_turn is not None:
-            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env, client_mode=client_mode, credits=credits)
+            row["fresh"] = fresh_recall(case, arm, work, model=model, executable=executable, env=env, client_mode=client_mode, credits=credits, hook_inject=hook_inject)
             if row["fresh"].get("session_id") == row.get("session_id") and row.get("session_id"):
                 row["fresh"]["error"] = "the fresh actor reused the capture session identity"
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -780,10 +809,14 @@ def run_all(
     client_mode: str = DEFAULT_CLIENT_MODE,
     credits: CreditsRun | None = None,
     ready_graph: bool = False,
+    hook_inject: str = DEFAULT_HOOK_INJECT,
+    activation_packet: str | None = None,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
     if hooked and client_mode == "tool-only":
         raise ValueError("--hook-turn requires --client-mode plugin")
+    if (error := hook_inject_error(hook_inject)) is not None:
+        raise ValueError(error)
     out = refuse_unsafe_out_dir(out)
     out.mkdir(parents=True, exist_ok=True)
     if credits:
@@ -816,6 +849,8 @@ def run_all(
                         client_mode=client_mode,
                         credits=credits,
                         ready_graph=ready_graph,
+                        hook_inject=hook_inject,
+                        activation_packet=activation_packet,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
@@ -838,6 +873,7 @@ def dry_run(
     hooked: bool = False,
     client_mode: str = DEFAULT_CLIENT_MODE,
     ready_graph: bool = False,
+    activation_packet: str | None = None,
 ) -> list[str]:
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
@@ -849,7 +885,7 @@ def dry_run(
     shutil.rmtree(work, ignore_errors=True)
     for name in ("hook-home", "logs", "scratch"):
         (work / name).mkdir(parents=True)
-    env = pinned_env(arm, work, case)
+    env = pinned_env(arm, work, case, activation_packet)
     try:
         seed_vault(case, arm, work, env, ready_graph)
         stage_agent_files(arm, work, env, client_mode)
