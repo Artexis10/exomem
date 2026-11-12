@@ -1,5 +1,9 @@
 # Import guidance probe
 
+`run --activation-packet {maps,anchors}` pins the packet profile for replay recording workers and full session-close servers, including dry runs.
+The harness records an explicit profile in recordings and run rows. A recording made with another profile must be recorded again.
+Without this option, outside `EXOMEM_*` settings remain scrubbed and the product chooses its default profile.
+
 This probe shows whether a real headless agent follows the Cloud import tool text (the `inspect_memory` and `manage_memory` doors plus the Cloud transfer tools) when a scripted server returns the states that text describes. Scenario files in `scenarios/` script the replies, and `status_shape.py` builds every `imports.status` reply with the product's own window code. The `observe_transfer`, `transfer_memory` and run-step replies have no in-repo source and are unverified, and the probe serves four tools (two doors and two Cloud tools), so it tests the text, not tool selection. Deterministic checks read the call log and a judge reads the agent's words; a run error, an unconnected server or an unreadable judge answer is `unknown`. Run `PYTHONPATH=benchmarks python -m import_guidance run --model <m> [--judge-model <m>] --repeats N --scenario <id|all> --out <dir outside every repository>` from the repository root, or add `--dry-run` to start no model. To add a case, copy a scenario file, script its replies, list its `checks` and `criteria` with the values they expect, and run `--dry-run`; each failure found later becomes a permanent case.
 
 ## Write-narration suite
