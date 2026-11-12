@@ -552,7 +552,7 @@ def _write_file(
 def _set_mtime(path: Path, mtime: float) -> None:
     try:
         os.utime(path, (mtime, mtime), follow_symlinks=False)
-    except (OSError, OverflowError, ValueError):
+    except (OSError, OverflowError, ValueError, NotImplementedError):
         pass  # a timestamp is metadata; never a reason to fail an import
 
 
