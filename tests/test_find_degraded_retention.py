@@ -149,7 +149,9 @@ def _with_active_vector_lane(monkeypatch: pytest.MonkeyPatch, ranked_rel: str) -
     The candidate bundle then carries a non-empty vector ranking, so every
     BM25-only candidate arrives needing corroboration while semantic lanes
     are live — the per-candidate gate must judge this page on its own word
-    coverage, not on the bundle's lane availability.
+    coverage, not on the bundle's lane availability. The ranked page itself
+    carries lane evidence and may legitimately surface, which is exactly
+    why the guard tests assert nothing else may.
     """
     real = find_module.find_candidates.collect_candidates
 
@@ -200,9 +202,9 @@ def test_live_lanes_still_veto_half_and_function_word_majorities(
 
     A 1-of-2 word match stays vetoed (the sourdough page), and queries that
     clear a word majority purely on function words retain nothing — the
-    paragraph page is dense in exactly those words. The vector-ranked kernel
-    page carries its own lane evidence, so it may appear; no BM25-only
-    candidate may.
+    paragraph page is dense in exactly those words. The injected kernel page
+    carries vector-lane evidence, so it may legitimately appear; any other
+    hit would be a BM25-only candidate that slipped the gate — none may.
     """
     _with_active_vector_lane(monkeypatch, f"{kb_dirname()}/{OTHER_PAGE}")
     hits = find_module.find(degraded_vault, query="sourdough zzzzunknownzzzz")

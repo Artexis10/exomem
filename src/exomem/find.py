@@ -6829,12 +6829,11 @@ def _find_semantic(
             if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
                 # the keyword scan. Try stem match before dropping — recovers
-                # morphology ("regulation" matching a "regulator" page). With the
-                # semantic lanes absent (see flag above) the gate relaxes from
-                # all-stems to a strict majority of the query's words anchored by
-                # at least one content word, so BM25's own top-ranked evidence
-                # survives interrogative phrasing without function-word overlap
-                # alone retaining junk.
+                # morphology ("regulation" matching a "regulator" page). The
+                # per-candidate gate above requires a strict majority of the
+                # query's words anchored by at least one content word, so
+                # BM25's own top-ranked evidence survives interrogative
+                # phrasing without function-word overlap alone retaining junk.
                 if not _supported_stems(page):
                     continue
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)

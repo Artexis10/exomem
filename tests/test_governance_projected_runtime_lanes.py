@@ -707,6 +707,51 @@ def test_hybrid_retention_drops_weak_bm25_only_projection(tmp_path):
     assert [hit.path for hit in result.hits] == [strong.item_identity]
 
 
+def test_hybrid_retention_keeps_majority_bm25_hit_with_live_vector_lane(
+    monkeypatch, tmp_path
+):
+    """A live vector lane does not reimpose every-word presence on BM25-only hits.
+
+    Mirrors the public-seam defect on the projected path: the target holds a
+    strict word majority including content words for the query but lacks the
+    phrasing word "after". Under the retired contract it was dropped whenever
+    the vector lane produced any hit; the per-candidate gate keeps it. The
+    half-covered item stays dropped.
+    """
+    target = _variant(
+        "Knowledge Base/target.md", "7" * 64, "the drift index measured 41.3 points"
+    )
+    half = _variant("Knowledge Base/half.md", "8" * 64, "the drift index")
+    distractor = _variant(
+        "Knowledge Base/distractor.md", "9" * 64, "unrelated greenhouse notes"
+    )
+    runtime = _runtime(
+        (_item(target), _item(half), _item(distractor)),
+        vectors=(_vector(distractor, (1.0, 0.0)),),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query: [[1.0, 0.0]],
+    )
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path,
+        runtime,
+        query="what did the drift index measure after",
+        limit=3,
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        principal=principal.owner_principal(surface="library"),
+        purpose=None,
+    )
+    paths = [hit.path for hit in result.hits]
+
+    assert target.item_identity in paths
+    assert half.item_identity not in paths
+
+
 def test_hybrid_retention_reads_cjk_runs_and_accent_folded_words(tmp_path):
     tower = _variant("Knowledge Base/tower.md", "5" * 64, "東京タワーの高さは三百メートル")
     weather = _variant("Knowledge Base/weather.md", "6" * 64, "東京の天気")
