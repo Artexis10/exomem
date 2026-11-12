@@ -246,36 +246,37 @@ def observe_memory(
         code = "STALE_PARENT_HASH" if error.code == "STALE_EDIT" else error.code
         raise ObserveMemoryError(code, error.reason) from error
 
-    current = semantic_index.current_parent_index_state(
+    current = semantic_index.selected_parent_index_state(
         vault_root, editable.rel_path, source=editable.original_text
+    )
+    language = (
+        current.definitions.snapshots["categories"].typed
+        if current.definitions is not None
+        else semantic_language_registry.core_registry()
     )
     current_unit = None
     if unit is not None:
-        unit_ref, expected_fingerprint = _bind_unit_id(vault_root, current.document, unit)
+        unit_ref, expected_fingerprint = _bind_unit_id(
+            vault_root, current.document, unit,
+            definitions_unavailable=current.definitions_unavailable,
+        )
     if unit_ref:
         resolution = current.document.resolve_unit(
             unit_ref,
             expected_fingerprint=expected_fingerprint,
         )
         if resolution.status != "found" or resolution.unit is None:
+            if current.definitions_unavailable and resolution.unit is None:
+                raise ObserveMemoryError(
+                    "REGISTRY_UNAVAILABLE",
+                    "the selected vocabulary definitions required to resolve this unit are unavailable",
+                    "Restore admitted definitions and read the unit again.",
+                )
             code = {
                 "stale": "STALE_UNIT_REFERENCE",
                 "ambiguous": "AMBIGUOUS_UNIT_REFERENCE",
                 "missing": "UNIT_NOT_FOUND",
             }.get(resolution.status, "UNIT_NOT_FOUND")
-            # A ref this parse cannot find reads as missing, or as stale when it names a
-            # fingerprint; the page's own registry tells which of those is a vault heading.
-            if resolution.status in {"missing", "stale"} and _a_vault_heading_holds(
-                vault_root, editable.rel_path, editable.original_text, unit_ref,
-                expected_fingerprint,
-            ):
-                raise ObserveMemoryError(
-                    "UNIT_NOT_FOUND",
-                    "the unit's heading is a vault kind or a vault label, which "
-                    f"{capabilities.active_tools_text('observe_memory')} cannot address yet",
-                    "Edit the unit in the page body with "
-                    f"{capabilities.active_tools_text('edit_memory')}.",
-                )
             raise ObserveMemoryError(
                 code,
                 f"unit reference is {resolution.status}; re-read the parent and retry",
@@ -299,7 +300,7 @@ def observe_memory(
     else:
         assert content is not None
         selected_kind = _select_kind(
-            vault_root,
+            language,
             kind=kind,
             current_unit=current_unit if proposal_mode == "update" else None,
             projects=_page_projects(frontmatter),
@@ -338,9 +339,7 @@ def observe_memory(
                 dropped_relations, compact=selected_kind in semantic_kinds.compact_kinds()
             )
         normalized_verdict = _resolve_verdict(
-            verdict,
-            base_unit,
-            semantic_language_registry.load_for_page(vault_root, editable.rel_path, frontmatter),
+            verdict, base_unit, language,
         )
         normalized_check_by = _resolve_check_by(check_by, base_unit)
         normalized_as_of = _resolve_governed_value(
@@ -613,7 +612,7 @@ def observe_memory(
     except semantic_writes.SemanticWriteError as error:
         raise ObserveMemoryError(error.code, error.reason) from error
 
-    final = semantic_index.current_parent_index_state(vault_root, editable.rel_path)
+    final = semantic_index.selected_parent_index_state(vault_root, editable.rel_path)
     final_unit = _unit_by_anchor(final.document, target_anchor)
     if timings is not None:
         # The ledger gets the stages whatever the envelope flag says; see
@@ -663,14 +662,21 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     path = page.get("path")
     if not isinstance(path, str) or not path.endswith(".md"):
         return []
-    document = semantic_index.current_parent_index_state(vault_root, path).document
+    selected = semantic_index.selected_parent_index_state(vault_root, path)
+    if selected.definitions_unavailable:
+        return {
+            "status": "unavailable",
+            "reason": "the selected vocabulary definitions required to list all units are unavailable",
+        }
     return [
         {"id": unit_id(unit), "category": unit.category, "text": unit.content}
-        for unit in document.units if unit.unit_ref
+        for unit in selected.document.units if unit.unit_ref
     ]
 
 
-def _bind_unit_id(vault_root: Path, document: Any, unit: str) -> tuple[str, str]:
+def _bind_unit_id(
+    vault_root: Path, document: Any, unit: str, *, definitions_unavailable: bool = False,
+) -> tuple[str, str]:
     """The unit_ref and fingerprint of the one unit `unit` names, or a refusal that says why.
 
     A principal that sees a released view is never given unit ids (`page_units`), so a unit reads
@@ -683,6 +689,12 @@ def _bind_unit_id(vault_root: Path, document: Any, unit: str) -> tuple[str, str]
         if visible and u.unit_ref and page_ids.part_head(u.unit_ref) == head
     ]
     if not found:
+        if definitions_unavailable:
+            raise ObserveMemoryError(
+                "REGISTRY_UNAVAILABLE",
+                "the selected vocabulary definitions required to resolve this unit are unavailable",
+                "Restore admitted definitions and read the unit again.",
+            )
         raise ObserveMemoryError(
             "UNIT_NOT_FOUND",
             f"unit id {unit} names no unit of this note; read the note's units for the current ids",
@@ -729,7 +741,7 @@ def _canonical_category(value: str) -> str:
 
 
 def _select_kind(
-    vault_root: Path,
+    language: semantic_language_registry.SemanticLanguageRegistry,
     *,
     kind: str | None,
     current_unit: Any | None,
@@ -742,7 +754,7 @@ def _select_kind(
     if raw is None or semantic_language_registry.normalize_label(raw) == _COMPACT_KIND:
         return _COMPACT_KIND
     registry = semantic_language_registry.for_attached_projects(
-        semantic_language_registry.load_registry(vault_root), projects
+        language, projects
     )
     resolution = registry.resolve_kind(raw, page_type=page_type)
     if resolution.resolved is None or resolution.status in {
@@ -772,25 +784,6 @@ def _select_kind(
             _belief_remediation(),
         )
     return resolution.resolved
-
-
-def _a_vault_heading_holds(
-    vault_root: Path, rel_path: str, source: str, unit_ref: str, fingerprint: str | None
-) -> bool:
-    """Whether `unit_ref` names a current unit that only the page's own registry reads.
-
-    This tool parses a page with the shipped kinds, so a unit under a vault kind's heading or a
-    vault label is missing to it. The page's registry parses the page once, on the refusal path
-    only, so the refusal can say what is true.
-    """
-    frontmatter, _body, _ = vault.parse_frontmatter(source)
-    language = semantic_language_registry.load_for_page(vault_root, rel_path, frontmatter)
-    if language is semantic_language_registry.core_registry():
-        return False
-    state = semantic_contract._parse_page_state(
-        vault_root, rel_path, source, language_registry=language
-    )
-    return state.document.resolve_unit(unit_ref, expected_fingerprint=fingerprint).status == "found"
 
 
 def _belief_remediation() -> str:

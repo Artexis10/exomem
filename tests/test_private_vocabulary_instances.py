@@ -1639,6 +1639,90 @@ def test_a_live_revocation_withholds_warm_private_units_but_keeps_the_page_reada
     assert "semantic_units_lexical" in revoked["degraded"]
 
 
+def test_a_private_unit_update_uses_its_definitions_and_reports_revoked_definitions(
+    configured_boundary, storage_scope, private_instances, vault,
+):
+    """Public labels cannot reinterpret a private update, or turn withheld units into missing ones."""
+    import yaml
+
+    from exomem import commands, freshness, lexstore, semantic_index
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    path = "Knowledge Base/Notes/Insights/private-update.md"
+    source = (
+        "---\ntype: insight\nstatus: active\nproject: private-project\n"
+        "exomem_id: 22222222-2222-4222-8222-222222222222\n---\n"
+        "# Private update\n\n- [decision] Keep the shared schedule.\n\n"
+        "## Pöytäkirja\n- id: local-protocol\n\nFollow the original protocol.\n"
+    )
+    (vault / path).parent.mkdir(parents=True, exist_ok=True)
+    (vault / path).write_text(source, encoding="utf-8")
+    public_scope = vault / "Knowledge Base/_Governance/scopes/public.yaml"
+    public = yaml.safe_load(public_scope.read_text(encoding="utf-8"))
+    public["exclude"]["paths"].append(path.removeprefix("Knowledge Base/"))
+    public_scope.write_text(yaml.safe_dump(public), encoding="utf-8")
+    full = private_instances("full")
+    with principal.request_scope(full):
+        for instance, kind, verdict in (
+            (instances.PUBLIC_INSTANCE, "public_protocol", "public_reviewed"),
+            (SCOPE, "protocol", "reviewed"),
+        ):
+            overlay = instances.select(vault, registry_spec("categories"), instance).overlay(vault)
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            overlay.write_text(
+                "schema_version: 1\ncategories: {}\nkinds:\n"
+                f"  {kind}:\n    description: A local protocol\n    labels:\n      fi: Pöytäkirja\n"
+                f"verdicts:\n  {verdict}:\n    description: The protocol was reviewed\n"
+                "    labels:\n      fi: Tarkistettu\n", encoding="utf-8",
+            )
+        assert all(freshness.rebaseline(vault).values())
+        lexstore.ensure_fresh(vault)
+        selected = semantic_index.selected_parent_index_state(vault, path)
+        refs = {unit.kind: unit.unit_ref for unit in selected.document.units}
+        listed = commands.op_read_memory(vault, path=path, units=True)["units"]
+        unit_id = next(unit["id"] for unit in listed if unit["text"] == "Follow the original protocol.")
+        proposal = {
+            "path": path, "unit": unit_id, "kind": "Pöytäkirja", "category": "procedure",
+            "content": "Follow the reviewed protocol.", "verdict": "Tarkistettu",
+        }
+        preview = commands.op_observe_memory(vault, operation="validate", **proposal)
+        updated = commands.op_observe_memory(
+            vault, operation="update", **proposal,
+            transition_token=preview["semantic"]["transition_token"],
+            relation_disposition="reviewed_none",
+            relation_review_hash=preview["semantic"]["transition_hash"],
+            relation_review_reason="This private protocol has no related conclusion.",
+        )
+        assert updated["unit"]["kind"] == "protocol"
+        assert updated["unit"]["verdict"] == "reviewed"
+        assert updated["unit_ref"] == refs["protocol"]
+        assert updated["unit"]["fingerprint"] == preview["unit"]["fingerprint"]
+
+    config, _ = configured_boundary
+    data = json.loads(config.read_text())
+    data["clients"][1]["denied_scope_ids"] = [storage_scope, INBOX]
+    data["clients"][1]["writable_scope_ids"] = [SCOPE]
+    config.write_text(json.dumps(data))
+    with principal.request_scope(full):
+        page = commands.op_read_memory(vault, path=path, units=True)
+        assert "Follow the reviewed protocol." in page["body"]
+        assert page["units"]["status"] == "unavailable"
+        assert commands.op_read_memory(vault, path=path, unit_ref=refs["protocol"])["status"] == "unavailable"
+        assert commands.op_read_memory(vault, path=path, unit_ref=refs["observation"])["status"] == "found"
+        for address in (
+            {"unit": updated["unit_id"]},
+            {"unit_ref": refs["protocol"], "expected_hash": page["content_hash"],
+             "expected_fingerprint": updated["unit"]["fingerprint"]},
+        ):
+            with pytest.raises(ValueError, match="^REGISTRY_UNAVAILABLE"):
+                commands.op_observe_memory(
+                    vault, path=path, operation="update", category="procedure",
+                    content="A withheld protocol cannot be updated.", **address,
+                )
+        assert (vault / path).read_text(encoding="utf-8").find("A withheld protocol") == -1
+
+
 def test_unit_ranking_keeps_only_public_instance_parents_across_requests(
     configured_boundary, storage_scope, private_instances, vault
 ):
