@@ -47,7 +47,7 @@ Privacy gain: identical plaintexts no longer share a name that the provider can 
 
 The media bucket keeps its one rule that cancels unfinished multipart uploads. The rule gains `days_from_hiding_to_deleting`, set from `var.cloud_media_condemned_days`. The variable has no default for a stack with the media bucket, so a plan of that bucket without a value fails. A stack without the media bucket needs no value, so its plans do not wait for a grace that it never uses. No rule hides a version by age.
 
-Confirmed (task 1.1): the provider deletes a version that a hide or a newer upload made non-current once the configured days pass. It keeps a current version, and deleting a hide marker keeps the version.
+Confirmed (task 1.1): the provider deletes a version that a hide or a newer upload made non-current after the configured days. It keeps a current version. Deleting a hide marker keeps the version.
 
 With D1, a hide is the only way to make a referenced version non-current. The rule therefore removes only what D3 and D5 condemned, plus unreferenced duplicate attempts.
 
@@ -58,8 +58,13 @@ No process in the cluster deletes versions. The edge key keeps `readFiles` and `
 - A second condemn through the edge returned 200 with `hidden: false`, so it is a no-op. A direct `b2_hide_file` on a hidden name returned 400, a known error.
 - GET by version ID through the edge returned the hidden version's bytes (200).
 - Deleting the hide marker made the version current again.
-- After the lifecycle pass, the bucket held 4 versions with 4 distinct names and no hide marker. Before it, the bucket held 7 versions and 1 hide marker. So the provider deleted the hidden and superseded versions, and kept the current and the rescued ones. The observation is at the level of the version set: the per-name map of the run was not kept.
-- The lifecycle pass had not run 31 h after setup. It had run by 2026-11-12 18:04 UTC, so the provider's delay after the due day is up to about 2 days.
+- The check recorded the name and version ID of each subject at setup. It then compared them with a listing after the lifecycle pass:
+  - The provider deleted the hidden version and its hide marker.
+  - The provider deleted the superseded version, and kept the newer upload of that name.
+  - The provider kept the current version.
+  - The provider kept both rescued versions: the one from the check and the one from the runbook.
+- Before the pass, the bucket held 7 versions, with 1 hide marker. After it, the bucket held 4 versions, with no hide marker.
+- The lifecycle pass had not run 31 h after setup. It had run by 2026-11-12 18:04 UTC. The provider documents one lifecycle run per day, at the first run after the configured days.
 
 ### D3. The backup Job condemns, through the edge, with its own credential
 

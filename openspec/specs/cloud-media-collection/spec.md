@@ -1,7 +1,7 @@
 # cloud-media-collection Specification
 
 ## Purpose
-Delete media versions that no vault, backup or running export still references, after a grace, without giving any running service a delete capability: unique object names, a release ledger, condemnation by the backup Job through the edge, and a provider lifecycle rule that deletes hidden versions.
+This capability deletes a media version once no vault, backup or running export references it, after a grace. No running service gets a delete capability. Four parts deliver it: unique object names, a release ledger, condemnation by the backup Job through the edge, and a provider lifecycle rule that deletes hidden versions.
 
 ## Requirements
 

@@ -7,7 +7,7 @@
   - † an expired key does or does not appear in the key listing;
   - † a key with only `listFiles` sees the `start` entries of unfinished large files.
 
-  Verify: the results are recorded in design.md, and each point marked † in this change is confirmed or corrected. (2026-11-09 to 2026-11-12, disposable bucket in the cell-data account, deleted afterwards. The lifecycle point is confirmed in part: the provider refuses to delete a locked version, and the hidden version was gone after the lapse. The read while still locked was lost.)
+  Verify: the results are recorded in design.md, and each point marked † in this change is confirmed or corrected. (2026-11-09 to 2026-11-12, disposable bucket in the cell-data account, deleted afterwards. The lifecycle point rests on the provider's documentation and an API refusal for "only after the lapse", and on a listing for "then". The check kept no listing from while the lock held.)
 
 ## 2. Substrate (D1, D4)
 

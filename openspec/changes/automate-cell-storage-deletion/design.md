@@ -104,7 +104,9 @@ Confirmed (task 1.1): a key limited to the bucket and the prefix, with only `lis
 - So a hidden version's lock ends at most R plus 1 days after the hide. Without the extender, a lock ends R days after its upload, which is earlier.
 - The provider therefore deletes the cell's backup versions about R plus 1 days after the hide, plus its own delay. R is 30 days by default, and the variable allows 1 to 60.
 
-Confirmed in part (task 1.1): the provider refuses to delete a locked version (401 `access_denied`), so no rule deletes a hidden version before its lock lapses. After the lapse, the hidden version was gone. The run did not observe the version while it was still locked: that read was lost. The lock lapsed at 2026-11-11 14:55 UTC, and the version was gone by 2026-11-12 18:04 UTC. So the delay after the due day is at most about 27 hours.
+Confirmed (task 1.1), from two sources:
+- **Only after the lapse.** The provider's lifecycle documentation states that a lifecycle deletion does not occur for a version under Object Lock. The check agrees: an API call to delete a locked version returned 401 `access_denied`. The check kept no listing from while the lock held.
+- **Then.** The lock of the hidden version lapsed at 2026-11-11 14:55 UTC. A listing at 2026-11-12 18:04 UTC no longer showed it, so the delay after the lapse was at most about 27 hours.
 
 ### D3. The media edge purges the media prefix
 
