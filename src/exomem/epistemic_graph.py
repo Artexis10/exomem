@@ -8899,7 +8899,8 @@ class EpistemicGraphIndex:
         direction: str = "any",
         registry_scope: str | None = None,
         keep: Callable[[str], bool] | None = None,
-        resolver: vault_module.WikilinkResolver | None = None,
+        resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
+        reader: Callable[[str], bool] | None = None,
     ) -> RelationFilterResult:
         """Pages participating in a typed edge whose canonical `relation_type` or
         `parent_relation` is in `keys` (extension parent roll-up).
@@ -8926,12 +8927,20 @@ class EpistemicGraphIndex:
         that authors the edge, then by the edge's place in that page, so a page's
         `provenance` never depends on which page the sidecar wrote last.
 
-        `keep` is a reader's view (`None` for the owner) and `resolver` the
-        recall resolver to re-resolve with (read once when `None`). For such a
-        reader every page with a link that a withheld page resolves differently
-        is re-derived in the reader's view, and an edge whose page or
-        counterpart the reader may not see drops out, as in a vault without the
-        withheld pages.
+        `keep` is a reader's view (`None` for the owner) and `resolver` builds
+        the request's link resolver to re-resolve with (read once when `None`).
+        For such a reader every page with a link that a withheld page resolves
+        differently is re-derived in the reader's view, and an edge whose page
+        or counterpart the reader may not see drops out, as in a vault without
+        the withheld pages.
+
+        `reader` is a restricted caller's release decision
+        (`egress.visible_page_filter`), None for the owner. It makes a write
+        that caller may not see leave its read as it was: a sidecar that
+        trails the live checkpoint only by such pages is read
+        (`_open_read_snapshot`), and the rows' links resolve as they were
+        derived (`_reader_resolver`, chosen before the read transaction
+        opens). Without such a resolver the read is temporarily unavailable.
         """
         requested_keys = [str(k) for k in keys if k]
         anchor_rel = _page_rel(anchor) if anchor else None
@@ -8958,12 +8967,41 @@ class EpistemicGraphIndex:
             )
         if not self.path.exists():
             return RelationFilterResult(status="warming")
-        conn = self._open_read_snapshot()
+        expected_meta: tuple[str | None, str | None] | None = None
+        if keep is None:
+            link_resolver = None
+        elif reader is None:
+            link_resolver = resolver() if resolver is not None else None
+        else:
+            decided = self._reader_resolver(resolver)
+            if decided is None:
+                return RelationFilterResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
+            link_resolver, topology, checkpoint_value = decided
+            expected_meta = (topology, checkpoint_value)
+        conn = self._open_read_snapshot(reader=reader)
         if conn is None:
             return RelationFilterResult(status="warming")
         try:
+            if expected_meta is not None:
+                # The resolver was chosen against a probe read of the sidecar; this
+                # transaction must be the same one it decided for.
+                meta = dict(
+                    conn.execute(
+                        "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
+                        (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
+                    ).fetchall()
+                )
+                if (
+                    meta.get(_RESOLVER_TOPOLOGY_KEY),
+                    meta.get(_RECALL_CHECKPOINT_KEY),
+                ) != expected_meta:
+                    return RelationFilterResult(
+                        status="temporarily_unavailable", reason="resolver_unavailable"
+                    )
             view = GraphView(
-                self.vault_root, conn, keep=keep, admitted=allowed_paths, resolver=resolver,
+                self.vault_root, conn, keep=keep, admitted=allowed_paths, resolver=link_resolver,
                 # A link whose candidates are all withheld still reaches a
                 # withheld page, and `_add` drops that edge.
                 reads_placeholders=False,
