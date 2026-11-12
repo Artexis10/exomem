@@ -27,7 +27,7 @@
 - [x] 4.2 Add `asserted_by` and `modality`, with context that presents attributed claims and keeps modalities apart.
 - [x] 4.3 Add `occurred_at`, the three quantity keys and `inference_mode` with its registry.
 - [x] 4.4 Reserve the new keys, with warnings for one release on pages that already use them.
-- [ ] 4.5 One release after slice 4 ships, turn the first-release warnings into errors. First, extend `semantic_census`, which counts errors only, to list the pages that carry first-release warnings, and repair or report each one. Then set `_FIRST_RELEASE_SEVERITY` to error, and delete `_RESERVED_BEFORE_UNIT_ROW_KEYS` and the placeholder-belief leniency.
+- [ ] 4.5 One release after slice 4 ships, turn the first-release warnings into errors. First, extend `semantic_census`, which counts errors only, to list the pages that carry first-release warnings, and repair or report each one. Then use error severity, delete `_RESERVED_BEFORE_UNIT_ROW_KEYS` and the placeholder-belief leniency, and invalidate older parser summaries through the existing parser version. Prove validation/commit rejection, source/stored/search exclusion of empty units, and unchanged updates to valid units. Keep this task unchecked until merge evidence is available.
 
 ## 5. Dimensions
 

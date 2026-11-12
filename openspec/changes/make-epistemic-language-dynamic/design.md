@@ -186,6 +186,8 @@ Every new key name is chosen to avoid ordinary rows: `value`, `at`, `holder`, `b
 
 Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release. The warning names the repair: rename the row, or give it a valid value.
 
+Task 4.5 ends this migration period. Invalid or misplaced rows, incomplete beliefs and missing assessed-claim relations become errors with the existing repairs. Metadata-only rich units leave the parsed units, stored structural views and search results. Parser version 9 invalidates version 8 summaries, whose stored `substantive_body` could retain an empty unit. The existing freshness and reconcile paths rebuild these summaries; this transition adds no state schema or repair service.
+
 ### Multilingual labels
 
 Each registry entry carries `labels: {language: text}`. Keys stay language-neutral. Parsing accepts a label as an alias of its key, so `## Väite` and `## Claim` are one kind. The registry check refuses a label that collides with another entry's key or label.
