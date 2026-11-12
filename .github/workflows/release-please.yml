@@ -111,6 +111,11 @@ jobs:
       - name: Regenerate current Cloud packages for the source release
         run: uv run --frozen python scripts/cloud-plugin.py build
 
+      # The Claude Code plugin tree is committed too, and its skill text pins the
+      # release it was synced from; a version bump leaves it stale without this.
+      - name: Resync the Claude Code plugin for the source release
+        run: uv run --frozen exomem package-skills --plugin-root plugins/claude-code
+
       - name: Commit the resync onto the release PR
         run: |
           if git diff --quiet; then
@@ -119,8 +124,8 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add plugins/cloud/generated
-          git commit -m "chore(cloud): regenerate Cloud packages for the release"
+          git add plugins/cloud/generated plugins/claude-code
+          git commit -m "chore(cloud): regenerate Cloud packages and plugin for the release"
           git push
 
   # Every run finds the release it serves and checks which of its artifacts are
