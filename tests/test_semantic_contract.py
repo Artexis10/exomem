@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -8,6 +9,7 @@ import pytest
 from exomem import (
     activation_manifest,
     capabilities,
+    command_surface,
     freshness,
     memory_refs,
     memory_schema,
@@ -744,8 +746,12 @@ def test_unit_coverage_and_relation_disposition_are_independent(tmp_path: Path) 
     assert "RELATION_DISPOSITION_MISSING" in codes
 
 
-@pytest.mark.parametrize("tool_shape", ["grouped", "public"])
-def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path, tool_shape: str) -> None:
+@pytest.mark.parametrize(("tool_shape", "rendering", "uses_alias"), [
+    ("grouped", None, False), ("public", "edit_note", True), ("public", "manage_memory", False),
+])
+def test_valid_unit_does_not_satisfy_missing_relation_review(
+    tmp_path: Path, tool_shape: str, rendering: str | None, uses_alias: bool,
+) -> None:
     after = _state(
         tmp_path,
         "Knowledge Base/Notes/Insights/unit-only.md",
@@ -758,7 +764,8 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path, too
         surface="mcp", profile="test", tier2_enabled=True,
         product_commands=(), tool_shape=tool_shape,
     )
-    with capabilities.active_surface(surface):
+    rendered = command_surface.rendering_scope(rendering) if rendering else nullcontext()
+    with capabilities.active_surface(surface), rendered:
         result = _evaluate(
             before=after,
             after=after,
@@ -774,7 +781,7 @@ def test_valid_unit_does_not_satisfy_missing_relation_review(tmp_path: Path, too
     assert "draft_hash" not in finding.remediation
     assert "draft_token" not in finding.remediation
     assert "re-issue the same edit" in finding.remediation
-    if tool_shape == "public":
+    if uses_alias:
         assert "unlinked_reason" in finding.remediation
         assert "relation_disposition=" not in finding.remediation
         assert "relation_review_reason" not in finding.remediation
