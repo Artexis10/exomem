@@ -143,7 +143,16 @@ Run these steps from the repository root:
 What the suite does:
 
 - The recorder lays the arm's scaffold, copies the seed over it with `session_seed.py`, and makes the scenario's calls. It never runs `settle_graph` on a seeded vault, because that step writes throwaway pages that `recall_context` could serve.
-- A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown. A live vault has one, because its writes build it. The scenario property `ready_graph` (the writer sets it) and the session-close flag `--ready-graph` both run `session_seed.reconcile` and `session_seed.wait_for_graph`. The first runs the arm's own `exomem maintain --reconcile` before any server of the run starts. It writes no page of the seed. It rewrites the count rows of the three `index.md` files. The second reads the arm's own `recall_context` until `map.membership_graph` is `available`. After 120 seconds it stops and names the state that it saw. The recording keeps `ready` with the state and the seconds, and a session row keeps the same in `ready`. The runner refuses an old recording of such a scenario that has no `ready`: delete it and record again.
+- A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown.
+  A live vault has one, because its writes build it.
+  The scenario property `ready_graph` (the writer sets it) and the session-close flag `--ready-graph` run `session_seed.reconcile` and `session_seed.wait_for_graph`.
+  The first runs the arm's own `exomem maintain --reconcile` before any server of the run starts.
+  It writes no page of the seed. It rewrites the count rows of the three `index.md` files.
+  The second uses the arm's `EpistemicGraphIndex(vault).availability_state(prove=True)` and proceeds only when it reports `available`.
+  This readiness check works with either activation packet. Recall capture and warm reads keep the selected packet.
+  After 120 seconds the check stops and names the state that it saw.
+  The recording keeps `ready` with the state and the seconds, and a session row keeps the same in `ready`.
+  The runner refuses an old recording of such a scenario that has no `ready`: delete it and record again.
 - The runner reuses a recording only while the arm's checkout is in the state that it was recorded from: the same HEAD and the same diff of tracked files against HEAD. Otherwise it stops, names both states and says to delete the recording. `replay-report` names every product state of each arm's runs, and flags an arm whose runs came from more than one.
 - The first read of a seeded vault is cold: the index is not ready, and the reply holds no context. The `recall_context` step therefore has a `warm` key. The recorder discards the first read. It then reads every `WARM_SECONDS` (`replay_cases.py`) until two successive reads agree apart from the listed fields, and records the later read. When no two successive reads agree within `WARM_WITHIN_SECONDS` (`record_worker.py`), the recording fails and names the tool.
 - The runner writes the arm's `UserPromptSubmit` hook declaration into the agent's settings. It sets `EXOMEM_RETRIEVE_INJECT=mcp`, the case's engagement and a hook home inside the run folder. Session-close uses the same code (`plugin_hooks` and `hook_env`). The row records `hook_invocations` for information only.
