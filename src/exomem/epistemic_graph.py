@@ -8960,7 +8960,11 @@ class EpistemicGraphIndex:
         (`_open_read_snapshot`), and the rows' links resolve as they were
         derived (`_reader_resolver`, chosen before the read transaction
         opens). Without such a resolver the read is temporarily unavailable.
+        In store mode the rows and the request's resolver read one store
+        snapshot, so there is no lag to bridge (`_store_reader_resolver`).
         """
+        from .vault_store import mode as store_mode
+
         requested_keys = [str(k) for k in keys if k]
         anchor_rel = _page_rel(anchor) if anchor else None
         # GraphView shares this operation's combined path and caller verdicts,
@@ -8991,6 +8995,12 @@ class EpistemicGraphIndex:
             link_resolver = None
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
+        elif store_mode.store_mode_for_reads(self.vault_root):
+            link_resolver = self._store_reader_resolver(resolver)
+            if link_resolver is None:
+                return RelationFilterResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
         else:
             decided = self._reader_resolver(resolver)
             if decided is None:
@@ -9229,6 +9239,23 @@ class EpistemicGraphIndex:
             edges.append(edge)
         return RelationEdgeResult(status="available", edges=tuple(edges))
 
+    def _store_reader_resolver(
+        self, request: Callable[[], vault_module.WikilinkResolver] | None
+    ) -> vault_module.WikilinkResolver | None:
+        """A restricted reader's link resolver in store mode, or None while the recall index warms.
+
+        The sidecar's lag bridge (`_reader_resolver`) has nothing to bridge here: the rows and the
+        request's resolver read one store snapshot, so the snapshot's own resolver fits its rows.
+        """
+        try:
+            return (
+                request()
+                if request is not None
+                else find_module.recall_resolver_snapshot(self.vault_root)
+            )
+        except find_module.RetrievalIndexWarming:
+            return None
+
     def _reader_resolver(
         self,
         request: Callable[[], vault_module.WikilinkResolver] | None,
@@ -9369,15 +9396,8 @@ class EpistemicGraphIndex:
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
         elif stored:
-            # The sidecar's lag bridge (`_reader_resolver`) has nothing to bridge here: the
-            # snapshot's own resolver fits its rows.
-            try:
-                link_resolver = (
-                    resolver()
-                    if resolver is not None
-                    else find_module.recall_resolver_snapshot(self.vault_root)
-                )
-            except find_module.RetrievalIndexWarming:
+            link_resolver = self._store_reader_resolver(resolver)
+            if link_resolver is None:
                 return UnitEdgeResult(
                     status="temporarily_unavailable", reason="resolver_unavailable"
                 )
