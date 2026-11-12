@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.175.0](https://github.com/Artexis10/exomem/compare/v0.174.0...v0.175.0) (2026-11-12)
+
+
+### Features
+
+* **cloud:** one-command platform upgrade, and release tags start cell rollout ([#2760](https://github.com/Artexis10/exomem/issues/2760)) ([9eec48b](https://github.com/Artexis10/exomem/commit/9eec48b8cf8437d1cc3a010059afafeafa92268f))
+* **vault-store:** tombstone, receipt and publish governed writes around a store-mode commit ([#2742](https://github.com/Artexis10/exomem/issues/2742)) ([33417c0](https://github.com/Artexis10/exomem/commit/33417c0f872d69a40685263784c5f18d97fe3a98))
+
+
+### Bug Fixes
+
+* **cloud:** pin shipped skill install lines to the release they ship ([#2768](https://github.com/Artexis10/exomem/issues/2768)) ([cc22bd3](https://github.com/Artexis10/exomem/commit/cc22bd33bfdbb50ff4b4ca49c99ec6d648d81205))
+* **find:** corroborate BM25-only candidates by word majority, not lane absence ([#2762](https://github.com/Artexis10/exomem/issues/2762)) ([3e6d41e](https://github.com/Artexis10/exomem/commit/3e6d41eb835397053f820d62758cfda31ba2a5eb))
+* **records:** report unreflected observations under a partial claims census ([#2769](https://github.com/Artexis10/exomem/issues/2769)) ([f447ce9](https://github.com/Artexis10/exomem/commit/f447ce9b995a6955a8a223f7e2efd76a85355d47))
+* restore Windows import durability and bound warm sweep CPU ([#2773](https://github.com/Artexis10/exomem/issues/2773)) ([6597852](https://github.com/Artexis10/exomem/commit/659785217869b07aec92ec82bd227da9a2f75a04))
+
 ## [0.174.0](https://github.com/Artexis10/exomem/compare/v0.173.0...v0.174.0) (2026-11-11)
 
 
