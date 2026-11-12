@@ -60,7 +60,9 @@
 
 ## 5. Validate, merge, release and archive
 
-- [ ] 5.1 Run `openspec validate add-approved-procedures --strict` and `openspec validate --all --strict`, and the public-artifact privacy gate.
-- [ ] 5.2 Get an independent review of the built change. Merge after the review.
+- [x] 5.1 Run `openspec validate add-approved-procedures --strict` and `openspec validate --all --strict`, and the public-artifact privacy gate.
+  - Evidence: 2026-11-12, scoped strict validation passed; all strict validation passed 267 of 267 items. The pinned project-local writer ran `scripts/validate-public-artifacts.py --repository`: 7365 files and 7989 text payloads were clean. Repeat validation after synchronization and archive.
+- [x] 5.2 Get an independent review of the built change. Merge after the review.
+  - Evidence: the core feature merged in [PR #2579](https://github.com/Artexis10/exomem/pull/2579) after [independent approval](https://github.com/Artexis10/exomem/pull/2579#issuecomment-6728082442). Its approval implementation is unchanged in release 0.175.1. The repository-task nudge merged in [PR #2729](https://github.com/Artexis10/exomem/pull/2729) after [independent approval](https://github.com/Artexis10/exomem/pull/2729#issuecomment-6809243598). The later short-turn hook change merged in [PR #2733](https://github.com/Artexis10/exomem/pull/2733) after [independent approval](https://github.com/Artexis10/exomem/pull/2733#issuecomment-6809445086). The final closure batch still needs its own review before delivery.
 - [ ] 5.3 Release through release-please. Install the release and verify its published tool contract through a native client. Keep client action-cache compatibility separate from the isolated CLI behavioural proof.
 - [ ] 5.4 After merge and the real-model proof, synchronize the deltas into the canonical specs and archive this change with `openspec archive`.
