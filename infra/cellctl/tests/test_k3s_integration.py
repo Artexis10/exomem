@@ -3364,6 +3364,7 @@ def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sClus
         CellManifestSpec,
         render_clone_restore_job,
         render_namespace,
+        render_network_policies,
     )
 
     image = _import_image(k3s.name, _build_standin_image(IMAGE_DIR), repository=STANDIN_REPOSITORY)
@@ -3377,7 +3378,10 @@ def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sClus
         hold_started_at="2026-01-01T00:00:00+00:00",
     )
     namespace = spec.namespace
-    _apply_server_side(k3s.name, [render_namespace(spec)])
+    # A pod in a labelled cell namespace is admitted only once the
+    # default-deny NetworkPolicy exists, so the seed lands the policies the
+    # same way reconcile renders them before any Job.
+    _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
 
     def claim(name: str) -> dict:
         return {
@@ -3395,6 +3399,9 @@ def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sClus
     _apply_server_side(k3s.name, [claim(spec.pvc_name), claim(clone_claim)])
 
     def helper_job(name: str, command: str) -> dict:
+        # The namespace enforces the restricted Pod Security the chart sets,
+        # so the helper runs as the runtime identity the real Jobs do, and
+        # the files it seeds are already owned the way a target's are.
         return {
             "apiVersion": "batch/v1",
             "kind": "Job",
@@ -3404,12 +3411,24 @@ def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sClus
                 "template": {
                     "spec": {
                         "restartPolicy": "Never",
+                        "securityContext": {
+                            "runAsNonRoot": True,
+                            "runAsUser": 10001,
+                            "runAsGroup": 10001,
+                            "fsGroup": 10001,
+                            "fsGroupChangePolicy": "OnRootMismatch",
+                            "seccompProfile": {"type": "RuntimeDefault"},
+                        },
                         "containers": [
                             {
                                 "name": "helper",
                                 "image": image,
                                 "command": ["sh", "-c", command],
-                                "securityContext": {"runAsUser": 0, "runAsGroup": 0},
+                                "securityContext": {
+                                    "allowPrivilegeEscalation": False,
+                                    "readOnlyRootFilesystem": True,
+                                    "capabilities": {"drop": ["ALL"]},
+                                },
                                 "volumeMounts": [
                                     {"name": "data", "mountPath": "/data"},
                                     {"name": "clone", "mountPath": "/clone"},
@@ -3446,8 +3465,7 @@ def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sClus
             "mkdir -p /clone/vault /clone/host /data/vault /data/host && "
             f"printf %s {acknowledged} > /clone/vault/ack && "
             "printf %s keeper > /data/keeper && "
-            "printf %s target > /data/vault/created-by-target && "
-            "chown -R 10001:10001 /clone /data",
+            "printf %s target > /data/vault/created-by-target",
         ),
         "seeding the clone and the cell volume",
     )
