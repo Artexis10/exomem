@@ -356,10 +356,12 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     print(f"review: schema check — {schema_check(runner, env, checkout)}")
 
     live_version = parse_release(live_tag) if live_tag else None
+    target_version = parse_release(args.tag)
+    assert target_version is not None  # parse_args already refuses a bad tag
     barriers = json.loads((checkout / "infra/contracts/upgrade-barriers-v1.json").read_text())["barriers"]
     if live_tag:
         changed = secret_contract_changed(runner, live_tag, args.tag)
-        due = barriers_between(barriers, live_version, parse_release(args.tag))
+        due = barriers_between(barriers, live_version, target_version)
         if changed and not due:
             raise Stop("secret-contract",
                        f"secret contract changed between {live_tag} and {args.tag} "
@@ -416,7 +418,7 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     # --- Record and dispatch. ---
     previous = newest_platform_deployment(runner, settings.repository)
     if previous is None:
-        crossed_ids = all_crossed_up_to(barriers, parse_release(args.tag))
+        crossed_ids = all_crossed_up_to(barriers, target_version)
     else:
         crossed_ids = sorted(set(previous.get("barriers_crossed", [])) | {entry["id"] for entry in due})
     record_deployment(runner, settings, args.tag, crossed_ids, "success")
@@ -431,7 +433,7 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
 def main() -> int:
     try:
         os.umask(0o077)
-        return platform_upgrade(sys.argv[1:], os.environ, subprocess_runner)
+        return platform_upgrade(sys.argv[1:], dict(os.environ), subprocess_runner)
     except Stop as error:
         print(f"{error.step}: {error.message}", file=sys.stderr)
         return 1
