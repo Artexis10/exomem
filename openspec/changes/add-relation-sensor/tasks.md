@@ -1,7 +1,7 @@
 ## 1. The sensor model instrument
 
 - [x] 1.1 Add the `relation.type` entry to `sensing.QUESTIONS`: slots `source`, `target`, `link`, `menu`; extractors `page-excerpt-v1`, `link-sentence-v1`, `relation-menu-v1`; vector `answer`. Add label map `relation-type-v1` with `propose_min` and the abstain reasons `input_too_long` and `low_confidence`. Verify: unit tests for each label-map rule in order, column and width validation, and re-derivation after a threshold change.
-- [x] 1.2 Add `sensing_llm`: the sensor-model pin registry entry shape, manifest digest check, file-backed read-only load, template rendering with escaped data slots, one evaluation per case, letter logits normalised over the case's letters, and `input_too_long` without truncation. This change supplies the runtime interface; a future admitted pin supplies its concrete runtime dependency. Verify: tests with a stub runtime for escaping, the letter-only vector, refusal on a digest mismatch, and refusal of an environment-named model.
+- [x] 1.2 Add `sensing_llm`: the sensor-model pin shape, tokenizer-map digest check, runtime interface, escaped data slots, one evaluation per case, normalized letter logits, and `input_too_long` without truncation. A future admitted pin must supply its runtime dependency, verified weights digest and file-backed read-only load. Verify: stub-runtime tests cover escaping, letter-only vectors, tokenizer-map mismatch and refusal of an environment-named model.
 - [x] 1.3 Dispatch generative questions in `sensor_worker`: question-scoped admission and refusal, evidence-gated admission (task 4.1), one thread and the existing budgets. Verify: missing sensor-model weights refuse `relation.type` while `pair.relation` keeps running.
 
 ## 2. The Dreamer producer

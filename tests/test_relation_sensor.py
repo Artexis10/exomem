@@ -292,16 +292,29 @@ def test_changed_letter_token_map_cannot_reuse_admission_evidence() -> None:
     ) == "evidence-pin-mismatch"
 
 
-def test_menu_change_new_reading_and_unrelated_edit_same_id() -> None:
+def test_menu_change_creates_a_new_reading() -> None:
     inst = _instrument()
     r1 = _request()
     rid1 = r1.reading_id(inst.identity.instrument_id)
     changed_menu = MENU + [{"key": "refutes", "label": "refutes", "definition": "A counts against B"}]
     rid2 = _request(menu=changed_menu).reading_id(inst.identity.instrument_id)
     assert rid1 != rid2
-    # An edit to a registry entry not on the menu changes no hash.
-    rid3 = _request().reading_id(inst.identity.instrument_id)
-    assert rid1 == rid3
+
+
+def test_failed_admission_evidence_retires_consumed_instruments(monkeypatch) -> None:
+    pin = sensing_llm.SensorModelPin(
+        model="stub/sensor", revision="1", weights_sha256="0" * 64,
+        runtime="stub", runtime_version="1", label_token_map="x" * 64,
+    )
+    monkeypatch.setattr(sensing_llm, "SENSOR_MODEL_PINS", (pin,))
+    monkeypatch.setattr(sensing_llm, "ADMISSION_EVIDENCE", {
+        pin.pin_id: _evidence(pin_id=pin.pin_id),
+    })
+    assert sensing_llm.pin_identity(pin).instrument_id in sensing_llm.active_instruments()
+    monkeypatch.setattr(sensing_llm, "ADMISSION_EVIDENCE", {
+        pin.pin_id: _evidence(pin_id=pin.pin_id, judged_true=3),
+    })
+    assert sensing_llm.active_instruments() == {}
 
 
 def test_threshold_only_change_rederives() -> None:

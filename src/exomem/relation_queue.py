@@ -25,6 +25,7 @@ from . import activation as activation_module
 from . import (
     agent_refusal,
     context_refs,
+    markdown_relations,
     note_types,
     recall_policy,
     relation_endpoints,
@@ -121,6 +122,14 @@ def _bullet(candidate: dict[str, Any]) -> str:
     relation = candidate.get("authored_label") or candidate.get("relation_type")
     if not relation:
         raise ValueError("INVALID_SELECTED_RELATION: the candidate names no relation to write")
+    if candidate.get("method") == "retype":
+        old_line = str((candidate.get("evidence") or {}).get("line") or "")
+        try:
+            return markdown_relations.retype_relation(old_line, str(relation))
+        except ValueError as error:
+            raise ValueError(
+                "REVIEW_ITEM_CHANGED: the retype candidate names no relation bullet; refresh the queue"
+            ) from error
     destination = str(candidate.get("to") or "").removesuffix(".md")
     return f"- {relation} [[{destination}]]"
 
@@ -306,7 +315,7 @@ RELATION_NOT_OFFERED_REMEDIATION = (
 
 
 def _candidate_options(
-    candidate: dict[str, Any], page: Any, fit: "RelationFit", *, sensed: bool = False
+    candidate: dict[str, Any], page: Any, fit: RelationFit, *, sensed: bool = False
 ) -> list[dict[str, Any]]:
     """The menu a candidate offers. A `retype` bullet, or a plain link that
     carries a sensed proposal, offers the generic relation's menu: it is
@@ -807,7 +816,7 @@ def _retype_candidates(
     vault_root: Path,
     page: Any,
     *,
-    fit: "RelationFit | None" = None,
+    fit: RelationFit | None = None,
     snapshot: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """Authored plain-link/generic bullets carrying a current relation verdict.
@@ -1033,7 +1042,11 @@ def _classify_current(
 
     The reason is "unverifiable" when the reference authority moved while the Markdown was read.
     """
-    authored_now = _current_candidate_is_authored(vault_root, page, candidate, fit=fit)
+    # Retyping replaces an authored plain bullet; all other eligibility rules still apply.
+    authored_now = (
+        False if candidate.get("method") == "retype"
+        else _current_candidate_is_authored(vault_root, page, candidate, fit=fit)
+    )
     # A settled generic pair classifies like an authored edge: nothing is left to accept.
     settled_now = _current_pair_is_settled(vault_root, page, candidate, fit=fit)
     if authored_now is None or settled_now is None:
@@ -1471,20 +1484,15 @@ def accept(
     if bind_page_hash:
         expected_hash = _page_content_hash(page)
     store = review_state_module.ReviewStateStore(vault_root)
-    reason = _enriched = None
-    if str(candidate.get("method") or "") != "retype":
-        # A retype candidate IS an authored plain-link/generic bullet; the
-        # authored/settled classification would refuse it as already done.
-        # Its freshness is the exact bullet line plus the page hash below.
-        reason, _enriched = _classify_current(
-            vault_root,
-            page,
-            candidate,
-            store=store,
-            state_payload=store.load(),
-            exact_refs=resolved.identity_refs,
-            fit=fit,
-        )
+    reason, _enriched = _classify_current(
+        vault_root,
+        page,
+        candidate,
+        store=store,
+        state_payload=store.load(),
+        exact_refs=resolved.identity_refs,
+        fit=fit,
+    )
     if reason == "unverifiable":
         raise _refresh_required(ref)
     if reason is not None:

@@ -11,9 +11,9 @@ use graph rows and never parse page text.
 
 Each source page is one replaceable scope (owner `relation-sensor`), one owned
 request per link, keyed by source path, target path and occurrence anchor.
-Submission writes the page's `relation_sensed` rows in the same transaction as
-the scope replacement, so a row is pending from the moment it is requested and
-keeps its verdict after the job retires.
+Submission writes the page's `relation_sensed` rows with its scope replacement.
+New inputs land pending; unchanged inputs keep their verdict after a revisit
+or job retirement.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import json
 import logging
 import sqlite3
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from . import (
 )
 from . import semantic_contract as semantic_contract_module
 from . import vault as vault_module
+from .markdown_relations import bullet_marker_length, heading_key
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +55,6 @@ INGEST_BATCH = 256
 
 _EXCERPT_CHARS = 900
 _LINK_CHARS = 300
-
-#: The canonical Relations section heading, the same literal the governed
-#: write uses (`relation_queue.accept`'s `heading="Relations"`).
-_RELATIONS_HEADING = "relations"
-
 
 class _GraphPage:
     """A page as the published graph describes it: no Markdown parse."""
@@ -190,7 +186,7 @@ def _section_lines(conn: sqlite3.Connection, rel_path: str) -> set[int]:
         "line_start IS NOT NULL AND line_end IS NOT NULL AND kind='candidate'",
         (rel_path,),
     ):
-        if str(title or "").strip().casefold() != _RELATIONS_HEADING:
+        if heading_key(str(title or "")) != heading_key("Relations"):
             continue
         try:
             out.update(range(int(start), int(end) + 1))
@@ -221,7 +217,8 @@ def link_line(lines: Sequence[str], number: int | None) -> str:
     """`link-sentence-v1`: the carrying line, plain, 300 chars; "" for a bare bullet."""
     if number is None or not (1 <= int(number) <= len(lines)):
         return ""
-    return _plain(lines[int(number) - 1]).lstrip("-*0123456789. ").strip()[:_LINK_CHARS]
+    line = lines[int(number) - 1]
+    return _plain(line[bullet_marker_length(line):])[:_LINK_CHARS]
 
 
 def menu_for(
@@ -429,8 +426,7 @@ def page_scope(
     """Submit one replaceable scope of relation.type requests for a page.
 
     The page's `relation_sensed` rows are replaced in the same transaction as
-    its jobs: every request lands as a pending row, so a verdict survives the
-    job's retirement.
+    its jobs: new inputs land pending, and unchanged inputs keep their verdicts.
     """
     registry = fit.registry(source)
     links = plain_links(conn, registry, source)
@@ -446,7 +442,8 @@ def page_scope(
             # senses pages in the order the relation queue presents them,
             # rather than in request-hash order.
             sensed_model.OwnedRequest(
-                request_key=key, request=request, order_key=f"{source.rel_path}\n{key}"
+                request_key=key, request=request, priority=2,
+                order_key=f"{source.rel_path}\n{key}"
             )
             for key, request, _row in requests
         ),
@@ -465,6 +462,7 @@ def produce(
     *,
     cursor: str,
     changed: Sequence[str],
+    halt: Callable[[], str | None] | None = None,
 ) -> dict[str, Any]:
     """One bounded pass: this tick's changed pages first, then the cursor.
 
@@ -472,40 +470,51 @@ def produce(
     connection, so this must run OUTSIDE the projection's write transaction;
     the caller applies `processed`/`removed`/`cursor` to the tables inside it.
     """
-    chosen: list[str] = []
+    stop = halt() if halt is not None else None
+    if stop is not None:
+        return {"submitted": 0, "pages": [], "cursor": cursor, "stop": stop}
+    chosen = list(dict.fromkeys(str(path) for path in changed))[:PAGES_PER_TICK]
+    cursor_paths: list[str] = []
     remaining = PAGES_PER_TICK
-    chosen.extend(str(path) for path in changed[:remaining])
     remaining -= len(chosen)
     if remaining > 0:
+        marks = ",".join("?" for _ in chosen)
+        excluded = f"AND path NOT IN ({marks}) " if chosen else ""
         # The path index lets the cursor stop at the page limit without sorting the corpus.
         rows = graph.execute(
             "SELECT path FROM graph_nodes INDEXED BY idx_graph_nodes_path "
-            "WHERE kind='file' AND path > ? "
+            "WHERE kind='file' AND path > ? " + excluded +
             "ORDER BY path LIMIT ?",
-            (cursor, remaining),
+            (cursor, *chosen, remaining),
         ).fetchall()
         wrapped = len(rows) < remaining
         for (path,) in rows:
-            chosen.append(str(path))
+            cursor_paths.append(str(path))
         remaining -= len(rows)
         if wrapped and remaining > 0:
+            seen = [*chosen, *cursor_paths]
+            marks = ",".join("?" for _ in seen)
+            excluded = f"AND path NOT IN ({marks}) " if seen else ""
             rows = graph.execute(
                 "SELECT path FROM graph_nodes INDEXED BY idx_graph_nodes_path "
-                "WHERE kind='file' AND path <= ? "
+                "WHERE kind='file' AND path <= ? " + excluded +
                 "ORDER BY path LIMIT ?",
-                (cursor, remaining),
+                (cursor, *seen, remaining),
             ).fetchall()
             for (path,) in rows:
-                if str(path) not in set(chosen):
-                    chosen.append(str(path))
-    chosen = chosen[:PAGES_PER_TICK]
+                cursor_paths.append(str(path))
+    chosen.extend(cursor_paths)
     if not chosen:
         return {"submitted": 0, "pages": [], "cursor": cursor}
 
     fit = relation_queue.RelationFit(Path(vault_root))
     submitted = 0
     processed: list[tuple[str, str]] = []
+    last_cursor = None
     for path in chosen:
+        stop = halt() if halt is not None else None
+        if stop is not None:
+            break
         page = _file_node(graph, path)
         if page is None:
             continue
@@ -517,18 +526,22 @@ def produce(
             processed.append((path, page.source_hash))
         elif isinstance(result, sensed_model.Submission) and result.state == "seeding":
             break
+        if path in cursor_paths:
+            last_cursor = path
 
     # The cursor advances past the deepest path this pass reached; a pass that
     # covered the whole table wraps so the next pass starts at the first path.
-    last = chosen[-1]
-    tail = graph.execute(
-        "SELECT 1 FROM graph_nodes INDEXED BY idx_graph_nodes_path "
-        "WHERE kind='file' AND path > ? LIMIT 1", (last,)
-    ).fetchone()
+    if last_cursor is not None:
+        tail = graph.execute(
+            "SELECT 1 FROM graph_nodes INDEXED BY idx_graph_nodes_path "
+            "WHERE kind='file' AND path > ? LIMIT 1", (last_cursor,)
+        ).fetchone()
+        cursor = "" if tail is None else last_cursor
     return {
         "submitted": submitted,
         "pages": processed,
-        "cursor": "" if tail is None else last,
+        "cursor": cursor,
+        "stop": stop,
     }
 
 
@@ -562,16 +575,19 @@ def ingest(conn: sqlite3.Connection, ledger: sqlite3.Connection | None) -> int:
         ).fetchall()
     if rows:
         sensed_model._set_meta(conn, "relation_ingest_cursor", str(rows[-1][0]))
+    stored = (
+        sensing_ledger.by_input_keys(
+            ledger, sensing.RELATION_TYPE, (str(row[1]) for row in rows), instrument_ids=active,
+        )
+        if rows and ledger is not None and active else {}
+    )
     filled = 0
     for request_key, input_key, old_instrument in rows:
         verdict = reading = instrument = None
         if ledger is not None and active:
-            stored = sensing_ledger.by_input_key(
-                ledger, sensing.RELATION_TYPE, str(input_key)
-            )
             for instrument_id in active:
                 reading = next(
-                    (r for r in stored if r.instrument_id == instrument_id),
+                    (r for r in stored.get(str(input_key), ()) if r.instrument_id == instrument_id),
                     None,
                 )
                 if reading is not None:

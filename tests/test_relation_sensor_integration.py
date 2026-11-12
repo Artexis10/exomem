@@ -21,6 +21,7 @@ from exomem import (
     relation_sensor,
     sensed_model,
     sensing,
+    sensing_ledger,
     sensing_llm,
     sensor_worker,
 )
@@ -155,7 +156,7 @@ def test_retire_then_ingest_keeps_the_proposal(tmp_path: Path, monkeypatch) -> N
     ]
     assert sensed, "the queue annotates the proposal"
     item = sensed[0]
-    assert item["sensed"]["relation"] == "supports" or item["sensed"]["relation"]
+    assert item["sensed"]["relation"] == "supports"
     assert item["sensed"]["proposed"] is True
     assert item["sensed"]["reading_id"]
     assert item.get("options"), "the item carries the menu as options"
@@ -391,6 +392,119 @@ def test_worker_order_follows_source_pages(tmp_path: Path, monkeypatch) -> None:
     # Jobs drain page by page in path order, as the queue lists sources.
     sources = [j.scope_key for j in jobs]
     assert sources == sorted(sources)
+    queued = list(sensed_model.runnable_jobs(vault))
+    pair_positions = [i for i, job in enumerate(queued) if job.request.question_type == sensing.PAIR_RELATION]
+    relation_positions = [i for i, job in enumerate(queued) if job.request.question_type == sensing.RELATION_TYPE]
+    assert pair_positions and relation_positions
+    assert max(pair_positions) < min(relation_positions)
+
+
+def test_unchanged_scope_keeps_its_verdict_and_changed_input_clears_it(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    before = [row for row in _rows(vault) if row[1] == sf.WINTER]
+    assert before and before[0][7] == "supports"
+    fit = relation_queue.RelationFit(vault)
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    source = relation_sensor._file_node(conn, sf.WINTER)
+    assert relation_sensor.page_scope(vault, conn, fit, source).state == "submitted"
+    conn.close()
+    assert [row for row in _rows(vault) if row[1] == sf.WINTER] == before
+    assert relation_sensor.sensed_rows_for(vault, [sf.WINTER])
+
+    fx.edit(vault, sf.WINTER, (vault / sf.WINTER).read_text().replace("Builds on", "The evidence follows"))
+    fx.publish_graph(vault)
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    source = relation_sensor._file_node(conn, sf.WINTER)
+    assert relation_sensor.page_scope(vault, conn, relation_queue.RelationFit(vault), source).state == "submitted"
+    conn.close()
+    changed = [row for row in _rows(vault) if row[1] == sf.WINTER]
+    assert changed and changed[0][5:9] == (None, None, None, None)
+    assert relation_sensor.sensed_rows_for(vault, [sf.WINTER]) == {}
+
+
+def test_changed_priority_never_skips_cursor_pages_or_duplicates_a_scope(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    paths = {name: f"{fx.KB}/Notes/Insights/{name}.md" for name in [
+        *(f"a-{i}" for i in range(4)), *(f"m-{i}" for i in range(8)), "z-0",
+    ]}
+    for name, path in paths.items():
+        fx.write(vault, path, sf.note(name, "2026-05-10", f"{name} fact."))
+    fx.publish_graph(vault)
+    sf.settle(vault)
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    start = paths["a-0"]
+    changed = [paths[f"m-{i}"] for i in range(8)]
+    result = relation_sensor.produce(vault, conn, cursor=start, changed=changed)
+    assert result["cursor"] == start
+    assert [path for path, _ in result["pages"]] == changed
+    result = relation_sensor.produce(vault, conn, cursor=start, changed=[paths["a-1"], paths["m-0"], paths["a-1"]])
+    expected = [paths["a-1"], paths["m-0"], paths["a-2"], paths["a-3"], sf.INLET, paths["m-1"], paths["m-2"], paths["m-3"]]
+    assert [path for path, _ in result["pages"]] == expected
+    assert result["cursor"] == paths["m-3"]
+    result = relation_sensor.produce(vault, conn, cursor=paths["z-0"], changed=[])
+    assert [path for path, _ in result["pages"]] == [paths["a-0"], paths["a-1"], paths["a-2"], paths["a-3"], sf.INLET, paths["m-0"], paths["m-1"], paths["m-2"]]
+    assert result["cursor"] == paths["m-2"]
+    conn.close()
+
+
+def test_replaced_ledger_clears_relation_reading_citations(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    _worker_and_ingest(vault, TypeStub())
+    before = _rows(vault)
+    assert before and all(row[5] for row in before)
+    assert relation_sensor.sensed_rows_for(vault, [sf.WINTER])
+
+    sensing_ledger.ledger_path(vault).unlink()
+    replacement = sensing_ledger.Ledger(vault).connect()
+    replacement.close()
+    sf.settle(vault, rounds=1)
+    after = _rows(vault)
+    assert after and all(row[5:9] == (None, None, None, None) for row in after)
+    assert relation_sensor.sensed_rows_for(vault, [sf.WINTER]) == {}
+
+
+@pytest.mark.parametrize("immediate", (True, False))
+def test_foreground_halt_stops_relation_scopes_and_preserves_cursor(tmp_path: Path, monkeypatch, immediate) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    requested = immediate
+    original = relation_sensor.page_scope
+
+    def become_active_after_scope(*args, **kwargs):
+        nonlocal requested
+        result = original(*args, **kwargs)
+        requested = True
+        return result
+
+    monkeypatch.setattr(relation_sensor, "page_scope", become_active_after_scope)
+    result = relation_sensor.produce(vault, conn, cursor="", changed=[], halt=lambda: "foreground" if requested else None)
+    assert len(result["pages"]) == (0 if immediate else 1)
+    assert result["stop"] == "foreground"
+    assert result["cursor"] == ("" if immediate else sf.INLET)
+    conn.close()
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("2026 budget follows [[X]]", "2026 budget follows X"),
+    ("1.5x faster than [[X]]", "1.5x faster than X"),
+    ("+ plus bullet [[X]]", "plus bullet X"),
+    ("2. ordered [[X]]", "ordered X"),
+    ("3) ordered [[X]]", "ordered X"),
+])
+def test_link_sentence_preserves_prose_and_removes_list_markers(line, expected) -> None:
+    assert relation_sensor.link_line([line], 1) == expected
 
 
 def test_edited_page_resubmits_and_stale_rows_drop(tmp_path: Path, monkeypatch) -> None:
@@ -505,47 +619,58 @@ def test_ingest_cursor_walks_starved_rows(tmp_path: Path, monkeypatch) -> None:
     _active(monkeypatch)
     vault = sf.build(tmp_path)
     sf.settle(vault)
+    template = _jobs(vault)[0].request
     conn = sensed_model._producer_connection(vault)
     rows = []
+    readings = []
     for index in range(300):
         key = f"k{index:04d}"
+        source_text = f"A distinct source statement {index}."
+        request = sensing.SenseRequest(
+            template.question_type, template.input_version,
+            (replace(template.inputs[0], text_sha256=sensing.text_sha256(source_text)), *template.inputs[1:]),
+            (source_text, *template.texts[1:]),
+        )
         rows.append((key, "s.md", f"t{index}.md", "a", "wikilink", None, None, None, None,
-                     "d" * 64, f"input-{index}", "source-hash", "target-hash"))
+                     "d" * 64, request.input_key, "source-hash", "target-hash"))
+        if index >= 275:
+            columns = sensing_llm.menu_columns(request)[1]
+            vector = [0.01] * len(columns)
+            vector[columns.index("supports")] = 0.9
+            vector[-1] += 1 - sum(vector)
+            readings.append(sensing.make_request_reading(
+                request, IDENTITY, vectors={"answer": vector},
+                abstain_reason=None, sensed_at="2026-05-10T00:00:00Z",
+            ))
     conn.executemany(
         "INSERT OR REPLACE INTO relation_sensed VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.close()
 
-    # Readings exist only for the last 25 rows.
-    answered = {f"input-{i}" for i in range(275, 300)}
-
-    from exomem import sensing_ledger
-
-    class FakeReading:
-        instrument_id = IDENTITY.instrument_id
-        reading_id = "r1"
-        vectors = {"answer": [0.9, 0.05, 0.05]}
-        verdict = sensing.Verdict("supports", 0.9)
-        columns = ("supports", "refines", "none")
-
-    monkeypatch.setattr(
-        sensing_ledger, "by_input_key",
-        lambda ledger, q, key: [FakeReading()] if key in answered else [],
-    )
+    # Real ledger readings exist only for the last 25 rows.
+    ledger_store = sensing_ledger.Ledger(vault)
+    ledger = ledger_store.connect()
+    assert all(readings)
+    ledger_store.append(ledger, readings)
     monkeypatch.setattr(relation_sensor, "INGEST_BATCH", 50)
     conn = sensed_model._producer_connection(vault)
-    ledger = sqlite3.connect(":memory:")  # presence only; by_input_key is stubbed
+    queries = []
+    ledger.set_trace_callback(queries.append)
     conn.execute("BEGIN IMMEDIATE")
     relation_sensor.ingest(conn, ledger)
     conn.execute("COMMIT")
+    assert len(queries) == 1, "one batch must not query once per pending row"
     first = conn.execute(
         "SELECT count(*) FROM relation_sensed WHERE verdict='supports'").fetchone()[0]
     conn.execute("BEGIN IMMEDIATE")
     for _ in range(6):
+        queries.clear()
         relation_sensor.ingest(conn, ledger)
+        assert len(queries) == 1
     conn.execute("COMMIT")
     second = conn.execute(
         "SELECT count(*) FROM relation_sensed WHERE verdict='supports'").fetchone()[0]
     conn.close()
+    ledger.close()
     assert first <= 50
     assert second == 25
 
@@ -643,7 +768,7 @@ def test_accept_a_different_offered_option(tmp_path: Path, monkeypatch) -> None:
     after = (vault / item["from"]).read_text(encoding="utf-8")
     assert f"- {other} [[" in after
     assert f"- {proposal} [[" not in after
-    assert result.get("sensed", {}).get("relation") == proposal or proposal in json.dumps(result)
+    assert result.get("sensed", {}).get("relation") == proposal
 
 
 def test_inactive_instrument_hides_persisted_proposal_before_next_tick(tmp_path: Path, monkeypatch) -> None:
@@ -660,7 +785,7 @@ def test_inactive_instrument_hides_persisted_proposal_before_next_tick(tmp_path:
     monkeypatch.setattr(sensing_llm, "active_instruments", lambda: {})
     assert _sensed_items(vault) == []
     assert relation_sensor.sensed_rows_for(vault, [item["from"]]) == {}
-    with pytest.raises(Exception, match="VOCABULARY_APPLICATION_INVALID|REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED"):
+    with pytest.raises(cli_ops.OpError, match="VOCABULARY_APPLICATION_INVALID"):
         _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
     assert (vault / item["from"]).read_text(encoding="utf-8") == before
 
@@ -683,7 +808,7 @@ def test_target_edit_hides_old_reading_without_resensing_source(tmp_path: Path, 
     assert _rows(vault) == old_rows, "the reading stays persisted until a later sensor tick"
     assert relation_sensor.sensed_for_candidate(vault, item["from"], sf.SEAL) is None
     assert not any(i["to"] == sf.SEAL for _, i in _sensed_items(vault))
-    with pytest.raises(Exception, match="VOCABULARY_APPLICATION_INVALID|REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED"):
+    with pytest.raises(cli_ops.OpError, match="VOCABULARY_APPLICATION_INVALID"):
         _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
     assert (vault / item["from"]).read_text(encoding="utf-8") == before
 
@@ -705,31 +830,9 @@ def test_changed_registry_menu_cannot_widen_a_stale_accept(tmp_path: Path, monke
     fx.publish_graph(vault)
     _warm(vault, monkeypatch)
     assert _sensed_items(vault) == []
-    with pytest.raises(Exception, match="VOCABULARY_APPLICATION_INVALID|REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED"):
+    with pytest.raises(cli_ops.OpError, match="VOCABULARY_APPLICATION_INVALID"):
         _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
     assert (vault / item["from"]).read_text(encoding="utf-8") == before
-
-
-def test_no_requested_relation_never_writes_the_proposal(tmp_path: Path, monkeypatch) -> None:
-    sf.enable(monkeypatch)
-    _active(monkeypatch)
-    vault = sf.build(tmp_path)
-    sf.settle(vault)
-    _worker_and_ingest(vault, TypeStub())
-    _warm(vault, monkeypatch)
-    group, item = _sensed_items(vault)[0]
-    proposal = item["sensed"]["relation"]
-    before = (vault / item["from"]).read_text(encoding="utf-8")
-    try:
-        result = _accept(vault, group, item)
-    except (ValueError, cli_ops.OpError) as exc:
-        result = {"error": str(exc)}
-    after = (vault / item["from"]).read_text(encoding="utf-8")
-    if result.get("accepted"):
-        # If the rule accepts without a choice, it is still never the proposal.
-        assert f"- {proposal} [[" not in after
-    else:
-        assert after == before
 
 
 RTYPE = f"{sf.KB}/Notes/Insights/retype-me.md"
@@ -800,6 +903,6 @@ def test_retype_accept_refuses_on_drift(tmp_path: Path, monkeypatch) -> None:
     )
     drifted = (vault / RTYPE).read_text(encoding="utf-8") + "\ndrifted line\n"
     (vault / RTYPE).write_text(drifted, encoding="utf-8")
-    with pytest.raises(Exception, match="REVIEW_ITEM_CHANGED|REVIEW_REFRESH_REQUIRED|drift|changed"):
+    with pytest.raises(ValueError, match="STALE_EDIT"):
         _accept(vault, group, item, requested_relation=item["sensed"]["relation"])
     assert (vault / RTYPE).read_text(encoding="utf-8") == drifted

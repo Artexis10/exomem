@@ -399,7 +399,16 @@ def pin_identity(pin: SensorModelPin) -> sensing.InstrumentIdentity:
 
 def active_instruments() -> dict[str, sensing.InstrumentIdentity]:
     """Identities whose `relation.type` readings are consumed, by instrument id."""
-    return {pin_identity(pin).instrument_id: pin_identity(pin) for pin in SENSOR_MODEL_PINS}
+    entry = sensing.QUESTIONS[sensing.RELATION_TYPE]
+    propose_min = sensing.label_map(entry.label_map_version).propose_min
+    identities = (
+        pin_identity(pin) for pin in SENSOR_MODEL_PINS
+        if evidence_check(
+            pin, ADMISSION_EVIDENCE.get(pin.pin_id),
+            label_map_version=entry.label_map_version, propose_min=propose_min,
+        ) is None
+    )
+    return {identity.instrument_id: identity for identity in identities}
 
 
 def instrument_identity(pin: SensorModelPin, runtime: LetterRuntime, letters: Sequence[str]) -> sensing.InstrumentIdentity:

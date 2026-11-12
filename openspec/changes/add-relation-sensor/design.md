@@ -88,10 +88,10 @@ The sensed tick gains a bounded `relation.type` producer. It never loads a model
   - authored relation bullets whose relation is the registry's plain-link key or a generic relation.
 
   A pair that already has a specific authored relation is skipped.
-- **Order.** Pages whose graph `source_hash` changed since the producer last saw them come first. A persisted cursor then walks the remaining pages in path order, so every page is reached once per pass.
+- **Order.** The tick submits changed source pages first, up to its fixed bound. A persisted cursor walks the other pages in path order. Changes beyond the tick's bound remain reachable through that cursor.
 - **Bounds.** At most `PAGES_PER_TICK` source pages and `LINKS_PER_PAGE` links per page per tick. These are constants of the producer, not settings. Cursor queries use the maintained path index. Exact retype lookups use a shared graph index over source path, origin, source anchor and target page; that index adds per-edge storage and maintenance cost.
 - **Submission.** One replaceable scope per source page, with one owned request per link. The stable request key is the source path, the target path and the link's occurrence anchor. A changed page replaces its scope atomically, so stale requests are removed.
-- **Ingestion.** The tick follows the ledger and writes one projection row per current link: request key, reading id, verdict, top key and probability, and the menu digest. Each row binds the published source and target hashes. Queue reads compare both hashes in the graph snapshot and require an active instrument, so a changed target cannot leave an old proposal current. A changed menu also suppresses the prior proposal before acceptance.
+- **Ingestion.** The tick batches ledger lookups for a bounded page of pending rows. Unchanged inputs retain their verdicts when their scope is replaced. Each row binds both published page hashes and the menu digest. Queue reads require matching graph hashes and an instrument with current admission evidence. A changed menu suppresses the prior proposal. A replaced ledger clears cached verdicts before bounded refill.
 
 ### D4. Delivery through the relation review queue
 
@@ -190,4 +190,4 @@ This change enables no model, sends no vault text to a provider, and changes no 
 
 - **The bar may not be met on CPU.** Then `relation.type` stays refused and the plumbing ships dark. The queue's deterministic behaviour is unchanged.
 - **The menu shapes the answer.** A relation missing from the menu cannot be proposed. The menu is the same one the agent sees, so the sensor never widens the agent's choice.
-- **Backlog time.** At one thread under the hourly budget, the first pass over a large vault takes weeks. New links are few per day, so the steady state keeps up. The Dreamer's changed-first order keeps recent work current.
+- **Backlog time.** No admitted runtime establishes initial or steady-state throughput. The first pin must measure both at the product's load target. Changed-first ordering prioritizes source edits. A target edit hides a stale proposal until the source is revisited.
