@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.176.0](https://github.com/Artexis10/exomem/compare/v0.175.1...v0.176.0) (2026-11-12)
+
+
+### Features
+
+* **sensing:** add a disabled pipeline for relation proposals ([#2730](https://github.com/Artexis10/exomem/issues/2730)) ([3cf084b](https://github.com/Artexis10/exomem/commit/3cf084baa4937b6528d71d326d2066eeb810246e))
+
 ## [0.175.1](https://github.com/Artexis10/exomem/compare/v0.175.0...v0.175.1) (2026-11-12)
 
 
