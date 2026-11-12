@@ -1254,9 +1254,9 @@ _DROPPED_RELATIONS_NAMED = 5
 def _dropped_relations_outcome(dropped: tuple[tuple[str, str], ...], *, compact: bool) -> str:
     """The sentence for an update that omits `relations` while its unit had some.
 
-    A prose-only update of a belief drops its `assesses` relation, so the belief then warns that
-    it names no claim; this names the relations that went. A rich unit keeps them when the call
-    sends them again; a compact observation carries none, so no call can keep them there.
+    An accepted update names the optional relations it dropped. Validation refuses an update
+    that drops a required assessed-claim relation. A rich unit keeps relations when the call
+    sends them again; a compact observation carries none.
     """
     named = "; ".join(f"{kind}: {target}" for kind, target in dropped[:_DROPPED_RELATIONS_NAMED])
     more = len(dropped) - _DROPPED_RELATIONS_NAMED
