@@ -9768,22 +9768,6 @@ class EpistemicGraphIndex:
             retype_by_source = relation_sensor.retype_candidates_many(
                 conn, selected_registries, sensed_by_key
             )
-            # Only bounded candidate endpoints need their structural frontmatter decoded.
-            menu_paths = set(selected)
-            menu_paths.update(str(row[2]) for row in wiki_and_authored_rows[:branch_cap])
-            for candidate_rows in (
-                unit_rows, question_rows, resolution_rows, frontmatter_rows, shared_source_rows,
-            ):
-                menu_paths.update(str(row[1]) for row in candidate_rows[:branch_cap])
-            menu_paths.update(
-                str(candidate["to"])
-                for candidates in retype_by_source.values() for candidate in candidates
-            )
-            menu_pages = {
-                path: relation_sensor._page_from_row((row[0], row[1], row[6], row[8], row[2]))
-                for path in menu_paths if (row := menu_rows.get(path)) is not None
-                and _recall_path_allowed(self.vault_root, path)
-            }
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
                 "status": "warming",
@@ -10189,20 +10173,16 @@ class EpistemicGraphIndex:
             "shared_sources",
             "retype",
         )
-        fit = relation_queue.RelationFit(self.vault_root, basis=type_basis)
 
-        def options_for(candidate: dict[str, Any], *, relation: str | None = None) -> list[dict[str, Any]]:
-            source_page = menu_pages.get(str(candidate["from"]))
-            target_page = menu_pages.get(str(candidate["to"]))
-            if source_page is None or target_page is None:
-                return []
-            return fit.options(
-                candidate,
-                registry=selected_registries[str(candidate["from"])],
-                source_page=source_page,
-                target_page=target_page,
-                relation=relation,
-            )
+        def menu_page(path: str) -> Any | None:
+            row = menu_rows.get(path)
+            if row is None:
+                return None
+            return relation_sensor._page_from_row((row[0], row[1], row[6], row[8], row[2]))
+
+        fit = relation_queue.RelationFit(
+            self.vault_root, basis=type_basis, page_lookup=menu_page,
+        )
 
         for source in selected:
             if len(groups) >= page_cap:
@@ -10293,7 +10273,7 @@ class EpistemicGraphIndex:
                 generic = relation_queue.generic_choice(
                     selected_registries[source],
                     candidate,
-                    options_for(candidate),
+                    fit.options(candidate, registry=selected_registries[source]),
                 )
                 if generic is not None:
                     item.update({**generic, "relation_label": None})
@@ -10310,11 +10290,12 @@ class EpistemicGraphIndex:
                                 source, target, f"occurrence-{occurrence}"
                             )
                         )
-                if sensed_row is not None:
+                if sensed_row is not None and sensed_row.get("verdict") not in ("none", "abstain"):
                     options = item.get("options")
                     if options is None:
-                        options = options_for(
+                        options = fit.options(
                             candidate,
+                            registry=selected_registries[source],
                             relation=relation_registry.generic_relation_key(),
                         )
                     block = relation_sensor.proposal(sensed_row, options or [])

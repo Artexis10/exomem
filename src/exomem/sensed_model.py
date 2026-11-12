@@ -1057,14 +1057,15 @@ def run_tick(
         from . import sensing_llm
 
         if sensing_llm.active_instruments():
+            if halt() is None:
+                with store.write(conn):
+                    _relation_ingest(conn, ledger)
             relation_result = _relation_producer(
                 vault_root, conn, rel_changed, report, halt
             )
             with store.write(conn):
                 _relation_bookkeeping(conn, rel_removed, relation_result)
                 _retire_satisfied(conn, ledger)
-                if halt() is None:
-                    _relation_ingest(conn, ledger)
         else:
             with store.write(conn):
                 _retire_satisfied(conn, ledger)

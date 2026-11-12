@@ -162,6 +162,38 @@ def test_retire_then_ingest_keeps_the_proposal(tmp_path: Path, monkeypatch) -> N
     assert item.get("options"), "the item carries the menu as options"
 
 
+def test_ready_verdicts_fill_when_the_producer_spends_the_remaining_budget(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    _active(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    assert _rows(vault) and all(row[7] is None for row in _rows(vault))
+    relation = TypeStub()
+    pair = sf.StubInstrument(sf.default_table())
+    sensor_worker.run_child(
+        vault, parent_pid=0, cpu_allotment=1e9, judgement_allotment=10**6,
+        idle_seconds=0.0,
+        admit_selected=lambda question: relation if question == sensing.RELATION_TYPE else pair,
+        sleep=lambda seconds: None,
+    )
+    conn = sensed_model.open_readonly(vault)
+    seen = dict(conn.execute("SELECT path, sig FROM pages"))
+    conn.close()
+    original = relation_sensor.produce
+    spent = False
+
+    def spend_remaining_budget(*args, **kwargs):
+        nonlocal spent
+        result = original(*args, **kwargs)
+        spent = True
+        return result
+
+    monkeypatch.setattr(relation_sensor, "produce", spend_remaining_budget)
+    sensed_model.run_tick(vault, seen=seen, halt=lambda: "cpu" if spent else None)
+    assert spent
+    assert all(row[7] == "supports" for row in _rows(vault))
+
+
 def test_menu_equals_the_queues_options(tmp_path: Path, monkeypatch) -> None:
     sf.enable(monkeypatch)
     vault = sf.build(tmp_path)
@@ -343,7 +375,8 @@ def test_producer_selection_work_stays_bounded_at_50000_graph_nodes(tmp_path: Pa
 
     small, small_statements, small_work = measured_tick()
     node_count = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
-    paths = [f"{fx.KB}/Notes/Insights/zz-generated-{index:05d}.md" for index in range(50_000 - node_count)]
+    generated_count = 50_000 - node_count
+    paths = [f"{fx.KB}/Notes/Insights/zz-generated-{index:05d}.md" for index in range(generated_count // 2)]
     _append_graph_rows(conn, "graph_nodes", (
         {"node_key": f"file:{path}", "kind": "file", "path": path} for path in paths
     ))
@@ -352,14 +385,26 @@ def test_producer_selection_work_stays_bounded_at_50000_graph_nodes(tmp_path: Pa
          "source_path": path, "origin": "wikilink"}
         for index, path in enumerate(paths)
     ))
+    selected_paths = [path for path, _ in small["pages"]]
+    _append_graph_rows(conn, "graph_nodes", (
+        {"node_key": f"unit:dense-{index}", "kind": "candidate",
+         "path": selected_paths[index % len(selected_paths)], "title": "Generated fragment",
+         "line_start": 1, "line_end": 1}
+        for index in range(generated_count - len(paths))
+    ))
     assert conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0] == 50_000
     large, large_statements, large_work = measured_tick()
     cursor_sql = next(sql for sql in large_statements if sql.startswith("SELECT path FROM graph_nodes"))
-    for name, sql in (
-        ("cursor_plan", cursor_sql),
-        ("unforced_cursor_plan", cursor_sql.replace(" INDEXED BY idx_graph_nodes_path", "")),
-    ):
-        record_property(name, [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)])
+    source_sql = next(sql for sql in large_statements if sql.startswith("SELECT path, title, page_type, metadata, source_hash"))
+    record_property("cursor_plan", [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + cursor_sql)])
+    record_property("source_plan", [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + source_sql)])
+    progress = []
+    conn.set_progress_handler(lambda: progress.append(1) or 0, 1)
+    conn.execute(cursor_sql).fetchall()
+    conn.set_progress_handler(None, 0)
+    cursor_steps = len(progress)
+    record_property("cursor_vm_steps", cursor_steps)
+    assert cursor_steps <= 200, "cursor selection must not visit candidate nodes sharing selected paths"
     record_property("small_graph_vm_steps", small_work)
     record_property("large_graph_vm_steps", large_work)
     record_property("small_graph_queries", len(small_statements))
@@ -370,6 +415,45 @@ def test_producer_selection_work_stays_bounded_at_50000_graph_nodes(tmp_path: Pa
     assert len(large_statements) == len(small_statements)
     assert large_work <= small_work * 1.2 + 500, (small_work, large_work)
     conn.close()
+
+
+@pytest.mark.parametrize("page_heading", (True, False))
+def test_excerpt_preserves_prose_and_omits_only_authored_relations(tmp_path: Path, page_heading) -> None:
+    vault = sf.build(tmp_path)
+    path = f"{fx.KB}/Notes/Insights/excerpt.md"
+    text = sf.note(
+        "A", "2026-05-10", "Another observed fact.",
+        links="Another fact uses [[Notes/Insights/seal-wear#Details|the alias]].\n"
+        "- see [[Notes/Insights/seal-wear]]\n"
+        "- SUPPORTS [[Notes/Insights/inlet-pressure]]\n"
+        "- cites-alias [[Notes/Insights/inlet-pressure]]\n"
+        "```\n- supports [[literal]]\n```",
+        extra="\n## Relations_\n\nRelations-only context.\n- links_to [[Notes/Insights/seal-wear]]\n"
+        "### More relation details\nHidden relation detail.\n\n## Evidence\nKept after relations.\n",
+    )
+    if not page_heading:
+        text = text.replace("# A\n\n", "")
+    fx.write(vault, path, text)
+    fx.write(vault, f"{fx.KB}/_Schema/relation-registry.yaml", (
+        "schema_version: 1\nextensions:\n  vault.cites:\n"
+        "    parent: relates_to\n    description: Cites a specific linked statement.\n"
+        "    aliases: [cites_alias]\n    direction: directed\n"
+    ))
+    fx.publish_graph(vault)
+    conn = epistemic_graph.EpistemicGraphIndex(vault)._open_read_snapshot()
+    page = relation_sensor._file_node(conn, path)
+    fit = relation_queue.RelationFit(vault)
+    links = relation_sensor.plain_links(conn, fit.registry(page), page)
+    source_text = relation_sensor.build_requests(vault, conn, fit, page, links)[0][1].texts[0]
+    conn.close()
+    assert source_text.startswith("A\nAnother fact uses the alias.")
+    assert "- see seal-wear" in source_text
+    assert "- supports [[literal]]" in source_text
+    assert "SUPPORTS" not in source_text
+    assert "cites-alias" not in source_text
+    assert "Relations-only context" not in source_text
+    assert "Hidden relation detail" not in source_text
+    assert "## Evidence Kept after relations." in source_text
 
 
 def test_worker_order_follows_source_pages(tmp_path: Path, monkeypatch) -> None:

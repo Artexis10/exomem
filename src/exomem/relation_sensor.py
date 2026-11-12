@@ -6,7 +6,7 @@ evidence the queue's `wikilink` method reads) and authored relation bullets
 whose relation is the registry's plain link or generic (origin
 `markdown_relation`). A pair that already carries a specific authored relation
 is skipped. The tick never loads a model. It parses only selected pages for
-their excerpts; relation-statement lines come from graph anchors. Queue reads
+their excerpts with the shared Markdown grammar. Queue reads
 use graph rows and never parse page text.
 
 Each source page is one replaceable scope (owner `relation-sensor`), one owned
@@ -39,9 +39,13 @@ from . import (
     sensing,
     sensing_llm,
 )
-from . import semantic_contract as semantic_contract_module
 from . import vault as vault_module
-from .markdown_relations import bullet_marker_length, heading_key
+from .markdown_relations import (
+    bullet_marker_length,
+    heading_key,
+    iter_headings,
+    scan_markdown_relations,
+)
 
 log = logging.getLogger(__name__)
 
@@ -94,27 +98,13 @@ def _page_from_row(row: tuple | None) -> _GraphPage | None:
 
 
 def _file_node(conn: sqlite3.Connection, rel_path: str) -> _GraphPage | None:
-    """One file node by path — the only page lookup the producer makes."""
+    """One file node by its graph-owned primary key."""
     return _page_from_row(
         conn.execute(
             "SELECT path, title, page_type, metadata, source_hash FROM graph_nodes "
-            "WHERE kind='file' AND path=?",
-            (rel_path,),
+            "WHERE node_key=?",
+            (epistemic_graph_module._file_key(rel_path),),
         ).fetchone()
-    )
-
-
-def _kind(fit: relation_queue.RelationFit, page: _GraphPage) -> Any:
-    """`RelationFit._kind` for a graph-described page (no file read)."""
-    resolved = fit._basis.resolve(
-        semantic_contract_module.normalized_compiled_type(page.page_type)
-    )
-    if resolved.note_type is None:
-        return None
-    from . import relation_endpoints
-
-    return relation_endpoints.page_kind(
-        resolved.note_type.role, page.frontmatter.get("entity_type"), fit._types()
     )
 
 
@@ -161,56 +151,39 @@ def _body_lines(vault_root: Path, page: _GraphPage) -> list[str] | None:
     return unicodedata.normalize("NFC", str(body)).splitlines()
 
 
-def _relation_lines(conn: sqlite3.Connection, rel_path: str) -> set[int]:
-    """Line numbers carrying authored relation statements, from graph anchors."""
-    lines: set[int] = set()
-    for (anchor,) in conn.execute(
-        "SELECT source_anchor FROM graph_edges WHERE origin='markdown_relation' "
-        "AND src_key=('file:' || ?)",
-        (rel_path,),
-    ):
-        anchor = str(anchor or "")
-        if anchor.startswith("line-"):
-            try:
-                lines.add(int(anchor[5:]))
-            except ValueError:
-                continue
-    return lines
-
-
-def _section_lines(conn: sqlite3.Connection, rel_path: str) -> set[int]:
-    """Line range of the canonical Relations section, from the graph's blocks."""
-    out: set[int] = set()
-    for title, start, end in conn.execute(
-        "SELECT title, line_start, line_end FROM graph_nodes WHERE path=? AND "
-        "line_start IS NOT NULL AND line_end IS NOT NULL AND kind='candidate'",
-        (rel_path,),
-    ):
-        if heading_key(str(title or "")) != heading_key("Relations"):
-            continue
-        try:
-            out.update(range(int(start), int(end) + 1))
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def excerpt(vault_root: Path, conn: sqlite3.Connection, page: _GraphPage,
+def excerpt(vault_root: Path, page: _GraphPage, registry: relation_registry.RelationRegistry,
             lines: list[str] | None = None) -> str:
     """`page-excerpt-v1`: title, then body minus relation statements, links
     rendered as display text, whitespace-collapsed, cut at 900 chars."""
     if lines is None:
         lines = _body_lines(vault_root, page) or []
-    drop = _relation_lines(conn, page.rel_path) | _section_lines(conn, page.rel_path)
-    body = _plain("\n".join(
-        line for index, line in enumerate(lines, start=1) if index not in drop
-    ))
-    title = page.title
-    if body.casefold().startswith(("# " + title).casefold()):
-        body = body[len(title) + 2:].strip()
-    elif body.casefold().startswith(title.casefold()):
-        body = body[len(title):].strip()
-    return f"{title}\n{body[:_EXCERPT_CHARS]}"
+    drop = {
+        candidate.line - 1
+        for candidate in scan_markdown_relations("\n".join(lines), include_legacy=True).candidates
+        if candidate.canonical or candidate.has_colon
+        or registry.resolve(candidate.raw_kind or "").canonical is not None
+    }
+    headings = {index: (level, title) for index, level, title in iter_headings(lines)}
+    first = next((index for index, line in enumerate(lines) if line.strip()), None)
+    first_heading = headings.get(first)
+    title_line = (
+        first if first_heading and first_heading[0] == 1
+        and heading_key(first_heading[1]) == heading_key(page.title) else None
+    )
+    relation_level = None
+    kept = []
+    for index, line in enumerate(lines):
+        heading = headings.get(index)
+        if heading is not None:
+            level, title = heading
+            if relation_level is not None and level <= relation_level:
+                relation_level = None
+            if relation_level is None and heading_key(title) == heading_key("Relations"):
+                relation_level = level
+        if relation_level is None and index not in drop and index != title_line:
+            kept.append(line)
+    body = _plain("\n".join(kept))
+    return f"{page.title}\n{body[:_EXCERPT_CHARS]}"
 
 
 def link_line(lines: Sequence[str], number: int | None) -> str:
@@ -368,7 +341,7 @@ def build_requests(
     body = _body_lines(vault_root, source)
     if body is None:
         return []  # file ahead of the graph: skipped, retried on a later tick
-    source_text = excerpt(vault_root, conn, source, lines=body)
+    source_text = excerpt(vault_root, source, registry, lines=body)
     out: list[tuple[str, sensing.SenseRequest, dict[str, Any]]] = []
     for link in links[:LINKS_PER_PAGE]:
         target = _file_node(conn, link.target)
@@ -377,7 +350,7 @@ def build_requests(
         target_lines = _body_lines(vault_root, target)
         if target_lines is None:
             continue  # target missing or ahead of the graph: only this link drops
-        target_text = excerpt(vault_root, conn, target, lines=target_lines)
+        target_text = excerpt(vault_root, target, fit.registry(target), lines=target_lines)
         link_text = link_line(body, link.line) if link.kind == "wikilink" else ""
         candidate = {
             "from": source.rel_path,
@@ -479,13 +452,13 @@ def produce(
     remaining -= len(chosen)
     if remaining > 0:
         marks = ",".join("?" for _ in chosen)
-        excluded = f"AND path NOT IN ({marks}) " if chosen else ""
-        # The path index lets the cursor stop at the page limit without sorting the corpus.
+        excluded = f"AND node_key NOT IN ({marks}) " if chosen else ""
+        # The graph schema's closed file: namespace excludes every non-file node from this range.
         rows = graph.execute(
-            "SELECT path FROM graph_nodes INDEXED BY idx_graph_nodes_path "
-            "WHERE kind='file' AND path > ? " + excluded +
-            "ORDER BY path LIMIT ?",
-            (cursor, *chosen, remaining),
+            "SELECT path FROM graph_nodes WHERE node_key GLOB 'file:*' AND node_key > ? " + excluded +
+            "ORDER BY node_key LIMIT ?",
+            (epistemic_graph_module._file_key(cursor),
+             *(epistemic_graph_module._file_key(path) for path in chosen), remaining),
         ).fetchall()
         wrapped = len(rows) < remaining
         for (path,) in rows:
@@ -494,12 +467,12 @@ def produce(
         if wrapped and remaining > 0:
             seen = [*chosen, *cursor_paths]
             marks = ",".join("?" for _ in seen)
-            excluded = f"AND path NOT IN ({marks}) " if seen else ""
+            excluded = f"AND node_key NOT IN ({marks}) " if seen else ""
             rows = graph.execute(
-                "SELECT path FROM graph_nodes INDEXED BY idx_graph_nodes_path "
-                "WHERE kind='file' AND path <= ? " + excluded +
-                "ORDER BY path LIMIT ?",
-                (cursor, *seen, remaining),
+                "SELECT path FROM graph_nodes WHERE node_key GLOB 'file:*' AND node_key <= ? " + excluded +
+                "ORDER BY node_key LIMIT ?",
+                (epistemic_graph_module._file_key(cursor),
+                 *(epistemic_graph_module._file_key(path) for path in seen), remaining),
             ).fetchall()
             for (path,) in rows:
                 cursor_paths.append(str(path))
@@ -533,8 +506,8 @@ def produce(
     # covered the whole table wraps so the next pass starts at the first path.
     if last_cursor is not None:
         tail = graph.execute(
-            "SELECT 1 FROM graph_nodes INDEXED BY idx_graph_nodes_path "
-            "WHERE kind='file' AND path > ? LIMIT 1", (last_cursor,)
+            "SELECT 1 FROM graph_nodes WHERE node_key GLOB 'file:*' AND node_key > ? "
+            "ORDER BY node_key LIMIT 1", (epistemic_graph_module._file_key(last_cursor),)
         ).fetchone()
         cursor = "" if tail is None else last_cursor
     return {

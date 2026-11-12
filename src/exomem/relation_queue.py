@@ -207,10 +207,15 @@ class RelationFit:
     chooses one (`relation_options.ranked_options` is the one producer). Page lookups are held
     for one read, so a page that many candidates name is read once. The same holds for a page's
     registry and parsed relation bullets, which a run of candidates from one page asks for each.
+    A graph read can supply `page_lookup` from its snapshot; missing pages never fall back to disk.
     """
 
-    def __init__(self, vault_root: Path, *, basis: note_types.Basis | None = None) -> None:
+    def __init__(
+        self, vault_root: Path, *, basis: note_types.Basis | None = None,
+        page_lookup: Callable[[str], Any | None] | None = None,
+    ) -> None:
         self._root = Path(vault_root)
+        self._page_lookup = page_lookup
         self._pages: dict[str, Any | None] = {}
         self._registries: dict[str, relation_registry.RelationRegistry] = {}
         self._bullets: dict[str, tuple[Any, ...]] = {}
@@ -227,7 +232,12 @@ class RelationFit:
         if rel not in self._pages:
             # A page recall policy keeps out is read no further, so it adds nothing to an option list.
             allowed = bool(rel) and recall_policy.is_recall_candidate(self._root, self._root / rel)
-            self._pages[rel] = _page_for(self._root, rel) if allowed else None
+            if not allowed:
+                self._pages[rel] = None
+            elif self._page_lookup is None:
+                self._pages[rel] = _page_for(self._root, rel)
+            else:
+                self._pages[rel] = self._page_lookup(rel)
         return self._pages[rel]
 
     def registry(self, page: Any) -> relation_registry.RelationRegistry:

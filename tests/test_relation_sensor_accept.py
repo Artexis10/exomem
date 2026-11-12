@@ -7,7 +7,14 @@ import pytest
 import sensing_fixture as sf
 import test_relation_sensor_integration as sensor
 
-from exomem import commands, epistemic_graph, freshness, markdown_relations, relation_queue
+from exomem import (
+    commands,
+    epistemic_graph,
+    freshness,
+    markdown_relations,
+    relation_queue,
+    relation_sensor,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +49,21 @@ def test_queue_with_readings_uses_no_page_file_reads(tmp_path: Path, monkeypatch
     monkeypatch.setattr(relation_queue, "_page_for", unexpected_page_read)
     batch = epistemic_graph.EpistemicGraphIndex(vault).relation_review_batch()
     assert any(item.get("sensed") for group in batch["groups"] for item in group["items"])
+
+
+def test_queue_without_menus_does_not_decode_endpoint_frontmatter(tmp_path: Path, monkeypatch) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+
+    def unexpected_endpoint_decode(*_args, **_kwargs):
+        pytest.fail("plain structural candidates need no menu endpoints")
+
+    monkeypatch.setattr(relation_sensor, "_page_from_row", unexpected_endpoint_decode)
+    batch = epistemic_graph.EpistemicGraphIndex(vault).relation_review_batch()
+    items = [item for group in batch["groups"] for item in group["items"]]
+    assert items
+    assert all(not item.get("options") for item in items)
 
 
 @pytest.mark.parametrize("target", [
