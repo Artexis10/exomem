@@ -292,6 +292,15 @@ def derived_behind():
     )
 
 
+def require_link_rows(conn: Connection) -> None:
+    """Refuse a read of the store's link rows while a store that an older build set up lacks some:
+    between the batches of its pass the tables exist, but the pages after its cursor lack rows."""
+    from . import rederive
+
+    if rederive.owner_schema_behind(conn):
+        raise derived_behind()
+
+
 @dataclass(frozen=True, slots=True)
 class StoreReadiness:
     """How current the derived rows of one snapshot are: what a store reader serves and shows.
@@ -732,16 +741,19 @@ def page_source(reader: Connection, vault_root: Path, rel: str) -> tuple[bytes, 
 
 
 def link_target_exists(reader: Connection, vault_root: Path, rel: str) -> bool:
-    """Whether a typed link to ``rel`` lands on a page, as a commit derives the graph rows: the
-    store's page when ``reader``'s snapshot holds one at that page path, else the file.
+    """Whether a typed link to ``rel`` lands on a page, as a commit derives the graph rows: for a
+    page path, whether ``reader``'s snapshot holds the page; for any other path, the file.
 
-    A page path the store holds no row for is a file like any unowned one, as ``derive`` reads its
-    bytes. A graph reader that re-derives a page's links asks here, so they land as its rows did.
+    A page path that the store holds no row for is no target, as every reader treats it: its file
+    may be one that a commit just removed and the projector has not yet deleted, and nothing
+    re-derives the linking page when the file goes. A graph reader that re-derives a page's links
+    asks here, so they land as its rows did.
     """
-    if ownership.classify(rel) is ownership.Ownership.PAGE and reader.execute(
-        "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
-    ).fetchone():
-        return True
+    if ownership.classify(rel) is ownership.Ownership.PAGE:
+        return (
+            reader.execute("SELECT 1 FROM store_pages WHERE path = ?", (rel,)).fetchone()
+            is not None
+        )
     return (_as_path(vault_root) / rel).exists()
 
 

@@ -124,8 +124,7 @@ def read(conn: Connection) -> Registry:
     reflected = _revision(meta.get(REGISTRY_REVISION))
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
-    owners = _revision(meta.get(OWNER_SCHEMA))
-    behind = owners is None or owners < OWNER_SCHEMA_VERSION
+    behind = _owners_behind(meta.get(OWNER_SCHEMA))
     if reflected is None or changed is None or behind:
         # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
@@ -133,6 +132,19 @@ def read(conn: Connection) -> Registry:
     if reflected >= changed:
         return Registry(CURRENT, reflected, changed)
     return Registry(REBUILDING, reflected, changed)
+
+
+def owner_schema_behind(conn: Connection) -> bool:
+    """Whether the store's owner objects are older than this build's, so some of the rows that this
+    build reads may not exist yet. The pass creates the objects in its first batch and fills them
+    batch by batch, so only the version that its last batch records says the rows are whole."""
+    row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
+    return _owners_behind(None if row is None else row[0])
+
+
+def _owners_behind(value: str | None) -> bool:
+    owners = _revision(value)
+    return owners is None or owners < OWNER_SCHEMA_VERSION
 
 
 def pending(conn: Connection, root: Path) -> str:

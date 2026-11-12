@@ -8361,18 +8361,15 @@ def store_inbound_wikilinks(
     Two keyed reads per chunk of targets: the link rows of the targets' three forms, and the pages
     that share their basenames. The selection rule is the file index's own. The links come in
     path order, then scan order, which is deterministic across runs. A store that an older build
-    set up, which has no inbound tables yet, raises ``VAULT_STORE_DERIVED_BEHIND``: an empty answer
-    would say that nothing links to the page.
+    set up raises ``VAULT_STORE_DERIVED_BEHIND`` until its pass has derived every page's rows: a
+    partial or empty answer would say that fewer pages, or none, link to the page.
     """
     from .vault_store import read as store_read
 
     wanted = list(dict.fromkeys(targets))
     if not wanted:
         return {}
-    if conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_links'"
-    ).fetchone() is None:
-        raise store_read.derived_behind()
+    store_read.require_link_rows(conn)
     forms = {target: _inbound_target_forms(target) for target in wanted}
     keys = list(dict.fromkeys(key for form in forms.values() for key in form[1:]))
     stems = list(dict.fromkeys(form[3] for form in forms.values()))
@@ -8460,12 +8457,9 @@ def store_pages_named(vault_root: Path, stem: str) -> list[str] | None:
     a bare ``[[stem]]`` can name. None when the vault reads files."""
 
     def named(conn) -> list[str]:
-        if conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_sources'"
-        ).fetchone() is None:
-            from .vault_store import read as store_read
+        from .vault_store import read as store_read
 
-            raise store_read.derived_behind()
+        store_read.require_link_rows(conn)
         return [path for path, in conn.execute(
             "SELECT path FROM inbound_sources WHERE stem = ? ORDER BY path", (stem,)
         )]

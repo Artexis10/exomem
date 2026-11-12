@@ -38,7 +38,7 @@ from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance.principal import request_scope
-from exomem.vault_store import mode, ownership, read, rederive, write
+from exomem.vault_store import mode, ownership, read, rederive, targets, write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -326,10 +326,16 @@ def test_a_store_from_an_older_build_refuses_link_reads_until_its_pass_derives_t
     vault, tmp_path  # noqa: F811
 ):
     """A store that an older build set up has no link tables: a reader that answers "no inbound
-    links" from it tells an agent that a page is safe to delete; an upgrade that leaves its tables
-    out of the rollback record keeps them after a rollback; one that never fills them serves an
-    empty list as complete."""
+    links" from it tells an agent that a page is safe to delete; one that answers once the pass's
+    first batch has created the tables counts only the pages that the batch reached; an upgrade
+    that leaves its tables out of the rollback record keeps them after a rollback; one that never
+    fills them serves an empty list as complete."""
     write_pages(vault)
+    # More stored pages than one batch derives, which sort before every page that links the claim.
+    write_pages(vault, {
+        f"Knowledge Base/Almanac/Entry {index:02d}.md": f"# Entry {index:02d}\n"
+        for index in range(rederive.BATCH_PAGES + 8)
+    })
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     derived = link_rows(vault)
@@ -348,6 +354,14 @@ def test_a_store_from_an_older_build_refuses_link_reads_until_its_pass_derives_t
         upgrading = CollectionWriter(vault, handle)
         write.commit(upgrading, put(RIVAL, PAGES[RIVAL].encode()))  # a commit before the pass
         project(upgrading, vault)
+        assert rederive.settle(vault, upgrading) == rederive.ADVANCED
+        assert mode.status(vault)["owner_schema"] == "behind"
+        with pytest.raises(OpError) as refused:
+            commands.op_list_inbound_links(vault, target=CLAIM)
+        assert refused.value.code == read.DERIVED_BEHIND
+        with pytest.raises(OpError) as refused:
+            targets.inbound_links(vault, [CLAIM])  # a move's or a delete's check
+        assert refused.value.code == read.DERIVED_BEHIND
         settle_to_the_end(vault, upgrading)
 
     assert link_rows(vault) == derived
