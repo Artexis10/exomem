@@ -85,3 +85,15 @@ async def test_access_tables_are_no_gap_while_access_recording_is_off(cell_db: C
 
     assert "table exomem_cloud_access_receipts is missing" in gaps
     assert "table exomem_cloud_placements is missing" in gaps
+
+
+async def test_a_schema_missing_a_column_read_by_import_row_names_it(cell_db: CellDatabase) -> None:
+    await _as_owner(cell_db, "ALTER TABLE exomem_cloud_imports DROP COLUMN declared_bytes")
+
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        gaps = await check_schema(connection)
+    finally:
+        await connection.close()
+
+    assert "column exomem_cloud_imports.declared_bytes is missing" in gaps

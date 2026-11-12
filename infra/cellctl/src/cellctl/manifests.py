@@ -1348,18 +1348,18 @@ def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
     ]
 
 
-def render_volume_snapshot(spec: CellManifestSpec, *, snapshot_class: str) -> dict:
-    """D3: a crash-consistent snapshot of the cell's own volume, named for its hold."""
+def render_volume_snapshot(spec: CellManifestSpec, *, snapshot_name: str, snapshot_class: str) -> dict:
+    """D3: snapshot the cell's volume under the caller's recorded name."""
 
     return {
         "apiVersion": "snapshot.storage.k8s.io/v1",
         "kind": "VolumeSnapshot",
-        "metadata": {"name": _job_name_for_hold(spec, SNAPSHOT_NAME), "namespace": spec.namespace, "labels": _labels(spec)},
+        "metadata": {"name": snapshot_name, "namespace": spec.namespace, "labels": _labels(spec)},
         "spec": {"volumeSnapshotClassName": snapshot_class, "source": {"persistentVolumeClaimName": spec.pvc_name}},
     }
 
 
-def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
+def render_clone_claim(spec: CellManifestSpec, *, snapshot_name: str, clone_name: str, clone_class: str) -> dict:
     """D3: the claim the backup Job reads, cloned from this hold's snapshot.
     Its class binds at once, and TopoLVM pins the clone's PV to the source's
     node, so the Job lands there with no node selector of its own."""
@@ -1367,7 +1367,7 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
     return {
         "apiVersion": "v1",
         "kind": "PersistentVolumeClaim",
-        "metadata": {"name": _job_name_for_hold(spec, CLONE_CLAIM_NAME), "namespace": spec.namespace, "labels": _labels(spec)},
+        "metadata": {"name": clone_name, "namespace": spec.namespace, "labels": _labels(spec)},
         "spec": {
             "accessModes": ["ReadWriteOnce"],
             "storageClassName": clone_class,
@@ -1375,7 +1375,7 @@ def render_clone_claim(spec: CellManifestSpec, *, clone_class: str) -> dict:
             "dataSourceRef": {
                 "apiGroup": "snapshot.storage.k8s.io",
                 "kind": "VolumeSnapshot",
-                "name": _job_name_for_hold(spec, SNAPSHOT_NAME),
+                "name": snapshot_name,
             },
         },
     }
@@ -1627,6 +1627,7 @@ def render_clone_restore_job(spec: CellManifestSpec, *, snapshot_claim: str) -> 
     still has one Job and one observation."""
 
     commands = [
+        *[f"test -d /snapshot/{path.rsplit('/', 1)[-1]}" for path in BACKUP_PATHS],
         # Empty each backed-up path and refill it from the clone: the
         # directories themselves stay, so the runtime UID needs write
         # permission under them, not on the volume root. Files the target

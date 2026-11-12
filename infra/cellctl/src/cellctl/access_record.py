@@ -179,6 +179,23 @@ class AccessVersionReader:
         return records
 
 
+# Columns of the access-record SQL below; the schema check shares this contract.
+PLACEMENT_COLUMNS = (
+    "cell_id", "pod_uid", "node", "source_created_at", "source_deletion_requested_at",
+    "first_observed_at", "last_observed_at", "workload_kind", "workload_uid", "phase",
+)
+PLACEMENT_UPDATE_COLUMNS = ("last_observed_at", "source_deletion_requested_at", "phase")
+RECEIPT_COLUMNS = (
+    "id", "bucket_id", "object_key", "version_id", "provider_at", "received_at", "processed_at",
+    "next_attempt_at", "attempts", "error_code",
+)
+RECEIPT_UPDATE_COLUMNS = ("attempts", "next_attempt_at", "processed_at", "error_code")
+RECORD_INSERT_COLUMNS = ("receipt_id", "line_number", "provider_at", *FIELDS, "identity_tier")
+RECORD_READ_COLUMNS = ("id", *RECORD_INSERT_COLUMNS)
+ENTRY_COLUMNS = ("cell_id", "record_id")
+SELECT_ALL_TABLES = frozenset({"exomem_cloud_access_receipts"})
+
+
 async def record_placements(
     connection, observations: dict[str, tuple[PodPlacement, ...]], now: datetime, *, max_gap_seconds: float
 ) -> None:
@@ -194,8 +211,7 @@ async def record_placements(
                 " AND last_observed_at BETWEEN $6::timestamptz-$10*interval '1 second' AND $6 "
                 " RETURNING cell_id) "
                 "INSERT INTO exomem_cloud_placements "
-                "(cell_id,pod_uid,node,source_created_at,source_deletion_requested_at,first_observed_at,last_observed_at,"
-                "workload_kind,workload_uid,phase) SELECT $1,$2,$3,$4,$5,$6,$6,$7,$8,$9 "
+                f"({','.join(PLACEMENT_COLUMNS)}) SELECT $1,$2,$3,$4,$5,$6,$6,$7,$8,$9 "
                 "WHERE NOT EXISTS(SELECT 1 FROM extended) ON CONFLICT DO NOTHING",
                 cell_id,
                 pod.uid,
@@ -241,12 +257,10 @@ async def derive_receipts(connection, reader: AccessVersionReader) -> int:
                 )
                 continue
             for line_number, record in enumerate(records):
-                columns = (*FIELDS, "identity_tier")
+                columns = RECORD_INSERT_COLUMNS[3:]
                 values = [record[key] for key in columns]
                 await connection.execute(
-                    "INSERT INTO exomem_cloud_access_records (receipt_id,line_number,provider_at,"
-                    + ",".join(columns)
-                    + ") VALUES ($1,$2,$3,"
+                    f"INSERT INTO exomem_cloud_access_records ({','.join(RECORD_INSERT_COLUMNS)}) VALUES ($1,$2,$3,"
                     + ",".join(f"${index}" for index in range(4, 4 + len(columns)))
                     + ") ON CONFLICT (receipt_id,line_number) DO NOTHING",
                     receipt["id"],
@@ -262,7 +276,7 @@ async def derive_receipts(connection, reader: AccessVersionReader) -> int:
     # Re-derive bounded received records against newly observed placement too.
     # The exact namespace binds API access. Node evidence uses observed Pod bounds.
     await connection.execute(
-        "INSERT INTO exomem_cloud_access_entries (cell_id,record_id) "
+        f"INSERT INTO exomem_cloud_access_entries ({','.join(ENTRY_COLUMNS)}) "
         "SELECT cell.cell_id,record.id FROM exomem_cloud_access_records record "
         "JOIN exomem_cloud_cells cell ON "
         "(record.namespace='exo-cell-'||cell.cell_id AND record.kind='kubernetes' "

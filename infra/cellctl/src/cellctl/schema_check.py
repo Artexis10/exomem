@@ -18,91 +18,56 @@ import asyncio
 import os
 import sys
 
-from .db import CELL_COLUMNS, EXPORT_COLUMNS, OBSERVED_COLUMNS, ROLLOUT_COLUMNS
+from . import access_record as access
+from . import db
 
-# Every table cellctl touches, with the columns its SQL reads and writes.
-# SELECT * statements take their columns from this list too: a column a
-# `SELECT *` row is read by name under the same contract. Grants to
-# exomem_cellctl are column-scoped on cells, rollout, imports and exports
-# (Substrate's exomem-cloud-grants.sql), so a write needs
-# has_column_privilege, not the table-level predicate.
+# Required columns come from the row shapes and SQL contracts at their call sites.
+# Media keys, deletion grants and operation grants remain backward-compatible.
 REQUIRED_TABLES: dict[str, dict[str, frozenset[str]]] = {
-    # MEDIA_KEY_COLUMNS and deletion_grant are deliberately absent: the
-    # reconcile loop tolerates their absence (media edge off, or a schema
-    # before the deletion-grant migration), so they are not gaps.
     "exomem_cloud_cells": {
-        "SELECT": frozenset(CELL_COLUMNS),
-        "UPDATE": frozenset({
-            *OBSERVED_COLUMNS,
-            "cell_root_key_wrapped", "cell_root_key_version", "content_keys_retired_at",
-        }),
+        "SELECT": frozenset(db.CELL_COLUMNS),
+        "UPDATE": frozenset(db.OBSERVED_COLUMNS),
     },
     "exomem_cloud_rollout": {
-        "SELECT": frozenset((*ROLLOUT_COLUMNS, "id")),
-        "UPDATE": frozenset(ROLLOUT_COLUMNS),
+        "SELECT": frozenset(db.ROLLOUT_READ_COLUMNS),
+        "UPDATE": frozenset(db.ROLLOUT_COLUMNS),
     },
-    "exomem_cloud_settings": {
-        "SELECT": frozenset({"key", "value"}),
-    },
-    # Read-only by grant: the image history is the barrier map, so the SELECT
-    # privilege itself is part of the check.
-    "exomem_cloud_image_history": {
-        "SELECT": frozenset({"image", "release_tag"}),
-    },
+    "exomem_cloud_settings": {"SELECT": frozenset(db.SETTINGS_COLUMNS)},
+    db.IMAGE_HISTORY_TABLE: {"SELECT": frozenset(db.IMAGE_HISTORY_COLUMNS)},
     "exomem_cloud_imports": {
-        "SELECT": frozenset({"import_id", "cell_id", "requested_state"}),
-        "UPDATE": frozenset({
-            "recipient", "upload_id", "part_urls", "urls_expire_at", "observed_state",
-            "error_code", "staged_files", "staged_bytes",
-        }),
+        "SELECT": db.IMPORT_READ_COLUMNS,
+        "UPDATE": db.IMPORT_COLUMNS,
     },
     "exomem_cloud_exports": {
-        "SELECT": frozenset({"export_id", "cell_id", "requested_state", "created_at", "link_requested_at"}),
-        "UPDATE": frozenset({*EXPORT_COLUMNS, "link_issued_at"}),
+        "SELECT": db.EXPORT_READ_COLUMNS,
+        "UPDATE": db.EXPORT_UPDATE_COLUMNS,
     },
     "exomem_cloud_capacity": {
-        "SELECT": frozenset({"node", "cell_slots", "attachments_used", "observed_at"}),
-        "INSERT": frozenset({"node", "cell_slots", "attachments_used", "observed_at"}),
-        "UPDATE": frozenset({"cell_slots", "observed_at"}),
+        "SELECT": frozenset(db.CAPACITY_COLUMNS),
+        "INSERT": frozenset(db.CAPACITY_COLUMNS),
+        "UPDATE": frozenset(db.CAPACITY_UPDATE_COLUMNS),
     },
 }
 
-
-# Tables cellctl only reads or writes while the feature that uses them is on.
-# The reconcile loop gates each on ClusterConfig; an absent table or grant is
-# a gap only while the matching feature runs. `access_record` is
-# ClusterConfig.access_record_enabled: exomem_cloud_placements and the three
-# access tables exist for the access-record loop alone.
 FEATURE_TABLES: dict[str, dict[str, dict[str, frozenset[str]]]] = {
     "access_record": {
-    "exomem_cloud_placements": {
-        "SELECT": frozenset({"cell_id", "pod_uid", "node", "source_created_at",
-                             "source_deletion_requested_at", "first_observed_at",
-                             "last_observed_at", "workload_kind", "workload_uid", "phase"}),
-        "INSERT": frozenset({"cell_id", "pod_uid", "node", "source_created_at",
-                             "source_deletion_requested_at", "first_observed_at",
-                             "last_observed_at", "workload_kind", "workload_uid", "phase"}),
-        "UPDATE": frozenset({"last_observed_at"}),
-    },
-    "exomem_cloud_access_receipts": {
-        "SELECT": frozenset({"id", "bucket_id", "object_key", "version_id", "provider_at",
-                             "received_at", "processed_at", "next_attempt_at", "attempts", "error_code"}),
-        "UPDATE": frozenset({"attempts", "next_attempt_at", "processed_at", "error_code"}),
-    },
-    "exomem_cloud_access_records": {
-        "SELECT": frozenset({"id"}),
-        "INSERT": frozenset({
-            "receipt_id", "line_number", "provider_at", "kind", "source_at",
-            "node", "boot_id", "event_id", "identity", "action", "target",
-            "namespace", "resource", "subresource", "session_id",
-            "authentication_method", "fingerprint", "fingerprint_kind", "result",
-            "identity_tier",
-        }),
-    },
-    "exomem_cloud_access_entries": {
-        "SELECT": frozenset({"cell_id", "record_id"}),
-        "INSERT": frozenset({"cell_id", "record_id"}),
-    },
+        "exomem_cloud_placements": {
+            "SELECT": frozenset(access.PLACEMENT_COLUMNS),
+            "INSERT": frozenset(access.PLACEMENT_COLUMNS),
+            "UPDATE": frozenset(access.PLACEMENT_UPDATE_COLUMNS),
+        },
+        "exomem_cloud_access_receipts": {
+            "SELECT": frozenset(access.RECEIPT_COLUMNS),
+            "UPDATE": frozenset(access.RECEIPT_UPDATE_COLUMNS),
+        },
+        "exomem_cloud_access_records": {
+            "SELECT": frozenset(access.RECORD_READ_COLUMNS),
+            "INSERT": frozenset(access.RECORD_INSERT_COLUMNS),
+        },
+        "exomem_cloud_access_entries": {
+            "SELECT": frozenset(access.ENTRY_COLUMNS),
+            "INSERT": frozenset(access.ENTRY_COLUMNS),
+        },
     },
 }
 
@@ -146,8 +111,11 @@ async def check_schema(connection, *, access_record: bool = False) -> list[str]:
         columns = frozenset().union(*accesses.values())
         for column in sorted(columns - found):
             gaps.append(f"column {table}.{column} is missing")
-        for privilege, write_columns in accesses.items():
-            for column in sorted(write_columns & found):
+        for privilege, required_columns in accesses.items():
+            # SELECT * needs grants on all present columns, including optional or newly added ones.
+            selected_columns = (found if privilege == "SELECT" and table in
+                                db.SELECT_ALL_TABLES | access.SELECT_ALL_TABLES else required_columns & found)
+            for column in sorted(selected_columns):
                 if not await connection.fetchval(
                     "SELECT has_column_privilege($1, $2, $3)", table, column, privilege,
                 ):

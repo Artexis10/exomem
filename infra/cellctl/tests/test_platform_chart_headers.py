@@ -1914,6 +1914,11 @@ def test_the_scope_policy_admits_the_prepare_job_and_its_no_egress_label() -> No
     assert "'prepare' in" in egress
     placement = _admission_expression(documents, "cellctl may use only exact operator-selected")
     assert "cell-prepare-" in placement and "podSpec.nodeName" in placement
+    prepare = placement[placement.index("variables.target.metadata.name.matches('^cell-prepare-"):]
+    prepare = prepare[:prepare.index("(!has(variables.podSpec.nodeName)")]
+    assert "labels['exomem.io/cell-job'] == 'prepare'" in prepare
+    assert "!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0" in prepare
+    assert "c.command == ['true']" in prepare
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

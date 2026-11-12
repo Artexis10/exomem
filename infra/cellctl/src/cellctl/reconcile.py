@@ -1918,7 +1918,8 @@ async def reconcile_once(
                     {"paused": True, "error_code": UPGRADE_BACKWARD_CROSSING, "held_cell_id": candidate},
                     only_if={"paused": False},
                 )
-                upgrade_candidates.discard(candidate)
+                upgrade_candidates.clear()
+                break
     crossing = {
         row.cell_id: releases is None or crosses_forward(
             _release(observations[row.cell_id].statefulset_previous_image or row.observed_image, releases),
@@ -3353,11 +3354,18 @@ async def _reconcile_row(
             if family is not None:
                 cluster.apply_all([render_backup_family_secret(spec, namespace=local.reservation_namespace, token=family["token"],
                     physical_uuid=family["physicalSourceUUID"])])
+            if (decision.create_snapshot or decision.create_clone) and local is not None:
+                snapshot_name = spec.pre_upgrade_volume_snapshot or snapshot_backup_name(
+                    SNAPSHOT_NAME, spec.cell_id, spec.hold_started_at,
+                    FamilyRequest.parse(spec.backup_family_request) if spec.backup_family_request else None)
+                clone_name = clone_claim_name(snapshot_name)
             if decision.create_snapshot and local is not None:
-                _run_cell_job(cluster, row.cell_id, render_volume_snapshot(spec, snapshot_class=local.snapshot_class),
+                _run_cell_job(cluster, row.cell_id, render_volume_snapshot(
+                    spec, snapshot_name=snapshot_name, snapshot_class=local.snapshot_class),
                               job_refused)
             if decision.create_clone and local is not None:
-                _run_cell_job(cluster, row.cell_id, render_clone_claim(spec, clone_class=local.clone_class), job_refused)
+                _run_cell_job(cluster, row.cell_id, render_clone_claim(
+                    spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class), job_refused)
             if decision.run_backup_job:
                 _run_cell_job(
                     cluster,
@@ -3648,16 +3656,10 @@ def _backup_source(decision, spec: CellManifestSpec) -> dict[str, object]:
             "retention": HOURLY_RETENTION_ARGS if decision.backup_prune else None,
         }
     if decision.hold_kind == "upgrade":
-        # A local cell backs up the upgrade hold's read-only clone, beside
-        # its serving target; a Hetzner cell's stopped backup reads its own
-        # claim. Neither prunes.
-        if spec.local_volume:
-            # The clone's name derives from the attempt's annotated
-            # VolumeSnapshot, which keeps the hold-started form.
-            vol = spec.pre_upgrade_volume_snapshot or ""
-            claim = (clone_claim_name(vol) if vol.startswith(f"{SNAPSHOT_NAME}-")
-                     else snapshot_backup_name(CLONE_CLAIM_NAME, spec.cell_id, spec.hold_started_at))
-            return {"claim_name": claim, "retention": None}
+        # Only a snapshot-backed attempt reads a clone. Old and reservation-backed
+        # local attempts still run a stopped restic backup on the live claim.
+        if spec.pre_upgrade_volume_snapshot is not None:
+            return {"claim_name": clone_claim_name(spec.pre_upgrade_volume_snapshot), "retention": None}
         return {"retention": None}
     if decision.hold_kind == MOVE:
         return {"retention": None}

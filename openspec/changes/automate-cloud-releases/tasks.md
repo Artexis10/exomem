@@ -174,7 +174,7 @@
 
 ## 3. Phase 2: restore point (D6)
 
-- [x] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the K3s Live job:
+- [ ] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the K3s Live job:
   - the target applies before the backup Job starts, which catches a backup that is still inside the stop;
   - no snapshot is taken while a pod uses the volume, which catches a crash-consistent restore point;
   - on the K3s Live job, a write acknowledged just before the stop is present after a forced-failure restore. It catches a snapshot of an unflushed volume that loses the last commits;
@@ -184,7 +184,7 @@
   - a missing snapshot falls back to the off-site backup. With neither, the row records `RESTORE_FAILED`, and no image starts. It catches a guess onto an unrestored volume;
   - a `cellctl` restart at each step resumes from the annotations, which catches an attempt that loses its restore point on restart.
 
-  Note: the reconcile tests all pass; the K3s live-job bullet is added as `test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s` in test_k3s_integration.py and runs only in CI (RUN_CELLCTL_K3S_TEST), so the box stays open until CI runs it.
+  Note: the reconcile tests pass. `test_clone_restore_copy_command_on_real_k3s` proves only the copy command on mounted claims. It takes no snapshot and stops no cell. The box stays open until the K3s Live job proves the acknowledged-write bullet with a real snapshot after the stop.
 - [x] 3.2 Drop `forget --prune` from the pre-upgrade backup of a cell without snapshot support, and keep its nightly prune. Verify: a test of `_backup_source` shows no retention for that cell's upgrade hold, and retention for its nightly backup. It catches a prune that holds restic's exclusive lock inside the stop.
 - [x] 3.3 Update `docs/runbooks/cloud-operator-restore.md` for the snapshot restore point. Verify: the runbook names `exomem.io/pre-upgrade-volume-snapshot`, the fallback order, and the forward-only hold's kept snapshot and clone. It catches a person who restores by hand from `last_backup_snapshot` instead of the attempt's own state.
 

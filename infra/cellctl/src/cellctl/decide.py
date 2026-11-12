@@ -92,8 +92,6 @@ class ReconcileConfig:
     # records RESTORE_FAILED. The hold stays; it never starts an image on
     # an unrestored volume.
     restore_bound: timedelta = timedelta(minutes=45)
-    # D8: nightly backup is due once this long has passed since the last one.
-    backup_interval: timedelta = timedelta(hours=20)
     # move-cloud-cells-to-local-storage D3: a cell on local storage is backed
     # up hourly. Under an hour, so its newest backup is never more than an
     # hour old plus the time one backup takes (RPO <= 1 h).
@@ -370,7 +368,11 @@ def nightly_backup_due(
         return False
     if row.last_backup_at is None:
         return True
-    return (now - row.last_backup_at) > config.backup_interval
+    start, _ = config.backup_window
+    window_start = now.replace(hour=start, minute=0, second=0, microsecond=0)
+    if window_start > now:
+        window_start -= timedelta(days=1)
+    return row.last_backup_at < window_start
 
 
 def hourly_backup_due(
@@ -699,7 +701,17 @@ def _continue_upgrade(
     # automate-cloud-releases D6: a cell on snapshot-capable local storage
     # takes a VolumeSnapshot after the stop instead of running the stopped
     # backup; its restore point and backup then run beside the attempt.
-    if storage.is_local(observation.pv_storage_class or observation.pvc_storage_class):
+    local = storage.local
+    # Reservation-backed upgrades use restic until their snapshot family protocol is supported.
+    # Holds with a restic point or an old stopped backup Job must finish on that same path.
+    restic_attempt = observation.statefulset_pre_upgrade_volume_snapshot is None and (
+        snapshot is not None or (
+            observation.statefulset_target_applied_at is None and observation.statefulset_image != target and (
+                observation.backup_job_running or observation.backup_job_succeeded or observation.backup_job_failed
+                or observation.backup_job_started_at is not None))
+    )
+    if (storage.is_local(observation.pv_storage_class or observation.pvc_storage_class)
+            and local is not None and not local.reservations and not restic_attempt):
         return _continue_upgrade_local(
             row, rollout, observation, now, config, cell_image, crossing, hold_started_at,
             previous_image, target, read_only, desired_replicas, hold
@@ -906,27 +918,23 @@ def _continue_upgrade_local(
     # once, so a restarted cellctl resumes the same restore point.
     if vol_name is None:
         if target_applied or observation.statefulset_target_applied_at is not None:
-            if restic_id is None:
-                # The annotation is gone after the target applied and the
-                # attempt recorded no off-site snapshot either: no restore
-                # point exists, so fail closed rather than label a
-                # post-upgrade capture as one.
-                return Decision(
-                    apply_manifests=True,
-                    replicas=0,
-                    read_only=read_only,
-                    image=target,
-                    hold_kind="restore",
-                    hold_started_at=now,
-                    previous_image=previous_image,
-                    row_updates={"hold_kind": "restore", "hold_started_at": now,
-                                 "observed_state": "stopping", "last_error_code": RESTORE_FAILED},
-                    rollout_updates={"paused": True, "error_code": RESTORE_FAILED,
-                                     "held_cell_id": row.cell_id},
-                )
-            # A hold that predates the VolumeSnapshot path continues on its
-            # restic restore point alone: no snapshot taken now could still be
-            # pre-upgrade state, so the readiness check below runs as before.
+            # The annotation is gone after the target applied and the
+            # attempt recorded no off-site snapshot either: no restore
+            # point exists, so fail closed rather than label a
+            # post-upgrade capture as one.
+            return Decision(
+                apply_manifests=True,
+                replicas=0,
+                read_only=read_only,
+                image=target,
+                hold_kind="restore",
+                hold_started_at=now,
+                previous_image=previous_image,
+                row_updates={"hold_kind": "restore", "hold_started_at": now,
+                             "observed_state": "stopping", "last_error_code": RESTORE_FAILED},
+                rollout_updates={"paused": True, "error_code": RESTORE_FAILED,
+                                 "held_cell_id": row.cell_id},
+            )
         elif observation.pod_exists:
             return hold(replicas=0, image=previous_image, row_updates={"observed_state": "stopping"})
         return step(

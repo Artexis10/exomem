@@ -6,9 +6,11 @@ path, without its prune.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
+import pytest
 
 from cellctl import reconcile
 from cellctl.decide import UPGRADE_FORWARD_ONLY, decide
@@ -39,8 +41,7 @@ CLONE_NAME = "cell-clone" + VOL_NAME[len("cell-snapshot"):]
 def _upgrade(**overrides) -> ClusterObservation:
     return _bound(
         LOCAL.class_name, statefulset_row_generation=1, pv_node="agent-1",
-        statefulset_hold_started_at=STARTED,
-        **{"statefulset_hold_kind": "upgrade", "statefulset_upgrade_target": IMAGE_B,
+        **{"statefulset_hold_started_at": STARTED, "statefulset_hold_kind": "upgrade", "statefulset_upgrade_target": IMAGE_B,
            "statefulset_previous_image": IMAGE_A, **overrides},
     )
 
@@ -290,10 +291,8 @@ async def test_the_clone_restore_job_mounts_the_clone_read_only_and_runs_as_the_
         mount = next(m for m in pod["containers"][0]["volumeMounts"] if m["name"] == "snapshot")
         assert mount["readOnly"] is True
         command = pod["containers"][0]["command"][-1]
-        assert "rm -rf" not in command
         for name in ("vault", "host"):
-            assert f"find /data/{name} -mindepth 1 -delete" in command
-            assert f"cp -a /snapshot/{name}/. /data/{name}/" in command
+            assert command.index(f"test -d /snapshot/{name}") < command.index("-delete")
     finally:
         await connection.close()
 
@@ -397,32 +396,112 @@ def test_a_restart_resumes_each_step_from_the_annotations() -> None:
     assert restore.run_clone_restore_job is True
 
 
-def test_a_restore_rebuilds_the_clone_when_the_snapshot_outlived_it() -> None:
+async def test_a_restore_rebuilds_the_clone_when_the_snapshot_outlived_it(cell_db: CellDatabase) -> None:
     """S2: the attempt's VolumeSnapshot exists and is ready but its clone is
     gone -- recreate the clone and wait for it to bind rather than falling to
     the restic snapshot or RESTORE_FAILED."""
+    restore_started = STARTED + timedelta(minutes=31)
+    restore_now = restore_started + timedelta(minutes=1)
     observation = _upgrade(statefulset_replicas=0, pod_exists=False,
-                           statefulset_hold_kind="restore",
+                           statefulset_hold_kind="restore", statefulset_hold_started_at=restore_started,
                            statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
                            statefulset_pre_upgrade_snapshot=RESTIC,
                            snapshot_exists=True, snapshot_ready=True)
-    row = _row(hold_kind="restore", hold_started_at=STARTED)
+    row = _row(hold_kind="restore", hold_started_at=restore_started)
 
-    create = _step(observation, row)
+    create = _step(observation, row, now=restore_now)
     assert (create.create_clone, create.run_clone_restore_job, create.run_restore_job_snapshot) == (
         True, False, None)
 
     unbound = _step(_upgrade(statefulset_replicas=0, pod_exists=False,
-                             statefulset_hold_kind="restore",
+                             statefulset_hold_kind="restore", statefulset_hold_started_at=restore_started,
                              statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
                              statefulset_pre_upgrade_snapshot=RESTIC,
-                             snapshot_exists=True, snapshot_ready=True, clone_exists=True), row)
+                             snapshot_exists=True, snapshot_ready=True, clone_exists=True), row, now=restore_now)
     assert (unbound.run_clone_restore_job, unbound.create_clone) == (False, False)
 
     bound = _step(_upgrade(statefulset_replicas=0, pod_exists=False,
-                           statefulset_hold_kind="restore",
+                           statefulset_hold_kind="restore", statefulset_hold_started_at=restore_started,
                            statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
                            statefulset_pre_upgrade_snapshot=RESTIC,
                            snapshot_exists=True, snapshot_ready=True,
-                           clone_exists=True, clone_bound=True), row)
+                           clone_exists=True, clone_bound=True), row, now=restore_now)
     assert bound.run_clone_restore_job is True
+
+    await _seed_cell(cell_db, CELL_ID, "tenant-a")
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await owner.execute(
+            "UPDATE exomem_cloud_cells SET hold_kind='restore', hold_started_at=$1 WHERE cell_id=$2",
+            restore_started, CELL_ID)
+    finally:
+        await owner.close()
+    cluster = FakeClusterGateway()
+    cluster.observations[CELL_ID] = observation
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    try:
+        await reconcile.reconcile_once(
+            connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(),
+            ClusterConfig(object_storage_bucket="exomem-cloud-backups", storage=MIGRATING), now=restore_now)
+        clone = next(m for m in cluster.jobs if m["kind"] == "PersistentVolumeClaim")
+        assert clone["metadata"]["name"] == CLONE_NAME
+        assert clone["spec"]["dataSourceRef"] == {
+            "apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": VOL_NAME}
+    finally:
+        await connection.close()
+
+
+def test_probe_attempt_that_predates_the_snapshot_path() -> None:
+    observation = _upgrade(
+        statefulset_replicas=1, statefulset_image=IMAGE_B, pod_exists=True, pod_ready=False,
+        statefulset_target_applied_at=NOW, statefulset_pre_upgrade_snapshot=RESTIC)
+    waiting = _step(observation)
+    assert (waiting.replicas, waiting.image, waiting.create_snapshot) == (1, IMAGE_B, False)
+    assert waiting.pre_upgrade_volume_snapshot is None
+    assert waiting.pre_upgrade_snapshot == RESTIC
+
+    ready = _step(replace(observation, pod_ready=True))
+    assert (ready.replicas, ready.hold_kind, ready.create_snapshot) == (1, None, False)
+    missed = _step(observation, now=NOW + timedelta(minutes=31))
+    assert (missed.hold_kind, missed.replicas, missed.create_snapshot) == ("restore", 0, False)
+    restoring = _step(replace(observation, statefulset_hold_kind="restore",
+                               statefulset_hold_started_at=NOW + timedelta(minutes=31),
+                               statefulset_replicas=0, pod_exists=False, pod_uses_volume=False),
+                      _row(hold_kind="restore", hold_started_at=NOW + timedelta(minutes=31)),
+                      now=NOW + timedelta(minutes=32))
+    assert restoring.run_restore_job_snapshot == RESTIC
+    assert (restoring.create_snapshot, restoring.create_clone) == (False, False)
+
+
+@pytest.mark.parametrize("job", [
+    {"backup_job_running": True},
+    {"backup_job_succeeded": True, "backup_job_snapshot_id": RESTIC},
+])
+def test_an_old_stopped_backup_job_finishes_on_the_restic_path(job) -> None:
+    decision = _step(_upgrade(statefulset_replicas=0, pod_exists=False, **job))
+    assert (decision.create_snapshot, decision.create_clone, decision.replicas) == (False, False, 0)
+    if job.get("backup_job_succeeded"):
+        assert decision.pre_upgrade_snapshot == RESTIC
+    else:
+        assert decision.run_backup_job is True
+
+
+def test_reservation_backed_upgrades_use_restic_without_a_snapshot_family() -> None:
+    decision = decide(
+        _row(hold_kind="upgrade", hold_started_at=STARTED), RolloutRow(),
+        _upgrade(statefulset_replicas=0, pod_exists=False), now=NOW, cell_image=IMAGE_B,
+        start_upgrade=False, storage=replace(MIGRATING, local=replace(LOCAL, reservations=True)))
+    assert (decision.run_backup_job, decision.create_snapshot, decision.create_clone) == (True, False, False)
+
+
+def test_a_restic_upgrade_on_local_storage_backs_up_the_live_claim() -> None:
+    from cellctl.decide import Decision
+    from cellctl.manifests import CellManifestSpec, render_backup_job
+
+    spec = CellManifestSpec(cell_id=CELL_ID, image=IMAGE_A, replicas=0, read_only=False,
+                            local_volume=True, hold_kind="upgrade", hold_started_at=STARTED.isoformat())
+    job = render_backup_job(spec, bucket_name="backups", endpoint="https://s3.example",
+                            **_backup_source(Decision(hold_kind="upgrade"), spec))
+    pod = job["spec"]["template"]["spec"]
+    data = next(v for v in pod["volumes"] if v["name"] == "data")
+    assert data["persistentVolumeClaim"]["claimName"] == spec.pvc_name

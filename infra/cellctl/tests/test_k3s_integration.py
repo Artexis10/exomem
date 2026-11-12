@@ -143,7 +143,6 @@ LIVE_CONFIG = ReconcileConfig(
     # headroom while still exercising the real D8 timeout branch elsewhere.
     backup_deadline=timedelta(seconds=180),
     upgrade_ready_deadline=timedelta(seconds=20),
-    backup_interval=timedelta(hours=24),  # only a never-backed-up cell's first backup fires
     # D8's production window is 02:00-05:00 UTC; the live run needs the nightly
     # path to be eligible whenever the suite happens to run.
     backup_window=(0, 24),
@@ -3248,7 +3247,9 @@ def test_the_operator_access_runbook_on_real_k3s(
 def test_local_storage_admission_confines_backup_clones_and_retains_before_a_claim_delete(k3s: K3sCluster) -> None:
     from cellctl.manifests import (
         CORDON_TOLERATION,
+        SNAPSHOT_NAME,
         CellManifestSpec,
+        clone_claim_name,
         render_backup_job,
         render_clone_claim,
         render_namespace,
@@ -3257,6 +3258,7 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
         render_resource_quota,
         render_statefulset,
         render_volume_snapshot,
+        snapshot_backup_name,
     )
     from cellctl.reconcile import RETAINED_DELETE_POLICY_NAME
     from cellctl.storage_config import LocalStorage
@@ -3274,6 +3276,9 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
                             hold_started_at="2026-01-01T00:00:00+00:00")
     _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
 
+    snapshot_name = snapshot_backup_name(SNAPSHOT_NAME, spec.cell_id, spec.hold_started_at)
+    clone_name = clone_claim_name(snapshot_name)
+
     def as_cellctl(*args: str, document: dict | None = None) -> subprocess.CompletedProcess[str]:
         return _kubectl(k3s.name, [*args, "--dry-run=server", cellctl],
                         documents=None if document is None else [document], check=False)
@@ -3288,12 +3293,12 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
             if status.get("observedGeneration") != policy["metadata"]["generation"]:
                 return False
             assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        return create(render_clone_claim(spec, clone_class=local.clone_class)).returncode == 0
+        return create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)).returncode == 0
 
     _wait_for(policies_ready, timeout=60, description="local storage admission")
 
     for admitted in (render_pvc(spec), render_resource_quota(spec),
-                     render_volume_snapshot(spec, snapshot_class=local.snapshot_class)):
+                     render_volume_snapshot(spec, snapshot_name=snapshot_name, snapshot_class=local.snapshot_class)):
         result = create(admitted)
         assert result.returncode == 0, result.stderr
     # Tasks 6.4 and 7.3: a local backup Job tolerates its node's cordon, so a
@@ -3307,7 +3312,7 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     every_taint["spec"]["template"]["spec"]["tolerations"][0].pop("key")
     serving = render_statefulset(spec)
     serving["spec"]["template"]["spec"]["tolerations"] = [dict(CORDON_TOLERATION)]
-    foreign = render_clone_claim(spec, clone_class=local.clone_class)
+    foreign = render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)
     foreign["spec"]["dataSourceRef"]["name"] = "cell-snapshot-" + "0" * 10
     unconfigured = render_pvc(spec)
     unconfigured["spec"]["storageClassName"] = "local-path"
@@ -3350,15 +3355,13 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
 # === automate-cloud-releases 3.1: the clone restore Job on real K3s ===
 
 
-def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sCluster) -> None:
-    """CI-only (the `k3s` fixture gates on RUN_CELLCTL_K3S_TEST): the restore
-    Job a readiness failure launches mounts the attempt's clone read-only and
-    replaces /data/vault and /data/host with its copies. A write the
-    pre-upgrade snapshot acknowledged therefore survives a forced restore,
-    files the target image created under those paths go with them, and a file
-    at the volume root is untouched. rancher.io/local-path stands in for the
-    TopoLVM pair: the Job mounts claims, not snapshots, so no snapshot
-    controller is needed to run the same manifest the reconcile loop renders."""
+def test_clone_restore_copy_command_on_real_k3s(k3s: K3sCluster) -> None:
+    """Prove the copy command on mounted local-path claims in CI.
+
+    The command copies prepared files, removes target-only files, and keeps
+    the volume root intact. This test takes no VolumeSnapshot, stops no cell,
+    and does not prove the acknowledged-write or TopoLVM flush contract.
+    """
 
     from cellctl.manifests import (
         CellManifestSpec,

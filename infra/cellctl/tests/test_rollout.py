@@ -9,7 +9,7 @@ from uuid import UUID
 from cellctl.decide import ReconcileConfig
 from cellctl.manifests import CellManifestSpec, render_prepare_job, render_resource_quota
 from cellctl.reconcile import _run_prepare_jobs
-from cellctl.rollout import initial_image, select_upgrade_candidate, select_upgrade_candidates
+from cellctl.rollout import initial_image, select_upgrade_candidates
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
 
 CELL_ID = "aaaaaaaaaaaaaaaa"
@@ -32,14 +32,14 @@ def test_row_desired_image_overrides_platform_image_for_new_and_existing_cells()
     rollout = RolloutRow()
 
     assert initial_image(row, rollout, PLATFORM_IMAGE) == (DESIRED_IMAGE, None)
-    assert select_upgrade_candidate(
+    assert select_upgrade_candidates(
         [row],
         {CELL_ID: ClusterObservation(statefulset_image=PLATFORM_IMAGE, pod_ready=True)},
         rollout,
         PLATFORM_IMAGE,
         now=datetime(2026, 1, 1, tzinfo=UTC),
-        any_cell_already_upgrading=False,
-    ) == CELL_ID
+        restore_active=False, concurrency_per_node=1,
+    ) == {CELL_ID}
 
 
 # --- automate-cloud-releases 1.9: per-node upgrade concurrency --------------

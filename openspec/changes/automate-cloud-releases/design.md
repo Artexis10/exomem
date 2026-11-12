@@ -253,7 +253,7 @@ Further rules:
 **Concurrency.**
 - In every phase, while the canary's image differs from its target (`desired_image` or `cell_image`), only the canary's attempt runs. A canary that is behind and cannot start, because it is stopped, not Ready, refused or in backoff, blocks every tenant attempt, as today (`rollout.py`). The canary's pin never relaxes this rule: after its attempt ends on an older pin, it is behind its target again.
 - Phase 1 keeps one attempt fleet-wide, as today, and adds windows, pins and the pause abort.
-- After pinning and the pause abort ship, task 1.9 adds per-node concurrency. After the canary runs its target, at most `cellctl.upgradeConcurrencyPerNode` cells per node carry an upgrade hold. A cell's node is the node that its row last observed.
+- After pinning and the pause abort ship, task 1.9 adds per-node concurrency. After the canary runs its target, at most `cellctl.upgradeConcurrencyPerNode` cells per node carry an upgrade hold. Concurrency keys on the observed PV node. Cells without a local PV share one fleet-wide slot, conservatively.
 - Any restore hold still blocks every new attempt fleet-wide, as today. Relocations after a node loss and failed attempts are rare, and they need the operator's attention more than throughput.
 - Hourly backup holds keep their own per-node slots. A cell carries one hold at a time.
 - Why: cells cluster by time zone, so many cells share a quiet hour. One attempt fleet-wide gives about 20 to 30 attempts per hour (est.).
