@@ -69,10 +69,11 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why this links to no other page."
+          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
         },
         "preview": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Validate the proposed content without saving it."
         },
         "detail": {
           "enum": [
@@ -213,7 +214,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why this links to no other page."
+          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -246,7 +247,8 @@
           "description": "Also return pages to link."
         },
         "preview": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Validate the proposed content without saving it."
         },
         "detail": {
           "enum": [
@@ -343,7 +345,7 @@
     }
   },
   "edit_note": {
-    "description": "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields.",
+    "description": "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate an existing unit, preview edit_observation with its current category and text.",
     "inputSchema": {
       "properties": {
         "note": {
@@ -483,10 +485,11 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why this links to no other page."
+          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
         },
         "preview": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Validate the proposed content without saving it."
         },
         "detail": {
           "enum": [
@@ -1460,7 +1463,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "Why this links to no other page."
+          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -1489,7 +1492,8 @@
           "type": "object"
         },
         "preview": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Validate the proposed content without saving it."
         },
         "detail": {
           "enum": [

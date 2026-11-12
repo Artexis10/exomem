@@ -200,8 +200,8 @@ class FileHandle(Wire):
     file_name: str | None = None
 
 
-_UNLINKED = Field(default=None, description="Why this links to no other page.")
-_PREVIEW = Field(default=None)
+_UNLINKED = Field(default=None, description="The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text.")
+_PREVIEW = Field(default=None, description="Validate the proposed content without saving it.")
 _DETAIL = Field(default=None)
 
 
@@ -940,7 +940,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("observe_memory", "observation"), ("observe_memory", "add")),
           captures=True),
     _tool("edit_note", "Edit note",
-          "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields.",
+          "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate an existing unit, preview edit_observation with its current category and text.",
           EditNote, "write", _edit_note,
           [Route("edit_memory", reverse=_spell_edit),
            Route("observe_memory", when={"operation": "update"}, add={"action": "edit_observation"},
