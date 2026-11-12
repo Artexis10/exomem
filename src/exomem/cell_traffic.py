@@ -226,9 +226,10 @@ def schedule_flush(traffic: CellTraffic) -> None:
 
 
 def shutdown_lifespan(inner, traffic: CellTraffic):
-    """Outermost lifespan of a Cloud cell. At the stop signal, after every inner
-    lifespan has closed its stores, it saves the counts and syncs the volume, so a
-    snapshot taken after the stop holds every acknowledged write (design D6)."""
+    """Save the counts and flush the state root after every inner lifespan closes.
+
+    Each vault writer supplies its own durability barrier before acknowledging a write.
+    """
 
     @contextlib.asynccontextmanager
     async def _lifespan(server):
