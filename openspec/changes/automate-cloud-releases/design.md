@@ -370,9 +370,9 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 4. Run a server-side dry run.
 5. Probe Substrate's columns: run the release's `cellctl` column check, read-only, against the control database.
 6. Compare the secret contracts of the live release and the tag. A change with no barrier entry stops the command and names the omission.
-7. List the `platform` barriers between the live release and the tag (D3). Each one needs `--crossed <id>`.
+7. List the open barriers (D3): those between the live release and the tag, and those at or below the tag that the newest successful platform Deployment does not list. Each open `platform` barrier needs `--crossed <id>`; an open `cell` barrier may take one.
 
-The command reads the live release from Helm's release metadata, not from the platform Deployment. A wrong record therefore cannot mislead it.
+The command reads the live release from Helm's release metadata, not from the platform Deployment. The live range always counts, so a record that runs ahead of the platform cannot hide a barrier. The record only adds barriers, such as one left unrecorded by a failed verify. Only a one-way barrier inside the live range removes `--atomic`.
 
 **Upgrade.**
 - Apply the namespaces. Then run `helm upgrade` with `--wait` and the timeout from a value.

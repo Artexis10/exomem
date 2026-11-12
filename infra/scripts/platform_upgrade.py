@@ -12,9 +12,9 @@ presence. Its machine review runs to completion before anything changes:
 5. run the release's `cellctl` schema check against the control database;
 6. compare the secret contracts of the live release and the tag — a change
    with no barrier entry stops the command;
-7. list the open barriers: those at or below the tag that the newest
-   successful platform Deployment does not record (without a record, those
-   after the live release). Each `platform` entry needs a `--crossed <id>`,
+7. list the open barriers: those after the live release and at or below the
+   tag, and those at or below the tag that the newest successful platform
+   Deployment does not record. Each `platform` entry needs a `--crossed <id>`,
    and a `cell` entry may take one so the platform Deployment records it —
    `cloud-deploy` stops on an unrecorded entry of either scope.
 
@@ -378,20 +378,23 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
         raise Stop("settings", f"{args.tag} is older than the live release {live_tag}; "
                                "the platform does not downgrade")
     barriers = json.loads((checkout / "infra/contracts/upgrade-barriers-v1.json").read_text())["barriers"]
-    # The barriers still open are those at or below the tag that the newest
-    # successful record lacks. Without a record, those after the live release.
-    # Keying on the record, not the live tag, keeps a barrier open after a
-    # failed verify or a skipped cell entry, so a rerun can still record it.
+    # A barrier is open when it lies after the live release and at or below the
+    # tag, or when it is at or below the tag and the newest successful record
+    # lacks it. The record keeps a barrier open after a failed verify or a
+    # skipped cell entry, so a rerun can still record it.
+    # The live range always counts, so a record that runs ahead of the platform
+    # (a wrong manual record, a Helm rollback) cannot hide a barrier.
     previous = newest_platform_deployment(runner, settings.repository)
+    in_range = barriers_between(barriers, live_version, target_version) if live_tag else []
+    open_entries = list(in_range)
     if previous is not None:
-        recorded = set(previous.get("barriers_crossed", []))
-        open_entries = [entry for entry in barriers
-                        if (v := parse_release(str(entry.get("version", "")))) is not None
-                        and v <= target_version and entry["id"] not in recorded]
-    elif live_tag:
-        open_entries = barriers_between(barriers, live_version, target_version)
-    else:
-        open_entries = []
+        recorded = previous.get("barriers_crossed")
+        if not isinstance(recorded, list):
+            raise Stop("deployment-record", "the newest platform Deployment has no barriers_crossed list")
+        open_entries += [entry for entry in barriers
+                         if (v := parse_release(str(entry.get("version", "")))) is not None
+                         and v <= target_version and entry["id"] not in recorded
+                         and entry not in in_range]
     # Platform entries are mandatory here; cell entries are optional
     # --crossed values that only the record can carry.
     due = [entry for entry in open_entries if entry.get("scope") == "platform"]
@@ -423,7 +426,8 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     if unrecorded:
         print(f"  note: {', '.join(unrecorded)} is a cell-scope barrier — not required here, "
               "but cloud-deploy stops until a platform upgrade records it with --crossed")
-    one_way = any(entry["kind"] == "one-way" for entry in due)
+    # Only a crossing this upgrade makes can be rolled back across.
+    one_way = any(entry["kind"] == "one-way" for entry in due if entry in in_range)
 
     # --- The upgrade. ---
     print("upgrade: applying the namespaces")

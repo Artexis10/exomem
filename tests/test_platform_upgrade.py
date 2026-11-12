@@ -285,6 +285,21 @@ def test_a_rerun_at_the_live_tag_still_records_an_unrecorded_barrier(tmp_path: P
     assert runner.mutating() == []
 
 
+def test_a_record_ahead_of_the_platform_cannot_hide_a_one_way_barrier(tmp_path: Path) -> None:
+    # Catches a wrong or rolled-back record that lists a barrier the live release
+    # has not crossed: the upgrade must still need --crossed and drop --atomic.
+    ahead = {"payload": {"barriers_crossed": ["secret-matrix-0.100.0", "key-conversion-0.173.0"]}}
+    result, runner, _ = run_upgrade(tmp_path, barriers=[ONE_WAY], detail=ahead)
+    assert result == 1
+    assert runner.mutating() == []
+
+    result, runner, _ = run_upgrade(tmp_path / "crossed", ("--crossed", "key-conversion-0.173.0"),
+                                    barriers=[ONE_WAY], detail=ahead)
+    assert result == 0
+    upgrade = next(c for c in runner.calls if c[:2] == ["helm", "upgrade"] and "--dry-run=server" not in c)
+    assert "--atomic" not in upgrade
+
+
 def test_the_dry_run_and_the_upgrade_share_the_post_renderer(tmp_path: Path) -> None:
     result, runner, _ = run_upgrade(tmp_path)
     assert result == 0
