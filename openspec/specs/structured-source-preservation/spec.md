@@ -136,3 +136,8 @@ The derived search indexes SHALL hold a bounded text rendering of a preserved da
 - **WHEN** a preserved dataset exceeds 64 KiB or the parse limits
 - **THEN** none of its values are indexed
 - **AND** its card is indexed exactly as before
+
+#### Scenario: A raw-protected original stays searchable
+- **WHEN** a small dataset is preserved under the release floor for explicitly protected immutable artifacts
+- **THEN** its values are indexed under that original's own path like any other admitted dataset
+- **AND** a search releases the hit only to a reader whom the release plane allows to read the original at full level

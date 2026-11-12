@@ -159,6 +159,35 @@ def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
     assert binary_record(served, DIAGRAM) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
 
 
+@pytest.mark.parametrize("store", [False, True], ids=["file mode", "store mode"])
+def test_a_previewed_binary_trash_refuses_bytes_that_changed_after_the_check(request, store):
+    """A store-mode binary trash that binds the store record, which a rewrite on disk leaves as it
+    was, and so moves to the trash bytes that the preview never hashed."""
+    root = request.getfixturevalue("served" if store else "vault")
+    now = dt.datetime(2026, 11, 11, 3, 14, 37)
+    preview = delete_file.delete_file(root, path=DIAGRAM, confirm=True, validate_only=True, now=now)
+
+    def rewrite():
+        # The file changes after the check, right before the move.
+        (root / DIAGRAM).write_bytes(b"rewritten")
+
+    before = tree(root)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(
+            root,
+            path=DIAGRAM,
+            confirm=True,
+            now=now,
+            expected_hash=preview.content_hash,
+            _fold=fold_leaf.Placement(preview.result.trash_path, rewrite),
+        )
+
+    assert refused.value.code == "STALE_DELETE"
+    assert new_files(before, root) == {DIAGRAM}, "only the rewrite changed a file; nothing moved"
+    assert (root / DIAGRAM).read_bytes() == b"rewritten"
+
+
 JUDGED = "Knowledge Base/Notes/Judged.md"
 
 
@@ -284,6 +313,8 @@ def test_a_paired_artifact_moves_its_bytes_and_its_page_in_one_commit(served, wr
             (result.new_path, "move"),
             (REPORT, "delete"),
             (MOVED_REPORT, "write"),
+            # The move's log entry commits in the same transaction.
+            ("Knowledge Base/log.md", "write"),
         ]
     )
 

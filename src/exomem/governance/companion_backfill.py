@@ -138,7 +138,24 @@ def _snapshot(vault_root, path: str, *, role: str):
     return snapshot
 
 
-def _identity(role: str, path: str, snapshot) -> dict[str, Any]:
+def _identity(vault_root, role: str, path: str, snapshot) -> dict[str, Any]:
+    """What binds one reviewed snapshot: its bytes, and the file it was read from.
+
+    A page that a store-mode vault holds has no file of its own, so the store revision that last
+    wrote it names that version instead. A proposal planned on the file then reads as stale after
+    the vault moves into store mode, and the owner reviews it again.
+    """
+    if snapshot.identity is None:
+        from ..vault_store import read
+
+        meta = read.owned_meta(vault_root, path)
+        return {
+            "role": role,
+            "path": path,
+            "sha256": _sha(snapshot.data),
+            "size": len(snapshot.data),
+            "store_revision": None if meta is None else meta.revision,
+        }
     return {
         "role": role,
         "path": path,
@@ -378,9 +395,9 @@ def plan(vault_root, value: object) -> BackfillPlan:
     )
     target = _render_target(companion.data, descriptor)
     identities = [
-        _identity("artifact", artifact_path, artifact),
-        _identity("companion", companion_path, companion),
-        *(_identity(role, path, snapshot) for role, path, snapshot in additional),
+        _identity(vault_root, "artifact", artifact_path, artifact),
+        _identity(vault_root, "companion", companion_path, companion),
+        *(_identity(vault_root, role, path, snapshot) for role, path, snapshot in additional),
     ]
     return BackfillPlan(
         normalized_input=normalized,

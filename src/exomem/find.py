@@ -6676,33 +6676,28 @@ def _find_semantic(
     clip_set: set[str] = set(clip_ranking)
     graph_set = set(graph_ranking)
     vector_paths: set[str] = set(vector_ranking)
-    # Degraded-corroboration retention flag — LANE-level, never per-page. When
-    # the vector and CLIP lanes produced no candidate at all for this query,
-    # no vector evidence exists for ANY candidate. Either the lane never ran —
-    # embeddings disabled (EXOMEM_DISABLE_EMBEDDINGS), the model warming/
-    # unavailable/failed, or an absent/empty embedding index — or a HEALTHY
-    # lane legitimately returned nothing because none of the eligible pages
-    # have indexed chunks (`available_nonmatching`: the allowed-paths search
-    # had no vectors to score). The relaxed gate deliberately covers that
-    # second case too: for these candidates, vector corroboration is
-    # unsatisfiable either way. In that state the all-stems veto below would
-    # drop every BM25-only candidate for interrogative phrasing ("How many…",
-    # "What is…") whose question words never appear in stored text, returning
-    # nothing even when BM25 ranks the correct page first. Retention then
-    # relaxes to a STRICT MAJORITY of the query's whitespace words being
-    # present, at least one of them a content word (see _stem_word_coverage):
-    # question words may be missing, but half-matched two-word queries,
-    # partially-matched exact-marker compounds, and function-word-only
-    # overlap against long prose all stay vetoed. With the vector lane live,
-    # the strict all-stems veto is unchanged.
-    semantic_lanes_absent = not vector_paths and not clip_set
-    # Loop-invariant for the relaxed gate: tokenize/classify the query's words
-    # once per query, not once per candidate page.
-    degraded_query_words = _query_word_stem_groups(query_norm) if semantic_lanes_absent else []
+    # BM25-only corroboration gate — PER-CANDIDATE, never per-bundle. A
+    # candidate that only the BM25 lane produced is retained when a STRICT
+    # MAJORITY of the query's whitespace words is present in the page's stem
+    # set, at least one of them a content word (see
+    # find_policy.stem_word_coverage): whole-word presence means every BM25
+    # subtoken stem of the word must occur, so compounds need all parts and
+    # punctuation cannot mask a match. The gate applies whether or not the
+    # vector/CLIP lanes produced candidates for this query — another lane's
+    # silence on one page is no evidence against it, and the lanes-absent
+    # case makes semantic corroboration unsatisfiable for every candidate.
+    # The strict majority still vetoes single-token overlaps, half-matched
+    # two-word queries, partially-matched exact-marker compounds, and
+    # function-word-only overlap against long prose; interrogative phrasing
+    # ("How many…", "What is…") whose question words never appear in stored
+    # text no longer hides the page BM25 ranked first.
+    # Loop-invariant: tokenize/classify the query's words once per query,
+    # not once per candidate page.
+    coverage_query_words = _query_word_stem_groups(query_norm)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
-    # BM25-only candidates must still satisfy the keyword all-tokens-present
-    # gate — without it, BM25's word-level tokenizer surfaces files that share
+    # BM25-only candidates must still satisfy the word-majority gate above —
+    # without it, BM25's word-level tokenizer surfaces files that share
     # any single token with the query (false positives). Vector-ranked
     # candidates skip that gate by design: surfacing semantically-similar
     # files that don't contain the literal tokens is the whole point.
@@ -6735,12 +6730,10 @@ def _find_semantic(
     chunk_text_by_path = {path: text for path, text in chunk_text_by_path.items() if isinstance(text, str)}
 
     def _supported_stems(page: ParsedPage | find_types.RankingPage) -> bool:
-        if semantic_lanes_absent:
-            present, total, content_present = find_policy.stem_word_coverage(
-                page.stem_set, degraded_query_words
-            )
-            return 2 * present > total and content_present > 0
-        return _stem_tokens_present(page, query_norm)
+        present, total, content_present = find_policy.stem_word_coverage(
+            page.stem_set, coverage_query_words
+        )
+        return 2 * present > total and content_present > 0
 
     def _needs_corroboration(path: str) -> bool:
         return (
@@ -6836,12 +6829,11 @@ def _find_semantic(
             if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
                 # the keyword scan. Try stem match before dropping — recovers
-                # morphology ("regulation" matching a "regulator" page). With the
-                # semantic lanes absent (see flag above) the gate relaxes from
-                # all-stems to a strict majority of the query's words anchored by
-                # at least one content word, so BM25's own top-ranked evidence
-                # survives interrogative phrasing without function-word overlap
-                # alone retaining junk.
+                # morphology ("regulation" matching a "regulator" page). The
+                # per-candidate gate above requires a strict majority of the
+                # query's words anchored by at least one content word, so
+                # BM25's own top-ranked evidence survives interrogative
+                # phrasing without function-word overlap alone retaining junk.
                 if not _supported_stems(page):
                     continue
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)

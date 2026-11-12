@@ -1,0 +1,11 @@
+{
+  "id": "f05-ack-thanks",
+  "title": "'ok, thanks' after a fact answer needs no recall and no new claim",
+  "suite": "session-close",
+  "seed": "fu-projects",
+  "engagement": "balanced",
+  "turns": [
+    "What's the deadline for Project Osprey?",
+    "thanks"
+  ]
+}

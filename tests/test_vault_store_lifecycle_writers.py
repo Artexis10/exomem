@@ -38,6 +38,7 @@ from exomem import delete_directory, delete_file, move_file, recover_from_trash,
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
+from exomem.governance import receipts
 from exomem.governance.principal import (
     library_scope,
     most_restrictive_principal,
@@ -325,19 +326,21 @@ def test_a_validated_move_names_the_hashes_that_its_commit_then_writes(served):
     assert renamed[GAMMA] == {"path": GAMMA, "absent": True}
 
 
-def test_a_validated_and_a_committed_move_of_a_governed_page_refuse_alike(served):
-    """A validation that passes a move that its commit then refuses: a caller plans on it."""
+def test_a_governed_page_moves_through_the_store_with_no_tombstone_or_receipt(served):
+    """A move of a governed page that refuses as the vault-wide policy check did, or that writes
+    the tombstone and receipt that only a trash or a recovery writes, in file mode as here."""
     store_gamma(served)
     govern(served, GAMMA)
     start = revision(served)
 
-    for validate_only in (True, False):
-        with pytest.raises(OpError) as refused:
-            move_file.move_file(served, old_path=GAMMA, new_path=MOVED, validate_only=validate_only)
-        assert refused.value.code == availability.WRITER_UNROUTED, validate_only
-
+    move_file.move_file(served, old_path=GAMMA, new_path=MOVED, validate_only=True)
     assert revision(served) == start
-    assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+    move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
+
+    assert read.owned_bytes(served, MOVED) == GAMMA_TEXT.encode()
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
+    assert not list((served / "Knowledge Base/_Governance").rglob("*.json"))
+    assert receipts.event_records(served) == []
 
 
 @pytest.mark.parametrize(

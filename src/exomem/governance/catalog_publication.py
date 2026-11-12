@@ -302,7 +302,9 @@ def mutation_from_planned_write(
             )
         if guard.leaf_policy == "absent":
             guarded_expected = None
-        elif guard.leaf_policy == "content":
+        elif guard.leaf_policy in {"content", "store"}:
+            # PathGuard's leaf policies are a closed set; a stored page's guard binds its stored
+            # hash, or its absence by None, as a file's content guard binds the file's.
             guarded_expected = guard.expected_content_hash
         else:
             guarded_expected = expected

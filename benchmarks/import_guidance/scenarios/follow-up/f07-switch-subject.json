@@ -1,0 +1,11 @@
+{
+  "id": "f07-switch-subject",
+  "title": "Short follow-up that explicitly switches subject",
+  "suite": "session-close",
+  "seed": "fu-projects",
+  "engagement": "balanced",
+  "turns": [
+    "What's the deadline for Project Osprey?",
+    "and for Harbor?"
+  ]
+}

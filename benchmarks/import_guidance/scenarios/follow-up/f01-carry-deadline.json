@@ -1,0 +1,11 @@
+{
+  "id": "f01-carry-deadline",
+  "title": "Deadline asked after turn 1 named one of two projects",
+  "suite": "session-close",
+  "seed": "fu-projects",
+  "engagement": "balanced",
+  "turns": [
+    "Remind me what Project Osprey is about.",
+    "and the deadline?"
+  ]
+}

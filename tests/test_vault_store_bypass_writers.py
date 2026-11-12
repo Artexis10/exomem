@@ -49,10 +49,8 @@ from exomem.governance import catalog_publication, membership, policy
 from exomem.governance.principal import (
     library_scope,
     most_restrictive_principal,
-    owner_principal,
     request_scope,
 )
-from exomem.governance.tool import op_govern_memory
 from exomem.vault_store import (
     availability,
     batch,
@@ -389,22 +387,6 @@ def govern(root, rel):
     membership.clear_memo()
 
 
-def test_delete_of_a_governed_page_refuses_by_name_and_changes_nothing(served):
-    """A delete that skips the tombstone and receipt that a governed page's trash writes."""
-    govern(served, BETA)
-    before = tree(served)
-    start = revision(served)
-
-    with pytest.raises(OpError) as refused:
-        delete_file.delete_file(served, path=BETA, confirm=True, force_orphan=True)
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "delete_file" in refused.value.message
-    assert revision(served) == start
-    assert tree(served) == before
-    assert read.owned_bytes(served, BETA)
-
-
 def history_name(index):
     """A snapshot name in the form that ``registry_history`` writes: a UTC stamp and a hash tag."""
     return f"20260101T{index:012d}Z-abcdef01"
@@ -486,27 +468,6 @@ def test_lifecycle_prepared_cleanup_keeps_a_slot_whose_page_changed_after_it_was
     assert [issue.code for issue in batch_result.blocked] == ["LIFECYCLE_RECONCILE_RACE"]
     assert revision(served) == start
     assert read.page_exists(served, reference)
-
-
-def test_companion_backfill_commit_refuses_by_name_before_it_arms_a_journal(served):
-    """A backfill that publishes its companion page to disk where the store holds the page."""
-    before = tree(served)
-    start = revision(served)
-
-    with reserved_paths._owner_authority_scope("govern_memory"), pytest.raises(OpError) as refused:
-        op_govern_memory(
-            served,
-            operation="backfill_companion",
-            backfill_action="commit",
-            proposal_id="01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            companion_input={},
-            principal=owner_principal(),
-        )
-
-    assert refused.value.code == availability.WRITER_UNROUTED
-    assert "companion_backfill" in refused.value.message
-    assert revision(served) == start
-    assert tree(served) == before
 
 
 def test_the_generic_path_writers_refuse_a_stored_page_and_pass_a_binary(served):
@@ -679,25 +640,25 @@ def test_a_store_that_refuses_its_writer_keeps_a_surplus_part_in_a_retire_and_a_
     assert revision(served) == start
 
 
-def test_delete_validation_refuses_what_the_commit_refuses_for_an_active_catalog(
+def test_delete_validation_refuses_what_the_commit_refuses_for_a_blocked_catalog(
     served, monkeypatch
 ):
-    """A plan that validates and then fails at its commit, because the catalog has no store form."""
+    """A plan that validates and then fails at its commit, because the active catalog cannot take
+    the change: the store form prepares the catalog before its validation returns."""
     store_gamma(served)
-    # The real publication needs an enrolled governance vault; its answer is the boundary here.
-    monkeypatch.setattr(
-        catalog_publication,
-        "prepare_catalog_membership_batch",
-        lambda *args, **kwargs: object(),
-    )
+    # The real publication needs an enrolled governance vault; its refusal is the boundary here.
+
+    def blocked(*_args, **_kwargs):
+        raise catalog_publication.CatalogPublicationError("catalog removal is stale")
+
+    monkeypatch.setattr(catalog_publication, "prepare_catalog_membership_batch", blocked)
     before = tree(served)
     start = revision(served)
 
     for validate_only in (True, False):
-        with pytest.raises(OpError) as refused:
+        with pytest.raises(delete_file.DeleteFileError) as refused:
             delete_file.delete_file(served, path=GAMMA, confirm=True, validate_only=validate_only)
-        assert refused.value.code == availability.WRITER_UNROUTED, validate_only
-        assert "catalog publication" in refused.value.message
+        assert refused.value.code == "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", validate_only
 
     assert revision(served) == start
     assert tree(served) == before

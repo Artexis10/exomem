@@ -36,6 +36,7 @@ from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import kb_dirname, kb_prefix
 from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .vault import (
+    LogWritePlan,
     VaultPathError,
     batch_atomic_write,
     find_inbound_wikilinks,
@@ -308,18 +309,6 @@ def _delete_file_local(
         except UnicodeDecodeError:
             pass
 
-    if store_writer is not None:
-        refusal = store_targets.governed_gap(vault_root)
-        if refusal is not None:
-            raise store_availability.unrouted("delete_file", refusal)
-        # Before validation returns, so a plan that validates is a plan that commits.
-        store_targets.active_catalog_gap(
-            vault_root,
-            "delete_file",
-            error_class=DeleteFileError,
-            removals=(catalog_publication.CatalogRemoval(rel_path, catalog_before_hash),),
-        )
-
     # Normalize expected_dead_inbound for filtering.
     expected_set: set[str] = set()
     if expected_dead_inbound:
@@ -429,8 +418,37 @@ def _delete_file_local(
     trash_rel = trash_abs.relative_to(vault_root).as_posix()
     meta_abs = trash_dir / f"{trash_filename}{METADATA_SUFFIX}"
     meta_rel = meta_abs.relative_to(vault_root).as_posix()
+    today_iso = today.isoformat()
+    rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
+    log_body = (
+        f"Trashed {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
+        f"inbound_links_at_trash={len(inbound_all)} "
+        f"(ignored={len(inbound_ignored)}, remaining={len(inbound)})."
+    )
+    if force_orphan:
+        log_body += " force_orphan=true."
+    if force_superseded:
+        log_body += " force_superseded=true."
+    if curated and allow_curated:
+        log_body += f" allow_curated=true (target tree: {curated})."
+    removal = catalog_publication.CatalogRemoval(rel_path, catalog_before_hash)
+    store_log: LogWritePlan | None = None
+    catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
     if store_writer is not None:
         store_targets.refuse_kind_change("delete_file", rel_path, trash_rel)
+        # Before validation returns, so a plan that validates is a plan that commits. The log entry
+        # commits with the trash, so the catalog names the same writes that file mode's does.
+        store_log = plan_log_entry(
+            vault_root, date_iso=today_iso, op="delete_file (trash)",
+            rel_path_no_ext=rel_no_ext, body=log_body,
+        )
+        catalog_target = store_targets.prepare_catalog(
+            vault_root,
+            error_class=DeleteFileError,
+            writes=store_log.writes,
+            removals=(removal,),
+            graph_replacement_provider=_removed_graph(vault_root, rel_path, store_log.writes),
+        )
 
     source_hash: str | None = None
     if validate_only or expected_hash is not None:
@@ -461,19 +479,6 @@ def _delete_file_local(
         fm=fm, force_orphan=force_orphan, force_superseded=force_superseded,
         allow_curated=bool(curated and allow_curated),
     )
-    today_iso = today.isoformat()
-    rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
-    log_body = (
-        f"Trashed {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
-        f"inbound_links_at_trash={len(inbound_all)} "
-        f"(ignored={len(inbound_ignored)}, remaining={len(inbound)})."
-    )
-    if force_orphan:
-        log_body += " force_orphan=true."
-    if force_superseded:
-        log_body += " force_superseded=true."
-    if curated and allow_curated:
-        log_body += f" allow_curated=true (target tree: {curated})."
     if store_writer is not None:
         assert stored_check is not None
         if not stored_page:
@@ -481,6 +486,7 @@ def _delete_file_local(
 
             # The bytes move with their record, so an evicted original is fetched first.
             originals_context.enter_context(local_originals(vault_root, (rel_path,)))
+        assert store_log is not None
         if _fold is not None:
             # Immediately before the move: the retained copy must still hold identical bytes.
             _fold.verify()
@@ -489,7 +495,7 @@ def _delete_file_local(
             metadata_bytes=metadata_bytes, judged_hash=catalog_before_hash or source_hash,
             linked_from=stored_check.bound,
             prior_markdown=prior_markdown, stored_original=stored_original,
-            log_entry=(today_iso, rel_no_ext, log_body), inbound=len(inbound),
+            log_plan=store_log, catalog_target=catalog_target, inbound=len(inbound),
             inbound_ignored=len(inbound_ignored), warnings=warnings,
         )
     log_plan = plan_log_entry(
@@ -499,30 +505,12 @@ def _delete_file_local(
         rel_path_no_ext=rel_no_ext,
         body=log_body,
     )
-    def graph_replacement_provider():
-        graph_before_corpus = semantic_contract.build_corpus_context(vault_root)
-        return graph_producer.replacements_for_removed_markdown(
-            vault_root,
-            before_corpus=graph_before_corpus,
-            removed_paths=(rel_path,),
-            writes=log_plan.writes,
-        )
-
     try:
         catalog_target = catalog_publication.prepare_catalog_membership_batch(
             vault_root,
             writes=log_plan.writes,
-            removals=(
-                catalog_publication.CatalogRemoval(
-                    rel_path,
-                    catalog_before_hash,
-                ),
-            ),
-            graph_replacement_provider=(
-                graph_replacement_provider
-                if rel_path.lower().endswith(".md")
-                else None
-            ),
+            removals=(removal,),
+            graph_replacement_provider=_removed_graph(vault_root, rel_path, log_plan.writes),
             now=int(time.time()),
         )
     except catalog_publication.CatalogPublicationError as error:
@@ -791,6 +779,23 @@ def _delete_file_local(
     )
 
 
+def _removed_graph(vault_root: Path, rel_path: str, writes) -> Callable | None:
+    """The graph replacements that the catalog needs for a trashed page, or None for a binary."""
+    if not rel_path.lower().endswith(".md"):
+        return None
+
+    def graph_replacement_provider():
+        graph_before_corpus = semantic_contract.build_corpus_context(vault_root)
+        return graph_producer.replacements_for_removed_markdown(
+            vault_root,
+            before_corpus=graph_before_corpus,
+            removed_paths=(rel_path,),
+            writes=writes,
+        )
+
+    return graph_replacement_provider
+
+
 def _trash_metadata_bytes(
     rel_path: str,
     now: dt.datetime,
@@ -831,7 +836,8 @@ def _trash_in_store(
     linked_from: frozenset[str],
     prior_markdown: str | None,
     stored_original: originals.OriginalSnapshot | None,
-    log_entry: tuple[str, str, str],
+    log_plan: LogWritePlan,
+    catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None,
     inbound: int,
     inbound_ignored: int,
     warnings: list[str],
@@ -845,12 +851,15 @@ def _trash_in_store(
     the store. The sidecar lands on disk inside the same rollback window. A page is bound to
     ``judged_hash``, the hash of the bytes whose frontmatter or preview the caller judged; a page
     that changed since, or a link from a page that the caller's inbound check did not see, refuses
-    the whole commit, and every rename is undone.
+    the whole commit, and every rename is undone. A binary with ``judged_hash`` (a previewed
+    trash) refuses when the bytes that moved are not the ones the preview hashed. A governed item keeps its tombstone and receipt
+    around the commit (``vault_store.governed``). The log entry commits with the trash, and an
+    active catalog publication, prepared before validation returned, publishes after the commit.
     """
     from . import extraction_parts
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
     from .vault_store import batch as store_batch
-    from .vault_store import binaries
+    from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import read as store_read
     from .vault_store.write import Expect, PageMove, StoreConflict
@@ -885,9 +894,23 @@ def _trash_in_store(
         relocation = binaries.plan(view, entries)
     expect.update(relocation.expect({rel_path: linked_from}))
     failed = "Trash placement could not be published"
+    # A governed item's receipt intent and tombstone come last before the commit, as in file mode.
+    deletion = governed.begin_deletion(
+        root, source_rel=rel_path, trash_rel=trash_rel, error_class=DeleteFileError
+    )
     try:
-        with binaries.relocated(root, relocation) as moved:
-            writes = [sidecar, *_trash_companion(root, trash_rel, stored_original, moved.records)]
+        with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
+            if not page and judged_hash is not None and any(
+                record.rel == trash_rel and record.sha256 != judged_hash for record in moved.records
+            ):
+                # The commit binds the store record, which a rewrite on disk leaves as it was, so
+                # the moved bytes answer to the preview here; raising renames them back.
+                raise DeleteFileError("STALE_DELETE", "delete source changed since its preview")
+            writes = [
+                sidecar,
+                *_trash_companion(root, trash_rel, stored_original, moved.records),
+                *log_plan.writes,
+            ]
             store_batch.commit_batch(
                 writer,
                 writes,
@@ -926,12 +949,12 @@ def _trash_in_store(
         due_state.refresh_after_writes(
             root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
         )
-    today_iso, rel_no_ext, body = log_entry
-    log_warning = write_log_entry(
-        root, date_iso=today_iso, op="delete_file (trash)", rel_path_no_ext=rel_no_ext, body=body
+    index = governed.settle(root, deletion, store_batch.row_report("delete", [rel_path]), warnings)
+    store_targets.publish_catalog(
+        catalog_target, error_class=DeleteFileError, what="the file was trashed"
     )
-    if log_warning:
-        warnings.append(log_warning)
+    if log_plan.warning:
+        warnings.append(log_plan.warning)
     return DeleteFileResult(
         path=rel_path,
         trash_path=trash_rel,
@@ -939,7 +962,7 @@ def _trash_in_store(
         inbound_link_count=inbound,
         inbound_ignored_count=inbound_ignored,
         warnings=warnings,
-        index=store_batch.row_report("delete", [rel_path]).as_dict(),
+        index=index,
     )
 
 

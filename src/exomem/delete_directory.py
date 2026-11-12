@@ -227,6 +227,20 @@ def _log_body(
     return log_body
 
 
+def _removed_graph(vault_root: Path, removed: tuple[str, ...], writes) -> Callable:
+    """The graph replacements that the catalog needs for the trashed pages of a folder."""
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_removed_markdown(
+            vault_root,
+            before_corpus=semantic_contract.build_corpus_context(vault_root),
+            removed_paths=removed,
+            writes=writes,
+        )
+
+    return graph_replacement_provider
+
+
 def _trash_metadata(
     rel_path: str,
     now: dt.datetime,
@@ -408,21 +422,15 @@ def _delete_directory_local(
     )
     catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
     if log_plan.writes or catalog_removals:
-        def graph_replacement_provider():
-            return graph_producer.replacements_for_removed_markdown(
-                vault_root,
-                before_corpus=semantic_contract.build_corpus_context(vault_root),
-                removed_paths=tuple(md_rels_to_unindex),
-                writes=log_plan.writes,
-            )
-
         try:
             catalog_target = catalog_publication.prepare_catalog_membership_batch(
                 vault_root,
                 writes=log_plan.writes,
                 removals=catalog_removals,
                 graph_replacement_provider=(
-                    graph_replacement_provider if md_rels_to_unindex else None
+                    _removed_graph(vault_root, tuple(md_rels_to_unindex), log_plan.writes)
+                    if md_rels_to_unindex
+                    else None
                 ),
                 now=int(time.time()),
             )
@@ -713,12 +721,14 @@ def _delete_in_store(
     whole. The commit binds every page and record it read and the folder's counts, so a page that
     changed or that a commit added, or a link from a page that the inbound check did not see,
     refuses the whole commit and every rename is undone. The sidecar lands on disk inside the same
-    rollback window.
+    rollback window. A folder that holds a governed item keeps its tombstone and receipt around the
+    commit (``vault_store.governed``), with file mode's limit on a receipt's items. The log entry
+    commits with the trash, and an active catalog publication publishes after the commit.
     """
     from .vault import CreateOnlyConflict, PathGuardError, PlannedWrite
     from .vault_store import availability as store_availability
     from .vault_store import batch as store_batch
-    from .vault_store import binaries
+    from .vault_store import binaries, governed
     from .vault_store import media as store_media
     from .vault_store import read as store_read
     from .vault_store.write import Expect, PageMove, StoreConflict
@@ -750,9 +760,6 @@ def _delete_in_store(
         if not pages and not abs_path.is_dir():
             raise DeleteDirectoryError(code="NOT_FOUND", reason=missing_path_reason(rel_path))
         curated = _refuse_protected(root, rel_path, allow_curated=allow_curated)
-        refusal = store_targets.governed_gap(root)
-        if refusal is not None:
-            raise store_availability.unrouted("delete_directory", refusal)
         if len(pages) > DIRECTORY_TRANSITION_LIMIT:
             raise DeleteDirectoryError(
                 code="PATH_GUARD_LIMIT",
@@ -783,15 +790,6 @@ def _delete_in_store(
         if file_count and not recursive:
             raise _not_empty(rel_path, file_count)
         hashes = {page: hashlib.sha256(body).hexdigest() for page, body in stored.items()}
-        store_targets.active_catalog_gap(
-            root,
-            "delete_directory",
-            error_class=DeleteDirectoryError,
-            removals=(
-                *(catalog_publication.CatalogRemoval(page, hashes[page]) for page in pages),
-                *(catalog_publication.CatalogRemoval(rel, None) for rel in listing.files),
-            ),
-        )
 
         # The links into the folder from outside it; a link between two of its pages moves with them.
         checks = store_targets.inbound_links(root, pages)
@@ -826,8 +824,35 @@ def _delete_in_store(
             entries = [binaries.Entry(rel_path, trash_rel, folder=True)]
         with store_read.snapshot(root) as view:
             relocation = binaries.plan(view, entries)
+        counts = {"files": file_count, "md_files": len(pages), "inbound": inbound_total}
+        # The log entry commits with the trash, so the catalog names the writes file mode's does.
+        log_plan = plan_log_entry(
+            root,
+            date_iso=today.isoformat(),
+            op="delete_directory (trash)",
+            rel_path_no_ext=rel_path,
+            body=_log_body(
+                rel_path,
+                trash_rel,
+                **counts,
+                recursive=recursive,
+                force_orphan=force_orphan,
+                curated=curated if allow_curated else None,
+            ),
+        )
+        catalog_target = store_targets.prepare_catalog(
+            root,
+            error_class=DeleteDirectoryError,
+            writes=log_plan.writes,
+            removals=(
+                *(catalog_publication.CatalogRemoval(page, hashes[page]) for page in pages),
+                *(catalog_publication.CatalogRemoval(rel, None) for rel in listing.files),
+            ),
+            graph_replacement_provider=(
+                _removed_graph(root, tuple(pages), log_plan.writes) if pages else None
+            ),
+        )
     meta_rel = f"{trash_rel}{METADATA_SUFFIX}"
-    counts = {"files": file_count, "md_files": len(pages), "inbound": inbound_total}
     sidecar = PlannedWrite(
         root / meta_rel,
         _trash_metadata(
@@ -855,10 +880,14 @@ def _delete_in_store(
 
                 # An evicted original's bytes move with its record, so they are fetched first.
                 hydrated.enter_context(local_originals(root, (rel_path,)))
-            with binaries.relocated(root, relocation) as moved:
+            # A governed folder's receipt intent and tombstone come last before the commit.
+            deletion = governed.begin_deletion(
+                root, source_rel=rel_path, trash_rel=trash_rel, error_class=DeleteDirectoryError
+            )
+            with governed.committing(deletion), binaries.relocated(root, relocation) as moved:
                 store_batch.commit_batch(
                     writer,
-                    [sidecar],
+                    [sidecar, *log_plan.writes],
                     vault_root=root,
                     lifecycle=store_batch.Lifecycle(
                         moves=tuple(PageMove(source, moves[source]) for source in pages),
@@ -900,22 +929,14 @@ def _delete_in_store(
         except UnicodeDecodeError:
             continue
     due_state.refresh_after_writes(root, trashed_pages)
-    log_warning = write_log_entry(
-        root,
-        date_iso=today.isoformat(),
-        op="delete_directory (trash)",
-        rel_path_no_ext=rel_path,
-        body=_log_body(
-            rel_path,
-            trash_rel,
-            **counts,
-            recursive=recursive,
-            force_orphan=force_orphan,
-            curated=curated if allow_curated else None,
-        ),
+    index = governed.settle(
+        root, deletion, store_batch.row_report("delete", [*pages, *listing.files]), warnings
     )
-    if log_warning:
-        warnings.append(log_warning)
+    store_targets.publish_catalog(
+        catalog_target, error_class=DeleteDirectoryError, what="the directory was trashed"
+    )
+    if log_plan.warning:
+        warnings.append(log_plan.warning)
     return DeleteDirectoryResult(
         path=rel_path,
         trash_path=trash_rel,
@@ -923,5 +944,5 @@ def _delete_in_store(
         file_count=file_count,
         inbound_link_count=inbound_total,
         warnings=warnings,
-        index=store_batch.row_report("delete", [*pages, *listing.files]).as_dict(),
+        index=index,
     )

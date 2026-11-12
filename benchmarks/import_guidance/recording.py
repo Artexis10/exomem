@@ -31,6 +31,11 @@ class Arm:
     root: Path
 
 
+#: The checkout folders a worker imports or installs from: the package and its scaffold under `src`, the client hooks
+#: under `plugins`.
+PRODUCT_FOLDERS = ("src", "plugins")
+
+
 def parse_arm(text: str) -> Arm:
     """`label=path`, or a path alone (its folder name is the label)."""
     label, sep, path = text.partition("=")
@@ -39,8 +44,10 @@ def parse_arm(text: str) -> Arm:
 
 
 def checkout_sha(root: Path) -> str:
-    """The checkout's HEAD, with `-dirty-` and the first 12 hex digits of the sha256 of its diff against HEAD when a
-    tracked file differs from HEAD, or "unknown". Untracked files do not count: a run folder kept inside the checkout
+    """The checkout's HEAD, with `-dirty-` and the first 12 hex digits of a sha256 when the product differs from HEAD,
+    or "unknown". The hash covers the diff of tracked files against HEAD, and the names and bytes of untracked,
+    unignored files under the folders the worker runs from (`PRODUCT_FOLDERS`): a new scaffold or registry file there
+    changes what a seeded vault holds. Untracked files elsewhere do not count: a run folder kept inside the checkout
     would otherwise change the state between two recordings."""
     head = subprocess.run(  # noqa: S603,S607
         ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
@@ -50,9 +57,19 @@ def checkout_sha(root: Path) -> str:
     diff = subprocess.run(  # noqa: S603,S607
         ["git", "-C", str(root), "diff", "HEAD", "--binary", "--no-color", "--no-ext-diff", "--no-textconv"], capture_output=True
     )
-    if diff.returncode != 0:
+    untracked = subprocess.run(  # noqa: S603,S607
+        ["git", "-C", str(root), "ls-files", "-z", "--others", "--exclude-standard", "--", *PRODUCT_FOLDERS], capture_output=True
+    )
+    if diff.returncode != 0 or untracked.returncode != 0:
         return "unknown"
-    return head.stdout.strip() + (f"-dirty-{hashlib.sha256(diff.stdout).hexdigest()[:12]}" if diff.stdout else "")
+    digest = hashlib.sha256(diff.stdout)
+    for name in sorted(filter(None, untracked.stdout.split(b"\0"))):
+        path = root / name.decode("utf-8", "surrogateescape")
+        if not path.is_file():
+            continue
+        digest.update(b"\0untracked\0" + name + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    changed = bool(diff.stdout) or any(untracked.stdout.split(b"\0"))
+    return head.stdout.strip() + (f"-dirty-{digest.hexdigest()[:12]}" if changed else "")
 
 
 def worker_env(arm: Arm, scratch: Path) -> dict[str, str]:

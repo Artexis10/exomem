@@ -40,6 +40,16 @@ A governed write in store mode SHALL commit every file it changes, the lexical c
 - **WHEN** the same sequence of page bytes is written once in file mode and once in store mode from the same starting vault
 - **THEN** the lexical page rows, semantic unit rows, graph nodes, graph edges, graph dependencies and parent references are equal, apart from columns that record write time or write order
 
+#### Scenario: A governed page's trash keeps its tombstone and receipt around the transaction
+- **WHEN** a store-mode delete or recovery moves a page that a governance policy restricts
+- **THEN** the receipt intent and the tombstone are written under the governance folder before the transaction, and the receipt settles after it from the store's rows and the vector and CLIP sidecars
+- **AND** reconcile settles a kill on either side of the transaction from the store, never from the Markdown projection
+
+#### Scenario: An active catalog publication follows the transaction that it names
+- **WHEN** a store-mode delete, move or recovery runs on a vault with an active governance catalog publication
+- **THEN** the catalog change is prepared before the writer's validation returns, the change and its log entry commit in one transaction, and the catalog publishes after it
+- **AND** a publication that fails after the transaction reports the catalog publication as uncertain
+
 ### Requirement: Markdown is a byte-exact projection
 In store mode, Exomem SHALL write each committed file to the vault as a byte-exact projection after the transaction commits. A projector SHALL make the projected file durable before it records the file's hash, size, modification time and revision in the projection manifest. At startup the projector SHALL remove its own unfinished temporary files and SHALL project every intent still queued. Several revisions of one file that queue before projection MAY coalesce into the latest one.
 

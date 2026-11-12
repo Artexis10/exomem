@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         help="session-close only: build each seeded vault's relation graph before the session, as a live vault has it "
         "(the arm's own reconcile, then wait until its recall_context reports the graph available)",
     )
+    run.add_argument("--hook-inject", choices=session_close.HOOK_INJECTS, help="session-close only: the retrieve hook's inject mode for every arm of the run (default mcp; working_set also turns on the hook's CLI rung)")
     run.add_argument("--credits-account", help="session-close only: select the maintained credits launcher account")
     run.add_argument("--credits-budget-usd", type=float, help="maximum requested for each capture or fresh process; requires account and reason")
     run.add_argument("--credits-reason", help="the maintained credits launcher's reason; requires account and budget")
@@ -238,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.client_mode is not None and args.suite != session_close.SUITE:
         raise SystemExit("--client-mode applies to the session-close suite only")
     args.client_mode = args.client_mode or session_close.DEFAULT_CLIENT_MODE
+    if args.hook_inject is not None and args.suite != session_close.SUITE:
+        raise SystemExit("--hook-inject applies to the session-close suite only")
+    args.hook_inject = args.hook_inject or session_close.DEFAULT_HOOK_INJECT
     if args.case_dir is not None and args.suite != session_close.SUITE:
         raise SystemExit("--case-dir applies to the session-close suite only")
     if args.ready_graph and args.suite != session_close.SUITE:
@@ -330,6 +334,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         client_mode=args.client_mode,
         credits=args.credits,
         ready_graph=args.ready_graph,
+        hook_inject=args.hook_inject,
     )
     return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 
