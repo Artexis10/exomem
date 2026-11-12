@@ -74,6 +74,15 @@ def _phase(log: Path, *args: str) -> dict:
     return _finish_phase(_start_phase(log, *args), log)
 
 
+def _verify_remote(url: str, *, archive_bytes: int, archive_sha256: str, max_bytes: int = PLENTY) -> dict:
+    # A refusal's detail names the cause; a bare `match=` on the code would drop it.
+    try:
+        return cloud_export.verify_remote_export(url, cell_id=CELL, archive_bytes=archive_bytes,
+                                                 archive_sha256=archive_sha256, max_bytes=max_bytes)
+    except cloud_export.ExportRefused as error:
+        pytest.fail(f"{error.code} {error.detail}")
+
+
 def test_an_export_carries_every_member_and_each_evicted_original_byte_identical(
         cell: Cell, storage: dict, tmp_path: Path, tmp_path_factory, monkeypatch):  # noqa: F811
     """Defect: the archive omits an evicted original, live or in Trash, or a note whose companion header cannot be
@@ -325,9 +334,8 @@ def test_an_evicted_original_above_the_librarys_per_file_default_passes_the_plan
                                          max_parts=10, max_bytes=PLENTY)
     PartStore.objects["/archive?versionId=exact"] = (
         staging / cloud_export_steps.EXPORT_DIR / cloud_export_steps.SPOOL_NAME / "part-00001").read_bytes()
-    verified = cloud_export.verify_remote_export(f"{storage['base']}/archive?versionId=exact", cell_id=CELL,
-                                                 archive_bytes=packed["bytes"], archive_sha256=packed["sha256"],
-                                                 max_bytes=PLENTY)
+    verified = _verify_remote(f"{storage['base']}/archive?versionId=exact",
+                              archive_bytes=packed["bytes"], archive_sha256=packed["sha256"])
 
     assert (packed["parts"], packed["evicted"], verified["verified"]) == (1, 1, True)
 

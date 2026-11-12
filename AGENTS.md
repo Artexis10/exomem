@@ -10,6 +10,10 @@ Before connector diagnosis or service/index operations, read `docs/agent-guidanc
 
 Read `CONTRIBUTING.md` before committing: use the pinned project-local uv writer and run the public-artifact privacy gate. Keep runtime tests in temporary state.
 
+## CI load: the PR tier is the merge evidence
+
+`ci.yml` runs one fast tier per pull request — including a py3.13 changed-tests job — and the Full tier on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs ~800 runner-minutes across 147 jobs. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A Full-only failure that reaches `main` is fixed forward there.
+
 ## Delegated worker tasks
 
 When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief, first read `docs/agent-guidance/workers.md`. Its scope, verification and no-push rules apply to those delegated workers. The current orchestrator owns integration; Codex and Claude can both hold that role. Ordinary inline work follows the shared task-routing rules.
@@ -43,6 +47,15 @@ The hard rule: **keep it generic.** `tests/test_scaffold_no_leak.py` fails if an
 personal name, product, or vault-structure label appears in the scaffold — or
 anywhere under `src/exomem/`. If a test flags a token, genericize it; don't add it
 to an allowlist.
+
+**Pin every install line.** Public-skill reviewers reject instructions that
+install or run code from a mutable source. A shipped doc that shows an install
+or run command for the package writes `<exomem-release>` where the version goes
+(`pip install exomem==<exomem-release>`, `uvx exomem@<exomem-release>`); every
+packaging and install path fills it with the release it ships, from
+`package_skills.release_version()`. Never write `exomem@latest`, an unversioned
+`uvx exomem`, or `pip install exomem` without that placeholder — the OpenAI
+submission lint fails the build on them.
 
 (Maintainer-only: the personal claude.ai `.skill` zip is built by
 `scripts/rebuild-schema-zip.py` **from this same scaffold**, overlaying only your real

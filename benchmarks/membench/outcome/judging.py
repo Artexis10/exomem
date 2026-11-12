@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import subprocess
 import threading
@@ -21,14 +22,16 @@ from epistemic.journeys.f27_replay import discover_agent_envelope, refuse_unsafe
 
 from membench.utility.switch_eval.judge import JudgeError, _refuse_tool_use, claude_argv, codex_argv
 
+from . import billing
 from .isolation import claude_env
 
 #: A judge backend per model family; the choice is the operator's, the default model is the strongest one.
 DEFAULT_MODELS = {"claude": "claude-opus-5-5", "codex": "gpt-6.1-sol"}
 #: The Codex judge's reasoning effort. The Claude judge takes the CLI default, as before.
 DEFAULT_EFFORT = {"claude": None, "codex": "high"}
-#: The judge a decision needs (PREREGISTRATION section 7, sequence 10): Claude Opus on the Claude
-#: subscription. A held-out report judged by anything else never reads as decision evidence.
+#: The judge a decision needs (PREREGISTRATION section 7, sequence 10): Claude Opus, paid from the
+#: Claude subscription or — once the sequence-11 amendment is acknowledged — from API credits. A
+#: held-out report judged by another model reads as instrument evidence (``gate.evidence_of``).
 DECISION_JUDGE = ("claude", DEFAULT_MODELS["claude"])
 #: How a judge backend relates to the actor, which always runs through the Claude CLI. A Claude judge is
 #: the actor's own model family, so its reports say so; a Codex judge re-judges a sample for agreement only.
@@ -88,7 +91,13 @@ class Judge:
         self.empty_mcp = work / "no-mcp.json"
         self.empty_mcp.write_text('{"mcpServers": {}}')
         self.schema_file = work / "verdict-schema.json"
-        self.env = claude_env()[0]
+        # Only the Claude CLI bills Anthropic: a credits declaration without a key refuses here, before any
+        # judgement. A Codex judge is billed by another provider and gets no Anthropic key.
+        self.env = (
+            claude_env()[0]
+            if spec.backend == "claude"
+            else {k: v for k, v in os.environ.items() if k != billing.KEY_VARIABLE}
+        )
 
     def argv(self, schema: dict, out: Path) -> list[str]:
         """The judge's command. Both backends read the prompt from stdin: a matter's deliverable can
@@ -243,6 +252,18 @@ def write_sample(judge_run: Path, sample_run: Path, fraction: float, seed: int) 
     return len(chosen)
 
 
+def stored_record(path: Path) -> dict:
+    """A ``judge.json`` as read. One from before the billing field gets ``subscription``, marked inferred.
+
+    Those runs followed the protocol that put decision judges on the subscription and faulted their actors
+    on any other source, but the judge's own environment was never checked. The file stays as written.
+    """
+    record = json.loads(path.read_text())
+    if record.get("backend") == "claude" and "billing" not in record:
+        record = {**record, "billing": billing.DEFAULT, "billing_inferred": True}
+    return record
+
+
 def judge_all(
     judge_dir: Path,
     spec: JudgeSpec,
@@ -258,13 +279,20 @@ def judge_all(
     One judging directory has one judge: a different spec refuses, so a report never mixes judges.
     """
     stored = judge_dir / "judge.json"
-    if stored.exists() and json.loads(stored.read_text()) != spec.record():
-        raise SystemExit(
-            f"{judge_dir} was judged by {stored.read_text()}; one judge judges every item. "
-            f"Judge with that spec, or use another --run-id"
-        )
-    stored.write_text(json.dumps(spec.record(), indent=2))
+    # The claude judge's billing is declared, not observed: its json result carries no credential source.
+    claude = spec.backend == "claude"
+    record = {**spec.record(), **({"billing": billing.declared()} if claude else {})}
+    if stored.exists():
+        have = {k: v for k, v in stored_record(stored).items() if k != "billing_inferred"}
+        if have != record:
+            raise SystemExit(
+                f"{judge_dir} was judged by {stored.read_text()}; one judge judges every item. "
+                f"Judge with that spec and billing ({json.dumps(record)}), or use another --run-id"
+            )
+    # The guard runs before the record: a refused judge leaves no file that locks the directory.
     judge = Judge(spec, judge_dir)
+    if not stored.exists():
+        stored.write_text(json.dumps(record, indent=2))
     sample = math.ceil(len(items) * rejudge_fraction)
     rejudge = random.Random(seed + 1).sample(items, sample)
     work = [(i, "verdicts") for i in items] + [(i, "rejudge") for i in rejudge]

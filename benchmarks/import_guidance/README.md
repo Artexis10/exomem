@@ -54,6 +54,8 @@ Capture and fresh rows retain `client_mode`, the actual argv, supplied settings,
 
 The native Claude route remains the default. For the maintained credits launcher, supply `--credits-account`, `--credits-budget-usd` and `--credits-reason` together. These options apply only to session-close. Empty account or reason values and nonpositive or nonfinite budgets fail before executable discovery.
 
+`--hook-inject {mcp,working_set}` (session-close only, default `mcp`) pins the retrieve hook's inject mode for every arm of a run. It is recorded as `hook_inject` in each `runs.jsonl` row and named in the `session-score` report. `working_set` also turns on the hook's CLI rung against the arm's pinned vault, points the hook away from any live service's `service.env`, and zeroes the hook's length, control-prompt and cooldown gates, as `mcp` mode does. Run each mode into its own `--out` folder. `outcome.json` belongs to the membench outcome command and is not written here.
+
 The adapter resolves `harness` on PATH without a shell. It uses `claude-credits run --stream-json` with the existing `--budget` option; the launcher owns framing, model and session flags. The remaining actor flags preserve strict MCP access, tool restrictions, settings, hook events and the selected client mode.
 
 The budget is the maximum requested for **each independent process**, including fresh recall. It is neither a decision-wide cap nor spending authority. The evaluation owner still agrees the total budget and reconciles costs. The maintained launcher must ship its literal duplex support before a programme run selects this route. Missing launchers and failed payer launches never fall back to subscription Claude.
@@ -152,3 +154,11 @@ Limits:
 - The graph state is read from the `map` block of the reply. A reply without a `map` block, or an arm that does not report the state, stops the recording with a message that names what it saw.
 - Whether `-p` mode emits hook responses under `--include-hook-events` is unverified. The report counts runs with and without them and does not gate on the count.
 - The judge model is in the same family as the agents.
+
+## Follow-up suite
+
+This family measures recall on short follow-up turns: a carried subject ("and the deadline?"), a subject switch ("and for Harbor?"), a continuation after an agent proposal ("do that", "continue") and an acknowledgement ("ok, thanks"). It lives in `scenarios/follow-up/` and uses the session-close format, with its own seeds, keys and `rubric.json`.
+
+- Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.
+- The scorer's capture judge never reads replies, so `session-score` yields only the deterministic page checks (the session must change no page). Reply quality is judged by the replay batch: run `PYTHONPATH=benchmarks python -m import_guidance.followup_judge_scenarios --case-dir <cases> --out <judge dir>`, then `judge-prepare --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>` and, once the judge returns lines, `judge-import --judgments <file> --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>`.
+- `answer-keys/<id>.json` is the session-close key; `answer-keys/<id>.marks.json` carries the same reference for the judge batch. The criteria F1 to F3 apply to the final reply only.

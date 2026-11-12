@@ -440,14 +440,37 @@ def test_success_is_flushed_to_disk_before_it_is_reported(
 ) -> None:
     """The caller deletes the ciphertext once it commits; a crash must not leave empty files."""
 
-    synced: list[bool] = []
-    monkeypatch.setattr(cloud_import.os, "sync", lambda: synced.append(True))
+    flushed: list[int] = []
+    fsync = os.fsync
+
+    def recording(descriptor: int) -> None:
+        flushed.append(descriptor)
+        fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", recording)
 
     _unpack(_archive(_file("a.md", b"a")), tmp_path / "staging")
-    assert synced == [True]
+    flushed_before = len(flushed)
+    assert flushed_before > 0  # the member and the directories that hold it
 
     _refusal(_archive(_typed("l", tarfile.SYMTYPE, linkname="/")), tmp_path / "refused")
-    assert synced == [True]
+    assert len(flushed) == flushed_before  # a refusal writes nothing, so nothing is flushed
+
+
+def test_an_unsupported_timestamp_does_not_refuse_a_valid_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows can lack no-follow timestamp updates; imported bytes must still land."""
+
+    def unsupported(*args, **kwargs) -> None:
+        raise NotImplementedError("utime: follow_symlinks unavailable on this platform")
+
+    monkeypatch.setattr(os, "utime", unsupported)
+    staging = tmp_path / "staging"
+    result = _unpack(_archive(_file("note.md", b"note\n")), staging)
+
+    assert result.files == 1
+    assert (staging / "note.md").read_bytes() == b"note\n"
 
 
 def _pax_member(name: str, data: bytes, pax: dict[str, str]) -> bytes:
@@ -458,6 +481,21 @@ def _pax_member(name: str, data: bytes, pax: dict[str, str]) -> bytes:
         info.pax_headers = pax
         archive.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links, modes and FIFOs")
+def test_the_flush_tolerates_what_it_did_not_write(tmp_path: Path) -> None:
+    """A walked tree can hold entries the caller never wrote; the flush must not die on them."""
+    root = tmp_path / "tree"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.md").write_bytes(b"a")
+    readonly = root / "sub" / "b.md"
+    readonly.write_bytes(b"b")
+    readonly.chmod(0o400)
+    (root / "dangling").symlink_to("gone")
+    os.mkfifo(root / "pipe")
+
+    cloud_import.flush_to_disk(root)
 
 
 def test_a_leading_zero_block_does_not_hide_the_archive(tmp_path: Path) -> None:

@@ -50,11 +50,11 @@ The engineering primary-source roster was not consulted for this design, because
 
 ### D1. A release sets the target image through Substrate's release route
 
-A new workflow, `.github/workflows/cloud-deploy.yml`, runs on two events:
-- the release workflow completes with success on a release tag. Only a run on a `v*` tag publishes, so the trigger filters on `workflow_run.head_branch`. A push to `main` that publishes nothing therefore starts no run;
-- a dispatch on `main`, with no inputs. The platform upgrade command and the runbook's manual upgrade end with `gh workflow run cloud-deploy.yml --ref main` (D2).
+A new workflow, `.github/workflows/cloud-deploy.yml`, runs on a dispatch on `main`, with no inputs. Three callers send it:
+- the release workflow's tag run, in its last job, after it publishes and attests the images. A push to `main` that publishes nothing therefore starts no run;
+- the platform upgrade command and the runbook's manual upgrade, which end with `gh workflow run cloud-deploy.yml --ref main` (D2).
 
-The release workflow's tag run starts from a dispatch with `github.token`. GitHub may not start another workflow from such a run's completion, and task 2.1 proves the trigger from a real tag publish. If no `workflow_run` arrives, the release workflow's tag run ends with an explicit dispatch of `cloud-deploy` on `main` instead. GitHub starts a run from a `workflow_dispatch` that `github.token` sends.
+The release workflow's tag run starts from a dispatch with `github.token`, and GitHub starts no other workflow from such a run's completion. The first design used a `workflow_run` trigger. Tags v0.172.0, v0.173.0 and v0.174.0 started no `cloud-deploy` run (2026-11-11 to 2026-11-12), so the trigger was replaced by the explicit dispatch. GitHub starts a run from a `workflow_dispatch` that `github.token` sends.
 
 Each run acts only on the newest published release. Steps:
 
@@ -70,7 +70,7 @@ The workflow prints error codes and counts only. It prints no cell ID, no tenant
 
 **Custody.**
 - `EXOMEM_DEPLOY_TOKEN` is a secret of the `cloud-deploy` environment. Its deployment branch policy admits only `main`.
-- GitHub runs a `workflow_run` workflow from the default branch's file, and `--ref main` runs `main`'s file. Anyone with write can dispatch the workflow on another ref, but the branch policy then withholds the token.
+- `--ref main` runs `main`'s file. Anyone with write can dispatch the workflow on another ref, but the branch policy then withholds the token.
 - The workflow holds no kubeconfig and no private-network peer. It calls Substrate's public admin URL over HTTPS only.
 - One concurrency group, without cancel-in-progress, serializes runs. GitHub replaces a pending run with a newer one. Each run reads the newest release, so the collapse loses nothing.
 - The poll interval and the poll timeout are repository variables.
@@ -175,7 +175,7 @@ The rule needs no list of digests. The phase-1 chart ships the barrier file, so 
 - keeps the attempt's restore point until the hold ends: its snapshot and clone, or its off-site backup. A person's manual restore then uses the attempt's own state (task 3.3).
 
 `cellctl` never re-applies a target for a cell in `forward-only-held`. The phase replaces today's rule that reads 0 replicas as "target not applied". The hold ends only by a person's action:
-- The person fixes forward: sets a fixed release as `cell_image` with the admin token, then clears the pause. Clearing the pause ends the hold. `cellctl` deletes the held attempt's snapshot and clone, because the quota admits one clone, and starts one new attempt toward the current target. That attempt is again a crossing attempt, so a second miss holds again and waits for a person.
+- The person fixes forward: sets a fixed release as `cell_image` with the admin token, sets the held cell's own image (`desired_image`) to the same release, then clears the pause. Clearing the pause ends the hold. `cellctl` deletes the held attempt's snapshot and clone, because the quota admits one clone, and starts one new attempt. A held tenant cell retries its pinned target, so without its own image the attempt repeats the target that missed. With it, the attempt pins the fixed release. That attempt is again a crossing attempt, so a second miss holds again and waits for a person. Once the cell is Ready, the person clears its own image, so that later releases reach it. The resumed attempt starts at once when the pause clears, even while the canary is behind its new target. The canary's attempt goes toward its current target. A tenant cell goes toward its own image when a person set one, and otherwise retries its pinned target, which the canary ran before the attempt began. A cell's own image overrides the canary-first rule, so a person who sets it can choose a release the canary has not run. The runbook tells that person to choose only a release the canary already runs.
 - Or the person restores the cell by hand with `docs/runbooks/cloud-operator-restore.md`, sets its `desired_image`, then clears the pause.
 
 After task 1.9 ships, several cells can be in the forward-only hold at once. One clear of the pause ends every such hold.
@@ -241,6 +241,7 @@ Further rules:
 
 **Pinned attempts.**
 - When an attempt starts, `cellctl` writes its target to the StatefulSet annotation `exomem.io/upgrade-target`. Every later pass of that attempt reads the pin and never recomputes the target. A new `cell_image` during an attempt therefore reaches that cell only through its next attempt.
+- An attempt that started before pinning existed has no pin. `cellctl` pins it on its first pass to the image that the cell applied, or ends it on the cell's current image when none applied.
 - When the rollout pauses, `cellctl` ends every attempt that has not applied its pinned target yet. It restarts that cell on its current image, clears the hold, and records nothing as a failure.
 - While paused, `cellctl` applies no target to any cell. An attempt that applied its target before the pause finishes its readiness wait. On a miss, its restore returns the cell to its previous image, or the forward-only hold keeps it stopped.
 - The first failure sets `held_cell_id`. A later concurrent failure keeps it, and records its own error on its cell's annotations and in the log.
@@ -369,9 +370,9 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 4. Run a server-side dry run.
 5. Probe Substrate's columns: run the release's `cellctl` column check, read-only, against the control database.
 6. Compare the secret contracts of the live release and the tag. A change with no barrier entry stops the command and names the omission.
-7. List the `platform` barriers between the live release and the tag (D3). Each one needs `--crossed <id>`.
+7. List the open barriers (D3): those between the live release and the tag, and those at or below the tag that the newest successful platform Deployment does not list. Each open `platform` barrier needs `--crossed <id>`; an open `cell` barrier may take one.
 
-The command reads the live release from Helm's release metadata, not from the platform Deployment. A wrong record therefore cannot mislead it.
+The command reads the live release from Helm's release metadata, not from the platform Deployment. The live range always counts, so a record that runs ahead of the platform cannot hide a barrier. The record only adds barriers, such as one left unrecorded by a failed verify. Any open one-way platform barrier removes `--atomic`.
 
 **Upgrade.**
 - Apply the namespaces. Then run `helm upgrade` with `--wait` and the timeout from a value.
@@ -503,6 +504,9 @@ These steps are not in this change's first phases.
 - **A default hour may be busy** for a new cell's tenant. It lasts until the cell observes enough of its lookback.
 - **Daylight saving** moves a local quiet hour by one UTC hour. The daily recompute follows it after the lookback.
 - **A forward-only failure** keeps the cell down until a person acts (D3).
+- **Open (task 1.14):** the origin proof and the artifact grant are signed once per request. Sign them per attempt before task 1.4 raises the hold budget above about 50 s.
+- **Open (task 1.15):** the cloud-rehearsal harness must send `release` with `cellImage`.
+- **Open (task 1.16):** the gateway's server-slot leave and retake around a hold has no test.
 - **A key rotation's restarts** follow the windows. The rotation's retire step waits for observed convergence, and an urgent re-render uses the runbook's bypass (D4).
 - **The held upgrade slot** stays taken for the off-site backup after Ready, about 30–90 s (est.) per attempt (D6).
 

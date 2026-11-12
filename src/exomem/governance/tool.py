@@ -42,7 +42,6 @@ from .. import (
 )
 from ..kbdir import kb_dirname
 from ..restore_journal import CONTINUITY_EVIDENCE, MEMBERSHIP_EVIDENCE
-from ..vault_store import targets as store_targets
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -5433,16 +5432,47 @@ def _actual_backfill_value(vault_root: Path, companion_path: str) -> dict[str, A
     }
 
 
+def _publish_backfilled_companion(
+    vault_root: Path, plan: companion_backfill.BackfillPlan
+) -> None:
+    """Replace the companion with the plan's target bytes, bound to the bytes the plan read.
+
+    A store-mode vault holds the companion page, so one store commit replaces it, bound to its
+    stored hash; the journal, the receipt and the terminal around it are governance's own. A file
+    is published in place, bound to its identity and hash. Either raises when the companion
+    changed since the plan read it: ``ContentHashMismatchError`` and ``PathGuardError`` from the
+    store, and ``ReservedPathLeafError`` from the disk.
+    """
+    prior_sha256 = hashlib.sha256(plan.prior_bytes).hexdigest()
+    from ..vault_store import availability as store_availability
+
+    writer = store_availability.page_writer(vault_root)
+    if writer is None:
+        reserved_paths.publish_generic_bytes(
+            vault_root,
+            plan.companion_path,
+            plan.target_bytes,
+            expected_identity=plan.companion_identity,
+            expected_sha256=prior_sha256,
+        )
+        return
+    from ..vault_store import batch as store_batch
+
+    store_batch.commit_batch(
+        writer,
+        [
+            vault.PlannedWrite(
+                Path(vault_root) / plan.companion_path,
+                plan.target_bytes.decode("utf-8"),
+                expected_hash=prior_sha256,
+            )
+        ],
+        vault_root=vault_root,
+    )
+
+
 def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     who = _require_owner(kwargs.get("principal"), vault_root=vault_root)
-    # The companion is `<artifact>.md`, a page, and this commit publishes it to disk after its
-    # journal arms: a refusal after that point would leave the journal open, so it refuses first.
-    store_targets.refuse_in_store_mode(
-        vault_root,
-        "companion_backfill",
-        "it publishes the companion page to disk, and a store-mode vault changes a page only "
-        "through a store commit",
-    )
     proposal_id = str(kwargs.get("proposal_id") or "")
     if not proposal_id:
         raise GovernanceError("PROPOSAL_UNKNOWN", "proposal_id is required")
@@ -5649,14 +5679,15 @@ def _backfill_commit(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
     if kwargs.get("crash_at") == "after_arming":
         raise GovernanceCrash("after_arming")
     try:
-        reserved_paths.publish_generic_bytes(
-            vault_root,
-            plan.companion_path,
-            plan.target_bytes,
-            expected_identity=plan.companion_identity,
-            expected_sha256=hashlib.sha256(plan.prior_bytes).hexdigest(),
-        )
-    except reserved_paths.ReservedPathLeafError as error:
+        _publish_backfilled_companion(vault_root, plan)
+    except vault.PathGuardError as error:
+        if error.code not in (vault.PATH_GUARD_CHANGED, vault.PATH_GUARD_CONTENT):
+            raise
+        reconcile_governance_operations(vault_root)
+        raise GovernanceError(
+            "STALE_COMPANION_BACKFILL", "companion changed during publication"
+        ) from error
+    except (reserved_paths.ReservedPathLeafError, vault.ContentHashMismatchError) as error:
         reconcile_governance_operations(vault_root)
         raise GovernanceError(
             "STALE_COMPANION_BACKFILL", "companion changed during publication"

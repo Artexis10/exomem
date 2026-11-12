@@ -185,12 +185,21 @@ def import_judgments(
     if not items:
         raise SystemExit(f"{out / 'private' / 'judge-map.json'} holds no items; run judge-prepare first")
     current = {run_id(run): prompt_sha256(prompt) for run, _criteria, prompt in blind_items(stage_b, stage_c, scenarios)}
+    mapped = {run_id(entry["run"]) for entry in items.values() if entry["twin_of"] is None}
+    if not mapped & current.keys():
+        raise SystemExit(
+            f"The runs given hold none of the {len(mapped)} runs in {out / 'private' / 'judge-map.json'}. "
+            "Pass the same --stage-b and --stage-c run files that judge-prepare read."
+        )
     rows, agreed, usable = [], 0, 0
     doubled = [entry for entry in items.values() if entry["twin_of"] is not None]
     for entry in items.values():
         verdict, outcomes = item_verdict(entry, lines)
         if entry["twin_of"] is None:
-            if current.get(run_id(entry["run"])) != entry.get("prompt_sha256"):
+            if run_id(entry["run"]) not in current:
+                absent = "the run is not in the runs given to judge-import; pass the run files that judge-prepare read"
+                verdict, outcomes = checks.UNKNOWN, [checks.Outcome(c["id"], checks.UNKNOWN, absent) for c in entry["criteria"]]
+            elif current[run_id(entry["run"])] != entry.get("prompt_sha256"):
                 # Bound to the exact prompt: a rerun answer or a changed reference must not inherit this judgment.
                 stale = "the run's answer, reference or criteria changed after judge-prepare; prepare and judge it again"
                 verdict, outcomes = checks.UNKNOWN, [checks.Outcome(c["id"], checks.UNKNOWN, stale) for c in entry["criteria"]]

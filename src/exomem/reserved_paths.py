@@ -1917,9 +1917,10 @@ def _refuse_stored_pages(
     These writers put bytes on disk or take them away, and a stored page changes only through a
     store commit: a file written there is an outside edit that the importer adopts, so the store
     and the files disagree. A binary, such as a metadata sidecar, is disk-first by design and
-    passes, as does any path the store does not own. A caller that routes the change through the
-    store never reaches this check, and a wrong refusal costs the owner a rollback to run that one
-    operation on files.
+    passes, as does any path the store does not own. A folder that the store holds no page or
+    binary record below passes too: renaming it changes nothing that the store holds. A caller that
+    routes the change through the store never reaches this check, and a wrong refusal costs the
+    owner a rollback to run that one operation on files.
     A path that is not a valid spelling passes: the writer's own check names that error.
     """
     from .vault_store import availability, mode, ownership
@@ -1935,12 +1936,22 @@ def _refuse_stored_pages(
             if folder
             else ownership.classify(rel) is ownership.Ownership.PAGE
         )
-        if owned and mode.store_mode_active(vault_root):
+        if owned and mode.store_mode_active(vault_root) and (
+            not folder or _store_holds_below(vault_root, rel)
+        ):
             raise availability.unrouted(
                 operation,
                 f"it would write to or remove {rel}, which the store holds and only a store "
                 "commit may change",
             )
+
+
+def _store_holds_below(vault_root: Path, rel: str) -> bool:
+    """Whether a store-mode vault's store holds a page or a binary record below the folder ``rel``."""
+    from .vault_store import read
+
+    with read.snapshot(vault_root) as view:
+        return view.holds_below(rel)
 
 
 def publish_generic_bytes(

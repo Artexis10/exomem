@@ -11,6 +11,7 @@ a different `restore_path` if the original location is now occupied.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 import itertools
@@ -37,6 +38,7 @@ from .trash_metadata import METADATA_SUFFIX, TRASH_SUBPATH
 from .trash_metadata import original_path as trash_original_path
 from .vault import (
     DIRECTORY_TRANSITION_LIMIT,
+    CreateOnlyConflict,
     DirectoryCensusGuard,
     PathGuard,
     PathGuardError,
@@ -959,17 +961,30 @@ def _recover_in_store(
     relation_reviews: Mapping[str, Mapping[str, str]] | None,
     fold: bool,
 ) -> RecoverResult:
-    """Recover a trashed page, or a trashed folder of pages, in one store transaction.
+    """Recover a trashed page, binary or folder in one store transaction.
 
     The store moves each page back with its rows and drops its record of the sidecar; the projector
-    moves the files afterwards. The semantic preflight and commit are file mode's, judged against
-    the stored pages. A trashed file whose bytes stay on disk, a folder that holds one, and a page
-    that carries its original or its part pages still refuse by name: they have no store form yet.
+    moves the page files afterwards. Each binary, and each file or folder the store does not own,
+    is renamed back first, and the commit records the binaries at their restored paths
+    (``vault_store.binaries`` names the window); a folder the store holds nothing below is renamed
+    whole. A stored original's reference-only companion is retired in the same commit, and a page's
+    part pages come back with it. The commit binds what it read and that nothing sits at or below
+    the destination, so a page that a commit adds there meanwhile refuses with DEST_EXISTS and every
+    rename is undone. The semantic preflight and commit are file mode's, judged against the stored
+    pages; a binary alone has none, as in file mode. A governed item keeps its recovery marker,
+    tombstone and receipt around the commit (``vault_store.governed``). The log entry commits with
+    the restore, and an active catalog publication publishes after the commit: the semantic commit
+    prepares and publishes it for a recovery with pages, as in file mode, and this writer for one
+    of binaries alone.
     """
+    from . import extraction_parts
     from .vault_store import availability as store_availability
     from .vault_store import batch as store_batch
+    from .vault_store import binaries, governed
+    from .vault_store import media as store_media
+    from .vault_store import ownership as store_ownership
     from .vault_store import read as store_read
-    from .vault_store.write import BinaryDelete, Expect, PageMove, StoreConflict
+    from .vault_store.write import BinaryDelete, Expect, PageDelete, PageMove, StoreConflict
 
     root = Path(vault_root)
     writer = store_availability.page_writer(root)
@@ -994,14 +1009,9 @@ def _recover_in_store(
                     reason="trash directory exceeds the bounded recovery census",
                 )
             stored = view.bodies(below)
-        if below:
+            held_below = view.holds_below(trash_rel)
+        if held_below or (root / trash_rel).is_dir():
             trash_kind = "directory"
-        elif (root / trash_rel).is_dir():
-            raise store_availability.unrouted(
-                "recover_from_trash",
-                "the store holds no page below this folder, and a folder of files whose bytes "
-                "stay on disk has no store form",
-            )
         else:
             try:
                 trash_abs, trash_rel = store_targets.resolve_existing(root, trash_path)
@@ -1025,49 +1035,116 @@ def _recover_in_store(
             allow_curated=allow_curated,
             fold=fold,
         )
+
+        def restored(source: str) -> str:
+            return f"{restore_rel.rstrip('/')}/{source[len(trash_rel) + 1:]}"
+
         # Each trashed page and where it goes back to; a lone page is a folder of one.
         moves = {
-            source: (
-                restore_rel
-                if trash_kind == "file"
-                else f"{restore_rel.rstrip('/')}/{source[len(trash_rel) + 1:]}"
-            )
-            for source in stored
+            source: restore_rel if trash_kind == "file" else restored(source) for source in stored
         }
+        parts_moves: dict[str, str] = {}
+        parts_hashes: dict[str, str] = {}
+        entries: list[binaries.Entry] = []
+        expect: dict[str, Expect] = {}
+        companion: tuple[str, str] | None = None
+        keep_metadata = False
+        if trash_kind == "directory":
+            with store_read.snapshot(root) as view:
+                listing = store_targets.folder_files(
+                    root,
+                    view,
+                    trash_rel,
+                    stored,
+                    operation="recover_from_trash",
+                    error_class=RecoverError,
+                    failed_code="RECOVER_FAILED",
+                )
+            if len(stored) + listing.file_count > DIRECTORY_TRANSITION_LIMIT:
+                raise RecoverError(
+                    code="PATH_GUARD_LIMIT",
+                    reason="trash directory exceeds the bounded recovery census",
+                )
+            if stored or listing.recorded:
+                entries = [
+                    *(binaries.Entry(rel, restored(rel)) for rel in listing.files),
+                    *(binaries.Entry(rel, restored(rel), folder=True) for rel in listing.folders),
+                ]
+            else:
+                # The store refers to nothing below the folder, so it moves back whole.
+                entries = [binaries.Entry(trash_rel, restore_rel, folder=True)]
+            # What the folder held when it was read, and that nothing sits at or below where it goes.
+            expect[trash_rel] = Expect(pages_below=len(stored), binaries_below=listing.recorded)
+            expect[restore_rel] = Expect(absent=True, pages_below=0, binaries_below=0)
+        elif stored:
+            # A page's part pages come back beside it: a dot folder on disk, or pages in the store.
+            parts = extraction_parts.folder_for(Path(trash_rel)).as_posix()
+            parts_back = extraction_parts.folder_for(Path(restore_rel)).as_posix()
+            with store_read.snapshot(root) as view:
+                part_pages = list(view.pages(f"{parts}/"))
+                taken = view.holds_below(parts_back)
+            if part_pages or (root / parts).is_dir():
+                if taken or (root / parts_back).exists():
+                    raise RecoverError(
+                        code="DEST_EXISTS",
+                        reason=(
+                            f"the part pages of {restore_rel!r} would land on {parts_back!r}, "
+                            "which already exists. Choose a different restore_path, or move it "
+                            "out of the way first."
+                        ),
+                    )
+            for part in part_pages:
+                parts_moves[part.path] = f"{parts_back}{part.path[len(parts):]}"
+                parts_hashes[part.path] = part.sha256
+            if not part_pages and (root / parts).is_dir():
+                entries.append(binaries.Entry(parts, parts_back, folder=True))
+        else:
+            entries.append(binaries.Entry(trash_rel, restore_rel))
+            try:
+                retained = trash_metadata.reference_companion(root, trash_rel)
+            except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                keep_metadata = True
+            else:
+                if retained is not None:
+                    companion_path, snapshot = retained
+                    companion = (companion_path, hashlib.sha256(snapshot.data).hexdigest())
+        destinations = [
+            entry.dst
+            for entry in entries
+            if not entry.folder
+            and store_ownership.classify(entry.dst) is store_ownership.Ownership.BINARY
+        ]
         from .collection_store import authority as collection_authority
 
         # Decided before the existence check below, so it cannot tell a withheld view from none.
         collection_authority.refuse_view_paths(
-            root, (restore_rel, *moves.values()), RecoverError
+            root,
+            (restore_rel, *moves.values(), *parts_moves.values(), *(e.dst for e in entries)),
+            RecoverError,
         )
         # Before the preflight: the commit refuses such a path after the slots have committed.
-        store_targets.refuse_crossing("recover_from_trash", moves.values())
+        store_targets.refuse_crossing(
+            "recover_from_trash", (*moves.values(), *parts_moves.values(), *destinations)
+        )
         if _restore_taken(root, trash_kind, restore_rel):
             raise _destination_exists(restore_rel)
-
-        refusal = (
-            store_targets.folder_form_gap(root, trash_rel, stored, error_class=RecoverError)
-            if trash_kind == "directory"
-            else store_targets.page_only_form_gap(
-                root, trash_rel, stored.get(trash_rel), destination=restore_rel
-            )
-        )
-        if refusal is not None:
-            raise store_availability.unrouted("recover_from_trash", refusal)
-        store_targets.active_catalog_gap(
+        content_paths = tuple(sorted({*moves.values(), *destinations}))
+        # The log entry commits with the restore, so the catalog names the writes file mode's does.
+        log_plan = plan_log_entry(
             root,
-            "recover_from_trash",
-            error_class=RecoverError,
-            content_paths=tuple(sorted(moves.values())),
+            date_iso=(today or dt.date.today()).isoformat(),
+            op="recover_from_trash",
+            rel_path_no_ext=restore_rel.removesuffix(".md"),
+            body=_log_body(trash_rel, restore_rel, trash_kind, curated if allow_curated else None),
         )
 
-        entries: list[semantic_writes.RecoveryEntry] = []
+        recovery_entries: list[semantic_writes.RecoveryEntry] = []
         for source, body in stored.items():
             try:
                 text = body.decode("utf-8")
             except UnicodeDecodeError as error:
                 raise RecoverError(code="RECOVER_FAILED", reason=str(error)) from error
-            entries.append(
+            recovery_entries.append(
                 semantic_writes.RecoveryEntry(
                     source,
                     trash_original_path(
@@ -1082,90 +1159,153 @@ def _recover_in_store(
                 )
             )
         with store_read.snapshot(root) as view:
+            relocation = binaries.plan(view, entries)
             # The store drops its record of the sidecar, and the projector removes the file.
             drop_sidecar = (
-                sidecar_guard.leaf_policy == "content" and view.binary(sidecar_rel) is not None
+                not keep_metadata
+                and sidecar_guard.leaf_policy == "content"
+                and view.binary(sidecar_rel) is not None
             )
-        try:
-            preflight = semantic_writes.preflight_recovery(
-                root,
-                entries=entries,
-                # A folder's guard binds that no page sits at its own path; `_restore_taken` judged
-                # the pages below it.
-                destination_root_guard=PathGuard.of_stored(restore_rel, None),
-                recovery_sidecar_guard=sidecar_guard,
-                catalog_content_paths=tuple(sorted(moves.values())),
-                catalog_publication_now=int(time.time()),
-                relation_reviews=relation_reviews,
+        preflight = None
+        if recovery_entries:
+            try:
+                preflight = semantic_writes.preflight_recovery(
+                    root,
+                    entries=recovery_entries,
+                    # A folder's guard binds that no page sits at its own path; the commit binds the
+                    # pages and records below it.
+                    destination_root_guard=PathGuard.of_stored(restore_rel, None),
+                    recovery_sidecar_guard=sidecar_guard,
+                    catalog_auxiliary_writes=log_plan.writes,
+                    catalog_content_paths=content_paths,
+                    catalog_publication_now=int(time.time()),
+                    relation_reviews=relation_reviews,
+                )
+                if validate_only:
+                    # The commit prepares this batch again after its rechecks, as file mode's does.
+                    semantic_writes.prepare_recovery_catalog(root, preflight)
+            except semantic_writes.SemanticWriteError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+            except PathGuardError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+        # Prepared before validation returns, so a plan that validates is a plan that commits.
+        catalog_target = (
+            None
+            if preflight is not None
+            else store_targets.prepare_catalog(
+                root, error_class=RecoverError, writes=log_plan.writes, content_paths=content_paths
             )
-        except semantic_writes.SemanticWriteError as error:
-            raise RecoverError(code=error.code, reason=error.reason) from error
-        except PathGuardError as error:
-            raise RecoverError(code=error.code, reason=error.reason) from error
+        )
         if validate_only:
             return RecoverResult(
                 trash_path=trash_rel,
                 restored_path=restore_rel,
                 kind=trash_kind,
                 warnings=[],
-                semantic=preflight.as_dict(),
+                semantic=None if preflight is None else preflight.as_dict(),
             )
+
+    expect.update(
+        {entry.trash_path: Expect(sha256=entry.source_guard.expected_content_hash)
+         for entry in recovery_entries}
+    )
+    expect.update({source: Expect(sha256=digest) for source, digest in parts_hashes.items()})
+    expect.update(
+        {destination: Expect(absent=True) for destination in (*moves.values(), *parts_moves.values())}
+    )
+    expect.update(relocation.expect())
+    if companion is not None:
+        expect[companion[0]] = Expect(sha256=companion[1])
+    sources = {*moves, *parts_moves, *relocation.recorded, trash_rel}
+    taken_paths = {*moves.values(), *parts_moves.values(), *destinations, restore_rel}
+    failed = "trash recovery could not be published"
 
     def restore_in_store() -> None:
         restoring = store_batch.Lifecycle(
-            moves=tuple(PageMove(source, moves[source]) for source in stored),
-            binary_deletes=(BinaryDelete(sidecar_rel),) if drop_sidecar else (),
-            expect={
-                **{
-                    entry.trash_path: Expect(sha256=entry.source_guard.expected_content_hash)
-                    for entry in entries
-                },
-                **{destination: Expect(absent=True) for destination in moves.values()},
-            },
+            moves=tuple(
+                PageMove(source, destination)
+                for source, destination in (*moves.items(), *parts_moves.items())
+            ),
+            deletes=() if companion is None else (PageDelete(companion[0]),),
+            binary_deletes=(
+                *relocation.binary_deletes,
+                *((BinaryDelete(sidecar_rel),) if drop_sidecar else ()),
+            ),
+            expect=expect,
         )
         try:
-            store_batch.commit_batch(writer, [], vault_root=root, lifecycle=restoring)
+            with binaries.relocated(root, relocation) as moved:
+                store_batch.commit_batch(
+                    writer,
+                    list(log_plan.writes),
+                    vault_root=root,
+                    lifecycle=dataclasses.replace(
+                        restoring, records=moved.records, refresh=moved.refresh
+                    ),
+                )
         except StoreConflict as conflict:
-            if conflict.path in moves:
+            if conflict.path in sources:
                 raise RecoverError(
                     code="PATH_GUARD_CHANGED",
                     reason="trash contents changed before the recovery transition",
                 ) from conflict
-            if conflict.path in moves.values():
+            if conflict.path in taken_paths:
                 raise _destination_exists(restore_rel) from conflict
-            raise RecoverError(
-                code="RECOVER_FAILED", reason="trash recovery could not be published"
-            ) from conflict
+            raise RecoverError(code="RECOVER_FAILED", reason=failed) from conflict
+        except PathGuardError as error:
+            # The log entry is guarded on the bytes it was planned from.
+            raise RecoverError(code=error.code, reason=error.reason) from error
+        except (binaries.Stranded, reserved_paths.ReservedPathLeafError, CreateOnlyConflict) as error:
+            # A CreateOnlyConflict is a log rotation's archive that another write created meanwhile.
+            raise RecoverError(*binaries.refusal(error, "RECOVER_FAILED", failed)) from error
 
-    try:
-        committed = semantic_writes.commit_recovery(
-            root, preflight=preflight, mutate=restore_in_store
-        )
-    except semantic_writes.SemanticWriteError as error:
-        raise RecoverError(code=error.code, reason=error.reason) from error
-    except PathGuardError as error:
-        raise RecoverError(code=error.code, reason=error.reason) from error
+    semantic: dict | None = None
+    # A governed item's receipt intent and recovery marker come last before the commit.
+    recovery = governed.begin_recovery(
+        root, trash_rel=trash_rel, restore_rel=restore_rel, error_class=RecoverError
+    )
+    with governed.committing(recovery):
+        if preflight is None:
+            restore_in_store()
+        else:
+            try:
+                # The semantic commit prepares and publishes the catalog around the restore.
+                committed = semantic_writes.commit_recovery(
+                    root, preflight=preflight, mutate=restore_in_store, auxiliaries_in_mutate=True
+                )
+            except semantic_writes.SemanticWriteError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+            except PathGuardError as error:
+                raise RecoverError(code=error.code, reason=error.reason) from error
+            semantic = committed.as_dict()
+    if trash_kind == "directory":
+        binaries.prune_empty(trash_abs)
 
     warnings: list[str] = []
-    if not drop_sidecar:
+    if keep_metadata:
+        warnings.append(
+            "recovered bytes; retained the changed or unreadable Trash companion and its "
+            "placement metadata"
+        )
+    elif not drop_sidecar:
         # A sidecar that the store does not record is a file of its own; file mode's step removes it.
         warnings.extend(_settle_sidecar(root, sidecar, sidecar_guard, _identity))
-    log_warning = write_log_entry(
-        root,
-        date_iso=(today or dt.date.today()).isoformat(),
-        op="recover_from_trash",
-        rel_path_no_ext=restore_rel.removesuffix(".md"),
-        body=_log_body(trash_rel, restore_rel, trash_kind, curated if allow_curated else None),
+    store_media.derive(root, destinations)
+    index = governed.settle(
+        root, recovery, store_batch.row_report("upsert", [*moves.values(), *destinations]), warnings
     )
-    if log_warning:
-        warnings.append(log_warning)
+    store_targets.publish_catalog(
+        catalog_target, error_class=RecoverError, what="the trash entry was recovered"
+    )
+    if log_plan.warning:
+        warnings.append(log_plan.warning)
     return RecoverResult(
         trash_path=trash_rel,
         restored_path=restore_rel,
         kind=trash_kind,
         warnings=warnings,
-        semantic=committed.as_dict(),
-        index=store_batch.row_report("upsert", list(moves.values())).as_dict(),
+        semantic=semantic,
+        index=index,
     )
 
 
@@ -1184,6 +1324,5 @@ def _restore_taken(vault_root: Path, trash_kind: str, restore_rel: str) -> bool:
         return (
             view.binary(restore_rel) is not None
             or (Path(vault_root) / restore_rel).is_file()
-            or next(view.children(restore_rel), None) is not None
-            or view.holds_binaries_under(f"{restore_rel}/")
+            or view.holds_below(restore_rel)
         )

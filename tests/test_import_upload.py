@@ -463,7 +463,7 @@ def test_the_import_flushes_what_it_wrote_and_not_the_whole_host(agent, duplicat
     def whole_host():
         raise AssertionError("the import called os.sync")
 
-    monkeypatch.setattr(os, "sync", whole_host)
+    monkeypatch.setattr(os, "sync", whole_host, raising=False)
 
     done = _journey_to_done(agent, pack({f"doc{n}.pdf": PDF + bytes([n]) for n in range(3)}))[-1]
 
@@ -484,7 +484,7 @@ def test_the_import_lane_is_refused_on_exomem_cloud(agent):
 def test_the_import_runs_on_a_platform_without_statvfs_or_sync(agent, duplicate_index, monkeypatch, pack):
     """Catches a Unix-only call on the route, which would fail every import on a Windows host."""
     monkeypatch.delattr(os, "statvfs")
-    monkeypatch.delattr(os, "sync")
+    monkeypatch.delattr(os, "sync", raising=False)
     # Windows answers `shutil.disk_usage` itself; the POSIX version needs `os.statvfs`.
     monkeypatch.setattr(shutil, "disk_usage", lambda path: types.SimpleNamespace(total=1 << 40, used=0, free=1 << 40))
 

@@ -6,7 +6,7 @@ Moves each successful Exomem release into Cloud's `cell_image` without an operat
 
 ### Requirement: A release sets the cell image only after its attestation verifies
 
-The `cloud-deploy` workflow SHALL run when the release workflow succeeds on a release tag, and on a dispatch on `main`. It SHALL act only on the newest published release. It SHALL set `cell_image` through Substrate's release route only after the cell image's attestation verifies as this repository's release workflow on the release tag. It SHALL send the digest with its verified release tag.
+The `cloud-deploy` workflow SHALL run on a dispatch on `main`. The release workflow's tag run SHALL send that dispatch after it publishes and attests the release's images. It SHALL act only on the newest published release. It SHALL set `cell_image` through Substrate's release route only after the cell image's attestation verifies as this repository's release workflow on the release tag. It SHALL send the digest with its verified release tag.
 
 #### Scenario: An attested release passes every gate
 

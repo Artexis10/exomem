@@ -18,7 +18,7 @@ Three earlier lessons bind this design.
 **Goals:**
 
 - One catalogue that can hold hundreds of epistemic phenomena, with a structure that does not change as it grows.
-- Every key derived in code from a generated world, for every phenomenon the catalogue marks as computable.
+- Every key derived in code from the evidence layer of a generated world, for every phenomenon the catalogue marks as computable.
 - A world whose documents carry their statements implicitly and messily, with the truth still known.
 - A reading that shows how far each arm sits from a floor and a ceiling, and how often it raises a false alarm.
 - Slices that are each useful alone. The first one gives f38 a generated development project beside its hand-written one.
@@ -70,7 +70,15 @@ The generator builds a world in three layers, and text comes after all three.
 - **Rejected: text first, keys extracted afterwards.** An audit that the Veracium paper cites found 6.4% of one benchmark's answer keys corrupt. STALE's scenarios are model-written and judge-validated, so their truth is asserted, not constructed.
 - **What would change this:** the full-history arm disagreeing with the keys on more than one probe in ten in a family. Then that family's norms are wrong, or its entries belong on the rubric track.
 
-**Every norm that a key rests on is registered.** Statements alone do not fix a key. The oracle also applies norms, such as that a holder's later statement replaces that holder's earlier one. `catalogue/norms.yaml` lists all 22, and the oracle applies no other.
+**How the world core reads its records.** Five rulings from task 3.2 fix the spec to the build.
+
+- "Sums that add up" is no slice 1 invariant. It belongs with slice 2's `quantity_calc`.
+- A `draw` records that the target event occurred at its date. `chance_model.rate` reads it.
+- A `merge` keeps the first listed entity as the survivor.
+- A statement id that a `copy.artefact` or a `cause` step names stands for the one artefact that carries it.
+- "One holder per role" means one value per attribute and scope at a time (`one-value-at-a-time`).
+
+**Every norm that a key rests on is registered.** Statements alone do not fix a key. The oracle also applies norms, such as that a holder's later statement replaces that holder's earlier one. `benchmarks/membench/world/catalogue/norms.yaml` lists all 22, and the oracle applies no other.
 
 - A **stated** norm appears in a document of the world, and the proof trace holds that document. Which record governs a fact is always a stated norm. So is every causal rule, every chance and every claim that a list is complete.
 - A **background** norm appears in no document. A careful reader is assumed to share it. Sixteen of the 22 norms are background norms.
@@ -83,12 +91,12 @@ The oracle never reads the generator's own model of events. `causal_model` and `
 
 This is the shipped vocabulary's rule, applied to the benchmark: open words, closed behaviours.
 
-- **Open:** phenomena, families, behaviours, norms, statement kinds, recipes, domain packs, surface forms and bridges. Each is a YAML entry. Adding one is a data change.
-- **Closed:** truth mechanisms and their readings, world operations, rule shapes, role kinds, key parts, key classes, probe forms, implicitness levels, volatility classes, scorers and dials (`catalogue/attributes.yaml`). Code implements each member. Adding one is a code change and a schema change.
+- **Open:** phenomena, families, behaviours, norms, statement kinds, hedges, recipes, domain packs, surface forms and bridges. Each is a YAML entry. Adding one is a data change. An open word carries a closed attribute only where code reads one, as a statement kind carries its commitment.
+- **Closed:** every set in `benchmarks/membench/world/catalogue/attributes.yaml`. These include truth mechanisms and their readings, world operations, rule shapes, role kinds, key parts, key classes, probe forms, statement bases, commitments, defeat modes, implicitness levels, volatility classes, scorers and dials. Code implements each member. Adding one is a code change and a schema change.
 
-Code never branches on a phenomenon id, a family key, a behaviour key or a norm key. A phenomenon is a composition of closed parts. The 512 entries need 13 pipeline mechanisms, 14 probe forms and 18 world operations.
+Code never branches on a phenomenon id, a family key, a behaviour key or a norm key. A phenomenon is a composition of closed parts. The 512 entries need 13 pipeline mechanisms, 14 probe forms and 16 world operations.
 
-**A recipe is data.** `catalogue/recipes.yaml` holds one recipe for each buildable phenomenon. A recipe holds no condition, no loop and no expression.
+**A recipe is data.** `benchmarks/membench/world/catalogue/recipes.yaml` holds one recipe for each buildable phenomenon. A recipe holds no condition, no loop and no expression.
 
 ```yaml
 currency.reversal:
@@ -115,15 +123,21 @@ currency.reversal:
 
 **Several mechanisms apply in one fixed order.** 214 entries name two or three mechanisms. An entry lists them as a set, and `pipeline_order` fixes the order in which they apply. Each mechanism narrows or annotates the statements that the later ones read. The recipe then names the one reading that is the key. In `entities.who-to-ask`, a later statement uses an entity's short name. `identity_map` resolves that name first. `state_fold` then folds both statements about the duty, and the key is `state_fold.current`.
 
-**What the first recipes showed.** This change ships 21 worked recipes. They cover the nine realms and all 13 pipeline mechanisms, and seven of them belong to slice 1.
+**What the desk-check showed.** Slice 1 started with a desk-check, before any code. This change now ships 46 recipes: the 26 that slice 1 needs, and 20 for later slices, at least two in each realm. 21 came with the first catalogue, and the desk-check of 2026-11-11 wrote 25. A scratch check, which is no part of the repository, found that every recipe names only declared closed values.
 
-- The closed sets were drafted first. Writing the recipes then added four readings and three operation arguments, and removed one rule shape. It added no mechanism and no operation.
-- They use 12 of the 18 operations. The other six (`correct`, `end`, `merge`, `split`, `omit`, `remove`) serve entries that have no recipe yet.
-- Slice 1 starts with a desk-check, before any code: the 26 recipes that slice 1 needs, and 20 recipes for later slices across the nine realms. 21 of those 46 exist. Each unused operation must find a recipe there or leave the set.
+- **The falsifier did not fire.** No recipe of the 46 needed a new mechanism or a new operation. The limit was a quarter of them.
+- **One closed value was forced.** `correction.user-correction` and `self.earlier-session` need the holder whom the actor works for, so `user` is a ninth role kind. `deception.injected-instruction` now binds its owner to it. `uncertainty.hedged-claim` needs a word for the `hedge` argument. No code branches on a hedge, so `hedges.yaml` holds hedges as open words, as statement kinds are. A statement without a hedge states its content without doubt. The 25 recipes added no reading and no argument. The first 21 had added four readings and three operation arguments, and had removed one rule shape.
+- **Two operations left the set.** The recipes use 16 of the 18 operations. `omit` duplicated a `state` step that applies in one world only. `split` found no recipe among the 46, and it returns with the recipe of `identity.split`, as a code change and a schema change. `correct`, `end`, `merge` and `remove` each found a recipe.
+- **Five meanings were sharpened, with no new value.** A statement of a kind that commits its holder to nothing does not count for `corpus_closure.recorded`. A `correct` step replaces a statement's content for the whole period that it covers, and `state_fold.replaced` holds the content that it replaced. A replaced statement supports nothing, as a withdrawn or defeated one does. `kind_tag.kind` and `holder_ledger.holder` each say which of several statements decides.
+- **Every recipe now keys every probe form that its entry declares.** Five recipes left a form unkeyed: `order.sequence`, `argument.rebuttal` and `calibration.known-chance`, and the twin parts of `propagation.dependent-update` and `deception.injected-instruction`. Two of them gained a key, and three entries lost a form. Six of the new recipes also changed their entry's forms, where the family's default asks a question that the phenomenon does not raise: five dropped a form, and `uncertainty.hedged-claim` asks `act` in place of `abstain`.
+- **Six entries named the wrong norms.** Three propagation recipes rest on support edges and on no stated rule. `scope.one-client` rests on a scoped decision and on no stated rule. `quantity.missing-term` rests on a stated dependency that its entry did not name. `machine.gap-not-zero` rests on absence and volatility, and its family's default names neither.
+- **A role trap can be right in the mutation world.** A trap such as "done" is the content that the plant leaves unestablished. Where the phenomenon is left out, a result may assert that content, and then it is no error. Decision 3 therefore drops a role trap from the key of a thread planted in the mutation world, but only where a statement that asserts and stands carries the role there. A role that only a proposed, reported or defeated statement carries stays a trap. The mutation check keeps every role trap that a statement carries.
+- **Still unexercised.** No recipe keys the probe form `as_of`. No recipe uses the rule shapes `implies` and `volatility`, or the arguments `set.scope`, `restrict.until` and `copy.altered`. 18 of the 52 pipeline readings are never read. `identity.alias` has no `twin` part, so its twin entry `identity.homonym` has no key yet, and the loader names it. The desk-check removed operations only, as this decision asks.
+- **What it does not show.** No recipe has been planted, so no key has met the mutation, invariance and uniqueness checks. `identity.rename` and `identity.alias` key the referent of the new name. A task that needs a fact filed under the other name has no key yet, because a key cannot say which name the probe uses.
 
 - **Rejected: one template function per phenomenon.** That is membench today. It puts vocabulary in code and does not reach hundreds of entries.
 - **Rejected: a rule language in the catalogue.** Data that defines its own truth rules turns a vocabulary into a programming language. The epistemic-language design rejected the same move. A recipe with conditions would be that language under another name, so the recipe form has none.
-- **What would change this:** more than a quarter of the 46 desk-checked recipes needing a new mechanism or a new operation. Then the closed sets are wrong, and the catalogue's structure does not hold. The desk-check reports new readings and arguments beside that number.
+- **What would change this:** more than a quarter of the 46 desk-checked recipes needing a new mechanism or a new operation. Then the closed sets are wrong, and the catalogue's structure does not hold. The desk-check found none in 46. The first family of each later slice repeats the reading, because 26 of the 46 belong to slice 1.
 
 ### 3. One coherent world, with planted threads that do not interfere
 
@@ -133,10 +147,21 @@ A world has a backbone and threads.
 - **A thread** plants one phenomenon on backbone entities, by its recipe. The planner plants a thread only when the world holds what the recipe needs, as RECON's production rules do.
 - **The planner reserves** every attribute that a thread's key reads. No other thread may change a reserved attribute. Each probe therefore depends on one planted change, which f38 requires.
 
+**How the planner reads its recipes.** Six rulings from task 3.4 and two from task 4.5b fix the spec to the build.
+
+- Reservation is exclusive over every bound `attribute`, `entity` and `event`.
+- An attribute role that no constraint narrows binds a `durable` attribute.
+- The value roles of one thread take distinct values.
+- A `name` role that no `name` step introduces is the entity's own name. One that a step introduces is a new name from the split's partition.
+- A recipe that binds an attribute of a windowed volatility class places the probe one session after the last moment before it, and every other gap exceeds the window. That is what makes `persistence.transient` depend on its plant.
+- The `distance` dial means that each gap between two adjacent moments is 1 to `distance` sessions.
+- A probe's session is reserved against its key: no other thread's document and no stable fact of that session names a thing that the key's value, traps or premise holds, and a thread that no draw can plant so is dropped as `session-clash` (task 4.5b).
+- An attribute whose values are holders (the value generator `holder`, drawn from one entity type) binds only to a role that sets `values: holder`, and the value roles of that attribute then draw people (task 4.5b).
+
 **Each thread has two worlds.** A recipe step may apply in the planted world only, or in the mutation world only. The mutation world is the thread with its phenomenon left out. It has three uses.
 
-- **The mutation check.** A probe depends on its plant when its value differs between the two worlds. It also does when it has a trap in the planted world and none in the mutation world. A probe that meets neither condition is refused. An abstention probe meets the first condition: its mutation world holds the statement that answers it.
-- **Twins at no authoring cost.** The `twins` dial sets the share of a family's threads that the planner plants in the mutation world. They ask the same probe forms, and the right answer reports no change, no conflict and no doubt.
+- **The mutation check.** A probe depends on its plant when its value differs between the two worlds. It also does when it has a trap in the planted world and none in the mutation world. The check reads each world's key under the carry rule of `recipes.yaml`: a role counts as a trap in a world where a statement of the thread carries it. It never drops a role trap by the rule for twins below, because a trap dropped there would hide a probe whose plant changes nothing. A probe that meets neither condition is refused. An abstention probe meets the first condition: its mutation world holds the statement that answers it.
+- **Twins at no authoring cost.** The `twins` dial sets the share of a family's threads that the planner plants in the mutation world. They ask the same probe forms, and the right answer reports none of the change, conflict or doubt that the phenomenon plants. A recipe's mutation world must therefore leave none of it: `uncertainty.competing-explanations` asserts its first explanation there. The key of such a thread keeps its reading traps. It drops a role trap only where a statement that carries the role asserts and stands there: its kind has the commitment `asserted`, and nothing withdraws, replaces or defeats it. That content is then no error. A role that only a proposed, reported or defeated statement carries stays a trap, because giving it as established stays wrong.
 - **Near-miss twins.** A declared twin entry may instead key a case that the plant does not touch. `scope.general-rule-applies` keeps the exception planted and asks about a case outside it.
 
 Compound threads, which combine two phenomena on purpose, come in slice 4 and declare both.
@@ -191,6 +216,19 @@ Real difficulty lives in statements that nobody marks. The design plants them wi
 
 The level and the bridge of every artefact go into the world's manifest, so a report can split results by level.
 
+**How the template renderer reads these rules.** Eight rulings from task 3.5 fix the spec to the build.
+
+- The `implicitness` dial sets the level of the artefacts that carry the planted change: those of the steps that apply in one world only. Every other artefact renders at `stated`.
+- A correction, a withdrawal, a rename, a merger, a telling and a restriction each have an artefact of their own. It announces the operation, carries no statement, and is in the evidence layer, so `corpus_closure` and the proof trace can find it. No mechanism reads an artefact today, so no key moves. At `stated` a correction names the content that it replaces and the content that replaces it.
+- An **explicit form** of a statement is any sentence that a `stated` surface form gives for it: the form's pattern filled with the attribute's label or with one of its paraphrases. The check compares those sentences with the text of an artefact. It uses no word list.
+- **Sharing a surface form** means using one registered text pattern. A bank may not hold one text twice, so a pattern is one form. A probe's task takes a form that no artefact of its thread uses, and the world is refused when none is left.
+- In slice 1 a form belongs to the split of the bank file that holds it, and a world refuses a bank of another split. Decision 8's partition of forms by a hash of their ids comes with the other splits in task 6.5, together with the check that no form id or text is in two banks.
+- At `paraphrased` the pack's paraphrase of an attribute replaces its label, so that the text avoids the words of the probe. A pack with no paraphrase for an attribute refuses the level.
+- An **anchor** is a name, a value or a date of the statements that an artefact carries. The check reads tokens (`str.split` with the punctuation at the ends stripped) and finds each anchor as a run of tokens. A **trap value** is a trap or the premise of a key of the artefact's thread, which the artefact neither carries nor announces. Task 3.5 read the values of other statements about the same attribute instead. Task 3.6 replaced that proxy with the key-derived list. The check no longer sees a value that no key names as a trap, such as the answer in an earlier document. It now sees a trap that no statement about the attribute holds, such as a role trap, and it never reads another thread. The model-prose renderer of task 7.3 reuses the same check.
+- A probe's task names the thing and the attribute that its key reads, and the context that the key reads when it reads one (the `{where}` slot of a form), and carries no value. The projection adds the stale value of a `premise` probe (task 4.5).
+
+The manifest records, for each artefact, the level, the surface forms and a hash of the text. Its `projection_digest` is `null` until a projection writes the world. Then it holds the SHA-256 of the projection file of decision 7 (task 4.5).
+
 **Model-written prose is optional and gated.** Templates are the default renderer and cost nothing. A model may rewrite an artefact for natural, messy prose. Then a check must pass in both directions:
 
 1. **Anchors.** Every name, value and date of the planted statements is present. No trap value appears in an artefact that must not hold it. No explicit form appears in an artefact rendered below `stated`.
@@ -244,7 +282,7 @@ A round plan declares each dial's value for each family before the round runs. N
 
 ### 7. Predictions are filed before a run
 
-`projections/exomem.yaml` states, per family, whether Exomem models it and what this design expects: pass, partial or fail. The file sits outside `catalogue/`. A manifest pins the catalogue's digest and the projection's digest apart, so an edited prediction changes no world. The report prints each prediction beside its result.
+`benchmarks/membench/projections/exomem.yaml` states, per family, whether Exomem models it and what this design expects: pass, partial or fail. It also holds what f38 needs to play a project. The file sits outside `benchmarks/membench/world/catalogue/`, and outside this change, because task 9.2 archives the change. A manifest pins the catalogue's digest and the projection's digest apart, so an edited prediction changes no world. The report prints each prediction beside its result.
 
 The first register expects no family to pass. It expects 13 of 35 to fail: persistence, source reliability, calibration, propagation, scope, quantity, statistics, meaning, inference, causation, belief states, deception and machine sources. It expects the implied and propagated levels to fail in every family. These are readings of the shipped pack and the active specs. No run backs them.
 
@@ -292,18 +330,72 @@ Where a probe asks for a structured field, code scores it: an exact value, a set
 
 A key carries the value, its accepted forms, a list of traps and the premise of a premise probe. It also carries the behaviours, the facts that the judge needs, the proof trace and the contest set. Accepted forms come from typed formatters and the identity map, never from a system's output.
 
+**How the key writer reads its recipes.** Seven rulings from task 3.6 fix the spec to the build.
+
+- A key is read in its thread's own world: the planted world, or the mutation world for a thread that the plan planted there. The shared world is for the renderer alone. A value that two threads share therefore draws no statement of the other thread into a key, a trap, a proof trace or a contest set.
+- The proof trace holds the documents of what the value and the facts rest on. These are the statement that the reading decides by, the operations that changed it (corrections, tellings, renamings, mergers) and each rule that the reading applied. A reading with no named basis is refused as `no-basis`, so no key has an empty proof trace by accident. An abstention key rests on nothing recorded, and its proof trace is empty.
+- A stated norm lives in the document of a rule or of a restriction. An entry that names a stated norm needs a document of that kind in its proof trace, or its key is refused as `no-norm-document`. The check does not say which norm the document states. No slice 1 entry names two stated norms. The first one that does needs a map from each rule shape to its norm, held as data.
+- The contest set holds the proof trace, the documents that hold a trap or the premise, and the documents of statements that ended and of what ended each. A statement holds a value as its content, and a correction holds its new content. A rule holds its value for this purpose, though the carry rule of a role trap does not count it. The premise counts as a trap here, because an actor that presupposes it gives the stale state.
+- A trap that equals the value is no trap. A trap reading is compared with the value as a whole before its answer is read as a list of values.
+- A premise is one stale state or none. A premise that reads several stale states is refused as `premise-not-one`, because a task presupposes one of them. Task 4.5 decides what a premise probe of a thread with no premise asks. A thread's own key reads its premise in the mutation world too, so the premise's carriers still join the contest set; what the probe shows the judge is task 4.5's call.
+- A key that is not unique, that reads a reading no mechanism builds, or that breaks a rule above is refused by name, with its thread and form. The writer lists every refusal, and a world with a refused key does not render. Values and traps that are statements stay statement ids. Task 4.5 names them for the judge.
+
+The keys are in `keys.json` beside the manifest, in evaluator custody like the rest of the key. The manifest's `rendering` section holds their count and digest.
+
 **f38 changes in four places.** Its case check refuses what a generated project needs. Task 1.3 agrees these changes with the change that owns the suite.
 
-1. **Behaviours come from the registry.** f38's judge rates six behaviours from a code constant, and its case check refuses any other. The catalogue names 21, and 15 occur in slice 1. The judge and the case check will read `behaviours.yaml`, whose first six entries are f38's own. That retires the constant.
-2. **A premise is keyed apart from a trap.** A premise probe's task must presuppose the stale or false state. The key holds that state in `premise`. The case check requires the premise in the task, and applies the leak rule to the value, the accepted forms and the traps only.
+1. **Behaviours come from the registry.** f38's judge rates six behaviours from a code constant, and its case check refuses any other. The catalogue names 21, and 15 occur in slice 1. The judge and the case check will read `behaviours.yaml`, whose first six entries are f38's own. That retires the constant. The judge's schema for a probe holds only the behaviours that the probe's key names, plus `trusts_stale` on every probe that is not a stable probe. A stable probe keeps today's exclusion (`behaviours_asked` in `judge.py`), so task 4.1 changes no report. The schema requires every behaviour that it lists on every verdict, and the report reads only those.
+2. **A premise is keyed apart from a trap.** A premise probe's task must presuppose the stale or false state. The key holds that state in `premise`. The case check requires the premise in the task, and applies the leak rule to the value, the accepted forms and the traps only. The judge sees the premise beside the value and the traps, and rates an answer that relies on the premise as `trusts_stale`. f38's judge sees a value, accepted forms, a rubric and one trap today.
 3. **A key holds a list of traps.** A value that changed three times has two traps. A hand-written project's single trap reads as a list of one.
 4. **A key names its reading.** The memory-needed gate skips a probe that is read as harm.
+
+**What tasks 4.1 to 4.3 built.** Four rulings fix the spec to the build.
+
+- The judge's line for each behaviour is that behaviour's registry description, with one rule for yes, no and not applicable. The old wording of the six f38 behaviours is gone, because it lived in a code constant. The only behaviour name left in code is `trusts_stale`.
+- The report has a behaviour row for each registry behaviour that some probe of the case set asks, in registry order. The development project asks the first six, so its rows are those of the old constant. A case set that asks fewer than six gets fewer rows, not rows of zeros.
+- A key names its reading in `key.reading`, a value of `result_readings`. A key with no reading reads as a position. The report keeps its pooled `harm` figure and adds `harm_read_probes`, per arm, over the probes that their keys read as harm.
+- The paired differences and the decision included a probe read as harm until task 4.6 separated them. An item file that an older run pooled has the older key format, so a report on that run refuses until its judge directory is moved aside.
+
+**What task 4.4 built.** Four rulings fix the spec to the build.
+
+- Arm `G` is arm `N` with another probe prompt. Both have no memory and play probes only: a main task cannot change what a later call sees, because the workspace resets before every call. Arm `H` stays the `--history full` run until task 5.1.
+- A key names its contest set in `key.contest`: a list of entries, each with a `session` and a `file`, that name a scripted file of the probe's session or an earlier one. The case check refuses an entry that names no such file. Task 4.5 places each artefact of a generated key's contest set in a session file and writes the entries. An artefact that is not a file has no place yet.
+- The prompt of `G` holds those files in session order, under a header that names no arm, store or memory product, and then the probe's task. It holds no task of an earlier session and no other file. A probe with an empty contest set reaches `G` as it reaches `N`.
+- `G` needs a contest set. The hand-written projects have none, so a run that asks for `G` on a project with a probe that lacks one is refused before any session starts, and `--arms` leaves `G` out by default.
+
+**What task 4.5 built.** `benchmarks/membench/outcome/epistemic/projection.py` turns a generated, rendered and keyed world into a project that f38 plays. Ten rulings fix the spec to the build.
+
+- **Sessions.** Session `n` is week `n` of the timeline, so a project has 12 sessions. Its files are the documents dated in that week, named by kind, date and a serial (`note/2025-02-10-1.txt`), so that no file name holds a thread or a step. Its task is one of the work tasks in `exomem.yaml`, drawn by a seeded choice. Until task 6.5 splits the work tasks with the banks, they sit in that file and name no value. The projection refuses a world where a work task holds a string of any key.
+- **Contest.** Each document of a key's contest set becomes a `{session, file}` entry, in session order. Every artefact of slice 1 is a document, so each has a file.
+- **A probe plays in its planned session.** The planner keeps that session free of the key's things (task 4.5b), so the project places a probe in the session of its date. The projection still refuses a world where the task or a file of that session holds a string of the key, as `task-holds-key-string` or `session-holds-key-string`. That guard does not fire on seeds 0 to 39 at any level.
+- **Words for a key.** An entity is its names that the probe's task does not use. A statement is the sentence that its document renders, so a warrant reading names its statements in the words that the actor sees. A set is its members, and a set within a set is in brackets. A bool, a set with more than one member and a none are no single value, so the key carries `value: null`. Every key has a rubric: the reading's own description from `attributes.yaml`, what it was asked of, and the answer. A reading of kind, modality, hedge or standing gives a property that an answer keeps, not a value that it states. It also leaves `value` null, because a kind word is ordinary text in the world's documents.
+- **Premise.** A premise probe's task takes one more line, from `exomem.yaml`, that states the stale state, unless the task holds it already.
+- **A probe in the mutation world.** Every probe of a thread planted in the mutation world has `premise: null`. Its premise probe keeps the task that the renderer wrote and asks no premise. Nothing changed, so the right answer carries on with the one setting and reports no change. The probe is a false-alarm probe: its behaviours are `mutation_behaviours` in `exomem.yaml`, which is `over_flags`, in place of its entry's. A planted false premise (`absence.false-premise`) names the event it plants, so its premise reading is true in the mutation world; the event's document stays in the contest set through the key's premise reading, and the judge is never told that a recorded event is a false premise.
+- **Labels.** A probe of the form `stable` has the label `stable` and no change. Every other probe has the dimension of its family, and the id of its thread as its change. A family that ships no dimension keeps its own key as the label. f38's case check, judge and report never list the labels: the check compares a label with `stable`, and the report builds a row for each label that a probe holds. So a family key is accepted, and its row is description. Each probe also holds its `family` and its `phenomenon`, for the report of task 4.6.
+- **Reading and behaviours.** A key's reading is the `read_as` of its probe form, so `abstain` and `unaided` are read as harm.
+- **Recall probes.** The slice 1 entries give three recall probes: `self.earlier-session`, `persistence.permanent` and the twin `currency.unchanged`. f38 asks four. The round of a development project plants the first recall entry that is no twin again, until the project holds `recall_probes` of them. It binds fresh things and adds no recipe.
+- **`projection_digest`.** A world's manifest pins the SHA-256 of `exomem.yaml`. The file moved from this change to `benchmarks/membench/projections/` for that, because task 9.2 archives the change.
+
+**What task 4.5 found, and task 4.5b fixed.** The recipes `entities.owner-change` and `entities.role-change` bound an owner or a seat to any durable attribute, so a document read "the visitors allowed at once for a site is a person's name". The pack now has three attributes whose values are people, and the two recipes bind only those. A scope probe's task named the thing and no context, although its key reads one. It now names that context. The planner also keeps each probe's session free of the key's things. Arm `H` shows whether any defect remains that makes a probe unsolvable.
+
+**What task 4.6 built.** `benchmarks/membench/outcome/epistemic/readings.py` reads the scores that `report.py` builds. Ten rulings fix the spec to the build.
+
+- **Rules and numbers are data.** `readings.yaml` holds the six readings with their rules, the numbers 20, 0.2 and 0.05, and the two reports in a row. It sits outside the catalogue and outside the projection, so an edited number changes no world's digest and no filed prediction. Code names the six readings, which are a closed set, and refuses a file that does not describe exactly them.
+- **Order of the readings.** The report decides them in this order, and the first that holds is the reading: `not measured`, `too few probes`, `no room`, `saturated`, then `room` or `room unclear`. `no room` comes before `saturated`: when the floor already nearly reaches the ceiling, the primary arm at the ceiling says nothing more. A family's position prints when the lower bound of `G` − `N` is at least 0.2, whatever the reading.
+- **What counts.** A position probe is a probe that no key reads as harm and that is no recall control. Harm probes and recall controls are counted apart in the same row. A family is sampled when one of its probes has an outcome. A probe counts once, however many windows it played. The count gate reads the probes played. The interval reads the probes that both `N` and `G` scored, and a missing interval reads `room unclear` with the reason beside it.
+- **Position.** (arm − `N`) / (`G` − `N`) over the probes that `N`, `G` and the arm all scored, with the paired difference of each beside it. It is unknown when the ceiling does not lead the floor on those probes. The pooled row applies the same rules to every probe that played, so slice 1 prints one pooled position and raw counts per family.
+- **Saturation.** The report reads earlier reports through `--earlier-report`, newest first. With none, no family reads `saturated`, and the row shows that no earlier report was given.
+- **False alarms.** A false-alarm probe is a probe whose key asks one of the projection's `mutation_behaviours`. That covers a thread planted in the mutation world, a twin and a recall control. The rate is the answers on which the judge finds the behaviour, among those that it rated yes or no. An unanswered or unjudged answer is counted apart.
+- **Predictions.** A family reads `pass` when the lower bound of `P` − `G` is above −0.05, `fail` when it is not and the lower bound of `P` − `F` is not above 0, and `partial` otherwise. A family that reads `too few probes` has no observed outcome, so no contradiction. A contradicted prediction lists the family's probes to read first.
+- **Lineage.** A phenomenon belongs to the lineage groups of its entry and of its family, and a probe belongs to each of them, so the shares need not add to 1. The share is over the probes whose phenomenon the catalogue knows. The loader now keeps those groups in `Entry.lineage`.
+- **Background norms.** A key rests on the background norms of its phenomenon. The reach is the full-history arm's mean score on those keys. A norm below the share that the solvable gate asks (90%) is named. Keys with no history answer are counted apart.
+- **Harm.** The paired differences and the decision leave out a probe read as harm. A family row gives each arm's harm on its harm probes, and the pooled `harm_read_probes` figure is as before.
 
 ### 11. The world's text is product-neutral, and the catalogue's shape is not
 
 **What is neutral.**
 
-- The evidence layer uses the W3C PROV names: entity, activity, agent, derivation and attribution. The statement kinds are the world's own (`catalogue/statement-kinds.yaml`). The world uses no Exomem kind, relation or dimension.
+- The evidence layer uses the W3C PROV names: entity, activity, agent, derivation and attribution. The statement kinds are the world's own (`benchmarks/membench/world/catalogue/statement-kinds.yaml`). The world uses no Exomem kind, relation or dimension.
 - The Exomem projection is the only file that maps the world to a product. It maps a family to the dimension key that f38 reports.
 - Every projection writes a parity report, as membench's native renderers do: each fact is represented, degraded or unsupported.
 - Arm `F` receives the same sessions, files and learning instruction as `P`.
@@ -341,20 +433,21 @@ A key carries the value, its accepted forms, a list of traps and the premise of 
 
 ## The catalogue
 
-`catalogue/` holds the first catalogue as data.
+`benchmarks/membench/world/catalogue/` holds the first catalogue as data.
 
 | File | Holds |
 |---|---|
-| `attributes.yaml` | The closed sets. They include 13 pipeline mechanisms with their readings, plus `run_record`, `judged` and `none`; 18 world operations; 9 rule shapes; 4 key classes; 14 probe forms; 7 implicitness levels; 5 volatility classes; 6 scorers; 8 dials. |
+| `attributes.yaml` | The closed sets. They include 13 pipeline mechanisms with their readings, plus `run_record`, `judged` and `none`; 16 world operations; 9 rule shapes; 9 role kinds; 4 key classes, each with the mechanisms that it admits; 14 probe forms; 4 statement bases; 4 commitments; 2 defeat modes; 7 implicitness levels; 5 volatility classes; 6 scorers; 8 dials. |
 | `behaviours.yaml` | 21 behaviours that a judge rates, each wanted or unwanted. The first six are f38's. |
 | `norms.yaml` | 22 norms that a key may rest on: 6 stated and 16 background. |
 | `statement-kinds.yaml` | 20 kinds of statement, each with how far it commits its holder. |
+| `hedges.yaml` | 1 hedge, `tentative`. A hedge is an open word with no closed attribute. |
 | `families.yaml` | 9 realms and 36 families, each with its question and its default attributes. |
 | `phenomena/<realm>.yaml` | 512 entries. An entry states what differs from its family's defaults. |
-| `recipes.yaml` | 21 worked recipes. |
+| `recipes.yaml` | 46 recipes: the 26 that slice 1 needs, and 20 for later slices. |
 | `lineage.yaml` | 36 sources, each with what this benchmark adopts and leaves, and how it was checked. |
 
-`projections/exomem.yaml` sits beside the catalogue and holds the Exomem dimension and the filed prediction per family.
+`benchmarks/membench/projections/exomem.yaml` sits outside the catalogue directory, and holds the Exomem dimension and the filed prediction per family, and the text and settings of the f38 projection.
 
 An entry reads:
 
@@ -364,7 +457,7 @@ An entry reads:
 
 It inherits the family's mechanisms (`state_fold`, `warrant_graph`), key class, norms, probe forms (`impact`, `act`) and behaviours.
 
-Size by family, counted on 2026-11-11 by loading every file in `catalogue/phenomena/`:
+Size by family, counted on 2026-11-11 by loading every file in `benchmarks/membench/world/catalogue/phenomena/`:
 
 | Realm | Families and entries |
 |---|---|
@@ -380,7 +473,7 @@ Size by family, counted on 2026-11-11 by loading every file in `catalogue/phenom
 
 By planned slice: 30 in slice 1, 242 in slice 2, 192 in slice 3, 41 in slice 4, and 7 declared out of scope. By key class: 473 computed, 29 on the rubric track, 3 run-relative and 7 out of scope.
 
-**The key classes are still a first assignment.** The first review moved 16 entries to the rubric track and 3 to the run-relative class, and removed 4. It reworded 50 entries. Some now have a document of the world state the rule that their key applies. Others now key an outcome of the world in place of a product's behaviour. An entry's class is confirmed when its recipe is written, and again when the full-history arm reads its probes on a development world.
+**The key classes are still a first assignment.** The first review moved 16 entries to the rubric track and 3 to the run-relative class, and removed 4. It reworded 50 entries. Some now have a document of the world state the rule that their key applies. Others now key an outcome of the world in place of a product's behaviour. An entry's class is confirmed when its recipe is written, and again when the full-history arm reads its probes on a development world. The desk-check read the 54 entries that the 46 recipes key, eight twins among them. In each, one reading fixes the answer, so none moved to the rubric track. `persistence.transient` keeps its class on one condition: the planner places the probe beyond the span of the attribute's volatility class.
 
 **A slice label is a plan, not a gate.** The loader computes which entries are buildable. An entry is buildable when it has a recipe and the generator implements every closed value that the entry and the recipe name. A round plan may name only buildable entries.
 
@@ -405,7 +498,7 @@ catalogue + domain pack + profile + seed
 1. **Load.** The catalogue loader validates every closed value and every reference, and lists the buildable entries. An unknown value stops the load with the entry's id.
 2. **Backbone.** The domain pack and the profile build entities, routines and stable facts. Names come from the wordbank's partition for the split.
 3. **Plan.** The planner draws threads for the round's families and binds each recipe's roles. It decides which threads take the mutation world, reserves attributes, and places slots and probes on the session timeline. A probe never shares a session with an artefact that holds its answer.
-4. **World and evidence.** Recipes run as world operations. A validator checks the world's invariants: times in order, one holder per role at a time unless stated, sums that add up.
+4. **World and evidence.** Recipes run as world operations. A validator checks the world's invariants: times in order, and one value per attribute and scope at a time unless stated.
 5. **Oracle.** The entry's mechanisms run in pipeline order at each probe's date. The oracle evaluates the recipe's readings and writes the key, the proof trace and the contest set. It checks that each key is unique.
 6. **Render.** Each statement gets a surface form at the round's implicitness level. The anchor check runs on every artefact.
 7. **Project.** Each projection writes its output and its parity report.
@@ -433,7 +526,7 @@ A world for one f38 project is small: 12 sessions, about 30 threads and a few hu
 | Mechanism | It reads | It derives |
 |---|---|---|
 | `corpus_closure` | The complete list of artefacts, authors, dates and copies. | Whether anything is recorded, what is missing under a stated rule, and what is filed twice. |
-| `identity_map` | Names, aliases, merges, splits and role holders over time. | The referent of a name at a date. |
+| `identity_map` | Names, aliases, merges and role holders over time. | The referent of a name at a date. |
 | `interval_order` | Event times with their recorded precision. | Four-valued order, overlap, duration, computed dates. |
 | `scope_lattice` | The contexts where each statement holds. | Whether a rule applies to the probe's case. |
 | `holder_ledger` | What each holder said, saw and was told, and when. | Whose claim it is, who knows it, what one holder thinks another believes. |
@@ -467,18 +560,20 @@ Rubric-track entries have no computed key. The oracle supplies the facts, a pred
 
 ## What the build costs
 
-No measurement backs the numbers in this section. The desk-check of slice 1 gives the first measured rate, and that rate replaces them.
+One number in this section comes from a timing: the rate at which a lane drafts recipes. No run file backs that timing, and no measurement backs the others.
 
-- **Recipes.** The 473 computed entries need 458 recipes, because the 15 twins use their base's recipe. 21 exist. The 29 rubric-track entries need rubric lines instead.
-- **Surface forms.** One form serves one pack, statement kind, level and artefact kind, in one split. Slice 1 writes the `dev` bank of one pack at three levels: about 200 forms, at eight kinds, three artefact kinds and three variants each. Each further pack, level and split is that work again.
-- **Bridges.** Each is written for one attribute of one pack, with the norm that makes it entail. The four deeper levels need them from slice 2.
-- **Effort.** A first guess for the catalogue beyond slice 1 is 60 to 80 lane-days. Nothing verifies it.
+- **Recipes.** The 473 computed entries need 458 recipes, because the 15 twins use their base's recipe. 46 exist. The 29 rubric-track entries need rubric lines instead.
+- **The drafting rate.** The desk-check of 2026-11-11 drafted 25 recipes in about 18 minutes, which is about 80 recipes an hour. The source is the drafting lane's own session clock. No run file records it, so the rate is unverified. That time holds the design of each recipe, the entry edits and a scratch check of closed values. It leaves out the reading of this design. It is one measurement, of one model lane, on recipes that mostly reuse the shapes of the first 21.
+- **What slowed the drafting.** Five things did, and none was the writing. An entry whose error is "cannot find it" needs a mutation world that changes a value, and the identity entries took the longest. A family's default probe forms did not fit six of the 25 entries. A family's default norms did not fit five. Three recipes needed a value that did not exist. A role trap needed a rule for the mutation world.
+- **What the rate does not cover.** At that rate, a draft of the 412 remaining recipes is about five lane-hours. A drafted recipe is not a working one: it must still plant in each pack and pass the mutation, invariance and uniqueness checks. No measurement backs the time for that, and task 6.3 records it for the first family of slice 2.
+- **Surface forms.** One form serves one pack, statement kind, level and artefact kind, in one split. Slice 1 writes the `dev` bank of one pack at three levels: about 200 forms, at eight kinds, three artefact kinds and three variants each. Each further pack, level and split is that work again. No measurement backs a rate for them. The slice 1 bank holds 108 forms: nine statement kinds, three rule shapes, six operations, six qualifiers and the eight probe forms that slice 1 asks, at one or two variants each. No run file records the time that they took.
+- **Bridges.** Each is written for one attribute of one pack, with the norm that makes it entail. The four deeper levels need them from slice 2. No measurement backs a rate for them.
 
 The claim that the other axes multiply the catalogue for free was wrong for surface forms and bridges, and this section replaces it.
 
 ## What comes from outside work
 
-`catalogue/lineage.yaml` holds the full list. The main debts:
+`benchmarks/membench/world/catalogue/lineage.yaml` holds the full list. The main debts:
 
 | Work | Adopted | Left |
 |---|---|---|
@@ -504,7 +599,7 @@ MemoryAgentBench, LongMemEval and FrontierMemory stay outside calibration runs. 
 Each slice is useful alone. `tasks.md` gives each task's check.
 
 1. **Slice 1: one generated development project beside the hand-written one.**
-   - A desk-check comes first: 46 recipes as data, before any code. 26 serve slice 1, and 20 serve later slices across the nine realms.
+   - A desk-check came first, and it is done: 46 recipes as data, before any code. 26 serve slice 1, and 20 serve later slices across the nine realms.
    - Then the loader, the world core, one pack, the template renderer at three levels and the f38 projection with its four changes.
    - Seven mechanisms, each in its smallest form: `state_fold`, `kind_tag`, `holder_ledger`, `identity_map`, `scope_lattice` with one level of nesting, `warrant_graph` at one hop, and `corpus_closure` for whether anything is recorded. f38's 11 dimensions and its abstention behaviour need all seven.
    - The 30 entries marked `s1`: two change entries for each of f38's 11 dimensions, three twins, two recall controls, two absence entries and one task that no memory bears on.
@@ -518,7 +613,7 @@ Each slice is useful alone. `tasks.md` gives each task's check.
 - **The catalogue encodes the home system's view of knowledge.** Four in five entries are home-defined, and twelve families mirror the product's own dimensions. The lineage marks, the independent review and the per-group report show the risk and do not remove it.
 - **The oracle can be wrong.** A wrong mechanism or norm yields confident wrong keys at scale. The mutation and invariance checks catch a key that ignores its plant. The full-history arm catches a key that a careful reader of every session rejects. Neither catches an error that the oracle and that reader share.
 - **Most computed keys rest on a background norm.** 357 of 473 do. A norm that readers do not share turns a computed key into an opinion. The per-norm report is the instrument for that, and it needs development rounds to say anything.
-- **The recipe form may be too weak.** 21 recipes fit it. The desk-check of 46 is the test, and decision 2 names the result that would end the design.
+- **The recipe form may be too weak.** 46 recipes fit it with no new mechanism or operation. That is one recipe in ten, none has been planted, and 26 of them belong to slice 1. Decision 2 names the result that would end the design, and the first family of each later slice repeats the reading.
 - **Templates can be pattern-matched.** A product could learn the surface banks. Disjoint banks per split, a held-out pack, paraphrased probes and the optional model prose reduce it.
 - **The world can feel synthetic.** A tidy world understates difficulty. The profile and the packs carry the realism, and the first rounds will show where they fall short.
 - **Small rounds say little per family.** A 12-session project gives pooled readings only. Per-family readings need deeper rounds, which cost model calls.

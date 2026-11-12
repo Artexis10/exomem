@@ -105,6 +105,24 @@ def derive(root: Path, rels: Iterable[str]) -> tuple[list[str], dict[str, str]]:
     return derived, failed
 
 
+def after_removal(root: Path, rels: Iterable[str]) -> None:
+    """Drop what lives outside the store for binaries that left ``rels`` (design D6).
+
+    A store commit carries a page's lexical, graph and identity rows. An image's or a video's CLIP
+    rows, a recording's speech progress and a video's scene frames live outside it, so a writer
+    that moved or trashed a binary drops them after its commit, as file mode's fan-out does. Each
+    step is best-effort: the commit is durable, and reconcile finds what a failure leaves.
+    """
+    from .. import embeddings, index_sync
+
+    removed = list(dict.fromkeys(rels))
+    try:
+        embeddings.delete_clip_after_remove(root, removed)
+    except Exception:  # noqa: BLE001 - the derived rows follow a durable commit
+        log.warning("CLIP cleanup failed for %s", removed, exc_info=True)
+    index_sync.drop_media_residue(root, removed)
+
+
 def recover(root: Path) -> int:
     """One bounded, rotating pass that reconciles the media binaries still without their rows.
 

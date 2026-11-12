@@ -28,10 +28,20 @@ from membench.outcome.epistemic import run as epistemic_run
 from membench.outcome.faults import RETRIES
 from membench.outcome.stats import paired_interval, stratified_bootstrap_ci
 
+
+@pytest.fixture(autouse=True)
+def _subscription_run(monkeypatch):
+    """A shell that carries an API key or a billing declaration must not decide what these tests run on."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("EXOMEM_OUTCOME_BILLING", raising=False)
+
+
 # The shipped arms read their instruction block out of docs/prominence.md.
 pytestmark = pytest.mark.reads_repository_docs
 
 ARMS = ["N", "F", "P", "E"]
+#: The arms that play each session's main task. N has no memory, so it plays probes only.
+SESSION_ARMS = ["F", "P", "E"]
 #: The session each scripted call belongs to.
 SESSION_OF = {
     "task s1": 1,
@@ -66,10 +76,14 @@ config = option("--mcp-config")
 servers = json.loads(Path(config).read_text())["mcpServers"] if config else {}
 cwd = Path.cwd()
 arm = cwd.parent.name
-prompt = json.loads(sys.stdin.readline())["message"]["content"]
+content = json.loads(sys.stdin.readline())["message"]["content"]
+# The actor sends one text block per user turn, the form the credits launcher also accepts.
+prompt = content if isinstance(content, str) else "".join(block["text"] for block in content)
 tags = re.findall(r"\[(task|probe) ([\w-]+)\]", prompt)
 kind, tag = tags[-1]
 call = f"{kind} {tag}"
+with LEDGER.with_name("prompts.jsonl").open("a") as fh:
+    fh.write(json.dumps({"arm": arm, "call": call, "prompt": prompt}) + "\n")
 
 
 def log(event):
@@ -310,7 +324,7 @@ def played(tmp_path_factory):
 def test_arms_start_a_session_together_and_the_next_only_after_every_arm_finished(played):
     """An arm that raced ahead would meet the provider at another hour than the arm it is compared with."""
     rows = [r for r in played.rows if r["arm"] in ARMS]
-    for arm in ARMS:
+    for arm in SESSION_ARMS:
         order = [r["call"] for r in rows if r["arm"] == arm and r["event"] == "start"]
         assert order == [
             "task s1",
@@ -340,13 +354,15 @@ def test_arms_start_a_session_together_and_the_next_only_after_every_arm_finishe
 def test_the_workspace_resets_each_session_but_the_folder_arm_keeps_its_memory(played):
     """Files an arm left behind must not carry into the next session; only its memory may."""
     run_dir = played.run_dir
-    for arm in ARMS:
+    for arm in SESSION_ARMS:
         third = call_record(run_dir, arm, "sessions", "s03")["reply"]
         assert "files=['notes.txt']" in third, f"{arm} saw files of an earlier session: {third}"
+    # N's probe sees the files of its own session only, and no memory.
+    first = call_record(run_dir, "N", "probes", "p-first")["reply"]
+    assert "files=['notes.txt', 'question.txt']" in first and "memory=[]" in first
     folder = call_record(run_dir, "F", "sessions", "s03")["reply"]
     # F's note-taker kept alpha and beta; the memory folder survived two workspace resets.
     assert "memory=['alpha', 'beta']" in folder
-    assert "memory=[]" in call_record(run_dir, "N", "sessions", "s03")["reply"]
     assert (
         "memory=['alpha', 'beta', 'gamma']" in call_record(run_dir, "P", "sessions", "s03")["reply"]
     )
@@ -359,18 +375,14 @@ def test_what_a_probe_writes_is_discarded_before_the_next_call(played):
     """A probe that wrote to memory would hand its own answer to the probe after it."""
     run_dir = played.run_dir
     for arm in ARMS:
-        replies = [
-            call_record(run_dir, arm, kind, name)["reply"]
-            for kind, name in (
-                ("sessions", "s03"),
-                ("probes", "p-first"),
-                ("probes", "p-second"),
-            )
-        ]
+        calls = [("probes", "p-first"), ("probes", "p-second")]
+        if arm in SESSION_ARMS:
+            calls.insert(0, ("sessions", "s03"))
+        replies = [call_record(run_dir, arm, kind, name)["reply"] for kind, name in calls]
         assert not any("PROBE-NOTE" in reply for reply in replies), (
             f"{arm} read a probe's memory write"
         )
-        assert "probe-p-first.scratch" not in replies[2], f"{arm} kept a probe's workspace file"
+        assert "probe-p-first.scratch" not in replies[-1], f"{arm} kept a probe's workspace file"
     notes = played.run_dir / "window-1" / "proj-a" / "F" / "work" / "memory" / "notes.txt"
     assert "PROBE-NOTE" not in notes.read_text()
     # What the probe changed is kept for the judge, though the next call never sees it.
@@ -380,14 +392,166 @@ def test_what_a_probe_writes_is_discarded_before_the_next_call(played):
 
 
 # --------------------------------------------------------------------------
+# The reference arms: N plays probes only, and G reads the probe's contest set.
+# --------------------------------------------------------------------------
+
+
+def contest_project() -> dict:
+    """Three sessions. The budget changed in session 2; each earlier session also holds a file that bears on no probe."""
+    budget = probe(
+        "p-budget",
+        3,
+        "[probe p-budget] What is the budget now?",
+        "55 units",
+        dimension="supersession",
+        change_id="ch1",
+    )
+    # Listed out of session order: the prompt orders the documents, not the key.
+    budget["key"]["contest"] = [
+        {"session": 2, "file": "update.txt"},
+        {"session": 1, "file": "brief.txt"},
+    ]
+    budget["key"]["trap"] = "40 units"
+    quiet = probe(
+        "p-quiet", 3, "[probe p-quiet] Who runs the weekly sync?", "Ines", dimension="stable"
+    )
+    quiet["key"]["contest"] = []
+    return {
+        "sessions": [
+            {
+                "session": 1,
+                "task": "[task s1] Tidy the notes.",
+                "files": {
+                    "other.txt": "Unrelated lunch order.",
+                    "brief.txt": "Budget is 40 units.",
+                },
+            },
+            {
+                "session": 2,
+                "task": "[task s2] Tidy the notes.",
+                "files": {
+                    "chatter.txt": "Weather talk.",
+                    "update.txt": "Budget raised to 55 units.",
+                },
+            },
+            {
+                "session": 3,
+                "task": "[task s3] Tidy the notes.",
+                "files": {"today.txt": "Nothing new."},
+            },
+        ],
+        "probes": [budget, quiet],
+    }
+
+
+def prompts_by_call(ledger: Path) -> dict[tuple[str, str], str]:
+    rows = [json.loads(line) for line in ledger.with_name("prompts.jsonl").read_text().splitlines()]
+    return {(r["arm"], r["call"]): r["prompt"] for r in rows}
+
+
+def test_the_gold_arm_reads_the_contest_set_in_session_order_and_nothing_else_of_earlier_sessions(
+    scratch, monkeypatch
+):
+    """A ceiling that also saw the unrelated files or the session tasks would be a second full-history arm."""
+    write_case_set(scratch.root, {"proj-a": contest_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    run_dir = play("r3", arms=["N", "G", "F"])
+
+    prompts = prompts_by_call(ledger)
+    task = "[probe p-budget] What is the budget now?"
+    gold = prompts[("G", "probe p-budget")]
+    assert gold.index("Budget is 40 units.") < gold.index("Budget raised to 55 units.")
+    for left_out in ("Unrelated lunch order", "Weather talk", "Tidy the notes", "[task s"):
+        assert left_out not in gold, (
+            f"G's prompt holds {left_out!r}, which is not in the contest set"
+        )
+    header = epistemic_run.GOLD_HEADER
+    assert gold.startswith(header) and gold.endswith(task)
+    assert not cases.holds_store_name(header)
+    assert not any(word in header.casefold() for word in ("gold", "contest", "evidence", "memory"))
+    # A probe with an empty contest set reaches G as it reaches N: the task alone.
+    assert prompts[("G", "probe p-quiet")] == "[probe p-quiet] Who runs the weekly sync?"
+    # The other arms' prompts are the probe's task, as before.
+    assert prompts[("N", "probe p-budget")] == task == prompts[("F", "probe p-budget")]
+    assert not (run_dir / "window-1" / "proj-a" / "G" / "sessions").exists()
+
+
+def test_arm_n_makes_no_session_call_and_still_answers_every_probe(scratch, monkeypatch):
+    """N has no memory, so a session call would cost money and change nothing a probe sees."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    run_dir = play("r4", arms=["N", "F"])
+
+    calls = [r["call"] for r in ledger_rows(ledger) if r["arm"] == "N" and r["event"] == "start"]
+    assert calls == ["probe p-early", "probe p-first", "probe p-second"]
+    n_folder = run_dir / "window-1" / "proj-a" / "N"
+    assert not (n_folder / "sessions").exists()
+    for probe_id in ("p-early", "p-first", "p-second"):
+        assert call_record(run_dir, "N", "probes", probe_id)["reply"], probe_id
+    state = json.loads((run_dir / "window-1" / "proj-a" / "state.json").read_text())
+    assert state["status"] == "complete" and state["sessions_played"] == 3
+
+
+def test_arm_g_refuses_a_project_whose_probe_has_no_contest_set_before_any_session_starts(
+    scratch, monkeypatch
+):
+    """A hand-written project has no contest set, and G would read it as N does while the report called it the ceiling."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    with pytest.raises(SystemExit) as refusal:
+        play("r5", arms=["N", "G"])
+
+    assert "p-early" in str(refusal.value) and "key.contest" in str(refusal.value)
+    assert not ledger.exists(), "no session started"
+    assert not (scratch.root / "runs" / "r5").exists(), "a refused case set leaves no run behind"
+
+
+def test_a_default_run_leaves_arm_g_out_so_a_project_with_no_contest_set_still_plays(
+    scratch, monkeypatch
+):
+    """Without --arms the suite plays its arms; G needs a contest set, so adding it must not break that default."""
+    write_case_set(scratch.root, {"proj-a": invented_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+
+    play("r6")
+
+    assert {r["arm"] for r in ledger_rows(ledger)} == set(ARMS)
+
+
+def test_a_contest_reference_to_a_missing_file_or_a_later_session_is_named_by_probe():
+    """A reference that matched no file would drop out of G's prompt, and G would read less than the key says."""
+    project = contest_project()
+    project["probes"][0]["key"]["contest"] = [
+        {"session": 1, "file": "no-such-file.txt"},
+        {"session": 4, "file": "today.txt"},
+        {"session": 3, "file": "today.txt"},
+    ]
+
+    problems = cases.structure_problems(project)
+
+    assert len(problems) == 2
+    assert all("probe p-budget: key.contest" in problem for problem in problems)
+    assert "no-such-file.txt" in problems[0] and "session 4" in problems[1]
+    assert cases.structure_problems(contest_project()) == []
+
+
+# --------------------------------------------------------------------------
 # The report.
 # --------------------------------------------------------------------------
 
 
-def report_args(run_id: str, judge: Path) -> SimpleNamespace:
+def report_args(run_id: str, judge: Path, earlier: tuple[Path, ...] = ()) -> SimpleNamespace:
     return SimpleNamespace(
         suite="epistemic",
         run_id=run_id,
+        earlier_report=[str(path) for path in earlier],
         rejudge_sample=None,
         judge="claude",
         judge_model=None,
@@ -423,6 +587,10 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
     gates = built["dev_gates"]
     assert (gates["solvable"]["rate"], gates["solvable"]["meets"]) == (1.0, True)
     assert (gates["memory_needed"]["rate"], gates["memory_needed"]["meets"]) == (1.0, True)
+    assert gates["memory_needed"]["skipped_as_harm"] == []
+    assert built["description"]["harm_read_probes"]["P"]["rate"] is None, (
+        "no probe of this project is read as harm: unknown, not 0"
+    )
     assert "status: complete" in printed and "decision: description only" in printed
 
     # The solvable gate's prompt carries sessions 1 to the probe's, then the probe.
@@ -440,6 +608,64 @@ def test_the_report_pairs_the_arms_on_change_probes_and_judges_blind(played, cap
             assert leak not in text, f"a judge input contains {leak!r}"
 
 
+def test_a_run_with_the_gold_arm_reports_it_and_reads_an_earlier_report_for_saturation(
+    scratch, monkeypatch, capsys
+):
+    """G has no pair of its own: it is the ceiling that the families read, so it must reach the report's tables."""
+    write_case_set(scratch.root, {"proj-a": contest_project()})
+    ledger = scratch.tmp / "ledger.jsonl"
+    use_fake_cli(monkeypatch, script(scratch.tmp / "claude", FAKE_CLAUDE, ledger=ledger))
+    judge = script(scratch.tmp / "judge", FAKE_JUDGE, prompts=scratch.tmp / "judge-prompts.jsonl")
+    play("r5", arms=["N", "G", "F"])
+
+    command._cmd_report(report_args("r5", judge))
+    first = scratch.root / "runs" / "r5" / "report-claude.json"
+    built = json.loads(first.read_text())
+    command._cmd_report(report_args("r5", judge, earlier=(first,)))
+    again = json.loads(first.read_text())
+
+    assert built["status"] == "complete" and "G" in built["arms"]
+    families = built["description"]["families"]
+    assert families["pooled"]["probes"]["played"] == 2
+    assert families["pooled"]["reading"] == "too few probes", "two probes are far under the count"
+    assert set(built["description"]["stable_probes"]) == {"N", "G", "F"}
+    assert (
+        families["earlier_reports"] == 0
+        and again["description"]["families"]["earlier_reports"] == 1
+    )
+    assert "families by reading" in capsys.readouterr().out
+
+
+def test_an_earlier_report_path_that_is_missing_is_refused_with_its_path(tmp_path):
+    missing = tmp_path / "report-claude.json"
+    args = report_args("r5", Path("judge"), earlier=(missing,))
+    with pytest.raises(SystemExit) as refused:
+        command._earlier_reports(args, "dev")
+    assert "no such file" in str(refused.value) and str(missing) in str(refused.value)
+
+
+def test_an_earlier_report_of_another_split_or_case_set_is_refused(tmp_path):
+    heldout = tmp_path / "heldout.json"
+    heldout.write_text(json.dumps({"suite": "epistemic", "split": "heldout"}))
+    args = report_args("r5", Path("judge"), earlier=(heldout,))
+    with pytest.raises(SystemExit, match="heldout"):
+        command._earlier_reports(args, "dev")
+
+    other_set = tmp_path / "other.json"
+    other_set.write_text(
+        json.dumps({"suite": "epistemic", "split": "dev", "case_check": {"proj-b": {}}})
+    )
+    args = report_args("r5", Path("judge"), earlier=(other_set,))
+    with pytest.raises(SystemExit, match="case set"):
+        command._earlier_reports(args, "dev", {"proj-a": {}})
+
+    same = tmp_path / "same.json"
+    report_dict = {"suite": "epistemic", "split": "dev", "case_check": {"proj-a": {}}}
+    same.write_text(json.dumps(report_dict))
+    args = report_args("r5", Path("judge"), earlier=(same,))
+    assert command._earlier_reports(args, "dev", {"proj-a": {}}) == [report_dict]
+
+
 def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp_path, monkeypatch):
     """Every folder and Exomem answer in a smoke run named its store, which would show the judge the arm."""
     entries = [
@@ -449,6 +675,7 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
             "item": None,
             "task": "t",
             "key": {"value": "8443"},
+            "behaviours": ["uses_current"],
             "answer": "Port 8443, from my note in memory/web.md.",
             "changed": "memory/web.md\n+port 8443",
         },
@@ -458,6 +685,7 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
             "item": None,
             "task": "t",
             "key": {"value": "8443"},
+            "behaviours": ["uses_current"],
             "answer": "Port 8443, as Exomem recalled through mcp__exomem__recall_context.",
             "changed": "",
         },
@@ -674,6 +902,254 @@ def test_a_key_with_an_unknown_behaviour_or_a_non_string_accept_item_refuses_wit
     )
 
 
+def test_a_key_naming_a_registered_behaviour_beyond_the_first_six_passes_the_case_check():
+    """`keeps_scope` is in the registry and was never in the old code constant."""
+    project = invented_project()
+    project["probes"][1]["key"]["behaviours"] = ["uses_current", "keeps_scope"]
+
+    assert cases.structure_problems(project) == []
+
+
+def test_the_verdict_schema_of_a_probe_holds_its_keys_behaviours_and_trusts_stale_unless_it_is_stable():
+    """A change probe's judge rates what its key names and trusts_stale; a stable probe's judge rates what its key names."""
+    change = invented_project()["probes"][1]
+    change["key"]["behaviours"] = ["keeps_scope", "resolves_identity"]
+    stable = invented_project()["probes"][0]
+    stable["key"]["behaviours"] = ["keeps_order"]
+
+    change_schema = epistemic_judge.verdict_schema(epistemic_judge.behaviours_asked(change))
+    stable_schema = epistemic_judge.verdict_schema(epistemic_judge.behaviours_asked(stable))
+
+    assert set(change_schema["properties"]) == {
+        "correct",
+        "keeps_scope",
+        "resolves_identity",
+        "trusts_stale",
+        "reason",
+    }
+    assert set(change_schema["required"]) == set(change_schema["properties"])
+    assert set(stable_schema["properties"]) == {"correct", "keeps_order", "reason"}
+    assert stable_schema["additionalProperties"] is False
+
+
+def test_the_judge_gives_each_item_the_schema_of_its_own_probe_and_asks_again_when_an_asked_behaviour_is_missing(
+    tmp_path, monkeypatch
+):
+    """One pooled run holds probes that ask different behaviours: a fixed schema would make the judge rate the wrong ones."""
+    pooled = {
+        "task": "t",
+        "key": {"value": "v", "accept": [], "rubric": [], "traps": [], "premise": None},
+        "answer": "a",
+        "changed": "(no file changed)",
+    }
+    items = [
+        {"id": "it-0000", **pooled, "behaviours": ["keeps_scope", "trusts_stale"]},
+        {"id": "it-0001", **pooled, "behaviours": ["keeps_order"]},
+    ]
+    (tmp_path / "judge").mkdir()
+    (tmp_path / "judge" / "items.jsonl").write_text("".join(json.dumps(i) + "\n" for i in items))
+    asked = []
+
+    class Judge:
+        """Answers each item's first call without `keeps_scope`, as a judge that ignored its schema would."""
+
+        def call(self, prompt, schema, *, out, timeout):
+            asked.append((out.name, sorted(schema["required"])))
+            rated = {"correct": True, "reason": "r", "trusts_stale": "no", "keeps_order": "yes"}
+            if out.name.endswith(".0.codex-out.json"):
+                return SimpleNamespace(verdict=rated, cost_usd=0.0, model_reported=[], error="")
+            return SimpleNamespace(
+                verdict={**rated, "keeps_scope": "yes"}, cost_usd=0.0, model_reported=[], error=""
+            )
+
+    def judge_all(judge_dir, spec, pooled_items, grade, **options):
+        return [grade(item, Judge(), "verdicts") for item in pooled_items]
+
+    rows = []
+    monkeypatch.setattr(
+        epistemic_judge, "judge_all", lambda *a, **k: rows.extend(judge_all(*a, **k))
+    )
+    epistemic_judge.judge(tmp_path, None, 0.0, 1)
+
+    assert [r["verdict"] is not None for r in rows] == [True, True]
+    assert asked == [
+        ("it-0000.verdicts.0.codex-out.json", ["correct", "keeps_scope", "reason", "trusts_stale"]),
+        ("it-0000.verdicts.1.codex-out.json", ["correct", "keeps_scope", "reason", "trusts_stale"]),
+        ("it-0001.verdicts.0.codex-out.json", ["correct", "keeps_order", "reason"]),
+    ]
+    assert rows[0]["errors"] == ["these behaviours are not yes, no or n/a: ['keeps_scope']"]
+
+
+def test_the_judge_reads_the_description_of_each_behaviour_the_probe_asks_and_no_other():
+    """The prompt's behaviour lines come from the registry, so a new registry entry needs no code."""
+    registry = cases.behaviours()
+    prompt = epistemic_judge.build_prompt(
+        {
+            "task": "t",
+            "key": {"value": "v", "accept": [], "rubric": [], "traps": [], "premise": None},
+            "behaviours": ["keeps_scope", "trusts_stale"],
+            "answer": "a",
+            "changed": "(no file changed)",
+        }
+    )
+
+    assert registry["keeps_scope"]["description"] in prompt
+    assert registry["trusts_stale"]["description"] in prompt
+    assert registry["keeps_order"]["description"] not in prompt
+
+
+def test_the_report_rows_of_a_project_that_asks_the_first_six_behaviours_are_those_of_the_old_constant():
+    """Before the registry, every arm had a row for each of six behaviours. These counts are the old code's output on the same fixture."""
+
+    def asks(dimension, behaviours):
+        return {"dimension": dimension, "key": {"behaviours": behaviours}}
+
+    meta = {
+        ("a", "stable-1"): asks("stable", ["uses_current"]),
+        ("a", "attr-1"): asks("attribution", ["keeps_attribution", "cites_source"]),
+        ("a", "conf-1"): asks("conflict", ["flags_conflict", "cites_source"]),
+        ("a", "open-1"): asks("calibration", ["abstains_when_unknown"]),
+        ("a", "cur-1"): asks("supersession", ["uses_current", "flags_conflict"]),
+    }
+
+    def answer(arm, probe_id, state="answered", **verdict):
+        return {
+            "arm": arm,
+            "project": "a",
+            "probe_id": probe_id,
+            "window": 1,
+            "state": state,
+            "verdict": None if state == "unanswered" else {"correct": True, **verdict},
+        }
+
+    outcomes = [
+        answer("N", "stable-1", uses_current="yes", trusts_stale="n/a"),
+        answer("N", "attr-1", keeps_attribution="no", cites_source="no", trusts_stale="yes"),
+        answer("N", "conf-1", flags_conflict="no", cites_source="n/a", trusts_stale="no"),
+        answer("N", "open-1", abstains_when_unknown="no", trusts_stale="n/a"),
+        answer("N", "cur-1", uses_current="no", flags_conflict="no", trusts_stale="yes"),
+        answer("P", "stable-1", uses_current="yes", trusts_stale="n/a"),
+        answer("P", "attr-1", keeps_attribution="yes", cites_source="yes", trusts_stale="no"),
+        answer("P", "conf-1", flags_conflict="yes", cites_source="yes", trusts_stale="no"),
+        answer("P", "open-1", abstains_when_unknown="yes", trusts_stale="n/a"),
+        answer("P", "cur-1", uses_current="yes", flags_conflict="n/a", trusts_stale="no"),
+        answer("P", "cur-1", state="unanswered"),
+    ]
+
+    rates = report.behaviour_rates(outcomes, meta, ["N", "P"])
+
+    # arm -> behaviour -> [yes, no, n/a, rate], in the old constant's order.
+    old = {
+        "N": {
+            "uses_current": [1, 1, 0, 0.5],
+            "flags_conflict": [0, 2, 0, 0.0],
+            "cites_source": [0, 1, 1, 0.0],
+            "keeps_attribution": [0, 1, 0, 0.0],
+            "abstains_when_unknown": [0, 1, 0, 0.0],
+            "trusts_stale": [2, 1, 1, 0.6667],
+        },
+        "P": {
+            "uses_current": [2, 0, 0, 1.0],
+            "flags_conflict": [1, 0, 1, 1.0],
+            "cites_source": [2, 0, 0, 1.0],
+            "keeps_attribution": [1, 0, 0, 1.0],
+            "abstains_when_unknown": [1, 0, 0, 1.0],
+            "trusts_stale": [0, 3, 1, 0.0],
+        },
+    }
+    assert {
+        arm: {b: list(row.values()) for b, row in rows.items()} for arm, rows in rates.items()
+    } == old
+    assert [list(rows) for rows in rates.values()] == [list(old["N"]), list(old["P"])]
+
+
+def test_a_behaviour_that_no_probe_asks_has_no_report_row_and_one_that_a_probe_asks_has_one():
+    """The rows follow the case set: a registry behaviour that the set never asks is not a zero row."""
+    meta = {
+        ("a", "p1"): {"dimension": "stable", "key": {"behaviours": ["keeps_scope"]}},
+        ("a", "p2"): {"dimension": "stable", "key": {"behaviours": ["uses_current"]}},
+    }
+
+    rates = report.behaviour_rates([], meta, ["N"])
+
+    assert list(rates["N"]) == ["uses_current", "keeps_scope"], (
+        "registry order, asked behaviours only"
+    )
+
+
+def premise_project(*, task: str, premise: str) -> dict:
+    """The invented project with a premise probe at p-first: its key holds a trap and a premise apart."""
+    project = invented_project()
+    project["probes"][1]["task"] = task
+    project["probes"][1]["key"].update(traps=["alpha"], premise=premise)
+    return project
+
+
+def test_a_premise_probe_whose_task_holds_its_premise_passes_without_the_premise_counting_as_a_leak():
+    """The task must state the stale state it presupposes, so the leak rule must not refuse the premise."""
+    project = premise_project(
+        task="[probe p-first] The opening fact is still open, so which fact did session two open with?",
+        premise="The opening fact is still open",
+    )
+
+    assert cases.structure_problems(project) == []
+    refusals, _, _ = cases.check_probes(project)
+    assert refusals == []
+
+
+def test_a_premise_that_the_probes_task_does_not_hold_refuses_the_case_set_and_names_the_probe():
+    """A premise the task never states would show the judge a state that no actor was asked to accept."""
+    project = premise_project(
+        task="[probe p-first] Which fact did session two open with?",
+        premise="The opening fact is still open",
+    )
+
+    problems = cases.structure_problems(project)
+
+    assert any(p.startswith("probe p-first: key.premise is not in its task") for p in problems)
+
+
+def test_the_leak_rule_still_covers_every_trap_of_a_key_and_a_key_gives_traps_or_a_trap_not_both():
+    """A trap in the task hands the answerer the wrong answer; two trap fields would leave one unread."""
+    project = invented_project()
+    project["probes"][1]["key"]["traps"] = ["unrelated", "session two"]
+    project["probes"][1]["task"] = "[probe p-first] Which fact did session two open with?"
+    project["probes"][2]["key"].update(traps=["delta"], trap="epsilon")
+
+    refusals, _, _ = cases.check_probes(project)
+    problems = cases.structure_problems(project)
+
+    assert refusals == ["probe p-first: key.traps[1] appears in its task"]
+    assert "probe p-second: give key.traps or key.trap, not both" in problems
+
+
+def test_a_hand_written_keys_single_trap_reads_as_a_list_of_one_and_the_project_loads_unchanged():
+    """The hand-written projects keep `key.trap`; the suite reads it as the first of a list."""
+    project = invented_project()
+    project["probes"][1]["key"]["trap"] = "alpha"
+
+    assert cases.structure_problems(project) == []
+    assert cases.key_traps(project["probes"][1]["key"]) == ["alpha"]
+    assert cases.key_traps(project["probes"][0]["key"]) == [], "a null trap is no trap"
+    assert epistemic_judge.shown_key(project["probes"][1]["key"])["traps"] == ["alpha"]
+
+
+def test_the_judges_prompt_holds_every_trap_and_the_premise_of_the_key(played):
+    """The judge rates `trusts_stale` from what it reads, so a trap or premise left out of its prompt could never be caught."""
+    projects = cases.load_split(played.root, "dev")
+    probe = next(p for p in projects["proj-a"][0]["probes"] if p["probe_id"] == "p-first")
+    probe["key"].update(traps=["alpha", "gamma-old"], premise="the opening fact is still open")
+
+    entries = epistemic_judge.collect(played.run_dir, projects, ["P"])
+    entry = next(e for e in entries if e["probe_id"] == "p-first" and e["state"] == "answered")
+    prompt = epistemic_judge.build_prompt(entry)
+
+    shown = json.loads(prompt.split("KEY:\n", 1)[1].split("\n\nANSWER:\n", 1)[0])
+    assert shown["traps"] == ["alpha", "gamma-old"]
+    assert shown["premise"] == "the opening fact is still open"
+    assert "relies on a trap or on the premise" in prompt
+
+
 def test_a_report_refuses_a_case_file_that_changed_since_the_run_played_it(scratch):
     """SPLIT.json can be repaired after a run; the report must still read the file the run played."""
     write_case_set(scratch.root, {"proj-a": invented_project()})
@@ -733,7 +1209,7 @@ def outcome(arm, project, probe_id, window, correct):
 def test_a_probe_scores_the_mean_of_its_windows_and_an_unjudged_window_is_unknown_not_a_loss():
     """Two windows average to 0, 0.5 or 1; a window the judge failed on drops out of the mean instead of reading as 0."""
     meta = {
-        (project, probe_id): {"dimension": "supersession", "probe_id": probe_id}
+        (project, probe_id): {"dimension": "supersession", "probe_id": probe_id, "key": {}}
         for project, probe_id in (("a", "a1"), ("a", "a2"), ("b", "b1"), ("b", "b2"))
     }
     answers = {
@@ -770,6 +1246,78 @@ def test_harm_leaves_probe_windows_where_p_has_no_verdict_out_of_its_denominator
 
     assert (row["harmed"], row["solved_by_n"], row["dropped_p_unknown"]) == (1, 2, 2)
     assert row["rate"] == 0.5 and row["probes"] == ["a:a2 window 1"]
+
+
+def test_a_key_naming_the_harm_reading_loads_and_one_naming_an_unregistered_reading_is_refused_by_name():
+    """The reading is a registry value; a misspelt one would silently keep a probe on the position track."""
+    project = invented_project()
+    project["probes"][1]["key"]["reading"] = "harm"
+    project["probes"][2]["key"]["reading"] = "dread"
+
+    problems = cases.structure_problems(project)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("probe p-second: key.reading names 'dread'")
+
+
+def gate_probe(reading):
+    return {
+        "dimension": "stable",
+        "key": {"behaviours": [], **({"reading": reading} if reading else {})},
+    }
+
+
+def test_the_memory_needed_gate_skips_a_probe_whose_key_reads_it_as_harm():
+    """N answers an abstention probe correctly by design, so the gate must neither fail it nor count it."""
+    outcomes = [
+        outcome("N", "a", "abstain-1", 1, True),
+        outcome("N", "a", "change-1", 1, False),
+        outcome("N", "a", "change-2", 1, False),
+    ]
+    reads_harm = {
+        ("a", p): gate_probe(r)
+        for p, r in (("abstain-1", "harm"), ("change-1", None), ("change-2", None))
+    }
+    reads_position = {**reads_harm, ("a", "abstain-1"): gate_probe(None)}
+
+    skipped = report.dev_gates(outcomes, reads_harm)["memory_needed"]
+    counted = report.dev_gates(outcomes, reads_position)["memory_needed"]
+
+    assert (skipped["rate"], skipped["meets"], skipped["failing_probes"]) == (1.0, True, [])
+    assert skipped["skipped_as_harm"] == ["a:abstain-1"]
+    assert skipped["answers_judged"] == 2
+    assert (counted["meets"], counted["failing_probes"]) == (False, ["a:abstain-1"])
+    assert counted["skipped_as_harm"] == []
+
+
+def test_the_report_gives_a_probe_read_as_harm_as_harm_against_arm_n_per_arm():
+    """P loses an abstention that N gets right; F keeps it. A position probe that P loses is not in this reading."""
+    meta = {
+        ("a", "abstain-1"): gate_probe("harm"),
+        ("a", "abstain-2"): gate_probe("harm"),
+        ("a", "change-1"): gate_probe(None),
+    }
+    outcomes = [
+        outcome("N", "a", "abstain-1", 1, True),
+        outcome("N", "a", "abstain-2", 1, True),
+        outcome("N", "a", "change-1", 1, True),
+        outcome("P", "a", "abstain-1", 1, False),
+        outcome("P", "a", "abstain-2", 1, None),
+        outcome("P", "a", "change-1", 1, False),
+        outcome("F", "a", "abstain-1", 1, True),
+        outcome("F", "a", "abstain-2", 1, True),
+    ]
+
+    rows = report.harm_read_probes(outcomes, meta, ["N", "F", "P"])
+
+    assert set(rows) == {"F", "P"}, "harm is read against N, so N has no row"
+    assert (rows["P"]["harmed"], rows["P"]["solved_by_n"], rows["P"]["rate"]) == (1, 1, 1.0)
+    assert rows["P"]["probes"] == ["a:abstain-1 window 1"]
+    assert rows["P"]["dropped_p_unknown"] == 1, "P's missing verdict is unknown, not harm"
+    assert (rows["F"]["harmed"], rows["F"]["solved_by_n"], rows["F"]["rate"]) == (0, 2, 0.0)
+    assert report.harm_read_probes(outcomes, meta, ["F", "P"]) is None, (
+        "without arm N there is no reading"
+    )
 
 
 def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():

@@ -1290,7 +1290,6 @@ def _retain_projected_bm25_hits(
         for lane in ("vector", "keyword", "clip")
         for hit in lane_hits.get(lane, ())
     }
-    semantic_lanes_absent = not lane_hits.get("vector") and not lane_hits.get("clip")
     query_groups = find_policy.query_word_stem_groups(query)
     retained: list[projected_retrieval.ProjectedLexicalHit] = []
     for hit in bm25_hits:
@@ -1304,11 +1303,10 @@ def _retain_projected_bm25_hits(
             frozenset(bm25.tokenize(text)),
             query_groups,
         )
-        if semantic_lanes_absent:
-            keep = 2 * present > total and content_present > 0
-        else:
-            keep = total > 0 and present == total
-        if keep:
+        # Same per-candidate contract as the public seam: a strict word
+        # majority plus at least one content word, whether or not the
+        # semantic lanes produced other hits for this query.
+        if 2 * present > total and content_present > 0:
             retained.append(hit)
     return tuple(retained)
 

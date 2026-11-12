@@ -1,0 +1,11 @@
+{
+  "id": "f02-carry-owner",
+  "title": "Owner asked after turn 1 named a different project",
+  "suite": "session-close",
+  "seed": "fu-projects",
+  "engagement": "balanced",
+  "turns": [
+    "I'm picking up Project Harbor next week. Give me a short summary of it.",
+    "what about the owner?"
+  ]
+}

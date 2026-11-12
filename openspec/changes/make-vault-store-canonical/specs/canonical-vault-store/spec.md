@@ -13,6 +13,11 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **THEN** the file stays on disk and is durable before the transaction that records its path and content hash commits
 - **AND** the store records that path and hash in the same transaction as the page that cites it
 
+#### Scenario: A governed move of a binary renames it, then records it
+- **WHEN** a delete, a move or a recovery in store mode moves a binary file
+- **THEN** the file is renamed on disk first, and one transaction records it at its new path and removes its old record, bound to the old record as read and to an empty new path
+- **AND** a refused transaction renames the file back, and a kill before the transaction leaves the old record to the next sweep, which pairs it with the moved file by its hash
+
 ### Requirement: One transaction per governed write
 A governed write in store mode SHALL commit every file it changes, the lexical catalogue rows, the graph nodes, edges and dependencies derived from those files, one audit row per file and one projection intent per file in one `BEGIN IMMEDIATE` transaction. The write SHALL acknowledge only after that transaction is durable. Derivation SHALL run from the bytes being written, before the transaction, with the same derivation code that file mode uses. When a write adds a title that makes links on other pages resolve, the same transaction SHALL update those pages' graph rows.
 
@@ -34,6 +39,16 @@ A governed write in store mode SHALL commit every file it changes, the lexical c
 #### Scenario: Derived rows match file mode exactly
 - **WHEN** the same sequence of page bytes is written once in file mode and once in store mode from the same starting vault
 - **THEN** the lexical page rows, semantic unit rows, graph nodes, graph edges, graph dependencies and parent references are equal, apart from columns that record write time or write order
+
+#### Scenario: A governed page's trash keeps its tombstone and receipt around the transaction
+- **WHEN** a store-mode delete or recovery moves a page that a governance policy restricts
+- **THEN** the receipt intent and the tombstone are written under the governance folder before the transaction, and the receipt settles after it from the store's rows and the vector and CLIP sidecars
+- **AND** reconcile settles a kill on either side of the transaction from the store, never from the Markdown projection
+
+#### Scenario: An active catalog publication follows the transaction that it names
+- **WHEN** a store-mode delete, move or recovery runs on a vault with an active governance catalog publication
+- **THEN** the catalog change is prepared before the writer's validation returns, the change and its log entry commit in one transaction, and the catalog publishes after it
+- **AND** a publication that fails after the transaction reports the catalog publication as uncertain
 
 ### Requirement: Markdown is a byte-exact projection
 In store mode, Exomem SHALL write each committed file to the vault as a byte-exact projection after the transaction commits. A projector SHALL make the projected file durable before it records the file's hash, size, modification time and revision in the projection manifest. At startup the projector SHALL remove its own unfinished temporary files and SHALL project every intent still queued. Several revisions of one file that queue before projection MAY coalesce into the latest one.

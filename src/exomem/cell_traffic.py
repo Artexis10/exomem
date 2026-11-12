@@ -181,6 +181,9 @@ class CellTraffic:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
+            from .governance.transaction import fsync_directory
+
+            fsync_directory(self.path.parent)
         except OSError:
             log.warning("event=cell_traffic_flush_failed the hourly counts were not saved")
         finally:
@@ -223,9 +226,10 @@ def schedule_flush(traffic: CellTraffic) -> None:
 
 
 def shutdown_lifespan(inner, traffic: CellTraffic):
-    """Outermost lifespan of a Cloud cell. At the stop signal, after every inner
-    lifespan has closed its stores, it saves the counts and syncs the volume, so a
-    snapshot taken after the stop holds every acknowledged write (design D6)."""
+    """Save the counts and flush the state root after every inner lifespan closes.
+
+    Each vault writer supplies its own durability barrier before acknowledging a write.
+    """
 
     @contextlib.asynccontextmanager
     async def _lifespan(server):
@@ -234,7 +238,13 @@ def shutdown_lifespan(inner, traffic: CellTraffic):
                 yield state
         finally:
             traffic.flush()
-            # A synced SQLite WAL replays on the next open, so the volume is consistent.
-            os.sync()
+            # A synced SQLite WAL replays on the next open. Only this state root's files: `os.sync`
+            # would wait on every filesystem the host mounts.
+            from . import cloud_import
+
+            try:
+                cloud_import.flush_to_disk(traffic.path.parent)
+            except OSError:
+                log.warning("event=cell_state_flush_failed the state root was not fully flushed")
 
     return _lifespan

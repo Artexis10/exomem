@@ -687,7 +687,8 @@ class Supervisor:
             try:
                 target = await self.runtime.inspect(target)
                 self._migration_declared(target)
-            except Exception:  # noqa: BLE001 - reject candidate failures before changing admission
+            except Exception as error:  # noqa: BLE001 - reject candidate failures before changing admission
+                log.warning("refusing managed upgrade target: %s", error)
                 return {
                     "ok": False,
                     "error": "target interpreter verification failed; current admission unchanged",
@@ -748,6 +749,10 @@ class Supervisor:
                     await self.ingress.detach_streams()
                     # Enrollment may have changed during standby warming or
                     # draining. Refuse before stopping the worker still serving.
+                    # A verdict-reporting target replays the verdict it computed
+                    # at inspect; state that changed since then is the worker's
+                    # own gate's to refuse, failing the upgrade past the stop
+                    # instead of refusing it here.
                     try:
                         migrate, reason = self._migration_declared(target)
                     except Exception:  # noqa: BLE001 - pre-stop refusal keeps the serving worker
@@ -1126,13 +1131,79 @@ def _collections_migration_pending(vault: Path) -> bool:
     return intent is not None and intent["kind"] == authority.MIGRATE
 
 
+def vault_state_verdict(vault: Path | str) -> dict[str, str]:
+    """Whether this release can serve the vault's machine-local state, under its own catalogs.
+
+    The managed supervisor runs this under the *target* interpreter and reports the
+    dict back, so the verdict comes from the release that would serve or migrate the
+    state rather than from the launcher's own catalogs. That is what lets a launcher
+    that predates a recorded optional format still start the worker that wrote it:
+    the supervisor never interprets format ids itself. ``{"verdict": "serve"}``
+    needs no migration, ``"migrate"`` runs the handoff's migrator step, and
+    ``"refuse"`` means this release cannot use the recorded state at all.
+    It runs inside ``inspect``'s probe budget, so its reads stay the bounded
+    local ones below.
+    """
+    from . import state_migration
+    from .collection_store import connection
+    from .collection_store import schema as store_schema
+    from .collection_store.authority import required_state_compatibility_ids
+    from .governance import raw_protection
+
+    root = Path(vault)
+    try:
+        # Optional ids this release predates partition as physical and fail
+        # validation below; name them first so the refusal says what they are.
+        unrecognized = state_migration.unrecognized_compatibility_ids(root)
+        if unrecognized:
+            return {
+                "verdict": "refuse",
+                "reason": "the vault records state formats this release does not "
+                "recognize: " + ", ".join(unrecognized),
+            }
+        required = required_state_compatibility_ids(root)
+        required |= raw_protection.required_compatibility(root)
+        recorded = state_migration.recorded_descriptor_ids(root)
+        physical, optional = state_migration.partition_state_descriptor_ids(recorded or ())
+        required |= optional
+        missing = required - set(state_migration.supported_state_compatibility_ids())
+        if missing:
+            return {
+                "verdict": "refuse",
+                "reason": "the vault requires state compatibility this release lacks: "
+                + ", ".join(sorted(missing)),
+            }
+        if required_state_compatibility_ids(root):
+            live = connection.recorded_schema(connection.store_path(root))
+            if live is not None and live > store_schema.SCHEMA_VERSION:
+                return {
+                    "verdict": "refuse",
+                    "reason": f"the collection store's schema {live} is newer than "
+                    "this release reads",
+                }
+        if recorded is None:
+            return {"verdict": "migrate", "reason": "state manifest records no descriptor set"}
+        if not state_migration.migration_completed(root):
+            return {"verdict": "migrate", "reason": "state manifest in-progress"}
+        if physical != set(state_migration.declared_descriptor_ids()):
+            return {"verdict": "migrate", "reason": "descriptors_changed"}
+        return {"verdict": "serve", "reason": "declared_none"}
+    except Exception:  # noqa: BLE001 - state this release cannot parse is a verdict of its own
+        return {
+            "verdict": "refuse",
+            "reason": "the vault's state manifest is unreadable by this release",
+        }
+
+
 def upgrade_blocker() -> str | None:
     """Why this supervisor cannot run an upgrade on the vault's state, with the fix, or None.
 
     The supervisor runs from the launcher venv, which a worker upgrade does not replace. When a
     newer worker records an optional state format that this release predates, the supervisor
-    cannot read the state manifest, so it could verify no target. Only an offline launcher
-    upgrade changes that, and the message says so before any release is staged.
+    cannot read the state manifest, so it could orchestrate no upgrade over it: handoff steps
+    still read state with the launcher's own code. Only an offline launcher upgrade changes
+    that, and the message says so before any release is staged. Serving is not orchestrating:
+    the recorded worker's own verdict, not this read, decides whether it starts.
     """
     vault = os.environ.get("EXOMEM_VAULT_PATH", "")
     if not vault or not Path(vault).is_absolute():
@@ -1203,10 +1274,14 @@ class WorkerRuntime:
             f"{socket_path.stem}-standby{socket_path.suffix}"
         )
         self.standby_capable = False
-        # The exact verified candidate, its optional state support, its store schema ceiling
-        # and the offline migrations its own migrator runs.
+        # The exact verified candidate, its optional state support, its store schema ceiling,
+        # the offline migrations its own migrator runs and its own state verdict.
         self._verified_state_compatibility: tuple[
-            tuple[str, str, tuple[str, ...]], frozenset[str], int | None, frozenset[str]
+            tuple[str, str, tuple[str, ...]],
+            frozenset[str],
+            int | None,
+            frozenset[str] | None,
+            dict[str, str] | None,
         ] | None = None
         #: The collections step decided for this handoff, then what the migrator reported.
         #: Content-free: a state, a fixed reason or the migrator's clamped outcome token.
@@ -1415,10 +1490,20 @@ class WorkerRuntime:
             "except Exception:\n"
             "    store_schema = None\n"
             + _STATE_DECLARATIONS_PROBE
+            # The target's verdict on this vault's state, computed by the target's own
+            # release: the supervisor never interprets format ids itself, so a launcher
+            # that predates a recorded format still starts the worker that wrote it.
+            + "try:\n"
+            + "    import os as _os\n"
+            + "    from exomem.service_manager import vault_state_verdict as _verdict\n"
+            + "    _vault = _os.environ.get('EXOMEM_VAULT_PATH', '')\n"
+            + "    state_verdict = _verdict(_vault) if _vault else None\n"
+            + "except Exception:\n"
+            + "    state_verdict = None\n"
             + 'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
             '"standby":standby,"state_descriptors":descriptors,'
             '"supported_state_compatibility":compatibility,"store_schema":store_schema,'
-            '"offline_migrations":migrations}))'
+            '"offline_migrations":migrations,"state_verdict":state_verdict}))'
         )
         probe = await asyncio.create_subprocess_exec(
             interpreter,
@@ -1465,12 +1550,22 @@ class WorkerRuntime:
             isinstance(entry, str) and entry for entry in migrations
         )):
             raise ValueError("target did not declare its offline migrations")
+        verdict = actual.get("state_verdict")
+        if not (
+            isinstance(verdict, dict)
+            and verdict.get("verdict") in {"serve", "migrate", "refuse"}  # nosemgrep: ep-word-membership -- the verdict token set is fixed by the worker probe protocol
+            and isinstance(verdict.get("reason"), str)
+        ):
+            # A target that predates the verdict probe, or whose report is not a
+            # verdict, leaves the supervisor's own read as the fallback.
+            verdict = None
         self.standby_capable = actual.get("standby") is True
         self._verified_state_compatibility = (
             (interpreter, version, tuple(descriptors)),
             frozenset(compatibility),
             store_schema,
             None if migrations is None else frozenset(migrations),
+            verdict,
         )
         return {
             "python": interpreter,
@@ -1817,24 +1912,48 @@ class WorkerRuntime:
         return {STANDBY_COLLECTIONS_ENV: "1" if possible else "0"}
 
     def _state_migration_required(self, target: dict[str, Any]) -> tuple[bool, str]:
-        """`migration_required` for the vault's machine-local state families alone."""
+        """`migration_required` for the vault's machine-local state families alone.
+
+        The verdict is the target's own, reported under its interpreter by
+        ``vault_state_verdict``: the supervisor never interprets optional format
+        ids itself, so a launcher that predates a recorded format still starts
+        the worker that wrote it. The launcher's own read remains only as the
+        fallback for a target that cannot report.
+        """
         vault = os.environ.get("EXOMEM_VAULT_PATH", "")
         if not vault or not Path(vault).is_absolute():
             return True, "vault binding unavailable"
+        verified = self._verified_for(target)
+        if verified is not None and verified[4] is not None:
+            verdict = verified[4]
+            if verdict["verdict"] == "refuse":
+                raise ValueError(
+                    "candidate does not support required state compatibility: "
+                    + verdict["reason"]
+                )
+            return verdict["verdict"] == "migrate", verdict["reason"]
         from . import state_migration
         from .collection_store.authority import required_state_compatibility_ids
         from .governance import raw_protection
 
-        required = required_state_compatibility_ids(Path(vault))
-        required |= raw_protection.required_compatibility(Path(vault))
-        recorded = state_migration.recorded_descriptor_ids(Path(vault))
-        physical, optional = state_migration.partition_state_descriptor_ids(recorded or ())
-        required |= optional
-        verified = self._verified_for(target)
+        try:
+            required = required_state_compatibility_ids(Path(vault))
+            required |= raw_protection.required_compatibility(Path(vault))
+            recorded = state_migration.recorded_descriptor_ids(Path(vault))
+            physical, optional = state_migration.partition_state_descriptor_ids(recorded or ())
+            required |= optional
+        except state_migration.StateMigrationManifestError:
+            # The launcher's own catalog predates the state, or the manifest is
+            # unreadable: the migrator and the worker's own gate, both running
+            # under the target's interpreter, decide instead.
+            return True, "state manifest unreadable by supervisor"
         supported = verified[1] if verified is not None else frozenset()
         if required - supported:
             raise ValueError("candidate does not support required state compatibility")
-        _require_store_schema(Path(vault), verified[2] if verified is not None else None)
+        try:
+            _require_store_schema(Path(vault), verified[2] if verified is not None else None)
+        except state_migration.StateMigrationManifestError:
+            return True, "state manifest unreadable by supervisor"
         if recorded is None:
             return True, "state manifest records no descriptor set"
         declared = target.get("state_descriptors")

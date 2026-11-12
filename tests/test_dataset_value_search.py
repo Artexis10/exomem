@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import time
 from pathlib import Path
 
 from exomem import commands, dataset_values, find, preserve
@@ -24,8 +25,15 @@ def _preserve(vault: Path, filename: str, data: bytes):
 
 
 def _find(vault: Path, query: str, limit: int = 15) -> list[dict]:
-    found = commands.op_find(vault, query=query, mode="keyword", graph=False, limit=limit)
-    return found["hits"] if isinstance(found, dict) else found
+    # Indexing a batch of fresh pages can still be warming; retry the exact recall briefly.
+    for _ in range(80):
+        try:
+            found = commands.op_find(vault, query=query, mode="keyword", graph=False, limit=limit)
+        except find.RetrievalIndexWarming:
+            time.sleep(0.25)
+            continue
+        return found["hits"] if isinstance(found, dict) else found
+    raise AssertionError("recall index still warming after 20s")
 
 
 def _note(vault: Path, rel: str, text: str, *, updated: str, number: int) -> None:
@@ -215,3 +223,224 @@ def test_an_original_that_no_longer_matches_its_card_is_not_served(vault):
     (vault / result.path).write_bytes(replaced)
     assert result.path not in _paths(_find(vault, ACCOUNT))
     assert result.path not in _paths(_find(vault, "EE81 7701"))
+
+
+NATURAL_PROFILE = json.dumps(
+    {
+        "supplier": {
+            "name": "Brightwater Haulage",
+            "bank": {"iban": ACCOUNT, "bank_name": "North Bank"},
+        }
+    }
+).encode()
+
+
+def _rendered_part(passage: str) -> str:
+    """The rendering part of a value passage: before the next-action line, minus a truncation line."""
+    return passage.split("[A rendering")[0].split("[Value rendering")[0].rstrip()
+
+
+def test_a_natural_question_finds_the_value(vault):
+    result = _preserve(vault, "supplier-profile.json", NATURAL_PROFILE)
+    for query in (
+        "Brightwater's IBAN",
+        "IBAN of Brightwater Haulage",
+        "what is the IBAN for Brightwater Haulage",
+    ):
+        hits = [hit for hit in _find(vault, query) if hit["path"] == result.path]
+        assert hits, query
+        passage = hits[0]["passage"]["text"]
+        assert ACCOUNT in passage
+        # The passage starts at the first field in record order that holds a matched word.
+        first_line = passage.splitlines()[0]
+        assert "supplier.name" in first_line or "iban" in first_line
+        assert len(_rendered_part(passage)) <= 600
+
+
+def test_a_name_no_dataset_holds_finds_no_value_hit(vault):
+    _preserve(vault, "supplier-profile.json", NATURAL_PROFILE)
+    result = _preserve(vault, "iban-only.json", json.dumps({"iban": ACCOUNT}).encode())
+    hits = _find(vault, "Zorblex IBAN")
+    assert result.path not in _paths(hits)
+    assert not [hit for hit in hits if hit["path"].endswith(".json")]
+
+
+def test_common_words_across_many_datasets_find_no_value_hit(vault, monkeypatch):
+    monkeypatch.setattr(dataset_values, "MAX_BUILDS_PER_REQUEST", 100)
+    for number in range(45):
+        data = json.dumps(
+            {"run": {"name": "test results", "status": "passed", "id": number}}
+        ).encode()
+        _preserve(vault, f"run-{number:02d}.json", data)
+    result = _preserve(vault, "supplier-profile.json", NATURAL_PROFILE)
+    noise = _find(vault, "test results")
+    assert not [hit for hit in noise if hit["path"].endswith(".json")]
+    assert result.path in _paths(_find(vault, "Brightwater IBAN"))
+
+
+def test_common_words_in_a_small_scope_still_match(vault):
+    result = _preserve(
+        vault,
+        "run.json",
+        json.dumps({"run": {"name": "test results", "status": "passed"}}).encode(),
+    )
+    _preserve(vault, "other.json", json.dumps({"note": "unrelated"}).encode())
+    assert result.path in _paths(_find(vault, "test results"))
+
+
+def test_words_far_apart_in_a_large_record_do_not_match(vault):
+    # Each object holding one word has more than 40 fields, so no part within the bound holds
+    # even one of them; only the root does, and it is over the bound too.
+    wide_a = {"x": "Quillon"} | {f"filler_{n}": n for n in range(45)}
+    wide_b = {"y": "Marrow"} | {f"filler_{n}": n for n in range(45)}
+    far = _preserve(vault, "far.json", json.dumps({"a": wide_a, "b": wide_b}).encode())
+    near = _preserve(
+        vault, "near.json", json.dumps({"both": {"x": "Quillon", "y": "Marrow"}}).encode()
+    )
+    paths = _paths(_find(vault, "Quillon Marrow"))
+    assert far.path not in paths
+    assert near.path in paths
+
+
+def test_value_hits_are_capped_at_three(vault):
+    for number in range(5):
+        _preserve(
+            vault,
+            f"marker-{number}.json",
+            json.dumps({"token": f"sharedmarker-{number % 2}", "id": number}).encode(),
+        )
+    originals = [path for path in _paths(_find(vault, "sharedmarker")) if path.endswith(".json")]
+    assert len(originals) <= 3
+
+
+def test_the_newest_version_comes_first(vault):
+    older = _preserve(vault, "profile-older.json", NATURAL_PROFILE)
+    newer = _preserve(vault, "profile-newer.json", NATURAL_PROFILE)
+    card = vault / older.sidecar_path
+    card_text = card.read_text(encoding="utf-8")
+    assert "captured:" in card_text
+    import re as _re
+
+    # `page.updated` reads the card's `captured`; stamping it back makes `older` the older card.
+    card.write_text(_re.sub(r"captured: .*", "captured: 2000-01-01T00:00:00Z", card_text), encoding="utf-8")
+    for query in (ACCOUNT, "ee817700123456789012"):
+        paths = _paths(_find(vault, query))
+        originals = [path for path in paths if path in (older.path, newer.path)]
+        assert originals[:1] == [newer.path], query
+
+
+def test_a_number_that_differs_in_one_group_finds_no_value_hit(vault):
+    first = _preserve(
+        vault,
+        "supplier-one.json",
+        json.dumps({"supplier": {"name": "Brightwater Haulage", "iban": ACCOUNT}}).encode(),
+    )
+    second = _preserve(
+        vault,
+        "supplier-two.json",
+        json.dumps(
+            {"supplier": {"name": "Zephyr Logistics", "iban": "EE81 7700 1234 5678 9099"}}
+        ).encode(),
+    )
+    found = _paths(_find(vault, "EE81 7700 1234 5678 9012"))
+    assert first.path in found
+    assert second.path not in found
+    found = _paths(_find(vault, "EE81 7700 1234 5678 9099"))
+    assert second.path in found
+    assert first.path not in found
+
+
+def test_a_digit_group_held_only_by_another_field_finds_no_value_hit(vault):
+    # The differing group sits in the same record and even the same row, but not in the
+    # same field as the rest of the number, so the match must not happen.
+    json_hit = _preserve(
+        vault,
+        "supplier-scattered.json",
+        json.dumps(
+            {"supplier": {"iban": "EE81 7700 1234 5678 9099"}, "audit": {"count": 9012}}
+        ).encode(),
+    )
+    csv_hit = _preserve(
+        vault,
+        "payments.csv",
+        b"iban,amount\nEE81 7700 1234 5678 9099,9012\n",
+    )
+    found = _paths(_find(vault, "EE81 7700 1234 5678 9012"))
+    assert json_hit.path not in found
+    assert csv_hit.path not in found
+
+
+def test_a_digit_in_a_field_name_finds_no_value_hit(vault):
+    keyed = _preserve(
+        vault,
+        "keyed.json",
+        json.dumps({"code": {"9012": "hello there"}}).encode(),
+    )
+    assert keyed.path not in _paths(_find(vault, "9012 hello"))
+
+
+def test_a_compound_word_split_between_key_and_value_matches(vault):
+    result = _preserve(vault, "acme.json", json.dumps({"iban": "Acme Corp"}).encode())
+    assert result.path in _paths(_find(vault, "acme-iban"))
+
+
+def test_a_compound_seen_only_in_field_names_finds_no_value_hit(vault):
+    # No field may borrow the value touch: the field holding the compound in its name
+    # must also hold one of the compound's stems in its value.
+    borrowed = _preserve(
+        vault,
+        "borrowed.json",
+        json.dumps({"test-results": "ok", "summary": "results in detail"}).encode(),
+    )
+    named = _preserve(
+        vault,
+        "named.json",
+        json.dumps({"acme-iban": "zzz", "note": "says iban"}).encode(),
+    )
+    assert borrowed.path not in _paths(_find(vault, "test-results"))
+    assert named.path not in _paths(_find(vault, "acme-iban"))
+
+
+def test_an_equal_coverage_match_prefers_the_record_with_the_fewest_fields(vault):
+    wide = {f"a{n:02d}": f"filler{n:02d}" for n in range(30)}
+    wide["note"] = "quillon"
+    data = json.dumps([{"b": {"name": "quillon"}}, wide]).encode()
+    result = _preserve(vault, "wide.json", data)
+    hits = [hit for hit in _find(vault, "quillon") if hit["path"] == result.path]
+    assert hits
+    assert "b.name" in hits[0]["passage"]["text"]
+    assert "filler" not in hits[0]["passage"]["text"]
+
+
+def test_a_passage_never_exceeds_its_character_bound(vault):
+    pad = "x" * 290
+    record = {
+        "a0": f"needle {pad}",
+        "a1": pad,
+        "a2": pad,
+        "a3": f"needle {pad}",
+    }
+    result = _preserve(vault, "padded.json", json.dumps(record).encode())
+    hits = [hit for hit in _find(vault, "needle") if hit["path"] == result.path]
+    assert hits
+    text = _rendered_part(hits[0]["passage"]["text"])
+    assert len(text) <= dataset_values.MAX_VALUE_PASSAGE_CHARS
+    assert "needle" in text
+
+
+def test_a_stale_value_terms_index_is_dropped_on_rebuild(vault, tmp_path):
+    import sqlite3
+
+    sidecar = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(sidecar)
+    conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute("INSERT INTO meta VALUES ('schema', '2')")
+    conn.execute("CREATE VIRTUAL TABLE value_terms USING fts5(tokens)")
+    conn.execute("INSERT INTO value_terms VALUES ('stale raw value')")
+    conn.commit()
+    conn.close()
+    dataset_values._open(sidecar).close()
+    conn = sqlite3.connect(sidecar)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+    conn.close()
+    assert not any(name.startswith("value_terms") for name in tables)

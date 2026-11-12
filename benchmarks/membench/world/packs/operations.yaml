@@ -1,0 +1,104 @@
+# The domain pack for a small software and operations team: people, a few systems and services,
+# the sites they work from, and the events of a working year. It is data. The generator reads
+# it to build the backbone of a world and to bind a recipe's roles to things that exist.
+#
+# Names come from the wordbank's partition for the world's split, so the pack holds none. Labels
+# are plain neutral words. A closed value (a volatility class, a value generator, a name space)
+# is one that `attributes.yaml` declares, and `pack.py` refuses any other.
+schema_version: 1
+pack: operations
+describes: "A small software and operations team."
+
+# How many days an observation of a volatility class stays current. A class that is not listed
+# holds its value until a recorded change.
+volatility_windows:
+  transient: 14
+  ephemeral: 1
+
+# The holder whom the actor works for.
+user:
+  names: person
+
+entity_types:
+  - id: person
+    holder: true
+    names: person
+    count: 16
+  - id: monitor
+    holder: true
+    names: product
+    count: 4
+    attributes:
+      - {id: signal-level, label: "signal level", paraphrases: ["strength of the signal"], volatility: ephemeral, value: {generator: integer, min: 0, max: 99}}
+  - id: service
+    holder: false
+    names: product
+    count: 12
+    attributes:
+      - {id: approvals, label: "approvals required before a deploy", paraphrases: ["sign-offs needed to ship"], volatility: durable, value: {generator: integer, min: 1, max: 9}}
+      - {id: retention, label: "days that logs are kept", paraphrases: ["log retention period"], volatility: durable, value: {generator: integer, min: 7, max: 365}}
+      - {id: replicas, label: "replicas in production", paraphrases: ["production copies running"], volatility: durable, value: {generator: integer, min: 1, max: 12}}
+      - {id: retry-limit, label: "retries before a job fails", paraphrases: ["allowed retry count"], volatility: durable, value: {generator: integer, min: 1, max: 10}}
+      - {id: support-tier, label: "support tier", paraphrases: ["level of support"], volatility: durable, value: {generator: choice, from: [bronze, silver, gold, platinum, basic, extended]}}
+      - {id: region, label: "hosting region", paraphrases: ["place it is hosted"], volatility: durable, value: {generator: choice, from: [north, south, east, west, central, coastal]}}
+      - {id: team-size, label: "people on the team", paraphrases: ["headcount"], volatility: slow, value: {generator: integer, min: 2, max: 30}}
+      - {id: queue-depth, label: "jobs waiting in the queue", paraphrases: ["backlog of jobs"], volatility: transient, value: {generator: integer, min: 0, max: 99}}
+      - {id: launch-year, label: "year of the first release", paraphrases: ["when it first shipped"], volatility: permanent, value: {generator: integer, min: 2008, max: 2024}}
+      - {id: owner, label: "owning engineer", paraphrases: ["engineer in charge"], volatility: durable, value: {generator: holder, from: person}}
+      - {id: on-call, label: "engineer on call", paraphrases: ["person carrying the pager"], volatility: durable, value: {generator: holder, from: person}}
+  - id: site
+    holder: false
+    names: city
+    count: 6
+    attributes:
+      - {id: capacity, label: "seats available", paraphrases: ["number of desks"], volatility: durable, value: {generator: integer, min: 10, max: 200}}
+      - {id: cleaning-day, label: "day of the weekly cleaning", paraphrases: ["weekday for cleaning"], volatility: durable, value: {generator: choice, from: [Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]}}
+      - {id: visitor-limit, label: "visitors allowed at once", paraphrases: ["guest cap"], volatility: durable, value: {generator: integer, min: 1, max: 20}}
+      - {id: site-lead, label: "site lead", paraphrases: ["person who runs the site"], volatility: durable, value: {generator: holder, from: person}}
+
+# Things that happen. Each has a chance that a document may state, drawn from `value`.
+event_types:
+  - id: release
+    label: "release"
+    names: project
+    count: 10
+    value: {generator: choice, from: [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]}
+  - id: outage
+    label: "outage"
+    names: product
+    count: 6
+    value: {generator: choice, from: [0.1, 0.2, 0.3, 0.5, 0.7, 0.9]}
+
+# Contexts in the scope lattice: each root holds `children` contexts that are within it.
+contexts:
+  names: org
+  roots: 4
+  children: 3
+
+# Audiences: each is a group of `size` holders drawn from one entity type.
+audiences:
+  count: 3
+  size: 4
+  from: person
+
+# What the backbone says by itself: a statement of this kind about a share of the attributes that no
+# thread reserves.
+facts:
+  kind: fact
+  share: 0.25
+
+# The kind of document that carries a statement, or announces an operation. A statement kind or an
+# operation that no list names goes into the `default` kind.
+artefacts:
+  default: note
+  kinds:
+    message: [question, report, instruction, proposal, opinion, supposition, story]
+    note: [fact, decision, rule, definition, plan, assumption, hypothesis, estimate, prediction, example]
+    log: [observation, measurement, result]
+  operations:
+    correct: message
+    withdraw: message
+    tell: message
+    name: note
+    merge: note
+    restrict: note

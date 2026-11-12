@@ -61,12 +61,19 @@ class Lifecycle:
     They join the batch's one store transaction, so a page never leaves its path without the rows
     and the other pages that go with it. ``expect`` holds what each named path must still be when
     the commit runs: a stale source refuses the whole commit with its ``StoreConflict``.
+
+    ``records`` are binaries that the writer already moved on disk (``binaries.relocate``), which
+    the commit records beside the ones the batch publishes. ``refresh`` names files the store does
+    not own that the writer moved before the commit, under their old and new paths: the commit
+    derives their rows again at the new path and drops them at the old one.
     """
 
     moves: tuple[PageMove, ...] = ()
     deletes: tuple[PageDelete, ...] = ()
     binary_deletes: tuple[BinaryDelete, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
+    records: tuple[BinaryRecord, ...] = ()
+    refresh: tuple[str, ...] = ()
 
 
 def commit_batch(
@@ -400,9 +407,12 @@ def _commit(
             puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
             deletes=plan.lifecycle.deletes,
             moves=plan.lifecycle.moves,
-            binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
+            binaries=(
+                *(_record(rel, write) for rel, write in plan.binaries),
+                *plan.lifecycle.records,
+            ),
             binary_deletes=plan.lifecycle.binary_deletes,
-            refresh=tuple(plan.refresh),
+            refresh=(*plan.refresh, *plan.lifecycle.refresh),
             expect=plan.expectations(),
         )
         try:

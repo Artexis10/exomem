@@ -17,6 +17,7 @@ import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography import x509
@@ -180,6 +181,47 @@ def test_completed_export_uses_range_reads_and_rejects_corruption_and_expired_ve
         with pytest.raises(cloud_export.ExportRefused, match="^EXPORT_FAILED$"):
             cloud_export.verify_remote_export(f"{storage['base']}/completed?versionId={version}",
                 cell_id=CELL, archive_bytes=len(archive), archive_sha256=packed["sha256"], max_bytes=1024**3)
+
+
+def test_a_refused_verification_names_its_cause_but_never_the_signed_url(vault, tmp_path, storage, monkeypatch):
+    """Defect: the verifier's refusal reports only `EXPORT_FAILED`, or the detail leaks the signed URL."""
+    monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
+    url = f"{storage['base']}/absent?versionId=none&token=a%2Fsigned%2Bpart"
+    with pytest.raises(cloud_export.ExportRefused) as refused:
+        cloud_export.verify_remote_export(url, cell_id=CELL, archive_bytes=10,
+                                          archive_sha256="0" * 64, max_bytes=1024**3)
+    assert refused.value.code == "EXPORT_FAILED"
+    detail = refused.value.detail
+    assert set(detail) <= {"cause", "status"} and detail["cause"].isidentifier()
+    if "status" in detail:
+        assert type(detail["status"]) is int and 100 <= detail["status"] <= 599
+    detail_text = json.dumps(detail)
+    assert url not in detail_text and storage["base"] not in detail_text
+    assert "versionId" not in detail_text and "token" not in detail_text and "signed" not in detail_text
+
+    # A failure carrying an HTTP status reports it beside the class.
+    class RefusedRead(Exception):
+        status = 503
+
+    PartStore.objects["/present?versionId=exact"] = b"\x00" * 32
+    monkeypatch.setattr(vault_portability, "verify_export_stream",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RefusedRead()))
+    with pytest.raises(cloud_export.ExportRefused) as refused:
+        cloud_export.verify_remote_export(f"{storage['base']}/present?versionId=exact", cell_id=CELL,
+                                          archive_bytes=32, archive_sha256="0" * 64, max_bytes=1024**3)
+    assert refused.value.detail == {"cause": "RefusedRead", "status": 503}
+
+
+def test_a_digest_mismatch_reports_only_the_mismatch_token(vault, tmp_path, storage, monkeypatch):
+    """Defect: a completed object whose bytes fail the digest reads as an unexplained failure."""
+    monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
+    PartStore.objects["/completed?versionId=exact"] = b"\x00" * 64
+    verified = SimpleNamespace(archive_size=64, archive_sha256="f" * 64)
+    monkeypatch.setattr(vault_portability, "verify_export_stream", lambda *_args, **_kwargs: verified)
+    with pytest.raises(cloud_export.ExportRefused) as refused:
+        cloud_export.verify_remote_export(f"{storage['base']}/completed?versionId=exact", cell_id=CELL,
+                                          archive_bytes=64, archive_sha256="0" * 64, max_bytes=1024**3)
+    assert refused.value.detail == {"mismatch": "sha256"}
 
 
 def test_the_cells_size_bounds_the_export_in_place_of_the_default_limit(vault, tmp_path, storage):

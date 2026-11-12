@@ -9,7 +9,7 @@ contract (placeholder projects/paths); adapt `project-keys.yaml` to your own.
 
 from __future__ import annotations
 
-import shutil
+import hashlib
 from pathlib import Path
 
 from . import indexes
@@ -78,6 +78,23 @@ def shipped_schema_sources() -> list[Path]:
     return found
 
 
+def _shipped_text(src: Path) -> str:
+    """Scaffold file text as deployed to a vault: release placeholders filled."""
+    text = src.read_text(encoding="utf-8")
+    if src.suffix == ".md":
+        from . import package_skills
+
+        text = package_skills.render_shipped_markdown(text)
+    return text
+
+
+def _shipped_bytes(src: Path) -> bytes:
+    """Scaffold file bytes as deployed to a vault store."""
+    if src.suffix == ".md":
+        return _shipped_text(src).encode("utf-8")
+    return src.read_bytes()
+
+
 def refresh_shipped_schema(vault_root: Path) -> list[str]:
     """Re-deploy the product-owned governance docs into an existing vault.
 
@@ -106,9 +123,10 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
         # moves out of the note namespace (#488).
         relative = src.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]
         dest = shipped_schema_target(vault_root) / relative
+        text = _shipped_text(src)
         try:
             current, guard = read_guarded_text(vault_root, dest)
-            if current == src.read_text(encoding="utf-8"):
+            if current == text:
                 continue
         except FileNotFoundError:
             try:
@@ -123,7 +141,7 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
             raise workflow_contracts.WorkflowContractError(
                 "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
             ) from error
-        writes.append(PlannedWrite(dest, src.read_text(encoding="utf-8"), guard=guard))
+        writes.append(PlannedWrite(dest, text, guard=guard))
         refreshed.append(dest.relative_to(vault_root).as_posix())
     if writes:
         try:
@@ -135,20 +153,166 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
     return refreshed
 
 
-def _refuse_overlay_in_store_mode(vault_root: Path) -> None:
-    """Refuse an overlay of the scaffold on a store-mode vault, before it writes a file.
+def _store_mode(vault_root: Path) -> bool:
+    from .vault_store import mode
 
-    The overlay copies the scaffold's index, log and schema files over the Markdown on disk, where
-    the store holds those pages, so the store and the files would disagree until the importer read
-    the copy as an outside edit. A false refusal costs one rollback of store mode.
+    return mode.store_mode_active(vault_root)
+
+
+def _commit_offline(vault_root: Path, operation: str, change_of, then=None) -> None:
+    """Commit ``change_of(view)`` to a store-mode vault as the offline owner, in one transaction.
+
+    The CLIs that overlay or reclaim schema pages run with the service stopped, so they take the
+    route that ``store-mode migrate`` and ``rollback`` take: the owner's lease, the operator
+    credential and the store's one writer. ``change_of`` reads the store under that writer and
+    returns the change, or None when there is nothing to commit. ``then`` writes what the store
+    does not own, after the commit and still as the owner: nothing is written before admission.
     """
-    from .vault_store import targets as store_targets
+    from .collection_store import admission
+    from .vault_store import read, write
 
-    store_targets.refuse_in_store_mode(
-        vault_root,
-        "exomem init --force",
-        "its overlay replaces Markdown pages that the store holds",
-    )
+    def step(_session, _token, writer) -> None:
+        with read.snapshot(vault_root) as view:
+            change = change_of(view)
+        if change is not None:
+            write.commit(writer, change)
+        if then is not None:
+            then()
+
+    admission.store_mode_route(Path(vault_root).resolve(), operation, step)
+
+
+def _scaffold_plan(vault_root: Path) -> tuple[list[Path], list[tuple[Path, Path]]]:
+    """The folders an overlay creates, and each scaffold file with where an overlay puts it.
+
+    It writes nothing. The activation conventions are left out: the packaged ones are the base
+    registry, not the add/drop grammar accepted at this vault-owned override path, so even a force
+    overlay leaves an owner's override intact.
+    """
+    kb = vault_root / kb_dirname()
+    # The product-owned markdown lands outside the note namespace; everything else -- index.md,
+    # log.md, the typed tree, and the per-vault YAML registries that also live under `_Schema/` --
+    # is the user's and stays in the Knowledge Base where they can see and edit it (#488).
+    product_owned = {source.relative_to(_SCAFFOLD) for source in shipped_schema_sources()}
+    folders: list[Path] = []
+    plan: list[tuple[Path, Path]] = []
+    for src in sorted(_SCAFFOLD.rglob("*")):
+        scaffold_rel = src.relative_to(_SCAFFOLD)
+        if scaffold_rel == Path("_Schema/activation-conventions.yaml"):
+            continue
+        if scaffold_rel in product_owned:
+            dest = shipped_schema_target(vault_root) / scaffold_rel.as_posix().split("/", 1)[1]
+        else:
+            dest = kb / scaffold_rel
+        if src.is_dir():
+            # A directory that exists only to hold product-owned markdown is not created in the
+            # Knowledge Base at all; its files carry their own `mkdir(parents=True)` at the new
+            # location.
+            if not any(str(candidate).startswith(str(scaffold_rel)) for candidate in product_owned):
+                folders.append(dest)
+            continue
+        plan.append((src, dest))
+    return folders, plan
+
+
+def _overlay_in_store(vault_root: Path) -> dict:
+    """``init --force`` on a store-mode vault, as the offline owner.
+
+    Nothing is written before the owner's route admits the call. Then one commit puts each scaffold
+    page that the store holds differently or not at all, and the migration marker and activation
+    manifest that file mode would create when the vault lacks them; the projector writes their
+    files afterwards, and nothing writes their Markdown here. An Entities index that exists is
+    kept, as file mode keeps it, and its counts are refreshed from the stored pages in the same
+    commit. What the store does not own (the folders, the product-owned copies under the dot
+    folder) is written on disk after the commit, as file mode writes it.
+    """
+    from . import workflow_contracts
+    from .activation_manifest import manifest_path, new_manifest
+    from .vault_store import ownership, read, write
+
+    kb = vault_root / kb_dirname()
+    folders, files = _scaffold_plan(vault_root)
+    pages: dict[str, Path] = {}
+    copies: list[tuple[Path, Path]] = []
+    for src, dest in files:
+        rel = dest.relative_to(vault_root).as_posix()
+        if ownership.classify(rel) is ownership.Ownership.PAGE:
+            pages[rel] = src
+        else:
+            copies.append((src, dest))
+    marker = workflow_contracts.migration_marker_path(vault_root).relative_to(vault_root).as_posix()
+    manifest = manifest_path(vault_root).relative_to(vault_root).as_posix()
+    entity_index = f"{kb_dirname()}/Entities/index.md"
+    entities = f"{kb_dirname()}/Entities/"
+    entity_registry = load_entity_types(vault_root)
+    created: list[str] = []
+
+    def overlay(view) -> write.StoreChange | None:
+        current = view.bodies(pages)
+        puts: dict[str, bytes] = {}
+        for rel, src in pages.items():
+            data = _shipped_bytes(src)
+            if (rel == entity_index and rel in current) or current.get(rel) == data:
+                continue
+            puts[rel] = data
+        index = puts.get(entity_index, current.get(entity_index))
+        if index is not None:
+            text = index.decode("utf-8")
+            counts = indexes.count_entity_pages(
+                (meta.path[len(entities):] for meta in view.pages(entities)), entity_registry
+            )
+            refreshed = render_wikilinks_for_vault(
+                indexes._refresh_entities_subindex_text(
+                    text, counts_by_type=counts, registry=entity_registry
+                ),
+                vault_root,
+            )
+            if refreshed != text:
+                puts[entity_index] = refreshed.encode("utf-8")
+        created.extend(sorted(puts))
+        # The marker comes first in file mode, before any scaffold change; here it is in the commit.
+        for rel, missing in (
+            (marker, workflow_contracts.new_migration_marker(vault_root)),
+            (manifest, new_manifest(vault_root)),
+        ):
+            if missing is not None:
+                puts[rel] = missing.encode("utf-8")
+        if manifest in puts:
+            created.append(manifest)
+        if not puts:
+            return None
+        return write.StoreChange(
+            write.Origin.GOVERNED,
+            "exomem init --force",
+            puts=tuple(write.PagePut(rel, body) for rel, body in sorted(puts.items())),
+            expect={
+                rel: write.Expect(sha256=hashlib.sha256(current[rel]).hexdigest())
+                if rel in current
+                else write.Expect(absent=True)
+                for rel in puts
+            },
+        )
+
+    def write_files() -> None:
+        from . import package_skills
+
+        for folder in folders:
+            folder.mkdir(parents=True, exist_ok=True)
+        for src, dest in copies:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            package_skills.copy_shipped_file(src, dest)
+            created.append(dest.relative_to(vault_root).as_posix())
+        for folder in _FOLDERS:
+            (kb / folder).mkdir(parents=True, exist_ok=True)
+        # The registry is a page: the store says whether the vault holds it, not its file.
+        registry = extension_registry_path(vault_root).relative_to(vault_root).as_posix()
+        if read.page_exists(vault_root, registry):
+            for definition in entity_registry.extensions.values():
+                if definition.status == "active":
+                    (kb / "Entities" / definition.folder).mkdir(parents=True, exist_ok=True)
+
+    _commit_offline(vault_root, "exomem init --force", overlay, then=write_files)
+    return {"vault": str(vault_root), "kb": str(kb), "created": created}
 
 
 def init_vault(
@@ -168,8 +332,8 @@ def init_vault(
     because the per-vault state key binds the final vault path.
     """
     vault_root = Path(vault_root)
-    if force:
-        _refuse_overlay_in_store_mode(vault_root)
+    if force and _store_mode(vault_root):
+        return _overlay_in_store(vault_root)
     vault_root.mkdir(parents=True, exist_ok=True)
     kb = vault_root / kb_dirname()
     fresh_vault = not kb.exists()
@@ -180,37 +344,17 @@ def init_vault(
         )
 
     created: list[str] = []
-    from . import workflow_contracts
+    from . import package_skills, workflow_contracts
 
     workflow_contracts.ensure_migration_marker(vault_root)
-    # The product-owned markdown lands outside the note namespace; everything
-    # else -- index.md, log.md, the typed tree, and the per-vault YAML registries
-    # that also live under `_Schema/` -- is the user's and stays in the Knowledge
-    # Base where they can see and edit it (#488).
-    product_owned = {source.relative_to(_SCAFFOLD) for source in shipped_schema_sources()}
-    for src in sorted(_SCAFFOLD.rglob("*")):
-        scaffold_rel = src.relative_to(_SCAFFOLD)
-        # Packaged conventions are the base registry, not the add/drop grammar
-        # accepted at this vault-owned override path. Absence uses those defaults;
-        # even a force overlay must leave an owner's override intact.
-        if scaffold_rel == Path("_Schema/activation-conventions.yaml"):
-            continue
-        if scaffold_rel in product_owned:
-            dest = shipped_schema_target(vault_root) / scaffold_rel.as_posix().split("/", 1)[1]
-        else:
-            dest = kb / scaffold_rel
-        if src.is_dir():
-            # A directory that exists only to hold product-owned markdown is not
-            # created in the Knowledge Base at all; its files carry their own
-            # `mkdir(parents=True)` at the new location.
-            if any(str(candidate).startswith(str(scaffold_rel)) for candidate in product_owned):
-                continue
-            dest.mkdir(parents=True, exist_ok=True)
-            continue
+    folders, files = _scaffold_plan(vault_root)
+    for folder in folders:
+        folder.mkdir(parents=True, exist_ok=True)
+    for src, dest in files:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and (not force or scaffold_rel == Path("Entities") / "index.md"):
+        if dest.exists() and (not force or dest == kb / "Entities" / "index.md"):
             continue
-        shutil.copy2(src, dest)
+        package_skills.copy_shipped_file(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
 
     for folder in _FOLDERS:
@@ -274,16 +418,8 @@ def reclaim_legacy_shipped_schema(vault_root: Path, *, apply: bool = False) -> d
     scope and never inspected.
     """
     vault_root = Path(vault_root)
-    if apply:
-        # The preview only reads the disk, so it stays. The unlink would remove files that the
-        # store holds as pages; a false refusal costs one rollback of store mode.
-        from .vault_store import targets as store_targets
-
-        store_targets.refuse_in_store_mode(
-            vault_root,
-            "exomem reclaim-schema --apply",
-            "it deletes `_Schema` Markdown from disk, and the store holds those pages",
-        )
+    if _store_mode(vault_root):
+        return _reclaim_in_store(vault_root, apply=apply)
     legacy_root = vault_root / kb_dirname() / "_Schema"
     target_root = shipped_schema_target(vault_root)
     removed: list[str] = []
@@ -331,3 +467,71 @@ def reclaim_legacy_shipped_schema(vault_root: Path, *, apply: bool = False) -> d
         "declined": declined,
         "reclaimed_kb": round(reclaimed_bytes / 1024, 1),
     }
+
+
+def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
+    """``reclaim_legacy_shipped_schema`` on a store-mode vault, where the legacy copies are pages.
+
+    The preview and the apply compare the stored bytes with the deployed copy, so a preview names
+    exactly what the apply removes. The apply deletes the equal pages in one commit as the offline
+    owner, each bound to the bytes it compared; the projector removes their files, and the folders
+    that empties are left for it.
+    """
+    from .vault_store import read, write
+
+    legacy = f"{kb_dirname()}/_Schema"
+    target_root = shipped_schema_target(vault_root)
+    relatives = [
+        source.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]
+        for source in shipped_schema_sources()
+    ]
+    report: dict = {}
+
+    def judge(view) -> write.StoreChange | None:
+        stored = view.bodies(f"{legacy}/{relative}" for relative in relatives)
+        removed: list[str] = []
+        declined: list[dict[str, str]] = []
+        reclaimed = 0
+        expect: dict[str, write.Expect] = {}
+        for relative in relatives:
+            body = stored.get(f"{legacy}/{relative}")
+            if body is None:
+                continue
+            current = target_root / relative
+            if not current.is_file():
+                declined.append({"path": relative, "reason": "not yet deployed to .exomem/schema"})
+                continue
+            try:
+                same = body == current.read_bytes()
+            except OSError as error:
+                declined.append({"path": relative, "reason": f"unreadable ({error})"})
+                continue
+            if not same:
+                declined.append({"path": relative, "reason": "differs from the deployed copy"})
+                continue
+            removed.append(relative)
+            reclaimed += len(body)
+            expect[f"{legacy}/{relative}"] = write.Expect(
+                sha256=hashlib.sha256(body).hexdigest()
+            )
+        report.update(
+            applied=apply,
+            removed=removed,
+            declined=declined,
+            reclaimed_kb=round(reclaimed / 1024, 1),
+        )
+        if not apply or not expect:
+            return None
+        return write.StoreChange(
+            write.Origin.GOVERNED,
+            "exomem reclaim-schema --apply",
+            deletes=tuple(write.PageDelete(rel) for rel in expect),
+            expect=expect,
+        )
+
+    if apply:
+        _commit_offline(vault_root, "exomem reclaim-schema --apply", judge)
+    else:
+        with read.snapshot(vault_root) as view:
+            judge(view)
+    return report

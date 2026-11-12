@@ -30,7 +30,9 @@ RESTRICTED = RequestPrincipal(audience_id="external", surface="mcp", resolved=Tr
 SCOPE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RULE_ID = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
 LATENCY_CORPUS_SIZE = 2_000
-WARM_SWEEP_CPU_CEILING_SECONDS = 3.0
+WARM_TO_COLD_CPU_RATIO_CEILING = 0.9
+# The ratio cannot catch a slowdown shared by both sweeps; allow ample runner headroom.
+WARM_CPU_SECONDS_CEILING = 6.0
 #: Far past the store's racy window, so a fixture file never looks freshly written.
 LONG_AGO_NS = 1_600_000_000_000_000_000
 
@@ -356,13 +358,20 @@ def test_a_warm_sweep_of_a_large_vault_extracts_no_page_and_stays_cheap(tmp_path
             _page(f"Note {index}", body, sources=(f"Source {index}",)),
         )
 
+    cold_started = time.thread_time()
     _stored_sweep(vault, None)
+    cold_cpu = time.thread_time() - cold_started
     started = time.thread_time()
     _, fields = _stored_sweep(vault, None)
-    elapsed = time.thread_time() - started
+    warm_cpu = time.thread_time() - started
 
     assert fields["pages_reextracted"] == 0
-    assert elapsed < WARM_SWEEP_CPU_CEILING_SECONDS
+    assert warm_cpu < WARM_CPU_SECONDS_CEILING, (
+        f"warm sweep {warm_cpu:.3f}s exceeds the {WARM_CPU_SECONDS_CEILING:.1f}s CPU ceiling"
+    )
+    assert warm_cpu < WARM_TO_COLD_CPU_RATIO_CEILING * cold_cpu, (
+        f"warm sweep {warm_cpu:.3f}s at {warm_cpu / cold_cpu:.3f}x the cold sweep's {cold_cpu:.3f}s"
+    )
 
 
 def test_a_stored_row_that_does_not_decode_never_changes_an_answer(tmp_path: Path) -> None:

@@ -253,9 +253,7 @@ def load_roles(vault_root: Path | None = None, *, proposal: Any | None = None) -
         return semantic_shipped
     path = override_path(vault_root)
     try:
-        raw, _ = registry_history.read_previous(
-            Path(vault_root), path, max_bytes=MAX_FILE_BYTES, guard_absence=False
-        )
+        raw = registry_history.read_override(Path(vault_root), path, max_bytes=MAX_FILE_BYTES)
     except registry_history.RegistryFileTooLarge:
         return replace(
             semantic_shipped,
