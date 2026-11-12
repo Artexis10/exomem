@@ -1,7 +1,7 @@
 """The short id an agent names one review item by, and how a decision binds it.
 
 A review item carries a `ref` that names it and a `fingerprint` that names the signal as read. The
-id is `<head of ref>.<tail of fingerprint>`. A decision binds it at the leaf, after admission, by
+id is `<head of ref>.<tail of fingerprint>`. Triage binds it before writer admission by
 reading the review queues once: the item that still holds the ref and the fingerprint supplies the
 guards the decision needs, and a stale id is refused with the current one.
 """

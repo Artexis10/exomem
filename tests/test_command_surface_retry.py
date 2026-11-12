@@ -1709,11 +1709,11 @@ def test_fastmcp_busy_is_normal_tool_content_but_unexpected_fault_is_native(
     for _ in range(2):
         result = asyncio.run(mcp.call_tool("mutate", {}, run_middleware=False))
         # The agent reads one coded error with its retry; correlation ids stay out of it.
-        assert result.structured_content == {"error": {
-            "code": "MUTATION_BUSY",
-            "message": "Memory was busy with another write, so this was not saved. Retry the same call.",
-            "retry": {"tool": "mutate", "after_s": 1},
-        }}
+        error = result.structured_content["error"]
+        assert error["code"] == "MUTATION_BUSY"
+        assert error["retry"] == {"tool": "mutate", "after_s": 1}
+        assert "req-fastmcp" not in error["message"]
+        assert "receipt-fastmcp" not in error["message"]
 
     read = asyncio.run(mcp.call_tool("inspect", {}, run_middleware=False))
     assert read.structured_content == {"available": True}

@@ -6909,6 +6909,12 @@ class LeaseManager:
         try:
             @contextmanager
             def operation_guard() -> Iterator[None]:
+                nonlocal kwargs
+                prepare = getattr(command, "prepare_arguments", None)
+                if prepare is not None:
+                    # Replay uses the original request identity and skips binding a changed handle.
+                    # A fresh execution resolves handles before either writer guard takes the boundary.
+                    kwargs = prepare(*injected, **kwargs)
                 # Wide guards outlive invoke_leaf; retain the session until
                 # their outer hold has handed off its committed receipts.
                 token = _ACTIVE_FAST_ACK_SESSION.set(fast_ack_session)

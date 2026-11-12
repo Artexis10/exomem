@@ -11021,6 +11021,32 @@ def _effect_block(
     }
 
 
+def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
+    """Resolve a review handle without writer admission; commit keeps its fingerprint guard."""
+    item_id = arguments.get("item_id")
+    if item_id is None:
+        return arguments
+    # The command schema fixes these mutually exclusive selector fields.
+    if any(arguments.get(key) is not None for key in ("ref", "expected_fingerprint", "source_path")):
+        raise ValueError(
+            "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
+        )
+    if corpus_aware_module.is_write_advisory_ref(item_id):
+        fingerprint = review_state_module.last_surfaced_fingerprint(
+            vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
+        )
+        if fingerprint is None:
+            from .cli_ops import OpError
+
+            raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
+        bound = {"ref": item_id, "expected_fingerprint": fingerprint}
+    else:
+        bound = review_ids_module.bind(
+            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+        )
+    return {**arguments, "item_id": None, **bound}
+
+
 def op_triage_memory(
     vault_root: Path,
     ref: str | None = None,
@@ -11048,27 +11074,13 @@ def op_triage_memory(
             `ref`, `expected_fingerprint` and `source_path`. A stale id refuses with the current one.
     """
     if item_id is not None:
-        if ref is not None or expected_fingerprint is not None or source_path is not None:
-            raise ValueError(
-                "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
-            )
-        if corpus_aware_module.is_write_advisory_ref(item_id):
-            # A write advisory is on no queue: its ref is its handle, and the ledger names the
-            # fingerprint it last surfaced with.
-            ref = item_id
-            expected_fingerprint = review_state_module.last_surfaced_fingerprint(
-                vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
-            )
-            if expected_fingerprint is None:
-                from .cli_ops import OpError
-
-                raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
-        else:
-            bound = review_ids_module.bind(
-                lambda **kw: op_review_memory(vault_root, **kw), item=item_id
-            )
-            ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
-            source_path = bound.get("source_path")
+        # Direct Python callers share the resolver; dispatched calls already carry bound arguments.
+        bound = _bind_triage_arguments(
+            vault_root, item_id=item_id, ref=ref,
+            expected_fingerprint=expected_fingerprint, source_path=source_path,
+        )
+        ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+        source_path = bound.get("source_path")
     if ref is None:
         raise ValueError("INVALID_REVIEW_ACTION: a triage decision requires `ref` or `item_id`")
     normalized_action = str(action or "").strip().lower()
@@ -15087,7 +15099,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "ref",
         _MCRC,
         ("attention",),
-        {"public_title": "Manage review decisions and attention", "surface": "primary", "actions": ("review", "update"), "first_run_safe": False},
+        {"public_title": "Manage review decisions and attention", "surface": "primary", "actions": ("review", "update"), "first_run_safe": False, "prepare_arguments": _bind_triage_arguments},
     ),
     (
         "connect_memory",
@@ -15515,6 +15527,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 executor=meta.get("executor", "cell"),
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
+                prepare_arguments=meta.get("prepare_arguments"),
             )
         )
     return tuple(cmds)

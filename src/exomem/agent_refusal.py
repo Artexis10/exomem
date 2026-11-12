@@ -143,14 +143,16 @@ def _after_seconds(refusal: Mapping[str, Any]) -> int | None:
 
 
 def _busy_message(refusal: Mapping[str, Any]) -> str:
-    waited = refusal.get("waited_ms")
-    seconds = round(waited / 1000) if isinstance(waited, (int, float)) and waited >= 0 else 0
-    held = (
-        f"Another write held memory for {seconds} seconds"
-        if seconds >= 2
-        else "Memory was busy with another write"
+    holder = _mapping(refusal.get("holder")) or {}
+    age = holder.get("age_seconds")
+    waited = refusal.get("waited_ms", refusal.get("wait_ms"))
+    age_text = f"{age} seconds" if isinstance(age, (int, float)) and not isinstance(age, bool) and age >= 0 else "unknown"
+    wait_text = f"{waited / 1000} seconds" if isinstance(waited, (int, float)) and not isinstance(waited, bool) and waited >= 0 else "unknown"
+    return (
+        f"Memory was busy (holder operation: {holder.get('operation') or 'unknown'}; "
+        f"holder age: {age_text}; caller wait: {wait_text}), "
+        "so this was not saved. Retry the same call."
     )
-    return f"{held}, so this was not saved. Retry the same call."
 
 
 def _relation_decision(parameters: Collection[str], called: Mapping[str, Any]) -> dict[str, Any] | None:
