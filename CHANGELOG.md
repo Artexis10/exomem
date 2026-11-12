@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.175.1](https://github.com/Artexis10/exomem/compare/v0.175.0...v0.175.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **bench:** preserve billing and context replay conditions ([#2778](https://github.com/Artexis10/exomem/issues/2778)) ([3211d11](https://github.com/Artexis10/exomem/commit/3211d115653fc2b22a629ac7532503d5a2d22a17))
+* **find:** keep a restricted caller's relation filter unchanged by writes it may not see ([#2766](https://github.com/Artexis10/exomem/issues/2766)) ([79b8b35](https://github.com/Artexis10/exomem/commit/79b8b35faa6a34b64620f982202cbf2fadfee604))
+* **graph:** reuse resident topology digests across checkpointless reads ([#2775](https://github.com/Artexis10/exomem/issues/2775)) ([c7889bd](https://github.com/Artexis10/exomem/commit/c7889bd57efa1898867f4cbfb6559da9fb0c0fae))
+
 ## [0.175.0](https://github.com/Artexis10/exomem/compare/v0.174.0...v0.175.0) (2026-11-12)
 
 
