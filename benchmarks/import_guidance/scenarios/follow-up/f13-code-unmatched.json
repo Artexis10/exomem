@@ -1,0 +1,11 @@
+{
+  "id": "f13-code-unmatched",
+  "title": "A standalone rename has no matching repository procedure",
+  "suite": "session-close",
+  "seed": "fu-repository",
+  "engagement": "balanced",
+  "turns": [
+    "Here is a standalone Python helper, with no project context: def combine(a, b): return a + b. I only want to change its name to add_values. The signature and addition behavior must stay the same.",
+    "rename this function"
+  ]
+}
