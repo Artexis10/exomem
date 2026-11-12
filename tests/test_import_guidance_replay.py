@@ -201,16 +201,10 @@ def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_
     mark, and the comparison would measure nothing."""
     seed = shelf_seed(tmp_path)
     baseline, _ = seed_a_vault(tmp_path, "baseline", ready_graph=False)
+    case = session_close.Case("shelf", "t", seed, "balanced", ("When does the tool shelf close?",), tmp_path / "case.json", None)
+    generated = replay_cases.scenario_for(case, {"reference": "", "deterministic": {}}, [])
     plan = tmp_path / "plan.json"
-    plan.write_text(
-        json.dumps(
-            {
-                "ready_graph": True,
-                "steps": [{"as": "context", "tool": "recall_context", "arguments": {"turn": "When does the tool shelf close?"}}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    plan.write_text(json.dumps(generated["record"]), encoding="utf-8")
     scratch = tmp_path / "record"
     scratch.mkdir()
     done = subprocess.run(  # noqa: S603
@@ -225,6 +219,7 @@ def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_
     else:
         assert "map" not in recorded["shapes"]["context"]
         assert "anchors" in recorded["shapes"]["context"]
+        assert recorded["shapes"]["context"]["continuity"]
     vault = next(scratch.glob("ig-record-*/vault"))
     pages, seed_unchanged = pages_and_seed_bytes(vault, seed)
     baseline_pages, _ = pages_and_seed_bytes(baseline, seed)
@@ -250,9 +245,16 @@ def test_the_warm_read_records_once_two_successive_replies_agree_and_fails_by_na
     index settles after the second read and so fails a recording that a short wait would have made."""
     from import_guidance.record_worker import warmed_reply
 
-    settling = iter([{"slice": []}, {"slice": ["a"]}, {"slice": ["a", "b"], "id": 1}, {"slice": ["a", "b"], "id": 2}])
-    reply = warmed_reply(lambda tool, arguments: next(settling), "recall_context", {}, {"seconds": 0.001, "ignore": ["id"]})
-    assert reply == {"slice": ["a", "b"], "id": 2}
+    case = session_close.Case("probe", "t", Path("seed"), "balanced", ("A request",), Path("case.json"), None)
+    warm = replay_cases.scenario_for(case, {"reference": "", "deterministic": {}}, [])["record"]["steps"][-1]["warm"]
+    settling = iter([{"slice": []}, {"slice": ["a"], "continuity": "first"}, {"slice": ["a", "b"], "continuity": "second"}, {"slice": ["a", "b"], "continuity": "third"}])
+
+    def read(tool, arguments):
+        assert arguments == {}, "warm reads must not feed earlier continuity into the next call"
+        return next(settling)
+
+    reply = warmed_reply(read, "recall_context", {}, {**warm, "seconds": 0.001})
+    assert reply == {"slice": ["a", "b"], "continuity": "third"}
 
     counter = itertools.count()
     with pytest.raises(SystemExit, match=r"recall_context still changed between two reads 0.001s apart: the index is not warm \(polled for 0.05s\)"):
