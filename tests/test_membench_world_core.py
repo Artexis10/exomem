@@ -479,7 +479,7 @@ def test_a_snapshot_waits_for_its_original_document_even_when_the_statement_is_o
 def test_distinct_edge_endpoints_keep_distinct_tokens_when_short_digest_prefixes_collide() -> None:
     from membench.ids import sentinel, stable_id
 
-    from benchmarks.membench.world.core import EdgeRef, document_ref
+    from benchmarks.membench.world.core import EdgeRef, source_ref
     from benchmarks.membench.world.render import Reader
 
     world = sound_world()
@@ -493,9 +493,7 @@ def test_distinct_edge_endpoints_keep_distinct_tokens_when_short_digest_prefixes
     # The short default remains compatible with existing callers and exposes the collision.
     assert stable_id("DOC", f"{source}.doc") == stable_id("DOC", f"{target}.doc")
     item = Reader(None, world).relation(edge, week_date(1), "link")
-    assert item.fills["source"] == document_ref(f"{source}.doc")
-    assert item.fills["target"] == document_ref(f"{target}.doc")
+    assert item.fills["source"] == source_ref(source)
+    assert item.fills["target"] == source_ref(target)
     assert item.fills["source"] != item.fills["target"]
-    assert document_ref(f"{source}.doc") == sentinel(
-        stable_id("DOC", f"{source}.doc", digest_chars=64)
-    )
+    assert source_ref(source) == sentinel(stable_id("SRC", source, digest_chars=64))

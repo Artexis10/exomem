@@ -47,8 +47,8 @@ from .core import (
     EdgeRef,
     Vocabulary,
     World,
-    document_ref,
     relation_form,
+    source_ref,
 )
 from .keys import KeyRefused, write_key
 from .loader import SLOT_ARGUMENTS, WORD_ARGUMENTS, Catalogue, Refusal
@@ -667,16 +667,14 @@ class _Planner:
                 ):
                     named[week_of(step["at"])] |= self.things(source)
         for artefact in world.artefacts.values():
-            named[week_of(artefact.at)].add(document_ref(artefact.id))
+            named[week_of(artefact.at)] |= {source_ref(ref) for ref in artefact.carries}
             for ref in artefact.relations:
                 if isinstance(ref, ContextParentRef):
                     context = world.contexts[ref.child]
                     named[week_of(artefact.at)] |= self.things((context.id, context.parent))
                 else:
-                    # Edge snapshots show opaque document references, never endpoint content.
-                    named[week_of(artefact.at)] |= {
-                        document_ref(f"{r}.doc") for r in (ref.source, ref.target)
-                    }
+                    # Edge snapshots cite individual source records, never endpoint content.
+                    named[week_of(artefact.at)] |= {source_ref(r) for r in (ref.source, ref.target)}
         oracle = Oracle(world, validity(self.pack))
         asked: dict[int, set[str]] = defaultdict(set)
         for form in self.catalogue.entries[thread.entry].probes:

@@ -289,9 +289,9 @@ def relation_form(ref: RelationRef) -> str:
     return CONTEXT_PARENT if isinstance(ref, ContextParentRef) else ref.mode or SUPPORT
 
 
-def document_ref(artefact_id: str) -> str:
-    """The opaque display reference shared by an original document and its relation snapshots."""
-    return sentinel(stable_id("DOC", artefact_id, digest_chars=64))
+def source_ref(record_id: str) -> str:
+    """An opaque citation for a source record, independent of the document that carries it."""
+    return sentinel(stable_id("SRC", record_id, digest_chars=64))
 
 
 @dataclass(frozen=True)

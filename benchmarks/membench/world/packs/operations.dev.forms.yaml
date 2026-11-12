@@ -32,9 +32,9 @@ frames:
 
 forms:
   - {id: context-parent-stated, serves: [relation.context-parent], level: stated, text: "The directory lists {child} within {parent}."}
-  - {id: support-stated, serves: [relation.support], level: stated, text: "The statement in {source} provides a reason for the statement in {target}."}
-  - {id: rebut-stated, serves: [relation.rebut], level: stated, text: "The statement in {source} supports the opposite conclusion to the statement in {target}."}
-  - {id: undercut-stated, serves: [relation.undercut], level: stated, text: "The statement in {source} challenges the grounds for the statement in {target}, without asserting the opposite."}
+  - {id: support-stated, serves: [relation.support], level: stated, text: "The statement identified by {source} provides a reason for the statement identified by {target}."}
+  - {id: rebut-stated, serves: [relation.rebut], level: stated, text: "The statement identified by {source} supports the opposite conclusion to the statement identified by {target}."}
+  - {id: undercut-stated, serves: [relation.undercut], level: stated, text: "The statement identified by {source} challenges the grounds for the statement identified by {target}, without asserting the opposite."}
   # --- statements that give a value for an attribute ---
   - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} confirms that the {about} for {subject} is {value}."}
   - {id: fact-stated-2, serves: [statement.fact], level: stated, text: "For the record, {by} states that the {about} for {subject} is {value}."}

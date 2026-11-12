@@ -212,7 +212,7 @@ The world, its statements and its rendered text SHALL carry no product's ontolog
 
 Each statement's content SHALL be fixed before rendering. A renderer SHALL choose an implicitness level from the declared set and a registered surface form, and SHALL record both in the manifest. Only a bridge declared as entailing SHALL yield a computed key for an implied statement, and that bridge SHALL name the stated rule or the registered background norm that makes it entail. A computed entry at the `silent` level SHALL name a stated norm. A probe SHALL NOT share a surface form with the artefact that answers it. An artefact rendered below the `stated` level SHALL NOT contain the explicit form of its statement.
 
-Artefacts SHALL support optional typed references to canonical context parents and support or defeat edges. A source snapshot SHALL add no operation or authoritative graph. An edge snapshot SHALL NOT publish before either endpoint statement or its unambiguous original document is available. The planner SHALL file originals on their statement dates and publish the snapshot at the later endpoint date. A directory snapshot SHALL publish in the first source session without claiming a membership start date. Its sentence SHALL name only the parent and child. An edge sentence SHALL contain only opaque original-document references and relation wording. Original headers SHALL show opaque references with full SHA-256 digests, while statement sentences, authors and dates remain unchanged. Pack data SHALL define the document kinds and natural wording. Rendering and hashing SHALL use the same validated original-document resolution. Missing or ambiguous originals SHALL fail before rendering or hashing. The manifest SHALL hash resolved canonical facts, chosen original documents, carrier text and provenance. A source repair SHALL advance the generator version without rewriting previous generated worlds.
+Artefacts SHALL support optional typed references to canonical context parents and support or defeat edges. A source snapshot SHALL add no operation or authoritative graph. An edge snapshot SHALL NOT publish before either endpoint statement or its unambiguous original document is available. The planner SHALL file originals on their statement dates and publish the snapshot at the later endpoint date. A directory snapshot SHALL publish in the first source session without claiming a membership start date. Its sentence SHALL name only the parent and child. An edge sentence SHALL contain only opaque endpoint-statement references and relation wording. Serialization SHALL place each full-width SHA-256 source-record citation beside its original statement line. Distinct endpoint statements SHALL keep distinct citations when one original document carries both. Original line text, authors and dates SHALL remain unchanged. Document headers SHALL carry no redundant citation. Pack data SHALL define the document kinds and natural wording. Rendering and hashing SHALL use the same validated original-document resolution. Missing or ambiguous originals SHALL fail before rendering or hashing. The manifest SHALL hash resolved canonical facts, chosen original documents, carrier text and provenance. A source repair SHALL advance the generator version without rewriting previous generated worlds.
 
 #### Scenario: A source relation has endpoints on different dates
 
@@ -225,6 +225,13 @@ Artefacts SHALL support optional typed references to canonical context parents a
 - **WHEN** an edge endpoint has no original document or more than one original document
 - **THEN** validation, rendering and hashing reject its snapshot with an actionable reference diagnostic
 - **AND** a later second original does not redirect an earlier snapshot
+
+#### Scenario: Both endpoints share one original document
+
+- **WHEN** one valid original document carries both distinct endpoint statements
+- **THEN** the edge sentence cites two distinct source-record references in the correct direction
+- **AND** each reference resolves to its corresponding original statement line
+- **AND** validation accepts the shared original without requiring separate documents
 
 #### Scenario: A snapshot predates an endpoint or its original document
 

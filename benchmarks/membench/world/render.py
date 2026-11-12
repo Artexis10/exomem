@@ -43,8 +43,8 @@ from .core import (
     RelationRef,
     Statement,
     World,
-    document_ref,
     relation_form,
+    source_ref,
 )
 from .keys import Key, KeyRefused, key_spec, keys_digest, keys_record, write_keys
 from .loader import Catalogue, Refusal
@@ -200,7 +200,7 @@ class Reader:
     def __init__(self, plan: Plan, world: World):
         self.plan, self.world = plan, world
         self.relations = world.relation_facts()
-        self.originals = check_relation_refs(
+        check_relation_refs(
             world,
             ((a.id, ref) for a in world.artefacts.values() for ref in a.relations),
             self.relations,
@@ -290,8 +290,8 @@ class Reader:
             fills = {"child": self.text(record.id, at), "parent": self.text(record.parent, at)}
         else:
             fills = {
-                "source": document_ref(self.originals[ref.source].id),
-                "target": document_ref(self.originals[ref.target].id),
+                "source": source_ref(ref.source),
+                "target": source_ref(ref.target),
             }
         return _Item(
             document,
@@ -473,6 +473,14 @@ class _Renderer:
             used.append(wrapper.id)
         return Line(item.ref, tuple(used), sentence)
 
+    def source_line(self, line: Line) -> str:
+        """Serialize each statement with its record citation, preserving the sentence used by keys."""
+        return (
+            f"{line.text} {source_ref(line.ref)}"
+            if line.ref in self.world.statements
+            else line.text
+        )
+
     def explicit(self, item: _Item) -> list[tuple[str, str]]:
         """Each sentence that a `stated` form gives for the item, with that form's id."""
         phrases = [None] if item.schema is None else [item.schema.label, *item.schema.paraphrases]
@@ -506,20 +514,19 @@ class _Renderer:
         head = (frame.unsigned if author is None else frame.signed).format(
             by=author, date=artefact.at.isoformat()
         )
-        head += " " + document_ref(artefact.id)
         lines = tuple(self.line(item, level) for item in items)
-        text = "\n".join([head, *(line.text for line in lines)]) + "\n"
+        text = "\n".join([head, *(self.source_line(line) for line in lines)]) + "\n"
         return Document(artefact.id, level, lines, text), items
 
     def check(self, artefact: Artefact, document: Document, items: list[_Item]) -> None:
-        if artefact.relations and (
+        if (artefact.relations or artefact.carries) and (
             len(document.lines) != len(items)
-            or any(line.text not in document.text.splitlines() for line in document.lines)
+            or any(f"\n{self.source_line(line)}\n" not in document.text for line in document.lines)
         ):
             self.refuse(
                 "source-coverage",
                 artefact.id,
-                "restore the relation sentence in its source document",
+                "restore the rendered source line in its document",
             )
         anchors = {artefact.at.isoformat(), *(a for i in items for a in i.anchors)}
         if document.level == STATED:

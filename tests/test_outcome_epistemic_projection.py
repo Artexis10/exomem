@@ -334,9 +334,7 @@ def test_required_relation_sources_reach_sessions_and_both_reference_prompts_wit
     world = plan.world()
     probes = probes_of(project)
     keys = {(k.thread, k.form): k for k in write_keys(plan, CATALOGUE)}
-    assert len(
-        {d.text.splitlines()[0].rsplit(" ", 1)[-1] for d in rendering.documents.values()}
-    ) == len(rendering.documents)
+    assert len({core.source_ref(ref) for ref in world.statements}) == len(world.statements)
     expected = world.relation_facts()
     carried = {ref: a for a in world.artefacts.values() for ref in a.relations}
     assert carried.keys() == expected.keys()
