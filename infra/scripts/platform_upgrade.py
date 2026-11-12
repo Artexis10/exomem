@@ -12,12 +12,16 @@ presence. Its machine review runs to completion before anything changes:
 5. run the release's `cellctl` schema check against the control database;
 6. compare the secret contracts of the live release and the tag — a change
    with no barrier entry stops the command;
-7. list the `platform` barriers between the live release and the tag, each
-   of which needs a `--crossed <id>`.
+7. list the barriers between the live release and the tag: each `platform`
+   entry needs a `--crossed <id>`, and a `cell` entry may take one so the
+   platform Deployment records it — `cloud-deploy` stops on an unrecorded
+   entry of either scope.
 
 Then it applies the namespaces, runs `helm upgrade --wait` (`--atomic`
-unless a crossed barrier is `one-way`), waits for `cellctl` and the gateway,
-records the platform Deployment, and dispatches `cloud-deploy`.
+unless a crossed platform barrier is `one-way`), waits for `cellctl` and
+the gateway, proves the scheduler CronJobs unsuspended and the encrypted
+storage class present, records the platform Deployment, and dispatches
+`cloud-deploy`.
 
 The live release's tag comes from the Helm release description this command
 writes on every upgrade (`platform-v<tag>`); an older platform needs
@@ -44,7 +48,6 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-BARRIER_FILE = ROOT / "infra/contracts/upgrade-barriers-v1.json"
 RELEASE = "exomem-platform"
 PLATFORM_NAMESPACE = "exomem-platform"
 CLOUD_NAMESPACE = "exomem-cloud"
@@ -53,16 +56,23 @@ DEPLOY_WORKFLOW = "cloud-deploy.yml"
 DEFAULT_REPOSITORY = "Artexis10/exomem"
 RELEASE_DESCRIPTION_PREFIX = "platform-"
 # The files a release may not change without an operator-step barrier entry:
-# the active secret registry, its selection and its destinations.
-SECRET_CONTRACT_PATHS = (
-    "infra/contracts/active-secret-registry-v1.json",
-    "infra/contracts/active-secret-selection-v1.json",
-    "infra/contracts/secret-destinations-v1.json",
-    "infra/contracts/active-secret-registries",
-)
+# the active secret registry, its selection and its destinations, at any
+# contract version.
+SECRET_CONTRACT_RE = re.compile(
+    r"^infra/contracts/(?:active-secret-registry-v\d+\.json"
+    r"|active-secret-selection-v\d+\.json"
+    r"|secret-destinations-v\d+\.json"
+    r"|active-secret-registries/.+\.json)$")
 # kubectl wait's bound for cellctl and the gateway after a successful upgrade.
 VERIFY_TIMEOUT = "180s"
 SCHEMA_DSN_ENV = "EXOMEM_CELLCTL_DSN"
+# The scheduler CronJobs the verify step proves unsuspended, and the
+# StorageClass the platform's volumes need.
+SCHEDULER_CRONJOBS = (
+    "exomem-hosted-scheduler-exomem-access-delivery",
+    "exomem-hosted-scheduler-exomem-reconcile",
+)
+STORAGE_CLASS = "exomem-cloud-encrypted"
 
 
 class Stop(Exception):
@@ -219,23 +229,18 @@ def schema_check(runner: Runner, env: dict[str, str], checkout: Path) -> str:
 
 
 def secret_contract_changed(runner: Runner, live_tag: str, tag: str) -> list[str]:
-    changed = []
-    for path in SECRET_CONTRACT_PATHS:
-        diff = runner(["git", "diff", "--quiet", live_tag, tag, "--", path], ROOT, None)
-        if diff.returncode == 1:
-            changed.append(path)
-        elif diff.returncode != 0:
-            raise Stop("secret-contract", f"cannot compare {path} between {live_tag} and {tag}")
-    return changed
+    diff = runner(["git", "diff", "--name-only", live_tag, tag, "--", "infra/contracts/"],
+                  ROOT, None)
+    if diff.returncode != 0:
+        raise Stop("secret-contract", f"cannot compare the secret contracts between {live_tag} and {tag}")
+    return [path for path in diff.stdout.splitlines() if SECRET_CONTRACT_RE.match(path)]
 
 
 def barriers_between(barriers: list[dict], live: tuple[int, int, int] | None,
                      tag: tuple[int, int, int]) -> list[dict]:
-    """`platform` entries after the live release and at or below the tag."""
+    """Every entry, of either scope, after the live release and at or below the tag."""
     entries = []
     for entry in barriers:
-        if entry.get("scope") != "platform":
-            continue
         version = parse_release(str(entry.get("version", "")))
         if version is None or version > tag or (live is not None and version <= live):
             continue
@@ -305,7 +310,9 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tag", help="release tag to upgrade to, for example v0.175.0")
     parser.add_argument("--crossed", action="append", default=[], metavar="ID",
-                        help="a platform barrier this upgrade crosses after its runbook step")
+                        help="a barrier between the live release and the tag that this "
+                             "upgrade records as crossed; mandatory for platform entries, "
+                             "optional for cell entries")
     parser.add_argument("--from", dest="from_tag", metavar="TAG",
                         help="the release the platform runs, when the release description does not say")
     parser.add_argument("--timeout", default="10m", help="helm upgrade --timeout (default 10m)")
@@ -316,6 +323,9 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     if args.from_tag and parse_release(args.from_tag) is None:
         raise Stop("settings", f"--from {args.from_tag}: not a release tag")
     settings = Settings.from_env(env, args.timeout)
+    if settings.upgrade_dir.resolve().is_relative_to(ROOT):
+        raise Stop("settings", "EXOMEM_UPGRADE_DIR must be outside the repository: "
+                               "the renders it holds carry the private values")
     settings.upgrade_dir.mkdir(parents=True, exist_ok=True)
     checkout = settings.upgrade_dir / "checkout"
 
@@ -333,24 +343,29 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     print("review: diffing against the live release")
     described = live_release_tag(runner)
     live_tag = args.from_tag or (described if isinstance(described, str) else None)
-    if described is False and not args.from_tag:
-        raise Stop("from", "a live release exists but its description names no tag; "
+    manifest = runner(["helm", "get", "manifest", RELEASE, "--namespace", PLATFORM_NAMESPACE], None, None)
+    live_exists = manifest.returncode == 0
+    if (live_exists or described is False) and not isinstance(described, str) and not args.from_tag:
+        raise Stop("from", "a live release exists but its tag cannot be read; "
                            "pass --from <tag> (this command writes it on every upgrade)")
     if isinstance(described, str) and args.from_tag and described != args.from_tag:
         print(f"  note: the release description says {described}; --from says {args.from_tag}")
     if live_tag is None:
         print("  no live release found; first install")
-    manifest = runner(["helm", "get", "manifest", RELEASE, "--namespace", PLATFORM_NAMESPACE], None, None)
-    if manifest.returncode == 0:
+    if live_exists:
         (settings.upgrade_dir / "live.yaml").write_text(manifest.stdout, encoding="utf-8")
         for line in diff_manifests(manifest.stdout, new_manifest):
             print(f"  {line}")
     elif live_tag is not None:
         raise Stop("review", f"live release is {live_tag} but `helm get manifest` failed")
 
+    post_renderer = checkout / "infra/helm/platform/reservation-post-renderer.py"
+    post_renderer_args = ["--post-renderer", str(post_renderer)] if post_renderer.exists() else []
+
     print("review: server-side dry run")
     dry_run = run(runner, "dry-run",
-                  ["helm", "upgrade", "--install", *helm_args(settings, checkout), "--dry-run=server"])
+                  ["helm", "upgrade", "--install", *helm_args(settings, checkout),
+                   "--dry-run=server", *post_renderer_args])
     (settings.upgrade_dir / "dry-run.yaml").write_text(dry_run.stdout, encoding="utf-8")
 
     print(f"review: schema check — {schema_check(runner, env, checkout)}")
@@ -358,30 +373,44 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     live_version = parse_release(live_tag) if live_tag else None
     target_version = parse_release(args.tag)
     assert target_version is not None  # parse_args already refuses a bad tag
+    if live_version is not None and target_version < live_version:
+        raise Stop("settings", f"{args.tag} is older than the live release {live_tag}; "
+                               "the platform does not downgrade")
     barriers = json.loads((checkout / "infra/contracts/upgrade-barriers-v1.json").read_text())["barriers"]
     if live_tag:
         changed = secret_contract_changed(runner, live_tag, args.tag)
-        due = barriers_between(barriers, live_version, target_version)
+        between = barriers_between(barriers, live_version, target_version)
+        # Platform entries are mandatory here; cell entries are optional
+        # --crossed values that only the record can carry, whatever their scope.
+        due = [entry for entry in between if entry.get("scope") == "platform"]
+        recordable = [entry for entry in between if entry.get("scope") != "platform"]
         if changed and not due:
             raise Stop("secret-contract",
                        f"secret contract changed between {live_tag} and {args.tag} "
                        f"({', '.join(changed)}) with no platform barrier entry")
     else:
-        due = []
+        due, recordable = [], []
 
-    if due:
-        print("review: platform barriers between the live release and the tag:")
+    if due or recordable:
+        print("review: barriers between the live release and the tag:")
         for entry in due:
             print(f"  {entry['id']} ({entry['kind']}): {entry.get('summary', '')}")
+        for entry in recordable:
+            print(f"  {entry['id']} ({entry.get('scope', '?')}, {entry['kind']}): "
+                  f"{entry.get('summary', '')}")
     crossed = set(args.crossed)
     missing = [entry["id"] for entry in due if entry["id"] not in crossed]
     if missing:
         raise Stop("barriers", f"uncrossed platform barriers: {', '.join(missing)} — "
                                "do each runbook step, then pass --crossed <id>")
-    extra = crossed - {entry["id"] for entry in due}
+    extra = crossed - {entry["id"] for entry in (*due, *recordable)}
     if extra:
         raise Stop("barriers", f"--crossed names no barrier between the live release and the tag: "
                                f"{', '.join(sorted(extra))}")
+    unrecorded = [entry["id"] for entry in recordable if entry["id"] not in crossed]
+    if unrecorded:
+        print(f"  note: {', '.join(unrecorded)} is a cell-scope barrier — not required here, "
+              "but cloud-deploy stops until a platform upgrade records it with --crossed")
     one_way = any(entry["kind"] == "one-way" for entry in due)
 
     # --- The upgrade. ---
@@ -391,10 +420,8 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
 
     upgrade_argv = ["helm", "upgrade", "--install", *helm_args(settings, checkout),
                     "--wait", "--timeout", settings.timeout,
-                    "--description", f"{RELEASE_DESCRIPTION_PREFIX}{args.tag}"]
-    post_renderer = checkout / "infra/helm/platform/reservation-post-renderer.py"
-    if post_renderer.exists():
-        upgrade_argv += ["--post-renderer", str(post_renderer)]
+                    "--description", f"{RELEASE_DESCRIPTION_PREFIX}{args.tag}",
+                    *post_renderer_args]
     if not one_way:
         upgrade_argv.append("--atomic")
     print(f"upgrade: {' '.join(upgrade_argv[:3])} ... ({'no --atomic: a one-way barrier was crossed' if one_way else '--atomic'})")
@@ -404,6 +431,17 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
         run(runner, "verify",
             ["kubectl", "--namespace", CLOUD_NAMESPACE, "wait", "--for=condition=Available",
              "deployment/cellctl", "deployment/exomem-cloud-gateway", "--timeout", VERIFY_TIMEOUT])
+        print("verify: scheduler CronJobs and the encrypted storage class")
+        cronjobs = run(runner, "verify",
+                       ["kubectl", "--namespace", PLATFORM_NAMESPACE, "get", "cronjob",
+                        *SCHEDULER_CRONJOBS,
+                        "-o", "jsonpath={range .items[*]}{.metadata.name} "
+                              "suspend={.spec.suspend}{\"\\n\"}{end}"])
+        lines = [line.strip() for line in cronjobs.stdout.splitlines() if line.strip()]
+        if len(lines) != len(SCHEDULER_CRONJOBS) or not all(
+                line.endswith("suspend=false") for line in lines):
+            raise Stop("verify", "a scheduler CronJob is missing or suspended: " + "; ".join(lines))
+        run(runner, "verify", ["kubectl", "get", "storageclass", STORAGE_CLASS])
     except Stop as error:
         print(f"{error.step}: {error.message}")
         try:
@@ -420,7 +458,7 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     if previous is None:
         crossed_ids = all_crossed_up_to(barriers, target_version)
     else:
-        crossed_ids = sorted(set(previous.get("barriers_crossed", [])) | {entry["id"] for entry in due})
+        crossed_ids = sorted(set(previous.get("barriers_crossed", [])) | set(args.crossed))
     record_deployment(runner, settings, args.tag, crossed_ids, "success")
     print(f"recorded the platform Deployment for {args.tag}")
 

@@ -222,6 +222,9 @@ uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
   upgrade (`platform-v<tag>`). A platform it has not upgraded yet needs `--from <tag>` once.
 - A `platform` barrier between the live release and the tag needs its runbook step done first,
   then `--crossed <id>`; a `one-way` barrier removes `--atomic` for that upgrade.
+- A `cell` barrier in the same range accepts `--crossed <id>` too: only a platform Deployment's
+  `barriers_crossed` records a crossing, and `cloud-deploy` stops on an unrecorded entry of either
+  scope. Record it here once its runbook step is done; the command prints a note while one is open.
 - A secret-contract change with no barrier entry stops the command and names the omission.
 - On success it records the platform Deployment and dispatches `cloud-deploy`; on a failed
   upgrade it records `failure` and dispatches nothing.
@@ -245,8 +248,9 @@ control database. The safe undo is to fix forward: correct the cause and run the
 A deleted cell does not convert. On its first pass, cellctl 0.147.0 or later erases the wrapped keys of each
 deleted cell (`retire_content_keys` in `infra/cellctl/src/cellctl/db.py`). A stopped cell converts when it next starts.
 
-If the upgrade crosses 0.147.0, do "Before the upgrade", then "Upgrade the release" and "Verify", then
-"After the backup key conversion". Do "If the upgrade fails" only after a failure.
+If the upgrade crosses 0.147.0, do "Before the upgrade", then run the upgrade — the command with
+`--crossed backup-key-conversion`, or "Manual fallback" — then "After the backup key conversion".
+Do "If the upgrade fails" only after a failure.
 
 #### Before the upgrade
 
@@ -275,7 +279,9 @@ If the upgrade crosses 0.147.0, do "Before the upgrade", then "Upgrade the relea
 
    Expect one row, with the status `deployed`.
 4. Note the time of the copy as `date -u +%FT%TZ` prints it. "After the backup key conversion" uses it.
-5. Use the command without `--atomic` in "Upgrade the release". A failed wait then leaves the new cellctl running.
+5. The upgrade must run without `--atomic`: pass `--crossed backup-key-conversion` to the command and it
+   drops `--atomic` itself, or drop it in the manual fallback's command. A failed wait then leaves the new
+   cellctl running.
 
 #### If the upgrade fails
 
@@ -325,7 +331,8 @@ The upgrade can fail at its apply or at its wait. Either way, the new cellctl ca
    kubectl --namespace exomem-cloud scale deployment/cellctl --replicas=1
    ```
 
-8. If a count is above 0, fix forward and never roll back. Correct the cause, then run the upgrade again without `--atomic`.
+8. If a count is above 0, fix forward and never roll back. Correct the cause, then run the upgrade again
+   without `--atomic` (`--crossed backup-key-conversion` on the command, or the manual fallback's variant).
 
 Expected result: after a rollback, the count is 0, the copy is gone and the old cellctl runs. Stop the
 change there, find the cause and start again from "Before the upgrade".
@@ -653,8 +660,9 @@ re-applies cells one at a time as soon as each is eligible. Set it back to `true
 
 ## After the backup key conversion
 
-Do this section once, after "Upgrade the release" and "Verify". When a follow-up release is planned, such as the
-second release of a key custody cutover, do it after that release instead.
+Do this section once, after the upgrade's verify step (the command runs it, or "Manual fallback › Verify").
+When a follow-up release is planned, such as the second release of a key custody cutover, do it after that
+release instead.
 
 The temporary copy must not outlive the upgrade. cellctl erases a deleted cell's wrapped keys on its first pass.
 A copy would keep the key of a cell after its deletion, and defeat the key expiry that the platform promises.

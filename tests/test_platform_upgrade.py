@@ -78,6 +78,8 @@ OLD_BARRIER = {"id": "secret-matrix-0.100.0", "version": "0.100.0", "scope": "pl
                "kind": "operator-step", "summary": "an older step."}
 CELL_BARRIER = {"id": "cell-something-0.173.0", "version": "0.173.0", "scope": "cell",
                 "kind": "operator-step", "summary": "a cell-scope entry, never the command's."}
+CELL_ONE_WAY = {"id": "cell-format-0.173.0", "version": "0.173.0", "scope": "cell",
+                "kind": "one-way", "summary": "a cell-scope migration that cannot roll back."}
 
 
 def env_for(tmp_path: Path) -> dict[str, str]:
@@ -94,7 +96,8 @@ class Recorded:
 
     def __init__(self, tmp_path: Path, *, barriers=(), schema_check=True, secret_changed=False,
                  deployments=None, statuses=None, detail=None, live_tag=LIVE_TAG,
-                 failures=()) -> None:
+                 failures=(), cronjobs=None, storage_class=True,
+                 status_fails=None, manifest_exists=None) -> None:
         self.checkout = tmp_path / "upgrade" / "checkout"
         self.barriers = list(barriers)
         self.schema_check = schema_check
@@ -104,6 +107,11 @@ class Recorded:
         self.detail = detail if detail is not None else {"payload": {"barriers_crossed": ["secret-matrix-0.100.0"]}}
         self.live_tag = live_tag
         self.failures = set(failures)
+        self.cronjobs = ("".join(f"{name} suspend=false\n" for name in pu.SCHEDULER_CRONJOBS)
+                         if cronjobs is None else cronjobs)
+        self.storage_class = storage_class
+        self.status_fails = (live_tag is None) if status_fails is None else status_fails
+        self.manifest_exists = (live_tag is not None) if manifest_exists is None else manifest_exists
         self.calls: list[list[str]] = []
         self.stdin_bodies: list[str] = []
 
@@ -134,19 +142,20 @@ class Recorded:
             case "git" if argv[1] == "worktree":
                 return pu.Completed(0)
             case "git" if argv[1] == "diff":
-                return pu.Completed(1 if self.secret_changed else 0)
+                return pu.Completed(
+                    0, "infra/contracts/active-secret-registry-v1.json\n" if self.secret_changed else "")
             case "git":
                 return pu.Completed(0)
             case "uv":
                 return pu.Completed(0)
             case "helm" if argv[1] == "status":
-                if self.live_tag is None:
+                if self.status_fails:
                     return pu.Completed(1, "", "release: not found")
                 if self.live_tag is False:
                     return pu.Completed(0, json.dumps({"info": {"description": "Upgrade complete"}}))
                 return pu.Completed(0, json.dumps({"info": {"description": f"platform-{self.live_tag}"}}))
             case "helm" if argv[1] == "get":
-                if self.live_tag is None:
+                if not self.manifest_exists:
                     return pu.Completed(1, "", "release: not found")
                 return pu.Completed(0, LIVE_MANIFEST)
             case "helm" if argv[1] == "template":
@@ -155,6 +164,12 @@ class Recorded:
                 return pu.Completed(0, NEW_MANIFEST)
             case "helm" if argv[1] == "upgrade":
                 return pu.Completed(0, "Release has been upgraded.")
+            case "kubectl" if "cronjob" in argv:
+                return pu.Completed(0, self.cronjobs)
+            case "kubectl" if "storageclass" in argv:
+                return pu.Completed(
+                    0 if self.storage_class else 1, "",
+                    f'storageclasses.storage.k8s.io "{pu.STORAGE_CLASS}" not found')
             case "kubectl":
                 return pu.Completed(0)
             case "gh" if argv[1] == "api" and any("statuses?per_page=1" in a for a in argv):
@@ -181,10 +196,11 @@ class Recorded:
                 or (c[0] == "gh" and c[1] == "workflow")]
 
 
-def run_upgrade(tmp_path: Path, runner_args=(), **recorded) -> tuple[int, Recorded, list[str]]:
+def run_upgrade(tmp_path: Path, runner_args=(), tag: str = TAG,
+                **recorded) -> tuple[int, Recorded, list[str]]:
     env = env_for(tmp_path)
     runner = Recorded(tmp_path, **recorded)
-    result = pu.platform_upgrade([TAG, *runner_args], env, runner)
+    result = pu.platform_upgrade([tag, *runner_args], env, runner)
     return result, runner, runner.calls
 
 
@@ -238,6 +254,63 @@ def test_an_operator_step_barrier_keeps_atomic(tmp_path: Path) -> None:
 def test_a_cell_scope_barrier_between_releases_needs_no_crossed(tmp_path: Path) -> None:
     result, runner, _ = run_upgrade(tmp_path, barriers=[CELL_BARRIER])
     assert result == 0
+
+
+def test_a_cell_scope_barrier_accepts_a_crossed_id_and_records_it(tmp_path: Path) -> None:
+    result, runner, _ = run_upgrade(tmp_path, ("--crossed", "cell-format-0.173.0"),
+                                    barriers=[CELL_ONE_WAY])
+    assert result == 0
+    bodies = [json.loads(b) for b in runner.stdin_bodies if b.lstrip().startswith('{')]
+    deployment = next(b for b in bodies if b.get("environment") == "cloud-platform")
+    assert sorted(deployment["payload"]["barriers_crossed"]) == [
+        "cell-format-0.173.0", "secret-matrix-0.100.0"]
+    # A cell-scope one-way changes nothing helm would roll back, so --atomic stays.
+    upgrade = next(c for c in runner.calls if c[:2] == ["helm", "upgrade"]
+                   and "--dry-run=server" not in c)
+    assert "--atomic" in upgrade
+
+
+def test_the_dry_run_and_the_upgrade_share_the_post_renderer(tmp_path: Path) -> None:
+    result, runner, _ = run_upgrade(tmp_path)
+    assert result == 0
+    dry_run = next(c for c in runner.calls if "--dry-run=server" in c)
+    upgrade = next(c for c in runner.calls if c[:2] == ["helm", "upgrade"]
+                   and "--dry-run=server" not in c)
+    assert "--post-renderer" in dry_run
+    assert "--post-renderer" in upgrade
+
+
+def test_a_tag_older_than_the_live_release_is_refused(tmp_path: Path) -> None:
+    result, runner, _ = run_upgrade(tmp_path, tag="v0.170.0")
+    assert result == 1
+    assert runner.mutating() == []
+
+
+def test_a_live_release_helm_status_cannot_read_needs_from(tmp_path: Path) -> None:
+    result, runner, _ = run_upgrade(tmp_path, live_tag=None,
+                                    status_fails=True, manifest_exists=True)
+    assert result == 1
+    assert runner.mutating() == []
+    result, runner, _ = run_upgrade(tmp_path, ("--from", LIVE_TAG), live_tag=None,
+                                    status_fails=True, manifest_exists=True)
+    assert result == 0
+
+
+def test_a_suspended_scheduler_cronjob_fails_the_verify(tmp_path: Path) -> None:
+    result, runner, _ = run_upgrade(
+        tmp_path,
+        cronjobs="exomem-hosted-scheduler-exomem-access-delivery suspend=true\n"
+                 "exomem-hosted-scheduler-exomem-reconcile suspend=false\n")
+    assert result == 1
+    assert any("state=failure" in " ".join(c) for c in runner.calls if "/statuses" in " ".join(c))
+    assert not any(c[:3] == ["gh", "workflow", "run"] for c in runner.calls)
+
+
+def test_a_missing_storage_class_fails_the_verify(tmp_path: Path) -> None:
+    result, runner, _ = run_upgrade(tmp_path, storage_class=False)
+    assert result == 1
+    assert any("state=failure" in " ".join(c) for c in runner.calls if "/statuses" in " ".join(c))
+    assert not any(c[:3] == ["gh", "workflow", "run"] for c in runner.calls)
 
 
 def test_a_success_records_the_deployment_and_dispatches(tmp_path: Path) -> None:
