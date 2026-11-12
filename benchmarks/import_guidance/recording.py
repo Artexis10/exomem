@@ -19,10 +19,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from membench.utility.switch_eval.protocol import PACKET_SETTING
+
 from .scripted_replies import Scenario
 
 WORKER = Path(__file__).resolve().parent / "record_worker.py"
 RECORD_TIMEOUT_SECONDS = 300.0
+#: The activation specification fixes these packet modes; this is a closed protocol enum.
+ACTIVATION_PACKETS = ("maps", "anchors")
 
 
 @dataclass(frozen=True)
@@ -72,9 +76,9 @@ def checkout_sha(root: Path) -> str:
     return head.stdout.strip() + (f"-dirty-{digest.hexdigest()[:12]}" if changed else "")
 
 
-def worker_env(arm: Arm, scratch: Path) -> dict[str, str]:
+def worker_env(arm: Arm, scratch: Path, activation_packet: str | None = None) -> dict[str, str]:
     """The worker imports the arm's `exomem` first, and reaches no real state: every state, home and temp folder
-    is under `scratch`, and no `EXOMEM_*` variable passes through."""
+    is under `scratch`. Outside `EXOMEM_*` variables never pass through; an explicit packet pin applies after the scrub."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("EXOMEM_", "PYTHON"))}
     home = scratch / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -86,6 +90,7 @@ def worker_env(arm: Arm, scratch: Path) -> dict[str, str]:
         "XDG_DATA_HOME": str(home / "share"),
         "XDG_CONFIG_HOME": str(home / "config"),
         "XDG_CACHE_HOME": str(home / "cache"),
+        **({PACKET_SETTING: activation_packet} if activation_packet is not None else {}),
     }
 
 
@@ -97,10 +102,15 @@ def seed_folder(scenario: Scenario) -> Path | None:
     return (scenario.path.parent / named if scenario.path else Path(named)).resolve()
 
 
-def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[str]:
+def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path, activation_packet: str | None = None) -> list[str]:
     """Write the arm's recording of one scenario to `target` unless it exists. Returns the problems found."""
     if target.exists():
         kept = load_recording(target)
+        if kept.get("activation_packet") != activation_packet:
+            return [
+                f"{scenario.id}: {target} was recorded with activation_packet {kept.get('activation_packet')!r}, "
+                f"but this call requests {activation_packet!r}; delete it to record again"
+            ]
         if scenario.record.get("ready_graph") and "ready" not in kept:
             # A recording made before the graph was built holds the graph warming, so it would measure nothing.
             return [f"{scenario.id}: {target} was recorded without building the graph; delete it to record again"]
@@ -129,7 +139,7 @@ def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[st
         done = subprocess.run(  # noqa: S603
             [sys.executable, str(WORKER), str(plan), str(arm.root), str(partial), *([str(seed)] if seed else [])],
             cwd=scratch,
-            env=worker_env(arm, scratch),
+            env=worker_env(arm, scratch, activation_packet),
             capture_output=True,
             text=True,
             timeout=RECORD_TIMEOUT_SECONDS,
@@ -147,6 +157,8 @@ def record(scenario: Scenario, arm: Arm, target: Path, scratch: Path) -> list[st
     recorded = json.loads(partial.read_text(encoding="utf-8"))
     recorded["arm"] = arm.label
     recorded["product_sha"] = checkout_sha(arm.root)
+    if activation_packet is not None:
+        recorded["activation_packet"] = activation_packet
     target.write_text(json.dumps(recorded, indent=1), encoding="utf-8")
     partial.unlink()
     return []

@@ -10,8 +10,8 @@ reaches no real state. The scaffold comes from the arm's `init_vault`, so each a
 A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown. A live
 vault has one, because its writes build it. `--ready-graph` brings a seeded vault to that state before anything reads it:
 the arm's own `exomem maintain --reconcile` (the reconcile that `maintain_memory` runs) rewrites no page of the seed, and
-then the arm's own `recall_context` is read until its map reports the graph as `available`. `record_worker.py` runs the
-same two steps (`reconcile`, then `wait_for_graph`) on its own server. The process prints one JSON line: the graph state
+then the arm's own graph index proves its state is `available`, independently of the activation packet.
+`record_worker.py` runs the same two steps (`reconcile`, then `wait_for_graph`). The process prints one JSON line: the graph state
 it saw and the seconds it took.
 """
 
@@ -24,13 +24,12 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 #: How long the arm's reconcile and the wait for its graph may take, each.
 READY_SECONDS = 120.0
 READY_INTERVAL = 2.0
-#: Any turn serves: the graph state is a field of the map block, whatever the turn.
-PROBE_TURN = "What does this memory hold?"
 
 
 def main(seed: Path, vault: Path, product_root: Path, ready_graph: bool = False) -> dict | None:
@@ -47,7 +46,7 @@ def main(seed: Path, vault: Path, product_root: Path, ready_graph: bool = False)
         return None
     started = time.monotonic()
     reconcile()
-    state = wait_for_graph(open_server(vault))
+    state = wait_for_graph(vault)
     return {"graph": state, "seconds": round(time.monotonic() - started, 1)}
 
 
@@ -94,27 +93,23 @@ def open_server(vault: Path) -> Callable[[str, dict], dict]:
     return call
 
 
-def graph_state(reply: dict) -> str:
-    """What `recall_context` says about the relation graph: `map.membership_graph`, or why it says nothing."""
-    block = reply.get("map")
-    if isinstance(block, dict):
-        return str(block.get("membership_graph") or "no state in the map block")
-    error = reply.get("error")
-    return f"error {error.get('code')}" if isinstance(error, dict) else "no map block yet"
-
-
 def wait_for_graph(
-    call: Callable[[str, dict], dict],
+    vault: Path,
     seconds: float = READY_SECONDS,
     interval: float = READY_INTERVAL,
     sleep: Callable[[float], None] = time.sleep,
+    *,
+    availability: Callable[[], str] | None = None,
 ) -> str:
-    """Read the arm's `recall_context` until its map reports the graph available; stop naming the state last seen."""
+    """Prove the arm's graph available, independently of packet shape; stop naming the state last seen."""
     from exomem.context_catalogue import EDGES_AVAILABLE
+    from exomem.epistemic_graph import EpistemicGraphIndex
 
+    if availability is None:
+        availability = partial(EpistemicGraphIndex(vault).availability_state, prove=True)
     deadline = time.monotonic() + seconds
     while True:
-        state = graph_state(call("recall_context", {"turn": PROBE_TURN}))
+        state = availability()
         if state == EDGES_AVAILABLE:
             return state
         if time.monotonic() >= deadline:

@@ -739,9 +739,12 @@ def test_a_billing_error_stops_the_run_like_a_rejected_limit(tmp_path, monkeypat
     (run / "E" / "built" / "vault").mkdir(parents=True)
     (run / "E" / "built" / "exomem-state").mkdir()
 
-    with pytest.raises(LimitRejected, match="credit balance"):
-        answer_all(planted_cases(3), run / "E", "m", "high")
+    with pytest.raises(SystemExit, match="funding required") as stopped:
+        with command.waits_for_room():
+            answer_all(planted_cases(3), run / "E", "m", "high")
 
+    assert "after funding the account" in str(stopped.value)
+    assert "reset" not in str(stopped.value)
     assert not list((run / "E" / "answers").glob("*.json")), "an empty balance is no answer"
     assert launches.read_text().count("launched") == 1, "no retry, and no later case"
 
