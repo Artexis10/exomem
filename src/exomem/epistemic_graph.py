@@ -14479,21 +14479,26 @@ class GraphView:
                 from .vault_store import mode as store_mode
                 from .vault_store import read as store_read
 
-                # A stored page's bytes and time are the store's: its file may be absent or stale.
-                stored = None if prepared is not None else store_read.owned_page_at(
-                    self.vault_root, path
+                in_store = store_mode.store_mode_for_reads(self.vault_root)
+                # In store mode the page's bytes and time, and each link's target, are the ones
+                # its rows were derived from (`page_source`, `link_target_exists`), read from the
+                # snapshot that holds those rows: a stored page's file may be absent or stale.
+                source = (
+                    store_read.page_source(self.conn, self.vault_root, rel_path)
+                    if in_store and prepared is None
+                    else None
                 )
-                # A link lands as the store's commit derived it (`link_target_exists`), read from
-                # the snapshot that holds these rows; file mode asks the files.
                 target_exists = (
                     (lambda rel: store_read.link_target_exists(self.conn, self.vault_root, rel))
-                    if store_mode.store_mode_for_reads(self.vault_root)
+                    if in_store
                     else None
                 )
                 if prepared is not None:
                     raw, mtime = prepared.source, path.stat().st_mtime
-                elif stored is not None:
-                    raw, mtime = stored.body.decode("utf-8"), stored.meta.mtime_ns / 1e9
+                elif in_store:
+                    if source is None:
+                        raise FileNotFoundError(rel_path)
+                    raw, mtime = source[0].decode("utf-8"), source[1] / 1e9
                 else:
                     raw = vault_module.read_bytes_without_pinning(
                         path, vault_root=self.vault_root
@@ -14509,7 +14514,7 @@ class GraphView:
                     return []
                 self._check()
                 state = semantic_index.current_parent_index_state(
-                    self.vault_root, rel_path if stored is not None else path, source=raw
+                    self.vault_root, rel_path if source is not None else path, source=raw
                 )
                 self._check()
                 edges = _structural_edges_for_page(

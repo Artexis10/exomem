@@ -10,6 +10,7 @@ every other path.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from collections.abc import Callable, Iterable, Iterator
@@ -706,6 +707,28 @@ def holds_file(vault_root: Path, rel: str) -> bool:
         return owned_meta(root, rel) is not None or (root / rel).is_file()
     except FileNotFoundError:
         return False
+
+
+def page_source(reader: Connection, vault_root: Path, rel: str) -> tuple[bytes, int] | None:
+    """The exact bytes and modification time that a commit derives the page at ``rel`` from, or
+    None when it has none: the store's page when ``reader``'s snapshot holds one, else the file.
+
+    A page path the store holds no row for is a file like any unowned one: the disk is its source
+    until a governed write holds it. A graph reader that re-derives a page's links reads here, so
+    it derives them from the bytes that its rows came from.
+    """
+    if ownership.classify(rel) is ownership.Ownership.PAGE:
+        row = reader.execute(
+            "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
+        ).fetchone()
+        if row is not None:
+            return bytes(row[0]), row[1]
+    path = _as_path(vault_root) / rel
+    try:
+        raw = vault.read_disk_bytes_without_pinning(path)
+        return raw, os.stat(path).st_mtime_ns
+    except OSError:
+        return None
 
 
 def link_target_exists(reader: Connection, vault_root: Path, rel: str) -> bool:

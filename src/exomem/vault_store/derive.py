@@ -19,7 +19,6 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +36,7 @@ from .. import (
 )
 from ..find_types import ParsedPage
 from ..semantic_index import SemanticParentIndexState
-from . import ownership, read
+from . import read
 
 if TYPE_CHECKING:
     from .write import StoreChange
@@ -109,24 +108,8 @@ class _Derivation:
     # ------------------------------------------------------------------ sources
 
     def source(self, rel: str) -> tuple[bytes, int] | None:
-        """The exact bytes and modification time of the page at ``rel``, or None when it has none.
-
-        The store holds an owned page; the disk holds any other, as the store does not own it.
-        """
-        if ownership.classify(rel) is ownership.Ownership.PAGE:
-            row = self.tx.execute(
-                "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
-            ).fetchone()
-            if row is not None:
-                return bytes(row[0]), row[1]
-            # A page path the store holds no row for is a file like any unowned one: the disk
-            # is its source until a governed write holds it.
-        path = self.root / rel
-        try:
-            raw = vault.read_disk_bytes_without_pinning(path)
-            return raw, os.stat(path).st_mtime_ns
-        except OSError:
-            return None
+        """The exact bytes and modification time of the page at ``rel`` (``read.page_source``)."""
+        return read.page_source(self.tx, self.root, rel)
 
     def page_bytes(self, rel: str) -> bytes:
         found = self.source(rel)
