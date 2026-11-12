@@ -24,7 +24,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import workflow_skills
+from . import package_skills, workflow_skills
 
 # The Exomem skill ships inside the package, the same `_Schema/` that `init` lays into a
 # vault. Resolving from `__file__` works for an installed wheel too, not just a
@@ -251,6 +251,14 @@ def _mirror_tree(src: Path, dest: Path, *, link: bool) -> str:
             pass
 
     shutil.copytree(src, dest)
+    # A dir symlink cannot be rendered without writing through to the scaffold;
+    # a real copy fills release placeholders with the installed release.
+    for document in dest.rglob("*.md"):
+        document.write_text(
+            package_skills.render_shipped_markdown(document.read_text(encoding="utf-8")),
+            encoding="utf-8",
+            newline="\n",
+        )
     return "copy"
 
 

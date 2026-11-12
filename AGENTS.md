@@ -48,6 +48,15 @@ personal name, product, or vault-structure label appears in the scaffold — or
 anywhere under `src/exomem/`. If a test flags a token, genericize it; don't add it
 to an allowlist.
 
+**Pin every install line.** Public-skill reviewers reject instructions that
+install or run code from a mutable source. A shipped doc that shows an install
+or run command for the package writes `<exomem-release>` where the version goes
+(`pip install exomem==<exomem-release>`, `uvx exomem@<exomem-release>`); every
+packaging and install path fills it with the release it ships, from
+`package_skills.release_version()`. Never write `exomem@latest`, an unversioned
+`uvx exomem`, or `pip install exomem` without that placeholder — the OpenAI
+submission lint fails the build on them.
+
 (Maintainer-only: the personal claude.ai `.skill` zip is built by
 `scripts/rebuild-schema-zip.py` **from this same scaffold**, overlaying only your real
 `project-keys.yaml` — no private canonical, no markers. Needs no version bump here.)

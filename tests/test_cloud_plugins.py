@@ -343,6 +343,41 @@ def test_openai_public_submission_rejects_app_references(tmp_path: Path, placeme
         cloud_plugins._validate_openai(ROOT, package)
 
 
+def test_openai_package_pins_every_install_line_to_the_release(tmp_path: Path) -> None:
+    """The reviewer's "untrusted or mutable source" finding stays cleared.
+
+    Every shipped install line names an immutable release, filled from
+    pyproject, and no floating tag or unversioned install survives into the
+    submission.
+    """
+    release = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    package = tmp_path / "openai"
+
+    importing = (package / "skills/exomem/references/importing.md").read_text()
+    assert f"uvx exomem@{release}" in importing
+    routing = (package / "skills/exomem/references/operation-routing.md").read_text()
+    assert f"pip install exomem=={release}" in routing
+
+    offenders = [
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.md")
+        if cloud_plugins._MUTABLE_EXOMEM_INSTALL.search(path.read_text(encoding="utf-8"))
+        or package_skills.RELEASE_PLACEHOLDER in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders
+
+
+def test_openai_submission_rejects_a_mutable_install_line(tmp_path: Path) -> None:
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    planted = tmp_path / "openai" / "skills/exomem/references/importing.md"
+    text = planted.read_text()
+    planted.write_text(text + "\nUse `uvx exomem@latest` to retry the command.\n")
+
+    with pytest.raises(ValueError, match="mutable source"):
+        cloud_plugins._validate_openai(ROOT, tmp_path / "openai")
+
+
 def test_openai_submission_icons_are_contained_square_pngs(tmp_path: Path) -> None:
     cloud_plugins.build_packages(ROOT, tmp_path)
     with zipfile.ZipFile(tmp_path / "openai.zip") as archive:
