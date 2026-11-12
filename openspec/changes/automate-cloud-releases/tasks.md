@@ -162,7 +162,7 @@
 ## 2. Phase 1 rehearsal
 
 - [ ] 2.1 With the operator's approval, rehearse a release end to end on the rehearsal cluster, with a disposable canary and two disposable cells. Start from a real tag publish, not a manual dispatch. If the tag run's completion starts no `cloud-deploy` run, add an explicit `gh workflow run cloud-deploy.yml --ref main` step to the release workflow's tag run, and repeat. Verify:
-  - a real tag publish starts `cloud-deploy`, which catches a `workflow_run` trigger that a run started with `github.token` never fires;
+  - a real tag publish starts `cloud-deploy`, which catches a `workflow_run` trigger that a run started with `github.token` never fires (2026-11-12: v0.172.0 to v0.174.0 started none, so the tag run now ends with the dispatch; the rehearsal proves the dispatch);
   - the workflow sets the image, the canary rolls at once, and each other cell rolls only in its window, after its idle minutes;
   - a client that calls a tool every second through each switch sees no error within the budget, and the run records the waits;
   - a second `cell_image` during a disposable cell's attempt leaves that attempt on its pinned target;

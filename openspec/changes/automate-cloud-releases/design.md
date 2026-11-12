@@ -50,11 +50,11 @@ The engineering primary-source roster was not consulted for this design, because
 
 ### D1. A release sets the target image through Substrate's release route
 
-A new workflow, `.github/workflows/cloud-deploy.yml`, runs on two events:
-- the release workflow completes with success on a release tag. Only a run on a `v*` tag publishes, so the trigger filters on `workflow_run.head_branch`. A push to `main` that publishes nothing therefore starts no run;
-- a dispatch on `main`, with no inputs. The platform upgrade command and the runbook's manual upgrade end with `gh workflow run cloud-deploy.yml --ref main` (D2).
+A new workflow, `.github/workflows/cloud-deploy.yml`, runs on a dispatch on `main`, with no inputs. Three callers send it:
+- the release workflow's tag run, in its last job, after it publishes and attests the images. A push to `main` that publishes nothing therefore starts no run;
+- the platform upgrade command and the runbook's manual upgrade, which end with `gh workflow run cloud-deploy.yml --ref main` (D2).
 
-The release workflow's tag run starts from a dispatch with `github.token`. GitHub may not start another workflow from such a run's completion, and task 2.1 proves the trigger from a real tag publish. If no `workflow_run` arrives, the release workflow's tag run ends with an explicit dispatch of `cloud-deploy` on `main` instead. GitHub starts a run from a `workflow_dispatch` that `github.token` sends.
+The release workflow's tag run starts from a dispatch with `github.token`, and GitHub starts no other workflow from such a run's completion. The first design used a `workflow_run` trigger. Tags v0.172.0, v0.173.0 and v0.174.0 started no `cloud-deploy` run (2026-11-11 to 2026-11-12), so the trigger was replaced by the explicit dispatch. GitHub starts a run from a `workflow_dispatch` that `github.token` sends.
 
 Each run acts only on the newest published release. Steps:
 
@@ -70,7 +70,7 @@ The workflow prints error codes and counts only. It prints no cell ID, no tenant
 
 **Custody.**
 - `EXOMEM_DEPLOY_TOKEN` is a secret of the `cloud-deploy` environment. Its deployment branch policy admits only `main`.
-- GitHub runs a `workflow_run` workflow from the default branch's file, and `--ref main` runs `main`'s file. Anyone with write can dispatch the workflow on another ref, but the branch policy then withholds the token.
+- `--ref main` runs `main`'s file. Anyone with write can dispatch the workflow on another ref, but the branch policy then withholds the token.
 - The workflow holds no kubeconfig and no private-network peer. It calls Substrate's public admin URL over HTTPS only.
 - One concurrency group, without cancel-in-progress, serializes runs. GitHub replaces a pending run with a newer one. Each run reads the newest release, so the collapse loses nothing.
 - The poll interval and the poll timeout are repository variables.
