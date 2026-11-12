@@ -26,5 +26,7 @@
 - [x] 5.2 Run the tests, `uv run python scripts/validate-public-artifacts.py --repository` and `openspec validate --all --strict`.
 
 - [ ] 5.3 Deliver the independently reviewed exact head through green PR CI, merge and ordinary release, then synchronize and archive this pipeline change. Archival depends on the merged source; record its closure in a bounded follow-up when needed.
+  - Source delivery: PR #2730 merged as `3cf084baa4937b6528d71d326d2066eeb810246e`. PR CI run `43317068663`, attempt 2, passed after an infrastructure retry. Independent review approved the merged patch.
+  - Release qualification remains pending. Keep this task open until the containing release qualifies, then synchronize and archive through the CLI.
 
 A shippable sensor-model pin is not part of this change. It needs a training set without private vault content and its own admission evidence (design D7), and lands as its own change.
