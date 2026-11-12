@@ -1000,7 +1000,7 @@
     }
   },
   "read_page": {
-    "description": "Read one page by title or id: text, type, date and links.",
+    "description": "Read one page by title or id: text, type, date and links. Unit ids are versioned edit handles and refresh after text changes. An authored '- id:' row is the stable unit anchor; preserve it on updates.",
     "inputSchema": {
       "properties": {
         "page": {
