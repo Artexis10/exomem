@@ -2300,26 +2300,24 @@ def _dependency_changed_keys(
     return keys
 
 
-#: One resident-resolver topology fingerprint per vault, keyed by the checkpoint the
-#: resolver stands at: a patch restamps the checkpoint, so a stale entry never decides
-#: a read, and a lag's repeated restricted reads pay one hash.
+#: One digest per resident publication, including builds with no checkpoint. Keep only
+#: the lightweight token, so eviction can release the resolver's maps. A publication's
+#: first hash still carries a timing signal; this memo does not hide write timing.
 _RESIDENT_TOPOLOGY_DIGESTS: dict[Path, tuple[object, str]] = {}
 
 
 def _resident_topology_fingerprint(
     vault_root: Path,
     resolver: vault_module.WikilinkResolver,
-    checkpoint: freshness.RecallFreshnessCheckpoint | None,
+    publication: object,
 ) -> str:
-    """The resident resolver's topology fingerprint, cached at its checkpoint."""
-    if checkpoint is None:
-        return _resolver_topology_fingerprint(resolver)
+    """Cache the topology digest of the exact resident maps copied by the borrower."""
     key = Path(vault_root)
     cached = _RESIDENT_TOPOLOGY_DIGESTS.get(key)
-    if cached is not None and cached[0] == checkpoint:
+    if cached is not None and cached[0] is publication:
         return cached[1]
     digest = _resolver_topology_fingerprint(resolver)
-    _RESIDENT_TOPOLOGY_DIGESTS[key] = (checkpoint, digest)
+    _RESIDENT_TOPOLOGY_DIGESTS[key] = (publication, digest)
     return digest
 
 
@@ -2865,6 +2863,12 @@ class EpistemicGraphIndex:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_review "
             "ON graph_edges(source_path, origin, relation_type, dst_key, source_anchor)"
+        )
+        # Sensed retypes bind an exact bullet anchor and target. The relation
+        # review index cannot seek that pair without an inferred relation key.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_anchor "
+            "ON graph_edges(source_path, origin, source_anchor, dst_page_key)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_unregistered "
@@ -8901,7 +8905,8 @@ class EpistemicGraphIndex:
         direction: str = "any",
         registry_scope: str | None = None,
         keep: Callable[[str], bool] | None = None,
-        resolver: vault_module.WikilinkResolver | None = None,
+        resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
+        reader: Callable[[str], bool] | None = None,
     ) -> RelationFilterResult:
         """Pages participating in a typed edge whose canonical `relation_type` or
         `parent_relation` is in `keys` (extension parent roll-up).
@@ -8928,12 +8933,20 @@ class EpistemicGraphIndex:
         that authors the edge, then by the edge's place in that page, so a page's
         `provenance` never depends on which page the sidecar wrote last.
 
-        `keep` is a reader's view (`None` for the owner) and `resolver` the
-        recall resolver to re-resolve with (read once when `None`). For such a
-        reader every page with a link that a withheld page resolves differently
-        is re-derived in the reader's view, and an edge whose page or
-        counterpart the reader may not see drops out, as in a vault without the
-        withheld pages.
+        `keep` is a reader's view (`None` for the owner) and `resolver` builds
+        the request's link resolver to re-resolve with (read once when `None`).
+        For such a reader every page with a link that a withheld page resolves
+        differently is re-derived in the reader's view, and an edge whose page
+        or counterpart the reader may not see drops out, as in a vault without
+        the withheld pages.
+
+        `reader` is a restricted caller's release decision
+        (`egress.visible_page_filter`), None for the owner. It makes a write
+        that caller may not see leave its read as it was: a sidecar that
+        trails the live checkpoint only by such pages is read
+        (`_open_read_snapshot`), and the rows' links resolve as they were
+        derived (`_reader_resolver`, chosen before the read transaction
+        opens). Without such a resolver the read is temporarily unavailable.
         """
         requested_keys = [str(k) for k in keys if k]
         anchor_rel = _page_rel(anchor) if anchor else None
@@ -8960,12 +8973,41 @@ class EpistemicGraphIndex:
             )
         if not self.path.exists():
             return RelationFilterResult(status="warming")
-        conn = self._open_read_snapshot()
+        expected_meta: tuple[str | None, str | None] | None = None
+        if keep is None:
+            link_resolver = None
+        elif reader is None:
+            link_resolver = resolver() if resolver is not None else None
+        else:
+            decided = self._reader_resolver(resolver)
+            if decided is None:
+                return RelationFilterResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
+            link_resolver, topology, checkpoint_value = decided
+            expected_meta = (topology, checkpoint_value)
+        conn = self._open_read_snapshot(reader=reader)
         if conn is None:
             return RelationFilterResult(status="warming")
         try:
+            if expected_meta is not None:
+                # The resolver was chosen against a probe read of the sidecar; this
+                # transaction must be the same one it decided for.
+                meta = dict(
+                    conn.execute(
+                        "SELECT key, value FROM graph_meta WHERE key IN (?, ?)",
+                        (_RESOLVER_TOPOLOGY_KEY, _RECALL_CHECKPOINT_KEY),
+                    ).fetchall()
+                )
+                if (
+                    meta.get(_RESOLVER_TOPOLOGY_KEY),
+                    meta.get(_RECALL_CHECKPOINT_KEY),
+                ) != expected_meta:
+                    return RelationFilterResult(
+                        status="temporarily_unavailable", reason="resolver_unavailable"
+                    )
             view = GraphView(
-                self.vault_root, conn, keep=keep, admitted=allowed_paths, resolver=resolver,
+                self.vault_root, conn, keep=keep, admitted=allowed_paths, resolver=link_resolver,
                 # A link whose candidates are all withheld still reaches a
                 # withheld page, and `_add` drops that edge.
                 reads_placeholders=False,
@@ -9211,10 +9253,10 @@ class EpistemicGraphIndex:
         stored = _checkpoint_from_value(meta.get(_RECALL_CHECKPOINT_KEY))
         borrowed = find_module.borrow_recall_resolver(self.vault_root)
         if borrowed is not None:
-            resident, checkpoint = borrowed
+            resident, checkpoint, publication = borrowed
             if stored is not None and checkpoint == stored:
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
-            if _resident_topology_fingerprint(self.vault_root, resident, checkpoint) == topology:
+            if _resident_topology_fingerprint(self.vault_root, resident, publication) == topology:
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
             # A built resolver would describe the same live vault and hash to the same
             # fingerprint: one topology hash decides this read.
@@ -9469,6 +9511,8 @@ class EpistemicGraphIndex:
                 "AND ids.exomem_id = n.exomem_id) END, n.page_type, n.tags_json, n.metadata "
                 "FROM graph_nodes n WHERE n.kind = 'file' ORDER BY n.path"
             ).fetchall()
+            # Retain these already-read endpoints for menus; no extra query or page read.
+            menu_rows = {str(row[0]): row for row in rows}
             rows = [
                 row for row in rows
                 if activation.structurally_eligible(
@@ -9752,6 +9796,16 @@ class EpistemicGraphIndex:
                     generic, per_source_cap, branch_cap + 1,
                 ),
             ).fetchall()
+            # relation.type's authored plain-link/generic bullets, from the same
+            # rows the graph already published. Only candidates with a current
+            # relation verdict survive the read below; without readings the
+            # query never runs (the projection read is not a graph query).
+            from . import relation_sensor
+
+            sensed_by_key = relation_sensor.sensed_rows_for(self.vault_root, selected, graph=conn)
+            retype_by_source = relation_sensor.retype_candidates_many(
+                conn, selected_registries, sensed_by_key
+            )
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
                 "status": "warming",
@@ -9818,10 +9872,15 @@ class EpistemicGraphIndex:
                     "wikilink",
                     "frontmatter_sources",
                     "shared_sources",
+                    "retype",
                 )
             }
             for rel in selected
         }
+        # relation.type readings: relation verdicts only. Empty when sensing is
+        # off, unadmitted or unprojected, and the queue is byte-identical.
+        for source, candidates in retype_by_source.items():
+            methods[source]["retype"].extend(candidates)
         for row in wiki_and_authored_rows[:branch_cap]:
             (
                 kind,
@@ -10150,8 +10209,19 @@ class EpistemicGraphIndex:
             "wikilink",
             "frontmatter_sources",
             "shared_sources",
+            "retype",
         )
-        fit = relation_queue.RelationFit(self.vault_root, basis=type_basis)
+
+        def menu_page(path: str) -> Any | None:
+            row = menu_rows.get(path)
+            if row is None:
+                return None
+            return relation_sensor._page_from_row((row[0], row[1], row[6], row[8], row[2]))
+
+        fit = relation_queue.RelationFit(
+            self.vault_root, basis=type_basis, page_lookup=menu_page,
+        )
+
         for source in selected:
             if len(groups) >= page_cap:
                 break
@@ -10249,6 +10319,27 @@ class EpistemicGraphIndex:
                     item["bullet"] = relation_queue._bullet(candidate)
                 if candidate.get("internal_evidence"):
                     item["internal_evidence"] = candidate["internal_evidence"]
+                sensed_row = candidate.get("_sensed")
+                if sensed_row is None and candidate.get("method") == "wikilink":
+                    occurrence = (candidate.get("internal_evidence") or {}).get("occurrence")
+                    if occurrence is not None:
+                        sensed_row = sensed_by_key.get(
+                            relation_sensor.request_key(
+                                source, target, f"occurrence-{occurrence}"
+                            )
+                        )
+                if sensed_row is not None and sensed_row.get("verdict") not in ("none", "abstain"):
+                    options = item.get("options")
+                    if options is None:
+                        options = fit.options(
+                            candidate,
+                            registry=selected_registries[source],
+                            relation=relation_registry.generic_relation_key(),
+                        )
+                    block = relation_sensor.proposal(sensed_row, options or [])
+                    if block is not None:
+                        item["options"] = options
+                        item["sensed"] = block
                 visible.append(item)
             if len(visible) > item_cap:
                 items_truncated = True

@@ -105,7 +105,8 @@ def scenario_for(case: Case, marks: dict, rubric: list[dict]) -> dict:
                     "as": "context",
                     "tool": "recall_context",
                     "arguments": {"turn": turn},
-                    "warm": {"seconds": WARM_SECONDS, "ignore": ["served_context_id"]},
+                    # Protocol F11 excludes per-call context IDs and continuity tokens from warm-read comparison.
+                    "warm": {"seconds": WARM_SECONDS, "ignore": ["served_context_id", "continuity"]},
                 },
             ],
         },

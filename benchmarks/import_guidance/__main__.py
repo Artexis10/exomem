@@ -24,6 +24,7 @@ from import_guidance import (  # noqa: E402
     store_report,
 )
 from import_guidance.recording import (  # noqa: E402
+    ACTIVATION_PACKETS,
     graph_states,
     load_recording,
     parse_arm,
@@ -41,6 +42,10 @@ def main(argv: list[str] | None = None) -> int:
         "--judge-model", default="opus", help="the judge's model; not the agent's by default"
     )
     run.add_argument("--repeats", type=int, default=1)
+    run.add_argument(
+        "--activation-packet", choices=ACTIVATION_PACKETS,
+        help="explicit packet profile for recording workers and session-close servers; unset keeps the product default",
+    )
     run.add_argument(
         "--repeat-offset",
         type=int,
@@ -258,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="ig-dry-") as scratch:
             for scenario in scenarios:
                 for arm in arms or [None]:
-                    problems = runner.dry_run(scenario, Path(scratch), arm)
+                    problems = runner.dry_run(scenario, Path(scratch), arm, activation_packet=args.activation_packet)
                     label = f"{arm.label}: " if arm else ""
                     print(
                         f"{label}{scenario.id}: "
@@ -298,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         out=args.out,
         arms=arms,
         repeat_offset=args.repeat_offset,
+        activation_packet=args.activation_packet,
     )
     print(runner.summary_table(rows))
     return 0
@@ -319,6 +325,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
                         hooked=args.hook_turn,
                         client_mode=args.client_mode,
                         ready_graph=args.ready_graph,
+                        activation_packet=args.activation_packet,
                     )
                     print(f"{arm.label}: {case.id}: {'ok' if not problems else 'PROBLEMS ' + '; '.join(problems)}")
                     failed += bool(problems)
@@ -335,6 +342,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         credits=args.credits,
         ready_graph=args.ready_graph,
         hook_inject=args.hook_inject,
+        activation_packet=args.activation_packet,
     )
     return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 
