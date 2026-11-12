@@ -253,3 +253,116 @@ def test_sidecar_unknown_page_falls_back_and_still_resolves(tmp_path: Path) -> N
     resolver = find_module.recall_resolver_snapshot(root)
 
     assert "Knowledge Base/Notes/Unknown" in resolver.full_paths
+
+
+def test_checkpointless_borrows_reuse_one_topology_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated restricted reads must not serialize the whole unchanged resolver again."""
+    from exomem import epistemic_graph
+
+    root = tmp_path / "vault"
+    _write(root, "Knowledge Base/Notes/Visible.md", "# Visible\n")
+    _seed_sidecar(root)
+    find_module.recall_resolver_snapshot(root, freshness=(1, 2, "disk-proof"))
+    hashes = []
+    real = epistemic_graph._resolver_topology_fingerprint
+
+    def counted(resolver):
+        hashes.append(1)
+        return real(resolver)
+
+    monkeypatch.setattr(epistemic_graph, "_resolver_topology_fingerprint", counted)
+    results = []
+    for _ in range(2):
+        borrowed = find_module.borrow_recall_resolver(root)
+        assert borrowed is not None and borrowed[1] is None
+        results.append(epistemic_graph._resident_topology_fingerprint(
+            root, borrowed[0], borrowed[-1]
+        ))
+    assert results[0] == results[1]
+    assert len(hashes) == 1
+
+
+def test_a_patched_resolver_cannot_reuse_its_previous_topology_digest(tmp_path: Path) -> None:
+    """A title edit patches the same resident object but must change its digest publication."""
+    from exomem import epistemic_graph
+
+    root = tmp_path / "vault"
+    rel = "Knowledge Base/Notes/Visible.md"
+    path = _write(root, rel, "# Before\n")
+    _seed_sidecar(root)
+    _seed_live_freshness(root)
+    checkpoint = freshness.live_recall_checkpoint(root, "vault")
+    find_module.recall_resolver_snapshot(root, expected_checkpoint=checkpoint)
+    before = find_module.borrow_recall_resolver(root)
+    resident = find_module._RECALL_RESOLVER_CACHE[root][1]
+    first = epistemic_graph._resident_topology_fingerprint(root, before[0], before[-1])
+
+    path.write_text("# After\n", encoding="utf-8")
+    freshness.on_files_changed(root, changed=[path])
+    find_module.on_resolver_files_changed(root, [rel], [])
+    after = find_module.borrow_recall_resolver(root)
+
+    assert find_module._RECALL_RESOLVER_CACHE[root][1] is resident
+    assert after[-1] is not before[-1]
+    assert epistemic_graph._resident_topology_fingerprint(root, after[0], after[-1]) != first
+    assert before[0].title_key_for_path(rel) == "before"
+
+
+def test_rebuilding_with_the_same_disk_key_rechecks_the_new_maps(tmp_path: Path) -> None:
+    """A sampled disk key may name two builds; it cannot identify their actual maps."""
+    from exomem import epistemic_graph
+
+    root = tmp_path / "vault"
+    rel = "Knowledge Base/Notes/Visible.md"
+    path = _write(root, rel, "# Before\n")
+    _seed_sidecar(root)
+    find_module.recall_resolver_snapshot(root, freshness=(1, 2, "sampled"))
+    before = find_module.borrow_recall_resolver(root)
+    first = epistemic_graph._resident_topology_fingerprint(root, before[0], before[-1])
+
+    path.write_text("# After\n", encoding="utf-8")
+    _seed_sidecar(root)
+    find_module.recall_resolver_snapshot(root, freshness=(1, 2, "sampled"))
+    after = find_module.borrow_recall_resolver(root)
+
+    assert after[-1] is not before[-1]
+    assert epistemic_graph._resident_topology_fingerprint(root, after[0], after[-1]) != first
+
+
+def test_an_old_hash_finishing_last_cannot_mask_the_new_topology(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delayed old reader may overwrite the memo but cannot authorize a newer topology."""
+    import threading
+
+    from exomem import epistemic_graph
+    from exomem.vault import WikilinkResolver
+
+    root = tmp_path / "vault"
+    before = WikilinkResolver.from_entries(root, [("note.md", "Before")])
+    after = WikilinkResolver.from_entries(root, [("note.md", "After")])
+    old_token, new_token = object(), object()
+    started, finish = threading.Event(), threading.Event()
+    real = epistemic_graph._resolver_topology_fingerprint
+
+    def delayed(resolver):
+        if resolver is before:
+            started.set()
+            assert finish.wait(5)
+        return real(resolver)
+
+    monkeypatch.setattr(epistemic_graph, "_resolver_topology_fingerprint", delayed)
+    worker = threading.Thread(target=epistemic_graph._resident_topology_fingerprint,
+                              args=(root, before, old_token))
+    worker.start()
+    try:
+        assert started.wait(5)
+        expected = epistemic_graph._resident_topology_fingerprint(root, after, new_token)
+    finally:
+        finish.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert epistemic_graph._resident_topology_fingerprint(root, after, new_token) == expected
+    assert expected != real(before)

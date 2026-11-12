@@ -1,0 +1,11 @@
+{
+  "id": "f12-code-do-that",
+  "title": "A code proposal accepted after repository context was recalled",
+  "suite": "session-close",
+  "seed": "fu-repository",
+  "engagement": "balanced",
+  "turns": [
+    "I am fixing empty arguments in my Alderframe CLI repository. The whole helper is: def first_arg(args): return args[0]. It should return None for an empty list and the first element otherwise, without renaming the function or parameter. Check the saved repository guidance, explain the smallest fix, and end by offering to show the corrected helper.",
+    "do that"
+  ]
+}

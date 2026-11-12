@@ -1,0 +1,11 @@
+{
+  "id": "f11-code-release",
+  "title": "A release instruction after the repository release reference was recalled",
+  "suite": "session-close",
+  "seed": "fu-repository",
+  "engagement": "balanced",
+  "turns": [
+    "The parser fix is merged in my Alderframe CLI repository. Its current release is 1.4.2. Check the saved delivery guidance and outline the next patch release. End by offering the release commands. We have no main-branch CI or release-workflow result in this conversation yet.",
+    "cut the release"
+  ]
+}
