@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -16,39 +15,13 @@ from exomem import (
     epistemic_graph,
     find,
     mutation_journal,
-    request_budget,
+    mutation_lock,
     review_ids,
     review_state,
     writer_lease,
 )
 from exomem.cli_ops import OpError
 from exomem.command_surface import Command
-
-
-@pytest.mark.parametrize("command_name, arguments", [
-    ("triage_memory", {"ref": "exomem://review/current", "action": "dismiss", "expected_fingerprint": "a" * 24}),
-    ("connect_memory", {"operation": "create-entity", "name": "Field Station"}),
-])
-def test_expired_budget_does_not_refuse_writes_that_bind_no_review_handle(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_name: str, arguments: dict,
-) -> None:
-    from dataclasses import replace
-
-    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "writer"))
-    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
-    saved = vault / "Knowledge Base/Notes/Insights/explicit-write.md"
-
-    def save(root: Path, **kwargs):
-        saved.write_text("# Explicit write\n", encoding="utf-8")
-        return {"saved": True}
-
-    command = replace(next(c for c in commands.PRODUCT_COMMANDS if c.name == command_name), leaf=save)
-    token = request_budget.set_current(request_budget.RequestBudget(seconds=1, entry=0))
-    try:
-        writer_lease.invoke_command(command, vault, **arguments)
-    finally:
-        request_budget.reset_current(token)
-    assert saved.read_text(encoding="utf-8") == "# Explicit write\n"
 
 
 @pytest.mark.parametrize("binding", ["queue", "write-advisory", "accept-relation"])
@@ -245,37 +218,14 @@ def test_busy_refusal_omits_unknown_holder_diagnostics() -> None:
     assert reply["error"]["diagnostics"] == {"caller_wait_seconds": 0.0}
 
 
-@pytest.mark.parametrize("binding", ["queue", "write-advisory", "accept-relation"])
-def test_expired_review_binding_refuses_before_writer_admission(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str,
-) -> None:
-    clock = [0.0]
-    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "writer"))
-    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
-    row = {"ref": "exomem://review/current", "fingerprint": "a" * 24}
-
-    def expired_read(*args, **kwargs):
-        clock[0] = 301.0
-        request_budget.checkpoint()
-        return row["fingerprint"] if binding == "write-advisory" else {"items": [row]}
-
-    def no_writer(*args, **kwargs):
-        pytest.fail("an expired bind must refuse before writer admission")
-
-    monkeypatch.setattr(commands, "op_review_memory", expired_read)
-    monkeypatch.setattr(review_state, "last_surfaced_fingerprint", expired_read)
-    monkeypatch.setattr(manager, "mutation_guard", no_writer)
-    command = next(c for c in commands.PRODUCT_COMMANDS
-                   if c.name == ("connect_memory" if binding == "accept-relation" else "triage_memory"))
-    handle = corpus_aware.write_advisory_ref("a" * 24) if binding == "write-advisory" else review_ids.item_id(row)
-    arguments = {"operation": "accept-relation"} if binding == "accept-relation" else {"action": "dismiss"}
-    token = request_budget.set_current(request_budget.RequestBudget(seconds=300))
-    try:
-        with pytest.raises(OpError) as caught:
-            writer_lease.invoke_command(command, vault, item_id=handle, why="handled: resolved", **arguments)
-        assert caught.value.code == "REQUEST_BUDGET_EXHAUSTED"
-        assert caught.value.details["committed"] is False
-    finally:
-        request_budget.reset_current(token)
-    assert request_budget.current_checkpoint() is None
+def test_busy_refusal_omits_the_placeholder_for_another_process_holder() -> None:
+    # Another process's hold that left no record reads as the lock's placeholder: no operation, no measured age.
+    refusal = {
+        "code": "MUTATION_BUSY", "status": "retryable", "wait_ms": 2500,
+        "holder": {"operation": mutation_lock.UNKNOWN_LABEL, "age_seconds": 0.0, "verified": False},
+    }
+    reply = agent_refusal.reply(
+        refusal, None, command="triage_memory", called={}, parameters=(),
+        write=True, full=False, envelope=refusal,
+    )
+    assert reply["error"]["diagnostics"] == {"caller_wait_seconds": 2.5}

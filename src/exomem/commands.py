@@ -28,8 +28,8 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, nullcontext, suppress
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
@@ -11021,28 +11021,6 @@ def _effect_block(
     }
 
 
-@contextmanager
-def _review_binding_read() -> Iterator[None]:
-    """Reuse the request deadline only while resolving a review handle."""
-    budget = request_budget_module.current()
-    check = request_budget_module.ReadCheckpoint(budget) if budget is not None else None
-    try:
-        # An expired bind must not commit after the caller leaves; a false expiry costs that caller a retry.
-        with request_budget_module.checking(check):
-            request_budget_module.checkpoint()
-            yield
-            request_budget_module.checkpoint()
-    except request_budget_module.ReadBudgetExhausted:
-        from .cli_ops import OpError
-
-        raise OpError(
-            "REQUEST_BUDGET_EXHAUSTED",
-            "The review item could not be resolved before the request deadline.",
-            "List the review items again and retry with a current item id.",
-            details={"committed": False},
-        ) from None
-
-
 def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
     """Resolve a review handle without writer admission; commit keeps its fingerprint guard."""
     item_id = arguments.get("item_id")
@@ -11053,20 +11031,19 @@ def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]
         raise ValueError(
             "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
         )
-    with _review_binding_read():
-        if corpus_aware_module.is_write_advisory_ref(item_id):
-            fingerprint = review_state_module.last_surfaced_fingerprint(
-                vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
-            )
-            if fingerprint is None:
-                from .cli_ops import OpError
+    if corpus_aware_module.is_write_advisory_ref(item_id):
+        fingerprint = review_state_module.last_surfaced_fingerprint(
+            vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
+        )
+        if fingerprint is None:
+            from .cli_ops import OpError
 
-                raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
-            bound = {"ref": item_id, "expected_fingerprint": fingerprint}
-        else:
-            bound = review_ids_module.bind(
-                lambda **kw: op_review_memory(vault_root, **kw), item=item_id
-            )
+            raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
+        bound = {"ref": item_id, "expected_fingerprint": fingerprint}
+    else:
+        bound = review_ids_module.bind(
+            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+        )
     return {**arguments, "item_id": None, **bound}
 
 
@@ -11327,17 +11304,16 @@ def _bind_connect_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any
     # The command schema fixes the explicit guards that item_id replaces.
     if any(arguments.get(key) is not None for key in ("ref", "expected_hash", "expected_fingerprint")):
         raise ValueError("INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint")
-    with _review_binding_read():
-        bound = review_ids_module.bind(
-            lambda **kw: op_review_memory(vault_root, **kw), item=item_id,
-            modes=review_ids_module.RELATION_QUEUE_MODES,
-        )
-        path = arguments.get("path") or bound.get("source_path")
-        path = page_names_module.resolve_page(vault_root, path, field="path") if path else path
-        try:
-            page = get_page_module.get_page(vault_root, path=path)
-        except get_page_module.GetError as error:
-            raise ValueError(f"{error.code}: {error.reason}") from error
+    bound = review_ids_module.bind(
+        lambda **kw: op_review_memory(vault_root, **kw), item=item_id,
+        modes=review_ids_module.RELATION_QUEUE_MODES,
+    )
+    path = arguments.get("path") or bound.get("source_path")
+    path = page_names_module.resolve_page(vault_root, path, field="path") if path else path
+    try:
+        page = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
     return {
         **arguments, "item_id": None, "ref": bound["ref"], "path": path,
         "expected_fingerprint": bound["expected_fingerprint"], "expected_hash": page.content_hash,
