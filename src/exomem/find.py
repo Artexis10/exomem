@@ -4928,7 +4928,8 @@ def _resolve_relation_filter(
         anchor=relation_of,
         direction=relation_direction,
         keep=view,
-        resolver=_request_resolver(vault_root, snapshot)() if view is not None else None,
+        resolver=_request_resolver(vault_root, snapshot) if view is not None else None,
+        reader=egress.visible_page_filter(vault_root) if view is not None else None,
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
