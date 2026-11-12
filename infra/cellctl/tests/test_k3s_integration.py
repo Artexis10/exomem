@@ -3315,6 +3315,13 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
             with_hook["spec"]["template"]["spec"]["containers"][0]["lifecycle"] = {event: handler}
             result = create(with_hook)
             assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
+    # An exec probe also runs its own command in the container.
+    for probe in ("startupProbe", "livenessProbe", "readinessProbe"):
+        with_probe = copy.deepcopy(prepare)
+        with_probe["spec"]["template"]["spec"]["containers"][0][probe] = {
+            "exec": {"command": ["sh", "-c", "echo arbitrary-code"]}}
+        result = create(with_probe)
+        assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
 
     for admitted in (render_pvc(spec), render_resource_quota(spec),
                      render_volume_snapshot(spec, snapshot_name=snapshot_name, snapshot_class=local.snapshot_class)):

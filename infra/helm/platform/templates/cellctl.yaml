@@ -886,7 +886,8 @@ spec:
           (!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0) &&
           (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&
           variables.podSpec.containers.all(c,
-            has(c.command) && c.command == ['true'] && !has(c.lifecycle)) &&
+            has(c.command) && c.command == ['true'] && !has(c.lifecycle) &&
+            !has(c.startupProbe) && !has(c.livenessProbe) && !has(c.readinessProbe)) &&
           has(variables.podSpec.nodeName) &&
           !has(variables.podSpec.nodeSelector) && !has(variables.podSpec.tolerations) &&
           !has(variables.podSpec.affinity) &&
