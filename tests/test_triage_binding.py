@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +15,8 @@ from exomem import (
     corpus_aware,
     epistemic_graph,
     find,
+    mutation_journal,
+    request_budget,
     review_ids,
     review_state,
     writer_lease,
@@ -21,7 +25,33 @@ from exomem.cli_ops import OpError
 from exomem.command_surface import Command
 
 
-@pytest.mark.parametrize("binding", ["queue", "write-advisory"])
+@pytest.mark.parametrize("command_name, arguments", [
+    ("triage_memory", {"ref": "exomem://review/current", "action": "dismiss", "expected_fingerprint": "a" * 24}),
+    ("connect_memory", {"operation": "create-entity", "name": "Field Station"}),
+])
+def test_expired_budget_does_not_refuse_writes_that_bind_no_review_handle(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command_name: str, arguments: dict,
+) -> None:
+    from dataclasses import replace
+
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "writer"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    saved = vault / "Knowledge Base/Notes/Insights/explicit-write.md"
+
+    def save(root: Path, **kwargs):
+        saved.write_text("# Explicit write\n", encoding="utf-8")
+        return {"saved": True}
+
+    command = replace(next(c for c in commands.PRODUCT_COMMANDS if c.name == command_name), leaf=save)
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=1, entry=0))
+    try:
+        writer_lease.invoke_command(command, vault, **arguments)
+    finally:
+        request_budget.reset_current(token)
+    assert saved.read_text(encoding="utf-8") == "# Explicit write\n"
+
+
+@pytest.mark.parametrize("binding", ["queue", "write-advisory", "accept-relation"])
 def test_governed_write_completes_while_review_handle_resolution_is_blocked(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str,
 ) -> None:
@@ -35,16 +65,18 @@ def test_governed_write_completes_while_review_handle_resolution_is_blocked(
     def blocked_read(*args, **kwargs):
         reading.set()
         assert release.wait(30)
-        return {"items": []} if binding == "queue" else None
+        return None if binding == "write-advisory" else {"items": []}
 
     monkeypatch.setattr(commands, "op_review_memory", blocked_read)
     monkeypatch.setattr(review_state, "last_surfaced_fingerprint", blocked_read)
-    triage = next(c for c in commands.PRODUCT_COMMANDS if c.name == "triage_memory")
-    handle = "missing.version" if binding == "queue" else corpus_aware.write_advisory_ref("a" * 24)
+    command = next(c for c in commands.PRODUCT_COMMANDS
+                   if c.name == ("connect_memory" if binding == "accept-relation" else "triage_memory"))
+    handle = corpus_aware.write_advisory_ref("a" * 24) if binding == "write-advisory" else "missing.version"
+    arguments = {"operation": "accept-relation"} if binding == "accept-relation" else {"action": "dismiss"}
 
     def resolve() -> None:
         try:
-            writer_lease.invoke_command(triage, vault, item_id=handle, action="dismiss", why="handled: resolved")
+            writer_lease.invoke_command(command, vault, item_id=handle, why="handled: resolved", **arguments)
         except OpError as error:
             if error.code != "ITEM_NOT_FOUND":
                 failures.append(error)
@@ -89,7 +121,14 @@ def test_stale_review_handle_refuses_with_current_id_before_writer_admission(
 ) -> None:
     row = {"ref": "exomem://review/current", "fingerprint": "a" * 24}
     stale = review_ids.item_id({**row, "fingerprint": "b" * 24})
-    monkeypatch.setattr(commands, "op_review_memory", lambda *args, **kwargs: {"items": [row]})
+    journal = tmp_path / "mutations.jsonl"
+    monkeypatch.setattr(mutation_journal, "journal_path", lambda: journal)
+
+    def surfaced_queue(*args, **kwargs):
+        review_state.record_surfaced(vault, [("current", row["fingerprint"])], surface="review")
+        return {"items": [row]}
+
+    monkeypatch.setattr(commands, "op_review_memory", surfaced_queue)
 
     manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "writer"))
     monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
@@ -104,10 +143,15 @@ def test_stale_review_handle_refuses_with_current_id_before_writer_admission(
         writer_lease.invoke_command(triage, vault, item_id=stale, action="dismiss", why="handled: resolved")
     assert caught.value.code == "STALE_ITEM"
     assert caught.value.details["current_id"] == review_ids.item_id(row)
+    recorded = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert recorded["error_code"] == "STALE_ITEM"
+    assert recorded["boundary_wait_ms"] is None
+    assert recorded["boundary_hold_ms"] is None
 
 
+@pytest.mark.parametrize("decision", ["dismiss", "accept"])
 def test_changed_relation_after_binding_refuses_before_saving_a_decision(
-    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str,
 ) -> None:
     notes = vault / "Knowledge Base/Notes/Insights"
     source = notes / "acorn.md"
@@ -129,17 +173,24 @@ def test_changed_relation_after_binding_refuses_before_saving_a_decision(
     guard = manager.mutation_guard
 
     def change_then_guard(*args, **kwargs):
-        source.write_text(source.read_text(encoding="utf-8") + "\nA changed measurement.\n", encoding="utf-8")
+        original = source.read_text(encoding="utf-8")
+        # Equivalent YAML leaves the candidate signal unchanged; accept must still guard the page bytes.
+        changed = (original.replace("type: insight", "type: 'insight'") if decision == "accept"
+                   else original + "\nA changed measurement.\n")
+        source.write_text(changed, encoding="utf-8")
         find.clear_cache()
         epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
         return guard(*args, **kwargs)
 
     monkeypatch.setattr(manager, "mutation_guard", change_then_guard)
-    triage = next(c for c in commands.PRODUCT_COMMANDS if c.name == "triage_memory")
+    command = next(c for c in commands.PRODUCT_COMMANDS
+                   if c.name == ("connect_memory" if decision == "accept" else "triage_memory"))
+    arguments = {"operation": "accept-relation"} if decision == "accept" else {"action": "dismiss"}
     before = review_state.ReviewStateStore(vault).load()
-    with pytest.raises(ValueError, match="REVIEW_ITEM_CHANGED"):
-        writer_lease.invoke_command(triage, vault, item_id=row["id"], action="dismiss", why="handled: resolved")
+    with pytest.raises(ValueError, match="STALE_EDIT" if decision == "accept" else "REVIEW_ITEM_CHANGED"):
+        writer_lease.invoke_command(command, vault, item_id=row["id"], why="handled: resolved", **arguments)
     assert review_state.ReviewStateStore(vault).load() == before
+    assert "## Relations" not in source.read_text(encoding="utf-8")
 
 
 def test_completed_triage_replays_original_receipt_after_advisory_fingerprint_changes(
@@ -165,17 +216,66 @@ def test_completed_triage_replays_original_receipt_after_advisory_fingerprint_ch
 
 
 @pytest.mark.parametrize("wait_field", ["waited_ms", "wait_ms"])
-def test_busy_refusal_names_holder_age_and_caller_wait_separately(wait_field: str) -> None:
+def test_busy_refusal_keeps_holder_age_and_caller_wait_in_diagnostics(wait_field: str) -> None:
     refusal = {
         "code": "MUTATION_BUSY", "status": "retryable", "committed": False,
-        wait_field: 4250, "holder": {"operation": "triage_memory", "age_seconds": 120.125},
+        wait_field: 4267.891, "holder": {"operation": "triage_memory", "age_seconds": 120.125},
     }
     reply = agent_refusal.reply(
         refusal, None, command="triage_memory", called={}, parameters=(),
         write=True, full=True, envelope=refusal,
     )
     message = reply["error"]["message"]
-    assert "triage_memory" in message
-    assert "holder age: 120.125 seconds" in message
-    assert "caller wait: 4.25 seconds" in message
+    assert message == "Memory was busy with another write, so this was not saved. Retry the same call."
+    assert reply["error"]["diagnostics"] == {
+        "holder_operation": "triage_memory", "holder_age_seconds": 120.1, "caller_wait_seconds": 4.3,
+    }
     assert reply["diagnostics"] == refusal
+
+
+def test_busy_refusal_omits_unknown_holder_diagnostics() -> None:
+    refusal = {"code": "MUTATION_BUSY", "status": "retryable", "wait_ms": 0}
+    reply = agent_refusal.reply(
+        refusal, None, command="triage_memory", called={}, parameters=(),
+        write=True, full=False, envelope=refusal,
+    )
+    assert reply["error"]["message"] == (
+        "Memory was busy with another write, so this was not saved. Retry the same call."
+    )
+    assert reply["error"]["diagnostics"] == {"caller_wait_seconds": 0.0}
+
+
+@pytest.mark.parametrize("binding", ["queue", "write-advisory", "accept-relation"])
+def test_expired_review_binding_refuses_before_writer_admission(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str,
+) -> None:
+    clock = [0.0]
+    monkeypatch.setattr(request_budget, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "writer"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    row = {"ref": "exomem://review/current", "fingerprint": "a" * 24}
+
+    def expired_read(*args, **kwargs):
+        clock[0] = 301.0
+        request_budget.checkpoint()
+        return row["fingerprint"] if binding == "write-advisory" else {"items": [row]}
+
+    def no_writer(*args, **kwargs):
+        pytest.fail("an expired bind must refuse before writer admission")
+
+    monkeypatch.setattr(commands, "op_review_memory", expired_read)
+    monkeypatch.setattr(review_state, "last_surfaced_fingerprint", expired_read)
+    monkeypatch.setattr(manager, "mutation_guard", no_writer)
+    command = next(c for c in commands.PRODUCT_COMMANDS
+                   if c.name == ("connect_memory" if binding == "accept-relation" else "triage_memory"))
+    handle = corpus_aware.write_advisory_ref("a" * 24) if binding == "write-advisory" else review_ids.item_id(row)
+    arguments = {"operation": "accept-relation"} if binding == "accept-relation" else {"action": "dismiss"}
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=300))
+    try:
+        with pytest.raises(OpError) as caught:
+            writer_lease.invoke_command(command, vault, item_id=handle, why="handled: resolved", **arguments)
+        assert caught.value.code == "REQUEST_BUDGET_EXHAUSTED"
+        assert caught.value.details["committed"] is False
+    finally:
+        request_budget.reset_current(token)
+    assert request_budget.current_checkpoint() is None

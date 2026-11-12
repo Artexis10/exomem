@@ -6910,6 +6910,7 @@ class LeaseManager:
             @contextmanager
             def operation_guard() -> Iterator[None]:
                 nonlocal kwargs
+                wide_hold["timing"] = None
                 prepare = getattr(command, "prepare_arguments", None)
                 if prepare is not None:
                     # Replay uses the original request identity and skips binding a changed handle.

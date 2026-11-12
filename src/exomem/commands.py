@@ -28,8 +28,8 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import ExitStack, nullcontext, suppress
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 from importlib.metadata import PackageNotFoundError, version
@@ -11021,6 +11021,28 @@ def _effect_block(
     }
 
 
+@contextmanager
+def _review_binding_read() -> Iterator[None]:
+    """Reuse the request deadline only while resolving a review handle."""
+    budget = request_budget_module.current()
+    check = request_budget_module.ReadCheckpoint(budget) if budget is not None else None
+    try:
+        # An expired bind must not commit after the caller leaves; a false expiry costs that caller a retry.
+        with request_budget_module.checking(check):
+            request_budget_module.checkpoint()
+            yield
+            request_budget_module.checkpoint()
+    except request_budget_module.ReadBudgetExhausted:
+        from .cli_ops import OpError
+
+        raise OpError(
+            "REQUEST_BUDGET_EXHAUSTED",
+            "The review item could not be resolved before the request deadline.",
+            "List the review items again and retry with a current item id.",
+            details={"committed": False},
+        ) from None
+
+
 def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
     """Resolve a review handle without writer admission; commit keeps its fingerprint guard."""
     item_id = arguments.get("item_id")
@@ -11031,19 +11053,20 @@ def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]
         raise ValueError(
             "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
         )
-    if corpus_aware_module.is_write_advisory_ref(item_id):
-        fingerprint = review_state_module.last_surfaced_fingerprint(
-            vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
-        )
-        if fingerprint is None:
-            from .cli_ops import OpError
+    with _review_binding_read():
+        if corpus_aware_module.is_write_advisory_ref(item_id):
+            fingerprint = review_state_module.last_surfaced_fingerprint(
+                vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
+            )
+            if fingerprint is None:
+                from .cli_ops import OpError
 
-            raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
-        bound = {"ref": item_id, "expected_fingerprint": fingerprint}
-    else:
-        bound = review_ids_module.bind(
-            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
-        )
+                raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
+            bound = {"ref": item_id, "expected_fingerprint": fingerprint}
+        else:
+            bound = review_ids_module.bind(
+                lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+            )
     return {**arguments, "item_id": None, **bound}
 
 
@@ -11296,6 +11319,31 @@ def _validate_vocabulary_binding(
         )
 
 
+def _bind_connect_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
+    """Bind accept-by-id before admission, including the source page's exact version."""
+    item_id = arguments.get("item_id")
+    if arguments.get("operation") != "accept-relation" or item_id is None:
+        return arguments
+    # The command schema fixes the explicit guards that item_id replaces.
+    if any(arguments.get(key) is not None for key in ("ref", "expected_hash", "expected_fingerprint")):
+        raise ValueError("INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint")
+    with _review_binding_read():
+        bound = review_ids_module.bind(
+            lambda **kw: op_review_memory(vault_root, **kw), item=item_id,
+            modes=review_ids_module.RELATION_QUEUE_MODES,
+        )
+        path = arguments.get("path") or bound.get("source_path")
+        path = page_names_module.resolve_page(vault_root, path, field="path") if path else path
+        try:
+            page = get_page_module.get_page(vault_root, path=path)
+        except get_page_module.GetError as error:
+            raise ValueError(f"{error.code}: {error.reason}") from error
+    return {
+        **arguments, "item_id": None, "ref": bound["ref"], "path": path,
+        "expected_fingerprint": bound["expected_fingerprint"], "expected_hash": page.content_hash,
+    }
+
+
 def op_connect_memory(
     vault_root: Path,
     operation: str = _CONNECT_MEMORY_DEFAULT_OPERATION,
@@ -11472,15 +11520,13 @@ def op_connect_memory(
         return result
     if operation == "accept-relation":
         if item_id is not None:
-            if any(given is not None for given in (ref, expected_hash, expected_fingerprint)):
-                raise ValueError(
-                    "INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint"
-                )
-            bound = review_ids_module.bind(
-                lambda **kw: op_review_memory(vault_root, **kw), item=item_id, modes=review_ids_module.RELATION_QUEUE_MODES
+            # Direct Python callers share the resolver; dispatched calls already carry bound guards.
+            bound = _bind_connect_arguments(
+                vault_root, operation=operation, item_id=item_id, path=path, ref=ref,
+                expected_hash=expected_hash, expected_fingerprint=expected_fingerprint,
             )
             ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
-            path = path or bound.get("source_path")
+            path, expected_hash = bound["path"], bound["expected_hash"]
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
 
@@ -11511,7 +11557,6 @@ def op_connect_memory(
             requested_relation=requested_relation,
             bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
             edit_memory=_accept_relations_edit,
-            bind_page_hash=item_id is not None,
         )
     if operation == "suggest-relations":
         # Relation proposals are owner work (see `op_suggest_relations`);
@@ -15110,7 +15155,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("suggest_links", "graph_context", "suggest_relations", "link", "list_inbound_links"),
-        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True, "restricted_refusal_floor": True},
+        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True, "restricted_refusal_floor": True, "prepare_arguments": _bind_connect_arguments},
     ),
     (
         "adopt_vault",

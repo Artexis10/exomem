@@ -1711,6 +1711,7 @@ def test_fastmcp_busy_is_normal_tool_content_but_unexpected_fault_is_native(
         # The agent reads one coded error with its retry; correlation ids stay out of it.
         error = result.structured_content["error"]
         assert error["code"] == "MUTATION_BUSY"
+        assert error["message"] == "Memory was busy with another write, so this was not saved. Retry the same call."
         assert error["retry"] == {"tool": "mutate", "after_s": 1}
         assert "req-fastmcp" not in error["message"]
         assert "receipt-fastmcp" not in error["message"]
