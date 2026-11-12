@@ -156,7 +156,7 @@
 
   Verify: every alert name of D2, D3 and D8 has a runbook step, and each new command runs as written against the rehearsal cluster. It catches an alert that fires with no step for the person who receives it, and a dispatch that the branch policy refuses.
 - [ ] 1.14 Open follow-up: sign the origin proof and the artifact grant per attempt, before task 1.4 raises the hold budget above about 50 s. Verify: a request that the gateway retries for the full budget still carries a valid proof and grant. It catches a held request that the cell refuses, because its proof expired during the hold.
-- [ ] 1.15 Open follow-up: make the cloud-rehearsal harness send `release` with `cellImage`. Verify: the harness sets the image through the deploy route without a refusal. It catches a rehearsal that fails on the narrowed deploy principal.
+- [ ] 1.15 (Harness merged in #2746; open until the rehearsal run shows the route accepts it.) Open follow-up: make the cloud-rehearsal harness send `release` with `cellImage`. Verify: the harness sets the image through the deploy route without a refusal. It catches a rehearsal that fails on the narrowed deploy principal.
 - [ ] 1.16 Open follow-up: add a test of the gateway server-slot leave and retake around a hold. Verify: a held request leaves its server slot, and retakes it when the cell accepts. It catches a slot that leaks, or a hold that counts against the server cap.
 
 ## 2. Phase 1 rehearsal

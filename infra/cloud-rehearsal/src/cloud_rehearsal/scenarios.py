@@ -71,6 +71,15 @@ WARM_ITERATIONS = 20
 LATENCY_ITERATIONS = 10
 CELLCTL_REPO = "Artexis10/exomem#1368"
 
+# automate-cloud-releases 1.15: the release route wants a vMAJOR.MINOR.PATCH
+# tag with every cellImage it has not seen. The rehearsal's control plane is
+# disposable, so the tags are a fixed ascending set per run, and the resume
+# re-records the good image under a newer tag rather than going back.
+RELEASE_V1 = "v0.0.1"
+RELEASE_V2 = "v0.0.2"
+RELEASE_BROKEN = "v0.0.3"
+RELEASE_RESUMED = "v0.0.4"
+
 # Runs inside a cell: its own readiness report, reduced to content-free fields.
 HEALTH_READY_PROBE = """
 import json, urllib.request
@@ -723,7 +732,7 @@ async def step_7_upgrade(ctx: Context, record: StepRecord) -> None:
     started = time.monotonic()
     # The upgrade contract starts at the release request, after diagnostics.
     record.evidence["pre_release_log_snapshot_seconds"] = round(started - snapshot_started, 4)
-    await ctx.admin_release({"cellImage": ctx.images.cell_v2})
+    await ctx.admin_release({"cellImage": ctx.images.cell_v2, "release": RELEASE_V2})
     record.evidence["release_request_seconds"] = round(time.monotonic() - started, 4)
     saw_hold = False
 
@@ -769,7 +778,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     previous = (await ctx.cell(ctx.a.cell_id))["observed_image"]
     started = time.monotonic()
     snapshot_logs(ctx)
-    await ctx.admin_release({"cellImage": ctx.images.cell_broken})
+    await ctx.admin_release({"cellImage": ctx.images.cell_broken, "release": RELEASE_BROKEN})
     deadline = started + 2400
 
     def canary_applied(row: dict[str, Any]) -> bool:
@@ -850,7 +859,7 @@ async def step_8_canary_failure(ctx: Context, record: StepRecord) -> None:
     if after.error_code:
         raise StepFailure(f"a governed write after the restore failed: {after.error_code}")
     # The owner resumes on the known-good release (D6 "While paused").
-    await ctx.admin_release({"cellImage": previous, "clearRolloutPause": True})
+    await ctx.admin_release({"cellImage": previous, "release": RELEASE_RESUMED, "clearRolloutPause": True})
     resumed = await ctx.rollout()
     record.evidence["resumed"] = {"paused": resumed.get("paused")}
 
