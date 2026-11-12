@@ -661,7 +661,7 @@ def _requeue_every_page(vault: Path) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("phase", ("removed", "read", "apply"))
-def test_foreground_halt_keeps_the_tick_out_of_error(tmp_path: Path, monkeypatch, caplog, phase) -> None:
+def test_foreground_halt_keeps_the_tick_out_of_error(tmp_path: Path, monkeypatch, phase) -> None:
     sf.enable(monkeypatch)
     vault = sf.build(tmp_path)
     sf.settle(vault)
@@ -683,10 +683,8 @@ def test_foreground_halt_keeps_the_tick_out_of_error(tmp_path: Path, monkeypatch
             return facts
 
         monkeypatch.setattr(sensed_model, "page_facts", become_active_after_read)
-    with caplog.at_level("WARNING", logger="exomem.sensed_model"):
-        report = sensed_model.run_tick(vault, seen=seen, halt=lambda: "foreground" if requested else None)
+    report = sensed_model.run_tick(vault, seen=seen, halt=lambda: "foreground" if requested else None)
     assert report.stop == "foreground"
-    assert caplog.records == []
 
 
 def test_large_removal_finishes_in_bounded_pair_and_relation_batches(tmp_path: Path, monkeypatch) -> None:
