@@ -12,10 +12,11 @@ presence. Its machine review runs to completion before anything changes:
 5. run the release's `cellctl` schema check against the control database;
 6. compare the secret contracts of the live release and the tag — a change
    with no barrier entry stops the command;
-7. list the barriers between the live release and the tag: each `platform`
-   entry needs a `--crossed <id>`, and a `cell` entry may take one so the
-   platform Deployment records it — `cloud-deploy` stops on an unrecorded
-   entry of either scope.
+7. list the open barriers: those at or below the tag that the newest
+   successful platform Deployment does not record (without a record, those
+   after the live release). Each `platform` entry needs a `--crossed <id>`,
+   and a `cell` entry may take one so the platform Deployment records it —
+   `cloud-deploy` stops on an unrecorded entry of either scope.
 
 Then it applies the namespaces, runs `helm upgrade --wait` (`--atomic`
 unless a crossed platform barrier is `one-way`), waits for `cellctl` and
@@ -310,7 +311,7 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("tag", help="release tag to upgrade to, for example v0.175.0")
     parser.add_argument("--crossed", action="append", default=[], metavar="ID",
-                        help="a barrier between the live release and the tag that this "
+                        help="an open barrier (at or below the tag, not yet recorded) that this "
                              "upgrade records as crossed; mandatory for platform entries, "
                              "optional for cell entries")
     parser.add_argument("--from", dest="from_tag", metavar="TAG",
@@ -377,22 +378,33 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
         raise Stop("settings", f"{args.tag} is older than the live release {live_tag}; "
                                "the platform does not downgrade")
     barriers = json.loads((checkout / "infra/contracts/upgrade-barriers-v1.json").read_text())["barriers"]
+    # The barriers still open are those at or below the tag that the newest
+    # successful record lacks. Without a record, those after the live release.
+    # Keying on the record, not the live tag, keeps a barrier open after a
+    # failed verify or a skipped cell entry, so a rerun can still record it.
+    previous = newest_platform_deployment(runner, settings.repository)
+    if previous is not None:
+        recorded = set(previous.get("barriers_crossed", []))
+        open_entries = [entry for entry in barriers
+                        if (v := parse_release(str(entry.get("version", "")))) is not None
+                        and v <= target_version and entry["id"] not in recorded]
+    elif live_tag:
+        open_entries = barriers_between(barriers, live_version, target_version)
+    else:
+        open_entries = []
+    # Platform entries are mandatory here; cell entries are optional
+    # --crossed values that only the record can carry.
+    due = [entry for entry in open_entries if entry.get("scope") == "platform"]
+    recordable = [entry for entry in open_entries if entry.get("scope") != "platform"]
     if live_tag:
         changed = secret_contract_changed(runner, live_tag, args.tag)
-        between = barriers_between(barriers, live_version, target_version)
-        # Platform entries are mandatory here; cell entries are optional
-        # --crossed values that only the record can carry, whatever their scope.
-        due = [entry for entry in between if entry.get("scope") == "platform"]
-        recordable = [entry for entry in between if entry.get("scope") != "platform"]
         if changed and not due:
             raise Stop("secret-contract",
                        f"secret contract changed between {live_tag} and {args.tag} "
                        f"({', '.join(changed)}) with no platform barrier entry")
-    else:
-        due, recordable = [], []
 
     if due or recordable:
-        print("review: barriers between the live release and the tag:")
+        print("review: barriers at or below the tag that the platform has not recorded:")
         for entry in due:
             print(f"  {entry['id']} ({entry['kind']}): {entry.get('summary', '')}")
         for entry in recordable:
@@ -405,7 +417,7 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
                                "do each runbook step, then pass --crossed <id>")
     extra = crossed - {entry["id"] for entry in (*due, *recordable)}
     if extra:
-        raise Stop("barriers", f"--crossed names no barrier between the live release and the tag: "
+        raise Stop("barriers", f"--crossed names no barrier that is open at this tag: "
                                f"{', '.join(sorted(extra))}")
     unrecorded = [entry["id"] for entry in recordable if entry["id"] not in crossed]
     if unrecorded:
@@ -445,7 +457,6 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     except Stop as error:
         print(f"{error.step}: {error.message}")
         try:
-            previous = newest_platform_deployment(runner, settings.repository)
             record_deployment(runner, settings, args.tag,
                               list((previous or {}).get("barriers_crossed", [])), "failure")
             print(f"recorded a failed platform Deployment for {args.tag}")
@@ -454,7 +465,6 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
         return 1
 
     # --- Record and dispatch. ---
-    previous = newest_platform_deployment(runner, settings.repository)
     if previous is None:
         crossed_ids = all_crossed_up_to(barriers, target_version)
     else:

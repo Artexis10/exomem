@@ -220,9 +220,10 @@ uv run --frozen python infra/scripts/platform_upgrade.py "$TAG" \
 
 - The command reads the live release's tag from the Helm release description it writes on every
   upgrade (`platform-v<tag>`). A platform it has not upgraded yet needs `--from <tag>` once.
-- A `platform` barrier between the live release and the tag needs its runbook step done first,
+- A barrier is open when it is at or below the tag and the newest successful platform Deployment
+  does not record it. An open `platform` barrier needs its runbook step done first,
   then `--crossed <id>`; a `one-way` barrier removes `--atomic` for that upgrade.
-- A `cell` barrier in the same range accepts `--crossed <id>` too: only a platform Deployment's
+- An open `cell` barrier accepts `--crossed <id>` too: only a platform Deployment's
   `barriers_crossed` records a crossing, and `cloud-deploy` stops on an unrecorded entry of either
   scope. Record it here once its runbook step is done; the command prints a note while one is open.
 - A secret-contract change with no barrier entry stops the command and names the omission.

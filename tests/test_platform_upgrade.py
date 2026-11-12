@@ -270,6 +270,21 @@ def test_a_cell_scope_barrier_accepts_a_crossed_id_and_records_it(tmp_path: Path
     assert "--atomic" in upgrade
 
 
+def test_a_rerun_at_the_live_tag_still_records_an_unrecorded_barrier(tmp_path: Path) -> None:
+    # Catches a barrier that a failed verify leaves unrecorded for good: helm already
+    # moved the live tag to the target, so a range from the live tag is empty.
+    result, runner, _ = run_upgrade(tmp_path, ("--crossed", "key-conversion-0.173.0"),
+                                    barriers=[ONE_WAY], live_tag=TAG)
+    assert result == 0
+    bodies = [json.loads(b) for b in runner.stdin_bodies if b.lstrip().startswith('{')]
+    deployment = next(b for b in bodies if b.get("environment") == "cloud-platform")
+    assert "key-conversion-0.173.0" in deployment["payload"]["barriers_crossed"]
+
+    result, runner, _ = run_upgrade(tmp_path / "again", barriers=[ONE_WAY], live_tag=TAG)
+    assert result == 1  # still a mandatory platform entry until a record lists it
+    assert runner.mutating() == []
+
+
 def test_the_dry_run_and_the_upgrade_share_the_post_renderer(tmp_path: Path) -> None:
     result, runner, _ = run_upgrade(tmp_path)
     assert result == 0
