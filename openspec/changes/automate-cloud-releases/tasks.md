@@ -174,7 +174,7 @@
 
 ## 3. Phase 2: restore point (D6)
 
-- [ ] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the K3s Live job:
+- [x] 3.1 Make a local cell's restore point a VolumeSnapshot taken after the stop. Start the target at once, and back up one clone of the snapshot after that. Keep the clone and the upgrade hold until the backup Job ends. On failure, restore from that clone, or else from the attempt's off-site backup. Verify with reconcile tests and the K3s Live job:
   - the target applies before the backup Job starts, which catches a backup that is still inside the stop;
   - no snapshot is taken while a pod uses the volume, which catches a crash-consistent restore point;
   - on the K3s Live job, a write acknowledged just before the stop is present after a forced-failure restore. It catches a snapshot of an unflushed volume that loses the last commits;
