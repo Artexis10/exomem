@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
@@ -11,6 +12,8 @@ from membench.outcome.faults import init_faults
 from membench.outcome.isolation import claude_env
 from membench.outcome.judging import Judge, JudgeSpec, judge_all, stored_record
 from membench.outcome.record import observed, run_identity
+from membench.utility.switch_eval import session
+from membench.utility.switch_eval.arms import arm_specs
 
 INIT = {"model": "m", "apiKeySource": "ANTHROPIC_API_KEY"}
 
@@ -146,3 +149,108 @@ def test_a_codex_judge_gets_no_anthropic_key(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
     monkeypatch.setenv(billing.ENV_VAR, "credits")
     assert "ANTHROPIC_API_KEY" not in Judge(JudgeSpec.of("codex"), tmp_path).env
+
+
+@pytest.mark.parametrize(
+    ("event", "message"),
+    [
+        ({"type": "assistant", "error": "billing_error"}, "funding required"),
+        (
+            {"type": "assistant", "message": {"error": "billing_error"}},
+            "funding required",
+        ),
+        (
+            {
+                "type": "rate_limit_event",
+                "rate_limit_info": {"status": "rejected", "resetsAt": 123},
+            },
+            "resets at 123",
+        ),
+    ],
+)
+def test_an_account_pause_is_not_retried_or_scored_and_names_its_remedy(tmp_path, event, message):
+    """Exhausted credits need funding; subscription limits keep their actual reset time."""
+    result = session.classify(
+        spec=arm_specs()["N"],
+        model="m",
+        client_version="test",
+        events=[event],
+        turn_records=[],
+        tap_events=[],
+        scored_turn=0,
+        timed_out=False,
+        quota=session.rejected_limit(event),
+        surface=None,
+    )
+    inputs = session.SessionInputs(
+        session.PlannedSession("case--N--r1", "case", "N", 1, 0),
+        "snapshot", (), {}, tmp_path, ("A question",), 0, {}, {},
+    )
+    attempts = []
+
+    def execute(inputs, attempt_dir):
+        attempts.append(attempt_dir)
+        return result
+
+    with pytest.raises(session.RunPaused, match=message) as stopped:
+        session.run_session(inputs, tmp_path, execute)
+
+    if "billing_error" in json.dumps(event):
+        assert "credit funds exhausted" in str(stopped.value)
+        assert "reset" not in str(stopped.value)
+    assert len(attempts) == 1
+    assert not (tmp_path / "session.json").exists(), "a funding pause is no product loss"
+
+
+@pytest.mark.parametrize("estimate", ["-1", "nan", "inf", "-inf", "not-a-number"])
+def test_an_invalid_owner_estimate_stops_before_launch(estimate, monkeypatch, capsys):
+    """Invalid cost metadata must never reach an actor launch."""
+    parser = argparse.ArgumentParser()
+    command.register(parser.add_subparsers())
+    launched = []
+    monkeypatch.setattr(command, "run_lab_suite", lambda *a, **k: launched.append(a))
+    with pytest.raises(SystemExit):
+        args = parser.parse_args(
+            ["outcome", "run", "lab", "--run-id", "cost", f"--estimated-cost-usd={estimate}"]
+        )
+        args.func(args)
+    assert "finite nonnegative" in capsys.readouterr().err
+    assert launched == []
+
+
+@pytest.mark.parametrize("estimate", [None, 0.0, 1.25])
+def test_an_owner_estimate_is_recorded_and_visible_before_actors(
+    tmp_path, monkeypatch, capsys, estimate
+):
+    """The optional owner estimate is visible at launch and survives a resume that omits it."""
+    monkeypatch.setenv(billing.ENV_VAR, "subscription")
+    monkeypatch.setattr(command, "runs_dir", lambda: tmp_path)
+    monkeypatch.setattr(command.record, "checkout_state", lambda: {})
+    monkeypatch.setattr(command.record, "cli_version", lambda: "test")
+    launched = []
+
+    def launch(run_dir, *args):
+        stored = command.read_record(run_dir)
+        shown = capsys.readouterr().out
+        if estimate is None:
+            assert "estimated_cost_usd" not in stored
+            assert "estimate" not in shown
+        else:
+            assert stored["estimated_cost_usd"] == estimate
+            assert "owner estimate" in shown and f"USD {estimate:g}" in shown
+        assert stored["billing"] == "subscription"
+        launched.append(run_dir)
+
+    monkeypatch.setattr(command, "run_lab_suite", launch)
+    parser = argparse.ArgumentParser()
+    command.register(parser.add_subparsers())
+    argv = ["outcome", "run", "lab", "--run-id", "cost"]
+    if estimate is not None:
+        argv += ["--estimated-cost-usd", str(estimate)]
+    args = parser.parse_args(argv)
+    args.func(args)
+    capsys.readouterr()
+    command.run_suite("lab", "cost")
+    estimate = 2.5
+    command.run_suite("lab", "cost", estimated_cost_usd=estimate)
+    assert len(launched) == 3

@@ -195,49 +195,49 @@ def test_a_seeded_session_vault_is_readied_without_writing_a_page_or_touching_th
     assert readied_pages == seeded_pages and seed_unchanged
 
 
-def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_beyond_the_seed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("activation_packet", ["maps", "anchors"])
+def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_beyond_the_seed(tmp_path: Path, activation_packet: str) -> None:
     """Catches a recorder that serves the graph warming for a seeded vault: both arms would then serve no relation
     mark, and the comparison would measure nothing."""
     seed = shelf_seed(tmp_path)
     baseline, _ = seed_a_vault(tmp_path, "baseline", ready_graph=False)
+    case = session_close.Case("shelf", "t", seed, "balanced", ("When does the tool shelf close?",), tmp_path / "case.json", None)
+    generated = replay_cases.scenario_for(case, {"reference": "", "deterministic": {}}, [])
     plan = tmp_path / "plan.json"
-    plan.write_text(
-        json.dumps(
-            {
-                "ready_graph": True,
-                "steps": [{"as": "context", "tool": "recall_context", "arguments": {"turn": "When does the tool shelf close?"}}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    plan.write_text(json.dumps(generated["record"]), encoding="utf-8")
     scratch = tmp_path / "record"
     scratch.mkdir()
     done = subprocess.run(  # noqa: S603
         [sys.executable, str(recording.WORKER), str(plan), str(ROOT), str(tmp_path / "out.json"), str(seed)],
-        cwd=scratch, env=recording.worker_env(Arm("test", ROOT), scratch), capture_output=True, text=True, timeout=300,
+        cwd=scratch, env=recording.worker_env(Arm("test", ROOT), scratch, activation_packet=activation_packet), capture_output=True, text=True, timeout=300,
     )
     assert done.returncode == 0, done.stderr[-400:]
     recorded = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
     assert recorded["ready"]["graph"] == "available"
-    assert recorded["shapes"]["context"]["map"]["membership_graph"] == "available"
+    if activation_packet == "maps":
+        assert recorded["shapes"]["context"]["map"]["membership_graph"] == "available"
+    else:
+        assert "map" not in recorded["shapes"]["context"]
+        assert "anchors" in recorded["shapes"]["context"]
+        assert recorded["shapes"]["context"]["continuity"]
     vault = next(scratch.glob("ig-record-*/vault"))
     pages, seed_unchanged = pages_and_seed_bytes(vault, seed)
     baseline_pages, _ = pages_and_seed_bytes(baseline, seed)
     assert pages == baseline_pages and seed_unchanged
 
 
-def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes() -> None:
+def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes(tmp_path: Path) -> None:
     """Catches a vault that is never ready being recorded anyway, or failing with a message that hides the state."""
     seen = []
 
-    def stays_warming(tool: str, arguments: dict) -> dict:
-        seen.append(tool)
-        return {"error": {"code": "COLD"}} if len(seen) == 1 else {"map": {"membership_graph": "warming"}}
+    def stays_unavailable() -> str:
+        seen.append(True)
+        return "unproven" if len(seen) == 1 else "unavailable"
 
-    with pytest.raises(SystemExit, match="warming"):
-        session_seed.wait_for_graph(stays_warming, seconds=0.05, interval=0.02)
-    steps = iter([{"map": {"membership_graph": "warming"}}, {"map": {"membership_graph": "available"}}])
-    assert session_seed.wait_for_graph(lambda tool, arguments: next(steps), seconds=5, interval=0.01) == "available"
+    with pytest.raises(SystemExit, match="unavailable"):
+        session_seed.wait_for_graph(tmp_path, availability=stays_unavailable, seconds=0.05, interval=0.02)
+    steps = iter(["unproven", "unavailable", "available"])
+    assert session_seed.wait_for_graph(tmp_path, availability=lambda: next(steps), seconds=5, interval=0.01) == "available"
 
 
 def test_the_warm_read_records_once_two_successive_replies_agree_and_fails_by_name_when_none_do_within_the_bound() -> None:
@@ -245,9 +245,16 @@ def test_the_warm_read_records_once_two_successive_replies_agree_and_fails_by_na
     index settles after the second read and so fails a recording that a short wait would have made."""
     from import_guidance.record_worker import warmed_reply
 
-    settling = iter([{"slice": []}, {"slice": ["a"]}, {"slice": ["a", "b"], "id": 1}, {"slice": ["a", "b"], "id": 2}])
-    reply = warmed_reply(lambda tool, arguments: next(settling), "recall_context", {}, {"seconds": 0.001, "ignore": ["id"]})
-    assert reply == {"slice": ["a", "b"], "id": 2}
+    case = session_close.Case("probe", "t", Path("seed"), "balanced", ("A request",), Path("case.json"), None)
+    warm = replay_cases.scenario_for(case, {"reference": "", "deterministic": {}}, [])["record"]["steps"][-1]["warm"]
+    settling = iter([{"slice": []}, {"slice": ["a"], "continuity": "first"}, {"slice": ["a", "b"], "continuity": "second"}, {"slice": ["a", "b"], "continuity": "third"}])
+
+    def read(tool, arguments):
+        assert arguments == {}, "warm reads must not feed earlier continuity into the next call"
+        return next(settling)
+
+    reply = warmed_reply(read, "recall_context", {}, {**warm, "seconds": 0.001})
+    assert reply == {"slice": ["a", "b"], "continuity": "third"}
 
     counter = itertools.count()
     with pytest.raises(SystemExit, match=r"recall_context still changed between two reads 0.001s apart: the index is not warm \(polled for 0.05s\)"):
