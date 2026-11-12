@@ -2300,26 +2300,24 @@ def _dependency_changed_keys(
     return keys
 
 
-#: One resident-resolver topology fingerprint per vault, keyed by the checkpoint the
-#: resolver stands at: a patch restamps the checkpoint, so a stale entry never decides
-#: a read, and a lag's repeated restricted reads pay one hash.
+#: One digest per resident publication, including builds with no checkpoint. Keep only
+#: the lightweight token, so eviction can release the resolver's maps. A publication's
+#: first hash still carries a timing signal; this memo does not hide write timing.
 _RESIDENT_TOPOLOGY_DIGESTS: dict[Path, tuple[object, str]] = {}
 
 
 def _resident_topology_fingerprint(
     vault_root: Path,
     resolver: vault_module.WikilinkResolver,
-    checkpoint: freshness.RecallFreshnessCheckpoint | None,
+    publication: object,
 ) -> str:
-    """The resident resolver's topology fingerprint, cached at its checkpoint."""
-    if checkpoint is None:
-        return _resolver_topology_fingerprint(resolver)
+    """Cache the topology digest of the exact resident maps copied by the borrower."""
     key = Path(vault_root)
     cached = _RESIDENT_TOPOLOGY_DIGESTS.get(key)
-    if cached is not None and cached[0] == checkpoint:
+    if cached is not None and cached[0] is publication:
         return cached[1]
     digest = _resolver_topology_fingerprint(resolver)
-    _RESIDENT_TOPOLOGY_DIGESTS[key] = (checkpoint, digest)
+    _RESIDENT_TOPOLOGY_DIGESTS[key] = (publication, digest)
     return digest
 
 
@@ -9211,10 +9209,10 @@ class EpistemicGraphIndex:
         stored = _checkpoint_from_value(meta.get(_RECALL_CHECKPOINT_KEY))
         borrowed = find_module.borrow_recall_resolver(self.vault_root)
         if borrowed is not None:
-            resident, checkpoint = borrowed
+            resident, checkpoint, publication = borrowed
             if stored is not None and checkpoint == stored:
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
-            if _resident_topology_fingerprint(self.vault_root, resident, checkpoint) == topology:
+            if _resident_topology_fingerprint(self.vault_root, resident, publication) == topology:
                 return resident, topology, meta.get(_RECALL_CHECKPOINT_KEY)
             # A built resolver would describe the same live vault and hash to the same
             # fingerprint: one topology hash decides this read.

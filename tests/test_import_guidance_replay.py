@@ -786,3 +786,27 @@ def test_the_replay_stages_the_arms_prompt_hook_in_mcp_mode_under_an_isolated_ho
     assert fake.env["EXOMEM_RETRIEVE_INJECT"] == "mcp" and fake.env["EXOMEM_PROMINENCE"] == "balanced"
     assert Path(fake.env["EXOMEM_HOOK_HOME"]).is_relative_to(tmp_path / "run")
     assert fake.judge_calls == 0 and row["hook_invocations"] == 1 and row["final_text"] == "Sails at 07:15."
+
+
+def test_a_reply_cannot_reveal_its_arm_through_its_runtime_directory(tmp_path: Path) -> None:
+    """A quoted working directory must not unblind a stage-C answer or break its judgment join."""
+    work = tmp_path / "model-quokka" / "arm-zeta" / "c0"
+    answer = f"Sails at 07:15. My working directory is {work}/cwd."
+    runs = write_rows(tmp_path / "runs.jsonl", [{
+        "scenario": "c0", "arm": "arm-zeta", "model": "model-quokka", "repeat": 0,
+        "client_mode": "plugin", "error": None, "replies": [answer],
+        "stream": str(work / "stream.jsonl"),
+    }])
+    out = tmp_path / "batch"
+    scenarios = [invented_scenario("c0")]
+    judge_batch.prepare([], [runs], scenarios, out=out)
+
+    views = (out / "judge-views.jsonl").read_text()
+    assert "arm-zeta" not in views and "model-quokka" not in views
+    assert "Sails at 07:15." in views and "<session-workdir>/cwd" in views
+    assert answer in runs.read_text()
+    summary = judge_batch.import_judgments(
+        judge_batch_as(out, lambda run: True), out=out,
+        stage_b=[], stage_c=[runs], scenarios=scenarios,
+    )
+    assert summary["agreement"] == 1.0

@@ -171,6 +171,9 @@ Limits:
 
 ## Follow-up suite
 
+Cases `f09` through `f14` cover repository dialogue: short acknowledgements, merge and release requests, a standalone rename, and initial retrieval of a matching method. The shell-free MCP runner measures retrieval decisions and replies. It does not execute repository delivery. The seeded methods are unapproved references; these cases do not prove approval signatures or native Codex hook behavior. Count tool calls by each stream's `result` boundaries when checking repeated recall.
+
+
 This family measures recall on short follow-up turns: a carried subject ("and the deadline?"), a subject switch ("and for Harbor?"), a continuation after an agent proposal ("do that", "continue") and an acknowledgement ("ok, thanks"). It lives in `scenarios/follow-up/` and uses the session-close format, with its own seeds, keys and `rubric.json`.
 
 - Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.

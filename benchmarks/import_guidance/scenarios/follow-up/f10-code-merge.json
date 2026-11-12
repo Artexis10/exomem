@@ -1,0 +1,11 @@
+{
+  "id": "f10-code-merge",
+  "title": "A merge instruction after the repository merge reference was recalled",
+  "suite": "session-close",
+  "seed": "fu-repository",
+  "engagement": "balanced",
+  "turns": [
+    "The parser fix in my Alderframe CLI repository is PR 42. Required checks passed and independent review accepted its current head. Check the saved delivery guidance and recommend the merge method. End by offering the exact merge command.",
+    "merge it"
+  ]
+}
