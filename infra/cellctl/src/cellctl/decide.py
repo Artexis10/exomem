@@ -1365,10 +1365,17 @@ def _restore_step(
     # first -- a Job mounts it read-only beside the volume and rewrites the
     # backup's paths. The quota admits one clone, and the attempt's backup
     # Job and this restore share it. The restic snapshot the clone's backup
-    # recorded is the fallback when the clone is already gone.
+    # recorded is the fallback when neither clone nor ready snapshot remains.
     vol_snapshot = observation.statefulset_pre_upgrade_volume_snapshot
     use_clone = vol_snapshot is not None and observation.clone_exists
-    restore_point = vol_snapshot if use_clone else snapshot
+    already_restored = (observation.statefulset_restored_snapshot is not None
+                        and observation.statefulset_restored_snapshot in (vol_snapshot, snapshot))
+    # A ready snapshot can rebuild a missing clone. Once restored, its marker
+    # also lets recovery finish after cleanup removes both snapshot and clone.
+    local_restore = vol_snapshot is not None and (
+        observation.clone_exists or (observation.snapshot_exists and observation.snapshot_ready)
+        or observation.statefulset_restored_snapshot == vol_snapshot)
+    restore_point = vol_snapshot if local_restore else snapshot
     read_only = row.desired_state == "read_only"
     desired_replicas = 0 if row.desired_state == "stopped" else 1
 
@@ -1387,18 +1394,9 @@ def _restore_step(
         )
 
     if restore_point is None:
-        # D6 resume: a restore hold without a pre-upgrade snapshot cannot
-        # arise through the normal procedure. Fail closed rather than guess
-        # at another snapshot -- a wrong guess could lose data, a wrong
-        # refusal only leaves one cell stopped until the owner looks.
-        return Decision(
-            apply_manifests=True,
-            replicas=0,
-            read_only=read_only,
-            image=previous_image,
-            hold_kind="restore",
-            hold_started_at=hold_started_at,
-            previous_image=previous_image,
+        # D6 resume: without a usable attempt source or a completed restore,
+        # stop rather than guess at another snapshot and risk losing data.
+        return hold(
             row_updates={"last_error_code": RESTORE_FAILED},
             # Paused once, when the row first records it, so an owner who
             # has looked and resumes the rollout is not re-paused each pass.
@@ -1409,8 +1407,6 @@ def _restore_step(
             ),
         )
 
-    already_restored = (observation.statefulset_restored_snapshot is not None
-                        and observation.statefulset_restored_snapshot in (vol_snapshot, snapshot))
     if not already_restored:
         # L1: wait for the previous/canary pod to fully release the RWO
         # volume before the restore Job runs, the same guard the backup path

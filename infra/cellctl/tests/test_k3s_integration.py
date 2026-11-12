@@ -3254,6 +3254,7 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
         render_clone_claim,
         render_namespace,
         render_network_policies,
+        render_prepare_job,
         render_pvc,
         render_resource_quota,
         render_statefulset,
@@ -3296,6 +3297,24 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
         return create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)).returncode == 0
 
     _wait_for(policies_ready, timeout=60, description="local storage admission")
+
+    prepare = render_prepare_job(spec, node="selected-agent", image=spec.image)
+    result = create(prepare)
+    assert result.returncode == 0, result.stderr
+    with_init = copy.deepcopy(prepare)
+    init = copy.deepcopy(with_init["spec"]["template"]["spec"]["containers"][0])
+    init.update(name="extra-init", command=["sh", "-c", "echo arbitrary-code"])
+    with_init["spec"]["template"]["spec"]["initContainers"] = [init]
+    result = create(with_init)
+    assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
+    # Kubernetes fixes these lifecycle fields; every hook can execute beyond the prepare no-op.
+    for event in ("postStart", "preStop"):
+        for handler in ({"exec": {"command": ["sh", "-c", "echo arbitrary-code"]}},
+                        {"httpGet": {"host": "127.0.0.1", "path": "/", "port": 8080}}):
+            with_hook = copy.deepcopy(prepare)
+            with_hook["spec"]["template"]["spec"]["containers"][0]["lifecycle"] = {event: handler}
+            result = create(with_hook)
+            assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
 
     for admitted in (render_pvc(spec), render_resource_quota(spec),
                      render_volume_snapshot(spec, snapshot_name=snapshot_name, snapshot_class=local.snapshot_class)):

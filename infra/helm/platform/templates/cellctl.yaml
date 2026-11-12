@@ -884,7 +884,9 @@ spec:
           'exomem.io/cell-job' in variables.target.spec.template.metadata.labels &&
           variables.target.spec.template.metadata.labels['exomem.io/cell-job'] == 'prepare' &&
           (!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0) &&
-          variables.podSpec.containers.all(c, has(c.command) && c.command == ['true']) &&
+          (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&
+          variables.podSpec.containers.all(c,
+            has(c.command) && c.command == ['true'] && !has(c.lifecycle)) &&
           has(variables.podSpec.nodeName) &&
           !has(variables.podSpec.nodeSelector) && !has(variables.podSpec.tolerations) &&
           !has(variables.podSpec.affinity) &&

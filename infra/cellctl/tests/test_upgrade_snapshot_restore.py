@@ -312,11 +312,12 @@ def test_the_hourly_backup_never_starts_while_an_upgrade_hold_owns_the_clone() -
     assert _select_backup_candidates(rows, observations, NOW, ReconcileConfig(), storage=MIGRATING) == set()
 
 
-def test_a_finished_clone_restore_restarts_the_previous_image_and_releases_the_pair() -> None:
+@pytest.mark.parametrize("restic_snapshot", [RESTIC, None])
+def test_a_finished_clone_restore_restarts_the_previous_image_and_releases_the_pair(restic_snapshot: str | None) -> None:
     hold_row = _row(hold_kind="restore", hold_started_at=STARTED)
     base = dict(
         statefulset_hold_kind="restore", statefulset_image=IMAGE_B, statefulset_replicas=0,
-        statefulset_pre_upgrade_snapshot=RESTIC, statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
+        statefulset_pre_upgrade_snapshot=restic_snapshot, statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
         snapshot_exists=True, clone_exists=True, clone_bound=True)
 
     # The Job reported success: the pass records which restore point ran,
@@ -396,37 +397,49 @@ def test_a_restart_resumes_each_step_from_the_annotations() -> None:
     assert restore.run_clone_restore_job is True
 
 
-async def test_a_restore_rebuilds_the_clone_when_the_snapshot_outlived_it(cell_db: CellDatabase) -> None:
+@pytest.mark.parametrize("restic_snapshot", [RESTIC, None])
+async def test_a_restore_rebuilds_the_clone_when_the_snapshot_outlived_it(
+    cell_db: CellDatabase, restic_snapshot: str | None,
+) -> None:
     """S2: the attempt's VolumeSnapshot exists and is ready but its clone is
     gone -- recreate the clone and wait for it to bind rather than falling to
     the restic snapshot or RESTORE_FAILED."""
-    restore_started = STARTED + timedelta(minutes=31)
+    restore_started = STARTED + timedelta(minutes=37)
     restore_now = restore_started + timedelta(minutes=1)
     observation = _upgrade(statefulset_replicas=0, pod_exists=False,
                            statefulset_hold_kind="restore", statefulset_hold_started_at=restore_started,
                            statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
-                           statefulset_pre_upgrade_snapshot=RESTIC,
+                           statefulset_pre_upgrade_snapshot=restic_snapshot,
                            snapshot_exists=True, snapshot_ready=True)
     row = _row(hold_kind="restore", hold_started_at=restore_started)
+
+    draining = _step(replace(observation, pod_exists=True, pod_uses_volume=True), row, now=restore_now)
+    assert draining.create_clone is False
+    assert draining.pre_upgrade_volume_snapshot == VOL_NAME
+    assert draining.row_updates.get("last_error_code") is None
 
     create = _step(observation, row, now=restore_now)
     assert (create.create_clone, create.run_clone_restore_job, create.run_restore_job_snapshot) == (
         True, False, None)
+    assert create.pre_upgrade_volume_snapshot == VOL_NAME
+    assert create.row_updates.get("last_error_code") is None
 
     unbound = _step(_upgrade(statefulset_replicas=0, pod_exists=False,
                              statefulset_hold_kind="restore", statefulset_hold_started_at=restore_started,
                              statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
-                             statefulset_pre_upgrade_snapshot=RESTIC,
+                             statefulset_pre_upgrade_snapshot=restic_snapshot,
                              snapshot_exists=True, snapshot_ready=True, clone_exists=True), row, now=restore_now)
     assert (unbound.run_clone_restore_job, unbound.create_clone) == (False, False)
+    assert unbound.pre_upgrade_volume_snapshot == VOL_NAME
 
     bound = _step(_upgrade(statefulset_replicas=0, pod_exists=False,
                            statefulset_hold_kind="restore", statefulset_hold_started_at=restore_started,
                            statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
-                           statefulset_pre_upgrade_snapshot=RESTIC,
+                           statefulset_pre_upgrade_snapshot=restic_snapshot,
                            snapshot_exists=True, snapshot_ready=True,
                            clone_exists=True, clone_bound=True), row, now=restore_now)
     assert bound.run_clone_restore_job is True
+    assert bound.pre_upgrade_volume_snapshot == VOL_NAME
 
     await _seed_cell(cell_db, CELL_ID, "tenant-a")
     owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
@@ -447,6 +460,8 @@ async def test_a_restore_rebuilds_the_clone_when_the_snapshot_outlived_it(cell_d
         assert clone["metadata"]["name"] == CLONE_NAME
         assert clone["spec"]["dataSourceRef"] == {
             "apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": VOL_NAME}
+        statefulset = cluster.applied[(f"exo-cell-{CELL_ID}", "StatefulSet", "cell")]
+        assert statefulset["metadata"]["annotations"]["exomem.io/pre-upgrade-volume-snapshot"] == VOL_NAME
     finally:
         await connection.close()
 

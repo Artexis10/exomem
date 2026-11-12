@@ -1918,7 +1918,10 @@ def test_the_scope_policy_admits_the_prepare_job_and_its_no_egress_label() -> No
     prepare = prepare[:prepare.index("(!has(variables.podSpec.nodeName)")]
     assert "labels['exomem.io/cell-job'] == 'prepare'" in prepare
     assert "!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0" in prepare
+    # Hostile templates run through this rendered rule in the K3s local-storage admission test.
+    assert "!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0" in prepare
     assert "c.command == ['true']" in prepare
+    assert "!has(c.lifecycle)" in prepare
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
