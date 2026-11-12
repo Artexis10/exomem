@@ -291,7 +291,7 @@ def relation_form(ref: RelationRef) -> str:
 
 def document_ref(artefact_id: str) -> str:
     """The opaque display reference shared by an original document and its relation snapshots."""
-    return sentinel(stable_id("DOC", artefact_id))
+    return sentinel(stable_id("DOC", artefact_id, digest_chars=64))
 
 
 @dataclass(frozen=True)
@@ -618,6 +618,14 @@ class World:
             return self.artefacts[ref]
         filed = self._filed.get(ref, ())
         return self.artefacts[filed[0]] if len(filed) == 1 else None
+
+    def original_documents(self) -> dict[str, Artefact]:
+        """Index only unambiguous original documents, using the world's existing resolution rule."""
+        return {
+            ref: original
+            for ref in self.statements
+            if (original := self.resolve_artefact(ref)) is not None
+        }
 
     def holders(self) -> Collection[str]:
         return [e.id for e in self.entities.values() if e.holder]

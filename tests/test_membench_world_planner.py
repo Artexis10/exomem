@@ -370,8 +370,8 @@ def test_an_edge_snapshot_hash_pins_its_original_endpoint_provenance() -> None:
     )
     (ref,) = carrier.relations
     before = {a["id"]: a["hash"] for a in artefact_hashes(world)}[carrier.id]
-    statement = world.statements[ref.source]
-    author = next(h for h in world.holders() if h != statement.by)
-    world.statements[ref.source] = dataclasses.replace(statement, by=author)
+    original = world.resolve_artefact(ref.source)
+    author = next(h for h in world.holders() if h != original.by)
+    world.artefacts[original.id] = dataclasses.replace(original, by=author)
     after = {a["id"]: a["hash"] for a in artefact_hashes(world)}[carrier.id]
     assert carrier.relations == (ref,) and before != after

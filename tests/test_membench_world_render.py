@@ -334,7 +334,10 @@ def test_relation_snapshots_preserve_original_text_and_never_repeat_endpoint_con
     world = PLAN.world()
     for artefact in world.artefacts.values():
         document = rendering.documents[artefact.id]
-        assert sentinel(stable_id("DOC", artefact.id)) in document.text.splitlines()[0]
+        assert (
+            sentinel(stable_id("DOC", artefact.id, digest_chars=64))
+            in document.text.splitlines()[0]
+        )
         units = parse_semantic_units(document.text, path="source.txt")
         relations = parse_markdown_relations(document.text)
         assert not units.units and not units.errors
@@ -346,8 +349,8 @@ def test_relation_snapshots_preserve_original_text_and_never_repeat_endpoint_con
                 assert document.lines[0].text == next(
                     f.text for f in BANK.forms if f.id == document.forms[0]
                 ).format(
-                    source=sentinel(stable_id("DOC", f"{ref.source}.doc")),
-                    target=sentinel(stable_id("DOC", f"{ref.target}.doc")),
+                    source=sentinel(stable_id("DOC", f"{ref.source}.doc", digest_chars=64)),
+                    target=sentinel(stable_id("DOC", f"{ref.target}.doc", digest_chars=64)),
                 )
                 for endpoint in (ref.source, ref.target):
                     original = rendering.documents[f"{endpoint}.doc"]

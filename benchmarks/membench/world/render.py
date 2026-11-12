@@ -200,17 +200,11 @@ class Reader:
     def __init__(self, plan: Plan, world: World):
         self.plan, self.world = plan, world
         self.relations = world.relation_facts()
-        check_relation_refs(
+        self.originals = check_relation_refs(
             world,
             ((a.id, ref) for a in world.artefacts.values() for ref in a.relations),
             self.relations,
         )
-        self.originals = {
-            ref: artefact.id
-            for artefact in world.artefacts.values()
-            if artefact.copy_of is None
-            for ref in artefact.carries
-        }
 
     def name(self, ref: Any, at: date) -> str | None:
         """The name of an entity at a date, of an event or of a context, or ``None`` if ``ref`` is none."""
@@ -296,8 +290,8 @@ class Reader:
             fills = {"child": self.text(record.id, at), "parent": self.text(record.parent, at)}
         else:
             fills = {
-                "source": document_ref(self.originals[ref.source]),
-                "target": document_ref(self.originals[ref.target]),
+                "source": document_ref(self.originals[ref.source].id),
+                "target": document_ref(self.originals[ref.target].id),
             }
         return _Item(
             document,

@@ -57,7 +57,7 @@ def catalogue_digest(directory: Path = CATALOGUE_DIR) -> str:
 def artefact_hashes(world: World) -> list[dict[str, Any]]:
     """Hash each document, its carried statements and its resolved relation facts and provenance."""
     relations = world.relation_facts()
-    check_relation_refs(
+    originals = check_relation_refs(
         world, ((a.id, ref) for a in world.artefacts.values() for ref in a.relations), relations
     )
     return [
@@ -72,7 +72,11 @@ def artefact_hashes(world: World) -> list[dict[str, Any]]:
                         {
                             "fact": asdict(relations[ref]),
                             "endpoints": [
-                                asdict(world.statements[s]) for s in (ref.source, ref.target)
+                                {
+                                    "statement": asdict(world.statements[s]),
+                                    "document": asdict(originals[s]),
+                                }
+                                for s in (ref.source, ref.target)
                             ]
                             if isinstance(ref, EdgeRef)
                             else [],

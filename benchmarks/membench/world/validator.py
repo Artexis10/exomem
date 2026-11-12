@@ -43,6 +43,7 @@ from .core import (
     CHANCE,
     PERMANENT,
     REPORTED,
+    Artefact,
     Context,
     ContextParentRef,
     Edge,
@@ -73,8 +74,9 @@ def check_relation_refs(
     world: World,
     refs: Iterable[tuple[str, RelationRef]],
     facts: Mapping[RelationRef, Context | Edge],
-) -> None:
-    """Check only the supplied new payloads against one canonical fact index."""
+) -> dict[str, Artefact]:
+    """Check the supplied snapshots and return their shared original-document resolution index."""
+    originals = world.original_documents()
     refusals = []
     for item, ref in refs:
         if isinstance(ref, ContextParentRef) and isinstance(ref.child, str):
@@ -109,8 +111,30 @@ def check_relation_refs(
             continue
         if not known:
             refusals.append(Refusal("unknown-reference", item, f"replace `{ref}` with {expected}"))
+        elif isinstance(ref, EdgeRef):
+            for endpoint in (ref.source, ref.target):
+                original = originals.get(endpoint)
+                if original is None:
+                    refusals.append(
+                        Refusal(
+                            "unresolved-artefact",
+                            item,
+                            f"give `{endpoint}` exactly one original document",
+                        )
+                    )
+                    continue
+                available = max(world.statements[endpoint].at, original.at)
+                if world.artefacts[item].at < available:
+                    refusals.append(
+                        Refusal(
+                            "acts-before-target",
+                            item,
+                            f"date the snapshot on or after {available} when `{endpoint}` and its original document are available",
+                        )
+                    )
     if refusals:
         raise WorldInvalid(refusals)
+    return originals
 
 
 def validate(world: World) -> list[Refusal]:

@@ -212,13 +212,25 @@ The world, its statements and its rendered text SHALL carry no product's ontolog
 
 Each statement's content SHALL be fixed before rendering. A renderer SHALL choose an implicitness level from the declared set and a registered surface form, and SHALL record both in the manifest. Only a bridge declared as entailing SHALL yield a computed key for an implied statement, and that bridge SHALL name the stated rule or the registered background norm that makes it entail. A computed entry at the `silent` level SHALL name a stated norm. A probe SHALL NOT share a surface form with the artefact that answers it. An artefact rendered below the `stated` level SHALL NOT contain the explicit form of its statement.
 
-Artefacts SHALL support optional typed references to canonical context parents and support or defeat edges. A source snapshot SHALL add no operation or authoritative graph. An edge snapshot SHALL publish at the later endpoint statement date. A directory snapshot SHALL publish in the first source session without claiming a membership start date. Its sentence SHALL name only the parent and child. An edge sentence SHALL contain only opaque original-document references and relation wording. Original headers SHALL show unique opaque references, while statement sentences, authors and dates remain unchanged. Pack data SHALL define the document kinds and natural wording. The manifest SHALL hash resolved canonical facts, carrier text and provenance. A source repair SHALL advance the generator version without rewriting previous generated worlds.
+Artefacts SHALL support optional typed references to canonical context parents and support or defeat edges. A source snapshot SHALL add no operation or authoritative graph. An edge snapshot SHALL NOT publish before either endpoint statement or its unambiguous original document is available. The planner SHALL file originals on their statement dates and publish the snapshot at the later endpoint date. A directory snapshot SHALL publish in the first source session without claiming a membership start date. Its sentence SHALL name only the parent and child. An edge sentence SHALL contain only opaque original-document references and relation wording. Original headers SHALL show opaque references with full SHA-256 digests, while statement sentences, authors and dates remain unchanged. Pack data SHALL define the document kinds and natural wording. Rendering and hashing SHALL use the same validated original-document resolution. Missing or ambiguous originals SHALL fail before rendering or hashing. The manifest SHALL hash resolved canonical facts, chosen original documents, carrier text and provenance. A source repair SHALL advance the generator version without rewriting previous generated worlds.
 
 #### Scenario: A source relation has endpoints on different dates
 
 - **WHEN** a source edge connects statements with different dates, in either recipe call order
 - **THEN** its unsigned snapshot publishes at the later endpoint date
 - **AND** filing it changes no operation sequence or recipe binding
+
+#### Scenario: An endpoint has no unambiguous original document
+
+- **WHEN** an edge endpoint has no original document or more than one original document
+- **THEN** validation, rendering and hashing reject its snapshot with an actionable reference diagnostic
+- **AND** a later second original does not redirect an earlier snapshot
+
+#### Scenario: A snapshot predates an endpoint or its original document
+
+- **WHEN** an edge snapshot predates either endpoint statement or its chosen original document
+- **THEN** validation, rendering and hashing name the earliest available date
+- **AND** backdating an original does not allow a future statement reference
 
 #### Scenario: A relation sentence is removed but its anchors remain
 
