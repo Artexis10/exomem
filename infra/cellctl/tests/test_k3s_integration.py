@@ -3383,6 +3383,27 @@ def test_clone_restore_job_keeps_the_acknowledged_write_on_real_k3s(k3s: K3sClus
     # same way reconcile renders them before any Job.
     _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
 
+    # The restore Job's env resolves the two Secrets a live cell namespace
+    # holds -- cell-credentials' backup-password and the custodian's
+    # cell-object-store-key -- even though the clone command never calls
+    # restic. Without them the pod waits in CreateContainerConfigError.
+    def secret(name: str, data: dict[str, str]) -> dict:
+        return {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": name, "namespace": namespace},
+            "type": "Opaque",
+            "stringData": data,
+        }
+
+    _apply_server_side(
+        k3s.name,
+        [
+            secret("cell-credentials", {"backup-password": "k3s-test-password"}),
+            secret("cell-object-store-key", {"keyId": "k3s-test-key", "applicationKey": "k3s-test-secret"}),
+        ],
+    )
+
     def claim(name: str) -> dict:
         return {
             "apiVersion": "v1",
