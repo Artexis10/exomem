@@ -1653,7 +1653,7 @@ def test_a_private_unit_update_uses_its_definitions_and_reports_revoked_definiti
     source = (
         "---\ntype: insight\nstatus: active\nproject: private-project\n"
         "exomem_id: 22222222-2222-4222-8222-222222222222\n---\n"
-        "# Private update\n\n- [decision] Keep the shared schedule.\n\n"
+        "# Private update\n\n- [decision] Keep the shared schedule. ^shared-schedule\n\n"
         "## Pöytäkirja\n- id: local-protocol\n\nFollow the original protocol.\n"
     )
     (vault / path).parent.mkdir(parents=True, exist_ok=True)
@@ -1709,7 +1709,8 @@ def test_a_private_unit_update_uses_its_definitions_and_reports_revoked_definiti
         assert "Follow the reviewed protocol." in page["body"]
         assert page["units"]["status"] == "unavailable"
         assert commands.op_read_memory(vault, path=path, unit_ref=refs["protocol"])["status"] == "unavailable"
-        assert commands.op_read_memory(vault, path=path, unit_ref=refs["observation"])["status"] == "found"
+        core = commands.op_read_memory(vault, path=path, unit_ref=refs["observation"])
+        assert core["status"] == "found"
         for address in (
             {"unit": updated["unit_id"]},
             {"unit_ref": refs["protocol"], "expected_hash": page["content_hash"],
@@ -1721,6 +1722,29 @@ def test_a_private_unit_update_uses_its_definitions_and_reports_revoked_definiti
                     content="A withheld protocol cannot be updated.", **address,
                 )
         assert (vault / path).read_text(encoding="utf-8").find("A withheld protocol") == -1
+
+        arguments = {
+            "path": path, "unit_ref": refs["observation"], "category": "decision",
+            "content": "Use the revised shared schedule.", "expected_hash": page["content_hash"],
+            "expected_fingerprint": core["unit"]["fingerprint"],
+        }
+        changed = commands.op_observe_memory(vault, operation="update", **arguments)
+        with pytest.raises(ValueError, match="^STALE_PARENT_HASH"):
+            commands.op_observe_memory(vault, operation="validate", **arguments)
+        with pytest.raises(ValueError, match="^STALE_UNIT_REFERENCE"):
+            commands.op_observe_memory(
+                vault, operation="validate", **{**arguments, "expected_hash": changed["after_hash"]},
+            )
+
+        reread = commands.op_read_memory(vault, path=path, unit_ref=refs["observation"])
+        repaired = commands.op_observe_memory(
+            vault, operation="update", path=path, unit_ref=refs["observation"],
+            category="decision", content="Keep the revised shared schedule.",
+            expected_hash=reread["parent"]["content_hash"],
+            expected_fingerprint=reread["unit"]["fingerprint"],
+        )
+        assert repaired["unit"]["content"] == "Keep the revised shared schedule."
+        assert "Follow the reviewed protocol." in (vault / path).read_text(encoding="utf-8")
 
 
 def test_unit_ranking_keeps_only_public_instance_parents_across_requests(

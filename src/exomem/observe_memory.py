@@ -266,7 +266,9 @@ def observe_memory(
             expected_fingerprint=expected_fingerprint,
         )
         if resolution.status != "found" or resolution.unit is None:
-            if current.definitions_unavailable and resolution.unit is None:
+            if current.definitions_unavailable and (resolution.status == "missing" or (
+                resolution.status == "stale" and resolution.actual_fingerprint is None
+            )):
                 raise ObserveMemoryError(
                     "REGISTRY_UNAVAILABLE",
                     "the selected vocabulary definitions required to resolve this unit are unavailable",
