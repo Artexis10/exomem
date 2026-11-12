@@ -10,7 +10,6 @@ contract (placeholder projects/paths); adapt `project-keys.yaml` to your own.
 from __future__ import annotations
 
 import hashlib
-import shutil
 from pathlib import Path
 
 from . import indexes
