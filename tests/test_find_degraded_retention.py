@@ -1,21 +1,25 @@
-"""Degraded-corroboration retention at the hybrid page seam (find.py).
+"""BM25-only corroboration retention at the hybrid page seam (find.py).
 
-Measured defect: with the vector/CLIP lanes producing no candidates
+Measured defects: first, with the vector/CLIP lanes producing no candidates
 (EXOMEM_DISABLE_EMBEDDINGS, absent/empty embedding index, warming or failed
 lane), the in-KB retention seam vetoed every BM25-only candidate unless the
 page contained ALL query stems — and interrogative phrasing ("How many…")
 contributes stems that never appear in stored text, so the product returned
-zero hits while its own BM25 lane ranked the correct page first.
+zero hits while its own BM25 lane ranked the correct page first. The same
+veto then reappeared per-bundle: with a live vector lane ranking unrelated
+candidates, a page holding every content stem but missing ordinary question
+phrasing (a connective like "after") was still dropped.
 
-These tests pin the fix: when the semantic lanes are structurally absent for
-the query, retention relaxes from all-stems to a STRICT MAJORITY of the
-query's whitespace words (whole-word presence: every BM25 subtoken stem of
-the word must appear, so compounds like `reference-marker-xyz` need all
-parts and trailing punctuation cannot mask a match) — and at least one
-present word must be a CONTENT word, so function-word overlap ("what is the
-… of the …") cannot carry the majority against paragraph-length prose.
-Exactly half is still vetoed; a live vector lane keeps the strict all-stems
-veto; keyword mode's conjunctive contract is untouched.
+These tests pin the fix: a BM25-only candidate is retained when a STRICT
+MAJORITY of the query's whitespace words is present (whole-word presence:
+every BM25 subtoken stem of the word must appear, so compounds like
+`reference-marker-xyz` need all parts and trailing punctuation cannot mask
+a match) — and at least one present word must be a CONTENT word, so
+function-word overlap ("what is the … of the …") cannot carry the majority
+against paragraph-length prose. The gate is per-candidate: another lane's
+silence on one page is no evidence against it, whether the semantic lanes
+are live or absent. Exactly half is still vetoed; keyword mode's
+conjunctive contract is untouched.
 """
 
 from __future__ import annotations
@@ -139,29 +143,73 @@ def test_no_shared_stem_query_still_returns_nothing(degraded_vault: Path) -> Non
     assert find_module.find(degraded_vault, query=IRRELEVANT_QUERY) == []
 
 
-def test_strict_veto_when_vector_lane_is_active(
-    degraded_vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Relaxed retention is conditioned on LANE availability, not page membership.
+def _with_active_vector_lane(monkeypatch: pytest.MonkeyPatch, ranked_rel: str) -> None:
+    """Simulate a live vector lane that ranked a different page.
 
-    Simulate a live vector lane that ranked a different page: the candidate
-    bundle then carries a non-empty vector ranking, so the strict all-stems
-    veto must still drop the BM25-only drift page (embeddings-active behavior
-    is unchanged by the fix).
+    The candidate bundle then carries a non-empty vector ranking, so every
+    BM25-only candidate arrives needing corroboration while semantic lanes
+    are live — the per-candidate gate must judge this page on its own word
+    coverage, not on the bundle's lane availability.
     """
     real = find_module.find_candidates.collect_candidates
-    other_rel = f"{kb_dirname()}/{OTHER_PAGE}"
 
-    def _with_active_vector_lane(vault_root, **kwargs):
+    def _collect(vault_root, **kwargs):
         bundle = real(vault_root, **kwargs)
-        bundle.vector_ranking = [other_rel]
+        bundle.vector_ranking = [ranked_rel]
         return bundle
 
-    monkeypatch.setattr(
-        find_module.find_candidates, "collect_candidates", _with_active_vector_lane
-    )
+    monkeypatch.setattr(find_module.find_candidates, "collect_candidates", _collect)
+
+
+def test_word_majority_retains_bm25_only_page_when_vector_lane_is_active(
+    degraded_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live vector lane does not reimpose the all-stems veto.
+
+    The drift page holds a strict word majority with content words for the
+    interrogative query, so it is retained even though the vector lane is
+    live and ranked only the kernel page.
+    """
+    _with_active_vector_lane(monkeypatch, f"{kb_dirname()}/{OTHER_PAGE}")
     hits = find_module.find(degraded_vault, query=QUERY)
-    assert all(not h.path.endswith("field-check.md") for h in hits)
+    assert any(h.path.endswith("field-check.md") for h in hits)
+
+
+def test_live_lanes_retain_page_missing_a_phrasing_word(
+    degraded_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A phrasing word the page lacks must not veto it under live lanes.
+
+    Mirrors the measured defect: a fully indexed note held every content
+    term yet the all-stems veto dropped it because a connective it never
+    contains appeared in the question, while the vector lane produced
+    unrelated candidates. Here "after" is absent from the drift page's
+    stems; the page still holds a strict word majority.
+    """
+    _with_active_vector_lane(monkeypatch, f"{kb_dirname()}/{OTHER_PAGE}")
+    hits = find_module.find(
+        degraded_vault, query="What did the drift index measure after the check?"
+    )
+    assert any(h.path.endswith("field-check.md") for h in hits)
+
+
+def test_live_lanes_still_veto_half_and_function_word_majorities(
+    degraded_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The preserved guards apply identically while semantic lanes are live.
+
+    A 1-of-2 word match stays vetoed (the sourdough page), and queries that
+    clear a word majority purely on function words retain nothing — the
+    paragraph page is dense in exactly those words. The vector-ranked kernel
+    page carries its own lane evidence, so it may appear; no BM25-only
+    candidate may.
+    """
+    _with_active_vector_lane(monkeypatch, f"{kb_dirname()}/{OTHER_PAGE}")
+    hits = find_module.find(degraded_vault, query="sourdough zzzzunknownzzzz")
+    assert all(hit.path.endswith("kernel-upgrade.md") for hit in hits)
+    for query in FUNCTION_WORD_QUERIES:
+        hits = find_module.find(degraded_vault, query=query)
+        assert all(hit.path.endswith("kernel-upgrade.md") for hit in hits), query
 
 
 def test_exactly_half_coverage_is_vetoed(degraded_vault: Path) -> None:
