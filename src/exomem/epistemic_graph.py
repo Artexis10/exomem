@@ -2864,6 +2864,12 @@ class EpistemicGraphIndex:
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_review "
             "ON graph_edges(source_path, origin, relation_type, dst_key, source_anchor)"
         )
+        # Sensed retypes bind an exact bullet anchor and target. The relation
+        # review index cannot seek that pair without an inferred relation key.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_relation_anchor "
+            "ON graph_edges(source_path, origin, source_anchor, dst_page_key)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_unregistered "
             "ON graph_edges(registry_status, raw_relation, source_path, source_anchor)"
@@ -9505,6 +9511,8 @@ class EpistemicGraphIndex:
                 "AND ids.exomem_id = n.exomem_id) END, n.page_type, n.tags_json, n.metadata "
                 "FROM graph_nodes n WHERE n.kind = 'file' ORDER BY n.path"
             ).fetchall()
+            # Retain these already-read endpoints for menus; no extra query or page read.
+            menu_rows = {str(row[0]): row for row in rows}
             rows = [
                 row for row in rows
                 if activation.structurally_eligible(
@@ -9788,6 +9796,16 @@ class EpistemicGraphIndex:
                     generic, per_source_cap, branch_cap + 1,
                 ),
             ).fetchall()
+            # relation.type's authored plain-link/generic bullets, from the same
+            # rows the graph already published. Only candidates with a current
+            # relation verdict survive the read below; without readings the
+            # query never runs (the projection read is not a graph query).
+            from . import relation_sensor
+
+            sensed_by_key = relation_sensor.sensed_rows_for(self.vault_root, selected, graph=conn)
+            retype_by_source = relation_sensor.retype_candidates_many(
+                conn, selected_registries, sensed_by_key
+            )
         except (sqlite3.Error, ValueError, KeyError, TypeError, OSError):
             return {
                 "status": "warming",
@@ -9854,10 +9872,15 @@ class EpistemicGraphIndex:
                     "wikilink",
                     "frontmatter_sources",
                     "shared_sources",
+                    "retype",
                 )
             }
             for rel in selected
         }
+        # relation.type readings: relation verdicts only. Empty when sensing is
+        # off, unadmitted or unprojected, and the queue is byte-identical.
+        for source, candidates in retype_by_source.items():
+            methods[source]["retype"].extend(candidates)
         for row in wiki_and_authored_rows[:branch_cap]:
             (
                 kind,
@@ -10186,8 +10209,19 @@ class EpistemicGraphIndex:
             "wikilink",
             "frontmatter_sources",
             "shared_sources",
+            "retype",
         )
-        fit = relation_queue.RelationFit(self.vault_root, basis=type_basis)
+
+        def menu_page(path: str) -> Any | None:
+            row = menu_rows.get(path)
+            if row is None:
+                return None
+            return relation_sensor._page_from_row((row[0], row[1], row[6], row[8], row[2]))
+
+        fit = relation_queue.RelationFit(
+            self.vault_root, basis=type_basis, page_lookup=menu_page,
+        )
+
         for source in selected:
             if len(groups) >= page_cap:
                 break
@@ -10285,6 +10319,27 @@ class EpistemicGraphIndex:
                     item["bullet"] = relation_queue._bullet(candidate)
                 if candidate.get("internal_evidence"):
                     item["internal_evidence"] = candidate["internal_evidence"]
+                sensed_row = candidate.get("_sensed")
+                if sensed_row is None and candidate.get("method") == "wikilink":
+                    occurrence = (candidate.get("internal_evidence") or {}).get("occurrence")
+                    if occurrence is not None:
+                        sensed_row = sensed_by_key.get(
+                            relation_sensor.request_key(
+                                source, target, f"occurrence-{occurrence}"
+                            )
+                        )
+                if sensed_row is not None and sensed_row.get("verdict") not in ("none", "abstain"):
+                    options = item.get("options")
+                    if options is None:
+                        options = fit.options(
+                            candidate,
+                            registry=selected_registries[source],
+                            relation=relation_registry.generic_relation_key(),
+                        )
+                    block = relation_sensor.proposal(sensed_row, options or [])
+                    if block is not None:
+                        item["options"] = options
+                        item["sensed"] = block
                 visible.append(item)
             if len(visible) > item_cap:
                 items_truncated = True
