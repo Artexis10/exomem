@@ -1099,3 +1099,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: python3 .release-tools/infra/scripts/release_recovery.py finish-images --tag "$TAG" --directory image-evidence
+
+  deploy-cells:
+    # automate-cloud-releases D1: start cloud-deploy on main once the tag's images
+    # and attestations are published. A dispatch is the only start that works:
+    # this run began from a github.token dispatch, so its completion fires no
+    # workflow_run. cloud-deploy reads the newest release itself.
+    needs: [plan, publish-image]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.dry_run != 'true' && needs.publish-image.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch cloud-deploy on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cloud-deploy.yml --ref main --repo "$GITHUB_REPOSITORY"
