@@ -273,7 +273,11 @@ def newest_platform_deployment(runner: Runner, repository: str) -> dict | None:
                 ["gh", "api", f"repos/{repository}/deployments/{deployment['id']}"]))
             payload = detail.get("payload") or {}
             if isinstance(payload, str):
-                payload = json.loads(payload or "{}")
+                try:
+                    payload = json.loads(payload or "{}")
+                except json.JSONDecodeError as error:
+                    raise Stop("deployment-record",
+                               f"the newest platform Deployment's payload is not JSON: {error}") from error
             return payload if isinstance(payload, dict) else {}
     if len(deployments) >= 20:
         # More unsuccessful records than one read covers: an older success may
@@ -426,8 +430,10 @@ def _platform_upgrade(argv: list[str], env: dict[str, str], runner: Runner) -> i
     if unrecorded:
         print(f"  note: {', '.join(unrecorded)} is a cell-scope barrier — not required here, "
               "but cloud-deploy stops until a platform upgrade records it with --crossed")
-    # Only a crossing this upgrade makes can be rolled back across.
-    one_way = any(entry["kind"] == "one-way" for entry in due if entry in in_range)
+    # Any open one-way platform barrier drops --atomic. A fix-forward after a
+    # failed one-way upgrade may name the target as --from, and an atomic
+    # rollback would then return to the release before the crossing.
+    one_way = any(entry["kind"] == "one-way" for entry in due)
 
     # --- The upgrade. ---
     print("upgrade: applying the namespaces")
