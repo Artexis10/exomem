@@ -200,24 +200,11 @@ def caller_is_owner(vault_root: Path) -> bool:
 
 
 #: The reasons a store form refuses, each named once for the page and the folder forms.
-_GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
 _LINKED = "the folder holds a symbolic link, which a folder write does not follow; remove it"
 _NOT_HELD = (
     "the folder holds a Markdown file that the store holds no page for, and moving the folder "
     "would leave it behind; retry once the store has imported or removed it"
 )
-
-
-def governed_gap(vault_root: Path) -> str | None:
-    """Why a store-mode vault cannot delete, move or recover a file yet, or None when it can.
-
-    A vault that declares a governance policy writes tombstones and receipts around a lifecycle
-    write, which the store form does not carry yet, so the writer refuses before it changes
-    anything.
-    """
-    from ..governance import lifecycle
-
-    return _GOVERNED if lifecycle.policy_governs_anything(vault_root) else None
 
 
 def evicted_original(vault_root: Path, rel: str):
@@ -337,52 +324,61 @@ def _gone_reason(vault_root: Path, gone: list[str]) -> str:
     )
 
 
-def active_catalog_gap(
+def prepare_catalog(
     vault_root: Path,
-    operation: str,
     *,
     error_class: Callable[..., Exception],
     writes: tuple[vault.PlannedWrite, ...] = (),
     removals: tuple = (),
     content_paths: tuple[str, ...] = (),
-) -> None:
-    """Refuse a store-mode lifecycle write while the vault's catalog publication is active.
+    graph_replacement_provider: Callable[[], tuple] | None = None,
+    part_folders: Mapping[str, str] | None = None,
+) -> object | None:
+    """The catalog publication that a store-mode lifecycle write must publish after its commit, or
+    None when the vault publishes none (design D8).
 
-    The catalog publishes a removal or a write in files after the change commits, and the store has
-    no form for them, so a change that committed would leave the catalog naming pages that moved.
-    It prevents that, and a wrong refusal costs a rollback of store mode. It is the same call that
-    file mode makes before it changes anything, with no log or graph writes: they matter only to a
-    publication that the store never carries, and an enrolled vault is refused with or without them.
-    ``error_class`` is the writer's own error, raised with the catalog's code when it cannot tell.
+    It is the preparation that file mode makes before it changes anything, with the same writes
+    and removals, so the catalog names exactly what the commit holds. It reads only the bytes that
+    it is given and the governance stores. The writer prepares it before its validation returns,
+    commits, then publishes it with ``publish_catalog``. A catalog that cannot take the change
+    raises ``error_class`` with GOVERNANCE_CATALOG_PUBLICATION_BLOCKED before anything changes.
     """
     from ..governance import catalog_publication
 
     try:
-        target = catalog_publication.prepare_catalog_membership_batch(
+        return catalog_publication.prepare_catalog_membership_batch(
             vault_root,
             writes=writes,
             removals=removals,
             content_paths=content_paths,
+            graph_replacement_provider=graph_replacement_provider,
             now=int(time.time()),
+            part_folders=part_folders or {},
         )
     except catalog_publication.CatalogPublicationError as error:
         raise error_class(
             code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", reason=str(error)
         ) from error
-    if target is not None:
-        raise availability.unrouted(
-            operation, "the vault's active catalog publication has no store form"
-        )
 
 
-def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
-    """Refuse ``operation`` while the vault is in store mode, for a writer whose paths are pages.
+def publish_catalog(target: object | None, *, error_class: Callable[..., Exception], what: str) -> None:
+    """Publish a prepared catalog after the commit that it names, as file mode does.
 
-    It is the form for a writer that has no path to test with ``owns_any`` before it starts, so it
-    costs a rollback to run that writer on files.
+    The commit is durable, so a publication that fails raises ``error_class`` with
+    GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN; reconcile's catalog acknowledgement repairs it.
+    ``what`` names the committed change in that error ("the file was trashed").
     """
-    if mode.store_mode_active(vault_root):
-        raise availability.unrouted(operation, why)
+    from ..governance import catalog_publication
+
+    if target is None:
+        return
+    try:
+        catalog_publication.publish_markdown_batch(target)
+    except Exception as error:  # noqa: BLE001 - the canonical change already committed
+        raise error_class(
+            code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            reason=f"{what} but its active catalog publication did not reach a verified terminal",
+        ) from error
 
 
 def relative(vault_root: Path, path: str) -> str:
