@@ -2,80 +2,117 @@
 
 ## Purpose
 
-Build a cell's retrieval catalogue under the target release's catalogue identity before the cell stops for its upgrade, so a catalogue-identity release no longer adds its whole rebuild to the stop.
+Build a catalogue beside the serving cell before its upgrade attempt, so a ready catalogue can remove the full parse from the stop.
 
 ## ADDED Requirements
 
-### Requirement: A catalogue build runs before the cell stops on every upgrade attempt
+### Requirement: A catalogue build runs before the upgrade attempt
 
-`cellctl` SHALL schedule a catalogue-build Job for a cell that is due an upgrade attempt, before the attempt stops the serving pod, while the serving pod still holds its volume. The Job SHALL run the target image on the node that holds the cell's volume and SHALL mount the cell's volume read-write. The attempt SHALL wait for the Job to reach a terminal state, bounded by a build timeout, and SHALL proceed on success, failure or timeout alike: a missing staged sibling only means the new pod rebuilds cold.
+The feature SHALL default off. When enabled, `cellctl` SHALL schedule a target-image build for each running rollout candidate when its upgrade window opens, subject to capacity and skip rules. The Job SHALL share the serving pod's node through scheduler-enforced placement and mount the live claim read-write. Attempts SHALL retain their existing due rules and deadlines, without waiting for a build result.
 
-#### Scenario: A due cell gets a builder before its stop
+#### Scenario: A candidate gets a builder during its window
 
-- **WHEN** a cell's upgrade attempt is due on a release whose catalogue identity differs from the live sidecar's
-- **THEN** the build Job runs to completion before the serving pod is stopped
-- **AND** a staged sibling for the target identity exists on the cell's volume when the attempt continues
+- **WHEN** an eligible candidate's window opens before its attempt becomes due and capacity permits
+- **THEN** its build Job runs beside the serving pod before the attempt
+- **AND** a successful build leaves a staged catalogue for the replacement
 
-#### Scenario: The build fails or times out
+#### Scenario: The build is unfinished when the attempt becomes due
 
-- **WHEN** the build Job fails, or does not reach a terminal state inside the build timeout
-- **THEN** the upgrade attempt proceeds to stop the serving pod
-- **AND** the Job's outcome is recorded on the attempt
+- **WHEN** the attempt becomes due before cellctl observes build success
+- **THEN** cellctl deletes the Job and confirms its pods have ended before stopping the cell
+- **AND** the replacement does not adopt that build, including a file published during cancellation
+- **AND** the attempt records the build outcome and continues under its existing deadlines
+
+#### Scenario: The build fails, expires or loses eligibility
+
+- **WHEN** the build fails, exceeds its bounded timeout, or loses eligibility through a pause, target change or closed window
+- **THEN** cellctl deletes any unfinished build Job
+- **AND** a due attempt proceeds without a warm catalogue when none is eligible
 
 ### Requirement: The build self-gates on catalogue identity
 
-The build SHALL compute the catalogue identity its own image produces and compare it to the live sidecar's stored identity. It SHALL build only when they differ, and SHALL exit successfully without building when they match, or when a staged sibling already carries its identity. It SHALL also decline to start a second build for a cell that already has one in flight.
+The build SHALL compute its identity from the target image and vault. It SHALL exit successfully without building when the live identity matches or a valid staged copy already carries its identity. It SHALL decline a second build while another holds the cell's staged-build lock.
 
-#### Scenario: A release that keeps the catalogue identity
+#### Scenario: A release keeps the catalogue identity
 
-- **WHEN** the scheduled build's computed identity equals the live sidecar's stored identity
-- **THEN** the Job exits successfully without touching the volume's catalogue files
+- **WHEN** the build's computed identity equals the live catalogue's stored identity
+- **THEN** the Job exits successfully without rebuilding or changing the live catalogue
 
-#### Scenario: A repeated build for the same target
+#### Scenario: A repeated build finds a complete staged copy
 
-- **WHEN** a staged sibling already carries the identity the build computes
+- **WHEN** a valid staged copy already carries the computed identity
 - **THEN** the Job exits successfully without rebuilding
 
-### Requirement: The build publishes a detached sibling, never the live sidecar
+#### Scenario: A build is already in progress
 
-The build SHALL write its catalogue to a staged sibling file that is named by the target's catalogue identity, beside the live sidecar on the cell's volume. It SHALL NOT rename, replace, truncate or write the live sidecar, and SHALL leave the serving pod's catalogue reads and its repair worker undisturbed. A build that dies SHALL leave a staged sibling either absent or whole — never a torn file the new pod could adopt.
+- **WHEN** another builder holds the cell's staged-build lock
+- **THEN** the new builder declines without changing staged files
+- **AND** an old timestamp does not permit it to remove the active builder's files
+
+### Requirement: The build writes only staged files and coordination locks
+
+The Job SHALL restrict shared-volume changes to staged catalogue families and their coordination locks. It SHALL publish a complete single-file staged copy named by its identity. It SHALL NOT change the live catalogue, vault content or another store. A killed build SHALL leave no torn file that boot can adopt.
 
 #### Scenario: The serving pod keeps serving during the build
 
-- **WHEN** the build Job runs beside a serving pod
-- **THEN** the live sidecar's path, contents and stored identity are unchanged for the build's whole run
-- **AND** the serving pod's repair worker publishes and reconciles exactly as if no build ran
+- **WHEN** the Job runs beside a serving pod
+- **THEN** the Job leaves the live catalogue and the serving pod's repair worker undisturbed
+- **AND** only the serving pod's ordinary work can change the live catalogue
+
+#### Scenario: The rest of the volume stays unchanged
+
+- **WHEN** the target-image Job runs and no other process writes during the observation
+- **THEN** every shared-volume file outside staged families and coordination locks remains byte-identical
+- **AND** the Job initializes or migrates no other store
 
 #### Scenario: A build is killed mid-write
 
-- **WHEN** the build Job is terminated before it finishes
-- **THEN** no adoptable staged sibling exists afterwards
-- **AND** the live sidecar is untouched
+- **WHEN** the build dies before it publishes the complete staged copy
+- **THEN** no adoptable copy from that build exists
+- **AND** the live catalogue remains untouched by the build
 
-### Requirement: The namespace quota admits exactly one builder beside the serving pod
+### Requirement: Quota and node capacity bound the build
 
-The cell namespace's `ResourceQuota` SHALL carry one warm-build slot: one extra pod plus the requests and limits of the build's bounded resource profile. The slot SHALL be sized so the Job is admitted beside the serving pod and the namespace's ordinary Job headroom, and no larger.
+The namespace quota SHALL add exactly one pod and the build profile's requests and limits beside existing headroom. Requests SHALL cover the measured or estimated build peak. Builds SHALL use scheduler capacity checks, without `nodeName` or `priorityClassName`. Until shared concurrency accounting includes builds, cellctl SHALL permit at most one build per node.
 
-#### Scenario: The builder is admitted during the window
+#### Scenario: The quota admits a builder beside the serving pod
 
-- **WHEN** the build Job is created while the serving pod and the namespace's ordinary headroom are committed
-- **THEN** the quota admits it
+- **WHEN** the serving pod and ordinary Job headroom consume their allotted quota
+- **THEN** the extra slot admits one builder with its full resource profile
 
-### Requirement: Cells the platform cannot read skip the build
+#### Scenario: The node lacks build capacity
 
-A tenant-locked cell SHALL get no catalogue-build Job: the build would need the cell's content key, and the custody contract hands that key only to the replacement instance. A cell that is not running SHALL get no build Job. Such cells rebuild on boot as they do today.
+- **WHEN** the scheduler cannot fit the build's requests on the serving pod's node
+- **THEN** the Job stays pending without bypassing capacity checks
+- **AND** the due attempt cancels it and proceeds cold
 
-#### Scenario: A tenant-locked cell is due
+#### Scenario: Another cell on the node already has a builder
 
-- **WHEN** a tenant-locked cell's upgrade attempt is due on a catalogue-identity release
-- **THEN** no catalogue-build Job is created for it
-- **AND** its stop carries the rebuild
+- **WHEN** one build occupies the node's build slot
+- **THEN** cellctl schedules no second build there
 
-### Requirement: Staged siblings are swept
+### Requirement: Tenant-locked and non-running cells skip the build
 
-`cellctl` SHALL remove staged siblings whose identity matches neither the cell's current live sidecar nor any pending target, keeping at most the siblings a current or pending target still wants. A cell's boot MAY sweep the same set. Sweep SHALL NOT remove a sibling while a build in flight could still be writing it.
+Tenant-locked cells SHALL receive no catalogue-build Job, even while unlocked. The build SHALL NOT join the custody key channel. Non-running cells SHALL receive no build Job. These cells SHALL retain their ordinary cold-rebuild behavior.
 
-#### Scenario: A rolled-back target leaves a sibling
+#### Scenario: A tenant-locked cell becomes a candidate
 
-- **WHEN** a staged sibling's identity belongs to a release that is no longer the target and was never adopted
-- **THEN** the sibling is removed on the next reconcile pass
+- **WHEN** a tenant-locked cell becomes a rollout candidate, including while unlocked
+- **THEN** cellctl creates no build Job for it
+- **AND** its replacement rebuilds cold when the catalogue identity changes
+
+#### Scenario: A cell is not running
+
+- **WHEN** a rollout candidate has no running serving pod
+- **THEN** cellctl creates no build Job for it
+- **AND** the cell rebuilds cold on boot when its catalogue requires it
+
+### Requirement: The builder removes superseded staged copies
+
+At startup, the build SHALL remove every completed staged copy except a valid copy of its own computed identity. Cleanup SHALL preserve active builds using their locks. Temporary-file cleanup SHALL also check every SQLite family member's age and open connections. File age alone SHALL NOT prove a build inactive.
+
+#### Scenario: A rolled-back target leaves a staged copy
+
+- **WHEN** a new builder starts with a different computed identity
+- **THEN** it removes the previous target's completed staged copy
+- **AND** it preserves temporary files protected by a live build lock
