@@ -940,7 +940,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("observe_memory", "observation"), ("observe_memory", "add")),
           captures=True),
     _tool("edit_note", "Edit note",
-          "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate an existing unit, preview edit_observation with its current category and text.",
+          "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate a current note, preview replace_body using the id and body returned by read_page.",
           EditNote, "write", _edit_note,
           [Route("edit_memory", reverse=_spell_edit),
            Route("observe_memory", when={"operation": "update"}, add={"action": "edit_observation"},

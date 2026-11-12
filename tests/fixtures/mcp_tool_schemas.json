@@ -345,7 +345,7 @@
     }
   },
   "edit_note": {
-    "description": "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate an existing unit, preview edit_observation with its current category and text.",
+    "description": "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate a current note, preview replace_body using the id and body returned by read_page.",
     "inputSchema": {
       "properties": {
         "note": {
