@@ -43,7 +43,6 @@ jobs:
       pull-requests: write
     env:
       LAND: ${{ vars.RELEASE_AUTO_MERGE != 'off' }}
-      NODE_PATH: ${{ runner.temp }}/release-please/node_modules
     steps:
       - name: Mint the release App token
         id: app-token
@@ -65,7 +64,9 @@ jobs:
           enable-cache: true
           prune-cache: true
       - name: Install the action's maintained metadata updaters
-        run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+        run: |
+          npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+          echo "NODE_PATH=$RUNNER_TEMP/release-please/node_modules" >> "$GITHUB_ENV"
       - name: Select or resume the immutable cut
         id: cut
         env:
