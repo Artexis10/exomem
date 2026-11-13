@@ -1227,7 +1227,8 @@ def test_a_prose_only_belief_update_refuses_to_drop_its_assessed_claim(tmp_path:
             "write them back",
         ),
         (
-            "public", "write them back on the unit's `relations:` line in the page body with edit_note",
+            "public",
+            "write them back on the unit's `relations:` line in the page body with edit_note",
             "`relations`, with",
         ),
     ],

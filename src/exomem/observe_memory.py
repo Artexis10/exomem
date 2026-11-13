@@ -271,7 +271,8 @@ def observe_memory(
             )):
                 raise ObserveMemoryError(
                     "REGISTRY_UNAVAILABLE",
-                    "the selected vocabulary definitions required to resolve this unit are unavailable",
+                    "the selected vocabulary definitions required to resolve this unit "
+                    "are unavailable",
                     "Restore admitted definitions and read the unit again.",
                 )
             code = {
@@ -668,7 +669,9 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     if selected.definitions_unavailable:
         return {
             "status": "unavailable",
-            "reason": "the selected vocabulary definitions required to list all units are unavailable",
+            "reason": (
+                "the selected vocabulary definitions required to list all units are unavailable"
+            ),
         }
     return [
         {"id": unit_id(unit), "category": unit.category, "text": unit.content}
