@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.178.0](https://github.com/Artexis10/exomem/compare/v0.177.1...v0.178.0) (2026-11-13)
+
+
+### Features
+
+* **vault-store:** decide restricted relation reads from stored page facts ([#2790](https://github.com/Artexis10/exomem/issues/2790)) ([7446e35](https://github.com/Artexis10/exomem/commit/7446e35f75f7cd08c6899d306084e53ea3b65fec))
+
+
+### Bug Fixes
+
+* **review:** bind a review item id from its stored due entry ([#2795](https://github.com/Artexis10/exomem/issues/2795)) ([4a8a8a5](https://github.com/Artexis10/exomem/commit/4a8a8a517a63e5f7b2111da13991f2b22156823b))
+
 ## [0.177.1](https://github.com/Artexis10/exomem/compare/v0.177.0...v0.177.1) (2026-11-13)
 
 
