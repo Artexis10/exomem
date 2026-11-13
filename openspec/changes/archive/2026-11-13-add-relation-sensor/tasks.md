@@ -25,8 +25,9 @@
 - [x] 5.1 Amend `add-sensed-epistemic-model` in place: D1's `relation.applies` contract is replaced by `relation.type` here, and task 9.4's relation typing is re-laned to this change.
 - [x] 5.2 Run the tests, `uv run python scripts/validate-public-artifacts.py --repository` and `openspec validate --all --strict`.
 
-- [ ] 5.3 Deliver the independently reviewed exact head through green PR CI, merge and ordinary release, then synchronize and archive this pipeline change. Archival depends on the merged source; record its closure in a bounded follow-up when needed.
+- [x] 5.3 Deliver the independently reviewed exact head through green PR CI, merge and ordinary release, then synchronize and archive this pipeline change. Archival depends on the merged source; record its closure in a bounded follow-up when needed.
   - Source delivery: PR #2730 merged as `3cf084baa4937b6528d71d326d2066eeb810246e`. PR CI run `43317068663`, attempt 2, passed after an infrastructure retry. Independent review approved the merged patch.
-  - Release qualification remains pending. Keep this task open until the containing release qualifies, then synchronize and archive through the CLI.
+  - Python qualification: release `v0.176.0` at `57ad2dceffaec30d971488457d4ed7934c6f61a7` qualified through producer run `43329366779`, attempt 1, artifact `13994202281`. The published wheel matches all nine changed source modules. Full CI run `43323457103`, attempt 2, passed on the merged source.
+  - Image qualification: publisher run `43329366779`, attempt 1, authenticated all five image variants and completed discovery tags at `2026-11-12T23:57:47Z`. The release hold is cleared. This bounded follow-up synchronizes and archives the pipeline change through the CLI. Consumer rollout remains separate from artifact qualification.
 
 A shippable sensor-model pin is not part of this change. It needs a training set without private vault content and its own admission evidence (design D7), and lands as its own change.
