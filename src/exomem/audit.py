@@ -1161,6 +1161,10 @@ def _safe_persisted_markdown_rel(value: object) -> str | None:
 
 def _no_follow_regular_markdown_path(vault_root: Path, rel: str) -> Path | None:
     """Return a regular leaf only after no-follow validation of every segment."""
+    from .vault_store import read
+
+    if read.serves(vault_root, rel):
+        return Path(vault_root) / rel if read.page_exists(vault_root, rel) else None
     current = Path(vault_root)
     try:
         for index, part in enumerate(PurePosixPath(rel).parts):
@@ -1548,6 +1552,10 @@ def _classify_semantic_isolation_row(
         return _SemanticIsolationRow(component, raw, None, edge_column)
     candidate = _no_follow_regular_markdown_path(vault_root, rel)
     if candidate is None:
+        from .vault_store import read
+
+        if read.serves(vault_root, rel):
+            return _SemanticIsolationRow(component, raw, rel, edge_column, missing=True)
         # A valid but missing identity remains ordinary missing-path cleanup;
         # a symlink/reparse leaf is never followed and its sidecar row is
         # handled only as an exact corrupt value.
@@ -1562,24 +1570,40 @@ def _classify_semantic_isolation_row(
     return _SemanticIsolationRow(component, raw, rel, edge_column)
 
 
+def _store_census(vault_root: Path, path: Path) -> bool:
+    from . import epistemic_graph, lexstore
+    from .vault_store import mode
+
+    # These two sidecar paths name tables that migration moves into the canonical store.
+    return path in (
+        lexstore.lexical_path(vault_root), epistemic_graph.sidecar_path(vault_root)
+    ) and mode.store_mode_for_reads(vault_root)
+
+
 def _sidecar_rows(
     vault_root: Path, path: Path, query: str, *, after: str, limit: int
 ) -> tuple[list[tuple[object, ...]], int, str | None, str | None]:
     """Read at most one bounded census page without creating a sidecar."""
-    state, binding = _bind_sidecar(path, writable=False)
-    if state == "absent":
-        return [], 0, None, None
-    if state == "unsupported":
-        return [], 0, None, "sidecar_unsupported"
-    if state != "regular" or binding is None:
-        return [], 0, None, "sidecar_unreadable"
     import sqlite3
 
-    try:
-        conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
-    except (OSError, sqlite3.Error):
-        binding.close()
-        return [], 0, None, "sidecar_unreadable"
+    binding = None
+    if _store_census(vault_root, path):
+        from .vault_store import read
+
+        conn = read.lend(vault_root)
+    else:
+        state, binding = _bind_sidecar(path, writable=False)
+        if state == "absent":
+            return [], 0, None, None
+        if state == "unsupported":
+            return [], 0, None, "sidecar_unsupported"
+        if state != "regular" or binding is None:
+            return [], 0, None, "sidecar_unreadable"
+        try:
+            conn = sqlite3.connect(f"{binding.path.as_uri()}?mode=ro", uri=True)
+        except (OSError, sqlite3.Error):
+            binding.close()
+            return [], 0, None, "sidecar_unreadable"
     try:
         cursor = conn.execute(query, (after,))
         rows: list[tuple[object, ...]] = []
@@ -1600,11 +1624,16 @@ def _sidecar_rows(
         return [], 0, None, "sidecar_schema_unreadable"
     finally:
         conn.close()
-        binding.close()
+        if binding is not None:
+            binding.close()
 
 
 def _sidecar_signature(vault_root: Path, path: Path) -> str | None:
     """Stable-enough revision marker for a bounded SQLite census cursor."""
+    if _store_census(vault_root, path):
+        from .vault_store import read
+
+        return f"store:{read.current_revision(vault_root)}"
     state, binding = _bind_sidecar(path, writable=False)
     if state == "absent":
         return hashlib.sha256(b"absent|absent|absent").hexdigest()
@@ -1623,6 +1652,8 @@ def _sidecar_signature(vault_root: Path, path: Path) -> str | None:
 
 def _graph_dependency_census_signature(vault_root: Path, path: Path) -> str | None:
     """Return the durable DB/WAL revision for one dependency-census page."""
+    if _store_census(vault_root, path):
+        return _sidecar_signature(vault_root, path)
     state, binding = _bind_sidecar(path, writable=False)
     if state == "absent":
         return hashlib.sha256(b"absent|empty-wal").hexdigest()
@@ -2318,21 +2349,17 @@ def _parse_all(
     admitted = (
         egress.restricted_release_filter(vault_root) if keep is _AUDIT_RELEASE_DEFAULT else keep
     )
+    from . import find_corpus
+
     pages: list[find_module.ParsedPage] = []
-    for path in find_module._walk_md(kb):
-        request_budget.checkpoint()
-        rel = path.relative_to(vault_root).as_posix()
-        if not egress.content_permits(vault_root, rel, who):
-            continue
-        if admitted is not None and not admitted(rel):
-            continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        page = find_module._parse_page(path, mtime, vault_root)
+    for page in find_corpus.corpus_pages(
+        vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
+        lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
+        keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content)
+        and (admitted is None or admitted(rel)),
+    ):
         # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
-        if page is not None and page.part_of is None:
+        if page.part_of is None:
             pages.append(page)
     return pages
 
@@ -2644,7 +2671,12 @@ def _check_wikilinks(
     kb_stripped_paths: set[str] = set()   # KB-relative, no .md
     names_to_paths: dict[str, list[str]] = {}  # bare filename (no ext) → vault-rel paths
     titles_to_paths: dict[str, list[str]] = {}  # title_key(frontmatter title) → paths
-    for md_path in _walk_vault_md(vault_root):
+    from . import find_corpus
+
+    for source in find_corpus.corpus_sources(
+        vault_root, "vault", lambda **walk: vault_module.walk_vault_md(vault_root, **walk)
+    ):
+        md_path = source.path
         request_budget.checkpoint()
         try:
             rel = md_path.relative_to(vault_root).as_posix()
@@ -2657,7 +2689,7 @@ def _check_wikilinks(
         # Title fallback: lets `[[Test Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
         try:
-            text, _guard = vault_module.read_guarded_text(vault_root, md_path)
+            text = source.read_text()
         except (OSError, UnicodeDecodeError, vault_module.PathGuardError):
             continue
         fm, _, _ = parse_frontmatter(text)
@@ -2884,7 +2916,11 @@ def _walk_vault_md(vault_root: Path):
     Knowledge Base/ only. Compiled notes can link to curated parent trees
     (per SKILL.md rule 1), so we need a full-vault existence set.
     """
-    yield from vault_module.walk_vault_md(vault_root)
+    from . import find_corpus
+
+    yield from find_corpus.corpus_paths(
+        vault_root, "vault", lambda **walk: vault_module.walk_vault_md(vault_root, **walk)
+    )
 
 
 # ---------------- check: orphan_entity ----------------
@@ -7328,10 +7364,11 @@ def _entity_recurrence_resolution_entries(
     # reaches the resolver under two spellings — two stem edges, two title
     # candidates, and a bare name that looks ambiguous because of how it was
     # enumerated rather than because of what the vault holds.
-    vault_resolved = vault_root.resolve()
+    from . import find_corpus
+
     for md_path in _walk_vault_md(vault_root):
         try:
-            entries[md_path.resolve().relative_to(vault_resolved).as_posix()] = None
+            entries[find_corpus.page_relative_path(md_path, vault_root)] = None
         except (OSError, ValueError):
             continue
     for rel_path, title in titles:
@@ -7754,6 +7791,8 @@ def _rel_kb_path_no_ext(absolute: Path, vault_root: Path) -> str:
 
     Matches the form wikilinks use after the leading 'Knowledge Base/' is stripped.
     """
-    rel = absolute.resolve().relative_to(vault_root.resolve())
+    from . import find_corpus
+
+    rel = PurePosixPath(find_corpus.page_relative_path(absolute, vault_root))
     no_ext = rel.with_suffix("").as_posix()
     return no_ext.removeprefix(kb_prefix()).lstrip("/")

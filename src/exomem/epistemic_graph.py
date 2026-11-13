@@ -10909,7 +10909,15 @@ def graph_context(
             unavailable["warnings"] = [_drift_warning({"graph_sidecar_unavailable": 1})]
         return unavailable
     try:
-        view = GraphView(vault_root, conn, keep=keep, seed_keep=seed_keep)
+        from .vault_store import mode as store_mode
+
+        parent_records = (
+            semantic_index.StoredParentRecords(vault_root)
+            if store_mode.store_mode_for_reads(Path(vault_root)) else None
+        )
+        view = GraphView(
+            vault_root, conn, keep=keep, seed_keep=seed_keep, parent_records=parent_records,
+        )
         query_instance, query_definitions = _query_meaning(
             view, registry_scope=registry_scope, path=path, unit_ref=unit_ref
         )
@@ -10959,8 +10967,13 @@ def graph_context(
                 return False
             accepted = freshness_cache.get(stamp)
             if accepted is None:
-                freshness = semantic_index.validate_parent_record(
-                    vault_root,
+                validate = (
+                    parent_records.validate if parent_records is not None
+                    else lambda **arguments: semantic_index.validate_parent_record(
+                        vault_root, **arguments
+                    )
+                )
+                freshness = validate(
                     parent_path=stamp[0],
                     parent_generation_value=stamp[1],
                     parent_source_hash=stamp[2],
@@ -11000,6 +11013,8 @@ def graph_context(
                 seed for seed in view.indexed_units(unit_ref)
                 if not _records_suppressed_path(vault_root, str(seed.get("path") or ""))
             ]
+            if parent_records is not None:
+                parent_records.prefetch(str(seed.get("path") or "") for seed in indexed)
             current = [
                 seed
                 for seed in indexed
@@ -11154,6 +11169,21 @@ def graph_context(
                 frontier,
                 limit=max(0, edge_inspection_budget - inspected_edges),
             )
+            if parent_records is not None and rows:
+                # These two fields are the graph edge protocol's fixed endpoint keys.
+                endpoints = {edge[key] for edge in rows for key in ("src_key", "dst_key")}
+                endpoint_paths = [
+                    str(path) for path, in conn.execute(
+                        "SELECT DISTINCT path FROM graph_nodes "
+                        "WHERE node_key IN (SELECT value FROM json_each(?)) AND kind = ?",
+                        (json.dumps(sorted(endpoints)), CANDIDATE_KIND),
+                    )
+                ]
+                view.prefetch([
+                    *endpoint_paths,
+                    *(str(edge.get("source_path") or "") for edge in rows
+                      if (edge.get("metadata") or {}).get("record_type") == "semantic_unit"),
+                ])
             inspected_edges += len(rows)
             edge_inspection_cap_hit = edge_inspection_cap_hit or inspection_overflow
             rows.sort(
@@ -11455,6 +11485,14 @@ def suggest_relations(
     # plain link, so the agent chooses one instead of taking the generic as the answer.
     fit = relation_queue.RelationFit(vault_root)
     proposed = _dedupe_candidates(candidates)[: max(0, limit)]
+    from .vault_store import read as store_read
+
+    store_read.prefetch_pages(vault_root, (
+        _page_rel(str(candidate.get(endpoint) or ""))
+        for candidate in proposed
+        if registry.is_generic(str(candidate.get("relation_type") or ""))
+        for endpoint in ("from", "to")  # fixed candidate protocol fields
+    ))
     # A candidate the relation queue holds open carries the fields that accept it, so the agent
     # needs no queue read first. The others carry none, and a failed lookup says so.
     reviews: dict[str, dict[str, str]] = {}
@@ -12687,15 +12725,19 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
         }
     finally:
         conn.close()
+    from . import find_corpus
+
     drift: list[dict[str, Any]] = []
     kb = vault_root / kb_dirname()
-    if not kb.is_dir():
+    if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return drift
     disk_paths: set[str] = set()
-    for md in find_module._walk_md(kb):
+    for source in find_corpus.corpus_sources(
+        vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk)
+    ):
         try:
-            rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            raw = vault_module.read_bytes_without_pinning(md, vault_root=vault_root).decode("utf-8")
+            rel = find_corpus.page_relative_path(source.path, vault_root)
+            raw = source.read_bytes().decode("utf-8")
         except (OSError, ValueError, UnicodeDecodeError):
             continue
         disk_paths.add(rel)
@@ -14080,9 +14122,11 @@ class GraphView:
         source_limit: int | None = None,
         summary_limit: int | None = None,
         preparation_limit: int | None = None,
+        parent_records: semantic_index.StoredParentRecords | None = None,
     ) -> None:
         self.vault_root = Path(vault_root)
         self.conn = conn
+        self.parent_records = parent_records
         self.keep = keep
         self.seed_keep = seed_keep if seed_keep is not None else keep
         self._unit_parents: dict[str, tuple[list[str], bool]] = {}
@@ -14144,27 +14188,47 @@ class GraphView:
         self.interrupted[path] = reason
 
     def _bounded_summaries(self, paths: list[str]) -> dict[str, Mapping[str, Any]]:
-        """Use live point signatures and resident parser facts before any source work."""
+        """Bound source bytes from canonical metadata before loading resident parser facts."""
         result: dict[str, Mapping[str, Any]] = {}
         try:
             self._check()
-            signatures = freshness.live_signatures(
-                self.vault_root, "vault", (self.vault_root / path for path in paths),
-            )
-            if signatures is None or self.checkpoint is None or (
-                freshness.live_recall_checkpoint(self.vault_root, "vault") != self.checkpoint
-            ):
+            from .vault_store import mode as store_mode
+            from .vault_store import read as store_read
+
+            if store_mode.store_mode_for_reads(self.vault_root):
+                with store_read.snapshot(self.vault_root) as snapshot:
+                    metadata = snapshot.page_metas(paths)
+                sizes = {}
+                for path in paths:
+                    if (meta := metadata.get(path)) is not None:
+                        sizes[path] = meta.size
+                    elif not store_read.serves(self.vault_root, path):
+                        try:
+                            sizes[path] = (self.vault_root / path).stat().st_size
+                        except OSError:
+                            self._interrupt(path, "live_signature_unavailable")
+                    else:
+                        self._interrupt(path, "live_signature_unavailable")
+                current = store_read.recall_checkpoint(self.vault_root, "vault")
+            else:
+                signatures = freshness.live_signatures(
+                    self.vault_root, "vault", (self.vault_root / path for path in paths),
+                )
+                sizes = {}
+                for path, signature in zip(paths, signatures or [None] * len(paths), strict=True):
+                    if signature is None:
+                        self._interrupt(path, "live_signature_unavailable")
+                    else:
+                        sizes[path] = signature[2]
+                current = freshness.live_recall_checkpoint(self.vault_root, "vault")
+            if self.checkpoint is None or current != self.checkpoint:
                 for path in paths:
                     self._interrupt(path, "live_signature_unavailable")
                 return result
-            sizes = {}
-            for path, signature in zip(paths, signatures, strict=True):
-                if signature is None:
-                    self._interrupt(path, "live_signature_unavailable")
-                elif signature[2] > self.source_limit:
+            for path, size in list(sizes.items()):
+                if size > self.source_limit:
                     self._interrupt(path, "source_work_limit")
-                else:
-                    sizes[path] = signature[2]
+                    del sizes[path]
             # SQLite returns a scalar byte count before it can deliver oversized JSON to Python.
             for path, size, metadata in self.conn.execute(
                 "SELECT path, length(CAST(metadata AS BLOB)), "
@@ -14263,7 +14327,10 @@ class GraphView:
 
     def prefetch(self, paths: Iterable[str]) -> None:
         """Read many admitted pages' stored summaries in one query before serving."""
+        paths = list(paths)
         self.parents.prefetch(paths)
+        if self.parent_records is not None:
+            self.parent_records.prefetch(path for path in paths if self.parents.allowed(path))
 
     def registry_for(self, rel_path: str) -> relation_registry.RelationRegistry:
         parent = self.parent(rel_path)
@@ -14679,7 +14746,7 @@ class GraphView:
                     else None
                 )
                 if prepared is not None:
-                    raw, mtime = prepared.source, path.stat().st_mtime
+                    raw, mtime = prepared.source, prepared.mtime
                 elif in_store:
                     if source is None:
                         raise FileNotFoundError(rel_path)

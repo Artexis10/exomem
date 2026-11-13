@@ -536,7 +536,7 @@ def test_governed_legacy_correction_uses_existing_edit_and_keeps_prior_account(
     assert list((tmp_path / "Knowledge Base/Notes").rglob("*.md")) == [tmp_path / UNTYPED_PAGE]
 
 
-@pytest.mark.parametrize("claim", ["parent", "directory", "path", "prior", "before_hash", "after_hash", "version", "filename", "create_only", "guard", "late_create_only", "late_guard", "episode_operation"])
+@pytest.mark.parametrize("claim", ["parent", "directory", "path", "prior", "before_hash", "after_hash", "version", "filename", "create_only", "guard", "late_create_only", "late_guard", "episode_operation", "stored_existing"])
 def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
     tmp_path: Path, owner, claim: str,
 ) -> None:
@@ -591,6 +591,10 @@ def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
         tmp_path / PAGE, after,
         guard=vault.PathGuard.capture(tmp_path, PAGE, leaf_policy="content", expected_content_hash=vault.content_hash(source)),
     )
+    if claim == "stored_existing":
+        forged = replace(history, guard=vault.PathGuard.of_stored(
+            history.path.relative_to(tmp_path).as_posix(), "b" * 64,
+        ))
     manifest = vocabulary_auxiliaries.seal(tmp_path, primary=primary, derived=(("compiled-history", history),))
     if claim == "late_create_only":
         forged = replace(history, create_only=False)

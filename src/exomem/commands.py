@@ -201,6 +201,7 @@ from .vault import (
     VaultPathError,
     admit_write_target,
     latest_operation_id,
+    read_bytes_without_pinning,
     resolve_under_vault,
 )
 from .viewer_map import op_viewer_map
@@ -5313,7 +5314,9 @@ def _replacement_predecessor_hash(vault_root: Path, old_path: str) -> str:
     if egress_module.write_target_withheld(vault_root, old_path):
         raise ValueError(unavailable)
     try:
-        return hashlib.sha256((Path(vault_root) / old_path).read_bytes()).hexdigest()
+        return hashlib.sha256(read_bytes_without_pinning(
+            Path(vault_root) / old_path, vault_root=vault_root,
+        )).hexdigest()
     except OSError as error:
         raise ValueError(unavailable) from error
 
@@ -6713,20 +6716,13 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
     """
     if not isinstance(target, str) or not target.strip():
         return []
-    from .vault_store import read as store_read
-
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
         for candidate in (clean,) if clean.lower().endswith(".md") else (clean, f"{clean}.md"):
-            # A page that the store serves is decided at its store key, never by its projection.
             try:
-                key = store_read.served_key(vault_root, candidate)
-            except FileNotFoundError:
-                continue  # the store serves the path and holds no page there
-            if key is not None:
-                return [key]
-            try:
-                candidate_abs, confined = resolve_under_vault(vault_root, candidate)
+                _candidate_abs, confined = resolve_under_vault(
+                    vault_root, candidate, must_exist=True, must_be_file=True,
+                )
             except VaultPathError:
                 # Undecidable the same way a candidate that doesn't resolve
                 # under the vault at all is: not the release plane's
@@ -6734,7 +6730,7 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
                 continue
             # Only a Markdown file is a page the target can name: a binary at the
             # path is a vault item, but not one the release plane judges as a page.
-            if candidate_abs.is_file() and confined.lower().endswith(".md"):
+            if confined.lower().endswith(".md"):
                 return [confined]
         return []
     # Bare basename: resolve it the way the matcher does — by filename across

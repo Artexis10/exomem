@@ -472,7 +472,9 @@ def _authored_targets(
 
 
 def _is_placeholder_target(vault_root: Path, target: str) -> bool:
-    return not (Path(vault_root) / epistemic_graph_module._page_rel(target)).is_file()
+    from .vault_store import read
+
+    return not read.holds_file(vault_root, epistemic_graph_module._page_rel(target))
 
 
 def _authors_toward(
@@ -602,6 +604,8 @@ def _ordered_pages(vault_root: Path, scan: Any) -> list[Any]:
 
 
 def _page_content_hash(page: Any) -> str:
+    if snapshot_hash := getattr(page, "snapshot_hash", None):
+        return snapshot_hash
     try:
         # Raw bytes, not `read_text`: `content_hash` is defined as the sha256
         # of a file's full raw text and `get_page` hands out exactly that, so a
@@ -876,6 +880,17 @@ def _page_for(vault_root: Path, rel_path: str) -> Any | None:
         )
     except vault_module.VaultPathError:
         return None
+    from .vault_store import read
+
+    try:
+        stored = read.owned_page(Path(vault_root), _rel)
+    except FileNotFoundError:
+        return None
+    if stored is not None:
+        return find_module._parse_page(
+            path, stored.meta.mtime_ns / 1e9, Path(vault_root),
+            content=stored.body, resolved_relative=_rel,
+        )
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -1118,13 +1133,21 @@ def open_reviews(
         open_fields: dict[str, dict[str, str]] = {}
         unsettled: set[str] = set()
         # One graph snapshot serves the generators and every candidate's reference lookup.
-        for candidate in _page_candidates(
-            vault_root, page, limit_per_page=_MAX_GENERATED_PER_METHOD, snapshot=snapshot
-        ):
+        candidates = [
+            candidate for candidate in _page_candidates(
+                vault_root, page, limit_per_page=_MAX_GENERATED_PER_METHOD, snapshot=snapshot
+            )
+            if candidate_identity(candidate) in identities
+            and str(candidate.get("from") or page.rel_path) == rel_path
+        ]
+        from .vault_store import read
+
+        read.prefetch_pages(vault_root, (
+            epistemic_graph_module._page_rel(str(candidate.get("to") or ""))
+            for candidate in candidates
+        ))
+        for candidate in candidates:
             identity = candidate_identity(candidate)
-            source = str(candidate.get("from") or page.rel_path)
-            if identity not in identities or source != rel_path:
-                continue
             if _is_placeholder_target(vault_root, str(candidate.get("to") or "")):
                 continue
             exact_refs = _hinted_candidate_refs(vault_root, candidate, snapshot=snapshot)
