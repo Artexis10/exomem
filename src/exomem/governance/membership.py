@@ -27,6 +27,7 @@ from .policy import Policy, Scope
 from .policy import load as load_policy
 
 _MEMO_MAX = 4096
+_ASSIGNMENT_UNSET = object()
 #: The frontmatter fields `markdown_subject` reads, through `ParsedPage`
 #: and `find_corpus.all_projects`. A stored summary keeps these for membership.
 FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_refs.ID_FIELD)  # nosemgrep: ep-word-set -- the closed frontmatter fields this kernel reads
@@ -259,12 +260,12 @@ def markdown_subject(page: ParsedPage) -> MarkdownSubject:
 
 def evaluate_subject(
     root: Path | None, subject: MarkdownSubject, policy: Policy,
-    assigned: frozenset[str] | None = None,
+    assigned: frozenset[str] | None | object = _ASSIGNMENT_UNSET,
 ) -> frozenset[str]:
     """The page's own scopes, current registry assignment and residual completion."""
     if policy.empty or not policy.scopes:
         return frozenset()
-    if assigned is None:
+    if assigned is _ASSIGNMENT_UNSET:
         assigned = _registry_assignment(root, subject.path, policy)
     matched = _evaluate_markdown_scopes(subject, policy) | (assigned or frozenset())
     if policy.residual_scope_id is None or matched:

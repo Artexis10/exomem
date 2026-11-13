@@ -14095,7 +14095,7 @@ class GraphView:
             batched = store_read.request_memo(self.vault_root) is not None
             with deciding(rel_paths) if batched else nullcontext():
                 admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
-                kept = self._kept_many(rel_paths)
+                kept = self._kept_many([path for path in rel_paths if path in admitted_paths])
                 return {path: path in admitted_paths and kept[path] for path in rel_paths}
 
         self.parents = semantic_index.AdmittedParents(

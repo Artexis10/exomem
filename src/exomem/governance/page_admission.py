@@ -13,7 +13,7 @@ import sqlite3
 from dataclasses import asdict, fields
 from pathlib import Path
 
-from .. import document_containers, find_corpus
+from .. import document_containers, find_corpus, vault
 from ..find_types import ParsedPage
 from . import bridges, membership, raw_protection
 from .policy import Policy
@@ -33,18 +33,28 @@ def create_schema(conn: sqlite3.Connection) -> None:
     )""")
 
 
-def simple_page(path: str, page: ParsedPage | None) -> bool:
+def simple_page(path: str, raw: bytes, page: ParsedPage | None) -> bool:
     """Whether one page's scopes determine its content floor and release selection."""
     from ..collection_store import ownership as collections
     from ..vault_store import ownership
 
+    if page is None:
+        return False
+    try:
+        frontmatter, _, _ = vault.parse_frontmatter(raw.decode("utf-8"))
+    except (UnicodeDecodeError, vault.FrontmatterError):
+        return False
+    # Custody reads raw bytes; normalized Markdown must agree before it can prove any claim absent.
+    if frontmatter != page.frontmatter:
+        return False
     return (
         ownership.classify(path) is ownership.Ownership.PAGE
-        and path.lower().endswith(".md") and page is not None
-        and "container_member" not in page.frontmatter
-        and "part_of" not in page.frontmatter and "parent_media" not in page.frontmatter
+        and path.lower().endswith(".md")
+        # These closed custody, extraction and frame fields require the scalar dependency chain.
+        and "container_member" not in frontmatter
+        and "part_of" not in frontmatter and "parent_media" not in frontmatter
         # Only the parsed bridge grammar proves absence; the byte probe is a positive cache guard.
-        and bridges.parse_bridge_frontmatter(page.frontmatter) == (None, None)
+        and bridges.parse_bridge_frontmatter(frontmatter) == (None, None)
         and not raw_protection.marked(path)
         and not document_containers.in_payload_tree(path) and not collections.relevant(path)
     )
@@ -62,7 +72,7 @@ def replace_row(
     subject = None if page is None else asdict(membership.markdown_subject(page))
     conn.execute(
         "INSERT INTO page_admission(path, sha256, facts_version, simple, subject) VALUES (?, ?, ?, ?, ?)",
-        (path, hashlib.sha256(raw).hexdigest(), FACTS_VERSION, simple_page(path, page),
+        (path, hashlib.sha256(raw).hexdigest(), FACTS_VERSION, simple_page(path, raw, page),
          json.dumps(subject, sort_keys=True, separators=(",", ":"))),
     )
 

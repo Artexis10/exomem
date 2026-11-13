@@ -87,11 +87,24 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
         "Knowledge Base/Notes/Claim.md": "title: Claim\ncontainer_member: null\n",
         "Knowledge Base/Notes/__exomem_raw_v1__original.md": "title: RAW\n",
         "Knowledge Base/Notes/Identity.md": "title: Identity\nexomem_id: 12345678-1234-4abc-8def-123456789abc\n",
+        "Knowledge Base/Notes/Invalid-id.md": "title: Invalid id\nexomem_id: malformed\n",
+        "Knowledge Base/Evidence/Video/clip.mp4.md": "title: Video\ntype: source\ntags: [secret]\n",
+        "Knowledge Base/Evidence/Video/clip.mp4.frames/scene-001.jpg.md": (
+            "title: Frame\ntype: source\nparent_media: Knowledge Base/Evidence/Video/clip.mp4\n"
+        ),
+        "Knowledge Base/Sources/Report.md": "title: Report\ntype: source\ntags: [secret]\n",
+        "Knowledge Base/Sources/.Report.parts/part-02.md": "title: Part\npart_of: ../Report.md\n",
+        "Knowledge Base/Sources/orphan.asice.documents/appendix.pdf.md": "title: Removed claim\n",
+        "Knowledge Base/Notes/Purpose.md": "title: Purpose\ntags: [purpose-only]\n",
     }
     for rel, frontmatter in pages.items():
         path = vault / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"---\n{frontmatter}---\n\nA beacon links to [[Beacon]].\n")
+    mixed_fence = "Knowledge Base/Notes/Mixed-fence.md"
+    (vault / mixed_fence).write_bytes(
+        b"---\n\r---\rcontainer_member: {version: 1}\n---\nA beacon links to [[Beacon]].\n"
+    )
     records = vault / "Knowledge Base/Records/Measurements"
     (records / "items").mkdir(parents=True)
     (records / "_collection.md").write_text(_manifest())
@@ -100,6 +113,14 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
     governance = vault / "Knowledge Base/_Governance"
     rule = governance / "rules/secret-external.yaml"
     rule.write_text(rule.read_text() + "purpose: audit\npurpose_condition: outside\n")
+    (governance / "scopes/purpose.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB2\ntags: [purpose-only]\n"
+    )
+    (governance / "rules/purpose.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB3\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FB2"]\naudience: external\nceiling: 0\n'
+        "purpose: audit\npurpose_condition: matches\n"
+    )
     (governance / "grants").mkdir()
     grant_file = governance / "grants/audit.yaml"
     grant = (
@@ -109,7 +130,7 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
     if store_mode:
         build_indexes(vault)
         assert migrate_apply(vault) == 0
-    paths = list(pages) + [child, source.sidecar_path,
+    paths = list(pages) + [mixed_fence, child, source.sidecar_path,
         "Knowledge Base/Records/Measurements/_collection.md",
         "Knowledge Base/Records/Measurements/items/raw.md",
         "Knowledge Base/Notes/Missing.md", "Knowledge Base/Notes/../Notes/Open.md"]
@@ -177,6 +198,14 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                     assert document_containers.parent_binding_for_path(vault, child) == binding
                     assert actual == answers(oracle), (selector, purpose)
                 assert not actual["Knowledge Base/Notes/Claim.md"]
+                assert not actual[mixed_fence]
+                assert not actual["Knowledge Base/Sources/orphan.asice.documents/appendix.pdf.md"]
+                assert actual["Knowledge Base/Notes/Purpose.md"] == (purpose is None)
+                if selector.startswith("tags:") and not granted:
+                    assert not actual["Knowledge Base/Evidence/Video/clip.mp4.frames/scene-001.jpg.md"]
+                    assert not actual["Knowledge Base/Sources/.Report.parts/part-02.md"]
+                if selector.startswith("refs:"):
+                    assert not actual["Knowledge Base/Notes/Invalid-id.md"]
                 assert actual["Knowledge Base/Notes/Open.md"]
 
 

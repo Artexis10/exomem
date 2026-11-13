@@ -101,6 +101,7 @@
 - [ ] 3.4 Extend the graph-reader drill with unique page ids, varied metadata, restricted caller layouts, cold processes, commits and owner passes. Record scalar decisions, page parses and YAML decodes at the load target.
 - [ ] 3.5 Limit restricted link re-resolution to shared name groups in store mode. Prove scalar edge parity for stem, title, mixed, root-path, fully withheld and Unicode homonyms.
 - [ ] 3.6 Derive byte-bound page selector facts in the commit, migration and owner pass. Decide distinct scope sets through the unchanged kernels. Prove restricted parity, zero scalar work on ordinary graph candidates, verification and rollback. Measure the remaining full-search cost before the separate ranking slice.
+  - Owner schema: whichever of this change and the unit_row_keys owner bump lands second takes version 3.
 
 ## 4. Projection and outside edits
 
