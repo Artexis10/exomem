@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 
 from . import call_spans, homes, markdown_relations, note_types
 from .entity_types import EntityTypeRegistry, core_registry, load_entity_types
-from .kbdir import kb_prefix
+from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     PathGuard,
     PlannedWrite,
@@ -223,6 +223,8 @@ def _stored_index_listing(
     """Stored count inputs plus the same unowned directory entries the file counters see."""
     from .vault_store import mode, ownership, read
 
+    if directory.parent.name != kb_dirname():
+        return None  # Standalone directory counters have no vault whose mode they can inspect.
     root = directory.parents[1]
     if not mode.store_mode_for_reads(root):
         return None
@@ -256,6 +258,8 @@ def _stored_index_listing(
             if on_error is not None:
                 on_error(error)
             continue
+    # The file counters count a directory ending in .md as well as its descendants.
+    pages.update(folder for folder in folders if folder.endswith(".md"))
     return read.Listing(tuple(pages), tuple(folders))
 
 
@@ -767,6 +771,30 @@ def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
     flat types (`Insights`, `Failures`, `Patterns`), the inner dict has a
     single `''` key with the total.
     """
+    stored = _stored_index_listing(notes_dir)
+    if stored is not None:
+        out = {
+            folder: {} for folder in stored.folders
+            if "/" not in folder and not folder.startswith("_")
+            and not is_scan_skipped_runtime_name(folder)
+        }
+        for folder in stored.folders:
+            parts = folder.split("/")
+            if len(parts) == 2 and parts[0] in out and not parts[1].startswith("_"):
+                out[parts[0]][parts[1]] = 0
+        nested = {folder for folder, children in out.items() if children}
+        for folder in out.keys() - nested:
+            out[folder][""] = 0
+        for rel in stored.pages:
+            parts = rel.split("/")
+            if parts[0] not in out or not rel.endswith(".md") or parts[-1] == "index.md":
+                continue
+            inner = out[parts[0]]
+            if parts[0] not in nested or len(parts) == 2:
+                inner[""] = inner.get("", 0) + 1
+            elif parts[1] in inner:
+                inner[parts[1]] += 1
+        return out
     out: dict[str, dict[str, int]] = {}
     if not notes_dir.is_dir():
         return out
@@ -990,13 +1018,15 @@ def compute_subindex_writes(
     are silently skipped — not every machine maintains the full hierarchy.
     A sub-index that a restricted writer may not write is skipped the same way.
     """
+    from .find_corpus import page_relative_path
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     admitted = connector_boundary.effect_admission(vault_root)
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = []
     planned_bases = {
-        path.resolve(): write for path, write in (base_writes or {}).items()
+        page_relative_path(path, vault_root): write for path, write in (base_writes or {}).items()
     }
 
     sources_dir = kb / "Sources"
@@ -1057,13 +1087,13 @@ def compute_subindex_writes(
 
     # Sources/index.md refresh.
     sources_index = sources_index_path(vault_root)
-    if sources_index.exists() and admitted(sources_index):
+    if store_read.page_exists(vault_root, sources_index.relative_to(vault_root).as_posix()) and admitted(sources_index):
         try:
             current, guard = read_guarded_text(vault_root, sources_index)
         except OSError:
             current = None
         if current is not None and include_sources_index:
-            base_write = planned_bases.get(sources_index.resolve())
+            base_write = planned_bases.get(page_relative_path(sources_index, vault_root))
             base = base_write.content if base_write is not None else current
             # Keep guarded reading outside the rendering cost: callers may
             # discard this text while still depending on its validation.
@@ -1088,13 +1118,13 @@ def compute_subindex_writes(
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
-    if notes_index.exists() and admitted(notes_index):
+    if store_read.page_exists(vault_root, notes_index.relative_to(vault_root).as_posix()) and admitted(notes_index):
         try:
             current, guard = read_guarded_text(vault_root, notes_index)
         except OSError:
             current = None
         if current is not None:
-            base_write = planned_bases.get(notes_index.resolve())
+            base_write = planned_bases.get(page_relative_path(notes_index, vault_root))
             base = base_write.content if base_write is not None else current
             new = _rewritten_in_place(
                 base,
@@ -1115,13 +1145,13 @@ def compute_subindex_writes(
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
-    if entities_index.exists() and admitted(entities_index):
+    if store_read.page_exists(vault_root, entities_index.relative_to(vault_root).as_posix()) and admitted(entities_index):
         try:
             current, guard = read_guarded_text(vault_root, entities_index)
         except OSError:
             current = None
         if current is not None:
-            base_write = planned_bases.get(entities_index.resolve())
+            base_write = planned_bases.get(page_relative_path(entities_index, vault_root))
             base = base_write.content if base_write is not None else current
             new = _rewritten_in_place(
                 base,
