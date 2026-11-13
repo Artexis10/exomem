@@ -187,7 +187,11 @@ class ExomemBackend:
         from .. import state_migration
 
         state_migration.require_vault_state_ready(self._vault)
+        from ..vault_store import availability
         from ..vault_store import mode as store_mode
+
+        # The service's rollout fence, so a session never serves a vault that the service refuses.
+        availability.require_servable(self._vault)
 
         if store_mode.store_mode_for_reads(self._vault):
             # The warm-up builds the lexical catalogue, the graph and the drain queues from files; a

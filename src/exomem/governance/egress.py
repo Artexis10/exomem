@@ -7898,6 +7898,16 @@ def file_mode_restricted_caller(
     return who
 
 
+def caller_is_owner(vault_root: Path, *, principal: RequestPrincipal | None = None) -> bool:
+    """Whether nothing is withheld from this caller, by a policy or by RAW.
+
+    Ask this beside whether a release filter exists, for what only the owner may do or read: a
+    bound store filters every caller's walk, the owner's too, so there a filter names no
+    restriction. In file mode the owner gets no filter, so the two agree.
+    """
+    return file_mode_restricted_caller(vault_root, principal) is None
+
+
 def caller_restricted(
     vault_root: Path,
     *,
@@ -8021,8 +8031,11 @@ def write_target_withheld(
     if keep is None:
         return False
     rel = str(rel_path or "").replace("\\", "/").strip().lstrip("/")
+    from ..vault_store import read as store_read
+
     try:
-        exists = bool(rel) and (Path(vault_root) / rel).is_file()
+        # A stored page exists while the store holds it, whatever its projection shows.
+        exists = bool(rel) and store_read.holds_file(Path(vault_root), rel)
     except OSError:
         return False
     return exists and not keep(rel)

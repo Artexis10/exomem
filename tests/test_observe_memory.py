@@ -20,7 +20,7 @@ from exomem import (
     semantic_language_registry,
     vault,
 )
-from exomem.governance.principal import owner_principal, request_scope
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
 PAGE_ID = "00000000-0000-4000-8000-000000000081"
 PAGE = "Knowledge Base/Notes/Insights/observe.md"
@@ -1169,10 +1169,12 @@ def test_a_principal_on_a_released_view_cannot_bind_a_unit_id(
     with pytest.raises(observe_memory.ObserveMemoryError, match="STALE_UNIT_REFERENCE"):
         observe_memory._bind_unit_id(tmp_path, document, stale)
 
+    # A released view is a non-owner's: a bound store gives the owner a filter too.
     monkeypatch.setattr(egress, "restricted_release_filter", lambda _root: lambda _path: False)
-    for given in (current, stale):
-        with pytest.raises(observe_memory.ObserveMemoryError, match="UNIT_NOT_FOUND"):
-            observe_memory._bind_unit_id(tmp_path, document, given)
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp", resolved=True)):
+        for given in (current, stale):
+            with pytest.raises(observe_memory.ObserveMemoryError, match="UNIT_NOT_FOUND"):
+                observe_memory._bind_unit_id(tmp_path, document, given)
 
 
 _BELIEF_PAGE_BODY = (

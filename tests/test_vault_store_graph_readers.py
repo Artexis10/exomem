@@ -355,8 +355,9 @@ def test_a_graph_and_link_read_serves_and_says_so_while_a_schema_change_is_appli
     stored, writer  # noqa: F811
 ):
     """A graph reader that refuses as warming for a pass that ends in minutes, or one that serves
-    rows derived under the previous schema without saying so; and a restricted caller that is
-    shown the revisions, which count the vault's writes."""
+    rows derived under the previous schema without saying so; a derived view that reads ready and
+    current over those rows; and a restricted caller that is shown the revisions, which count the
+    vault's writes."""
     for rel in (CLAIM, EVIDENCE, RIVAL):
         write.commit(writer, put(rel, PAGES[rel].encode()))
     write.commit(writer, put(PROFILES, b"profiles: {}\n"))
@@ -365,19 +366,25 @@ def test_a_graph_and_link_read_serves_and_says_so_while_a_schema_change_is_appli
     context = commands.op_graph_context(stored, path=CLAIM)
     links = commands.op_list_inbound_links(stored, target=EVIDENCE)
     asked = commands.op_ask_memory(stored, query="lighthouse", limit=15)
+    view = commands.read_memory_stored(stored, path="exomem://map")
     with request_scope(EXTERNAL):
         restricted = commands.op_graph_context(stored, path=CLAIM)
+        restricted_view = commands.read_memory_stored(stored, path="exomem://map")
 
     assert context["available"] and context["edges"] and links["count"] == 1
-    assert context["lag"]["registry"] == links["lag"]["registry"] == "rebuilding"
-    assert context["notice"] == links["notice"] == asked["notice"]
+    assert context["lag"]["registry"] == links["lag"]["registry"] == view["lag"]["registry"] == "rebuilding"
+    assert context["notice"] == links["notice"] == asked["notice"] == view["notice"]
+    assert view["state"] != "ready" or view["stale"] is True
     assert restricted["notice"] == context["notice"] and "lag" not in restricted
+    assert restricted_view["notice"] == context["notice"] and "lag" not in restricted_view
 
     project(writer, stored)
     settle_to_the_end(stored, writer)
 
     settled = commands.op_graph_context(stored, path=CLAIM)
+    settled_view = commands.read_memory_stored(stored, path="exomem://map")
     assert "notice" not in settled and "lag" not in settled
+    assert "notice" not in settled_view and "lag" not in settled_view
 
 
 def drop_link_tables(root):

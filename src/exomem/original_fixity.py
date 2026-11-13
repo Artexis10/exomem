@@ -1064,7 +1064,10 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
         return [], "unknown"
     coverage = "unknown" if _no_answer(meta) is not None else None
     # An outside path names the owner's own filesystem; another audience receives only the kind of copy.
-    restricted = bool(rows) and egress.visible_page_filter(Path(vault)) is not None
+    restricted = (
+        bool(rows) and not egress.caller_is_owner(Path(vault))
+        and egress.visible_page_filter(Path(vault)) is not None
+    )
 
     def route(row: Row) -> list[dict[str, str]]:
         return [copy if copy["source"] in _VAULT_COPIES or not restricted

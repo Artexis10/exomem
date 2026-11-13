@@ -148,7 +148,7 @@ def caller_is_owner(vault_root: Path) -> bool:
     """
     from ..governance import egress
 
-    return egress.file_mode_restricted_caller(vault_root, None) is None
+    return egress.caller_is_owner(vault_root)
 
 
 #: The reasons a store form refuses, each named once for the page and the folder forms.

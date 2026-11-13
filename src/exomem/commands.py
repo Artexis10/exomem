@@ -6448,7 +6448,7 @@ def op_delete(
     # holding only pages withheld from the writer does not exist for it, as
     # its listing says, and is answered as a missing path.
     keep = egress_module.restricted_release_filter(vault_root)
-    restricted = keep is not None
+    restricted = keep is not None and not egress_module.caller_is_owner(vault_root)
     if restricted and recursive:
         raise ValueError(_FOLDER_DELETE_REFUSAL)
     path = _resolve_memory_identifier(vault_root, path)
@@ -8410,7 +8410,15 @@ def read_memory_stored(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
                 "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
-        return context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
+        view = context_views_module.read_view(vault_root, path, continuation=continuation, purpose=purpose)
+        # A store-mode view is compiled over rows that a registry pass may still re-derive: a view
+        # that would read ready and current says so, in the words every store-mode reader uses.
+        registry_lag = _store_registry_lag(vault_root, egress_module.caller_restricted(vault_root))
+        if registry_lag is not None:
+            view = {**view, **registry_lag}
+            if view.get("state") == context_views_module.READY:
+                view["stale"] = True
+        return view
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.

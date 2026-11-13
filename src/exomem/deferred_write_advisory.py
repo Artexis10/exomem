@@ -159,9 +159,15 @@ def _observe_fingerprint(vault_root: Path, rel_path: str) -> str | None:
     non-UTF-8 target has no current generation to observe and returns None
     rather than a value that could accidentally compare equal.
     """
+    from .vault_store import read as store_read
+
     target = Path(vault_root).joinpath(*str(rel_path).split("/"))
     try:
-        if target.is_symlink() or not target.is_file():
+        if store_read.serves(vault_root, str(rel_path)):
+            # A stored page is its store row: its projection's link or absence says nothing.
+            if not store_read.holds_file(vault_root, str(rel_path)):
+                return None
+        elif target.is_symlink() or not target.is_file():
             return None
         text, _guard = read_guarded_text(vault_root, target)
         return content_hash(text)

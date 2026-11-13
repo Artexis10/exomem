@@ -2344,7 +2344,7 @@ def _validate_collection_create_for_profile(
     _require_activity_log(root)
     if not all(
         record_governance.full_release_filter(root)(path)
-        for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}/log.md")
+        for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}log.md")
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     from .collection_store import summary
@@ -5558,7 +5558,9 @@ def _portable_absence_guards(root: Path, *targets: Path) -> tuple[vault.Director
 
 
 def _require_activity_log(root: Path) -> None:
-    if not (root / vault.kb_prefix() / "log.md").is_file():
+    from .vault_store import read as store_read
+
+    if not store_read.holds_file(root, f"{vault.kb_prefix()}log.md"):
         raise collections.CollectionError(
             "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
         )

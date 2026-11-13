@@ -51,12 +51,12 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
-from exomem.collection_store import connection
+from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
-from exomem.governance.principal import RequestPrincipal, request_scope
-from exomem.vault_store import importer, ownership, read, write
+from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.vault_store import availability, importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
@@ -1021,6 +1021,56 @@ def test_a_stored_page_in_a_paths_scope_is_withheld_whatever_its_projection_is_l
         assert "Secret/S.md" not in json.dumps(answer, default=str)
 
 
+def test_a_write_door_withholds_a_stored_page_that_has_no_projection(stored, writer):  # noqa: F811
+    """A withheld check that asks the disk whether the page exists reads a stored page that has no
+    projection as no page and never withholds it: a write door then serves a page that its caller
+    may not see, once the store answers that the page exists."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Sources/Secret/**"]')
+    secret = "Knowledge Base/Sources/Secret/Ledger.md"
+    visible = "Knowledge Base/Sources/Open/Notice.md"
+    page = b"---\ntitle: Ledger\ntype: source\ncreated: 2025-01-01\n---\n# Ledger\n\nFigures.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(secret, page), write.PagePut(visible, page),
+    )))
+    for rel in (secret, visible):
+        (stored / rel).unlink(missing_ok=True)
+
+    proposal = commands.op_manage_memory_file(
+        stored, operation="propose-reclassification", path=secret, source_kind="article"
+    )
+    with request_scope(EXTERNAL):
+        withheld = (egress.write_target_withheld(stored, secret), egress.write_target_withheld(stored, visible))
+
+    assert proposal["path"] == secret  # the owner's door finds the stored source
+    assert withheld == (True, False)
+
+
+def test_a_bound_store_lets_the_owner_delete_a_folder_and_still_refuses_a_restricted_caller(
+    stored, writer  # noqa: F811
+):
+    """A bound store filters every caller's walk, the owner's too, so a folder delete that reads
+    "a filter exists" as "the caller is restricted" refuses the owner a recursive delete."""
+    folder = "Knowledge Base/Notes/Retired"
+    pages = [f"{folder}/{name}.md" for name in ("One", "Two")]
+    body = b"---\ntitle: R\ntype: note\n---\n# R\n\nRetired.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=tuple(
+        write.PagePut(rel, body) for rel in pages
+    )))
+    for rel in pages:  # as the projector writes them
+        (stored / rel).parent.mkdir(parents=True, exist_ok=True)
+        (stored / rel).write_bytes(body)
+    token = preview._BOUND.set((stored.resolve(), writer, False))
+    try:
+        with request_scope(EXTERNAL), pytest.raises(ValueError, match="AUDIENCE_RESTRICTED"):
+            commands.op_delete(stored, path=folder, confirm=True, recursive=True)
+        with request_scope(owner_principal(surface="mcp")):
+            commands.op_delete(stored, path=folder, confirm=True, recursive=True)
+    finally:
+        preview._BOUND.reset(token)
+
+    assert not any(read.holds_file(stored, rel) for rel in pages)
+
+
 @pytest.mark.timeout(300)
 def test_a_stored_page_with_an_invalid_container_claim_is_refused_as_in_file_mode(
     vault, monkeypatch  # noqa: F811
@@ -1137,6 +1187,8 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
 
     started = []
     monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
+    # The session past the rollout fence, which refuses a store-mode vault on this build.
+    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))
