@@ -84,7 +84,9 @@ def test_wrong_committed_plugin_version_cannot_tag_a_release(tmp_path):
         cuts.check_packages(tmp_path, "1.2.0")
 
 
-def native(root, branch, releases, recording, *, pull_requests=None):
+def native(
+    root, branch, releases, recording, *, pull_requests=None, record=None, existing_release=False
+):
     result = subprocess.run(
         ("node", str(ROOT / "tests/fixtures/release/pinned_release_please.cjs")),
         input=json.dumps(
@@ -94,7 +96,9 @@ def native(root, branch, releases, recording, *, pull_requests=None):
                 "releases": releases,
                 "recording": str(recording),
                 "pullRequests": pull_requests or [],
-                "operation": "releases" if pull_requests else "proposal",
+                "operation": "publish" if record else "releases" if pull_requests else "proposal",
+                "record": record,
+                "existingRelease": existing_release,
             }
         ),
         text=True,
@@ -140,7 +144,7 @@ def generate(root, runtime):
     not os.environ.get("RELEASE_PLEASE_NODE_MODULES"),
     reason="explicit pinned Release Please integration proof",
 )
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(450)
 def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_instructions(
     tmp_path, monkeypatch
 ):
@@ -231,7 +235,6 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     assert len(native_release) == 1
     assert native_release[0]["sha"] == release
     tag = native_release[0]["tag"]
-    git(root, "tag", tag, native_release[0]["sha"])
     assert git(root, "rev-list", "--parents", "-1", release).split() == [release, source]
     assert git(root, "rev-parse", f"{release}^{{tree}}") == git(
         root, "rev-parse", f"{head}^{{tree}}"
@@ -279,7 +282,11 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
             "sha": head,
             "repo": {"full_name": "example/project"},
         },
-        "body": cuts.INTENT_START + json.dumps(intent) + cuts.INTENT_END,
+        "body": proposal["body"]
+        + "\n\n"
+        + cuts.INTENT_START
+        + json.dumps(intent)
+        + cuts.INTENT_END,
     }
 
     reconciliation_prs = []
@@ -306,6 +313,8 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
                 "workflow_id": 8,
                 "path": cuts.evidence.WORKFLOW,
                 "event": "workflow_dispatch",
+                "status": "completed",
+                "head_sha": source,
                 "conclusion": "success",
                 "repository": {"full_name": "example/project"},
                 "head_repository": {"full_name": "example/project"},
@@ -374,6 +383,80 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     monkeypatch.setattr(cuts.evidence, "read_receipt", lambda run, repository: producer)
     resumed = cuts.prepare(source)
     record = cuts.qualify(resumed)
+    bad_intent = {
+        **intent,
+        "version": "999.0.0",
+        "policy": [],
+        "evidence": {**producer, "run_id": "999999999"},
+    }
+    merged_pr["body"] = (
+        proposal["body"] + "\n\n" + cuts.INTENT_START + json.dumps(bad_intent) + cuts.INTENT_END
+    )
+    with pytest.raises(ValueError, match="checkpoint version"):
+        cuts.qualify(resumed)
+    merged_pr["body"] = (
+        proposal["body"] + "\n\n" + cuts.INTENT_START + json.dumps(intent) + cuts.INTENT_END
+    )
+    malicious = native(
+        root,
+        branch,
+        releases,
+        tmp_path / "rejected-native-version.jsonl",
+        pull_requests=[
+            {
+                "number": 1,
+                "title": proposal["title"].replace(proposal["version"], "999.0.0"),
+                "body": proposal["body"].replace(proposal["version"], "999.0.0")
+                + "\n\n"
+                + cuts.INTENT_START
+                + json.dumps(intent)
+                + cuts.INTENT_END,
+                "sha": release,
+            }
+        ],
+        record=record,
+    )
+    assert "authenticated cut" in malicious["error"] and malicious["mutations"] == []
+    assert git(root, "tag", "--list", "v999.0.0") == ""
+    assert git(root, "tag", "--list", tag) == ""
+    git(root, "tag", tag, baseline)
+    conflict = native(
+        root,
+        branch,
+        releases,
+        tmp_path / "conflicting-native-tag.jsonl",
+        pull_requests=[
+            {"number": 1, "title": proposal["title"], "body": merged_pr["body"], "sha": release}
+        ],
+        record=record,
+    )
+    assert "immutable tag conflicts" in conflict["error"] and conflict["mutations"] == []
+    assert git(root, "rev-parse", tag) == baseline
+    git(root, "tag", "-d", tag)
+    published = native(
+        root,
+        branch,
+        releases,
+        tmp_path / "guarded-native-tag.jsonl",
+        pull_requests=[
+            {"number": 1, "title": proposal["title"], "body": merged_pr["body"], "sha": release}
+        ],
+        record=record,
+    )
+    assert "error" not in published, published
+    assert published["releases"][0]["sha"] == record["release"]
+    assert published["releases"][0]["tag"] == record["tag"]
+    # A post-tag/pre-origin retry derives the predecessor from C, not releases/latest or its checkpoint.
+    merged_pr["body"] = (
+        proposal["body"]
+        + "\n\n"
+        + cuts.INTENT_START
+        + json.dumps({**intent, "policy": [], "predecessor": {"tag": "v0.0.0", "source": "f" * 40}})
+        + cuts.INTENT_END
+    )
+    resumed_after_tag = cuts.prepare(source)
+    after_tag = cuts.qualify(resumed_after_tag)
+    assert after_tag == record
     assert resumed["source"] == source and resumed["merged"] is True
     assert record["release"] == git(root, "rev-parse", tag) == release
     assert record["evidence"] == producer and record["version"] == proposal["version"]
@@ -448,6 +531,14 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     late_plugin = root / "plugins/claude-code/skills/exomem/references/late-release/usage.md"
     assert initial_version in late_plugin.read_text()
     expired["value"] = True
+    original_body = merged_pr["body"]
+    merged_pr["body"] = cuts.INTENT_START + "invalid checkpoint" + cuts.INTENT_END
+    original_policy = list(policy)
+    policy.append({"context": "later policy", "app_id": 7})
+    assert cuts.qualify({"source": source, "branch": branch}) == record
+    assert cuts.prepare(source)["policy"] == record["required_checks"]
+    policy[:] = original_policy
+    merged_pr["body"] = original_body
     original_select = cuts.evidence.select_evidence
     # A green receipt from an older package contract cannot bless this stale source.
     monkeypatch.setattr(cuts.evidence, "select_evidence", lambda source, repo: {"run_id": "11"})
@@ -531,22 +622,6 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     git(root, "checkout", "--quiet", second_branch)
     git(root, "merge", "--squash", second_head)
     second_release = commit(root, second["title"])
-    second_native = native(
-        root,
-        second_branch,
-        releases,
-        tmp_path / "tag2-transport.jsonl",
-        pull_requests=[
-            {"number": 2, "title": second["title"], "body": second["body"], "sha": second_release}
-        ],
-    )["releases"]
-    assert len(second_native) == 1 and second_native[0]["sha"] == second_release
-    assert second_native[0]["notes"].count("intervening behavior") == 1
-    assert "selected behavior" not in second_native[0]["notes"]
-    git(root, "tag", second_native[0]["tag"], second_native[0]["sha"])
-    assert (root / "intervening.txt").exists()
-    assert "selected evidence boundary" in plugin_page.read_text()
-    git(root, "checkout", "--quiet", "main")
     second_producer = {
         **producer,
         "source_commit": reconciled,
@@ -571,6 +646,22 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
             },
         },
     )
+    second_native = native(
+        root,
+        second_branch,
+        releases,
+        tmp_path / "tag2-transport.jsonl",
+        record=second_record,
+        pull_requests=[
+            {"number": 2, "title": second["title"], "body": second["body"], "sha": second_release}
+        ],
+    )["releases"]
+    assert len(second_native) == 1 and second_native[0]["sha"] == second_release
+    assert second_native[0]["notes"].count("intervening behavior") == 1
+    assert "selected behavior" not in second_native[0]["notes"]
+    assert (root / "intervening.txt").exists()
+    assert "selected evidence boundary" in plugin_page.read_text()
+    git(root, "checkout", "--quiet", "main")
     cuts.reconcile_files(root, second_record, second_native[0]["notes"])
     generate(root, tmp_path / "runtime")
     final_main = commit(root, "chore: reconcile later published metadata")
@@ -621,10 +712,28 @@ def test_duplicate_intents_dispatch_at_most_one_full_fallback(monkeypatch):
         "branch": cuts.evidence.cut_branch(source),
         "policy": [{"context": "required CI gate", "app_id": 15368}],
     }
-    pr = {"number": 1, "merged": False, "head": {"sha": head}, "body": ""}
+    pr = {
+        "number": 1,
+        "merged": False,
+        "base": {"ref": cut["branch"]},
+        "head": {
+            "sha": head,
+            "ref": f"release-please--branches--{cut['branch']}",
+            "repo": {"full_name": "example/project"},
+        },
+        "body": "",
+    }
     monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(cuts.evidence, "main_check_policy", lambda: cut["policy"])
     monkeypatch.setenv("GH_TOKEN", "fixture")
     monkeypatch.setattr(cuts, "release_pull", lambda branch: pr)
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(cuts, "trusted_main", lambda: "c" * 40)
+    monkeypatch.setattr(cuts, "accepted_origin", lambda *args: None)
+    monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: "")
+    monkeypatch.setattr(cuts, "predecessor", lambda *args: ({"version": "1.0.0"}, None))
+    monkeypatch.setattr(cuts, "check_metadata_delta", lambda *args: "1.1.0")
+    monkeypatch.setattr(cuts.evidence, "release_pr", lambda *args: pr)
     monkeypatch.setattr(
         cuts,
         "save_intent",
@@ -668,10 +777,22 @@ def test_failed_required_check_stops_a_cut_before_metadata_execution_or_merge(mo
     pr = {
         "number": 1,
         "merged": False,
-        "head": {"sha": head},
+        "base": {"ref": cut["branch"]},
+        "head": {
+            "sha": head,
+            "ref": f"release-please--branches--{cut['branch']}",
+            "repo": {"full_name": "example/project"},
+        },
         "body": cuts.INTENT_START + json.dumps(intent) + cuts.INTENT_END,
     }
     monkeypatch.setattr(cuts, "release_pull", lambda branch: pr)
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(cuts, "trusted_main", lambda: "c" * 40)
+    monkeypatch.setattr(cuts, "accepted_origin", lambda *args: None)
+    monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: "")
+    monkeypatch.setattr(cuts, "predecessor", lambda *args: ({"version": "1.0.0"}, None))
+    monkeypatch.setattr(cuts, "check_metadata_delta", lambda *args: "1.1.0")
+    monkeypatch.setattr(cuts.evidence, "release_pr", lambda *args: pr)
     monkeypatch.setattr(cuts.evidence, "release_pr", lambda *args: pr)
     monkeypatch.setattr(cuts.evidence, "main_check_policy", lambda: intent["policy"])
     monkeypatch.setattr(
@@ -694,6 +815,8 @@ def test_failed_required_check_stops_a_cut_before_metadata_execution_or_merge(mo
             else [{"statuses": []}]
         ),
     )
+    monkeypatch.setattr(cuts, "authenticate_evidence", lambda source, producer: producer)
+    monkeypatch.setattr(cuts, "save_intent", lambda *args: None)
     writes = []
     monkeypatch.setattr(cuts.evidence, "command", lambda *args, **kwargs: writes.append(args))
     with pytest.raises(ValueError, match="required checks failed: required CI gate"):
@@ -755,3 +878,144 @@ def test_prepare_reuses_only_the_current_full_package_contract(monkeypatch, pack
     else:
         assert cuts.prepare(source)["source"] == source
         assert len(writes) == 1
+
+
+@pytest.mark.parametrize(
+    "merged", [False, True], ids=["open-retained-fake-producer", "squashed-retained-fake-producer"]
+)
+def test_unaccepted_retry_authenticates_the_retained_producer_before_any_merge(monkeypatch, merged):
+    """A mutable checkpoint cannot replace Full authentication on either retry route."""
+    source, head, release, tree = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    branch = cuts.evidence.cut_branch(source)
+    policy = [{"context": "required CI gate", "app_id": 15368}]
+    intent = {
+        "source": source,
+        "branch": branch,
+        "head": head,
+        "version": "1.1.0",
+        "predecessor": {
+            "tag": "v1.0.0",
+            "version": "1.0.0",
+            "source": source,
+            "reconciliation_commit": source,
+        },
+        "policy": policy,
+        "evidence": {
+            "run_id": "999999999",
+            "run_attempt": "1",
+            "source_commit": source,
+            "tested_commit": source,
+            "tested_tree": tree,
+        },
+    }
+    pr = {
+        "number": 1,
+        "state": "closed" if merged else "open",
+        "merged": merged,
+        "merge_commit_sha": release,
+        "base": {"ref": branch, "sha": source},
+        "head": {
+            "ref": f"release-please--branches--{branch}",
+            "sha": head,
+            "repo": {"full_name": "example/project"},
+        },
+        "body": cuts.INTENT_START + json.dumps(intent) + cuts.INTENT_END,
+    }
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(cuts, "release_pull", lambda branch: pr)
+    monkeypatch.setattr(cuts, "trusted_main", lambda: "e" * 40)
+    monkeypatch.setattr(cuts, "origin_at", lambda *args: None)
+    monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: source)
+    monkeypatch.setattr(
+        cuts, "read_json", lambda ref, path: {".": "1.0.0" if ref == source else "1.1.0"}
+    )
+    monkeypatch.setattr(cuts, "verify_metadata", lambda *args: "1.1.0")
+    monkeypatch.setattr(cuts, "check_metadata_delta", lambda *args: "1.1.0")
+    monkeypatch.setattr(cuts, "save_intent", lambda *args: None)
+    monkeypatch.setattr(cuts.evidence, "validate_predecessor", lambda *args: None)
+    monkeypatch.setattr(cuts.evidence, "release_pr", lambda *args: pr)
+    monkeypatch.setattr(cuts.evidence, "main_check_policy", lambda: policy)
+    monkeypatch.setattr(
+        cuts.evidence,
+        "inherited_checks",
+        lambda *args: [{"name": "required CI gate", "bucket": "pass"}],
+    )
+    monkeypatch.setattr(cuts, "verify_squash", lambda *args: {"commit": {"tree": {"sha": tree}}})
+
+    def api(path, **kwargs):
+        if path.startswith("actions/"):
+            raise ValueError("bound Full producer is unavailable")
+        if path == "pulls/1":
+            return pr
+        if path == "releases/latest":
+            return {"tag_name": "v1.0.0"}
+        return {"commit": {"tree": {"sha": tree}}}
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+    monkeypatch.setattr(cuts.evidence, "optional_api", lambda path: {"object": {"sha": release}})
+    writes = []
+
+    def command(*args, **kwargs):
+        writes.append(args)
+        pr["merged"] = True
+        return b""
+
+    monkeypatch.setattr(cuts.evidence, "command", command)
+    with pytest.raises(ValueError, match="bound Full producer"):
+        cuts.qualify({"source": source, "branch": branch, "policy": policy})
+    assert writes == []
+
+
+@pytest.mark.skipif(
+    not os.environ.get("RELEASE_PLEASE_NODE_MODULES"), reason="pinned native release transport"
+)
+def test_native_mutation_guard_rejects_changed_body_and_resumes_matching_tag(tmp_path, monkeypatch):
+    """Native body parsing cannot replace the authenticated version at the write boundary."""
+    monkeypatch.setenv("NODE_PATH", os.environ["RELEASE_PLEASE_NODE_MODULES"])
+    repository(tmp_path)
+    (tmp_path / "release-please-config.json").write_text(
+        json.dumps(
+            {"packages": {".": {"release-type": "python", "include-component-in-tag": False}}}
+        )
+    )
+    (tmp_path / ".release-please-manifest.json").write_text('{".":"1.0.0"}')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname="example"\nversion="1.0.0"\n')
+    source = commit(tmp_path, "chore: previous release")
+    branch = cuts.evidence.cut_branch(source)
+    git(tmp_path, "checkout", "--quiet", "-b", branch)
+    (tmp_path / ".release-please-manifest.json").write_text('{".":"1.1.0"}')
+    release = commit(tmp_path, "chore: release metadata")
+    body = ":robot: I have created a release *beep* *boop*\n---\n\n## 1.1.0\n\n### Features\n\n* selected behavior\n\n---\nThis PR was generated with Release Please."
+    record = {"branch": branch, "tag": "v1.1.0", "version": "1.1.0", "release": release}
+    pulls = [
+        {
+            "number": 1,
+            "title": "chore: release 999.0.0",
+            "body": body.replace("1.1.0", "999.0.0"),
+            "sha": release,
+        }
+    ]
+    rejected = native(
+        tmp_path, branch, [], tmp_path / "rejected.jsonl", pull_requests=pulls, record=record
+    )
+    assert "authenticated cut" in rejected["error"] and rejected["mutations"] == []
+    assert git(tmp_path, "tag", "--list") == ""
+    pulls[0]["body"] = body
+    pulls[0]["title"] = "chore: release 1.1.0"
+    created = native(
+        tmp_path, branch, [], tmp_path / "created.jsonl", pull_requests=pulls, record=record
+    )
+    assert "error" not in created, created
+    assert created["releases"][0]["tag"] == record["tag"]
+    assert git(tmp_path, "rev-parse", record["tag"]) == release
+    resumed = native(
+        tmp_path,
+        branch,
+        [],
+        tmp_path / "resumed.jsonl",
+        pull_requests=pulls,
+        record=record,
+        existing_release=True,
+    )
+    assert "error" not in resumed, resumed
+    assert git(tmp_path, "rev-parse", record["tag"]) == release

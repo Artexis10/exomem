@@ -1102,12 +1102,15 @@ def test_release_controller_uses_main_and_pinned_native_actions_for_fixed_cuts()
         for step in job["steps"]
         if step.get("uses", "").startswith("googleapis/release-please-action@")
     ]
-    assert len(actions) == 2
+    assert len(actions) == 1
     for action in actions:
         assert action["uses"].endswith("45996ed1f6d02564a971a2fa1b5860e934307cf7")
         assert action["with"]["target-branch"] == "${{ steps.cut.outputs.branch }}"
     assert actions[0]["with"]["skip-github-release"] is True
-    assert actions[1]["with"]["skip-github-pull-request"] is True
+    publish = next(
+        step for step in job["steps"] if "release_cuts.py publish" in step.get("run", "")
+    )
+    assert publish["env"]["GH_TOKEN"] == "${{ steps.landing-token.outputs.token }}"
     steps = job["steps"]
     preflight = next(index for index, step in enumerate(steps) if "check-head" in step.get("run", ""))
     candidate_index = next(index for index, step in enumerate(steps) if step.get("with", {}).get("path") == "candidate")

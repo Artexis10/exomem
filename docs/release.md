@@ -286,6 +286,14 @@ and Full producer. A nightly run without a cut intent cannot merge or tag.
 Cut branches inherit main's configured required check contexts and integration
 identities. Missing checks remain pending. An empty policy, a failed policy read,
 a failed check or another App's check cannot authorize a merge.
+A checkpoint retains pointers; it supplies no accepted proof. Every unaccepted
+retry derives the version and predecessor from immutable commits, authenticates the
+exact Full producer, and reads current required contexts and App identities.
+After squash, the guarded publisher uses Release Please 17.6.0's native release
+operation. Its mutation boundary checks the actual candidate's tag, version and
+squash against that authenticated identity. A conflicting tag stops without a rewrite.
+Accepted main origins retain authority when temporary proof expires or policy changes.
+
 The metadata tier checks the Cloud packages, committed Claude plugin content,
 selected plugin version, lockfile and configured version updates. An allowed
 JSON path permits only the maintained updater's version changes.

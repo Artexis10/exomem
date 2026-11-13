@@ -119,20 +119,11 @@ jobs:
         with:
           client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-      - name: Qualify the exact head and verify its squash outcome
+      - name: Authenticate the cut and guard native release creation
         if: env.LAND == 'true'
         env:
           GH_TOKEN: ${{ steps.landing-token.outputs.token }}
-        run: python3 scripts/release_cuts.py qualify
-      - name: Tag the verified native squash outcome
-        if: env.LAND == 'true'
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0, release-please 17.6.0
-        with:
-          token: ${{ steps.landing-token.outputs.token }}
-          target-branch: ${{ steps.cut.outputs.branch }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-          skip-github-pull-request: true
+        run: python3 scripts/release_cuts.py publish
       - name: Reconcile current main and publish only after origin acceptance
         if: env.LAND == 'true'
         env:

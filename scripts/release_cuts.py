@@ -2,7 +2,7 @@
 """Select, qualify and reconcile one fixed source through the main controller.
 
 A conflict stops one cut. Main remains available for ordinary delivery.
-The pinned Release Please action owns proposals, versions, notes and tags.
+Pinned Release Please owns proposals, versions, notes and tags.
 """
 
 from __future__ import annotations
@@ -107,62 +107,90 @@ def save_intent(pr: dict, intent: dict) -> None:
     )
 
 
+def predecessor(source: str, main: str) -> tuple[dict, dict | None]:
+    """C's immutable manifest names its predecessor, including after an in-flight tag exists."""
+    version = read_json(source, ".release-please-manifest.json")["."]
+    tag = "v" + version
+    previous_origin = origin_at(main, tag)
+    if previous_origin:
+        verify_origin(previous_origin, main, require_evidence=False)
+        reconciliation = git(
+            "log", "--diff-filter=A", "--format=%H", "-1", main, "--", origin_path(tag)
+        )
+        previous = {
+            "tag": tag,
+            "version": version,
+            "source": previous_origin["source"],
+            "reconciliation_commit": reconciliation,
+        }
+    else:
+        git("fetch", "--quiet", "origin", f"refs/tags/{tag}")
+        anchor = git("rev-parse", "FETCH_HEAD^{commit}")
+        git("merge-base", "--is-ancestor", anchor, main)
+        previous = {
+            "tag": tag,
+            "version": version,
+            "source": anchor,
+            "reconciliation_commit": anchor,
+        }
+    evidence.validate_predecessor(source, version, previous)
+    if (
+        previous_origin
+        and read_json(source, "release-please-config.json").get("last-release-sha")
+        != previous["source"]
+    ):
+        raise ValueError("source does not retain the preceding released source boundary")
+    return previous, previous_origin
+
+
+def accepted_origin(pr: dict | None, source: str, main: str) -> dict | None:
+    if not pr or not pr.get("merged"):
+        return None
+    release = pr["merge_commit_sha"]
+    git("fetch", "--quiet", "origin", release)
+    version = read_json(release, ".release-please-manifest.json")["."]
+    record = origin_at(main, "v" + version)
+    if record is not None:
+        if record["source"] != source or record["release"] != release:
+            raise ValueError("accepted release origin conflicts with the resumed cut")
+        verify_origin(record, main, require_evidence=False)
+    return record
+
+
 def prepare(source: str) -> dict:
     branch = evidence.cut_branch(source)
     main = trusted_main()
     git("merge-base", "--is-ancestor", source, main)
     pr = release_pull(branch)
+    accepted = accepted_origin(pr, source, main)
+    if accepted is not None:
+        return {
+            "source": source,
+            "branch": branch,
+            "predecessor": accepted["predecessor"],
+            "policy": accepted["required_checks"],
+            "propose": False,
+            "merged": True,
+        }
     intent = read_intent(pr) if pr else None
+    if intent and (intent["source"] != source or intent["branch"] != branch):
+        raise ValueError("existing intent conflicts with the selected cut")
     for page in evidence.api("pulls?state=open&per_page=100", pages=True):
         for other in page:
             if other["base"]["ref"].startswith("release-cuts/") and other["base"]["ref"] != branch:
                 raise ValueError(
                     f"finish cut PR #{other['number']} before selecting another source"
                 )
-    latest = evidence.api("releases/latest")
-    previous_tag = latest["tag_name"]
-    if intent:
-        if intent["source"] != source or intent["branch"] != branch:
-            raise ValueError("existing intent conflicts with the selected cut")
-        previous = intent["predecessor"]
-    else:
-        version = read_json(source, ".release-please-manifest.json")["."]
-        previous_origin = origin_at(main, previous_tag)
-        if previous_origin:
-            verify_origin(previous_origin, main, require_evidence=False)
-            path = origin_path(previous_tag)
-            # The accepted record's introduction is reachable from main; it never contains its own SHA.
-            reconciliation = git("log", "--diff-filter=A", "--format=%H", "-1", main, "--", path)
-            previous = {
-                "tag": previous_tag,
-                "version": previous_origin["version"],
-                "source": previous_origin["source"],
-                "reconciliation_commit": reconciliation,
-            }
-        else:
-            git("fetch", "--quiet", "origin", f"refs/tags/{previous_tag}")
-            anchor = git("rev-parse", "FETCH_HEAD^{commit}")
-            # A missing isolated origin is pending reconciliation, never a legacy ancestry shortcut.
-            git("merge-base", "--is-ancestor", anchor, main)
-            previous = {
-                "tag": previous_tag,
-                "version": previous_tag.removeprefix("v"),
-                "source": anchor,
-                "reconciliation_commit": anchor,
-            }
-        evidence.validate_predecessor(source, version, previous)
-        config = read_json(source, "release-please-config.json")
-        if previous_origin and config.get("last-release-sha") != previous["source"]:
-            raise ValueError("source does not retain the preceding released source boundary")
-        if previous_origin:
-            selected = evidence.select_evidence(source, os.environ["GH_REPO"])
-            if selected is None or selected.get("package_checks") != evidence.PACKAGE_CHECKS:
-                # Avoid Full on an unfinished repair. A wrong rejection costs this cut one local check.
-                with reconciliation_tree(source, previous_origin, "") as (_, expected):
-                    if expected != git("rev-parse", f"{source}^{{tree}}"):
-                        raise ValueError(
-                            "source must contain the completed preceding reconciliation"
-                        )
+    previous, previous_origin = predecessor(source, main)
+    if pr is None and evidence.api("releases/latest")["tag_name"] != previous["tag"]:
+        raise ValueError("source must contain the preceding reconciliation and published version")
+    if previous_origin and intent is None:
+        selected = evidence.select_evidence(source, os.environ["GH_REPO"])
+        if selected is None or selected.get("package_checks") != evidence.PACKAGE_CHECKS:
+            # Avoid Full on an unfinished repair. A wrong rejection costs this cut one local check.
+            with reconciliation_tree(source, previous_origin, "") as (_, expected):
+                if expected != git("rev-parse", f"{source}^{{tree}}"):
+                    raise ValueError("source must contain the completed preceding reconciliation")
     ref = evidence.optional_api(f"git/ref/heads/{branch}")
     if ref is None:
         if pr:
@@ -176,7 +204,7 @@ def prepare(source: str) -> dict:
         "source": source,
         "branch": branch,
         "predecessor": previous,
-        "policy": intent["policy"] if intent else evidence.main_check_policy(),
+        "policy": evidence.main_check_policy(),
         "propose": pr is None,
         "merged": bool(pr and pr.get("merged")),
     }
@@ -284,11 +312,8 @@ def push_generated(cut: dict, candidate: Path) -> None:
     )
 
 
-def check_packages(root: Path, version: str) -> None:
-    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
-    plugin = json.loads((root / "plugins/claude-code/.claude-plugin/plugin.json").read_text())
-    if project["version"] != version or plugin["version"] != version:
-        raise ValueError("package and committed plugin must use the selected release version")
+def child_environment(root: Path) -> dict:
+    # Candidate code receives package inputs, never controller credentials.
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -299,6 +324,15 @@ def check_packages(root: Path, version: str) -> None:
         UV_PROJECT_ENVIRONMENT=str(root / ".venv"),
         XDG_STATE_HOME=str(root / ".test-state"),
     )
+    return environment
+
+
+def check_packages(root: Path, version: str) -> None:
+    project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
+    plugin = json.loads((root / "plugins/claude-code/.claude-plugin/plugin.json").read_text())
+    if project["version"] != version or plugin["version"] != version:
+        raise ValueError("package and committed plugin must use the selected release version")
+    environment = child_environment(root)
     for args in (
         ("uv", "lock", "--check"),
         ("uv", "run", "--frozen", "python", "scripts/cloud-plugin.py", "check"),
@@ -317,31 +351,75 @@ def check_packages(root: Path, version: str) -> None:
         evidence.command(*args, cwd=root, env=environment)
 
 
+def authenticate_evidence(source: str, producer: dict) -> dict:
+    run = evidence.api(f"actions/runs/{producer['run_id']}/attempts/{producer['run_attempt']}")
+    if (
+        not evidence.trusted_full(
+            run, os.environ["GH_REPO"], evidence.api("actions/workflows/ci.yml")["id"]
+        )
+        or run["status"] != "completed"
+        or run["conclusion"] != "success"
+    ):
+        raise ValueError("bound Full producer did not succeed")
+    receipt = evidence.read_receipt(run, os.environ["GH_REPO"])
+    if receipt is None:
+        raise ValueError("bound Full producer evidence is pending or unavailable")
+    authenticated = {**receipt, "source_commit": source}
+    if authenticated["tested_tree"] != evidence.api(f"commits/{source}")["commit"]["tree"]["sha"]:
+        raise ValueError("bound Full producer tested a different source tree")
+    evidence.bind_evidence({"evidence": producer}, authenticated)
+    return authenticated
+
+
 def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
-    source, branch = cut["source"], cut["branch"]
+    source, branch = cut["source"], evidence.cut_branch(cut["source"])
+    if cut["branch"] != branch:
+        raise ValueError("cut branch differs from its selected source")
     pr = release_pull(branch)
     if not pr:
         raise ValueError("Release Please has not created the cut proposal; retry this source")
-    intent = read_intent(pr)
-    if intent is None:
-        if pr.get("merged"):
-            raise ValueError("merged cut has no retained checked intent")
-        intent = {
-            **cut,
-            "head": pr["head"]["sha"],
-            "policy": cut["policy"],
-            "fallback_requested": False,
-        }
+    main = trusted_main()
+    accepted = accepted_origin(pr, source, main)
+    if accepted is not None:
+        return accepted
+    checkpoint = read_intent(pr)
+    if checkpoint is None and pr.get("merged"):
+        raise ValueError("merged cut lacks its retained Full producer pointer")
+    head = pr["head"]["sha"]
+    if (
+        pr["base"]["ref"] != branch
+        or pr["head"]["ref"] != f"release-please--branches--{branch}"
+        or pr["head"]["repo"]["full_name"] != os.environ["GH_REPO"]
+        or (checkpoint and (checkpoint["source"] != source or checkpoint["head"] != head))
+    ):
+        raise ValueError("release source or head changed after cut selection")
+    git("merge-base", "--is-ancestor", source, main)
+    previous, _ = predecessor(source, main)
+    version = check_metadata_delta(source, head)
+    if checkpoint and checkpoint.get("version") not in (None, version):
+        raise ValueError("checkpoint version differs from the checked manifest")
+    intent = {
+        **cut,
+        "head": head,
+        "version": version,
+        "predecessor": previous,
+        "policy": evidence.main_check_policy(),
+        "fallback_requested": bool(checkpoint and checkpoint.get("fallback_requested")),
+    }
+    if checkpoint and checkpoint.get("evidence"):
+        intent["evidence"] = checkpoint["evidence"]
+    if not pr.get("merged"):
+        evidence.release_pr(pr["number"], source, head)
         save_intent(pr, intent)
-    if intent["source"] != source or intent["head"] != pr["head"]["sha"]:
-        raise ValueError("release head changed after cut selection")
-    if pr.get("merged"):
-        return make_origin(pr, intent)
-    if not intent.get("evidence"):
+    if intent.get("evidence"):
+        intent["evidence"] = authenticate_evidence(source, intent["evidence"])
+    else:
+        if pr.get("merged"):
+            raise ValueError("merged cut lacks its retained Full producer pointer")
         for _ in range(POLLS):
             selected = evidence.select_evidence(source, os.environ["GH_REPO"])
             if selected:
-                intent["evidence"] = evidence.bind_evidence(intent, selected)
+                intent["evidence"] = authenticate_evidence(source, selected)
                 save_intent(pr, intent)
                 break
             inflight = evidence.full_inflight(source, os.environ["GH_REPO"])
@@ -366,13 +444,13 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
             raise ValueError(
                 "Full evidence is pending; retry the same source after its producer completes"
             )
-    if evidence_only:
-        return cut
+    if evidence_only and not pr.get("merged"):
+        return {**cut, "predecessor": previous, "policy": intent["policy"]}
     for _ in range(evidence.CHECK_POLLS):
-        current = evidence.release_pr(pr["number"], source, intent["head"])
-        if evidence.main_check_policy() != intent["policy"]:
-            raise ValueError("main required-check policy changed during this cut")
-        checks = evidence.inherited_checks(intent["head"], intent["policy"])
+        if not pr.get("merged"):
+            evidence.release_pr(pr["number"], source, head)
+        intent["policy"] = evidence.main_check_policy()
+        checks = evidence.inherited_checks(head, intent["policy"])
         if checks is not None:
             if any(check["bucket"] != "pass" for check in checks):
                 raise ValueError(
@@ -382,14 +460,15 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
             break
         time.sleep(evidence.CHECK_POLL_SECONDS)
     else:
-        raise ValueError(
-            "required checks are pending; retry this cut after the configured App checks report"
-        )
-    intent["version"] = verify_metadata(source, intent["head"])
-    save_intent(current, intent)
-    evidence.release_pr(pr["number"], source, intent["head"])
+        raise ValueError("required checks are pending; retry after configured App checks report")
+    if verify_metadata(source, head) != version:
+        raise ValueError("checked release manifest version changed")
+    if pr.get("merged"):
+        return make_origin(pr, intent)
+    save_intent(pr, intent)
+    evidence.release_pr(pr["number"], source, head)
     evidence.command(
-        "gh", "pr", "merge", str(pr["number"]), "--squash", "--match-head-commit", intent["head"]
+        "gh", "pr", "merge", str(pr["number"]), "--squash", "--match-head-commit", head
     )
     for _ in range(12):
         pr = evidence.api(f"pulls/{pr['number']}")
@@ -487,13 +566,7 @@ def reconciliation_tree(base: str, record: dict, notes: str):
                 git("merge-base", "--is-ancestor", record["source"], newer["source"])
         # Equal accepted origins preserve later versions and notes; generation still runs below.
         reconcile_files(root, record, notes)
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key
-            not in ("GH_TOKEN", "GITHUB_TOKEN", "RELEASE_MERGE_TOKEN", "RELEASE_ACTIONS_TOKEN")
-        }
-        environment.update(PYTHONPATH=str(root / "src"), UV_PROJECT_ENVIRONMENT=str(root / ".venv"))
+        environment = child_environment(root)
         evidence.command(
             "uv",
             "run",
@@ -706,19 +779,7 @@ def verify_origin(record: dict, main: str, *, require_evidence: bool) -> None:
         source, read_json(source, ".release-please-manifest.json")["."], record["predecessor"]
     )
     if require_evidence:
-        producer = record["evidence"]
-        run = evidence.api(f"actions/runs/{producer['run_id']}/attempts/{producer['run_attempt']}")
-        if (
-            not evidence.trusted_full(
-                run, os.environ["GH_REPO"], evidence.api("actions/workflows/ci.yml")["id"]
-            )
-            or run["conclusion"] != "success"
-        ):
-            raise ValueError("bound Full producer did not succeed")
-        receipt = evidence.read_receipt(run, os.environ["GH_REPO"])
-        if receipt is None:
-            raise ValueError("bound Full producer evidence is pending or unavailable")
-        evidence.bind_evidence({"evidence": producer}, {**receipt, "source_commit": source})
+        authenticate_evidence(source, record["evidence"])
         if verify_metadata(source, head) != record["version"]:
             raise ValueError("checked release version conflicts with the origin")
 
@@ -755,6 +816,7 @@ def main() -> None:
             "push-generated",
             "evidence",
             "qualify",
+            "publish",
             "reconcile",
             "verify-tag",
         ),
@@ -784,11 +846,19 @@ def main() -> None:
         if args.candidate is None:
             parser.error("push-generated requires --candidate")
         push_generated(json.loads(args.state.read_text()), args.candidate)
-    elif args.operation in ("evidence", "qualify"):
+    elif args.operation in ("evidence", "qualify", "publish"):
         record = qualify(
             json.loads(args.state.read_text()), evidence_only=args.operation == "evidence"
         )
         args.state.write_text(json.dumps(record, indent=2) + "\n")
+        if args.operation == "publish":
+            print(
+                evidence.command(
+                    "node", str(Path(__file__).with_name("release_publish.cjs")), str(args.state)
+                )
+                .decode()
+                .strip()
+            )
     elif args.operation == "reconcile":
         record = json.loads(args.state.read_text())
         reconcile(record)
