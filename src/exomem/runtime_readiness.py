@@ -27,12 +27,8 @@ log = logging.getLogger(__name__)
 # cadence of at least one probe per five minutes rather than one late burst.
 SILENT_TRAFFIC_WINDOW_SECONDS = 24 * 60 * 60
 SILENT_TRAFFIC_MINIMUM_HEALTH_PROBES = 288
-# A 2.4k-note Windows vault needs about 0.27 seconds to read its mutation
-# boundary plus graph epoch under memory pressure.  The former 0.25-second
-# ceiling therefore rejected ordinary work and made successive readiness
-# probes alternate 503/200 as the second probe reused the first one's late
-# result.  Keep a hard sub-second bound, with enough headroom for the measured
-# steady state; genuinely blocked graph publication still fails closed.
+# Keep the real boundary and coordinator lease measurements bounded. Owner
+# graph, collection and idempotency diagnostics must not spend this budget.
 COORDINATION_STATUS_TIMEOUT_SECONDS = 0.75
 
 _COORDINATION_PROBES_LOCK = threading.Lock()
@@ -730,10 +726,9 @@ def _bounded_coordination_status(
 ) -> Mapping[str, Any] | None:
     """Run at most one status probe per vault and fail closed on its deadline.
 
-    The underlying diagnostic traverses graph state and can encounter a live
-    publication hold.  Readiness cannot inherit that unbounded wait: the public
-    endpoint must answer within the edge budget, and repeated health polls must
-    not create an unbounded thread pile while the first probe is still blocked.
+    A real boundary or coordinator probe can stall. The public endpoint must
+    answer within its budget, and repeated polls must not create an unbounded
+    thread pile while the first probe is still blocked.
     """
     key = (
         "<process-local>"
@@ -785,7 +780,7 @@ def runtime_readiness(
     """Measure this process's eligibility without exposing vault or credential state."""
     from . import readiness, service_standby
     from .session_validation_cache import session_store_readiness
-    from .writer_lease import coordination_status
+    from .writer_lease import _coordination_readiness_status
 
     coordination: Mapping[str, Any]
     configured_vault: Path | None = None
@@ -803,7 +798,7 @@ def runtime_readiness(
         )
         measured = _bounded_coordination_status(
             configured_vault,
-            coordination_status,
+            _coordination_readiness_status,
         )
         if measured is None:
             coordination = _unmeasured_coordination("status_timeout")
