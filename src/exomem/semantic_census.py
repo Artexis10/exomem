@@ -19,6 +19,8 @@ from . import (
 )
 from .kbdir import kb_dirname, kb_prefix
 from .memory_refs import ID_FIELD, normalize_id
+from .vault_store import directory as store_directory
+from .vault_store import mode as store_mode
 
 DEFAULT_MAX_FILES = 512
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024
@@ -358,7 +360,7 @@ def _governance_report(
     complete_root_scan: bool,
 ) -> tuple[dict[str, Any], set[str]]:
     metadata_work: set[str] = set()
-    kb_present = (root / kb_dirname()).is_dir()
+    kb_present = store_directory.is_dir(root, kb_dirname())
     unavailable = {
         "kb_present": kb_present,
         "saved_contracts": {
@@ -607,43 +609,60 @@ def scan(
     unreadable_directories = 0
     enumeration_incomplete = False
     directory_entry_budget_exhausted = False
+    source = (
+        store_directory.Reader(root_path)
+        if store_mode.store_mode_for_reads(root_path) else None
+    )
     try:
         initial_ancestors = _directory_identity_chain(root_path, scan_root)
     except (OSError, RuntimeError, ValueError):
         initial_ancestors = ()
-        enumeration_incomplete = True
-        unreadable_directories += 1
+        if source is None:
+            enumeration_incomplete = True
+            unreadable_directories += 1
     pending_directories = (
-        [(scan_root, initial_ancestors)] if initial_ancestors else []
+        [(scan_root, initial_ancestors)] if initial_ancestors or source is not None else []
     )
     directory_entries_admitted = 0
 
     while pending_directories:
         dirpath, expected_ancestors = pending_directories.pop()
-        if not _directory_identities_current(root_path, expected_ancestors):
+        if source is None and not _directory_identities_current(root_path, expected_ancestors):
             unreadable_directories += 1
             enumeration_incomplete = True
             continue
-        entries: list[os.DirEntry[str]] = []
+        entries: list[os.DirEntry[str] | store_directory.Entry] = []
         sentinel_observed = False
         try:
-            with os.scandir(dirpath) as iterator:
-                while directory_entries_admitted < effective_directory_entry_budget:
-                    try:
-                        entry = next(iterator)
-                    except StopIteration:
-                        break
-                    directory_entries_enumerated += 1
-                    directory_entries_admitted += 1
-                    entries.append(entry)
-                if directory_entries_admitted >= effective_directory_entry_budget:
-                    try:
-                        next(iterator)
-                    except StopIteration:
-                        pass
-                    else:
+            if source is not None:
+                remaining = effective_directory_entry_budget - directory_entries_admitted
+                found = source.entries(dirpath, remaining + 1)
+                entries = found[:remaining]
+                sentinel_observed = len(found) > remaining
+                directory_entries_enumerated += len(entries) + int(sentinel_observed)
+                directory_entries_admitted += len(entries)
+                source.prefetch(
+                    entries, max_files=effective_max_files - markdown_scanned,
+                    max_bytes=effective_max_bytes - bytes_scanned,
+                )
+            else:
+                with os.scandir(dirpath) as iterator:
+                    while directory_entries_admitted < effective_directory_entry_budget:
+                        try:
+                            entry = next(iterator)
+                        except StopIteration:
+                            break
                         directory_entries_enumerated += 1
-                        sentinel_observed = True
+                        directory_entries_admitted += 1
+                        entries.append(entry)
+                    if directory_entries_admitted >= effective_directory_entry_budget:
+                        try:
+                            next(iterator)
+                        except StopIteration:
+                            pass
+                        else:
+                            directory_entries_enumerated += 1
+                            sentinel_observed = True
         except OSError:
             unreadable_directories += 1
             enumeration_incomplete = True
@@ -654,19 +673,25 @@ def scan(
         ] = []
         for entry in sorted(entries, key=lambda item: item.name):
             filename = entry.name
-            try:
-                entry_info = _comparable_identity_stat(entry)
-            except OSError:
-                if filename.casefold().endswith(".md"):
-                    markdown_seen += 1
-                    markdown_omitted += 1
-                    unreadable_files += 1
-                continue
-            is_directory = (
-                stat.S_ISDIR(entry_info.st_mode)
-                and not stat.S_ISLNK(entry_info.st_mode)
-                and not _is_reparse(entry_info)
-            )
+            stored_meta = entry.meta if source is not None else None
+            if source is not None and entry.disk is None:
+                is_directory = entry.directory
+                entry_info = None
+            else:
+                disk_entry = entry.disk if source is not None else entry
+                try:
+                    entry_info = _comparable_identity_stat(disk_entry)
+                except OSError:
+                    if filename.casefold().endswith(".md"):
+                        markdown_seen += 1
+                        markdown_omitted += 1
+                        unreadable_files += 1
+                    continue
+                is_directory = (
+                    stat.S_ISDIR(entry_info.st_mode)
+                    and not stat.S_ISLNK(entry_info.st_mode)
+                    and not _is_reparse(entry_info)
+                )
             if is_directory:
                 if filename in _SKIP_ALWAYS or (
                     not include_hidden
@@ -675,13 +700,11 @@ def scan(
                     hidden_omitted += 1
                     continue
                 child_path = Path(entry.path)
-                child_identity = vault._identity(
-                    child_path.relative_to(root_path).as_posix(),
-                    entry_info,
+                child_ancestors = () if entry_info is None else (
+                    *expected_ancestors,
+                    vault._identity(child_path.relative_to(root_path).as_posix(), entry_info),
                 )
-                child_directories.append(
-                    (child_path, (*expected_ancestors, child_identity))
-                )
+                child_directories.append((child_path, child_ancestors))
                 continue
             if not include_hidden and filename.startswith("."):
                 hidden_omitted += 1
@@ -693,17 +716,30 @@ def scan(
                 markdown_omitted += 1
                 continue
             disk_path = Path(entry.path)
-            expected_file = vault._identity(
-                disk_path.relative_to(root_path).as_posix(),
-                entry_info,
-            )
-            read_status, raw = _read_regular_file_bounded(
-                root_path,
-                disk_path,
-                effective_max_bytes - bytes_scanned,
-                expected_ancestors=expected_ancestors,
-                expected_file=expected_file,
-            )
+            if stored_meta is not None:
+                if stored_meta.size > effective_max_bytes - bytes_scanned:
+                    read_status, raw = "oversized", None
+                else:
+                    raw = source.body(
+                        entry, max_files=effective_max_files - markdown_scanned,
+                        max_bytes=effective_max_bytes - bytes_scanned,
+                    )
+                    read_status = "ok"
+            else:
+                expected_file = vault._identity(
+                    disk_path.relative_to(root_path).as_posix(), entry_info,
+                )
+                try:
+                    ancestors = (
+                        _directory_identity_chain(root_path, dirpath)
+                        if source is not None else expected_ancestors
+                    )
+                    read_status, raw = _read_regular_file_bounded(
+                        root_path, disk_path, effective_max_bytes - bytes_scanned,
+                        expected_ancestors=ancestors, expected_file=expected_file,
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    read_status, raw = "unreadable", None
             if read_status == "oversized":
                 markdown_omitted += 1
                 continue

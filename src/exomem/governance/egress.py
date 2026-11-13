@@ -2171,9 +2171,12 @@ def _page_local_path(vault_root: Path, rel_path: str, *, withheld: bool) -> bool
             or bound_writer(vault_root) is not None or ownership.relevant(rel_path)):
         return False
     if withheld:
+        from ..vault_store import read
+
         try:
-            with open(Path(vault_root) / rel_path, "rb"):
-                pass
+            if read.owned_meta(vault_root, rel_path) is None:
+                with open(Path(vault_root) / rel_path, "rb"):
+                    pass
         except OSError:
             return False
     return True

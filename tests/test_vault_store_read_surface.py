@@ -33,6 +33,7 @@ from exomem import (
     commands,
     epistemic_graph,
     find,
+    freshness,
     lexstore,
     schema,
     temporal,
@@ -143,16 +144,11 @@ OWNER_REFUSALS = {
 # These are the remaining observed command cases after the shared read fixes, not a blanket xfail.
 # A new command is unmarked; an invalid sample raises an ordinary assertion, not this failure.
 KNOWN_FAILURES = {
-    "activate_context": "Restricted recall still opens withheld page projections",
-    "adopt_vault": "The structure scan still walks projected pages",
     "coordination_status": "Status still probes graph-sidecar ownership",
     "edit_memory": "Validation mints a fresh transition token and hashes even in unchanged file mode",
-    "get": "Page links still stat and scan projections",
     "observe_memory": "Validation mints a fresh transition token and hashes even in unchanged file mode",
-    "overview": "The structure scan still walks projected pages",
-    "read_memory": "Page links still stat and scan projections",
     "replace_memory": "Replacement validation's navigation plan still scans projected indexes",
-    "viewer_map": "Bounded viewer summaries still require file-mode live signatures",
+    "viewer_map": "Payloads match; store revision identity intentionally differs from file generation metadata",
 }
 
 
@@ -287,6 +283,15 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
     before = {}
     for caller, scope in callers.items():
         clear_reader_caches(vault)
+        # Cache eviction also clears the watcher registry. Restore service readiness before
+        # comparing bounded graph reads and complete link answers with the store's current rows.
+        if SAMPLES[name].get("links") or name == "viewer_map":
+            freshness.seed(vault, "vault", (
+                (str(path), freshness.stat_signature(path)) for path in vaults.walk_vault_md(vault)
+            ))
+            assert epistemic_graph.EpistemicGraphIndex(vault).available()
+        if SAMPLES[name].get("links"):
+            assert vaults.prime_inbound_index(vault, eager=True)
         with scope():
             before[caller] = comparable(answer(command, vault, arguments, source_schema))
     if "refusal" in before["owner"]:

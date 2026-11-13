@@ -14121,27 +14121,47 @@ class GraphView:
         self.interrupted[path] = reason
 
     def _bounded_summaries(self, paths: list[str]) -> dict[str, Mapping[str, Any]]:
-        """Use live point signatures and resident parser facts before any source work."""
+        """Bound source bytes from canonical metadata before loading resident parser facts."""
         result: dict[str, Mapping[str, Any]] = {}
         try:
             self._check()
-            signatures = freshness.live_signatures(
-                self.vault_root, "vault", (self.vault_root / path for path in paths),
-            )
-            if signatures is None or self.checkpoint is None or (
-                freshness.live_recall_checkpoint(self.vault_root, "vault") != self.checkpoint
-            ):
+            from .vault_store import mode as store_mode
+            from .vault_store import read as store_read
+
+            if store_mode.store_mode_for_reads(self.vault_root):
+                with store_read.snapshot(self.vault_root) as snapshot:
+                    metadata = snapshot.page_metas(paths)
+                sizes = {}
+                for path in paths:
+                    if (meta := metadata.get(path)) is not None:
+                        sizes[path] = meta.size
+                    elif not store_read.serves(self.vault_root, path):
+                        try:
+                            sizes[path] = (self.vault_root / path).stat().st_size
+                        except OSError:
+                            self._interrupt(path, "live_signature_unavailable")
+                    else:
+                        self._interrupt(path, "live_signature_unavailable")
+                current = store_read.recall_checkpoint(self.vault_root, "vault")
+            else:
+                signatures = freshness.live_signatures(
+                    self.vault_root, "vault", (self.vault_root / path for path in paths),
+                )
+                sizes = {}
+                for path, signature in zip(paths, signatures or [None] * len(paths), strict=True):
+                    if signature is None:
+                        self._interrupt(path, "live_signature_unavailable")
+                    else:
+                        sizes[path] = signature[2]
+                current = freshness.live_recall_checkpoint(self.vault_root, "vault")
+            if self.checkpoint is None or current != self.checkpoint:
                 for path in paths:
                     self._interrupt(path, "live_signature_unavailable")
                 return result
-            sizes = {}
-            for path, signature in zip(paths, signatures, strict=True):
-                if signature is None:
-                    self._interrupt(path, "live_signature_unavailable")
-                elif signature[2] > self.source_limit:
+            for path, size in list(sizes.items()):
+                if size > self.source_limit:
                     self._interrupt(path, "source_work_limit")
-                else:
-                    sizes[path] = signature[2]
+                    del sizes[path]
             # SQLite returns a scalar byte count before it can deliver oversized JSON to Python.
             for path, size, metadata in self.conn.execute(
                 "SELECT path, length(CAST(metadata AS BLOB)), "
