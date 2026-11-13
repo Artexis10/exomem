@@ -7488,77 +7488,159 @@ def _check_entity_recurrence_from_store(
     return [_entity_recurrence_finding(candidate) for candidate in candidates]
 
 
-#: The last proximity sweep per vault. The sweep multiplies every eligible
-#: page's chunks against every chunk in the vault, and its answer moves only
-#: with the vectors, the eligible set, the authored exclusions and the band.
-#: The matrix is held weakly, so the memo never keeps one resident after the
-#: index or quiet mode releases it.
-_SWEEP_MEMO: dict[str, tuple[tuple[Any, ...], Any, dict[tuple[str, str], float]]] = {}
+@dataclass(frozen=True)
+class _Sweep:
+    """One proximity sweep: what it read, and every in-band pair it found."""
+
+    band: tuple[float, float]
+    matrix: Any  # a weak reference: the memo never keeps a matrix resident
+    vectors: dict[str, bytes]  # eligible page -> digest of its chunk vectors
+    pairs: dict[tuple[str, str], float]
+
+
+#: The last proximity sweep per vault. A pair's score moves only with the chunk
+#: vectors of its two pages and with the band, so the next sweep multiplies
+#: only the pages whose vectors changed.
+_SWEEP_MEMO: dict[str, _Sweep] = {}
 _SWEEP_MEMO_LOCK = threading.Lock()
 _SWEEP_MEMO_CAP = 8
+#: The cells of one product, about 32 MB of cosines. One product per page read
+#: the whole matrix once for each page; a product of several pages against the
+#: eligible chunks reads it once for all of them.
+_SWEEP_PRODUCT_CELLS = 8_000_000
 
 
-def _swept_pairs(
-    vault_root: Path, key: tuple[Any, ...], matrix: Any
-) -> dict[tuple[str, str], float] | None:
-    """The remembered sweep when nothing it read has changed, else None.
+def _band_pairs(
+    row_files: list[str],
+    rows: Any,
+    row_starts: list[int],
+    column_files: list[str],
+    columns: Any,
+    column_starts: list[int],
+    floor: float,
+    ceiling: float,
+    np: Any,
+    *,
+    square: bool = False,
+) -> Iterable[tuple[str, str, float]]:
+    """Each `(row page, column page, score)` that the band admits.
 
-    The vectors are identified by the matrix object alone, with no generation:
-    every catch-up and reload builds a new array (`_splice_path_blocks` is
-    copy-on-write) and nothing writes into a served one.
+    A page's chunks are adjacent, and `*_starts` holds each page's first chunk.
+    Seen from one page, a chunk of the other page scores its best cosine with
+    any chunk of this page. A score outside the band counts for nothing, and
+    the pair takes the best score that counts, seen from either page.
+
+    `square` says that the rows are the columns. A product then starts at its
+    own first row: an earlier product already held each pair before it.
     """
-    with _SWEEP_MEMO_LOCK:
-        held = _SWEEP_MEMO.get(str(vault_root))
-    if held is None or held[0] != key or held[1]() is not matrix:
-        return None
-    return dict(held[2])
-
-
-def _remember_sweep(
-    vault_root: Path, key: tuple[Any, ...], matrix: Any, pairs: dict[tuple[str, str], float]
-) -> None:
-    with _SWEEP_MEMO_LOCK:
-        _SWEEP_MEMO.pop(str(vault_root), None)
-        while len(_SWEEP_MEMO) >= _SWEEP_MEMO_CAP:
-            _SWEEP_MEMO.pop(next(iter(_SWEEP_MEMO)))
-        _SWEEP_MEMO[str(vault_root)] = (key, weakref.ref(matrix), dict(pairs))
+    ends = [*row_starts[1:], len(rows)]
+    first = 0
+    while first < len(row_files):
+        base = row_starts[first]
+        left, page = (base, first) if square else (0, 0)
+        room = max(1, _SWEEP_PRODUCT_CELLS // max(1, len(columns) - left))
+        last = first + 1
+        while last < len(row_files) and ends[last] - base <= room:
+            last += 1
+        products = rows[base : ends[last - 1]] @ columns[left:].T
+        own = [start - base for start in row_starts[first:last]]
+        other = [start - left for start in column_starts[page:]]
+        # From the row page: each column chunk against the page's best chunk.
+        seen = np.maximum.reduceat(products, own, axis=0)
+        seen = np.where((seen >= floor) & (seen < ceiling), seen, -np.inf)
+        score = np.maximum.reduceat(seen, other, axis=1)
+        # From the column page: each row chunk against that page's best chunk.
+        seen = np.maximum.reduceat(products, other, axis=1)
+        seen = np.where((seen >= floor) & (seen < ceiling), seen, -np.inf)
+        score = np.maximum(score, np.maximum.reduceat(seen, own, axis=0))
+        for row, column in zip(*np.nonzero(score > -np.inf), strict=True):
+            yield (
+                row_files[first + int(row)],
+                column_files[page + int(column)],
+                float(score[row, column]),
+            )
+        first = last
 
 
 def _sweep_pairs(
+    vault_root: Path,
     metadata: list[tuple[str, int]],
     matrix: Any,
     eligible: Mapping[str, Any],
-    excluded: set[tuple[str, str]],
     floor: float,
     ceiling: float,
     np: Any,
 ) -> dict[tuple[str, str], float]:
-    """Max chunk-cosine per deduped unordered file pair, both endpoints eligible."""
+    """Max in-band chunk-cosine per unordered pair of eligible pages.
+
+    Only the chunks of eligible pages are multiplied: no other chunk can be an
+    endpoint. The remembered sweep answers for each page whose vectors are the
+    same bytes, so a write costs the products of the pages it changed.
+    """
     rows_by_file: dict[str, list[int]] = {}
     for i, (fp, _cidx) in enumerate(metadata):
-        rows_by_file.setdefault(fp, []).append(i)
-    pair_cos: dict[tuple[str, str], float] = {}
-    for fp, _page in eligible.items():
-        rows = rows_by_file.get(fp)
-        if not rows:
-            continue  # eligible page with no vectors yet (e.g. never embedded)
-        sub = matrix[rows]                       # (m, D) this file's chunk vectors
-        col_max = (sub @ matrix.T).max(axis=0)   # (N,) best cosine file→each chunk
-        in_band = np.nonzero((col_max >= floor) & (col_max < ceiling))[0]
-        for j in in_band:
-            other_fp = metadata[int(j)][0]
-            if other_fp == fp or other_fp not in eligible:
-                continue
-            score = float(col_max[int(j)])
-            a, b = sorted((fp, other_fp))
-            key = (a, b)
-            # Already surfaced as an authored contradiction: the stronger signal
-            # owns the pair, so it is not re-measured, re-counted, or re-capped.
-            if key in excluded:
-                continue
-            if key not in pair_cos or score > pair_cos[key]:
-                pair_cos[key] = score
-    return pair_cos
+        if fp in eligible:
+            rows_by_file.setdefault(fp, []).append(i)
+    band = (float(floor), float(ceiling))
+    with _SWEEP_MEMO_LOCK:
+        held = _SWEEP_MEMO.get(str(vault_root))
+    if held is not None and held.band != band:
+        held = None
+    if (
+        held is not None
+        and held.matrix() is matrix
+        and held.vectors.keys() == rows_by_file.keys()
+    ):
+        # Every catch-up and reload builds a new array (`_splice_path_blocks` is
+        # copy-on-write) and nothing writes into a served one.
+        return held.pairs
+    # An eligible page with no vectors yet (never embedded) has no row here.
+    files = sorted(rows_by_file)
+    digests = {
+        fp: hashlib.blake2b(matrix[rows_by_file[fp]].tobytes(), digest_size=16).digest()
+        for fp in files
+    }
+    known = held.vectors if held is not None else {}
+    changed = [fp for fp in files if known.get(fp) != digests[fp]]
+    pairs = {
+        pair: score
+        for pair, score in (held.pairs.items() if held is not None else ())
+        if all(fp in digests and known[fp] == digests[fp] for fp in pair)
+    }
+    found: Iterable[tuple[str, str, float]] = ()
+    if changed:
+        starts: list[int] = []
+        order: list[int] = []
+        for fp in files:
+            starts.append(len(order))
+            order.extend(rows_by_file[fp])
+        vectors = np.ascontiguousarray(matrix[order])
+        if len(changed) == len(files):
+            found = _band_pairs(
+                files, vectors, starts, files, vectors, starts, floor, ceiling, np, square=True
+            )
+        else:
+            moved_starts: list[int] = []
+            moved_order: list[int] = []
+            for fp in changed:
+                moved_starts.append(len(moved_order))
+                moved_order.extend(rows_by_file[fp])
+            found = _band_pairs(
+                changed, np.ascontiguousarray(matrix[moved_order]), moved_starts,
+                files, vectors, starts, floor, ceiling, np,
+            )
+    for fp, other_fp, score in found:
+        if fp == other_fp:
+            continue
+        pair = (fp, other_fp) if fp < other_fp else (other_fp, fp)
+        if score > pairs.get(pair, -math.inf):
+            pairs[pair] = score
+    with _SWEEP_MEMO_LOCK:
+        _SWEEP_MEMO.pop(str(vault_root), None)
+        while len(_SWEEP_MEMO) >= _SWEEP_MEMO_CAP:
+            _SWEEP_MEMO.pop(next(iter(_SWEEP_MEMO)))
+        _SWEEP_MEMO[str(vault_root)] = _Sweep(band, weakref.ref(matrix), digests, pairs)
+    return pairs
 
 
 @call_spans.timed("audit.corpus_contradictions")
@@ -7679,17 +7761,15 @@ def _proximity_contradictions(
         _enrich_contradiction_polarity(vault_root, [], eligible, sense_scope=sense_scope)
         return []
     excluded = exclude or set()
-
-    sweep_key = (
-        frozenset(eligible),
-        frozenset(excluded),
-        float(floor),
-        float(ceiling),
-    )
-    pair_cos = _swept_pairs(vault_root, sweep_key, matrix)
-    if pair_cos is None:
-        pair_cos = _sweep_pairs(metadata, matrix, eligible, excluded, floor, ceiling, np)
-        _remember_sweep(vault_root, sweep_key, matrix, pair_cos)
+    # Already surfaced as an authored contradiction: the stronger signal owns
+    # the pair, so it is not re-counted or re-capped.
+    pair_cos = {
+        pair: cos
+        for pair, cos in _sweep_pairs(
+            vault_root, metadata, matrix, eligible, floor, ceiling, np
+        ).items()
+        if pair not in excluded
+    }
 
     # Order into a usable review queue: priority = cosine + w · pair_dormancy,
     # same-family pairs demoted, then capped at top-N with an explicit count.
