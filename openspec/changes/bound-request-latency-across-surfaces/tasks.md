@@ -114,6 +114,14 @@
 - [ ] 3.19 Read the review queues without one pass over the vault for each queue, and bind or refuse any id without such a pass.
   - An id index, if this task needs one, records each id where the service gives it out. The first-surfaced ledger cannot be that index: its writes are best effort, it keeps only the first surface of an item, and it drops old rows.
   - Baseline, same ledger and window: `list_review_items` had n=27, p50 21.9 s and maximum 645 s. One decision scan spent 504 to 994 s in `audit.corpus_contradictions`.
+  - Attributed 2026-11-13 on a copy of a 14,000-page vault, one process, one read of each queue.
+    - The proximity sweep of the contradiction queue multiplied each eligible page's chunks against every chunk of the vault: 3,309 products over a matrix of 199,612 rows of 1,024 floats, where the eligible pages hold 45,350 rows. Its memo was keyed on the identity of the matrix object, and every embedding catch-up builds a new one, so most reads swept again. On the installed service 17 of 23 recorded sweeps were full, at 500 to 990 s each on one core.
+    - Each queue read parses every page again: 14,010 parses in each pass. The page cache holds 4,096 pages (32 MB under the service profile), fewer than the vault, so a pass over the vault in one order never reuses it. Without the sweep, one read of all twelve queues took 88 s.
+    - In the default review pass, the artifact role state reads and parses each page a second time (31% of the pass), and the unprocessed-source check takes 24%. Two references that the identity projection does not hold each cost a scan of every page.
+  - Repaired: the sweep multiplies eligible chunks only, reads each product from both pages' sides, and remembers a digest of each page's vectors, so a later sweep multiplies only the pages whose vectors changed.
+  - Measured on the same copy, all processor threads: unchanged sweep 142.6 s; repaired, cold 11.9 s; a new matrix with the same vectors 0.18 s; three pages changed 0.30 s. On one thread: unchanged about 407 s, estimated from 36.9 s for 300 of the 3,309 pages; repaired, cold 22.5 s; three pages changed 0.45 s. Both sweeps gave the same 1,080 pairs; the largest score difference was 4.2e-7.
+  - Verify: `tests/test_audit_contradiction_order.py` plants chunks in pages of 1 to 1,400 chunks and checks the pairs of a cold sweep and of a sweep after one page changed.
+  - Still open: a cold sweep still grows with the square of the eligible rows, and each process start pays one. Each queue read still parses the vault once. An id that is not a stored due entry's still binds by a read of all queues. A review read that does no vault-sized work needs published results, which is a design decision that this change does not yet hold.
 
 ## 4. Verify installed behavior and deliver
 
