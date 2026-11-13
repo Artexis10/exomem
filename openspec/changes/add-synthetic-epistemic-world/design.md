@@ -457,6 +457,14 @@ The successor round omits `scope.one-client` from its declared entries. Both of 
 
 The 90% full-history gate, 80% position gate, arms, scoring fields and spending rules remain unchanged. A fresh round needs its own cost estimate. This amendment authorizes no replay, rejudgment or reinterpretation of prior results.
 
+### 2. Clarify assertion wording and restore the position denominator
+
+Two shared development forms now state their existing meanings more directly. A fact form says that its holder states the value. It does not imply an independent check. A decision form says that its holder sets the value, rather than leaving its effective time ambiguous. Neither form adds a verification requirement or changes the world, key, recipe or task.
+
+The memory-needed report uses the existing probe-reading classifier and counts position probes only, as decision 6 requires. It lists excluded harm probes and stable recall controls separately. The 80% threshold stays unchanged. Full-history scoring still includes every probe.
+
+These corrections apply prospectively to every arm under its existing visibility rules. Existing source worlds, answers and judgments remain intact. Exposed-case checks must precede a fresh development world. A repair does not replace a failed answer within an earlier run or establish an actor gain.
+
 ## The catalogue
 
 `benchmarks/membench/world/catalogue/` holds the first catalogue as data.

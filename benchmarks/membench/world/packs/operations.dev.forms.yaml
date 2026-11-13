@@ -36,13 +36,13 @@ forms:
   - {id: rebut-stated, serves: [relation.rebut], level: stated, text: "The statement identified by {source} supports the opposite conclusion to the statement identified by {target}."}
   - {id: undercut-stated, serves: [relation.undercut], level: stated, text: "The statement identified by {source} challenges the grounds for the statement identified by {target}, without asserting the opposite."}
   # --- statements that give a value for an attribute ---
-  - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} confirms that the {about} for {subject} is {value}."}
+  - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} states that the {about} for {subject} is {value}."}
   - {id: fact-stated-2, serves: [statement.fact], level: stated, text: "For the record, {by} states that the {about} for {subject} is {value}."}
   - {id: fact-paraphrased-1, serves: [statement.fact], level: paraphrased, text: "{by} mentions that {subject} has {about} of {value}."}
   - {id: fact-paraphrased-2, serves: [statement.fact], level: paraphrased, text: "According to {by}, {subject} stands at {value} for {about}."}
   - {id: fact-unmarked-1, serves: [statement.fact], level: unmarked, text: "{subject} - {about}: {value}"}
   - {id: fact-unmarked-2, serves: [statement.fact], level: unmarked, text: "{about}, {subject}: {value}"}
-  - {id: decision-stated-1, serves: [statement.decision], level: stated, text: "{by} decides that the {about} for {subject} will be {value}."}
+  - {id: decision-stated-1, serves: [statement.decision], level: stated, text: "{by} decides that the {about} for {subject} is set to {value}."}
   - {id: decision-stated-2, serves: [statement.decision], level: stated, text: "Decision by {by}: the {about} for {subject} is set to {value}."}
   - {id: decision-paraphrased-1, serves: [statement.decision], level: paraphrased, text: "{by} has settled on {value} as the {about} for {subject}."}
   - {id: decision-paraphrased-2, serves: [statement.decision], level: paraphrased, text: "{by} picks {value} for {about} on {subject}."}
