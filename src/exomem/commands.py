@@ -11076,9 +11076,21 @@ def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]
             raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
         bound = {"ref": item_id, "expected_fingerprint": fingerprint}
     else:
-        bound = review_ids_module.bind(
-            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
-        )
+        from . import due_state as due_state_module
+
+        def read(**kw: Any) -> Any:
+            return op_review_memory(vault_root, **kw)
+
+        if egress_module.visible_page_filter(vault_root) is None:
+            bound = review_ids_module.bind_decision(
+                read,
+                item=item_id,
+                stored=due_state_module.stored_by_head(vault_root, item_id.partition(".")[0]),
+            )
+        else:
+            # A restricted audience is served fingerprints recomposed over what it may see, and the
+            # stored entries are the owner's. Its ids bind only from the queues it can read.
+            bound = review_ids_module.bind(read, item=item_id)
     return {**arguments, "item_id": None, **bound}
 
 

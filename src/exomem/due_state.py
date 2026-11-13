@@ -95,7 +95,7 @@ from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import call_spans, published_admission
+from . import call_spans, page_ids, published_admission
 from . import promotions as promotions_module
 from . import review_state as review_state_module
 from .collection_store.preview import (
@@ -4406,6 +4406,34 @@ def stored_identity(vault_root: Path, review_id: str) -> tuple[str, str, str] | 
     review of one delivered ref costs a dictionary lookup once it is warm.
     """
     return _fingerprints_for(vault_root).get(review_state_module.review_ref(review_id))
+
+
+#: `short-id head -> refs` per vault, valid for the one `_fingerprints_for` index it was built from.
+_HEADS: dict[str, tuple[dict[str, tuple[str, str, str]], dict[str, list[str]]]] = {}
+
+
+def stored_by_head(vault_root: Path, head: str) -> list[tuple[str, str]]:
+    """``(ref, fingerprint)`` of every stored entry whose short id starts with `head`. No audit.
+
+    A short id cannot be decoded, so a decision that names one needs this index to find the entry
+    without rebuilding a review queue. Two refs share a head only by hash collision; the caller
+    picks the one whose whole id matches.
+    """
+    fingerprints = _fingerprints_for(vault_root)
+    key = str(vault_root)
+    with _FINGERPRINTS_LOCK:
+        hit = _HEADS.get(key)
+    if hit is None or hit[0] is not fingerprints:
+        heads: dict[str, list[str]] = {}
+        for ref in fingerprints:
+            heads.setdefault(page_ids.part_head(ref), []).append(ref)
+        with _FINGERPRINTS_LOCK:
+            if len(_HEADS) >= _FINGERPRINTS_CAP:
+                _HEADS.pop(next(iter(_HEADS)), None)
+            _HEADS[key] = (fingerprints, heads)
+    else:
+        heads = hit[1]
+    return [(ref, fingerprints[ref][0]) for ref in heads.get(head, ())]
 
 
 def _page_local_supersession(vault_root: Path, pages: list[Any], **_dates: Any) -> list[Any]:
