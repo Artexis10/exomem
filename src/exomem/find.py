@@ -16,7 +16,7 @@ import os
 import threading
 import time
 from collections import ChainMap, OrderedDict
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -3212,7 +3212,7 @@ class _UnitCandidate:
         return self.row.parent_path
 
     @property
-    def frontmatter(self) -> dict[str, Any]:
+    def frontmatter(self) -> Mapping[str, Any]:
         return self.parent_metadata.ranking.frontmatter
 
     @property

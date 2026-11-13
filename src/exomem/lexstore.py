@@ -617,27 +617,67 @@ def _ranking_metadata_json(page: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _ranking_metadata(
-    raw: str, frontmatter_memo: dict[str, dict] | None = None,
-) -> RankingPage:
+def _ranking_frontmatter(authored: str, memo: dict[str, dict] | None) -> dict:
+    """Decode exact authored types only when a ranking consumer needs the complete subject."""
     import yaml
 
     from . import vault
 
-    payload = json.loads(raw)
-    authored = payload.pop("frontmatter_yaml")
     try:
-        frontmatter = None if frontmatter_memo is None else frontmatter_memo.get(authored)
+        frontmatter = None if memo is None else memo.get(authored)
         if frontmatter is None:
             frontmatter = vault.yaml_safe_load(authored)
     except yaml.YAMLError as error:
         raise ValueError("invalid ranking frontmatter") from error
     if not isinstance(frontmatter, dict):
         raise ValueError("invalid ranking frontmatter")
-    if frontmatter_memo is not None:
+    if memo is not None:
         # Exact serialized metadata can repeat across pages; each page still owns its mutable values.
-        frontmatter_memo[authored] = frontmatter
+        memo[authored] = frontmatter
         frontmatter = copy.deepcopy(frontmatter)
+    return frontmatter
+
+
+class _RankingFrontmatter(Mapping[str, Any]):
+    """One request's exact structural YAML, with its existing typed status projection."""
+
+    def __init__(self, authored: str, status: list[Any] | None, memo: dict[str, dict] | None) -> None:
+        self._authored = authored
+        self._status = status
+        self._memo = memo
+        self._decoded: dict | None = None
+
+    def _load(self) -> dict:
+        if self._decoded is None:
+            self._decoded = _ranking_frontmatter(self._authored, self._memo)
+        return self._decoded
+
+    def __getitem__(self, key: str) -> Any:
+        # These are fixed projection fields and wire tags from _eligibility_view_json, not vocabulary.
+        if key == "status":
+            if self._status is None:
+                raise KeyError(key)
+            if self._status[0] == "scalar":
+                return self._status[1]
+        return self._load()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._load())
+
+    def __len__(self) -> int:
+        return len(self._load())
+
+
+def _ranking_metadata(
+    raw: str, frontmatter_memo: dict[str, dict] | None = None,
+    *, status_view: Mapping[str, Any] | None = None,
+) -> RankingPage:
+    payload = json.loads(raw)
+    authored = payload.pop("frontmatter_yaml")
+    frontmatter = (
+        _ranking_frontmatter(authored, frontmatter_memo) if status_view is None
+        else _RankingFrontmatter(authored, status_view.get("status"), frontmatter_memo)
+    )
     for key in ("stem_set", "outbound_targets", "superseded_by"):  # nosemgrep: ep-word-set -- fixed ranking payload fields
         if not isinstance(payload[key], list) or not all(isinstance(value, str) for value in payload[key]):
             raise ValueError("invalid ranking text projection")
@@ -4518,6 +4558,7 @@ def _eligibility_metadata_query(
     ).fetchall()
     result = {}
     frontmatter_memo: dict[str, dict] = {}
+    stored_ranking = include_ranking and store_rows_serve(vault_root)
     try:
         for path, payload, parent, updated, ranking, content_hash in rows:
             payload = None if payload is None else json.loads(payload)
@@ -4534,7 +4575,10 @@ def _eligibility_metadata_query(
                 updated,
                 None if payload is None else payload["media_file"],
                 None if payload is None else payload["frame_ts"],
-                ranking=None if ranking is None else _ranking_metadata(ranking, frontmatter_memo),
+                ranking=None if ranking is None else _ranking_metadata(
+                    ranking, frontmatter_memo,
+                    status_view=payload["view"] if stored_ranking and payload is not None else None,
+                ),
                 content_hash=content_hash,
             )
         if not (include_units or include_occurrences or include_structure):

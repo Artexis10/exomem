@@ -1031,12 +1031,14 @@ def admission_sample(root, caller, operation):
     from exomem.governance.principal import library_scope
 
     counters = {"scalar_decisions": 0, "page_parses": 0, "yaml_decodes": 0,
-                "ordinary_scalar_decisions": 0, "ordinary_page_parses": 0}
+                "ordinary_scalar_decisions": 0, "ordinary_page_parses": 0,
+                "ownership_classifications": 0, "page_hydrations": 0,
+                "admitted_publications": 0, "published_candidates": 0}
 
     def counted(name, real):
         def call(*args, **kwargs):
             counters[name] += 1
-            if name != "yaml_decodes":
+            if name in ("scalar_decisions", "page_parses"):
                 path = str(args[1] if name == "scalar_decisions" else args[0])
                 if path.startswith(str(root) + "/"):
                     path = path[len(str(root)) + 1:]
@@ -1045,12 +1047,22 @@ def admission_sample(root, caller, operation):
             return real(*args, **kwargs)
         return call
 
+    publish = lexstore.LexicalStore.published_admitted_paths
+
+    def published(self, scope, checkpoint, admission, candidates, **kwargs):
+        counters["admitted_publications"] += 1
+        counters["published_candidates"] += len(candidates)
+        return publish(self, scope, checkpoint, admission, candidates, **kwargs)
+
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(egress, "_decide_path", counted("scalar_decisions", egress._decide_path))
         patch.setattr(find_corpus, "_parse_page_after_checkpoint",
                       counted("page_parses", find_corpus._parse_page_after_checkpoint))
         # Both safe_load and the vault's libyaml loader call this decoder entry.
         patch.setattr(yaml, "load", counted("yaml_decodes", yaml.load))
+        patch.setattr(ownership, "classify", counted("ownership_classifications", ownership.classify))
+        patch.setattr(find, "_resolve_page", counted("page_hydrations", find._resolve_page))
+        patch.setattr(lexstore.LexicalStore, "published_admitted_paths", published)
         with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
             started = time.perf_counter()
             if operation == "participants":
@@ -1064,6 +1076,27 @@ def admission_sample(root, caller, operation):
                 size = len(GRAPH_CALLS["find relation_of"](root))
             elapsed = (time.perf_counter() - started) * 1000
     return {"ms": elapsed, "result_count": size, **counters, "load": os.getloadavg()}
+
+
+@pytest.mark.parametrize("caller", ["owner", "few withheld"])
+def test_store_hub_ranking_reads_yaml_only_for_selected_pages(stored, writer, caller, monkeypatch):  # noqa: F811
+    """A linked page's unique identifier must not force YAML decoding for every ranked candidate."""
+    # Keep secondary link degrees constant as the main hub grows; the final next-page target is absent.
+    monkeypatch.setattr(sys.modules[__name__], "GENERATED", 241)
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, 120)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    sample = admission_sample(stored, caller, "find")
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "grow hub", puts=tuple(
+            write.PagePut(*linked_page(index)) for index in range(120, 240)
+        ),
+    ))
+    larger = admission_sample(stored, caller, "find")
+    assert sample["result_count"] == 15
+    assert larger["result_count"] == sample["result_count"]
+    # Emitted pages retain full release proofs; doubling unselected candidates must add no decodes.
+    assert larger["yaml_decodes"] <= sample["yaml_decodes"], (sample, larger)
 
 
 @pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
@@ -1132,7 +1165,7 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
                 report_path.write_text(json.dumps(report, indent=2))
     with read.snapshot(stored) as snapshot:
         report["rows"] = {table: snapshot.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-                          for table in ("store_pages", "graph_nodes", "graph_edges")}
+                          for table in ("store_pages", "semantic_units", "graph_nodes", "graph_edges")}
         if snapshot.connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'page_admission'").fetchone():
             import time
 
@@ -1151,12 +1184,48 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
     if profile_path := os.environ.get("EXOMEM_ADMISSION_DRILL_PROFILE"):
         import cProfile
         import pstats
+        import statistics
 
-        write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + b"\nProfile revision.\n"))
-        find.clear_cache()
-        with cProfile.Profile() as profiler:
-            report["profile_sample"] = admission_sample(stored, "few withheld", "find")
-        profiler.dump_stats(profile_path + ".pstats")
-        with Path(profile_path).open("w") as output:
-            pstats.Stats(profiler, stream=output).sort_stats("cumulative").print_stats(65)
+        slowest = sorted(
+            report["samples"],
+            key=lambda cell: statistics.median(sample["ms"] for sample in report["samples"][cell]),
+            reverse=True,
+        )[:2]
+        report["profiles"] = {}
+        for index, cell in enumerate(slowest):
+            caller, operation, state = cell.split("/")
+            selector = '["cohort-0"]' if caller != "most withheld" else (
+                '[' + ', '.join(f'"cohort-{i}"' for i in range(9)) + ']'
+            )
+            scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
+            target = profile_path + f".{index}"
+            if state == "cold process":
+                script = (
+                    "import cProfile,json,pstats,sys; from pathlib import Path; "
+                    "from test_vault_store_graph_readers import admission_sample; "
+                    "p=cProfile.Profile(); p.enable(); "
+                    "sample=admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3]); "
+                    "p.disable(); p.dump_stats(sys.argv[4]+'.pstats'); "
+                    "out=open(sys.argv[4],'w'); "
+                    "pstats.Stats(p,stream=out).sort_stats('cumulative').print_stats(65); "
+                    "out.close(); print(json.dumps(sample))"
+                )
+                profiled = subprocess.run(
+                    [sys.executable, "-c", script, str(stored), caller, operation, target],
+                    check=True, capture_output=True, text=True, timeout=180,
+                )
+                sample = json.loads(profiled.stdout.splitlines()[-1])
+            else:
+                admission_sample(stored, caller, operation)
+                if state == "first after commit":
+                    write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\nProfile {index}.\n".encode()))
+                elif state == "registry pass":
+                    rederive.settle(stored, writer)
+                membership.clear_memo()
+                with cProfile.Profile() as profiler:
+                    sample = admission_sample(stored, caller, operation)
+                profiler.dump_stats(target + ".pstats")
+                with Path(target).open("w") as output:
+                    pstats.Stats(profiler, stream=output).sort_stats("cumulative").print_stats(65)
+            report["profiles"][cell] = {"path": target, "sample": sample}
     report_path.write_text(json.dumps(report, indent=2))

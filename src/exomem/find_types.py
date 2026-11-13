@@ -273,7 +273,7 @@ def emitted_parent(parent_media: str | None, part_of: str | None) -> str | None:
 class RankingPage:
     """Selection-free ranking inputs from one admitted page generation."""
 
-    frontmatter: dict[str, Any]
+    frontmatter: Mapping[str, Any]
     page_type: str | None
     updated: str
     media_type: str | None
