@@ -924,7 +924,7 @@ def page_relative_path(path: Path, vault_root: Path) -> str:
     try:
         return path.resolve().relative_to(vault_root.resolve()).as_posix()
     except ValueError:
-        return path.as_posix()
+        raise ValueError("page path is outside the vault") from None
 
 
 def parse_page(

@@ -18,9 +18,9 @@ from test_vault_store_migration import (  # noqa: F401
     vault,
 )
 
-from exomem import audit, commands, due_state, get_page, lexstore
+from exomem import audit, commands, due_state, find_corpus, get_page, lexstore
 from exomem.vault import kb_root
-from exomem.vault_store import mode, ownership, read
+from exomem.vault_store import directory, mode, ownership, read
 
 pytestmark = [
     pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
@@ -266,6 +266,39 @@ def test_overview_batches_only_kept_directory_bodies(vault, monkeypatch):  # noq
     assert not {path for path in generated if "/_trash/" in path or "/.hidden/" in path} & fetched
     assert max(map(len, batches)) <= 32
     assert max(peak_bodies) <= 32 * 512 * 1024
+
+
+@pytest.mark.parametrize("corpus_first", [False, True])
+def test_directory_scans_preserve_metadata_held_by_the_corpus(vault, corpus_first):  # noqa: F811
+    """A later directory scan must not make an already loaded corpus page disappear."""
+    assert migrate_apply(vault) == 0
+    rel = "Knowledge Base/Notes/Alpha.md"
+    (vault / rel).unlink()
+    with read.request_snapshot(vault), read.snapshot(vault) as view:
+        reader = directory.Reader(vault)
+        if corpus_first:
+            list(view.page_sources())
+        reader.entries(vault / "Knowledge Base/Notes")
+        list(view.page_sources())
+        expected = read.owned_meta(vault, rel)
+        assert expected is not None
+        reader.entries(vault / "Knowledge Base")
+        assert read.owned_meta(vault, rel) == expected
+
+
+def test_file_page_identity_refuses_paths_outside_the_vault(vault, tmp_path):  # noqa: F811
+    """An escaped file identity must never enter a parser or a release decision as an absolute path."""
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="outside the vault"):
+        find_corpus.page_relative_path(outside, vault)
+    linked = vault / "Knowledge Base/Notes/Linked.md"
+    linked.symlink_to(outside)
+    with pytest.raises(ValueError, match="outside the vault"):
+        find_corpus.page_relative_path(linked, vault)
+    assert find_corpus.page_relative_path(vault / "Knowledge Base/Notes/Alpha.md", vault) == (
+        "Knowledge Base/Notes/Alpha.md"
+    )
 
 
 def test_tag_preview_batches_canonical_metadata_and_bodies(vault, record_property):  # noqa: F811

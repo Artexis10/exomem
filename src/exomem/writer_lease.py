@@ -8916,9 +8916,8 @@ def invoke_command(
     from .collection_store import ownership
 
     if not read_only:
-        # Each mutation gets a fresh membership proof; the writer still checks publication authority.
-        # Read finalization would reject a binding change that this mutation itself committed.
-        with ownership.read_scope(injected[0]):
+        # Ownership rechecks must see collections committed since preflight, including this mutation's own.
+        with ownership.mutation_fence_scope():
             try:
                 # The same fixed phase labels as the read-only path below.
                 with body_meter as measured, call_spans.span("command.body", measured):

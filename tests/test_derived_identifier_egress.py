@@ -822,9 +822,8 @@ def mutation_fence_budget(monkeypatch, record_property, vault_backend):
         if not commands.invocation_is_read_only(command, kwargs):
             sample = {key: counts[key] - before[key] for key in counts}
             observed.append(sample)
+            # Ownership reuses one fence; an independent writer admission can read it once more.
             assert sample["fences"] <= 2, sample
-            if vault_backend == "store" and sample["membership"]:
-                assert sample["fences"] == 1, sample
         return result
 
     monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", counted_fence)

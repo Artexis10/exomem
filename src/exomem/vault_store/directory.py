@@ -44,14 +44,16 @@ class Reader:
     def __init__(self, root: Path, *, max_batch_files: int = read.KEYS_PER_QUERY) -> None:
         self.root = root
         self._batch = read.PageBatch(root, max_batch_files=max_batch_files)
-        self._metadata: set[str] = set()
+        self._metadata: dict[str, read.PageMeta] = {}
 
     def entries(self, directory: Path, limit: int | None = None) -> list[Entry]:
         rel = directory.relative_to(self.root).as_posix()
         rel = "" if rel == "." else rel
         with read.snapshot(self.root) as view:
-            for key in self._metadata:
-                view.memo.get("page_metadata", {}).pop(key, None)
+            metadata = view.memo.get("page_metadata", {})
+            for key, value in self._metadata.items():
+                if metadata.get(key) is value:
+                    metadata.pop(key)
             self._metadata.clear()
         stored = self._stored_entries(rel, limit)
         try:
@@ -110,9 +112,10 @@ class Reader:
                     None if slash else read.PageMeta(*row),
                 )
             metadata = view.memo.setdefault("page_metadata", {})
-            self._metadata = {entry.meta.path for entry in found.values()
-                              if entry.meta is not None and entry.meta.path not in metadata}
-            metadata.update((entry.meta.path, entry.meta) for entry in found.values() if entry.meta is not None)
+            for entry in found.values():
+                if entry.meta is not None and entry.meta.path not in metadata:
+                    metadata[entry.meta.path] = entry.meta
+                    self._metadata[entry.meta.path] = entry.meta
         return found
 
     def prefetch(self, entries: list[Entry], *, max_files: int, max_bytes: int) -> None:
