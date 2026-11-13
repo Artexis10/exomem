@@ -102,3 +102,9 @@ artefacts:
     name: note
     merge: note
     restrict: note
+  # Closed source-record forms, with natural wording in the surface bank.
+  relations:
+    context-parent: directory
+    support: register
+    rebut: register
+    undercut: register

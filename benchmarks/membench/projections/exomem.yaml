@@ -38,7 +38,9 @@ f38:
     - "Look at what was filed this week, do the work that follows from it and keep a short record of what you did."
     - "Read this week's files in order, act on the ones that need action and leave the rest as they are."
   # A premise probe's task presupposes a stale or false state. The line is added when the task does not already hold it.
-  premise_line: "The earlier setting I mean is {premise}."
+  premise_line: "With {premise} still current, the follow-up should be routine."
+  # One shared frame gives relative time its world date before any arm or judge reads the task.
+  task_frame: "The simulated date for this task is {date}. Interpret relative time in this task against that date.\n\n{task}"
   # The readings whose answer is a property that an answer keeps, such as the kind of a statement, and no value that
   # an answer states. The key carries such an answer in its rubric and leaves `value` null, because a kind or a hedge
   # is a word that ordinary documents hold, and the suite's leak rule would then refuse the probe.
