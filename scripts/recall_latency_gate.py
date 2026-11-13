@@ -1206,13 +1206,16 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
     import hashlib
     import sqlite3
     import string
+    from contextlib import closing
 
     import numpy as np
     from synth_vault import reference_source
 
     from exomem import find_results, lexstore, vault
+    from exomem.vault_store import read as store_read
 
-    with sqlite3.connect(lexstore.lexical_path(vault_root)) as conn:
+    borrowed = store_read.lend(vault_root)
+    with closing(borrowed if borrowed is not None else sqlite3.connect(lexstore.lexical_path(vault_root))) as conn:
         pages = conn.execute("SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0").fetchone()[0]
         units, unit_pages = conn.execute(
             "SELECT count(*), count(DISTINCT parent_path) FROM semantic_units WHERE in_kb=1"
@@ -1270,7 +1273,7 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
             **({"lexical_rows": lexical_rows} if index is None else {})}
 
 
-def _prepare_worker(vault_root: Path, startup: dict) -> dict:
+def _prepare_worker(vault_root: Path, startup: dict, *, prepare_vault: Callable[[Path], None] | None = None) -> dict:
     import hashlib
     import sqlite3
 
@@ -1336,11 +1339,19 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
         if due_state.load(vault_root) is None:
             # A failed best-effort save must not label a cold benchmark fixture warm.
             raise MeasurementRefused("advisory-projection-unavailable")
-        corpus = _stored_corpus(vault_root, index, rels, profile)
         for scope in ("vault", "kb"):
             freshness.seed(vault_root, scope, (
                 (str(vault_root / rel), freshness.stat_signature(vault_root / rel)) for rel in rels
             ))
+        if prepare_vault is not None:
+            # Offline fixture migration must finish before the maintained runtime takes custody.
+            try:
+                if not lexical_only:
+                    embeddings.embed_texts = seeded
+                prepare_vault(vault_root)
+            finally:
+                embeddings.embed_texts = original
+        corpus = _stored_corpus(vault_root, index, rels, profile)
         enter_managed_recall(vault_root, full_startup=True)
         # Normal startup may leave this disposable matrix cold; preparation owns the wait.
         if index is not None:
@@ -1455,7 +1466,7 @@ class _Worker:
     def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict,
                  *, python: Path | str | None = None, runtime_prefix: Path | None = None,
                  runtime_policy: str = "parent-benchmark", calibration: str | None = None,
-                 generate_only: bool = False):
+                 generate_only: bool = False, worker_script: Path | None = None):
         import subprocess
 
         startup = {"profile": profile, "runtime_lock_digest": _runtime_lock_digest(source, phase="worker-startup"),
@@ -1477,7 +1488,7 @@ class _Worker:
             startup["generate_only"] = True
         try:
             self.process = subprocess.Popen(
-                [str(python if python is not None else sys.executable), "-u", str(Path(__file__).resolve()), "--worker-source", str(source),
+                [str(python if python is not None else sys.executable), "-u", str(worker_script or Path(__file__).resolve()), "--worker-source", str(source),
                  "--worker-cpus", json.dumps(cpus), "--worker-vault", str(vault)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 env=environment, text=True,
