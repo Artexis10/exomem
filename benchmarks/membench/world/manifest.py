@@ -1,8 +1,7 @@
 """What fixes a world's bytes: digests, and a record of each artefact that a manifest pins.
 
 The manifest of a plan lists the generator version, the digest of the catalogue and of the pack, a
-commitment to the seed and a hash of every artefact. A hash covers an artefact and the statements
-that it carries, so two runs that agree on every hash agree on the world's evidence.
+commitment to the seed and a hash of every artefact. A hash covers an artefact, its carried statements and its resolved relation facts with endpoint provenance, so two runs that agree on every hash agree on the world's evidence.
 """
 
 from __future__ import annotations
@@ -14,10 +13,11 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from .core import World
+from .core import EdgeRef, World
 from .loader import CATALOGUE_DIR
+from .validator import check_relation_refs
 
-GENERATOR_VERSION = "1"
+GENERATOR_VERSION = "2"
 
 
 def _plain(value: Any) -> Any:
@@ -55,13 +55,35 @@ def catalogue_digest(directory: Path = CATALOGUE_DIR) -> str:
 
 
 def artefact_hashes(world: World) -> list[dict[str, Any]]:
-    """Each artefact of the world, with the hash of its own record and of the statements it carries."""
+    """Hash each document, its carried statements and its resolved relation facts and provenance."""
+    relations = world.relation_facts()
+    originals = check_relation_refs(
+        world, ((a.id, ref) for a in world.artefacts.values() for ref in a.relations), relations
+    )
     return [
         {
             "id": a.id,
             "kind": a.kind,
             "hash": digest(
-                {"artefact": asdict(a), "carries": [asdict(world.statements[s]) for s in a.carries]}
+                {
+                    "artefact": asdict(a),
+                    "carries": [asdict(world.statements[s]) for s in a.carries],
+                    "relations": [
+                        {
+                            "fact": asdict(relations[ref]),
+                            "endpoints": [
+                                {
+                                    "statement": asdict(world.statements[s]),
+                                    "document": asdict(originals[s]),
+                                }
+                                for s in (ref.source, ref.target)
+                            ]
+                            if isinstance(ref, EdgeRef)
+                            else [],
+                        }
+                        for ref in a.relations
+                    ],
+                }
             ),
         }
         for a in sorted(world.artefacts.values(), key=lambda a: a.id)
