@@ -1073,7 +1073,7 @@ def _handoff_derived_batches(session: _FastAcknowledgementSession) -> int:
                 where["stage"] = "signal"
                 derived_receipts.signal_components(session.vault_root, receipt)
             batch.handoff_outcome = proof.outcome
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - acknowledgement failure degrades the persisted terminal
         logger.warning(
             "fast acknowledgement failed; the persisted terminal degrades to "
             "derived_sync=pending (%s)",
@@ -1979,7 +1979,7 @@ class LeaseConfig:
             try:
                 origin = urllib.parse.urlsplit(self.url or "")
                 address = ipaddress.ip_address(origin.hostname or "")
-                origin.port  # Validate the URL parser's port field before using the origin.
+                _ = origin.port  # Validate the URL parser's port field before using the origin.
             except ValueError:
                 origin = None
             if (
@@ -8926,10 +8926,16 @@ def invoke_command(
     from .collection_store import ownership
     from .collection_store import preview as store_preview
     from .governance import companions
+    from .vault_store import mode as vault_store_mode
+    from .vault_store import read as vault_store_read
 
     # The command's store-owned pages are decided on one store request per decision shape, dropped
     # with the command; a refused request withholds them together for the rest of it.
-    with ownership.read_scope(injected[0]) as ownership_scope, \
+    store_snapshot = (
+        vault_store_read.request_snapshot(injected[0])
+        if vault_store_mode.store_mode_for_reads(injected[0]) else nullcontext()
+    )
+    with store_snapshot, ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector, \
             published_admission.deciding(), companions.request_byte_proofs():
         from .cli_ops import _AuditBudgetExhausted

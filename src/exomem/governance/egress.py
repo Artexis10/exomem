@@ -8850,10 +8850,20 @@ def filter_withheld_entries(
         different answer per platform -- which is the whole thing this
         resolver exists to remove.
         """
+        from ..vault_store import read as store_read
+
         current = vault_root
         real: list[str] = []
         entry: os.DirEntry[str] | None = None
         for part in parts:
+            # A store-owned page is a leaf even when its projection is absent or is a directory.
+            if real:
+                parent = "/".join(real)
+                if store_read.serves(vault_root, parent) and (
+                    store_read.page_exists(vault_root, parent)
+                    or not store_read.holds_folder(vault_root, parent)
+                ):
+                    return None
             if current not in listings:
                 try:
                     with os.scandir(current) as scanned:

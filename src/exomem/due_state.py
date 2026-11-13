@@ -1055,7 +1055,7 @@ def _has_entries(payload: Any) -> bool:
 
 
 def _page_exists(vault_root: Path, rel_path: str) -> bool:
-    """Whether a stored entry's page is still on disk.
+    """Whether a stored entry's page still exists in its canonical owner.
 
     Named rather than inlined so the drop it guards is a mechanism a test can
     remove: patching `Path.exists` wholesale also breaks reading the projection,
@@ -1073,7 +1073,9 @@ def _page_exists(vault_root: Path, rel_path: str) -> bool:
                     layout == "markdown-items" and rel_path.startswith(source_path + "/")
                 ):
                     return False
-    return (Path(vault_root) / rel_path).exists()
+    from .vault_store import read
+
+    return read.page_exists(vault_root, rel_path)
 
 
 def _unbucket(bucket: Any) -> list[dict[str, Any]]:
@@ -3374,7 +3376,8 @@ def for_activation(
         for row in rows:
             anchor = material.get(str(row.get("path") or ""))
             if anchor:
-                from . import review_ids  # imported here: review_ids reaches the public tool table, which due_state must not load at import
+                # review_ids reaches the public tool table; keep this import local.
+                from . import review_ids
 
                 packet["relevant_due_refs"] = [{
                     "ref": row["ref"], "fingerprint": row["fingerprint"],
@@ -3576,6 +3579,9 @@ def _served_rows(
                     # The build's rule: unreadable review state serves nothing.
                     return []
             with call_spans.span("recall.due_state.exists", {"rows": len(held)}):
+                from .vault_store import read
+
+                read.prime_page_metadata(vault_root, (row["path"] for row in held if row.get("path")))
                 rows = [
                     dict(row)
                     for row in held
@@ -4132,6 +4138,15 @@ def _served_entries_uncached(
             for family in artifact_role_review.FAMILIES:
                 categories[family] = {}
     candidate_rows: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    from .vault_store import read
+
+    read.prime_page_metadata(vault_root, (
+        str(entry["path"])
+        for pages in categories.values() if isinstance(pages, dict)
+        for bucket in pages.values()
+        for entry in _unbucket(bucket)
+        if entry.get("path")
+    ))
     # The episode backlog is the owner's compiler queue: its stored rows count lines against the
     # owner's view of the citing pages, so a count served to a restricted caller would move with a
     # page withheld from it. That caller gets the family from its own audit, which reads the page as absent.

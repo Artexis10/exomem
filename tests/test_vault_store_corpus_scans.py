@@ -1,0 +1,186 @@
+"""Whole-corpus readers retain stored pages without a query per page."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+
+import pytest
+from test_artifact_role_projection import write as write_role
+from test_artifact_role_review import method
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_graph_readers import record_store_reads, write_pages
+from test_vault_store_migration import (  # noqa: F401
+    build_indexes,
+    migrate_apply,
+    rollback_apply,
+    vault,
+)
+
+from exomem import audit, commands, due_state, get_page, lexstore
+from exomem.vault import kb_root
+from exomem.vault_store import mode, ownership, read
+
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
+    pytest.mark.timeout(900),
+]
+
+
+def test_audit_reads_stored_corpus_in_one_query(vault, monkeypatch):  # noqa: F811
+    """A deleted projection must keep its findings without N keyed body or metadata reads."""
+    generated = {
+        f"Knowledge Base/Notes/Signal-{number}.md": (
+            f"---\ntitle: Signal {number}\ntype: note\n---\n# Signal {number}\n\n"
+            f"The lantern records signal {number}.\n"
+        )
+        for number in range(24)
+    }
+    write_pages(vault, generated)
+    build_indexes(vault)
+    expected = {
+        page.rel_path: (page.body, page.mtime)
+        for page in audit._parse_all(kb_root(vault), vault, keep=None)
+    }
+    owned = {
+        item.rel for item in ownership.iter_owned(vault)
+        if item.ownership is ownership.Ownership.PAGE
+    }
+    assert migrate_apply(vault) == 0
+    for rel in owned:
+        (vault / rel).unlink()
+    statements = []
+    with record_store_reads(vault, monkeypatch, page_paths=owned) as events:
+        with read.request_snapshot(vault), read.snapshot(vault) as view:
+            view.connection.set_trace_callback(statements.append)
+            try:
+                actual = {
+                    page.rel_path: (page.body, page.mtime)
+                    for page in audit._parse_all(kb_root(vault), vault, keep=None)
+                }
+                # Audit composes several corpus consumers inside the same request.
+                repeated = {
+                    page.rel_path: (page.body, page.mtime)
+                    for page in audit._parse_all(kb_root(vault), vault, keep=None)
+                }
+            finally:
+                view.connection.set_trace_callback(None)
+    assert actual == expected
+    assert repeated == actual
+    selects = [sql for sql in statements if sql.startswith("SELECT") and "store_pages" in sql]
+    assert len(selects) == 1, selects
+    assert not events["page_io"]
+    assert len(events["snapshots"]) == 1
+    assert not events["sidecars"]
+    assert not events["machinery"]
+
+
+def test_audit_uses_current_unowned_link_targets(vault):  # noqa: F811
+    """A changed unowned title must change the audit's link findings beside damaged projections."""
+    external = vault / "Reference" / "Signal.md"
+    external.parent.mkdir()
+    external.write_text("---\ntitle: Earlier Reference\n---\n# Reference signal\n", encoding="utf-8")
+    alpha = "Knowledge Base/Notes/Alpha.md"
+    with (vault / alpha).open("a", encoding="utf-8") as page:
+        page.write("\n[[Earlier Reference]] and [[Current Reference]].\n")
+    build_indexes(vault)
+    lexstore.search_bm25(vault, "signal", 3, scope="vault", repair=True)
+    before = commands.op_audit(vault, categories=["forward_reference"], detail="full")
+    findings = [row for row in before["findings"] if row["path"] == alpha]
+    assert len(findings) == 1
+    assert "Current Reference" in findings[0]["detail"]
+    assert migrate_apply(vault) == 0
+    external.write_text("---\ntitle: Current Reference\n---\n# Reference signal\n", encoding="utf-8")
+    for item in ownership.iter_owned(vault):
+        if item.ownership is ownership.Ownership.PAGE:
+            (vault / item.rel).write_text("Damaged projection", encoding="utf-8")
+    with read.request_snapshot(vault):
+        after = commands.op_audit(vault, categories=["forward_reference"], detail="full")
+    findings = [row for row in after["findings"] if row["path"] == alpha]
+    assert len(findings) == 1
+    assert "Earlier Reference" in findings[0]["detail"]
+
+
+def test_log_reads_keep_unprojected_history(vault):  # noqa: F811
+    """Review and census history must include a rotated log after its projection disappears."""
+    from exomem import vault as vault_module
+
+    archive = vault / "Knowledge Base/_archive/logs/log-2025-01.md"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    archive.write_text("## [2025-01-02] edit | Notes/Alpha\n\nClarified the signal.\n", encoding="utf-8")
+    live = vault / "Knowledge Base/log.md"
+    live.write_bytes(
+        b"## [2025-01-03] edit | Notes/Alpha\r\n\r\nUpdated the signal.\r\nSecond line.\r"
+    )
+    build_indexes(vault)
+    expected_census = vault_module.read_operation_log(vault)
+    expected_history = vault_module.read_log_entries(vault, "Knowledge Base/Notes/Alpha.md")
+    assert expected_census["files_read"] == 2
+    assert migrate_apply(vault) == 0
+    archive.unlink()
+    live.unlink()
+    with read.request_snapshot(vault):
+        assert vault_module.read_operation_log(vault) == expected_census
+        assert vault_module.read_log_entries(vault, "Knowledge Base/Notes/Alpha.md") == expected_history
+
+
+def test_stored_page_keeps_the_file_timestamp(vault):  # noqa: F811
+    """A direct page read must retain the exact advisory timestamp after migration."""
+    rel = "Knowledge Base/Notes/Alpha.md"
+    path = vault / rel
+    # This timestamp exposes the rounding difference between a float division and a file stat.
+    timestamp_ns = 1_794_532_852_076_726_900
+    os.utime(path, ns=(timestamp_ns, timestamp_ns))
+    build_indexes(vault)
+    expected = get_page.get_page(vault, path=rel).as_dict()
+    assert migrate_apply(vault) == 0
+    path.unlink()
+    with read.request_snapshot(vault):
+        assert get_page.get_page(vault, path=rel).as_dict() == expected
+
+
+def test_mode_changes_keep_existing_role_advice(vault, monkeypatch, tmp_path):  # noqa: F811
+    """Migration and rollback must preserve review obligations when their fingerprint owner changes."""
+    write_role(vault, method())
+    build_indexes(vault)
+    due_state.reconcile(vault)
+    before = commands.op_bootstrap(vault, profile="full")
+    assert before["due_state"]["categories"]["artifact_role_promotion"] == 1
+    assert migrate_apply(vault) == 0
+    owned = {
+        item.rel: (vault / item.rel).read_bytes() for item in ownership.iter_owned(vault)
+        if item.ownership is ownership.Ownership.PAGE
+    }
+    for rel in owned:
+        (vault / rel).unlink()
+    with record_store_reads(vault, monkeypatch, page_paths=owned) as events:
+        with read.request_snapshot(vault):
+            after = commands.op_bootstrap(vault, profile="full")
+    assert after["due_state"]["categories"]["artifact_role_promotion"] == 1
+    assert not events["page_io"]
+    assert len(events["snapshots"]) == 1
+    assert not events["sidecars"]
+    assert not events["machinery"]
+    for rel, body in owned.items():
+        (vault / rel).write_bytes(body)
+    assert rollback_apply(vault, tmp_path / "export") == 0
+    restored = commands.op_bootstrap(vault, profile="full")
+    assert restored["due_state"]["categories"]["artifact_role_promotion"] == 1
+
+
+def test_review_refresh_failure_preserves_committed_migration(vault, monkeypatch, capsys):  # noqa: F811
+    """An advisory-cache error must not claim that the canonical cutover rolled back."""
+    due_state.reconcile(vault)
+
+    def unavailable(_root):
+        raise OSError("review state unavailable")
+
+    monkeypatch.setattr(due_state, "reconcile", unavailable)
+    assert migrate_apply(vault) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "migrated"
+    assert mode.store_mode_for_reads(vault)
+    assert result["review_advice"]["state"] == "refresh_failed"
+    assert result["warnings"]
+    assert result["diagnostics"]["review_advice"]["error"] == "OSError"

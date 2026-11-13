@@ -217,10 +217,65 @@ def _count_markdown_pages(
     return count
 
 
+def _stored_index_listing(
+    directory: Path, *, on_error: Callable[[OSError], None] | None = None
+):
+    """Stored count inputs plus the same unowned directory entries the file counters see."""
+    from .vault_store import mode, ownership, read
+
+    root = directory.parents[1]
+    if not mode.store_mode_for_reads(root):
+        return None
+    prefix = directory.relative_to(root).as_posix() + "/"
+    with read.snapshot(root) as view:
+        pages = {meta.path[len(prefix):] for meta in view.pages(prefix)}
+    folders = {
+        "/".join(parts[:depth])
+        for path in pages
+        for parts in [path.split("/")]
+        for depth in range(1, len(parts))
+    }
+    pending = [directory]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    rel = Path(entry.path).relative_to(directory).as_posix()
+                    if ownership.classify(prefix + rel) is ownership.Ownership.PAGE:
+                        continue
+                    if entry.name.endswith(".md"):
+                        pages.add(rel)
+                    if entry.is_dir(follow_symlinks=False):
+                        folders.add(rel)
+                        pending.append(Path(entry.path))
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            # Nested file counts already tolerate an unreadable directory.
+            if on_error is not None:
+                on_error(error)
+            continue
+    return read.Listing(tuple(pages), tuple(folders))
+
+
 def _count_sources(
     sources_dir: Path, *, on_error: Callable[[OSError], None] | None = None
 ) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
+    stored = _stored_index_listing(sources_dir, on_error=on_error)
+    if stored is not None:
+        out = {
+            name: 0 for name in stored.folders
+            if "/" not in name and not name.startswith("_")
+            and not is_scan_skipped_runtime_name(name)
+        }
+        for rel in stored.pages:
+            parts = rel.split("/")
+            if (len(parts) > 1 and parts[0] in out and parts[-1] != "index.md"
+                    and rel.endswith(".md") and not any(p.startswith("_") for p in parts[1:-1])):
+                out[parts[0]] += 1
+        return out
     out: dict[str, int] = {}
     try:
         entries = list(sources_dir.iterdir())
@@ -309,6 +364,19 @@ def _count_notes(notes_dir: Path, *, home_set: homes.HomeSet | None = None) -> d
     home's key for a home. A page counts once, under the deepest folder that owns it.
     Excludes index.md files and any folder starting with "_".
     """
+    stored = _stored_index_listing(notes_dir)
+    if stored is not None:
+        owners = tuple(
+            owner for owner in _notes_owners(home_set)
+            if "/".join(owner.parts) in stored.folders
+        )
+        out = {owner.token: 0 for owner in owners}
+        for rel in stored.pages:
+            parts = tuple(rel.split("/"))
+            owner = _owner_of(owners, parts[:-1])
+            if owner is not None and parts[-1] != "index.md" and rel.endswith(".md"):
+                out[owner.token] += 1
+        return out
     out: dict[str, int] = {}
     if not notes_dir.is_dir():
         return out
@@ -547,6 +615,19 @@ def _count_entities(
     Returns a dict keyed by registered entity-type ID. Excludes index.md and
     `_*` folders.
     """
+    stored = _stored_index_listing(entities_dir)
+    if stored is not None:
+        registry = registry or load_entity_types(entities_dir.parents[1])
+        out = {
+            definition.id: 0 for folder in stored.folders
+            if "/" not in folder and not folder.startswith("_")
+            and (definition := registry.by_folder.get(folder.casefold())) is not None
+        }
+        for key, count in count_entity_pages(
+            (rel for rel in stored.pages if rel.endswith(".md")), registry
+        ).items():
+            out[key] = count
+        return out
     out: dict[str, int] = {}
     if not entities_dir.is_dir():
         return out

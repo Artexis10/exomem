@@ -73,6 +73,53 @@ def stored_body(root, rel):
     return rows(root, "SELECT body FROM store_pages WHERE path = ?", rel)[0][0]
 
 
+def test_path_resolution_uses_stored_files_and_folders_without_probing_projections(
+    stored, writer, monkeypatch
+):
+    """A missing or symlinked projection must not change existence, kind or containment refusals."""
+    folder = "Knowledge Base/_Schema/virtual"
+    write.commit(writer, put(f"{folder}/settings.md", b"# Settings\n"))
+    (stored / ALPHA).unlink()
+    (stored / ALPHA).symlink_to(stored.parent / "outside.md")
+    alias = "Knowledge Base/note-alias"
+    (stored / alias).symlink_to(stored / "Knowledge Base/Notes", target_is_directory=True)
+    real_stat = os.stat
+    real_lstat = os.lstat
+
+    def watching(real):
+        def watched(path, *args, **kwargs):
+            assert str(path) != str(stored / ALPHA), "stored leaf reached the filesystem"
+            return real(path, *args, **kwargs)
+        return watched
+
+    monkeypatch.setattr(os, "stat", watching(real_stat))
+    monkeypatch.setattr(os, "lstat", watching(real_lstat))
+    with read.request_snapshot(stored):
+        resolution = vault_module.resolve_under_vault(
+            stored, ALPHA, must_exist=True, must_be_file=True, return_details=True,
+        )
+        assert resolution.resolved_relative == ALPHA
+        assert vault_module.resolve_under_vault(stored, f"{alias}/Alpha.md")[1] == ALPHA
+        assert vault_module.resolve_under_vault(
+            stored, "Knowledge Base/Notes/../Notes/Alpha.md", must_exist=True,
+        )[1] == ALPHA
+        assert vault_module.resolve_under_vault(
+            stored, folder, must_exist=True, must_be_dir=True,
+        )[1] == folder
+        with pytest.raises(vault_module.VaultPathError) as wrong_kind:
+            vault_module.resolve_under_vault(stored, ALPHA, must_be_dir=True)
+        assert wrong_kind.value.code == "NOT_A_DIR"
+        with pytest.raises(vault_module.VaultPathError) as wrong_kind:
+            vault_module.resolve_under_vault(stored, folder, must_be_file=True)
+        assert wrong_kind.value.code == "NOT_A_FILE"
+        with pytest.raises(vault_module.VaultPathError) as absent:
+            vault_module.resolve_under_vault(stored, NEW, must_exist=True)
+        assert absent.value.code == "NOT_FOUND"
+        with pytest.raises(vault_module.VaultPathError) as escape:
+            vault_module.resolve_under_vault(stored, "../outside.md", must_exist=True)
+        assert escape.value.code == "INVALID_PATH"
+
+
 def test_a_file_mode_vault_refuses_a_snapshot_instead_of_reading_empty(vault):  # noqa: F811
     """A reader that takes a vault whose mode it cannot confirm for an empty store."""
     with pytest.raises(connection.CollectionStoreError, match=read.NOT_ACTIVE):

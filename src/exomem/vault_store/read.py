@@ -52,6 +52,12 @@ class PageMeta:
     #: The stored frontmatter as JSON text, or None when the page has none.
     frontmatter_json: str | None
 
+    @property
+    def mtime(self) -> float:
+        """Modification seconds with the same rounding as the file stat's timestamp."""
+        seconds, nanos = divmod(self.mtime_ns, 1_000_000_000)
+        return seconds + nanos / 1e9
+
 
 @dataclass(frozen=True, slots=True)
 class StoredPage:
@@ -95,6 +101,12 @@ class StoreSnapshot:
 
     def page(self, rel: str) -> StoredPage | None:
         """One page's exact bytes with its metadata, or None when the store holds no such page."""
+        sources = self.memo.get("corpus_sources")
+        if sources is not None:
+            return sources.get(rel)
+        prefetched = self.memo.get("pages", {})
+        if rel in prefetched:
+            return prefetched[rel]
         row = self.connection.execute(
             f"SELECT {_META_COLUMNS}, body FROM store_pages WHERE path = ?", (rel,)
         ).fetchone()
@@ -102,10 +114,45 @@ class StoreSnapshot:
 
     def page_meta(self, rel: str) -> PageMeta | None:
         """One page's path, revision, hash, size, mtime and frontmatter, without its body."""
+        metadata = self.memo.setdefault("page_metadata", {})
+        if rel in metadata:
+            return metadata[rel]
+        if "corpus_sources" in self.memo:
+            return None
+        prefetched = self.memo.get("pages", {})
+        if rel in prefetched:
+            page = prefetched[rel]
+            return None if page is None else page.meta
         row = self.connection.execute(
             f"SELECT {_META_COLUMNS} FROM {_META_FROM} WHERE path = ?", (rel,)
         ).fetchone()
-        return None if row is None else PageMeta(*row)
+        metadata[rel] = None if row is None else PageMeta(*row)
+        return metadata[rel]
+
+    def prime_page_metadata(self, rels: Iterable[str]) -> None:
+        """Read the supplied pages' metadata in batches before checking each page."""
+        metadata = self.memo.setdefault("page_metadata", {})
+        missing = set(rels) - metadata.keys()
+        found = {row[0]: PageMeta(*row) for row in self._each(missing, _META_COLUMNS)}
+        metadata.update((rel, found.get(rel)) for rel in missing)
+
+    def page_sources(self) -> Iterator[StoredPage]:
+        """Each page's bytes and metadata, loaded once when a request scans the whole corpus."""
+        from .. import request_budget
+
+        sources = self.memo.get("corpus_sources")
+        if sources is None:
+            sources = {}
+            for row in self.connection.execute(
+                f"SELECT {_META_COLUMNS}, body FROM store_pages ORDER BY path"
+            ):
+                request_budget.checkpoint()
+                meta = PageMeta(*row[:-1])
+                self.memo.setdefault("page_metadata", {})[meta.path] = meta
+                sources[meta.path] = StoredPage(row[-1], meta)
+            # Audit's parse, link and drift scans share bytes until this pinned snapshot ends.
+            self.memo["corpus_sources"] = sources
+        yield from sources.values()
 
     def pages(self, prefix: str = "") -> Iterator[PageMeta]:
         """The metadata of every page whose path starts with ``prefix``, in path order."""
@@ -145,16 +192,36 @@ class StoreSnapshot:
         """The paths in ``rels`` that the store holds a page at, read in a few queries."""
         return frozenset(path for path, in self._each(rels, "path"))
 
+    def page_metas(self, rels: Iterable[str]) -> dict[str, PageMeta]:
+        """Each requested page's metadata, in keyed batches without loading its body."""
+        return {row[0]: PageMeta(*row) for row in self._each(rels, _META_COLUMNS, metadata_only=True)}
+
+    def prefetch_pages(self, rels: Iterable[str]) -> None:
+        """Hold a bounded caller-selected batch for repeated parent and target reads in this snapshot."""
+        pages = self.memo.setdefault("pages", {})
+        wanted = {rel for rel in rels if rel not in pages}
+        loaded = {
+            row[0]: StoredPage(row[-1], PageMeta(*row[:-1]))
+            for row in self._each(wanted, f"{_META_COLUMNS}, body")
+        }
+        pages.update(dict.fromkeys(wanted))
+        pages.update(loaded)
+
     def bodies(self, rels: Iterable[str]) -> dict[str, bytes]:
         """The exact bytes of each page in ``rels`` that the store holds, read in a few queries."""
+        sources = self.memo.get("corpus_sources")
+        if sources is not None:
+            return {rel: sources[rel].body for rel in rels if rel in sources}
         return dict(self._each(rels, "path, body"))
 
-    def _each(self, rels: Iterable[str], columns: str) -> Iterator[tuple]:
+    def _each(self, rels: Iterable[str], columns: str, *, metadata_only: bool = False) -> Iterator[tuple]:
         wanted = list(dict.fromkeys(rels))
+        # Metadata batches use the same covering index as point metadata reads.
+        source = _META_FROM if metadata_only or columns == _META_COLUMNS else "store_pages"
         for start in range(0, len(wanted), KEYS_PER_QUERY):
             chunk = wanted[start : start + KEYS_PER_QUERY]
             yield from self.connection.execute(
-                f"SELECT {columns} FROM store_pages WHERE path IN ({', '.join('?' * len(chunk))})",
+                f"SELECT {columns} FROM {source} WHERE path IN ({', '.join('?' * len(chunk))})",
                 chunk,
             )
 
@@ -632,6 +699,26 @@ def current_revision(vault_root: Path) -> int:
         return view.revision
 
 
+def snapshot_identity(reader, keys: tuple[str, ...]) -> dict[str, str]:
+    """The open graph reader's identity: its store revision, or file mode's graph metadata.
+
+    Graph generations advance on graph writes, but cannot identify every store commit.
+    A lend already holds its revision. Static graph metadata retains the projection's identity;
+    the copied recall checkpoint never describes a store snapshot.
+    """
+    values = {}
+    if isinstance(reader, _Lend):
+        values["generation"] = str(reader._view.revision)
+        # These are graph metadata fields: the store revision replaces both volatile witnesses.
+        keys = tuple(key for key in keys if key not in ("generation", "recall_projection_identity"))
+    if keys:
+        values.update(reader.execute(
+            f"SELECT key, value FROM graph_meta WHERE key IN ({', '.join('?' for _ in keys)})",
+            keys,
+        ).fetchall())
+    return values
+
+
 def _as_path(value: Path | str) -> Path:
     """``Path(value)`` without copying a path that already is one: a file-mode read pays this per call."""
     return value if isinstance(value, Path) else Path(value)
@@ -665,6 +752,14 @@ def from_store(vault_root: Path, rel: str, store_read: Callable[[], T]) -> T | N
         if error.code != NOT_ACTIVE:
             raise
     return store_read() if serves(root, rel) else None
+
+
+def prefetch_pages(vault_root: Path, rels: Iterable[str]) -> None:
+    """Batch a request's upcoming page reads; unowned paths keep their file-mode readers."""
+    root = _as_path(vault_root)
+    if mode.store_mode_for_reads(root):
+        with snapshot(root) as view:
+            view.prefetch_pages(rel for rel in rels if ownership.classify(rel) is ownership.Ownership.PAGE)
 
 
 def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
@@ -706,6 +801,15 @@ def page_exists(vault_root: Path, rel: str) -> bool:
     except FileNotFoundError:
         return False
     return (root / rel).exists()
+
+
+def prime_page_metadata(vault_root: Path, rels: Iterable[str]) -> None:
+    """Prime only the supplied store-owned pages in the current request snapshot."""
+    if mode.store_mode_for_reads(vault_root):
+        with snapshot(vault_root) as view:
+            view.prime_page_metadata(
+                rel for rel in rels if ownership.classify(rel) is ownership.Ownership.PAGE
+            )
 
 
 def holds_file(vault_root: Path, rel: str) -> bool:

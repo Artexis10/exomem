@@ -24,7 +24,7 @@ from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
 from .vault import relative_posix
 
 if TYPE_CHECKING:
-    from .vault_store.read import PageMeta
+    from .vault_store.read import PageMeta, StoredPage
 
 log = logging.getLogger(__name__)
 
@@ -298,7 +298,7 @@ class FrontmatterCache:
                     signature,
                     parse_page(
                         path,
-                        meta.mtime_ns / 1e9,
+                        meta.mtime,
                         vault_root,
                         content=stored.body,
                         resolved_relative=rel,
@@ -481,13 +481,7 @@ class StoreCorpus:
         return self.disk(skip=self._owned)
 
     def _owned(self, path: Path) -> bool:
-        from .vault_store import ownership
-
-        try:
-            rel = relative_posix(path, self.vault_root)
-        except ValueError:
-            return False
-        return ownership.classify(rel) is ownership.Ownership.PAGE
+        return _store_owned_path(path, self.vault_root)
 
     def signature_lookup(self) -> Callable[[Path], freshness.FileSignature]:
         """The change signature of each page: the store's row for a stored page, the stat of any
@@ -540,6 +534,94 @@ def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[..., Iterable
     return StoreCorpus(
         vault_root=Path(vault_root), revision=view.revision, pages=members, disk=disk_walk
     )
+
+
+def _store_owned_path(path: Path, vault_root: Path) -> bool:
+    from .vault_store import ownership
+
+    try:
+        rel = relative_posix(path, vault_root)
+    except ValueError:
+        return False
+    return ownership.classify(rel) is ownership.Ownership.PAGE
+
+
+@dataclass(frozen=True)
+class CorpusSource:
+    """One corpus page: stored bytes and metadata, or its original file reader."""
+
+    path: Path
+    vault_root: Path
+    stored: StoredPage | None = None
+
+    def read_text(self) -> str:
+        if self.stored is not None:
+            return self.stored.body.decode("utf-8")
+        from . import vault
+
+        return vault.read_guarded_text(self.vault_root, self.path)[0]
+
+    def read_bytes(self) -> bytes:
+        if self.stored is not None:
+            return self.stored.body
+        from . import vault
+
+        return vault.read_bytes_without_pinning(self.path, vault_root=self.vault_root)
+
+    def parse(self, file_page: Callable[[Path], ParsedPage | None]) -> ParsedPage | None:
+        if self.stored is None:
+            return file_page(self.path)
+        meta = self.stored.meta
+        return parse_page(
+            self.path, meta.mtime, self.vault_root,
+            content=self.stored.body, resolved_relative=meta.path,
+        )
+
+
+def corpus_sources(
+    vault_root: Path, scope: str, disk_walk: Callable[..., Iterable[Path]],
+) -> Iterable[CorpusSource]:
+    """Read a corpus's stored bytes and metadata in one query, then its unowned files.
+
+    File mode keeps the caller's walk. A source reads a file only when the consumer asks for it,
+    so admission still precedes parsing and an unreadable file can still count as a link target.
+    """
+    from .vault_store import read
+
+    root = Path(vault_root)
+    if store_serves(root):
+        with read.snapshot(root) as view:
+            for source in view.page_sources():
+                request_budget.checkpoint()
+                if read.corpus_member(source.meta.path, scope):
+                    yield CorpusSource(root / source.meta.path, root, source)
+        paths = disk_walk(skip=lambda path: _store_owned_path(path, root))
+    else:
+        paths = disk_walk()
+    for path in paths:
+        request_budget.checkpoint()
+        yield CorpusSource(path, root)
+
+
+def corpus_pages(
+    vault_root: Path,
+    scope: str,
+    disk_walk: Callable[..., Iterable[Path]],
+    file_page: Callable[[Path], ParsedPage | None],
+    *,
+    keep: Callable[[str, bytes | None], bool],
+) -> Iterable[ParsedPage]:
+    """Parse admitted corpus sources without a query or a file probe per stored page."""
+    for source in corpus_sources(vault_root, scope, disk_walk):
+        content = source.stored.body if source.stored is not None else None
+        if not keep(source.path.relative_to(vault_root).as_posix(), content):
+            continue
+        try:
+            page = source.parse(file_page)
+        except OSError:
+            continue
+        if page is not None:
+            yield page
 
 
 def kb_walk_member(rel: str) -> bool:
@@ -824,7 +906,7 @@ def page_stat(path: Path, vault_root: Path) -> PageStat:
 
         meta = read.owned_meta(vault_root, rel)
         if meta is not None:
-            return PageStat(meta.mtime_ns / 1e9, meta.mtime_ns, meta.size)
+            return PageStat(meta.mtime, meta.mtime_ns, meta.size)
     found = path.stat()
     return PageStat(found.st_mtime, found.st_mtime_ns, found.st_size)
 
