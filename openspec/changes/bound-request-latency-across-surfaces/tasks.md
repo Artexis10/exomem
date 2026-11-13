@@ -95,6 +95,12 @@
 - [ ] 3.16 After installation, compare `ask_memory`, `activate_context` and `read_memory` dispatch timings in the request ledger by concurrency bucket: alone, 1.5 to 3, and 3 to 6.
   - Use at least 100 calls per tool per arm, report the write count per window, and give bootstrap 95% intervals.
   - Record each site's span check from 3.8-3.14.
+- [ ] 3.18 Bind a review item id from stored state before any review queue is read.
+  - Baseline, from the request ledger of the installed service, 2026-11-11 to 2026-11-13: 9 of 9 `decide_review_item` calls by id were refused `ITEM_NOT_FOUND` after 752 to 1,758 s each. All 8 ids are current `note_cohesion` entries of the stored projection. The binder read only the review listings, and no listing holds that family.
+  - Verify: `tests/test_note_cohesion.py` follows the dismissal that a write response spells out, for a fresh vault, a live vault, a stale id and a restricted caller. `tests/test_triage_binding.py` refuses an unknown id without reading a page.
+  - Still open: a listed item's id still binds by reading the review queues. Task 3.19 removes that pass.
+- [ ] 3.19 Read the review queues without one pass over the vault for each queue.
+  - Baseline, same ledger and window: `list_review_items` had n=27, p50 21.9 s and maximum 645 s. One decision scan spent 504 to 994 s in `audit.corpus_contradictions`.
 
 ## 4. Verify installed behavior and deliver
 

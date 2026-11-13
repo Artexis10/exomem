@@ -25,6 +25,10 @@ from exomem import (
     review_state,
     writer_lease,
 )
+from exomem.cli_ops import OpError
+from exomem.governance.principal import request_scope
+from tests.page_opens import pages_opened
+from tests.test_episode_memory_command import _audience, _withhold_notes_from
 
 TODAY = dt.date(2026, 8, 16)
 PAGE = "Knowledge Base/Notes/Research/Travel/seasonal-fare-scouting.md"
@@ -67,12 +71,12 @@ def _put(vault: Path, rel: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _grow_by_one(vault: Path, number: int) -> dict:
+def _grow_by_one(vault: Path, number: int, *, page: str = PAGE) -> dict:
     """One compiled write that adds the page's `number`th unit."""
     return writer_lease.invoke_command(
         _command("observe_memory"),
         vault,
-        path=PAGE,
+        path=page,
         operation="add",
         category="decision",
         content=f"Booking rule {number}: hold the fare for trip {number} until the sale opens.",
@@ -168,6 +172,78 @@ def test_dismissing_another_family_on_the_page_leaves_the_question_open(vault: P
 
     still = _grow_by_one(vault, 10)["structure_suggestion"]
     assert (still["ref"], still["fingerprint"]) == (asked["ref"], asked["fingerprint"])
+
+
+def _keep_whole(vault: Path, asked: dict) -> dict:
+    """The dismissal exactly as the write response spells it: by the item's id, through dispatch."""
+    return writer_lease.invoke_command(
+        _command("triage_memory"),
+        vault,
+        item_id=asked["id"],
+        action="dismiss",
+        why="intentional: the page answers one question, the fare timing rules",
+    )
+
+
+def test_the_spelled_keep_whole_call_dismisses_the_question(vault: Path) -> None:
+    """This family is on no review listing. A binder that finds an id only by reading the
+    listings refuses the call that the response told the agent to make. The vault here has no
+    stored projection yet, as a new vault has none before its first rebuild."""
+    _put(vault, PAGE, _page(13))
+    asked = _grow_by_one(vault, 14)["structure_suggestion"]
+
+    _keep_whole(vault, asked)
+
+    assert "structure_suggestion" not in _grow_by_one(vault, 15)
+
+
+def test_the_spelled_keep_whole_call_reads_only_its_own_page(vault: Path) -> None:
+    """A binder that rebuilds the review queues reads every page in the vault for one decision.
+    On a large vault that takes minutes for each answer."""
+    _put(vault, PAGE, _page(13))
+    due_state.reconcile(vault, today=TODAY)  # a live vault holds its projection
+    asked = _grow_by_one(vault, 14)["structure_suggestion"]
+
+    with pages_opened(vault) as opened:
+        _keep_whole(vault, asked)
+
+    assert opened <= {PAGE}
+
+
+def test_a_keep_whole_call_for_a_grown_page_names_the_current_id(vault: Path) -> None:
+    """The page reached its next step after the question was asked, so the id is stale.
+    The refusal must give the current id without reading the vault to find it."""
+    _put(vault, PAGE, _page(13))
+    due_state.reconcile(vault, today=TODAY)  # a live vault holds its projection
+    asked = _grow_by_one(vault, 14)["structure_suggestion"]
+    for number in range(15, 21):
+        _grow_by_one(vault, number)
+    current = _grow_by_one(vault, 21)["structure_suggestion"]
+    assert current["id"] != asked["id"]
+
+    with pages_opened(vault) as opened, pytest.raises(OpError) as refused:
+        _keep_whole(vault, asked)
+
+    assert refused.value.code == "STALE_ITEM"
+    assert refused.value.details["current_id"] == current["id"]
+    assert opened == set()
+
+
+def test_a_restricted_caller_learns_nothing_from_the_id_of_a_withheld_page(vault: Path) -> None:
+    """The stored entries are the owner's. An answer from them would tell a restricted caller
+    that a page withheld from it holds an open question, and give that question's current id."""
+    withheld = "Knowledge Base/Notes/Insights/withheld-fare-rules.md"
+    _put(vault, withheld, _page(13, page_type="insight"))
+    due_state.reconcile(vault, today=TODAY)
+    asked = _grow_by_one(vault, 14, page=withheld)["structure_suggestion"]
+    for number in range(15, 22):
+        _grow_by_one(vault, number, page=withheld)
+    _withhold_notes_from(vault, "client-a")
+
+    with request_scope(_audience("client-a")), pytest.raises(OpError) as refused:
+        _keep_whole(vault, asked)
+
+    assert refused.value.code == "ITEM_NOT_FOUND"
 
 
 @pytest.mark.parametrize("status", ["superseded", "dropped"])
