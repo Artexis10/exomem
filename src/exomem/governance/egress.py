@@ -8105,7 +8105,22 @@ def edge_view(
     visible = visible_page_filter(vault_root)
     if visible is None or admission is None:
         return admission if visible is None else visible
-    return lambda path: admission(path) and visible(path)
+    content, release = admission_of(admission), admission_of(visible)
+    if content is None or release is None:
+        return lambda path: admission(path) and visible(path)
+
+    def identity():
+        left, right = content.identity(), release.identity()
+        return None if left is None or right is None else ("edge-view", left, right)
+
+    def decide(path, publish=False):
+        allowed, local = content.decide(path, publish)
+        if not allowed:
+            return False, local
+        released, release_local = release.decide(path, publish)
+        return released, local and release_local
+
+    return AdmittedPredicate(Admission(identity, decide))
 
 
 class ReaderViewUnavailable(RuntimeError):

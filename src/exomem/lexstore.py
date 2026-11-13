@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import copy
 import enum
 import functools
 import hashlib
@@ -616,18 +617,27 @@ def _ranking_metadata_json(page: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _ranking_metadata(raw: str) -> RankingPage:
+def _ranking_metadata(
+    raw: str, frontmatter_memo: dict[str, dict] | None = None,
+) -> RankingPage:
     import yaml
 
     from . import vault
 
     payload = json.loads(raw)
+    authored = payload.pop("frontmatter_yaml")
     try:
-        frontmatter = vault.yaml_safe_load(payload.pop("frontmatter_yaml"))
+        frontmatter = None if frontmatter_memo is None else frontmatter_memo.get(authored)
+        if frontmatter is None:
+            frontmatter = vault.yaml_safe_load(authored)
     except yaml.YAMLError as error:
         raise ValueError("invalid ranking frontmatter") from error
     if not isinstance(frontmatter, dict):
         raise ValueError("invalid ranking frontmatter")
+    if frontmatter_memo is not None:
+        # Exact serialized metadata can repeat across pages; each page still owns its mutable values.
+        frontmatter_memo[authored] = frontmatter
+        frontmatter = copy.deepcopy(frontmatter)
     for key in ("stem_set", "outbound_targets", "superseded_by"):  # nosemgrep: ep-word-set -- fixed ranking payload fields
         if not isinstance(payload[key], list) or not all(isinstance(value, str) for value in payload[key]):
             raise ValueError("invalid ranking text projection")
@@ -4507,6 +4517,7 @@ def _eligibility_metadata_query(
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
     result = {}
+    frontmatter_memo: dict[str, dict] = {}
     try:
         for path, payload, parent, updated, ranking, content_hash in rows:
             payload = None if payload is None else json.loads(payload)
@@ -4523,7 +4534,7 @@ def _eligibility_metadata_query(
                 updated,
                 None if payload is None else payload["media_file"],
                 None if payload is None else payload["frame_ts"],
-                ranking=None if ranking is None else _ranking_metadata(ranking),
+                ranking=None if ranking is None else _ranking_metadata(ranking, frontmatter_memo),
                 content_hash=content_hash,
             )
         if not (include_units or include_occurrences or include_structure):

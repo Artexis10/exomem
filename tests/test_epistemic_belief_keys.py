@@ -1,12 +1,12 @@
-"""Belief units and the governed keys that slice 4 of `make-epistemic-language-dynamic` adds.
+"""Belief units and governed metadata after their migration release.
 
-This module began as the before-picture, in the style of `test_epistemic_kind_parity`:
-every `# CORE` value never changes, and a `# FLIPS slice4` value is one that the slice
-edited on purpose. The comment on each flipped line names the value it held before.
+Valid units keep their values. Invalid rows name their repair, and metadata-only units
+stay out of parsed units, stored structural views and search results.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +17,7 @@ from exomem import (
     lexstore,
     public_surface,
     relation_registry,
+    semantic_index,
     semantic_units,
     working_set_index,
     working_set_runtime,
@@ -58,8 +59,8 @@ def test_a_plain_beliefs_heading_written_before_the_kind() -> None:
     document = _parse("# Release outlook\n\n## Beliefs\n\nThe team trusts the new pipeline.\n")
 
     assert [unit.kind for unit in document.units] == ["belief"]  # FLIPS slice4: was [] (no belief kind)
-    assert _codes(document.errors) == []  # CORE
-    assert _codes(document.warnings) == ["incomplete_rich_belief"]  # FLIPS slice4: was []
+    assert _codes(document.errors) == ["incomplete_rich_belief", "missing_rich_assessed_claim"]
+    assert document.warnings == ()
 
 
 def test_a_credence_row_on_a_claim() -> None:
@@ -109,9 +110,9 @@ def test_a_unit_whose_rows_are_only_new_governed_keys() -> None:
 def test_a_new_governed_row_below_a_nested_heading() -> None:
     document = _parse("# Release outlook\n\n## Claim\n### Detail\n- modality: should\n")
 
-    assert [unit.kind for unit in document.units] == ["claim"]  # CORE: first release keeps the unit
-    assert _codes(document.errors) == []  # CORE until task 4.5 makes it empty_rich_unit
-    assert _codes(document.warnings) == ["empty_rich_unit"]  # FLIPS slice4: was [] (row not reserved)
+    assert document.units == ()
+    assert _codes(document.errors) == ["empty_rich_unit"]
+    assert document.warnings == ()
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +143,8 @@ def test_a_sourced_forecast_keeps_its_holder_probability_basis_and_claim() -> No
 def test_an_unsourced_probability_is_refused_and_names_the_basis_row() -> None:
     """Catches a bare number that reads as calibrated when nobody said why."""
     document = _parse(
-        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: 0.7\n\n"
-        "The release will slip a week.\n"
+        "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: 0.7\n"
+        "- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n"
     )
 
     (error,) = document.errors
@@ -155,7 +156,8 @@ def test_a_percentage_is_refused_with_the_probability_to_write_instead() -> None
     """Catches `80%` stored as an unreadable credence, or read as a probability of 80."""
     document = _parse(
         "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: 80%\n"
-        "- credence_basis: the last six release cycles\n\nThe release will slip a week.\n"
+        "- credence_basis: the last six release cycles\n"
+        "- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n"
     )
 
     (error,) = document.errors
@@ -187,17 +189,17 @@ def test_a_number_on_a_claim_is_refused_with_the_belief_form() -> None:
     assert "credence_basis" in error.remediation
 
 
-def test_a_belief_that_names_no_claim_warns_with_the_relation_to_add() -> None:
+def test_a_belief_that_names_no_claim_is_refused_with_the_relation_to_add() -> None:
     """Catches a belief with no claim to assess, which context cannot place beside that claim."""
     document = _parse(
         "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n\n"
         "The release will slip a week.\n"
     )
 
-    (warning,) = document.warnings
-    assert document.errors == ()
-    assert warning.code == "missing_rich_assessed_claim"
-    assert "- relations: assesses:" in warning.remediation
+    (error,) = document.errors
+    assert document.warnings == ()
+    assert error.code == "missing_rich_assessed_claim"
+    assert "- relations: assesses:" in error.remediation
 
 
 def test_a_vault_extension_of_assesses_names_the_assessed_claim(tmp_path: Path) -> None:
@@ -223,7 +225,8 @@ def test_a_vault_extension_of_assesses_names_the_assessed_claim(tmp_path: Path) 
 def test_a_belief_with_a_credence_but_no_holder_is_refused() -> None:
     """Catches a belief that nobody holds, which reads as the vault's own view."""
     document = _parse(
-        "# Release outlook\n\n## Belief\n- credence: likely\n\nThe release will slip a week.\n"
+        "# Release outlook\n\n## Belief\n- credence: likely\n"
+        "- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n"
     )
 
     assert _codes(document.errors) == ["missing_rich_credence_holder"]
@@ -265,41 +268,42 @@ def test_a_vault_kind_without_the_credence_trait_refuses_a_credence() -> None:
     assert "## Belief" in error.remediation
 
 
-def test_a_plain_beliefs_heading_warns_with_both_repairs_and_still_parses() -> None:
-    """Catches an old page with a `## Beliefs` section that this release stops parsing."""
+def test_a_plain_beliefs_heading_is_refused_with_both_repairs() -> None:
+    """An old belief heading must now name its holder, value and assessed claim."""
     document = _parse("# Release outlook\n\n## Beliefs\n\nThe team trusts the new pipeline.\n")
 
-    (warning,) = document.warnings
-    assert document.errors == ()
-    assert [unit.content for unit in document.units] == ["The team trusts the new pipeline."]
-    assert warning.severity == "warning"
-    assert "credence_holder" in warning.remediation
-    assert "rename the heading" in warning.remediation
+    assert document.warnings == ()
+    assert _codes(document.errors) == ["incomplete_rich_belief", "missing_rich_assessed_claim"]
+    incomplete = next(error for error in document.errors if error.code == "incomplete_rich_belief")
+    assert "credence_holder" in incomplete.remediation
+    assert "rename the heading" in incomplete.remediation
 
 
-def test_an_empty_beliefs_placeholder_on_an_old_page_warns_and_still_parses() -> None:
-    """Catches an old page whose empty `## Beliefs` heading this release starts refusing."""
+def test_an_empty_beliefs_placeholder_is_refused_and_excluded() -> None:
+    """An empty belief must not remain a tolerated placeholder."""
     document = _parse("# Release outlook\n\n## Beliefs\n\n## Next steps\n\nShip it.\n")
 
-    assert document.errors == ()
-    assert _codes(document.warnings) == ["empty_rich_unit"]
+    assert _codes(document.errors) == ["empty_rich_unit"]
+    assert document.warnings == ()
     assert document.units == ()
 
 
-def test_a_bad_reserved_row_under_an_old_beliefs_heading_warns_and_still_parses() -> None:
-    """Catches an old `## Beliefs` section whose ordinary rows this release starts refusing."""
+def test_a_bad_reserved_row_under_an_old_beliefs_heading_is_refused() -> None:
+    """Missing belief rows must not downgrade another malformed row to a warning."""
     document = _parse("# Release outlook\n\n## Beliefs\n- tags: a b\n\nThe team trusts the pipeline.\n")
 
-    assert document.errors == ()
-    assert _codes(document.warnings) == ["incomplete_rich_belief", "invalid_rich_tags"]
+    assert document.warnings == ()
+    assert _codes(document.errors) == [
+        "incomplete_rich_belief", "invalid_rich_tags", "missing_rich_assessed_claim",
+    ]
     assert [unit.content for unit in document.units] == ["The team trusts the pipeline."]
 
 
 def test_a_bad_reserved_row_on_a_belief_with_its_rows_is_still_an_error() -> None:
-    """Catches the first-release leniency spreading to a belief written in the new form."""
+    """Malformed tags remain an error on a belief with complete governed rows."""
     document = _parse(
         "# Release outlook\n\n## Belief\n- credence_holder: Finance lead\n- credence: likely\n"
-        "- tags: a b\n\nThe release will slip a week.\n"
+        "- tags: a b\n- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n"
     )
 
     assert [(error.code, error.line) for error in document.errors] == [("invalid_rich_tags", 6)]
@@ -313,7 +317,7 @@ def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path
         "---\ntitle: Release outlook\ntype: insight\nstatus: active\n"
         "exomem_id: 33333333-3333-4333-8333-333333333333\nupdated: 2026-10-01\n---\n\n"
         "# Release outlook\n\n## Belief\n- id: slip\n- credence_holder: Finance lead\n"
-        "- credence: likely\n\nThe release will slip a week.\n",
+        "- credence: likely\n- relations: assesses: [[Release date]]\n\nThe release will slip a week.\n",
         encoding="utf-8",
     )
     (belief,) = semantic_units.parse_semantic_units(
@@ -324,6 +328,7 @@ def test_an_edit_to_a_beliefs_prose_keeps_its_holder_and_credence(tmp_path: Path
     updated = commands.op_observe_memory(
         tmp_path, path=PATH, operation="update", category="belief",
         content="The release will slip two weeks.", kind="belief",
+        relations=[{"kind": "assesses", "target": "[[Release date]]"}],
         unit_ref=belief.unit_ref, expected_fingerprint=belief.fingerprint,
         expected_hash=vault_module.content_hash(page.read_bytes().decode("utf-8")),
     )
@@ -459,19 +464,19 @@ def test_an_event_time_with_a_clock_time_is_accepted() -> None:
     assert event.occurred_at == "2026-03-01T14:30+02:00"
 
 
-def test_a_newly_reserved_row_with_an_old_value_warns_and_still_parses() -> None:
-    """Catches a page written before the keys existed that stops parsing in this release."""
+def test_a_reserved_row_with_an_invalid_value_is_refused_and_projects_nothing() -> None:
+    """An invalid modality must name the repair and project no valid value."""
     document = _parse("# Release outlook\n\n## Claim\n- modality: video\n\nThe talk is online.\n")
 
-    (warning,) = document.warnings
-    assert document.errors == ()
+    (error,) = document.errors
+    assert document.warnings == ()
     assert [unit.content for unit in document.units] == ["The talk is online."]
     assert document.units[0].modality is None
-    assert warning.code == "invalid_rich_modality"
-    assert "modality" in warning.message
+    assert error.code == "invalid_rich_modality"
+    assert "modality" in error.message
     for modality in ("is", "should", "must", "may"):
-        assert modality in warning.remediation
-    assert "rename the row" in warning.remediation
+        assert modality in error.remediation
+    assert "rename the row" in error.remediation
 
 
 @pytest.mark.parametrize(
@@ -481,18 +486,18 @@ def test_a_newly_reserved_row_with_an_old_value_warns_and_still_parses() -> None
         ("Procedure", "- inference_mode: induction", "Run the nightly build."),
     ],
 )
-def test_a_row_on_a_kind_that_does_not_take_it_warns_and_projects_nothing(
+def test_a_row_on_a_kind_that_does_not_take_it_is_refused_and_projects_nothing(
     heading: str, row: str, body: str,
 ) -> None:
     """Catches an event time on a claim, or a mode on a procedure, read as if it applied."""
     document = _parse(f"# Release outlook\n\n## {heading}\n{row}\n\n{body}\n")
 
-    (warning,) = document.warnings
+    (error,) = document.errors
     key = row.removeprefix("- ").split(":", 1)[0]
-    assert document.errors == ()
+    assert document.warnings == ()
     assert getattr(document.units[0], key) is None
-    assert warning.code == f"misplaced_rich_{key}"
-    assert "rename the row" in warning.remediation.lower()
+    assert error.code == f"misplaced_rich_{key}"
+    assert "rename the row" in error.remediation.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -623,8 +628,8 @@ def test_a_find_pack_shows_each_units_attribution_and_modality(vault: Path) -> N
     assert "asserted_by" not in units["norm"] and "credence" not in units["vendor"]
 
 
-def test_a_unit_emptied_only_by_a_new_key_stays_in_the_index(vault: Path) -> None:
-    """Catches the parser keeping a first-release unit that the stored summary and find drop."""
+def test_a_metadata_only_unit_is_excluded_from_parse_stored_view_and_find(vault: Path) -> None:
+    """Nested governed rows must not leave an empty unit in any read surface."""
     body = (
         "# Deploy policy\n\n## Claim\n### Approvals detail\n- modality: should\n\n"
         "## Claim\n- id: other\n\nDeploys run nightly.\n"
@@ -649,11 +654,59 @@ def test_a_unit_emptied_only_by_a_new_key_stays_in_the_index(vault: Path) -> Non
     found = commands.op_find(vault, query="", mode="keyword", kinds=["claim"])
 
     parsed_refs = [unit.unit_ref for unit in parsed.units]
-    assert len(parsed_refs) == 2
+    assert parsed_refs == [f"{POLICY_REF}#other"]
+    assert _codes(parsed.errors) == ["empty_rich_unit"]
+    assert parsed.warnings == ()
     assert [unit.unit_ref for unit in stored.units] == parsed_refs
     assert sorted(hit["unit_ref"] for hit in found if hit["unit_ref"].startswith(POLICY_REF)) == sorted(
         parsed_refs
     )
+
+
+def test_the_migration_releases_cached_empty_unit_is_rebuilt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A version-eight summary must not keep its old substantive-body decision after upgrade."""
+    page = vault / POLICY
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: resource\nstatus: active\n"
+        f"exomem_id: {POLICY_ID}\n---\n\n# Deploy policy\n\n"
+        "## Claim\n### Detail\n- modality: should\n\n"
+        "## Claim\n- id: other\n\nDeploys run nightly.\n",
+        encoding="utf-8",
+    )
+    # Build the old catalog identity as well as its page version, as a released store would.
+    with monkeypatch.context() as migration_release:
+        migration_release.setattr(semantic_index, "PARSER_VERSION", 8)
+        lexstore.ensure_fresh(vault)
+    connection = lexstore.get_store(vault)._connect()
+    try:
+        metadata = json.loads(connection.execute(
+            "SELECT structure_json FROM pages WHERE path = ?", (POLICY,),
+        ).fetchone()[0])
+        # Parser version eight retained units emptied only by the newly reserved rows.
+        metadata["parser_version"] = 8
+        metadata["structure"]["rich"][1]["substantive_body"] = True
+        with connection:
+            connection.execute(
+                "UPDATE pages SET structure_json = ? WHERE path = ?",
+                (json.dumps(metadata), POLICY),
+            )
+        with pytest.raises(ValueError, match="SEMANTIC_STRUCTURE_UNAVAILABLE"):
+            semantic_index.Interpretations(vault).parent(POLICY, metadata)
+        lexstore.ensure_fresh(vault)
+        repaired = json.loads(connection.execute(
+            "SELECT structure_json FROM pages WHERE path = ?", (POLICY,),
+        ).fetchone()[0])
+        assert repaired["parser_version"] == semantic_index.PARSER_VERSION
+        assert repaired["structure"]["rich"][1]["substantive_body"] is False
+    finally:
+        connection.close()
+    found = commands.op_find(vault, query="", mode="keyword", kinds=["claim"])
+    assert [hit["unit_ref"] for hit in found if hit["unit_ref"].startswith(POLICY_REF)] == [
+        f"{POLICY_REF}#other",
+    ]
 
 
 def test_a_find_pack_cuts_a_long_basis_and_says_it_did(vault: Path) -> None:

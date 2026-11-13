@@ -35,12 +35,22 @@ from test_vault_store_readers import (
 )
 from test_vault_store_rederive import PROFILES, project, settle_to_the_end
 
-from exomem import commands, epistemic_graph, find, graph_read_publication, lexstore
+from exomem import (
+    access,
+    commands,
+    epistemic_graph,
+    find,
+    graph_read_publication,
+    lexstore,
+    semantic_index,
+)
 from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
+from exomem.governance import egress
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
+from exomem.vocabulary import instances
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -449,7 +459,12 @@ def linked_page(index):
     return (
         f"Knowledge Base/Notes/Gen/Page-{index:04d}.md",
         (
-            f"---\ntitle: Page {index}\ntype: note\n---\n# Page {index}\n\n"
+            f"---\ntitle: Page {index}\ntype: note\n"
+            "created: 2026-01-01\nupdated: 2026-06-01\nproject: harbour\n"
+            "tags: [navigation, fieldwork]\naliases: []\nstatus: active\n"
+            "summary: Observations from the lighthouse survey\n"
+            "sources: []\nrelated: []\n---\n"
+            f"# Page {index}\n\n"
             f"The lantern number {index} burns at the lighthouse, as [[Lantern Claim]] says; "
             f"see [[Page-{(index + 1) % max(GENERATED, 1):04d}]].\n"
         ).encode(),
@@ -507,6 +522,22 @@ def drill_figures(root):
         figures[name] = {
             "cold_ms": round(statistics.median(cold)),
             "warm_ms": round(statistics.median(warm)),
+            "cold_samples_ms": cold,
+            "warm_samples_ms": warm,
+        }
+    with request_scope(EXTERNAL):
+        cold, warm = [], []
+        for _ in range(3):
+            find.clear_cache()
+            for times in (cold, warm):
+                started = time.perf_counter()
+                assert GRAPH_CALLS["find relation_of"](root)
+                times.append((time.perf_counter() - started) * 1000)
+        figures["find relation_of external"] = {
+            "cold_ms": round(statistics.median(cold)),
+            "warm_ms": round(statistics.median(warm)),
+            "cold_samples_ms": cold,
+            "warm_samples_ms": warm,
         }
     return figures
 
@@ -520,6 +551,7 @@ def test_each_graph_and_link_statement_finds_its_rows_through_an_index(
     for rel in (CLAIM, EVIDENCE, RIVAL):
         write.commit(writer, put(rel, PAGES[rel].encode()))
     commit_linked(writer, GENERATED)
+    restrict_external(stored, 'tags: ["secret"]')
     find.clear_cache()
     graph_and_link_reads(stored)  # the admitted sets are read once per revision, as file mode does
     if DRILL_REPORT:
@@ -592,7 +624,11 @@ def test_a_commit_writes_the_link_rows_of_its_own_pages_and_no_others(
     assert all(any(f"'{rel}'" in sql for sql in touched) for rel in pages)
 
     def link(path, body):
-        return (path, 7, body.decode().splitlines()[6].strip(), "Lantern Claim")
+        number, line = next(
+            (number, line) for number, line in enumerate(body.decode().splitlines(), 1)
+            if "[[Lantern Claim]]" in line
+        )
+        return (path, number, line.strip(), "Lantern Claim")
 
     kept = [link(*linked_page(index)) for index in range(GENERATED) if index not in (3, 4)]
     assert inbound(stored, CLAIM)[1] == sorted(
@@ -739,3 +775,218 @@ def test_a_relation_filter_answers_from_the_store_when_the_sidecar_file_is_gone(
 
     assert {hit.path for hit in found} == {CLAIM, EVIDENCE}
     assert (participants.status, participants.paths) == ("available", frozenset({CLAIM, EVIDENCE}))
+
+
+def test_a_link_hub_reads_no_author_summary_and_binds_policy_once(
+    stored, writer, monkeypatch,  # noqa: F811
+):
+    """Core links must not parse each author or stat the access policy once per endpoint."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, 100)
+    interpreted, summaries, policies = [], [], []
+    parent = semantic_index.Interpretations.parent
+    load = epistemic_graph.GraphView._summaries
+    policy = access._policy_state
+
+    def interpret(self, path, metadata):
+        interpreted.append(path)
+        return parent(self, path, metadata)
+
+    def loading(self, paths):
+        summaries.extend(paths)
+        return load(self, paths)
+
+    def reading_policy(*args, **kwargs):
+        policies.append(1)
+        return policy(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_index.Interpretations, "parent", interpret)
+    monkeypatch.setattr(epistemic_graph.GraphView, "_summaries", loading)
+    monkeypatch.setattr(access, "_policy_state", reading_policy)
+    result = epistemic_graph.EpistemicGraphIndex(stored).relation_participants([], anchor=CLAIM)
+
+    assert result.status == "available"
+    assert {path for path in result.paths if "/Gen/" in path} == {
+        linked_page(index)[0] for index in range(100)
+    }
+    assert len(policies) < 12, f"policy reads grew with hub degree: {len(policies)}"
+    assert not any("/Gen/" in path for path in interpreted + summaries)
+
+
+def test_an_interpretation_reads_the_binding_configuration_once(tmp_path, monkeypatch):
+    """Interpreting another author must not re-read connector configuration for every page."""
+    reads = []
+    real = instances.configuration
+
+    def configuration(root):
+        reads.append(1)
+        return real(root)
+
+    monkeypatch.setattr(instances, "configuration", configuration)
+    interpretation = semantic_index.Interpretations(tmp_path)
+    assert interpretation.definitions("first.md", {}) is not None
+    assert interpretation.definitions("second.md", {}) is not None
+    interpretation.admitted_instances()
+    interpretation.dependency()
+    interpretation.public_dependency()
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("relations", [None, ["supports"]])
+def test_a_repeated_store_find_reads_no_graph_statement(stored, writer, monkeypatch, relations):  # noqa: F811
+    """A result-cache hit must skip graph resolution, including anchored key validation."""
+    for rel in (CLAIM, EVIDENCE, RIVAL):
+        write.commit(writer, put(rel, PAGES[rel].encode()))
+    find.clear_cache()
+    kwargs = dict(query="", relation_of=CLAIM, relations=relations, mode="keyword", graph=False)
+    first = find.find(stored, **kwargs)
+    assert first
+    statements = []
+    real = connection.store_reader
+
+    @contextlib.contextmanager
+    def tracing(*args, **kwargs):
+        with real(*args, **kwargs) as reader:
+            reader.set_trace_callback(statements.append)
+            try:
+                yield reader
+            finally:
+                reader.set_trace_callback(None)
+
+    monkeypatch.setattr(connection, "store_reader", tracing)
+    timings = find.FindTimings()
+    second = find.find(stored, **kwargs, timings=timings)
+    assert second == first and timings.cache["hit"]
+    # The graph tables share the `graph_` name prefix that their schema fixes; a statement naming one reads them.
+    assert not [sql for sql in statements if "graph_" in sql.lower()]
+
+
+def test_relation_matching_keeps_units_symmetry_unavailable_instances_and_withheld_names(vault):  # noqa: F811
+    """Slim core matching must preserve file-mode answers at the vocabulary and privacy boundaries."""
+    unavailable = f"{INSIGHTS}/Unavailable.md"
+    pages = {
+        **PAGES, **UNIT_PAGES,
+        LAMP: UNIT_PAGES[LAMP] + "\n## Claim\n- relations: supports: [[Tide Evidence]]\n\nOil is evidence.\n",
+        unavailable: (
+            "---\ntitle: Unavailable\ntype: note\nregistry_scope: missing\n---\n"
+            "A core link to [[Tide Evidence]] survives unavailable extension definitions.\n"
+        ),
+    }
+    del pages[TIDE_TWIN]  # Leave one visible homonym and one withheld homonym.
+    write_pages(vault, pages)
+    restrict_external(vault, 'tags: ["secret"]')
+    build_indexes(vault)
+
+    def answers():
+        index = epistemic_graph.EpistemicGraphIndex(vault)
+        keep = egress.edge_view(vault, None)
+        def resolver():
+            return find.recall_resolver_snapshot(vault)
+        results = {
+            "unit": index.relation_participants(["supports"], keep=keep, resolver=resolver),
+            "symmetric inbound": index.relation_participants(
+                ["contradicts"], direction="inbound", keep=keep, resolver=resolver,
+            ),
+            "symmetric outbound": index.relation_participants(
+                ["contradicts"], direction="outbound", keep=keep, resolver=resolver,
+            ),
+            "homonym": index.relation_participants([], anchor=TIDE, keep=keep, resolver=resolver),
+            "unavailable": index.relation_participants([], anchor=unavailable, keep=keep),
+        }
+        assert LAMP in results["unit"].paths
+        assert results["symmetric inbound"].paths == results["symmetric outbound"].paths
+        assert {CLAIM, RIVAL} <= results["symmetric inbound"].paths
+        assert results["unavailable"].status == "temporarily_unavailable"
+        return results
+
+    before = {"owner": answers()}
+    with request_scope(EXTERNAL):
+        before["external"] = answers()
+        assert CLAIM in before["external"]["homonym"].paths
+        assert SECRET not in before["external"]["unit"].paths
+    migrate_apply(vault)
+    find.clear_cache()
+    assert answers() == before["owner"]
+    with request_scope(EXTERNAL):
+        assert answers() == before["external"]
+
+
+@pytest.mark.parametrize("change", ["store commit", "policy", "caller"])
+def test_withheld_names_follow_the_store_policy_and_caller(stored, writer, change):  # noqa: F811
+    """A stale visibility cache reveals a withheld homonym by removing a visible link or endpoint."""
+    from dataclasses import replace
+
+    source = f"{INSIGHTS}/Survey.md"
+    visible = f"{INSIGHTS}/Signal.md"
+    hidden = f"{INSIGHTS}/Other.md"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "homonyms", puts=(
+        write.PagePut(source, b"---\ntitle: Survey\ntype: note\n---\nSee [[Beacon]].\n"),
+        write.PagePut(visible, b"---\ntitle: Beacon\ntype: note\ntags: [blocked]\n---\nVisible beacon.\n"),
+        write.PagePut(hidden, (
+            "---\ntitle: " + ("Other" if change == "store commit" else "Beacon")
+            + "\ntype: note\ntags: [secret]\n---\nPrivate beacon.\n"
+        ).encode()),
+    )))
+    project(writer, stored)
+    restrict_external(stored, 'tags: ["secret"]')
+    governance = stored / "Knowledge Base" / "_Governance"
+    if change == "caller":
+        (governance / "scopes" / "blocked.yaml").write_text(
+            'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAW\nname: Blocked\ntags: [blocked]\n'
+        )
+        (governance / "rules" / "partner.yaml").write_text(
+            'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB1\n'
+            'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAW"]\naudience: partner\nceiling: 0\n'
+        )
+
+    def answer(who, anchor, withheld):
+        with request_scope(who):
+            find.clear_cache()  # Clear result/resolver caches; the revision's name cache must stay valid.
+            hits = find.find(stored, query="", relation_of=anchor, mode="keyword", graph=False)
+            assert source in {hit.path for hit in hits}
+            assert withheld not in json.dumps([(hit.path, hit.title, hit.excerpt) for hit in hits])
+            return [(hit.path, hit.title, hit.excerpt) for hit in hits]
+
+    before = answer(EXTERNAL, visible, hidden)
+    assert answer(EXTERNAL, visible, hidden) == before
+    if change == "store commit":
+        write.commit(writer, put(hidden, (
+            b"---\ntitle: Beacon\ntype: note\ntags: [secret]\n---\nPrivate beacon.\n"
+        )))
+        assert answer(EXTERNAL, visible, hidden) == before
+    elif change == "policy":
+        scope = governance / "scopes" / "secret.yaml"
+        scope.write_text(scope.read_text().replace('["secret"]', '["blocked"]'))
+        assert answer(EXTERNAL, hidden, visible) == before
+    else:
+        assert answer(replace(EXTERNAL, audience_id="partner"), hidden, visible) == before
+
+
+def test_a_repeated_restricted_hub_does_not_recheck_unchanged_pages(
+    stored, writer, monkeypatch,  # noqa: F811
+):
+    """A new graph operation must not repeat visibility decisions on unchanged linking pages."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, 40)
+    restrict_external(stored, 'tags: ["secret"]')
+    def participants():
+        with read.request_snapshot(stored):
+            return epistemic_graph.EpistemicGraphIndex(stored).relation_participants(
+                [], anchor=CLAIM, keep=egress.edge_view(stored, find.caller_admission(stored)),
+                resolver=lambda: find.recall_resolver_snapshot(stored),
+            )
+
+    with request_scope(EXTERNAL):
+        assert participants().paths
+        checked = []
+        permits = egress.content_permits
+
+        def checking(root, path, *args, **kwargs):
+            checked.append(path)
+            return permits(root, path, *args, **kwargs)
+
+        monkeypatch.setattr(egress, "content_permits", checking)
+        find.clear_cache()
+        assert participants().paths
+        # Every endpoint still passes recall admission; its stable release verdict needs no new read.
+        assert not any("/Gen/" in path for path in checked)

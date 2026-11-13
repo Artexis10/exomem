@@ -596,6 +596,9 @@ def scan(
     units = Counter(total=0, compact=0, rich=0)
     diagnostic_counts: Counter[str] = Counter()
     diagnostic_examples: list[dict[str, Any]] = []
+    warning_counts: Counter[str] = Counter()
+    warning_examples: list[dict[str, Any]] = []
+    pages_with_warnings = 0
     page_states: list[semantic_contract.SemanticPageState] = []
     markdown_seen = 0
     markdown_scanned = 0
@@ -777,21 +780,29 @@ def scan(
                 resolved_frequencies[unit.category] += 1
                 canonical_raw[unit.category_key][unit.category_raw] += 1
                 resolved_canonical[unit.category][unit.category_key] += 1
-            for diagnostic in document.errors:
-                if diagnostic.registry_namespace is not None:
-                    continue
-                diagnostic_counts[diagnostic.code] += 1
-                if len(diagnostic_examples) < effective_example_limit:
-                    diagnostic_examples.append(
-                        {
-                            "path": rel_path,
-                            "code": diagnostic.code,
-                            "severity": diagnostic.severity,
-                            "line": diagnostic.line,
-                            "span": _safe_span(diagnostic),
-                            "remediation": diagnostic.remediation,
-                        }
-                    )
+            page_warnings = tuple(
+                warning for warning in document.warnings if warning.registry_namespace is None
+            )
+            pages_with_warnings += bool(page_warnings)
+            for findings, counts, examples in (
+                (document.errors, diagnostic_counts, diagnostic_examples),
+                (page_warnings, warning_counts, warning_examples),
+            ):
+                for diagnostic in findings:
+                    if diagnostic.registry_namespace is not None:
+                        continue
+                    counts[diagnostic.code] += 1
+                    if len(examples) < effective_example_limit:
+                        examples.append(
+                            {
+                                "path": rel_path,
+                                "code": diagnostic.code,
+                                "severity": diagnostic.severity,
+                                "line": diagnostic.line,
+                                "span": _safe_span(diagnostic),
+                                "remediation": diagnostic.remediation,
+                            }
+                        )
         reached_entry_budget = sentinel_observed or (
             directory_entries_admitted >= effective_directory_entry_budget
             and bool(pending_directories or child_directories)
@@ -926,6 +937,13 @@ def scan(
             "counts": dict(sorted(diagnostic_counts.items())),
             "examples": diagnostic_examples,
             "examples_omitted": max(0, malformed_count - len(diagnostic_examples)),
+            "warnings": {
+                "count": sum(warning_counts.values()),
+                "pages": pages_with_warnings,
+                "counts": dict(sorted(warning_counts.items())),
+                "examples": warning_examples,
+                "examples_omitted": max(0, sum(warning_counts.values()) - len(warning_examples)),
+            },
         },
         "governance": governance,
         "safe_next_actions": _safe_next_actions(

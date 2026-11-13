@@ -186,9 +186,19 @@ Every new key name is chosen to avoid ordinary rows: `value`, `at`, `holder`, `b
 
 Each new key is reserved, as `verdict` and `check_by` are. A page that already uses one as an ordinary row gets a warning, not an error, for one release. The warning names the repair: rename the row, or give it a valid value.
 
+Task 4.5 ends this migration period. Invalid or misplaced rows, incomplete beliefs and missing assessed-claim relations become errors with the existing repairs. Metadata-only rich units leave the parsed units, stored structural views and search results. Parser version 9 invalidates version 8 summaries, whose stored `substantive_body` could retain an empty unit. The existing freshness and reconcile paths rebuild these summaries; this transition adds no state schema or repair service.
+
 ### Multilingual labels
 
 Each registry entry carries `labels: {language: text}`. Keys stay language-neutral. Parsing accepts a label as an alias of its key, so `## Väite` and `## Claim` are one kind. The registry check refuses a label that collides with another entry's key or label.
+
+`observe_memory` uses `selected_parent_index_state` for lookup, returned units and page short IDs.
+Kind and verdict validation read that selection's categories snapshot, with the existing project scope.
+The parent index and lexical sidecars keep neutral structure; registry changes need no corpus rebuild.
+If definitions become unavailable, dependent unit resolution reports unavailable and the complete unit list is unavailable.
+Core-safe units retain the selected adapter's existing read and mutation contract.
+
+This preserves the canonical semantic-write contract and `add-governed-vault-consolidation`.
 
 ## Debt
 
@@ -210,7 +220,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | C4 and C5 category fallbacks; C6 category leg; C9; C11; `CONCLUSION_CATEGORIES`; `_CATEGORY_BY_LABEL` | artifact_role_review 84-92; epistemic_graph 14748; audit 6018; context_roles 796; working_set_index 291 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
 | C10 `UNITS_V1` | sensing 245-275 | Frozen instrument (proposal). |
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
-| Vault verdicts, vault kinds and kind labels in the vault-neutral parse | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column; `observe_memory` unit refs and the `unit` its result returns | These read the parse that uses the shipped registry, as vault kinds and categories already are there. A vault verdict shows in `metadata.verdict` and in the selected unit view, not in `unit.verdict` of the neutral parse. A unit under a vault kind's heading or a vault label is missing to `observe_memory`: it refuses the ref with `UNIT_NOT_FOUND` and says to edit the page body. Task 6.3 makes these readers read the page's registry. A vault-registry change does not rebuild the derived stores, as for relations. |
+| Neutral sidecars and selected vocabulary | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column | These store neutral structure by contract. Selected readers interpret each admitted page with its definitions; a registry change needs no rebuild. Task 6.3 moves `observe_memory` onto that existing adapter. |
 | A `Relations` heading that names a kind | semantic_blocks relation section; semantic_language_registry `_check_kind_labels` | A vault kind's heading alias of `Relations` turns every page's `## Relations` section into a unit of that kind, and a label on a shipped kind can now do the same. The registry check does not refuse that spelling yet. |
 | Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
 | Retry advice while the graph is stale | find `_resolve_relation_filter`, `_dimension_edges` (warming site `relation_graph_rebuilding`) | On the scan path, a `unit.dimension` filter that needs edges, or a `relations=` filter, raises the warming outcome while the graph rebuilds, and its remediation says to retry. After a direct file edit, only a reconcile (`maintain_memory` with mode `reconcile`) ends that state, so a retry can return the same outcome. The remediation belongs to the shared warming outcome, so this slice does not change it. |

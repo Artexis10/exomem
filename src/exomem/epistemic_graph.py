@@ -19,6 +19,7 @@ import stat
 import threading
 import time
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -9053,7 +9054,7 @@ class EpistemicGraphIndex:
             if not plan.exact_keys and anchor_rel is None:
                 return RelationFilterResult(status="available")
             candidates = (
-                _relation_candidates(conn, view, plan, registry)
+                _relation_candidates(conn, view, plan, registry, slim=True)
                 if plan.exact_keys
                 else _anchor_candidates(conn, anchor_rel)
             )
@@ -9070,7 +9071,7 @@ class EpistemicGraphIndex:
                         if not plan.exact_keys and anchor_rel not in (src_path, dst_path):
                             continue
                         candidates.append((src_path, dst_path, (page, index), edge))
-            rows = _matched_rows(view, candidates, plan if plan.exact_keys else None)
+            rows = _matched_rows(view, candidates, plan if plan.exact_keys else None, slim=True)
         except sqlite3.Error:
             return RelationFilterResult(status="warming")
         finally:
@@ -9226,7 +9227,9 @@ class EpistemicGraphIndex:
             )
             if not plan.exact_keys:
                 return RelationEdgeResult(status="available")
-            rows = _matched_rows(view, _relation_candidates(conn, view, plan, registry), plan)
+            rows = _matched_rows(
+                view, _relation_candidates(conn, view, plan, registry, slim=True), plan, slim=True,
+            )
         except sqlite3.Error:
             return RelationEdgeResult(status="warming")
         finally:
@@ -10646,6 +10649,7 @@ def _relation_candidates(
     registry: relation_registry.RelationRegistry,
     *,
     pages: Collection[str] | None = None,
+    slim: bool = False,
 ) -> list[_RelationCandidate]:
     """Stored edges that could match `plan` under some authoring page's own meaning.
 
@@ -10653,8 +10657,9 @@ def _relation_candidates(
     label. `_matched_rows` interprets each one before it is ranked. `pages`, when
     given, keeps only the edges with an end on one of those pages.
     """
+    columns = _RELATION_MATCH_COLUMNS if slim else EDGE_COLUMNS
     select = (
-        f"SELECT s.path, d.path, e.rowid, {EDGE_COLUMNS} FROM graph_edges e "
+        f"SELECT s.path, d.path, e.rowid, {columns} FROM graph_edges e "
         "JOIN graph_nodes s ON s.node_key = e.src_key "
         "JOIN graph_nodes d ON d.node_key = e.dst_key "
     )
@@ -10690,7 +10695,7 @@ def _relation_candidates(
         )
         params.extend((CANDIDATE_STATUS, *labels, *near_params))
     raw_rows = conn.execute(" UNION ".join(branches), params).fetchall() if branches else []
-    return _stored_candidates(raw_rows)
+    return _stored_candidates(raw_rows, conn=conn if slim else None)
 
 
 def _anchor_candidates(
@@ -10705,7 +10710,7 @@ def _anchor_candidates(
         return []
     marks = ",".join("?" for _ in anchor_node_keys)
     select = (
-        f"SELECT s.path, d.path, e.rowid, {EDGE_COLUMNS} FROM graph_edges e "
+        f"SELECT s.path, d.path, e.rowid, {_RELATION_MATCH_COLUMNS} FROM graph_edges e "
         "JOIN graph_nodes s ON s.node_key = e.src_key "
         "JOIN graph_nodes d ON d.node_key = e.dst_key "
         "WHERE (e.relation_type IS NOT NULL OR e.registry_status = ?) "
@@ -10714,13 +10719,40 @@ def _anchor_candidates(
         f"{select}AND e.src_key IN ({marks}) UNION {select}AND e.dst_key IN ({marks})",
         (CANDIDATE_STATUS, *anchor_node_keys, CANDIDATE_STATUS, *anchor_node_keys),
     ).fetchall()
-    return _stored_candidates(raw_rows)
+    return _stored_candidates(raw_rows, conn=conn)
 
 
-def _stored_candidates(raw_rows: list[tuple[Any, ...]]) -> list[_RelationCandidate]:
+# Only schema columns needed to match a core row; candidate rows still need the full edge.
+_RELATION_MATCH_COLUMNS = "e.source_path, e.relation_type, e.parent_relation, e.registry_status"
+
+
+def _stored_candidates(
+    raw_rows: list[tuple[Any, ...]], *, conn: sqlite3.Connection | None = None,
+) -> list[_RelationCandidate]:
+    full = {}
+    if conn is not None:
+        candidate_ids = [row[2] for row in raw_rows if row[-1] == CANDIDATE_STATUS]
+        if candidate_ids:
+            full = {
+                rowid: _edge_row_to_dict(edge_row)
+                for rowid, *edge_row in conn.execute(
+                    f"SELECT e.rowid, {EDGE_COLUMNS} FROM graph_edges e "
+                    "WHERE e.rowid IN (SELECT value FROM json_each(?))",
+                    (json.dumps(candidate_ids),),
+                )
+            }
     candidates: list[_RelationCandidate] = []
     for src_path, dst_path, rowid, *edge_row in raw_rows:
-        edge = _edge_row_to_dict(edge_row)
+        if conn is None:
+            edge = _edge_row_to_dict(edge_row)
+        elif rowid in full:
+            edge = full[rowid]
+        else:
+            source_path, relation_type, parent_relation, registry_status = edge_row
+            edge = {
+                "source_path": source_path, "relation_type": relation_type,
+                "parent_relation": parent_relation, "registry_status": registry_status,
+            }
         candidates.append(
             (str(src_path), str(dst_path), (str(edge.get("source_path") or ""), int(rowid)), edge)
         )
@@ -10734,6 +10766,8 @@ def _matched_rows(
     view: GraphView,
     candidates: list[_RelationCandidate],
     plan: traversal_profiles.RelationQueryPlan | None,
+    *,
+    slim: bool = False,
 ) -> list[_MatchedRow]:
     """Interpret each candidate with its authoring page's meaning, then match and order.
 
@@ -10743,18 +10777,31 @@ def _matched_rows(
     match slot.
     """
     matched: list[tuple[int, tuple[str, int], _MatchedRow]] = []
-    view.prefetch(
+    paths = {
         str(path)
         for src_path, dst_path, (source_path, _place), _edge in candidates
         for path in (src_path, dst_path, source_path)
-    )
+        if path
+    }
+    if slim:
+        view.parents.admit(paths)
+        view.prefetch(
+            path for src, dst, position, edge in candidates
+            if edge.get("registry_status") == CANDIDATE_STATUS
+            for path in (src, dst, position[0])
+        )
+    else:
+        view.prefetch(paths)
+    core = relation_registry.core_registry()
     for src_path, dst_path, position, stored in candidates:
-        edge = view.edge(stored)
+        # Non-candidate rows carry fixed core meaning, independent of page vocabulary instances.
+        fixed = slim and stored.get("registry_status") != CANDIDATE_STATUS
+        edge = stored if fixed else view.edge(stored)
         if edge is None or edge.get("relation_type") is None:
             continue
         relation_type = str(edge["relation_type"])
         parent = edge.get("parent_relation")
-        authored = view.registry_for(str(edge.get("source_path") or ""))
+        authored = core if fixed else view.registry_for(str(edge.get("source_path") or ""))
         definition = authored.definition(relation_type)
         symmetric = definition is not None and definition.direction == "symmetric"
         if plan is None:
@@ -10912,7 +10959,9 @@ def graph_context(
             if accepted is None:
                 validate = (
                     parent_records.validate if parent_records is not None
-                    else lambda **arguments: semantic_index.validate_parent_record(vault_root, **arguments)
+                    else lambda **arguments: semantic_index.validate_parent_record(
+                        vault_root, **arguments
+                    )
                 )
                 freshness = validate(
                     parent_path=stamp[0],
@@ -14030,6 +14079,21 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     return {f"{candidate}.md" for candidate in found}
 
 
+@dataclass(frozen=True)
+class _WithheldNames:
+    """Stable store-page verdicts and the names their withheld pages can resolve through."""
+
+    verdicts: Mapping[str, bool]
+    keys: frozenset[str]
+    live: tuple[str, ...]
+
+
+# Bound retained caller views; a revision change naturally retires every verdict it changes.
+_WITHHELD_NAMES: OrderedDict[tuple, _WithheldNames] = OrderedDict()
+_WITHHELD_NAMES_LOCK = threading.Lock()
+_WITHHELD_NAMES_MAX = 8
+
+
 class GraphView:
     """One graph operation's admitted reading of the shared neutral rows.
 
@@ -14039,7 +14103,7 @@ class GraphView:
     the meaning its authoring page selects. For a reader other than the owner
     it also re-resolves exactly the links whose candidate set includes a page
     that reader may not see, as the vault without those pages would resolve
-    them. Nothing it computes is written back or shared with another caller.
+    them. Only stable admission verdicts share the same store revision and caller identity.
     """
 
     def __init__(
@@ -14069,16 +14133,22 @@ class GraphView:
         self.interpretations = interpretations or semantic_index.Interpretations(vault_root)
 
         def admitted_many(rel_paths: list[str]) -> dict[str, bool]:
-            admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
-            return {
-                rel_path: rel_path in admitted_paths and (keep is None or keep(rel_path))
-                for rel_path in rel_paths
-            }
+            from .published_admission import deciding
+            from .vault_store import read as store_read
+
+            batched = store_read.request_memo(self.vault_root) is not None
+            with deciding(rel_paths) if batched else nullcontext():
+                admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
+                return {
+                    rel_path: rel_path in admitted_paths
+                    and (self.keep is None or self.keep(rel_path))
+                    for rel_path in rel_paths
+                }
 
         self.parents = semantic_index.AdmittedParents(
             self._summaries,
             allowed=lambda rel_path: _recall_path_allowed(self.vault_root, rel_path)
-            and (keep is None or keep(rel_path)),
+            and (self.keep is None or self.keep(rel_path)),
             allowed_many=admitted_many,
             interpretations=self.interpretations,
             admitted=admitted,
@@ -14754,22 +14824,83 @@ class GraphView:
             self._node_paths[key] = str(row[0]) if row is not None else None
         return self._node_paths[key]
 
-    def changed_sources(self) -> set[str]:
-        """Every page the reader sees with a link that resolves differently here.
+    def _withheld_name_keys(self) -> set[str]:
+        """Reuse only page-local verdicts proved by this store snapshot and admission identity.
 
-        Such a link has a withheld candidate, so the pages that name a withheld
-        page's path, stem or title hold every one of them.
+        File-mode graph publications can lag the files, so they keep the live path. Unowned
+        pages and decisions that depend on live state are always rechecked, even in store mode.
         """
+        from .published_admission import admission_of, deciding
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        resolver = self._shared_resolver()
+        keep = self.keep
+        if keep is None:
+            return set()
+        offered = admission_of(keep)
+        identity = offered.identity() if offered is not None else None
+        if identity is None or not store_mode.store_mode_for_reads(self.vault_root):
+            return _dependency_changed_keys({
+                f"{path}.md" for path in resolver.full_paths if not keep(f"{path}.md")
+            }, resolver)
+        # Read the revision from the connection that holds the graph rows, never a newer snapshot.
+        revision = self.conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()[0]
+        policy = recall_policy.recall_policy_identity(self.vault_root)
+        key = (self.vault_root, revision, policy, identity)
+        with _WITHHELD_NAMES_LOCK:
+            names = _WITHHELD_NAMES.get(key)
+            if names is not None:
+                _WITHHELD_NAMES.move_to_end(key)
+        if names is None:
+            paths = [f"{path}.md" for path in resolver.full_paths]
+            held = store_read.held_lookup(self.vault_root, paths)
+            verdicts, live = {}, []
+            batched = store_read.request_memo(self.vault_root) is not None
+            with deciding(paths) if batched else nullcontext():
+                for path in paths:
+                    self._check()
+                    if held(path):
+                        allowed, local = offered.decide(path, True)
+                        if local:
+                            verdicts[path] = allowed
+                            continue
+                    live.append(path)
+            names = _WithheldNames(
+                verdicts,
+                frozenset(_dependency_changed_keys({
+                    path for path, allowed in verdicts.items() if not allowed
+                }, resolver)),
+                tuple(live),
+            )
+            # Only a request-pinned snapshot proves one revision; a direct call is never kept.
+            if (batched and store_read.current_revision(self.vault_root) == revision
+                    and offered.identity() == identity
+                    and recall_policy.recall_policy_identity(self.vault_root) == key[2]):
+                with _WITHHELD_NAMES_LOCK:
+                    _WITHHELD_NAMES[key] = names
+                    _WITHHELD_NAMES.move_to_end(key)
+                    while len(_WITHHELD_NAMES) > _WITHHELD_NAMES_MAX:
+                        _WITHHELD_NAMES.popitem(last=False)
+
+        def visible(path):
+            known = names.verdicts.get(path)
+            return keep(path) if known is None else known
+
+        self.keep = visible
+        return set(names.keys) | _dependency_changed_keys({
+            path for path in names.live if not keep(path)
+        }, resolver)
+
+    def changed_sources(self) -> set[str]:
+        """Every visible page whose links can resolve differently because of a withheld name."""
         if self.keep is None:
             return set()
-        resolver = self._shared_resolver()
-        withheld = {
-            f"{path}.md" for path in resolver.full_paths if not self.keep(f"{path}.md")
-        }
+        keys = self._withheld_name_keys()
         return {
             source
             for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
-                self.conn, _dependency_changed_keys(withheld, resolver)
+                self.conn, keys
             )
             if self.keep(source) and self.target_changes(raw_target)
         }

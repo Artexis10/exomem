@@ -1,5 +1,48 @@
 ## MODIFIED Requirements
 
+### Requirement: Structured Semantic Unit Mutation
+The system SHALL expose `observe_memory` with `add`, `update`, `remove`, and `validate` operations for writable compiled pages. It SHALL accept parent path/reference, category, content, optional kind/tags/context, expected parent hash, and current unit reference/fingerprint where required. Update and remove SHALL require both the current expected parent hash and current unit fingerprint. Compact observation SHALL be the default authoring form. Typed `relations` SHALL be rejected unless an explicit governed non-observation kind selects rich form; remediation SHALL tell the caller to select rich form or author a canonical note-level relation.
+
+Unit lookup, page short IDs and returned units SHALL use the parent page's admitted definitions through the selected parent adapter.
+Kind and verdict validation SHALL use the same selected categories snapshot and retain the page's project scope.
+Shared parent and lexical sidecars SHALL retain neutral structure without caller-selected meanings.
+Registry-label changes SHALL affect selected reads without rebuilding those sidecars.
+When definitions are unavailable, dependent unit resolution SHALL report unavailable rather than missing.
+The complete unit list SHALL report unavailable rather than an exact empty list.
+Core-safe units SHALL retain the selected adapter's existing availability and validation contract.
+
+#### Scenario: Add compact observation
+- **WHEN** `observe_memory(operation="add")` receives a parent, category, and content
+- **THEN** it writes one canonical compact observation under `## Observations`, returns its unit reference, and refreshes derived indexes
+
+#### Scenario: Update uses drift guards
+- **WHEN** an update supplies a stale parent hash or stale anonymous unit fingerprint
+- **THEN** the operation fails without changing Markdown or indexes
+
+#### Scenario: Validate performs no write
+- **WHEN** `observe_memory(operation="validate")` receives a proposed unit
+- **THEN** it returns normalized unit and contract findings without modifying the vault or sidecars
+
+#### Scenario: Compact relation input is rejected clearly
+- **WHEN** `observe_memory` receives `relations` without an explicit non-observation governed kind
+- **THEN** it performs no write and returns remediation for rich-unit or note-level relation authoring
+
+#### Scenario: Immutable trees refuse observation mutation
+- **WHEN** `observe_memory` targets Sources, Evidence, a read-only/excluded subtree, or a path outside the governed KB
+- **THEN** it refuses with the existing write-boundary error contract
+
+#### Scenario: A selected vault label remains addressable through an update
+- **WHEN** retrieval finds an anchored unit under a vault kind or translated label
+- **THEN** direct read and page short IDs identify the same selected unit
+- **AND** validate and update preserve its address, metadata and selected kind while returning the new content
+- **AND** a conflicting public label does not change the private page's selected kind or verdict
+
+#### Scenario: Unavailable definitions do not become a proved unit miss
+- **WHEN** a caller loses admission to a warmed page's selected definitions while retaining access to the page
+- **THEN** the raw page remains readable and core-safe unit reads retain their existing availability
+- **AND** the complete unit list and dependent unit reads report unavailable
+- **AND** dependent updates by reference or short ID fail with `REGISTRY_UNAVAILABLE` without changing the page
+
 ### Requirement: Current Relation Review Disposition
 
 Every newly created active governed compiled page SHALL have a current relation-review
