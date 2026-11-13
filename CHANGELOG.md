@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.177.1](https://github.com/Artexis10/exomem/compare/v0.177.0...v0.177.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **benchmarks:** preserve statement provenance and calibration gates ([#2787](https://github.com/Artexis10/exomem/issues/2787)) ([3396b59](https://github.com/Artexis10/exomem/commit/3396b5906d1ac786bb5fef407d49f8a5e5a385f3))
+* **semantic:** enforce selected kinds and strict governed rows ([#2784](https://github.com/Artexis10/exomem/issues/2784)) ([e6d48b8](https://github.com/Artexis10/exomem/commit/e6d48b8737d8d5225c796caff987fcb2bab410fa))
+
+
+### Performance
+
+* **graph:** filter relations on a hub without interpreting every linking page ([#2789](https://github.com/Artexis10/exomem/issues/2789)) ([9a976be](https://github.com/Artexis10/exomem/commit/9a976bec7a25d885ca968b0565d503bef784fc1a))
+
 ## [0.177.0](https://github.com/Artexis10/exomem/compare/v0.176.0...v0.177.0) (2026-11-13)
 
 
