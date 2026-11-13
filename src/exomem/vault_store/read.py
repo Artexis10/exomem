@@ -303,7 +303,7 @@ def require_link_rows(conn: Connection) -> None:
     between the batches of its pass the tables exist, but the pages after its cursor lack rows."""
     from . import rederive
 
-    if rederive.owner_schema_behind(conn):
+    if rederive.owner_schema_behind(conn, required_version=rederive.LINK_ROWS_VERSION):
         raise derived_behind()
 
 

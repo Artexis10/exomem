@@ -227,6 +227,29 @@ def test_participant_validation_is_bounded_by_unique_endpoints(tmp_path: Path, m
     assert len(calls) == len(rels)
 
 
+def test_recall_excluded_endpoints_do_not_receive_release_decisions(tmp_path: Path) -> None:
+    """Structured records must not add release work or disclosure receipts to a graph read."""
+    from test_records_recall_policy import _manifest
+
+    vault = tmp_path / "vault"
+    record = "Knowledge Base/Records/Measurements/items/raw.md"
+    _write(vault, A, "---\ntype: insight\n---\nBody.\n")
+    _write(vault, "Knowledge Base/Records/Measurements/_collection.md", _manifest())
+    _write(vault, record, "Structured record only.\n")
+    decisions = []
+
+    def keep(path):
+        decisions.append(path)
+        return True
+
+    with sqlite3.connect(":memory:") as conn:
+        view = epistemic_graph.GraphView(vault, conn, keep=keep)
+        view.parents.admit([A, record])
+        assert view.parents.allowed(A)
+        assert not view.parents.allowed(record)
+    assert decisions == [A]
+
+
 # ---------------------------------------------------------------- relation_edges
 
 

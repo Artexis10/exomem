@@ -38,7 +38,9 @@ PASS = "vault_store_registry_pass"
 #: that this build derives; its pass creates the objects and derives every page, and only then
 #: records this version. Version 1 adds the inbound-link tables.
 OWNER_SCHEMA = "vault_store_owner_schema"
-OWNER_SCHEMA_VERSION = 1
+# Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
+LINK_ROWS_VERSION = 1
+OWNER_SCHEMA_VERSION = 2
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
@@ -134,17 +136,18 @@ def read(conn: Connection) -> Registry:
     return Registry(REBUILDING, reflected, changed)
 
 
-def owner_schema_behind(conn: Connection) -> bool:
+def owner_schema_behind(conn: Connection, *, required_version: int | None = None) -> bool:
     """Whether the store's owner objects are older than this build's, so some of the rows that this
     build reads may not exist yet. The pass creates the objects in its first batch and fills them
     batch by batch, so only the version that its last batch records says the rows are whole."""
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
-    return _owners_behind(None if row is None else row[0])
+    return _owners_behind(None if row is None else row[0], required_version=required_version)
 
 
-def _owners_behind(value: str | None) -> bool:
+def _owners_behind(value: str | None, *, required_version: int | None = None) -> bool:
     owners = _revision(value)
-    return owners is None or owners < OWNER_SCHEMA_VERSION
+    required = OWNER_SCHEMA_VERSION if required_version is None else required_version
+    return owners is None or owners < required
 
 
 def pending(conn: Connection, root: Path) -> str:
@@ -232,6 +235,9 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
     tx.executemany(
         "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
     )
+    if "page_admission" in created:
+        # Earlier batches wrote no page facts, so an older cursor cannot skip those pages.
+        tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
         vault.derive_inbound_rows(root, tx, include=lambda rel: rel not in held)
