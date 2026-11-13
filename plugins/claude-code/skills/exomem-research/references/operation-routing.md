@@ -123,7 +123,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
        `token` is a secret: never print it or put it in a message. It works once and
        expires within fifteen minutes, so prepare the file and digest first.
     4. Send the bytes in one of two ways.
-       - Install the CLI pinned to this package's release (`pip install exomem==0.177.1`) and run
+       - Install the CLI pinned to this package's release (`pip install exomem==0.178.0`) and run
          `exomem attach <file> --handoff-file handoff.json --root <dir>`, where `<dir>`
          holds the file. It prints the reply.
        - When installing is not possible, or the installed release has no
