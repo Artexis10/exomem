@@ -1,33 +1,20 @@
-# Explicit release intent supplies evidence and refreshes checks. An intent that
-# names the reviewed release head also lands it: once evidence and every required
-# check pass, the guarded merge runs for that exact source and head. An intent
-# without a head, a Full run no intent named, or RELEASE_AUTO_MERGE=off when a run
-# starts leaves the merge to the release session. An intent stays valid for one day
-# while main and the release head stay unchanged. Long-lived GitHub auto-merge is
-# not release intent. Landing reads the release App secrets at repository level.
+# The privileged controller always executes on main. Only release cuts serialize.
+# Main pushes retain artifact recovery and never run Release Please.
 name: release evidence automation
 
 on:
   workflow_dispatch:
     inputs:
-      release_pr:
-        description: Release PR number requesting source evidence
-        required: false
-        type: string
-      expected_base:
-        description: Exact main source commit selected for the release PR
-        required: false
-        type: string
-      expected_head:
-        description: Reviewed release PR head; with it, the release merges itself once its checks pass
+      source:
+        description: Full merged main commit SHA to select or resume as the fixed release source
         required: false
         type: string
       evidence_run:
-        description: Full CI producer run whose completion refreshes release checks
+        description: Completed Full producer whose receipt refreshes pending metadata checks
         required: false
         type: string
       evidence_attempt:
-        description: Exact Full CI producer attempt
+        description: Exact Full producer attempt
         required: false
         type: string
 
@@ -38,93 +25,132 @@ permissions:
 
 env:
   GH_REPO: ${{ github.repository }}
-  # The repository variable RELEASE_AUTO_MERGE=off turns landing off without a code change.
-  LAND: ${{ vars.RELEASE_AUTO_MERGE != 'off' && secrets.RELEASE_PLEASE_APP_CLIENT_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
 
-# Duplicate intent for one PR must not dispatch concurrent Full fallback runs.
+# Evidence callbacks never queue behind the cut that is waiting for their checks.
 concurrency:
-  group: release-evidence-automation-${{ inputs.release_pr || inputs.evidence_run }}
+  group: release-evidence-${{ inputs.source != '' && 'cut' || inputs.evidence_run }}
+  cancel-in-progress: false
 
 jobs:
-  dispatch-evidence:
-    name: dispatch evidence run on release intent
-    if: ${{ inputs.release_pr != '' }}
+  cut:
+    if: ${{ inputs.source != '' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 180
+    environment: release
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+    env:
+      LAND: ${{ vars.RELEASE_AUTO_MERGE != 'off' }}
+      NODE_PATH: ${{ runner.temp }}/release-please/node_modules
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-      - name: Reuse complete evidence or dispatch the Full fallback
-        id: intent
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.release_pr }}
-          BASE_SHA: ${{ inputs.expected_base }}
-          HEAD_SHA: ${{ inputs.expected_head }}
-        run: |
-          args=(intent --pr "$PR_NUMBER" --expected-base "$BASE_SHA")
-          if [ -n "$HEAD_SHA" ]; then args+=(--expected-head "$HEAD_SHA" --output release-intent.json); fi
-          python3 scripts/release_evidence.py "${args[@]}"
-      - name: Keep the release intent for the evidence run
-        if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused != 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-intent
-          path: release-intent.json
-          if-no-files-found: error
-          retention-days: 1
       - name: Mint the release App token
-        if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused == 'true' }}
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-          # Only what the merge needs.
-          permission-contents: write
-          permission-pull-requests: write
-      - name: Land the intended release on reused evidence
-        if: ${{ inputs.expected_head != '' && env.LAND == 'true' && steps.intent.outputs.reused == 'true' }}
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          prune-cache: true
+      - name: Install the action's maintained metadata updaters
+        run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+      - name: Select or resume the immutable cut
+        id: cut
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE: ${{ inputs.source }}
+        run: python3 scripts/release_cuts.py prepare --source "$SOURCE"
+      - name: Propose the release on its isolated source
+        if: steps.cut.outputs.propose == 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0, release-please 17.6.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          target-branch: ${{ steps.cut.outputs.branch }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
+      - name: Reject non-metadata changes before executing candidate code
+        if: steps.cut.outputs.merged != 'true'
+        id: proposal
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_MERGE_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 scripts/release_evidence.py land --intent release-intent.json
+        run: python3 scripts/release_cuts.py check-head
+      - name: Check out the generated release proposal
+        if: steps.cut.outputs.merged != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.proposal.outputs.head }}
+          path: candidate
+          persist-credentials: false
+          token: ${{ github.token }}
+      - name: Regenerate packages from the selected source
+        if: steps.cut.outputs.merged != 'true'
+        working-directory: candidate
+        run: |
+          uv run --frozen python scripts/cloud-plugin.py build
+          uv run --frozen exomem package-skills --plugin-root plugins/claude-code
+      - name: Push only generated packages with the release App
+        if: steps.cut.outputs.merged != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 scripts/release_cuts.py push-generated --candidate candidate
+      - name: Retain authentic evidence before minting the landing token
+        if: env.LAND == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ACTIONS_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_cuts.py evidence
+      - name: Mint a fresh release App token after Full qualification
+        if: env.LAND == 'true'
+        id: landing-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+      - name: Qualify the exact head and verify its squash outcome
+        if: env.LAND == 'true'
+        env:
+          GH_TOKEN: ${{ steps.landing-token.outputs.token }}
+        run: python3 scripts/release_cuts.py qualify
+      - name: Tag the verified native squash outcome
+        if: env.LAND == 'true'
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0, release-please 17.6.0
+        with:
+          token: ${{ steps.landing-token.outputs.token }}
+          target-branch: ${{ steps.cut.outputs.branch }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
+      - name: Reconcile current main and publish only after origin acceptance
+        if: env.LAND == 'true'
+        env:
+          GH_TOKEN: ${{ steps.landing-token.outputs.token }}
+          RELEASE_ACTIONS_TOKEN: ${{ github.token }}
+        run: python3 scripts/release_cuts.py reconcile
 
   rerun-evidence-check:
-    name: re-run release checks when evidence lands
-    if: ${{ inputs.evidence_run != '' && inputs.release_pr == '' }}
+    if: ${{ inputs.evidence_run != '' && inputs.source == '' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-      - name: Refresh release checks after the exact Full attempt completes
+      - name: Refresh metadata checks after the exact Full attempt completes
         env:
           GH_TOKEN: ${{ github.token }}
           EVIDENCE_RUN: ${{ inputs.evidence_run }}
           EVIDENCE_ATTEMPT: ${{ inputs.evidence_attempt }}
         run: python3 scripts/release_evidence.py refresh --run-id "$EVIDENCE_RUN" --attempt "$EVIDENCE_ATTEMPT"
-      - name: Find a release intent for the release PR's source and head
-        if: ${{ env.LAND == 'true' }}
-        id: find
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/release_evidence.py land --find
-      - name: Mint the release App token
-        if: ${{ steps.find.outputs.intended == 'true' }}
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.RELEASE_PLEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
-          # Only what the merge needs.
-          permission-contents: write
-          permission-pull-requests: write
-      - name: Land the intended release
-        if: ${{ steps.find.outputs.intended == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_MERGE_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 scripts/release_evidence.py land

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -906,7 +907,7 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     """Release checks use the same tested-tree selector as evidence automation."""
     workflow = _workflow()
     job = workflow["jobs"]["release-evidence"]
-    report, checkout, scope, step = job["steps"]
+    report, checkout, install, scope, step = job["steps"]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert "scripts/release_evidence.py" in checkout["with"]["sparse-checkout"]
     assert scope["shell"] == "bash"
@@ -1081,33 +1082,58 @@ def test_cross_platform_matrix_runs_nightly_and_manually_only() -> None:
     ]
 
 
-def test_release_evidence_automation_merges_only_through_land_with_the_app_token() -> None:
-    workflow = yaml.safe_load((ROOT / ".github/workflows/release-evidence-automation.yml").read_text())
+def test_release_controller_uses_main_and_pinned_native_actions_for_fixed_cuts() -> None:
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/release-evidence-automation.yml").read_text()
+    )
     assert set(_triggers(workflow)) == {"workflow_dispatch"}
-    jobs = workflow["jobs"]
-    intent = jobs["dispatch-evidence"]
-    refresh = jobs["rerun-evidence-check"]
-    assert intent["if"] == "${{ inputs.release_pr != '' }}"
-    assert refresh["if"] == "${{ inputs.evidence_run != '' && inputs.release_pr == '' }}"
-    assert "scripts/release_evidence.py" in intent["steps"][1]["run"]
-    assert "scripts/release_evidence.py refresh" in refresh["steps"][1]["run"]
-    for job in (intent, refresh):
-        assert job["steps"][0]["with"]["ref"] == "main"
-        merges = [
-            step for step in job["steps"]
-            if "release_evidence.py land" in step.get("run", "") and "--find" not in step["run"]
-        ]
-        assert len(merges) == 1
-        # A merge made with the workflow token starts no Release Please run, so no tag would follow.
-        assert merges[0]["env"]["RELEASE_MERGE_TOKEN"] == "${{ steps.app-token.outputs.token }}"
-    # The workflow token itself can read pull requests but never merge one.
-    assert workflow["permissions"] == {
-        "actions": "write", "contents": "read", "pull-requests": "read",
-    }
+    job = workflow["jobs"]["cut"]
+    assert "github.ref == 'refs/heads/main'" in job["if"]
+    assert job["environment"] == "release"
+    checkout = next(
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("actions/checkout")
+        and step.get("with", {}).get("path") != "candidate"
+    )
+    assert checkout["with"]["ref"] == "main"
+    actions = [
+        step
+        for step in job["steps"]
+        if step.get("uses", "").startswith("googleapis/release-please-action@")
+    ]
+    assert len(actions) == 2
+    for action in actions:
+        assert action["uses"].endswith("45996ed1f6d02564a971a2fa1b5860e934307cf7")
+        assert action["with"]["target-branch"] == "${{ steps.cut.outputs.branch }}"
+    assert actions[0]["with"]["skip-github-release"] is True
+    assert actions[1]["with"]["skip-github-pull-request"] is True
+    steps = job["steps"]
+    preflight = next(index for index, step in enumerate(steps) if "check-head" in step.get("run", ""))
+    candidate_index = next(index for index, step in enumerate(steps) if step.get("with", {}).get("path") == "candidate")
+    candidate = steps[candidate_index]
+    assert preflight < candidate_index
+    assert candidate["with"]["ref"] == "${{ steps.proposal.outputs.head }}"
+    assert candidate["with"]["persist-credentials"] is False
+    assert checkout["with"]["persist-credentials"] is False
+    generation = next(step for step in steps if step.get("working-directory") == "candidate")
+    assert "GH_TOKEN" not in generation.get("env", {})
+    assert "git push" not in generation["run"]
+    publisher = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text())
+    assert all(
+        "release-please-action" not in step.get("uses", "")
+        for current in publisher["jobs"].values()
+        for step in current.get("steps", [])
+    )
+    assert "needs" not in publisher["jobs"]["plan"]
+    assert "verify-tag" in publisher["jobs"]["plan"]["steps"][-1]["run"]
     landed = _workflow()["jobs"]["release-evidence-landed"]
-    assert landed["needs"] == "gate"
-    assert landed["if"] == "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}"
-    assert landed["steps"][0]["env"]["EVIDENCE_ATTEMPT"] == "${{ github.run_attempt }}"
+    assert "refs/heads/release-cuts/" in landed["if"]
+    assert workflow["permissions"] == {
+        "actions": "write",
+        "contents": "read",
+        "pull-requests": "read",
+    }
 
 
 def test_python_qualification_does_not_wait_for_image_publication() -> None:
@@ -1208,3 +1234,20 @@ def test_no_folded_run_script_carries_a_yaml_style_comment() -> None:
         "a `#` inside a folded `>` run scalar is part of the command and comments "
         f"out every flag after it: {offenders}"
     )
+
+
+def test_full_package_receipt_contract_has_the_required_generator_checks() -> None:
+    """A Full receipt may replace projection only while its gate proves all generated packages."""
+    workflow = _workflow()
+    build = workflow["jobs"]["build"]
+    assert "if" not in build and "build" in workflow["jobs"]["gate"]["needs"]
+    commands = [step.get("run", "") for step in build["steps"]]
+    assert "uv lock --check" in commands
+    assert "uv run --frozen python scripts/cloud-plugin.py check" in commands
+    plugin = next(command for command in commands if "test_committed_plugin_matches_the_packaged_sources" in command)
+    selectors = set(shlex.split(plugin))
+    assert {
+        "tests/test_plugin_sync.py::test_committed_plugin_matches_the_packaged_sources",
+        "tests/test_plugin_sync.py::test_manifest_matches_apart_from_the_version",
+        "tests/test_plugin_sync.py::test_plugin_version_matches_the_selected_release",
+    } <= selectors

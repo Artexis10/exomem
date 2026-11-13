@@ -253,61 +253,93 @@ A retry can inherit an earlier successful gate. The receipt keeps its issuing
 attempt and names the latest successful attempt separately. Qualification does
 not rerun Full solely because a retry copied the successful gate.
 
-1. Merge the reviewed source PR; expect Release Please to update its release PR.
-2. Inspect that release PR and its source; expect only managed release metadata and generated Cloud packages.
-3. Record the selected PR, source commit, and reviewed head; expect explicit inputs for the guarded merge.
+Select one merged source commit. The controller creates `release-cuts/<source>`
+at that commit and runs the pinned Release Please action against that branch.
+Later main commits do not change the selected source. Main remains available
+for normal merges and PR pushes.
+
+1. Resolve the merged source; expect one full immutable commit identity.
 
 ```bash
-read -r release_pr source_commit reviewed_head < <(gh pr view release-please--branches--main --json number,baseRefOid,headRefOid --jq '[.number,.baseRefOid,.headRefOid] | map(tostring) | join(" ")')
-printf 'Release PR: %s\nSource: %s\nReviewed head: %s\n' "$release_pr" "$source_commit" "$reviewed_head"
+source_commit=$(gh api "repos/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/commits/main" --jq .sha)
 ```
 
-Record the ready PR/head event and its source in the release handoff. Measure
-ready-to-all-green CI and ready-to-qualified artifacts separately, including queue
-time and retries. Retain the earlier Python qualification time separately.
-
-4. Request evidence for the selected source and reviewed head; expect reuse or one Full fallback dispatch.
+2. Start or resume the cut; expect one controller run on main for that source.
 
 ```bash
-gh workflow run release-evidence-automation.yml --ref main -f release_pr="$release_pr" -f expected_base="$source_commit" -f expected_head="$reviewed_head"
+gh workflow run release-evidence-automation.yml --ref main -f source="$source_commit"
 ```
 
-The evidence workflow refreshes failed release checks when complete proof
-arrives. Repeated intent reuses matching proof or an existing Full run. The
-release PR retains lint, build, specs, capabilities, image smoke,
-release-file validation, and the wheel onboarding check.
+3. Read the controller and publisher summaries; expect separate source, Python, image and consumer states.
 
-5. Wait for evidence and required checks; expect the release PR to merge itself.
+This is one operation. The controller creates the proposal, regenerates packages,
+retains the selected head, qualifies evidence, merges, tags, reconciles and dispatches
+publication. It reads App credentials only from the main-scoped `release`
+environment. `RELEASE_AUTO_MERGE=off` stops landing and native tag creation.
 
-With `expected_head`, the workflow lands the release: after evidence and every
-required check pass, it runs the guarded merge below for that exact source and
-head, with the release App token so that Release Please tags the merge. It
-merges nothing when main moved, the release head changed, a required check
-failed, or no intent named that head; a scheduled Full run alone never merges.
-Its run log names the reason. The repository variable `RELEASE_AUTO_MERGE=off`
-turns landing off for runs that start afterwards.
+The controller reuses authentic Full evidence for the source or an identical
+tested tree. It reuses an existing matching Full run before requesting one fallback
+on the stable cut branch. A retained intent prevents duplicate fallbacks.
+The intent stays on the cut PR and binds its source, checked head, check policy
+and Full producer. A nightly run without a cut intent cannot merge or tag.
 
-An intent stays valid for one day while main and the release head stay
-unchanged, so a later Full run, such as the nightly, can still land it after a
-failed attempt. To hold a release, set `RELEASE_AUTO_MERGE` to `off` before the
-next evidence run.
+Cut branches inherit main's configured required check contexts and integration
+identities. Missing checks remain pending. An empty policy, a failed policy read,
+a failed check or another App's check cannot authorize a merge.
+The metadata tier checks the Cloud packages, committed Claude plugin content,
+selected plugin version, lockfile and configured version updates. An allowed
+JSON path permits only the maintained updater's version changes.
 
-6. If the release PR is still open (intent without a head, landing off, or a failed landing), run the guarded merge with the recorded inputs; expect the reviewed head to merge.
+After the squash, the controller verifies its sole parent and checked tree before
+Release Please creates the native tag. It then opens a main PR that patches current
+metadata and regenerates packages from current main. The PR preserves intervening
+product changes and dependency selections. The controller compares the prospective merge tree with regenerated outputs from
+that same main revision. Unrelated main advancement needs no refreshed checks.
+A conflict or different generated tree refreshes only reconciliation.
+The controller checks the actual squash against its actual parent and repairs a
+raced result before it declares reconciliation complete. It retains the source's
+Full evidence throughout. A resumed older cut preserves a newer accepted version
+and source boundary.
 
-```bash
-GH_REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" python3 scripts/release_evidence.py merge --pr "$release_pr" --expected-base "$source_commit" --expected-head "$reviewed_head"
-```
+The reconciliation records `last-release-sha` as the selected source, not the later
+metadata commit. The next source must contain this reconciliation and its published
+manifest version. Before a new cut, authentic Full can supply the generated-package
+proof only when its receipt names the current package-check contract. That contract
+covers the lock, Cloud output and committed plugin content, manifest and selected version.
+Otherwise, a local projection prevents an unfinished repair from starting another
+Full run. A wrong rejection delays only that cut and costs one local package check.
+The isolated release commit stays outside main ancestry so the
+next native scan can reach that source boundary. Only cuts and reconciliation
+serialize.
 
-The command checks current main, the release PR, required checks, managed files,
-and Full source evidence. It rereads main and the PR head immediately before
-merging. Any failed preflight stops before `gh pr merge`. GitHub pins the head
-with `--match-head-commit`; its API cannot atomically pin the expected base.
-A main update between the final read and merge remains possible. Record the
-actual merge ancestry and investigate a mismatch before qualifying artifacts.
+The write-once record at `.github/release-cuts/<tag>.json` binds the source,
+reviewed head, squash, trees, version, Full producer, required checks and predecessor.
+The publisher reads it from an explicitly fetched main revision before publishing.
+It rejects changed, deleted or replaced records. Legacy releases retain their
+main-ancestry path. Accepted records remain available after temporary Actions
+artifacts expire; recovery still verifies original distributions and image evidence.
 
-7. Inspect the tagged publisher run; expect Release Please to create the tag and GitHub Release.
-8. Read its Python qualification receipt; expect exact producer identity and matching official distribution hashes.
-9. Inspect each image result independently; expect its own publication and qualification state.
+Retry the same source when a controller run stops. A retry after tagging keeps the
+same version, tag, squash and Full producer. Changed cut content, tag conflicts and
+conflicting immutable bytes stop that cut. Temporarily missing graph or check state
+remains pending during bounded observation. A missing Full dispatch after an interrupted
+request remains visible; investigate that request rather than dispatching another fallback.
+
+Record the source-ready event, main advancement, exact Full producer, Python
+qualification, all-image qualification and consumer verification separately.
+Ready-to-artifacts time includes queueing and retries. Publication time cannot
+replace a missing consumer timestamp.
+
+### Migration and rollback
+
+Deploy the controller between releases and close the stale main release proposal.
+Main pushes then create neither release proposals nor releases; they retain artifact
+recovery. Existing published tags and recovery evidence remain unchanged.
+
+Set `RELEASE_AUTO_MERGE=off` to stop new landing. Finish or explicitly abandon an
+unpublished cut before selecting another. Preserve every tag, accepted origin and
+published byte after publication starts. Keep isolated-origin verification available
+when disabling new cut creation. No repository-wide delivery hold is needed.
 
 The publisher builds or recovers the wheel, sdist, and Cloud archives from the
 tag. It publishes missing enabled artifacts. Python qualification runs after
