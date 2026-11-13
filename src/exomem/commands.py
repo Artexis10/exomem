@@ -7122,6 +7122,9 @@ def _abstention_reason(packet: dict) -> str:
     return str(abstention.get("reason") or "")
 
 
+# A recall changes no governance and takes a release decision for every lead, guard and carrier.
+# The dispatcher opens this scope only for the commands that carry its timing floor.
+@governance_policy_module.request_policy_snapshot()
 def op_activate_context(
     vault_root: Path,
     turn: str = "",
