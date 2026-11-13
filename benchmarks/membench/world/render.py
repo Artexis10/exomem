@@ -36,13 +36,23 @@ from typing import Any
 
 from membench.ids import child_seed
 
-from .core import BOTH, Artefact, Statement, World
+from .core import (
+    BOTH,
+    Artefact,
+    ContextParentRef,
+    RelationRef,
+    Statement,
+    World,
+    relation_form,
+    source_ref,
+)
 from .keys import Key, KeyRefused, key_spec, keys_digest, keys_record, write_keys
 from .loader import Catalogue, Refusal
 from .manifest import dump
 from .pack import AttributeSchema
 from .planner import Plan, Thread
 from .surface import LEVELS, PARAPHRASED, STATED, Bank, Form
+from .validator import check_relation_refs
 
 
 class RenderRefused(Exception):
@@ -189,6 +199,12 @@ class _Item:
 class Reader:
     def __init__(self, plan: Plan, world: World):
         self.plan, self.world = plan, world
+        self.relations = world.relation_facts()
+        check_relation_refs(
+            world,
+            ((a.id, ref) for a in world.artefacts.values() for ref in a.relations),
+            self.relations,
+        )
 
     def name(self, ref: Any, at: date) -> str | None:
         """The name of an entity at a date, of an event or of a context, or ``None`` if ``ref`` is none."""
@@ -266,6 +282,27 @@ class Reader:
             tuple(anchors),
             allowed,
             s.about,
+        )
+
+    def relation(self, ref: RelationRef, at: date, document: str) -> _Item:
+        record = self.relations[ref]
+        if isinstance(ref, ContextParentRef):
+            fills = {"child": self.text(record.id, at), "parent": self.text(record.parent, at)}
+        else:
+            fills = {
+                "source": source_ref(ref.source),
+                "target": source_ref(ref.target),
+            }
+        return _Item(
+            document,
+            f"relation.{relation_form(ref)}",
+            fills,
+            frozenset(fills),
+            None,
+            (),
+            tuple(fills.values()),
+            frozenset(),
+            None,
         )
 
     def operation(self, ref: str) -> _Item:
@@ -436,6 +473,14 @@ class _Renderer:
             used.append(wrapper.id)
         return Line(item.ref, tuple(used), sentence)
 
+    def source_line(self, line: Line) -> str:
+        """Serialize each statement with its record citation, preserving the sentence used by keys."""
+        return (
+            f"{line.text} {source_ref(line.ref)}"
+            if line.ref in self.world.statements
+            else line.text
+        )
+
     def explicit(self, item: _Item) -> list[tuple[str, str]]:
         """Each sentence that a `stated` form gives for the item, with that form's id."""
         phrases = [None] if item.schema is None else [item.schema.label, *item.schema.paraphrases]
@@ -463,16 +508,26 @@ class _Renderer:
             items = [self.reader.operation(artefact.announces)]
         else:
             items = [self.reader.statement(self.world.statements[s]) for s in artefact.carries]
+        items += [self.reader.relation(ref, artefact.at, artefact.id) for ref in artefact.relations]
         author = None if artefact.by is None else self.reader.text(artefact.by, artefact.at)
         frame = self.bank.frames[artefact.kind or ""]
         head = (frame.unsigned if author is None else frame.signed).format(
             by=author, date=artefact.at.isoformat()
         )
         lines = tuple(self.line(item, level) for item in items)
-        text = "\n".join([head, *(line.text for line in lines)]) + "\n"
+        text = "\n".join([head, *(self.source_line(line) for line in lines)]) + "\n"
         return Document(artefact.id, level, lines, text), items
 
     def check(self, artefact: Artefact, document: Document, items: list[_Item]) -> None:
+        if (artefact.relations or artefact.carries) and (
+            len(document.lines) != len(items)
+            or any(f"\n{self.source_line(line)}\n" not in document.text for line in document.lines)
+        ):
+            self.refuse(
+                "source-coverage",
+                artefact.id,
+                "restore the rendered source line in its document",
+            )
         anchors = {artefact.at.isoformat(), *(a for i in items for a in i.anchors)}
         if document.level == STATED:
             anchors |= {a for i in items for a in i.stated}

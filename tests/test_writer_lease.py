@@ -1197,6 +1197,59 @@ def test_status_records_coordinator_error_instead_of_silently_returning_unhealth
     assert status["last_coordinator_error"]["age_seconds"] >= 0
 
 
+def test_readiness_stays_ready_while_owner_graph_diagnostics_are_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import graph_sync, runtime_readiness, session_validation_cache
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    config = LeaseConfig(
+        url="https://lease.example", vault_id="main", replica_id="replica-a",
+        state_dir=tmp_path / "lease",
+    )
+    manager = LeaseManager(
+        config, client=FakeClient(LeaseRecord("replica-a", time.time() + 60, 7))
+    )
+    monkeypatch.setattr(writer_lease_module, "get_manager", lambda: manager)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", config.url)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", config.replica_id)
+    monkeypatch.setattr(
+        readiness, "retrieval_admission", lambda _vault=None: {"state": "ready", "admitted": True}
+    )
+    monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
+    monkeypatch.setattr(runtime_readiness, "_measure_observability", lambda: {})
+    monkeypatch.setattr(runtime_readiness, "_COORDINATION_PROBES", {})
+    entered, release = threading.Event(), threading.Event()
+    diagnostics = []
+
+    def blocked_graph(_vault):
+        entered.set()
+        assert release.wait(_HOLD_SECONDS)
+        return {"state": "recovery_required", "generation": 1}
+
+    monkeypatch.setattr(graph_sync, "status", blocked_graph)
+    owner = threading.Thread(target=lambda: diagnostics.append(manager.status(vault)))
+    owner.start()
+    try:
+        assert entered.wait(_OBSERVE_SECONDS)
+        snapshot = runtime_readiness.runtime_readiness(mcp_tool_surface_sha256="a" * 64)
+        assert snapshot["status"] == "ready"
+        assert snapshot["takeover_eligible"] is True
+        assert snapshot["coordination"]["role"] == "writer"
+        assert snapshot["coordination"]["mutation_boundary"]["state"] == "free"
+        assert snapshot["reasons"] == []
+    finally:
+        release.set()
+        owner.join(_OBSERVE_SECONDS)
+        manager.close()
+
+    assert not owner.is_alive()
+    assert diagnostics[0]["graph_sync"] == {"state": "recovery_required", "generation": 1}
+    assert "idempotency" in diagnostics[0]
+
+
 def test_status_last_coordinator_error_persists_across_a_later_healthy_status(
     tmp_path: Path,
 ) -> None:

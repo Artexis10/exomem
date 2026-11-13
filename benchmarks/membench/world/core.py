@@ -31,7 +31,7 @@ from typing import Any
 
 import yaml
 
-from membench.ids import stable_id
+from membench.ids import sentinel, stable_id
 
 from .loader import CATALOGUE_DIR
 
@@ -264,8 +264,39 @@ class Restriction:
 
 
 @dataclass(frozen=True)
+class ContextParentRef:
+    """A reference to the canonical parent of one context, not a dated membership event."""
+
+    child: str
+
+
+@dataclass(frozen=True)
+class EdgeRef:
+    """A reference to one canonical support or defeat edge."""
+
+    source: str
+    target: str
+    mode: str | None
+
+
+RelationRef = ContextParentRef | EdgeRef
+
+# These source snapshot forms are closed protocol values; defeat modes live in the world schema.
+CONTEXT_PARENT, SUPPORT = "context-parent", "support"
+
+
+def relation_form(ref: RelationRef) -> str:
+    return CONTEXT_PARENT if isinstance(ref, ContextParentRef) else ref.mode or SUPPORT
+
+
+def source_ref(record_id: str) -> str:
+    """An opaque citation for a source record, independent of the document that carries it."""
+    return sentinel(stable_id("SRC", record_id, digest_chars=64))
+
+
+@dataclass(frozen=True)
 class Artefact:
-    """One document. A copy has ``copy_of`` and carries what its source carries."""
+    """One document with statements, an announcement or relation references. A copy carries its source."""
 
     id: str
     kind: str | None
@@ -277,6 +308,7 @@ class Artefact:
     announces: str | None = (
         None  # the operation that this document announces, in ``World.operations``
     )
+    relations: tuple[RelationRef, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -369,13 +401,22 @@ class World:
         kind: str | None = None,
         by: str | None = None,
         announces: str | None = None,
+        relations: Iterable[RelationRef] = (),
     ) -> Artefact:
         """File statements, or announce one operation, in a document. The planner decides which."""
         self._claim(id_, "artefact")
-        self.artefacts[id_] = Artefact(id_, kind, by, at, tuple(carries), announces=announces)
+        self.artefacts[id_] = Artefact(
+            id_, kind, by, at, tuple(carries), announces=announces, relations=tuple(relations)
+        )
         for statement in self.artefacts[id_].carries:
             self._filed.setdefault(statement, []).append(id_)
         return self.artefacts[id_]
+
+    def relation_facts(self) -> dict[RelationRef, Context | Edge]:
+        """Index the canonical facts without copying their records."""
+        return {
+            ContextParentRef(c.id): c for c in self.contexts.values() if c.parent is not None
+        } | {EdgeRef(e.source, e.target, e.mode): e for e in self.edges}
 
     # -- applying a step -------------------------------------------------------------------------
 
@@ -577,6 +618,14 @@ class World:
             return self.artefacts[ref]
         filed = self._filed.get(ref, ())
         return self.artefacts[filed[0]] if len(filed) == 1 else None
+
+    def original_documents(self) -> dict[str, Artefact]:
+        """Index only unambiguous original documents, using the world's existing resolution rule."""
+        return {
+            ref: original
+            for ref in self.statements
+            if (original := self.resolve_artefact(ref)) is not None
+        }
 
     def holders(self) -> Collection[str]:
         return [e.id for e in self.entities.values() if e.holder]

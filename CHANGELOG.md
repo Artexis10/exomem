@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.177.0](https://github.com/Artexis10/exomem/compare/v0.176.0...v0.177.0) (2026-11-13)
+
+
+### Features
+
+* **vault-store:** answer store-mode graph and link reads from derived inbound tables ([#2753](https://github.com/Artexis10/exomem/issues/2753)) ([64992e5](https://github.com/Artexis10/exomem/commit/64992e5fcee0f604dedbc277564d712405538cfa))
+
+
+### Bug Fixes
+
+* **readiness:** measure lease proof without owner diagnostics ([#2782](https://github.com/Artexis10/exomem/issues/2782)) ([c79559b](https://github.com/Artexis10/exomem/commit/c79559b83745537aac3709ac475bb3ce2c6ed20a))
+* **review:** resolve a review item before taking the vault write boundary ([#2780](https://github.com/Artexis10/exomem/issues/2780)) ([6ce4e18](https://github.com/Artexis10/exomem/commit/6ce4e1853d26830cc127b2ba1e18d006d399ac8d))
+
 ## [0.176.0](https://github.com/Artexis10/exomem/compare/v0.175.1...v0.176.0) (2026-11-12)
 
 
