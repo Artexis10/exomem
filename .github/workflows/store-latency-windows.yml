@@ -2,10 +2,18 @@ name: Store latency (native Windows)
 
 # The store's phase gate needs guarded append, full inspect, bulk and query
 # timings on native NTFS, and file-mode query timings at the same sizes to
-# compare against. Dispatch this lane by hand against a ref; it gates nothing
-# and uploads the diagnostic's JSON reports.
+# compare against. It also needs the store-mode suites to pass where the held
+# filesystem, the renames and the durability flushes are the native Windows
+# ones; the per-PR tier runs those suites on Linux only. Dispatch this lane by
+# hand against a ref; it gates nothing and uploads its reports.
 on:
   workflow_dispatch:
+    inputs:
+      run:
+        description: Which part to run
+        type: choice
+        options: [both, latency, suites]
+        default: both
 
 permissions:
   contents: read
@@ -13,6 +21,7 @@ permissions:
 jobs:
   store-latency:
     name: store append and inspect latency (native NTFS)
+    if: inputs.run != 'suites'
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -52,4 +61,39 @@ jobs:
           path: |
             store-latency-windows.json
             file-latency-windows.json
+          if-no-files-found: warn
+
+  store-suites:
+    name: store-mode suites (native NTFS)
+    if: inputs.run != 'latency'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          prune-cache: true
+      - name: Run the store-mode suites
+        shell: bash
+        env:
+          KB_MCP_DISABLE_EMBEDDINGS: "1"
+          KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
+          EXOMEM_DISABLE_CLIP: "1"
+          # The service fixture must not start model loading or cache warmup.
+          EXOMEM_DISABLE_EMBEDDINGS: "1"
+          EXOMEM_DISABLE_WARMUP: "1"
+          EXOMEM_WRITER_LEASE_STATE_DIR: ${{ runner.temp }}\exomem-reserved-state
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          uv run --frozen --python 3.13 pytest tests/test_vault_store_*.py
+          -p no:randomly -q -n 4 --timeout 600 -rfEX
+          --junitxml store-suites-windows.xml
+      - name: Upload the junit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-suites-windows
+          path: store-suites-windows.xml
           if-no-files-found: warn
