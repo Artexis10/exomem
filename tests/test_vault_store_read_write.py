@@ -77,7 +77,7 @@ def stored_body(root, rel):
 
 @pytest.mark.parametrize("committed", [False, True])
 def test_inherited_worker_snapshot_cannot_mix_revisions(stored, writer, committed):
-    """A worker may join only the request's revision; a raced read retries on its pinned thread."""
+    """A worker may join only the request's revision; a raced worker tells the caller to retry."""
     with read.request_snapshot(stored):
         def body():
             with read.snapshot(stored) as view:
@@ -92,7 +92,8 @@ def test_inherited_worker_snapshot_cannot_mix_revisions(stored, writer, committe
                 with pytest.raises(connection.CollectionStoreError) as refused:
                     future.result()
                 assert refused.value.code == "VAULT_STORE_SNAPSHOT_CHANGED"
-                assert body() == pinned  # The retry reads the request's original bytes and revision.
+                assert "retry the request" in str(refused.value)
+                assert body() == pinned  # The original request still holds its pinned bytes and revision.
             else:
                 assert future.result() == pinned
     if committed:
@@ -121,6 +122,7 @@ def test_path_resolution_uses_stored_files_and_folders_without_probing_projectio
     monkeypatch.setattr(os, "stat", watching(real_stat))
     monkeypatch.setattr(os, "lstat", watching(real_lstat))
     with read.request_snapshot(stored):
+        assert vault_module.resolve_under_vault(stored, ".", must_be_dir=True)[0] == stored
         resolution = vault_module.resolve_under_vault(
             stored, ALPHA, must_exist=True, must_be_file=True, return_details=True,
         )
@@ -144,6 +146,35 @@ def test_path_resolution_uses_stored_files_and_folders_without_probing_projectio
         with pytest.raises(vault_module.VaultPathError) as escape:
             vault_module.resolve_under_vault(stored, "../outside.md", must_exist=True)
         assert escape.value.code == "INVALID_PATH"
+
+
+@pytest.mark.parametrize("projection", ["missing", "stale"])
+def test_creation_guards_an_unguarded_stored_auxiliary(stored, writer, projection):
+    """Creation must bind canonical auxiliary bytes with either a missing or stale projection."""
+    from test_relation_review import _ID_B, _PAGE_B, _source
+
+    from exomem import relation_review
+    from exomem.collection_store import preview
+
+    auxiliary = "Knowledge Base/nav.md"
+    write.commit(writer, put(auxiliary, b"# Earlier navigation\n"))
+    source = _source(_ID_B)
+    with preview.preview_store(stored, writer.handle):
+        validation = relation_review.validate_creation_draft(
+            stored, path=_PAGE_B, source=source, draft_id=_ID_B, operation="create",
+        )
+        if projection == "stale":
+            (stored / auxiliary).write_bytes(b"# Projection decoy\n")
+        else:
+            (stored / auxiliary).unlink(missing_ok=True)
+        relation_review.commit_creation_draft(
+            stored, path=_PAGE_B, source=source, draft_id=_ID_B, operation="create",
+            relation_disposition="reviewed_none", relation_review_hash=validation.draft_hash,
+            relation_review_reason="No matching relation in this draft",
+            auxiliary_writes=(vault_module.PlannedWrite(stored / auxiliary, "# Current navigation\n"),),
+        )
+    assert stored_body(stored, auxiliary) == b"# Current navigation\n"
+    assert stored_body(stored, _PAGE_B) == source.encode("utf-8")
 
 
 def test_a_file_mode_vault_refuses_a_snapshot_instead_of_reading_empty(vault):  # noqa: F811

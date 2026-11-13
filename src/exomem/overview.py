@@ -41,6 +41,8 @@ JUNK_LIST_CAP = 20         # listed junk paths per category (counts stay exact)
 TOP_FILES_CAP = 5          # largest / oldest-unmodified entries
 PATTERN_CAP = 3            # dominant name patterns per folder
 CONTENT_READ_CAP = 512 * 1024  # bytes; larger md files are counted, not read
+CONTENT_BATCH_FILES = 32
+CONTENT_BATCH_BYTES = CONTENT_BATCH_FILES * CONTENT_READ_CAP
 
 #: `_Governance/` is the policy tree, not vault content, and it is skipped for
 #: EVERY audience including the owner — the same reasoning that keeps it out of
@@ -174,20 +176,17 @@ def _resolve_subtree(root: Path, path: str) -> tuple[Path, str]:
 def _walk(root: Path, scan: Path):
     if not store_mode.store_mode_for_reads(root):
         for directory, dirs, files in os.walk(scan):
-            yield directory, dirs, files, {}
+            yield directory, dirs, files, {}, None
         return
-    source = store_directory.Reader(
-        root, whole=True, max_page_bytes=CONTENT_READ_CAP,
-        subtree=scan.relative_to(root).as_posix(),
-    )
+    source = store_directory.Reader(root, max_batch_files=CONTENT_BATCH_FILES)
     pending = [scan]
     while pending:
         directory = pending.pop()
         entries = source.entries(directory)
         dirs = [entry.name for entry in entries if entry.directory]
         files = [entry.name for entry in entries if not entry.directory]
-        stored = {entry.name: entry.meta for entry in entries if entry.disk is None}
-        yield str(directory), dirs, files, stored
+        stored = {entry.name: entry for entry in entries if entry.disk is None}
+        yield str(directory), dirs, files, stored, source
         pending.extend(directory / name for name in reversed(dirs))
 
 
@@ -232,7 +231,7 @@ def overview(
     total_bytes = 0
     max_depth_seen = 0
 
-    for dirpath, dirnames, filenames, stored_entries in _walk(root, scan):
+    for dirpath, dirnames, filenames, stored_entries, source in _walk(root, scan):
         dirnames.sort()
         filenames.sort()
 
@@ -283,6 +282,7 @@ def overview(
         st.children = [f"{rp}/{d}" if rp else d for d in dirnames]
 
         name_set = set(filenames)
+        kept_files = []
         for fn in filenames:
             if not include_hidden and fn.startswith("."):
                 continue
@@ -298,8 +298,19 @@ def overview(
             if release_keep is not None and not release_keep(child_rel):
                 st.pruned_direct += 1
                 continue
+            kept_files.append(fn)
+        if source is not None:
+            source.prefetch(
+                [stored_entries[fn] for fn in kept_files
+                 if fn in stored_entries and stored_entries[fn].meta is not None
+                 and stored_entries[fn].meta.size <= CONTENT_READ_CAP],
+                max_files=CONTENT_BATCH_FILES, max_bytes=CONTENT_BATCH_BYTES,
+            )
+        for fn in kept_files:
+            child_rel = f"{root_rp}/{fn}" if root_rp else fn
             fpath = Path(dirpath) / fn
-            meta = stored_entries.get(fn)
+            entry = stored_entries.get(fn)
+            meta = entry.meta if entry is not None else None
             if meta is not None:
                 fst_size, fst_mtime = meta.size, meta.mtime
             else:
@@ -318,13 +329,16 @@ def overview(
             text: str | None = None
             if fn.lower().endswith(".md") and fst_size <= CONTENT_READ_CAP:
                 try:
-                    snapshot = reserved_paths.read_generic_bytes(root, child_rel)
+                    if meta is not None:
+                        raw = source.body(entry, max_files=CONTENT_BATCH_FILES, max_bytes=CONTENT_BATCH_BYTES)
+                    else:
+                        snapshot = reserved_paths.read_generic_bytes(root, child_rel)
+                        raw, fst_mtime = snapshot.data, snapshot.mtime
                 except reserved_paths.ReservedPathLeafError:
                     continue
-                fst_size = len(snapshot.data)
-                fst_mtime = snapshot.mtime
+                fst_size = len(raw)
                 if fst_size <= CONTENT_READ_CAP:
-                    text = snapshot.data.decode("utf-8", errors="replace")
+                    text = raw.decode("utf-8", errors="replace")
             st.files_direct += 1
             st.names.append(fn)
             total_bytes += fst_size

@@ -1098,7 +1098,10 @@ def _move_file_local(
             )
             def run_preflight() -> semantic_writes.MovePreflight:
                 call_spans.measure(call_spans.MOVE_PREFLIGHTS)
-                with call_spans.measure_ms(call_spans.MOVE_PREFLIGHT_MS):
+                from . import state_paths
+
+                # Reuse host placement for this read-only preflight; policy and commit checks stay live.
+                with state_paths.resolution_scope(), call_spans.measure_ms(call_spans.MOVE_PREFLIGHT_MS):
                     return semantic_writes.preflight_move(
                         vault_root,
                         old_path=old_rel,

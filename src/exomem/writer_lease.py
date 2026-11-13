@@ -8913,30 +8913,34 @@ def invoke_command(
         call_spans.meter(call_spans.MOVE_PREFLIGHT_MS, call_spans.MOVE_PREFLIGHTS)
         if command.name == "manage_memory_file" else nullcontext()
     )
+    from .collection_store import ownership
+
     if not read_only:
-        try:
-            # The same fixed phase labels as the read-only path below.
-            with body_meter as measured, call_spans.span("command.body", measured):
-                result = _invoke()
-            with call_spans.span("command.terminal_filter"):
-                try:
-                    return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
-                except Exception as error:
-                    converted = post_leaf_refusal(error)
-                    if converted is error:
-                        raise
-                    raise converted from error
-        except BaseException as error:
-            with call_spans.span("command.terminal_filter"):
-                postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
-            raise
+        # Each mutation gets a fresh membership proof; the writer still checks publication authority.
+        # Read finalization would reject a binding change that this mutation itself committed.
+        with ownership.read_scope(injected[0]):
+            try:
+                # The same fixed phase labels as the read-only path below.
+                with body_meter as measured, call_spans.span("command.body", measured):
+                    result = _invoke()
+                with call_spans.span("command.terminal_filter"):
+                    try:
+                        return postfilter(command.name, result, injected[0], request_kwargs=kwargs)
+                    except Exception as error:
+                        converted = post_leaf_refusal(error)
+                        if converted is error:
+                            raise
+                        raise converted from error
+            except BaseException as error:
+                with call_spans.span("command.terminal_filter"):
+                    postfilter_error(command.name, error, injected[0], request_kwargs=kwargs)
+                raise
     # The try lives INSIDE the boundary so `collector` is still bound when the
     # filter runs: `disclosure_boundary`'s `finally` resets the contextvar on
     # the way out, so an except-block outside it records credential blocks into
     # a collector that is already gone, and emits no receipt for a governed read
     # that touched withheld items before failing.
     from . import published_admission
-    from .collection_store import ownership
     from .collection_store import preview as store_preview
     from .governance import companions
     from .vault_store import mode as vault_store_mode
@@ -8944,11 +8948,7 @@ def invoke_command(
 
     # The command's store-owned pages are decided on one store request per decision shape, dropped
     # with the command; a refused request withholds them together for the rest of it.
-    store_snapshot = (
-        vault_store_read.request_snapshot(injected[0])
-        if vault_store_mode.store_mode_for_reads(injected[0]) else nullcontext()
-    )
-    with store_snapshot, ownership.read_scope(injected[0]) as ownership_scope, \
+    with ExitStack() as snapshot_scope, ownership.read_scope(injected[0]) as ownership_scope, \
             disclosure_boundary(injected[0], command.name) as collector, \
             published_admission.deciding(), companions.request_byte_proofs():
         from .cli_ops import _AuditBudgetExhausted
@@ -8971,6 +8971,8 @@ def invoke_command(
         call_spans.record_span_since("command.leaf_pre", "command.leaf_start")
         try:
             try:
+                if vault_store_mode.store_mode_for_reads(injected[0]):
+                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0]))
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()

@@ -33,7 +33,16 @@ def vault_backend(request, monkeypatch):
 
 
 def prepare_vault(root):
-    """Activate a constructed fixture with the production migration row builders."""
+    """Activate twin privacy fixtures through production row builders, not production cutover.
+
+    A case builds several independent vaults while one configured runtime and coordinator vault id
+    remain bound to another path. Running production cutover here would require replacing that
+    process-wide lifecycle between twins, including while earlier twins remain in use.
+    This fixture stages real rows but bypasses verification, claim/marker publication, the manifest,
+    mode-object registration, audit rows and advice refresh, and inserts the mode row directly.
+    Production cutover has separate coverage in test_vault_store_migration and
+    test_vault_store_corpus_scans; these fixtures prove disclosure over canonical bytes only.
+    """
     if _BACKEND.get() == "file" or mode.store_mode_for_reads(root):
         return
     with library_scope():

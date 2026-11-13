@@ -609,7 +609,7 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
     so a read that runs again meets the mode the records now show.
 
     Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned.
-    A worker with inherited context must see that revision too, or retry on the request thread.
+    A worker with inherited context must see that revision too, or refuse so the caller can retry the request.
     """
     root = Path(vault_root)
     scope = _REQUEST.get()
@@ -625,15 +625,69 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
                 mode.forget_read_mode(vault_root)
                 raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
             if scope is not None and scope.root == root and row[1] != scope.view.revision:
-                # Mixing revisions corrupts a read; a false refusal costs one retry on the pinned thread.
+                # Mixing revisions corrupts a read; a false refusal costs the caller a fresh request.
                 raise connection.CollectionStoreError(
                     "VAULT_STORE_SNAPSHOT_CHANGED",
-                    "the worker read a different store revision; rerun on the request thread",
+                    "the worker read a different store revision; retry the request",
                 )
             yield StoreSnapshot(revision=row[1], connection=reader)
         finally:
             if reader.in_transaction:
                 reader.execute("ROLLBACK")
+
+
+class PageBatch:
+    """Reuse one bounded body batch inside the caller's pinned request snapshot."""
+
+    def __init__(self, root: Path, *, max_batch_files: int = KEYS_PER_QUERY) -> None:
+        self.root = root
+        # Cache capacity is distinct from the census's remaining valid-file slots.
+        self._max_batch_files = max(1, max_batch_files)
+        self._candidates: list[PageMeta] = []
+        self._positions: dict[str, int] = {}
+        self._batch_size = 1
+        self._loaded: set[str] = set()
+
+    def prefetch(self, pages: list[PageMeta], *, max_files: int, max_bytes: int) -> None:
+        self._candidates = list(pages)
+        self._positions = {page.path: index for index, page in enumerate(self._candidates)}
+        self._batch_size = min(self._max_batch_files, max(1, max_files))
+        self._prefetch(self._candidates, max_files=min(max_files, self._max_batch_files), max_bytes=max_bytes)
+
+    def _prefetch(self, pages: list[PageMeta], *, max_files: int, max_bytes: int) -> None:
+        wanted = []
+        for page in pages:
+            if max_files <= 0:
+                break
+            if page.size <= max_bytes:
+                wanted.append(page.path)
+                max_bytes -= page.size
+                max_files -= 1
+        with snapshot(self.root) as view:
+            cached = view.memo.setdefault("pages", {})
+            for key in self._loaded:
+                cached.pop(key, None)
+            self._loaded = set(wanted) - cached.keys()
+            view.prefetch_pages(wanted)
+
+    def body(self, page: PageMeta, *, max_files: int, max_bytes: int) -> bytes:
+        with snapshot(self.root) as view:
+            if page.path not in view.memo.get("pages", {}):
+                # One oversized page occupies its own batch, as the scalar read would.
+                self._batch_size = min(self._max_batch_files, self._batch_size * 2)
+                self._prefetch(
+                    self._candidates[self._positions[page.path]:],
+                    max_files=min(self._max_batch_files, max(max_files, self._batch_size)),
+                    max_bytes=max(max_bytes, page.size),
+                )
+            return view.page(page.path).body
+
+    def clear(self) -> None:
+        """Release only this batch's bytes, preserving anything another reader prefetched."""
+        with snapshot(self.root) as view:
+            for path in self._loaded:
+                view.memo.get("pages", {}).pop(path, None)
+        self._loaded.clear()
 
 
 class _Lend:

@@ -52,7 +52,7 @@ from exomem.writer_lease import invoke_command
 
 pytestmark = [
     pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(900),
+    pytest.mark.timeout(180),
 ]
 
 SOURCE = "Knowledge Base/Sources/Beacon Survey.md"
@@ -125,6 +125,11 @@ SAMPLES = {
         "content": "## Observations\n\n- [finding] The lantern burns until dawn.\n",
         "draft_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     },
+}
+
+EXTRA_SAMPLES = {
+    "maintain_memory:tag-variants": ("maintain_memory", {"mode": "tag-variants"}),
+    "schema_memory:census": ("schema_memory", {"operation": "census", "subject": "relations"}),
 }
 
 # Path-only raw authorizers cannot resolve a tag scope without parsing. These command
@@ -221,7 +226,7 @@ def answer(command, root, arguments, source_schema, *, store=False):
     return json.loads(json.dumps(value, default=str))
 
 
-def comparable(value):
+def comparable(value, *, inbound_links=False):
     """Normalize response identity fields, retaining the content of a continuity token.
 
     The viewer's observed_at dates one observation. recall_context's
@@ -246,20 +251,45 @@ def comparable(value):
         generation.pop("index_generation", None)
     if "budget" in result:
         result["budget"].pop("serialized_chars", None)
+    if inbound_links:
+        for container in (result, result.get("links")):
+            if isinstance(container, dict) and isinstance(container.get("inbound"), list):
+                # canonical-vault-store specifies path order for store links and walk order for files.
+                container["inbound"] = sorted(
+                    container["inbound"], key=lambda row: json.dumps(row, sort_keys=True),
+                )
     return result
 
 
-@pytest.mark.parametrize("name", sorted(READ_COMMANDS))
-def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property, request, name):  # noqa: F811
+def test_comparison_ignores_only_inbound_order_and_keeps_duplicate_links():
+    """Filesystem walk order must not produce false parity failures or hide a missing link."""
+    first = {"path": "Notes/First.md", "line_number": 2}
+    second = {"path": "Notes/Second.md", "line_number": 5}
+    answer = {"links": {"inbound": [first, second, first]}, "hits": [first, second]}
+    reordered = {"links": {"inbound": [second, first, first]}, "hits": [first, second]}
+    assert comparable(answer, inbound_links=True) == comparable(reordered, inbound_links=True)
+    reordered["links"]["inbound"].pop()
+    assert comparable(answer, inbound_links=True) != comparable(reordered, inbound_links=True)
+    reordered["links"]["inbound"].append(first)
+    reordered["hits"].reverse()
+    assert comparable(answer, inbound_links=True) != comparable(reordered, inbound_links=True)
+
+
+@pytest.mark.parametrize("sample", sorted((*SAMPLES, *EXTRA_SAMPLES)))
+def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property, request, sample):  # noqa: F811
     """Lost content, changed refusals, projection I/O, sidecars, extra snapshots and repairs."""
-    assert name in SAMPLES, f"registered reader {name} has no sample"
+    name, sample_arguments = EXTRA_SAMPLES.get(sample, (sample, SAMPLES.get(sample)))
+    assert sample_arguments is not None, f"registered reader {name} has no sample"
     selector = (
         'paths: ["Notes/Secret Log.md", "Notes/Hidden/**"]'
         if name in PATH_POLICY_SAMPLES else 'tags: ["secret"]'
     )
     restrict_external(vault, selector)
-    if SAMPLES[name].get("validate_only") or name == "observe_memory":
+    if sample_arguments.get("validate_only") or name == "observe_memory":
         request.getfixturevalue("validation_clock")
+    if sample == "schema_memory:census":
+        from exomem import relation_census
+        monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
     write_pages(vault)
     write_pages(vault, UNIT_PAGES)
     write_pages(vault, {
@@ -271,9 +301,15 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         page.write("\nA lantern observation. <!-- survey:beacon -->\n")
     if name == "episode_memory":
         record_episode(vault)
+    if sample == "maintain_memory:tag-variants":
+        write_pages(vault, {
+            f"Knowledge Base/Notes/Tag-{number}.md":
+                f"---\ntitle: Tag {number}\ntags: [{tag}]\n---\n# Tag\n"
+            for number, tag in enumerate(("harbors", "harbor", "harbor"))
+        })
     build_indexes(vault)
     source_schema = schema.load_source_schema(vault)
-    arguments = copy.deepcopy(SAMPLES[name])
+    arguments = copy.deepcopy(sample_arguments)
     if arguments.get("ref") == "$review":
         items = attention.attention(
             vault, categories=["unprocessed_source"], limit=0, record_surfacing=False,
@@ -281,21 +317,22 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         arguments["ref"] = next(item.ref for item in items if item.path == SOURCE)
     command = READ_COMMANDS[name]
     assert commands.invocation_is_read_only(command, arguments)
+    links = bool(sample_arguments.get("links") or name == "list_inbound_links")
     callers = {"owner": nullcontext, "external": lambda: request_scope(EXTERNAL)}
     before = {}
     for caller, scope in callers.items():
         clear_reader_caches(vault)
         # Cache eviction also clears the watcher registry. Restore service readiness before
         # comparing bounded graph reads and complete link answers with the store's current rows.
-        if SAMPLES[name].get("links") or name == "viewer_map":
+        if sample_arguments.get("links") or name == "viewer_map":
             freshness.seed(vault, "vault", (
                 (str(path), freshness.stat_signature(path)) for path in vaults.walk_vault_md(vault)
             ))
             assert epistemic_graph.EpistemicGraphIndex(vault).available()
-        if SAMPLES[name].get("links"):
+        if sample_arguments.get("links"):
             assert vaults.prime_inbound_index(vault, eager=True)
         with scope():
-            before[caller] = comparable(answer(command, vault, arguments, source_schema))
+            before[caller] = comparable(answer(command, vault, arguments, source_schema), inbound_links=links)
     if "refusal" in before["owner"]:
         assert name in OWNER_REFUSALS, f"invalid file-mode sample: {before['owner']}"
         assert before["owner"]["reason"].startswith(OWNER_REFUSALS[name])
@@ -313,7 +350,7 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             file_mode.setattr(mode, "store_mode_for_reads", lambda _root: False)
             for caller, scope in callers.items():
                 with scope():
-                    before[caller] = comparable(answer(command, vault, arguments, source_schema))
+                    before[caller] = comparable(answer(command, vault, arguments, source_schema), inbound_links=links)
     expected = copy.deepcopy(before)
     if name == "coordination_status":
         # Sidecar synchronization does not exist in store mode; assert the canonical revision instead.
@@ -322,6 +359,13 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         for value in expected.values():
             value["graph_sync"] = {"state": "not_applicable", "generation": None}
             value["vault_store"] = {"state": "available", "revision": revision}
+    if sample == "schema_memory:census":
+        # Canonical-vault-store graph reads identify the store revision, not the sidecar counter.
+        with read.snapshot(vault) as snapshot:
+            revision = snapshot.revision
+        for value in expected.values():
+            if value.get("graph_generation") is not None:
+                value["graph_generation"] = revision
     if name == "viewer_map":
         with read.snapshot(vault) as snapshot:
             revision = snapshot.revision
@@ -333,6 +377,9 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         sidecar.unlink(missing_ok=True)
         sidecar.write_bytes(SENTINEL)
 
+    if sample == "maintain_memory:tag-variants":
+        # Tags remain canonical store facts when ordinary lexical retrieval uses its Python rung.
+        monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     observations = []
     for damage in ("deleted", "poisoned"):
         for relative in owned:
@@ -345,7 +392,7 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             clear_reader_caches(vault)
             # Only migrated page rows count: a prospective destination or schema folder is no stored projection.
             with scope(), record_store_reads(vault, monkeypatch, page_paths=owned) as events:
-                actual = comparable(answer(command, vault, arguments, source_schema, store=True))
+                actual = comparable(answer(command, vault, arguments, source_schema, store=True), inbound_links=links)
             violations = []
             if actual != expected[caller]:
                 violations.append("answer differs")

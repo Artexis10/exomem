@@ -799,6 +799,41 @@ def test_a_restricted_writers_entity_candidate_is_decided_over_its_view(
         assert identity["pages"] == sorted([f"{NOTES}/Insights/open-first.md", written["B"]["path"]])
 
 
+@pytest.fixture
+def mutation_fence_budget(monkeypatch, record_property, vault_backend):
+    """A restricted move must not read the coordinator fence for every membership decision."""
+    fence = writer_lease.LeaseCoordinatorClient.collection_store_fence
+    invoke = writer_lease.invoke_command
+    permits = connector_boundary.permits
+    counts = {"fences": 0, "membership": 0}
+    observed = []
+
+    def counted_fence(*args, **kwargs):
+        counts["fences"] += 1
+        return fence(*args, **kwargs)
+
+    def counted_permits(*args, **kwargs):
+        counts["membership"] += 1
+        return permits(*args, **kwargs)
+
+    def checked(command, *args, **kwargs):
+        before = dict(counts)
+        result = invoke(command, *args, **kwargs)
+        if not commands.invocation_is_read_only(command, kwargs):
+            sample = {key: counts[key] - before[key] for key in counts}
+            observed.append(sample)
+            assert sample["fences"] <= 2, sample
+            if vault_backend == "store" and sample["membership"]:
+                assert sample["fences"] == 1, sample
+        return result
+
+    monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", counted_fence)
+    monkeypatch.setattr(connector_boundary, "permits", counted_permits)
+    monkeypatch.setattr(writer_lease, "invoke_command", checked)
+    yield
+    record_property("mutation_fence_reads", json.dumps(observed))
+
+
 @pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("detail", ["compact", "legacy"])
 @pytest.mark.parametrize("audience", AUDIENCES)
@@ -1587,7 +1622,7 @@ def _semantic_move_fixture() -> dict[str, str]:
 @pytest.mark.parametrize("detail", [None, "compact", "full", "legacy"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
-    tmp_path: Path, audience: str, detail: str | None
+    tmp_path: Path, audience: str, detail: str | None, mutation_fence_budget
 ) -> None:
     """The answer carries nothing about a withheld linking page, which the
     confined mover cannot rewrite and leaves as it was: no graph or index
@@ -1778,11 +1813,12 @@ def _withheld_linkers(target: str) -> dict[str, tuple[str, str]]:
 
 
 @pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("detail", [None, "compact", "full", "legacy"])
 @pytest.mark.parametrize("guess", [_GUESSED, "other-guess"])
 @pytest.mark.parametrize("linker", ["non-compliant", "sources", "compliant"])
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
-    tmp_path: Path, audience: str, linker: str, guess: str
+    tmp_path: Path, audience: str, linker: str, guess: str, detail: str | None, mutation_fence_budget
 ) -> None:
     """Moving a page onto a guessed name and away again reads the same whether
     or not a withheld page links that name. A confined mover cannot write a
@@ -1801,40 +1837,39 @@ def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
     moves = ((f"{INSIGHTS}/zeta.md", f"{INSIGHTS}/Scratch/{guess}.md"),
              (f"{INSIGHTS}/Scratch/{guess}.md", f"{INSIGHTS}/Scratch/moved-on.md"))
 
-    for detail in (None, "compact", "full", "legacy"):
-        extra = {} if detail is None else {"response_detail": detail}
-        answers = {}
-        for variant, files in variants.items():
-            vault = _materialize(
-                tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+    extra = {} if detail is None else {"response_detail": detail}
+    answers = {}
+    for variant, files in variants.items():
+        vault = _materialize(
+            tmp_path / str(detail) / variant / "vault", files, audience, scope=scope
+        )
+        answers[variant] = [
+            _VOLATILE_TEXT.sub(
+                "<v>",
+                _text(
+                    _call(
+                        vault, _writer(audience), "manage_memory_file", operation="move",
+                        old_path=old, new_path=new, update_wikilinks=True, **extra,
+                    )
+                ),
             )
-            answers[variant] = [
-                _VOLATILE_TEXT.sub(
-                    "<v>",
-                    _text(
-                        _call(
-                            vault, _writer(audience), "manage_memory_file", operation="move",
-                            old_path=old, new_path=new, update_wikilinks=True, **extra,
-                        )
-                    ),
-                )
-                for old, new in moves
-            ]
-            if variant == "A":
-                assert page_bytes(vault, hidden).decode() == text
-                if guess == _GUESSED and detail is None:
-                    _reset()
-                    with library_scope():
-                        report = audit_module.audit(
-                            vault, categories=["broken_wikilink", "forward_reference"]
-                        )
-                    assert any(
-                        finding.path == hidden and _GUESSED in finding.detail
-                        for finding in report.findings
-                    ), [finding.as_dict() for finding in report.findings]
-        assert '"__error__"' not in _text(answers["B"]), (detail, answers["B"])
-        assert answers["A"] == answers["B"], (detail, answers["A"])
-        assert answers["C"] == answers["B"], detail
+            for old, new in moves
+        ]
+        if variant == "A":
+            assert page_bytes(vault, hidden).decode() == text
+            if guess == _GUESSED and detail is None:
+                _reset()
+                with library_scope():
+                    report = audit_module.audit(
+                        vault, categories=["broken_wikilink", "forward_reference"]
+                    )
+                assert any(
+                    finding.path == hidden and _GUESSED in finding.detail
+                    for finding in report.findings
+                ), [finding.as_dict() for finding in report.findings]
+    assert '"__error__"' not in _text(answers["B"]), (detail, answers["B"])
+    assert answers["A"] == answers["B"], (detail, answers["A"])
+    assert answers["C"] == answers["B"], detail
 
 
 @pytest.mark.usefixtures("granted_writer")

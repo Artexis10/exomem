@@ -230,6 +230,7 @@ class StoredParentRecords:
     def __init__(self, vault_root: Path) -> None:
         self.root = Path(vault_root)
         self._current: dict[str, tuple[str, str | None] | None] = {}
+        self._not_admitted: set[str] = set()
 
     def prefetch(self, paths: Iterable[str]) -> None:
         from . import recall_policy
@@ -240,10 +241,11 @@ class StoredParentRecords:
             return
         admitted = recall_policy.admitted_among(self.root, wanted)
         with read.snapshot(self.root) as view:
-            metadata = view.page_metas(admitted)
+            metadata = view.page_metas(wanted)
+        self._not_admitted.update(path for path in wanted - admitted if path in metadata)
         for path in wanted:
             meta = metadata.get(path)
-            if meta is None:
+            if meta is None or path not in admitted:
                 self._current[path] = None
                 continue
             frontmatter = json.loads(meta.frontmatter_json or "{}")
@@ -264,7 +266,10 @@ class StoredParentRecords:
         self.prefetch([parent_path])
         current = self._current[parent_path]
         if current is None:
-            return SemanticIndexFreshness(False, "recall_parent_not_admitted", parent_path)
+            return SemanticIndexFreshness(
+                False, "recall_parent_not_admitted" if parent_path in self._not_admitted else "missing_parent",
+                parent_path,
+            )
         return validate_parent_snapshot(
             parent_path=parent_path, parent_generation_value=parent_generation_value,
             parent_source_hash=parent_source_hash, parser_version=parser_version,

@@ -37,45 +37,23 @@ class Entry:
 class Reader:
     """Merge directory names once; never inspect a page's projected leaf.
 
-    Whole scans batch metadata and size-capped bytes. Bounded scans read only the requested
-    directory entries and fetch their admitted bytes as a batch within the caller's byte budget.
+    Read one kept directory at a time. Retain only its metadata and the current bounded
+    body batch; the caller prunes subtrees and admits files before prefetching their bytes.
     """
 
-    def __init__(
-        self, root: Path, *, whole: bool = False, max_page_bytes: int = 0, subtree: str = "",
-    ) -> None:
+    def __init__(self, root: Path, *, max_batch_files: int = read.KEYS_PER_QUERY) -> None:
         self.root = root
-        self.whole = whole
-        self._directories: dict[str, dict[str, Entry]] = {}
-        self._candidates: list[Entry] = []
-        self._positions: dict[str, int] = {}
-        self._batch_size = 1
-        if whole:
-            with read.snapshot(root) as view:
-                prefix = f"{subtree.rstrip('/')}/" if subtree and subtree != "." else ""
-                metadata = tuple(view.pages(prefix))
-                view.memo.setdefault("page_metadata", {}).update((meta.path, meta) for meta in metadata)
-                view.prefetch_pages(
-                    meta.path for meta in metadata
-                    if meta.path.lower().endswith(".md") and meta.size <= max_page_bytes
-                )
-                for meta in metadata:
-                    parts = meta.path.split("/")
-                    for depth, name in enumerate(parts):
-                        folder = "/".join(parts[:depth])
-                        relative = "/".join(parts[:depth + 1])
-                        self._directories.setdefault(folder, {})[name] = Entry(
-                            root / relative, depth < len(parts) - 1,
-                            meta if depth == len(parts) - 1 else None,
-                        )
+        self._batch = read.PageBatch(root, max_batch_files=max_batch_files)
+        self._metadata: set[str] = set()
 
     def entries(self, directory: Path, limit: int | None = None) -> list[Entry]:
         rel = directory.relative_to(self.root).as_posix()
         rel = "" if rel == "." else rel
-        if self.whole:
-            stored = dict(self._directories.get(rel, {}))
-        else:
-            stored = self._stored_entries(rel, limit)
+        with read.snapshot(self.root) as view:
+            for key in self._metadata:
+                view.memo.get("page_metadata", {}).pop(key, None)
+            self._metadata.clear()
+        stored = self._stored_entries(rel, limit)
         try:
             # A virtual directory can have a missing or symlinked projection. Only its stored
             # children count there; following that projection could import unrelated disk files.
@@ -131,40 +109,17 @@ class Reader:
                     self.root / prefix / name, bool(slash),
                     None if slash else read.PageMeta(*row),
                 )
-            view.memo.setdefault("page_metadata", {}).update(
-                (entry.meta.path, entry.meta) for entry in found.values() if entry.meta is not None
-            )
+            metadata = view.memo.setdefault("page_metadata", {})
+            self._metadata = {entry.meta.path for entry in found.values()
+                              if entry.meta is not None and entry.meta.path not in metadata}
+            metadata.update((entry.meta.path, entry.meta) for entry in found.values() if entry.meta is not None)
         return found
 
     def prefetch(self, entries: list[Entry], *, max_files: int, max_bytes: int) -> None:
-        self._candidates = [
-            entry for entry in entries
-            if entry.meta is not None and entry.name.lower().endswith(".md")
-        ]
-        self._positions = {entry.meta.path: index for index, entry in enumerate(self._candidates)}
-        self._batch_size = max(1, max_files)
-        self._prefetch(self._candidates, max_files=max_files, max_bytes=max_bytes)
-
-    def _prefetch(self, entries: list[Entry], *, max_files: int, max_bytes: int) -> None:
-        wanted = []
-        for entry in entries:
-            if max_files <= 0:
-                break
-            if entry.meta.size <= max_bytes:
-                wanted.append(entry.meta.path)
-                max_bytes -= entry.meta.size
-                max_files -= 1
-        with read.snapshot(self.root) as view:
-            view.prefetch_pages(wanted)
+        self._batch.prefetch(
+            [entry.meta for entry in entries if entry.meta is not None and entry.name.lower().endswith(".md")],
+            max_files=max_files, max_bytes=max_bytes,
+        )
 
     def body(self, entry: Entry, *, max_files: int, max_bytes: int) -> bytes:
-        with read.snapshot(self.root) as view:
-            if entry.meta.path not in view.memo.get("pages", {}):
-                # Undecodable pages consume no census slot. Grow the next batch so those pages
-                # do not turn a bounded scan into one point query for every remaining page.
-                self._batch_size *= 2
-                self._prefetch(
-                    self._candidates[self._positions[entry.meta.path]:],
-                    max_files=max(max_files, self._batch_size), max_bytes=max_bytes,
-                )
-            return view.page(entry.meta.path).body
+        return self._batch.body(entry.meta, max_files=max_files, max_bytes=max_bytes)

@@ -18,6 +18,7 @@ import json
 import logging
 import operator
 import os
+import posixpath
 import re
 import secrets
 import stat
@@ -1407,6 +1408,12 @@ class PathGuard:
         return self.leaf_policy == "absent" or (
             self.leaf_policy == "store" and self.expected_content_hash is None
         )
+
+    @property
+    def binds_bytes(self) -> bool:
+        """Whether this guard binds existing bytes by their canonical SHA-256."""
+        # nosemgrep: ep-word-membership -- PathGuard defines these two hash-bearing leaf policies.
+        return self.leaf_policy in ("content", "store") and self.expected_content_hash is not None
 
     @classmethod
     def capture_store(cls, vault_root: Path, target: str) -> PathGuard:
@@ -7174,30 +7181,38 @@ def resolve_under_vault(
         if first.casefold() != kb_dirname().casefold() and first != "..":
             rel = f"{kb_dirname()}/{rel}"
 
-    candidate = vault_root / rel
-    from .vault_store import mode as store_mode
+    normalized = posixpath.normpath(rel)
+    if normalized == ".." or normalized.startswith("../"):
+        raise VaultPathError(code="INVALID_PATH", reason=f"path escapes vault root: {raw!r}")
+    candidate = vault_root / normalized
+    try:
+        vault_resolved = vault_root.resolve()
+        parent = candidate.parent.resolve() if normalized != "." else vault_resolved
+        parent.relative_to(vault_resolved)
+    except (ValueError, OSError) as e:
+        raise VaultPathError(
+            code="INVALID_PATH", reason=f"path escapes vault root: {raw!r} ({e})",
+        ) from None
     from .vault_store import read as store_read
 
-    stored = store_read.serves(vault_root, rel)
-    if not stored and ".." in rel.split("/"):
-        # Parent tokens can reach a stored page despite the original spelling's ownership.
-        stored = store_mode.store_mode_for_reads(vault_root)
+    # Classify only a contained spelling; a stored leaf's projection cannot redirect its key.
+    stored = store_read.serves(vault_root, normalized)
     try:
-        # A stored page's leaf is a store key; only its folders can redirect the path.
-        resolved = candidate.parent.resolve() / candidate.name if stored else candidate.resolve()
-        vault_resolved = vault_root.resolve()
+        resolved = parent / candidate.name if stored else (vault_root / rel).resolve()
         resolved.relative_to(vault_resolved)
         if stored and not store_read.serves(
             vault_root, resolved.relative_to(vault_resolved).as_posix()
         ):
             stored = False
-            resolved = candidate.resolve()
+            resolved = (vault_root / rel).resolve()
             resolved.relative_to(vault_resolved)
     except (ValueError, OSError) as e:
         raise VaultPathError(
-            code="INVALID_PATH",
-            reason=f"path escapes vault root: {raw!r} ({e})",
+            code="INVALID_PATH", reason=f"path escapes vault root: {raw!r} ({e})",
         ) from None
+
+    if not stored:
+        candidate = vault_root / rel
 
     if must_be_under_kb:
         kb_resolved = (vault_root / kb_dirname()).resolve()

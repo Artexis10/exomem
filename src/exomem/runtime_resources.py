@@ -489,6 +489,7 @@ class SemanticPreparation:
         self.source = ""
         self.signature: Any = None
         self.mtime_ns: int | None = None
+        self.mtime: float | None = None
         self.guard: Any = None
         self.source_bytes = source_bytes
         self.parser_bytes = 0
@@ -619,6 +620,7 @@ def semantic_preparation(
                 raise OSError("semantic input changed during preparation")
             preparation.signature = signature
             preparation.mtime_ns = stored.mtime_ns if stored is not None else info.st_mtime_ns
+            preparation.mtime = stored.mtime if stored is not None else info.st_mtime
             preparation.hold(source)
             yield preparation
 

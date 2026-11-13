@@ -188,7 +188,7 @@ def _canonical(root, conn, placement, recorded, *, private=False, restored=None,
         if not fence.enrolled:
             from .export import completed_retirement_binding
 
-            completed = completed_retirement_binding(root, manager.client, sid)
+            completed = completed_retirement_binding(root, manager.client, sid, fence=fence)
             if completed is not None:
                 return Proof((placement, sid, instance, "exported", completed), None)
             if not private and intent is not None and intent["kind"] == authority.EXPORT:
