@@ -95,6 +95,13 @@
 - [ ] 3.16 After installation, compare `ask_memory`, `activate_context` and `read_memory` dispatch timings in the request ledger by concurrency bucket: alone, 1.5 to 3, and 3 to 6.
   - Use at least 100 calls per tool per arm, report the write count per window, and give bootstrap 95% intervals.
   - Record each site's span check from 3.8-3.14.
+- [ ] 3.18 Bind the id of a stored due entry from the entry, before any review queue is read.
+  - Baseline, from the request ledger of the installed service, 2026-11-11 to 2026-11-13: 9 of 9 `decide_review_item` calls by id were refused `ITEM_NOT_FOUND` after 752 to 1,758 s each. All 8 ids are current `note_cohesion` entries of the stored projection. The binder read only the review listings, and no listing holds that family.
+  - Verify: `tests/test_note_cohesion.py` follows the dismissal that a write response spells out, counts the pages that the decision opens, and compares the refusal that a restricted caller gets for a withheld page's id with the refusal for an id that does not exist.
+  - Still open, for task 3.19: every other id binds by a read of all review queues. That covers the id of a listed item, an earlier id of a stored entry and an unknown id. A vault that has no projection yet refuses the id of a due entry until its first rebuild ends.
+- [ ] 3.19 Read the review queues without one pass over the vault for each queue, and bind or refuse any id without such a pass.
+  - An id index, if this task needs one, records each id where the service gives it out. The first-surfaced ledger cannot be that index: its writes are best effort, it keeps only the first surface of an item, and it drops old rows.
+  - Baseline, same ledger and window: `list_review_items` had n=27, p50 21.9 s and maximum 645 s. One decision scan spent 504 to 994 s in `audit.corpus_contradictions`.
 
 ## 4. Verify installed behavior and deliver
 

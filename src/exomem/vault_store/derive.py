@@ -35,6 +35,7 @@ from .. import (
     vault,
 )
 from ..find_types import ParsedPage
+from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
 from . import read
 
@@ -105,6 +106,10 @@ class _Derivation:
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_links'"
         ).fetchone() is not None
 
+        self.admission = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_admission'"
+        ).fetchone() is not None
+
     # ------------------------------------------------------------------ sources
 
     def source(self, rel: str) -> tuple[bytes, int] | None:
@@ -168,17 +173,22 @@ class _Derivation:
         for rel in self.removed:
             lexstore.delete_page_rows(self.tx, rel)
             memory_refs.replace_identity_row(self.tx, rel, None)
+            if self.admission:
+                page_admission.replace_row(self.tx, rel, None)
         derived: dict[str, tuple[str | None, bool]] = {}
         for rel in (*self.written, *self.refreshed):
             found = self.source(rel)
             lexstore.delete_page_rows(self.tx, rel)
             if found is None:
                 memory_refs.replace_identity_row(self.tx, rel, None)
+                if self.admission:
+                    page_admission.replace_row(self.tx, rel, None)
                 derived[rel] = (None, False)
                 continue
             raw, mtime_ns = found
             in_kb, in_vault = lexstore.page_membership(rel)
             rows = None
+            page = None
             if in_kb or in_vault:
                 page, state = self.parse(rel, raw, mtime_ns)
                 rows = lexstore.page_rows(
@@ -187,6 +197,12 @@ class _Derivation:
                 )
             if rows is not None:
                 lexstore.write_page_rows(self.tx, rows)
+            if self.admission:
+                if page is None and not (in_kb or in_vault) and rel.lower().endswith(".md"):
+                    page = find_corpus.parse_page(
+                        self.root / rel, mtime_ns / 1e9, self.root, content=raw, resolved_relative=rel,
+                    )
+                page_admission.replace_row(self.tx, rel, raw, page)
             identity = memory_refs.identity_row(self.root, rel, raw)
             memory_refs.replace_identity_row(self.tx, rel, identity)
             derived[rel] = (

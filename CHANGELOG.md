@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.178.0](https://github.com/Artexis10/exomem/compare/v0.177.1...v0.178.0) (2026-11-13)
+
+
+### Features
+
+* **vault-store:** decide restricted relation reads from stored page facts ([#2790](https://github.com/Artexis10/exomem/issues/2790)) ([7446e35](https://github.com/Artexis10/exomem/commit/7446e35f75f7cd08c6899d306084e53ea3b65fec))
+
+
+### Bug Fixes
+
+* **release:** qualify fixed sources while main advances ([#2786](https://github.com/Artexis10/exomem/issues/2786)) ([d50d3bd](https://github.com/Artexis10/exomem/commit/d50d3bd8a0f844a3e845ff2dcaa8b9d9b21a1342))
+* **review:** bind a review item id from its stored due entry ([#2795](https://github.com/Artexis10/exomem/issues/2795)) ([4a8a8a5](https://github.com/Artexis10/exomem/commit/4a8a8a517a63e5f7b2111da13991f2b22156823b))
+
+## [0.177.1](https://github.com/Artexis10/exomem/compare/v0.177.0...v0.177.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **benchmarks:** preserve statement provenance and calibration gates ([#2787](https://github.com/Artexis10/exomem/issues/2787)) ([3396b59](https://github.com/Artexis10/exomem/commit/3396b5906d1ac786bb5fef407d49f8a5e5a385f3))
+* **semantic:** enforce selected kinds and strict governed rows ([#2784](https://github.com/Artexis10/exomem/issues/2784)) ([e6d48b8](https://github.com/Artexis10/exomem/commit/e6d48b8737d8d5225c796caff987fcb2bab410fa))
+
+
+### Performance
+
+* **graph:** filter relations on a hub without interpreting every linking page ([#2789](https://github.com/Artexis10/exomem/issues/2789)) ([9a976be](https://github.com/Artexis10/exomem/commit/9a976bec7a25d885ca968b0565d503bef784fc1a))
+
 ## [0.177.0](https://github.com/Artexis10/exomem/compare/v0.176.0...v0.177.0) (2026-11-13)
 
 

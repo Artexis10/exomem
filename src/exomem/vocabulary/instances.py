@@ -397,7 +397,7 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     compiled = policy.load(root)
     page = find_types.ParsedPage(path=Path(root) / path, rel_path=path,
                                 frontmatter=semantic_contract._thaw(frontmatter), body="", title="", mtime=0)
-    scopes = membership._evaluate_markdown_scopes(page, compiled)
+    scopes = membership._evaluate_markdown_scopes(membership.markdown_subject(page), compiled)
     candidates = set(scopes).intersection(document["private"])
     destinations = {scope for folder, scope in document["destinations"].items() if _contains(folder, path)}
     selected = document["selections"].get(path, registry_scope)

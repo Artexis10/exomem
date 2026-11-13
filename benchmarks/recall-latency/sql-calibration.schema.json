@@ -67,6 +67,7 @@
       "properties": {
         "pages": {"$ref": "#/$defs/count"}, "chunks": {"type": "null"},
         "units": {"$ref": "#/$defs/count"}, "unit_pages": {"$ref": "#/$defs/count"},
+        "reference": {"$ref": "urn:exomem:recall-latency:reference-corpus"},
         "vector_units": {"type": "null"},
         "median_page_bytes": {"type": "number", "minimum": 0},
         "spot_checks": {"$ref": "#/$defs/count"},

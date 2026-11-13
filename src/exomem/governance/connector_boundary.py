@@ -448,7 +448,12 @@ def _permits_membership(root: Path, path: str, denied: frozenset[str], compiled:
                                 proposed_companion=proposed_companion, artifact_copy=artifact_copy)
     except _ADMISSION_REFUSALS:
         return False
-    return bool(sets) and all(not denied.intersection(scopes) for scopes in sets)
+    return bool(sets) and all(permits_scopes(denied, scopes) for scopes in sets)
+
+
+def permits_scopes(denied: frozenset[str], scopes: frozenset[str]) -> bool:
+    """Apply the connector ceiling to an already established scope set."""
+    return not denied.intersection(scopes)
 
 
 def _unwritten_capture_slot(root: Path, path: str, who: RequestPrincipal | None) -> bool:
