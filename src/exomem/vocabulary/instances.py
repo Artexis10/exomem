@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -57,10 +57,18 @@ class DefinitionsSelection:
     snapshots that build used. Page membership is still resolved per page.
     """
 
-    def __init__(self, root: Path, subjects: tuple[str, ...]) -> None:
+    def __init__(
+        self, root: Path, subjects: tuple[str, ...], *,
+        configured: Callable[[], dict[str, Any] | None] | None = None,
+    ) -> None:
         self._root = Path(root)
         self._subjects = subjects
         self._selected: dict[tuple[str, str | None], tuple[RegistrySpec, Snapshot] | RegistryError] = {}
+        self._configured = configured
+
+    def configuration(self) -> dict[str, Any] | None:
+        """Read the binding configuration, or join an interpretation's request-local read."""
+        return configuration(self._root) if self._configured is None else self._configured()
 
     def _select(self, subject: str, scope: str | None) -> tuple[RegistrySpec, Snapshot]:
         from . import registry, registry_spec
@@ -68,8 +76,10 @@ class DefinitionsSelection:
         outcome = self._selected.get((subject, scope))
         if outcome is None:
             try:
-                spec = select(self._root, registry_spec(subject), scope)
-                outcome = (spec, registry.load(spec, self._root))
+                spec = select(
+                    self._root, registry_spec(subject), scope, configured=self.configuration,
+                )
+                outcome = (spec, registry.load(spec, self._root, configured=self.configuration))
             except RegistryError as error:
                 outcome = error
             self._selected[(subject, scope)] = outcome
@@ -87,7 +97,7 @@ class DefinitionsSelection:
 
     def page_definitions(self, path: str, frontmatter: dict) -> PageDefinitions:
         """Select once from canonical membership, then admit only the requested subjects."""
-        scope = page_scope(self._root, path, frontmatter)
+        scope = page_scope(self._root, path, frontmatter, configured=self.configuration)
         snapshots = {}
         binding = None
         for subject in self._subjects:
@@ -105,7 +115,7 @@ class DefinitionsSelection:
         from ..governance import policy
 
         try:
-            document = configuration(self._root)
+            document = self.configuration()
         except AssignmentRequired:
             document = None
         scopes = (None,) if document is None or public_only else (None, *sorted(document["private"]))
@@ -265,7 +275,8 @@ def unassigned_pack_only(root: Path, spec: RegistrySpec) -> bool:
 
 
 def select(root: Path, spec: RegistrySpec, scope: str | None = None, *,
-           authoring: bool = False) -> RegistrySpec:
+           authoring: bool = False,
+           configured: Callable[[], dict[str, Any] | None] | None = None) -> RegistrySpec:
     """Select storage only; the canonical release decision still owns admission.
 
     `authoring` marks a registry operation or overlay write. A version-1 armed
@@ -275,7 +286,7 @@ def select(root: Path, spec: RegistrySpec, scope: str | None = None, *,
     """
     scope = None if scope == PUBLIC_INSTANCE else scope
     try:
-        document = configuration(root)
+        document = configuration(root) if configured is None else configured()
     except AssignmentRequired:
         if authoring or scope is not None or _legacy_storage(Path(root), spec):
             raise
@@ -364,7 +375,8 @@ def public_storage(root: Path, path: str) -> bool:
 
 
 def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str | None = None,
-               prospective: bool = False) -> str | None:
+               prospective: bool = False,
+               configured: Callable[[], dict[str, Any] | None] | None = None) -> str | None:
     """Resolve canonical page membership before looking up any definition or folder."""
     from .. import find_types, semantic_contract
     from ..governance import membership, policy
@@ -374,7 +386,7 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     if registry_scope is not None and not isinstance(registry_scope, str):
         raise RegistryError("REGISTRY_UNAVAILABLE: invalid page instance selector")
     try:
-        document = configuration(root)
+        document = configuration(root) if configured is None else configured()
     except AssignmentRequired:
         # Version 1 assigns no private instance, so every page selects public.
         document = None
@@ -407,22 +419,29 @@ def page_scope(root: Path, path: str, frontmatter: dict, *, registry_scope: str 
     return selected
 
 
-def recheck_binding(root: Path, spec: RegistrySpec) -> RegistrySpec:
+def recheck_binding(
+    root: Path, spec: RegistrySpec, *,
+    configured: Callable[[], dict[str, Any] | None] | None = None,
+) -> RegistrySpec:
     """Select fresh storage and require the operation's original binding."""
     from . import registry_spec
 
     current = select(root, registry_spec(spec.name),
-                     None if spec.instance_id == PUBLIC_INSTANCE else spec.instance_id)
+                     None if spec.instance_id == PUBLIC_INSTANCE else spec.instance_id,
+                     configured=configured)
     if (current.instance_id != spec.instance_id or current.binding_revision != spec.binding_revision
             or current.stem != spec.stem or current.overlay(root) != spec.overlay(root)):
         raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")
     return current
 
 
-def recheck(root: Path, spec: RegistrySpec) -> None:
+def recheck(
+    root: Path, spec: RegistrySpec, *,
+    configured: Callable[[], dict[str, Any] | None] | None = None,
+) -> None:
     """Recheck the same binding and its current admission at the existing write seam."""
     from .contract import admission_refusal
 
-    current = recheck_binding(root, spec)
+    current = recheck_binding(root, spec, configured=configured)
     if admission_refusal(root, current):
         raise RegistryError("REGISTRY_UNAVAILABLE: selected instance changed or is unavailable")

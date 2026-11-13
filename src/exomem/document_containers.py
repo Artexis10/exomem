@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import stat
 import tempfile
@@ -480,6 +481,9 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
     if raw is None:
         raw = content if page_path == path and content is not None else (staged.encode("utf-8") if isinstance(staged, str) else None)
     in_subtree = in_payload_tree(path)
+    # Store metadata proves only absence of this schema key; claims and unknown metadata still parse.
+    if not _OVERLAY.get() and artifact_copy is None and _stored_unclaimed(root, page_path, supplied_digest, content):
+        return None
     remembered_read = None
     if raw is None:
         if classified.disposition is not reserved_paths.PathDisposition.ORDINARY:
@@ -549,6 +553,48 @@ def parent_binding_for_path(root: Path, path: str, *, content: bytes | None = No
         page_path = source_path.as_posix()
         fm = parse_frontmatter(reserved_paths.read_generic_bytes(root, page_path).data.decode("utf-8"), strict=True)[0]
     return _parent_binding_for_page(root, page_path, fm, artifact_copy=artifact_copy)
+
+
+def _stored_unclaimed(root: Path, path: str, digest: str | None, content: bytes | None) -> bool:
+    """Prove no container claim from this request's exact stored frontmatter, never from a projection."""
+    from .published_admission import request_decisions
+    from .vault_store import read
+
+    memo = read.request_memo(root)
+    if memo is None or in_payload_tree(path) or not read.serves(root, path):
+        return False
+    if reserved_paths.classify_logical(path).disposition is not reserved_paths.PathDisposition.ORDINARY:
+        return False
+    key = "container-unclaimed-pages"
+    known = memo.setdefault(key, {})
+    if path not in known:
+        requested = {path}
+        scope = request_decisions()
+        previous = memo.get("container-announced")
+        count = 0 if scope is None else len(scope.paths)
+        # Doubling bounds scans of cumulative announcements; the current miss always gets a read.
+        prefetch = scope is not None and (
+            previous is None or previous[0] is not scope or count >= 2 * max(1, previous[1])
+        )
+        if prefetch:
+            requested.update(
+                rel if rel.lower().endswith(".md") else rel + ".md"
+                for rel in scope.pending()
+            )
+        requested.difference_update(known)
+        with read.snapshot(root) as view:
+            rows = view.page_metas(requested)
+        unclaimed: dict[str, str | None] = dict.fromkeys(requested)
+        for rel, row in rows.items():
+            # NULL metadata is unknown, and an explicit JSON null is still a custody claim.
+            frontmatter = json.loads(row.frontmatter_json) if row.frontmatter_json is not None else None
+            if isinstance(frontmatter, dict) and "container_member" not in frontmatter:
+                unclaimed[rel] = row.sha256
+        known.update(unclaimed)
+        if prefetch:
+            memo["container-announced"] = (scope, count)
+    stored_digest = known[path]
+    return stored_digest is not None and (content is None or digest == stored_digest)
 
 
 def parent_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:

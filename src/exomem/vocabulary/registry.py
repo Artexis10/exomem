@@ -423,7 +423,10 @@ def _build(spec: RegistrySpec, text: str | None) -> Snapshot:
     )
 
 
-def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
+def load(
+    spec: RegistrySpec, vault_root: Path | None, *,
+    configured: Callable[[], dict[str, Any] | None] | None = None,
+) -> Snapshot:
     """The current snapshot of one registry for one vault (pack only without a vault)."""
     if vault_root is None:
         return _pack_only(spec)
@@ -431,9 +434,9 @@ def load(spec: RegistrySpec, vault_root: Path | None) -> Snapshot:
     from . import instances
 
     if spec.binding_revision is None and spec.instance_id == PUBLIC_INSTANCE:
-        spec = instances.select(Path(vault_root), spec)
+        spec = instances.select(Path(vault_root), spec, configured=configured)
     if spec.binding_revision is not None:
-        instances.recheck(Path(vault_root), spec)
+        instances.recheck(Path(vault_root), spec, configured=configured)
     root = Path(vault_root)
     path = spec.overlay(root)
     key = _cache_key(vault_root, spec)
