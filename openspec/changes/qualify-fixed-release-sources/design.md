@@ -121,7 +121,7 @@ Use recorded API transport fixtures and block outbound writes.
 6. Alter allowed JSON and generated content; expect rejection before tag creation.
 
 The fixture proves integration and ordering, not Exomem's Full corpus.
-Qualify the first ordinary cut with one authentic Full source run, then verify its actual artifacts and canary.
+Qualify two ordinary cuts with authentic Full source runs, then verify their actual artifacts and canaries.
 Record source, main advancement, CI, Python, all-image and consumer timestamps separately.
 Observe ordinary concurrent work when available; another owner's activity is not a release gate.
 
@@ -130,7 +130,7 @@ Observe ordinary concurrent work when available; another owner's activity is not
 1. Obtain approval for this contract and its single cohesive implementation batch; expect implementation authority.
 2. Complete the isolated proof and independent review; expect the selected source and next notes to remain correct.
 3. Enable cut creation between releases and close stale main release proposals; expect no competing release engine.
-4. Publish one ordinary isolated cut and verify its provenance and canary; expect complete release evidence.
+4. Publish two ordinary isolated cuts and verify their provenance and canaries; expect complete release evidence.
 5. Synchronize and archive this change after delivery; expect canonical specifications to describe the shipped contract.
 
 Rollback disables new cut creation and leaves main work available.

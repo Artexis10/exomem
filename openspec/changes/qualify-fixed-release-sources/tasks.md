@@ -19,6 +19,6 @@
 ## 3. Integration and delivery
 
 - [x] 3.1 Run the disposable two-cut proof with pinned Release Please and blocked outbound writes; expect intervening changes exactly once.
-- [ ] 3.2 Run scoped tests, strict OpenSpec validation and independent batch review; expect green PR CI and an explicit ship verdict.
-- [ ] 3.3 Deliver one ordinary cut with authentic Full, qualified artifacts and actual canary; expect separately sourced timing and provenance records.
+- [x] 3.2 Run scoped tests, strict OpenSpec validation and independent batch review; expect green PR CI and an explicit ship verdict.
+- [ ] 3.3 Verify two ordinary cuts with authentic Full, qualified artifacts and actual canaries; expect separate timing and provenance records.
 - [ ] 3.4 Synchronize and archive this change after acceptance; expect canonical requirements, strict validation and clean task resources.
