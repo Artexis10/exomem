@@ -781,9 +781,12 @@ class Importer:
         """
         with read.snapshot(self._root) as view:
             rows = view.connection.execute(_RECORDED_HASHES).fetchall()
+            held = frozenset(
+                row[0] for row in view.connection.execute("SELECT path FROM store_pages")
+            )
         judged: set[str] = set()
         for rel, content_hash in rows:
-            if self._owned_or_not_markdown(rel):
+            if self._owned_or_not_markdown(rel, held):
                 continue
             judged.add(rel)
             disk = self._observe(filesystem, rel, report)
@@ -796,7 +799,7 @@ class Importer:
         report.corpus_files = len(corpus)
         walked = [vault.relative_posix(path, self._root) for path in corpus]
         for rel in (*walked, *self._layer_pages()):
-            if rel in judged or self._owned_or_not_markdown(rel):
+            if rel in judged or self._owned_or_not_markdown(rel, held):
                 continue
             judged.add(rel)  # both walks reach a layer page that the corpus holds
             disk = self._observe(filesystem, rel, report)
@@ -838,10 +841,14 @@ class Importer:
         return sorted(found)
 
     @staticmethod
-    def _owned_or_not_markdown(rel: str) -> bool:
-        return ownership.classify(rel) is not ownership.Ownership.NONE or not ownership.is_markdown(
-            rel
-        )
+    def _owned_or_not_markdown(rel: str, held: frozenset[str]) -> bool:
+        """Whether the store owns ``rel``, so the disk is not the source of its rows.
+
+        Held means a ``store_pages`` row, not a ``PAGE`` spelling: a file at a page path that the
+        store holds no row for is a file the disk still owns, and the sweep judges it like any
+        unowned file so its derived rows track its bytes.
+        """
+        return rel in held or not ownership.is_markdown(rel)
 
     def _check_unowned(
         self, rel: str, disk: OnDisk | None, content_hash: str | None, report: ImportReport

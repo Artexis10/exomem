@@ -71,98 +71,50 @@ class InboundCheck(NamedTuple):
 
 
 def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundCheck]:
-    """The links to each stored page in ``rels``, from the store and from the files, each counted
-    once.
+    """The links to each stored page in ``rels``: the store's inbound rows, then each file that the
+    store holds no rows for, read off the disk.
 
-    Neither source sees the whole vault. The graph rows are derived in each commit, so they name
-    the linking pages as of the current revision, including a page that has no file yet; they hold
-    nothing for a note that nothing has imported. The file index finds a note outside the store's
-    pages, as file mode does, and misses a page that has no file. A page that the store holds is
-    read from the store, and its file is only a projection, which may trail it. A graph source with
-    no stored page comes from the index or, failing that, is reported at line 0 (a link by title or
-    alias), never dropped. A file in the Knowledge Base that the store holds no page for is read
-    off the disk, because the index reads it through the store and skips it; a bare ``[[name]]``
-    in it counts even when another page shares the name. A file that a queued delete has not
-    removed yet counts until the projector catches up. Each wrong count costs one ``force_orphan``.
-    ``bound`` is every graph source: the commit refuses a source outside it.
-
-    A folder's pages share one walk of the disk, one read of the file index and one read of the
-    graph rows, so the cost grows with the links and not with the pages times the vault.
-
-    The graph keeps no edge to a binary, which is no page. A binary's linking pages are the stored
-    pages whose recorded link targets name it (``epistemic_graph.dependent_paths``), each read
-    once; ``bound`` holds no source for it, so its commit binds no link gained after this read.
+    The rows answer for every page that the store holds and every file that the importer's sweep
+    reached, as of the snapshot, by the file index's own rule (``vault.store_inbound_wikilinks``),
+    with line and context: a page that has no file yet counts, and a file that a queued delete has
+    not removed yet does not. A file with no rows (a note that nothing has imported or swept yet)
+    is read off the disk, and a bare ``[[name]]`` in it counts even when another page shares the
+    name. Such a note outside what the store owns counts as a link; one in the Knowledge Base goes
+    to ``unimported``. Each wrong count costs one ``force_orphan``. ``bound`` is every page that
+    the rows name: the commit binds the same rule (``write.check``) and refuses a link from a page
+    outside it. A folder's pages share one read of the rows and one walk of the disk, so the cost
+    grows with the links and not with the pages times the vault.
     """
-    from .. import epistemic_graph
-
     root = Path(vault_root)
     targets = list(dict.fromkeys(rels))
-    files = [rel for rel in targets if ownership.classify(rel) is not ownership.Ownership.PAGE]
     # A form names the pages that a link in that form reaches: two pages may share a basename.
     reached: dict[str, set[str]] = {}
     for rel in targets:
         for form in vault._inbound_target_forms(rel)[1:]:
             reached.setdefault(form, set()).add(rel)
-
-    def matching(source: str, text: str) -> dict[str, list[vault.InboundLink]]:
-        found: dict[str, list[vault.InboundLink]] = {}
-        for line, context, raw in vault._scan_wikilinks(text):
-            for rel in reached.get(vault._inbound_bucket_key(raw), ()):
-                if rel != source:
-                    found.setdefault(rel, []).append(vault.InboundLink(source, line, context, raw))
-        return found
-
-    # A stored page may have no file yet, and the index reads a bare `[[name]]` by counting files.
-    on_disk = vault.find_inbound_wikilinks_many(root, targets, held=True)
-    links: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     unimported: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     with read.snapshot(root) as view:
-        sources = view.inbound_sources_many(targets)
-        naming = (
-            epistemic_graph.dependent_paths(view.connection, files, ()) if files else set()
-        )
-        # One chunk of linking pages' bodies at a time: a folder's linkers may be thousands.
-        linkers = sorted(set().union(*sources.values()) | naming)
-        found_in: dict[str, dict[str, list[vault.InboundLink]]] = {}
-        for start in range(0, len(linkers), read.KEYS_PER_QUERY):
-            for source, body in view.bodies(linkers[start : start + read.KEYS_PER_QUERY]).items():
-                found_in[source] = matching(source, body.decode("utf-8", errors="replace"))
-        for rel in targets:
-            for source in sorted(sources[rel] & found_in.keys()):
-                links[rel].extend(
-                    found_in[source].get(rel) or [vault.InboundLink(source, 0, "", "")]
-                )
-        for rel in files:
-            for source in sorted(naming & found_in.keys()):
-                links[rel].extend(found_in[source].get(rel, ()))
-        indexed = view.held_pages(link.path for found in on_disk.values() for link in found)
-        for rel, found in on_disk.items():
-            links[rel].extend(link for link in found if link.path not in indexed)
-        candidates: dict[str, Path] = {}
-        for path in vault.walk_vault_md(root):
-            source = vault.relative_posix(path, root)
-            if ownership.classify(source) is ownership.Ownership.PAGE:
-                candidates[source] = path
-        stored = view.held_pages(candidates)
+        links = vault.store_inbound_wikilinks(view.connection, targets)
+        candidates = {vault.relative_posix(path, root): path for path in vault.walk_vault_md(root)}
+        derived = vault.store_inbound_sources(view.connection, candidates)
+    bound = {rel: frozenset(link.path for link in links[rel]) for rel in targets}
     for source, path in candidates.items():
-        if source in stored:
+        if source in derived:
             continue
+        owned = ownership.classify(source) is ownership.Ownership.PAGE
         try:
             # The descriptor read refuses a symlink, which a file swapped after the walk could be;
             # `read_guarded_text` would look for the file in the store instead.
             raw, _guard = vault._read_bounded_guarded_snapshot(root, source, path.lstat().st_size)
         except (OSError, vault.PathGuardError):
             continue
-        for rel, found in matching(source, raw.decode("utf-8", errors="replace")).items():
-            unimported[rel].extend(found)
-    checks: dict[str, InboundCheck] = {}
-    for rel in targets:
-        shown = {link.path for link in links[rel]}
-        links[rel].extend(
-            vault.InboundLink(source, 0, "", "") for source in sorted(sources[rel] - shown)
-        )
-        checks[rel] = InboundCheck(links[rel], unimported[rel], sources[rel])
-    return checks
+        for line, context, target in vault._scan_wikilinks(raw.decode("utf-8", errors="replace")):
+            for rel in reached.get(vault._inbound_bucket_key(target), ()):
+                if rel != source:
+                    (unimported if owned else links)[rel].append(
+                        vault.InboundLink(source, line, context, target)
+                    )
+    return {rel: InboundCheck(links[rel], unimported[rel], bound[rel]) for rel in targets}
 
 
 def visible_links(

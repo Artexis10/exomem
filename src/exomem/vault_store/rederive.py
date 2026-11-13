@@ -33,7 +33,13 @@ from . import derive, mode
 OVERLAY_REVISION = "vault_store_overlay_revision"
 REGISTRY_REVISION = "vault_store_registry_revision"
 PASS = "vault_store_registry_pass"
-KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS)
+#: The version of the owners' objects (tables and indexes outside the collection schema) whose rows
+#: the store holds, and this build's version. A store that an older build set up lacks an object
+#: that this build derives; its pass creates the objects and derives every page, and only then
+#: records this version. Version 1 adds the inbound-link tables.
+OWNER_SCHEMA = "vault_store_owner_schema"
+OWNER_SCHEMA_VERSION = 1
+KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
 #: ``mode.UNKNOWN``.
@@ -62,6 +68,9 @@ class Registry:
     state: str
     revision: int | None
     target: int | None
+    #: Whether the store's owner objects are older than this build's (``OWNER_SCHEMA``): the state
+    #: is then ``unknown`` until a pass creates and fills them.
+    owner_schema_behind: bool = False
 
 
 def is_overlay_source(root: Path, rel: str) -> bool:
@@ -85,9 +94,11 @@ def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revi
 
 
 def record_derived_from_files(tx: Connection, revision: int) -> None:
-    """Migration's rows equal a cold derivation from the files, so they reflect ``revision``."""
+    """Migration's rows equal a cold derivation from the files, so they reflect ``revision``, and its
+    owners' objects are this build's."""
     _set(tx, OVERLAY_REVISION, str(revision))
     _set(tx, REGISTRY_REVISION, str(revision))
+    _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
     tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
 
 
@@ -101,24 +112,39 @@ def read(conn: Connection) -> Registry:
 
     ``unknown`` is a store that records no reflected revision, and one whose record of the last
     overlay change is not a number: neither says which overlay the rows reflect, and a guess of
-    ``current`` would serve the rows of an overlay that may have changed.
+    ``current`` would serve the rows of an overlay that may have changed. A store whose owner
+    objects are older than this build's is ``unknown`` too: some of its rows do not exist yet.
     """
     meta = dict(
         conn.execute(
-            "SELECT key, value FROM store_meta WHERE key IN (?, ?)",
-            (OVERLAY_REVISION, REGISTRY_REVISION),
+            "SELECT key, value FROM store_meta WHERE key IN (?, ?, ?)",
+            (OVERLAY_REVISION, REGISTRY_REVISION, OWNER_SCHEMA),
         )
     )
     reflected = _revision(meta.get(REGISTRY_REVISION))
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
-    if reflected is None or changed is None:
+    behind = _owners_behind(meta.get(OWNER_SCHEMA))
+    if reflected is None or changed is None or behind:
         # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
-        return Registry(mode.UNKNOWN, reflected, None if head is None else head[0])
+        return Registry(mode.UNKNOWN, reflected, None if head is None else head[0], behind)
     if reflected >= changed:
         return Registry(CURRENT, reflected, changed)
     return Registry(REBUILDING, reflected, changed)
+
+
+def owner_schema_behind(conn: Connection) -> bool:
+    """Whether the store's owner objects are older than this build's, so some of the rows that this
+    build reads may not exist yet. The pass creates the objects in its first batch and fills them
+    batch by batch, so only the version that its last batch records says the rows are whole."""
+    row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
+    return _owners_behind(None if row is None else row[0])
+
+
+def _owners_behind(value: str | None) -> bool:
+    owners = _revision(value)
+    return owners is None or owners < OWNER_SCHEMA_VERSION
 
 
 def pending(conn: Connection, root: Path) -> str:
@@ -161,6 +187,8 @@ def settle(root: Path, writer) -> str:
     if due != READY or target is None:
         return due
     with writer.handle.transaction() as tx:
+        if registry.owner_schema_behind:
+            _create_owner_objects(tx, root)
         target, found = _resume(tx, target, registry.state)
         paths = [
             row[0]
@@ -182,10 +210,31 @@ def settle(root: Path, writer) -> str:
             if overlay is not None and _revision(overlay[0]) is None:
                 # Every page reflects the overlay at ``target``, so it replaces the damaged record.
                 _set(tx, OVERLAY_REVISION, str(target))
+            if registry.owner_schema_behind:
+                _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
         _set(tx, PASS, json.dumps({"target": target, "after": paths[-1]}))
         return ADVANCED
+
+
+def _create_owner_objects(tx: Connection, root: Path) -> None:
+    """Create, in the batch's transaction, each owner object that this build has and the store lacks,
+    and record it, so that a rollback drops it with the objects that migration created.
+
+    The owners' DDL creates only what is missing, so every batch of the pass may run it. The pass
+    derives the stored pages; the files that the store does not own get their link rows here, once,
+    from the disk that holds them, as migration derives them.
+    """
+    from .migrate import create_owner_schema
+
+    created = dict(item for group in create_owner_schema(tx) for item in group.items())
+    tx.executemany(
+        "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
+    )
+    if "inbound_links" in created:
+        held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
+        vault.derive_inbound_rows(root, tx, include=lambda rel: rel not in held)
 
 
 def _due(conn: Connection, root: Path) -> tuple[str, Registry]:

@@ -177,7 +177,8 @@ They verify pipeline behavior with a controlled instrument, not learned-model ac
 The historical real-model E2E pass remains reported, with its original receipts unavailable.
 
 `tests/test_relation_sensor_integration.py::test_producer_selection_work_stays_bounded_at_50000_graph_nodes` exercises the real producer against the maintained graph schema.
-It records 66 graph queries at both corpus sizes and approximately 2,900 versus 2,600 SQLite VM steps, sampled every 100 steps.
+The final scoped run records 34 graph queries at both corpus sizes and approximately 1,700 versus 1,500 SQLite VM steps, sampled every 100 steps.
+Its JUnit properties record 85 cursor VM steps and primary-key query plans for cursor and source lookups.
 The high-degree retype check records 98 VM steps with the exact-anchor index and 6,153 without it, returning identical candidates.
 These checks measure deterministic query work, not model quality or end-to-end request latency.
 

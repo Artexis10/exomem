@@ -2655,6 +2655,21 @@ _PRE_ADMISSION_SIGNALS = (
 _Tool = TypeVar("_Tool", bound=Callable[..., Any])
 
 
+def _store_registry_lag(vault_root: Path, restricted: bool) -> dict | None:
+    """The registry notice (``notice`` and ``lag``) that a store-mode reader's result carries, or None.
+
+    A store-mode vault serves its search, graph and link rows while a registry pass re-derives them,
+    and every reader says so in the same words. The revisions count the vault's writes, which a
+    restricted caller is not shown.
+    """
+    from .vault_store import read as store_read
+
+    found = store_read.request_registry_notice(vault_root)
+    if found is not None and restricted:
+        return {"notice": found["notice"]}
+    return found
+
+
 def _reads_one_store_snapshot(operation: _Tool) -> _Tool:
     """Run a recall tool in one store snapshot: its search and its release decisions then read one
     revision, and open one snapshot for the call instead of one per page. A vault that is not in
@@ -3310,15 +3325,10 @@ def op_find(
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
     from .collection_store import preview as store_preview
-    from .vault_store import read as store_read
 
     if store_preview.pages_unavailable(vault_root):
         degraded.append(find_module._STORE_UNAVAILABLE_COMPONENT)
-    # A store-mode vault serves its rows while a registry pass re-derives them, and says so.
-    registry_lag = store_read.request_registry_notice(vault_root)
-    if registry_lag is not None and restricted:
-        # The revisions count the vault's writes, which a restricted caller is not shown.
-        registry_lag = {"notice": registry_lag["notice"]}
+    registry_lag = _store_registry_lag(vault_root, restricted)
     if restricted:
         # These internal status tokens disclose pending writes before RAW admission.
         hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
@@ -3804,6 +3814,7 @@ def op_suggest_links(
     return [s.as_dict() for s in suggestions]
 
 
+@_reads_one_store_snapshot
 def op_graph_context(
     vault_root: Path,
     path: str | None = None,
@@ -3881,7 +3892,11 @@ def op_graph_context(
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
-    return egress_module.guard_graph_context(vault_root, context, purpose=purpose)
+    guarded = egress_module.guard_graph_context(vault_root, context, purpose=purpose)
+    registry_lag = _store_registry_lag(vault_root, egress_module.caller_restricted(vault_root))
+    if registry_lag is not None:
+        guarded.update(registry_lag)
+    return guarded
 
 
 def op_suggest_relations(
@@ -6596,6 +6611,7 @@ def op_recover_from_trash(
     return result.as_dict()
 
 
+@_reads_one_store_snapshot
 def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     """Tier 2: find files whose wikilinks resolve to `target`. Read-only.
 
@@ -6678,6 +6694,9 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         # knowledge, so it is not held.
         if unseen:
             projection_timing_module.floor_restricted_outcome()
+    registry_lag = _store_registry_lag(vault_root, visible is not None)
+    if registry_lag is not None:
+        payload.update(registry_lag)
     return payload
 
 
@@ -6694,9 +6713,18 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
     """
     if not isinstance(target, str) or not target.strip():
         return []
+    from .vault_store import read as store_read
+
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
         for candidate in (clean,) if clean.lower().endswith(".md") else (clean, f"{clean}.md"):
+            # A page that the store serves is decided at its store key, never by its projection.
+            try:
+                key = store_read.served_key(vault_root, candidate)
+            except FileNotFoundError:
+                continue  # the store serves the path and holds no page there
+            if key is not None:
+                return [key]
             try:
                 candidate_abs, confined = resolve_under_vault(vault_root, candidate)
             except VaultPathError:
@@ -6704,13 +6732,20 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
                 # under the vault at all is: not the release plane's
                 # business, and never stat'd or read to get there.
                 continue
-            if candidate_abs.is_file():
+            # Only a Markdown file is a page the target can name: a binary at the
+            # path is a vault item, but not one the release plane judges as a page.
+            if candidate_abs.is_file() and confined.lower().endswith(".md"):
                 return [confined]
         return []
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
     # not a vault item.
     stem = clean[: -len(".md")] if clean.lower().endswith(".md") else clean
+    from .vault import store_pages_named
+
+    named = store_pages_named(vault_root, stem)
+    if named is not None:
+        return named  # the pages that the store's link rows count under the name, files or not
     return [
         str(p.relative_to(Path(vault_root))).replace("\\", "/")
         for p in Path(vault_root).rglob(f"{stem}.md")
@@ -11021,6 +11056,32 @@ def _effect_block(
     }
 
 
+def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
+    """Resolve a review handle without writer admission; commit keeps its fingerprint guard."""
+    item_id = arguments.get("item_id")
+    if item_id is None:
+        return arguments
+    # The command schema fixes these mutually exclusive selector fields.
+    if any(arguments.get(key) is not None for key in ("ref", "expected_fingerprint", "source_path")):
+        raise ValueError(
+            "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
+        )
+    if corpus_aware_module.is_write_advisory_ref(item_id):
+        fingerprint = review_state_module.last_surfaced_fingerprint(
+            vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
+        )
+        if fingerprint is None:
+            from .cli_ops import OpError
+
+            raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
+        bound = {"ref": item_id, "expected_fingerprint": fingerprint}
+    else:
+        bound = review_ids_module.bind(
+            lambda **kw: op_review_memory(vault_root, **kw), item=item_id
+        )
+    return {**arguments, "item_id": None, **bound}
+
+
 def op_triage_memory(
     vault_root: Path,
     ref: str | None = None,
@@ -11048,27 +11109,13 @@ def op_triage_memory(
             `ref`, `expected_fingerprint` and `source_path`. A stale id refuses with the current one.
     """
     if item_id is not None:
-        if ref is not None or expected_fingerprint is not None or source_path is not None:
-            raise ValueError(
-                "INVALID_REVIEW_ACTION: item_id replaces ref, expected_fingerprint and source_path"
-            )
-        if corpus_aware_module.is_write_advisory_ref(item_id):
-            # A write advisory is on no queue: its ref is its handle, and the ledger names the
-            # fingerprint it last surfaced with.
-            ref = item_id
-            expected_fingerprint = review_state_module.last_surfaced_fingerprint(
-                vault_root, corpus_aware_module.parse_write_advisory_ref(item_id)
-            )
-            if expected_fingerprint is None:
-                from .cli_ops import OpError
-
-                raise OpError("ITEM_NOT_FOUND", f"write advisory {item_id} has not surfaced in this vault.")
-        else:
-            bound = review_ids_module.bind(
-                lambda **kw: op_review_memory(vault_root, **kw), item=item_id
-            )
-            ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
-            source_path = bound.get("source_path")
+        # Direct Python callers share the resolver; dispatched calls already carry bound arguments.
+        bound = _bind_triage_arguments(
+            vault_root, item_id=item_id, ref=ref,
+            expected_fingerprint=expected_fingerprint, source_path=source_path,
+        )
+        ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
+        source_path = bound.get("source_path")
     if ref is None:
         raise ValueError("INVALID_REVIEW_ACTION: a triage decision requires `ref` or `item_id`")
     normalized_action = str(action or "").strip().lower()
@@ -11284,6 +11331,30 @@ def _validate_vocabulary_binding(
         )
 
 
+def _bind_connect_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
+    """Bind accept-by-id before admission, including the source page's exact version."""
+    item_id = arguments.get("item_id")
+    if arguments.get("operation") != "accept-relation" or item_id is None:
+        return arguments
+    # The command schema fixes the explicit guards that item_id replaces.
+    if any(arguments.get(key) is not None for key in ("ref", "expected_hash", "expected_fingerprint")):
+        raise ValueError("INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint")
+    bound = review_ids_module.bind(
+        lambda **kw: op_review_memory(vault_root, **kw), item=item_id,
+        modes=review_ids_module.RELATION_QUEUE_MODES,
+    )
+    path = arguments.get("path") or bound.get("source_path")
+    path = page_names_module.resolve_page(vault_root, path, field="path") if path else path
+    try:
+        page = get_page_module.get_page(vault_root, path=path)
+    except get_page_module.GetError as error:
+        raise ValueError(f"{error.code}: {error.reason}") from error
+    return {
+        **arguments, "item_id": None, "ref": bound["ref"], "path": path,
+        "expected_fingerprint": bound["expected_fingerprint"], "expected_hash": page.content_hash,
+    }
+
+
 def op_connect_memory(
     vault_root: Path,
     operation: str = _CONNECT_MEMORY_DEFAULT_OPERATION,
@@ -11460,15 +11531,13 @@ def op_connect_memory(
         return result
     if operation == "accept-relation":
         if item_id is not None:
-            if any(given is not None for given in (ref, expected_hash, expected_fingerprint)):
-                raise ValueError(
-                    "INVALID_MODE: item_id replaces ref, expected_hash and expected_fingerprint"
-                )
-            bound = review_ids_module.bind(
-                lambda **kw: op_review_memory(vault_root, **kw), item=item_id, modes=review_ids_module.RELATION_QUEUE_MODES
+            # Direct Python callers share the resolver; dispatched calls already carry bound guards.
+            bound = _bind_connect_arguments(
+                vault_root, operation=operation, item_id=item_id, path=path, ref=ref,
+                expected_hash=expected_hash, expected_fingerprint=expected_fingerprint,
             )
             ref, expected_fingerprint = bound["ref"], bound["expected_fingerprint"]
-            path = path or bound.get("source_path")
+            path, expected_hash = bound["path"], bound["expected_hash"]
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
 
@@ -11499,7 +11568,6 @@ def op_connect_memory(
             requested_relation=requested_relation,
             bound=vocabulary_ref is not None and vocabulary_fingerprint is not None,
             edit_memory=_accept_relations_edit,
-            bind_page_hash=item_id is not None,
         )
     if operation == "suggest-relations":
         # Relation proposals are owner work (see `op_suggest_relations`);
@@ -15087,7 +15155,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "ref",
         _MCRC,
         ("attention",),
-        {"public_title": "Manage review decisions and attention", "surface": "primary", "actions": ("review", "update"), "first_run_safe": False},
+        {"public_title": "Manage review decisions and attention", "surface": "primary", "actions": ("review", "update"), "first_run_safe": False, "prepare_arguments": _bind_triage_arguments},
     ),
     (
         "connect_memory",
@@ -15098,7 +15166,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("suggest_links", "graph_context", "suggest_relations", "link", "list_inbound_links"),
-        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True, "restricted_refusal_floor": True},
+        {"public_title": "Find or create knowledge connections", "surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True, "restricted_refusal_floor": True, "prepare_arguments": _bind_connect_arguments},
     ),
     (
         "adopt_vault",
@@ -15515,6 +15583,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 executor=meta.get("executor", "cell"),
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
+                prepare_arguments=meta.get("prepare_arguments"),
             )
         )
     return tuple(cmds)

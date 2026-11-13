@@ -210,14 +210,17 @@ def test_participant_validation_is_bounded_by_unique_endpoints(tmp_path: Path, m
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
 
-    original = epistemic_graph._recall_path_allowed
+    from exomem import recall_policy
+
+    original = recall_policy._admitted_relative
     calls: list[str] = []
 
-    def _counting_allowed(root: Path, rel: str) -> bool:
-        calls.append(rel)
-        return original(root, rel)
+    # The per-path decision that a single check and a batch of endpoints both make.
+    def _counting_admission(root, path, *arguments, **keywords):
+        calls.append(Path(path).relative_to(root).as_posix())
+        return original(root, path, *arguments, **keywords)
 
-    monkeypatch.setattr(epistemic_graph, "_recall_path_allowed", _counting_allowed)
+    monkeypatch.setattr(recall_policy, "_admitted_relative", _counting_admission)
 
     assert idx.relation_participants(["supports"]).paths == frozenset(rels)
     assert set(calls) == set(rels)
