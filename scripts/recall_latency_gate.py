@@ -887,11 +887,14 @@ def validate_document(document: dict, schema: str, *, directory: Path = BENCHMAR
                       definition: str | None = None) -> None:
     """Validate stored evidence using the project's maintained JSON Schema engine."""
     from jsonschema import Draft202012Validator, FormatChecker
+    from referencing import Registry, Resource
 
     shape = json.loads((directory / schema).read_text())
+    reference_shape = json.loads((directory / "reference-corpus.schema.json").read_text())
+    registry = Registry().with_resource(reference_shape["$id"], Resource.from_contents(reference_shape))
     if definition is not None:
         shape = {"$defs": shape["$defs"], "$ref": f"#/$defs/{definition}"}
-    validator = Draft202012Validator(shape, format_checker=FormatChecker())
+    validator = Draft202012Validator(shape, format_checker=FormatChecker(), registry=registry)
     validator.validate(document)
     if schema == "summary.schema.json" and definition in (None, "paired_fragment"):
         if any(sample["repeat"] >= PAIRING["repeats"] for sample in document["samples"]):
@@ -1206,16 +1209,30 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
     import hashlib
     import sqlite3
     import string
+    from contextlib import closing
 
     import numpy as np
     from synth_vault import reference_source
 
     from exomem import find_results, lexstore, vault
+    from exomem.vault_store import mode as store_mode
+    from exomem.vault_store import read as store_read
 
-    with sqlite3.connect(lexstore.lexical_path(vault_root)) as conn:
+    borrowed = store_read.lend(vault_root) if store_mode.store_mode_for_reads(vault_root) else None
+    with closing(borrowed if borrowed is not None else sqlite3.connect(lexstore.lexical_path(vault_root))) as conn:
         pages = conn.execute("SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0").fetchone()[0]
         units, unit_pages = conn.execute(
             "SELECT count(*), count(DISTINCT parent_path) FROM semantic_units WHERE in_kb=1"
+        ).fetchone()
+        # Supporting backend pages contribute load, but not generated reference composition.
+        reference_paths = json.dumps(rels)
+        reference_pages = conn.execute(
+            "SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0 "
+            "AND path IN (SELECT value FROM json_each(?))", (reference_paths,),
+        ).fetchone()[0]
+        reference_units, reference_unit_pages = conn.execute(
+            "SELECT count(*), count(DISTINCT parent_path) FROM semantic_units WHERE in_kb=1 "
+            "AND parent_path IN (SELECT value FROM json_each(?))", (reference_paths,),
         ).fetchone()
         for rel in (rels[0], rels[len(rels) // 2], rels[-1]):
             digest = conn.execute("SELECT content_hash FROM pages WHERE path=?", (rel,)).fetchone()
@@ -1252,17 +1269,21 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
             transcript_sizes.append(len(raw))
     vocabulary = len((terms & source_terms) - {""})
     median = statistics.median(sizes)
-    if (pages < REFERENCE["pages_min"]
+    if (len(rels) != profile["pages"] or reference_pages != len(rels)
+        or reference_pages < REFERENCE["pages_min"] or pages < REFERENCE["pages_min"]
         or (index is not None and (chunks < REFERENCE["chunks_min"] or vector_units < units))
-        or units < REFERENCE["units_min"] or unit_pages < pages * profile["unit_page_fraction"]
+        or units < REFERENCE["units_min"] or reference_units < REFERENCE["units_min"]
+        or reference_unit_pages < len(rels) * profile["unit_page_fraction"]
         or vocabulary < profile["vocabulary_min"]
         or min(links) < profile["links_min"] or max(links) > profile["links_max"]
-        or len(transcript_sizes) < pages * profile["transcript_fraction"]
+        or len(transcript_sizes) < len(rels) * profile["transcript_fraction"]
         or any(not profile["transcript_bytes"][0] <= size <= profile["transcript_bytes"][1]
                for size in transcript_sizes)
         or not profile["median_page_bytes"][0] <= median <= profile["median_page_bytes"][1]):
         raise MeasurementRefused("stored-corpus-below-reference-profile")
     return {"pages": pages, "chunks": chunks, "units": units, "unit_pages": unit_pages,
+            "reference": {"paths": len(rels), "pages": reference_pages,
+                          "units": reference_units, "unit_pages": reference_unit_pages},
             "vector_units": vector_units, "median_page_bytes": median,
             "spot_checks": 3 if index is None else 6,
             "vocabulary_terms": vocabulary, "wikilinks_min": min(links), "wikilinks_max": max(links),
@@ -1270,7 +1291,7 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
             **({"lexical_rows": lexical_rows} if index is None else {})}
 
 
-def _prepare_worker(vault_root: Path, startup: dict) -> dict:
+def _prepare_worker(vault_root: Path, startup: dict, *, prepare_vault: Callable[[Path], None] | None = None) -> dict:
     import hashlib
     import sqlite3
 
@@ -1336,11 +1357,19 @@ def _prepare_worker(vault_root: Path, startup: dict) -> dict:
         if due_state.load(vault_root) is None:
             # A failed best-effort save must not label a cold benchmark fixture warm.
             raise MeasurementRefused("advisory-projection-unavailable")
-        corpus = _stored_corpus(vault_root, index, rels, profile)
         for scope in ("vault", "kb"):
             freshness.seed(vault_root, scope, (
                 (str(vault_root / rel), freshness.stat_signature(vault_root / rel)) for rel in rels
             ))
+        if prepare_vault is not None:
+            # Offline fixture migration must finish before the maintained runtime takes custody.
+            try:
+                if not lexical_only:
+                    embeddings.embed_texts = seeded
+                prepare_vault(vault_root)
+            finally:
+                embeddings.embed_texts = original
+        corpus = _stored_corpus(vault_root, index, rels, profile)
         enter_managed_recall(vault_root, full_startup=True)
         # Normal startup may leave this disposable matrix cold; preparation owns the wait.
         if index is not None:
@@ -1455,7 +1484,7 @@ class _Worker:
     def __init__(self, source: Path, vault: Path, state: Path, cpus: list[int], profile: dict,
                  *, python: Path | str | None = None, runtime_prefix: Path | None = None,
                  runtime_policy: str = "parent-benchmark", calibration: str | None = None,
-                 generate_only: bool = False):
+                 generate_only: bool = False, worker_script: Path | None = None):
         import subprocess
 
         startup = {"profile": profile, "runtime_lock_digest": _runtime_lock_digest(source, phase="worker-startup"),
@@ -1477,7 +1506,7 @@ class _Worker:
             startup["generate_only"] = True
         try:
             self.process = subprocess.Popen(
-                [str(python if python is not None else sys.executable), "-u", str(Path(__file__).resolve()), "--worker-source", str(source),
+                [str(python if python is not None else sys.executable), "-u", str(worker_script or Path(__file__).resolve()), "--worker-source", str(source),
                  "--worker-cpus", json.dumps(cpus), "--worker-vault", str(vault)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 env=environment, text=True,

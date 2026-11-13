@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:exomem:recall-latency:reference-corpus",
+  "description": "Frozen reference path count and its eligible stored page, unit and unit-parent counts.",
+  "type": "object",
+  "additionalProperties": false,
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0}
+  },
+  "properties": {
+    "paths": {"$ref": "#/$defs/count"},
+    "pages": {"$ref": "#/$defs/count"},
+    "units": {"$ref": "#/$defs/count"},
+    "unit_pages": {"$ref": "#/$defs/count"}
+  },
+  "required": ["paths", "pages", "units", "unit_pages"]
+}
