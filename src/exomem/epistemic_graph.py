@@ -19,7 +19,6 @@ import stat
 import threading
 import time
 import weakref
-from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -8981,9 +8980,20 @@ class EpistemicGraphIndex:
         def _path_allowed(rel_path: str) -> bool:
             allowed = allowed_paths.get(rel_path)
             if allowed is None:
-                allowed = _recall_path_allowed(self.vault_root, rel_path) and (
-                    keep is None or keep(rel_path)
-                )
+                from .published_admission import admission_of
+                from .vault_store import read as store_read
+
+                allowed = _recall_path_allowed(self.vault_root, rel_path)
+                if allowed and keep is not None:
+                    offered = admission_of(keep)
+                    allowed = (
+                        offered.decide_many([rel_path])[rel_path][0]
+                        if (
+                            offered is not None
+                            and store_read.request_memo(self.vault_root) is not None
+                        )
+                        else keep(rel_path)
+                    )
                 allowed_paths[rel_path] = allowed
             return allowed
 
@@ -14024,6 +14034,11 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     cleaned = vault_module._strip_wikilink_brackets(raw_target)
     cleaned = cleaned.split("|", 1)[0].split("#", 1)[0].strip()
     cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    return _link_candidates_for_key(resolver, cleaned)
+
+
+def _link_candidates_for_key(resolver: vault_module.WikilinkResolver, cleaned: str) -> set[str]:
+    """Read a normalized resolver key without consuming its extension or link syntax again."""
     if not cleaned:
         return set()
     found = {
@@ -14037,21 +14052,6 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     return {f"{candidate}.md" for candidate in found}
 
 
-@dataclass(frozen=True)
-class _WithheldNames:
-    """Stable store-page verdicts and the names their withheld pages can resolve through."""
-
-    verdicts: Mapping[str, bool]
-    keys: frozenset[str]
-    live: tuple[str, ...]
-
-
-# Bound retained caller views; a revision change naturally retires every verdict it changes.
-_WITHHELD_NAMES: OrderedDict[tuple, _WithheldNames] = OrderedDict()
-_WITHHELD_NAMES_LOCK = threading.Lock()
-_WITHHELD_NAMES_MAX = 8
-
-
 class GraphView:
     """One graph operation's admitted reading of the shared neutral rows.
 
@@ -14061,7 +14061,7 @@ class GraphView:
     the meaning its authoring page selects. For a reader other than the owner
     it also re-resolves exactly the links whose candidate set includes a page
     that reader may not see, as the vault without those pages would resolve
-    them. Only stable admission verdicts share the same store revision and caller identity.
+    them. Store-mode selection reads byte-bound facts through the current caller's admission kernel.
     """
 
     def __init__(
@@ -14095,11 +14095,8 @@ class GraphView:
             batched = store_read.request_memo(self.vault_root) is not None
             with deciding(rel_paths) if batched else nullcontext():
                 admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
-                return {
-                    rel_path: rel_path in admitted_paths
-                    and (self.keep is None or self.keep(rel_path))
-                    for rel_path in rel_paths
-                }
+                kept = self._kept_many(rel_paths)
+                return {path: path in admitted_paths and kept[path] for path in rel_paths}
 
         self.parents = semantic_index.AdmittedParents(
             self._summaries,
@@ -14562,7 +14559,16 @@ class GraphView:
         changed = self._changes.get(raw_target)
         if changed is None:
             candidates = sorted(_link_candidates(self._shared_resolver(), raw_target))
-            if self.check is None:
+            from .vault_store import read as store_read
+
+            if store_read.request_memo(self.vault_root) is not None:
+                verdicts = self._kept_many(candidates)
+                seen_count = sum(verdicts.values())
+                changed = (
+                    seen_count < len(candidates)
+                    if self.reads_placeholders else 0 < seen_count < len(candidates)
+                )
+            elif self.check is None:
                 if self.reads_placeholders:
                     changed = any(not self.keep(candidate) for candidate in candidates)
                 else:
@@ -14757,73 +14763,56 @@ class GraphView:
             self._node_paths[key] = str(row[0]) if row is not None else None
         return self._node_paths[key]
 
-    def _withheld_name_keys(self) -> set[str]:
-        """Reuse only page-local verdicts proved by this store snapshot and admission identity.
-
-        File-mode graph publications can lag the files, so they keep the live path. Unowned
-        pages and decisions that depend on live state are always rechecked, even in store mode.
-        """
+    def _kept_many(self, paths: Iterable[str]) -> dict[str, bool]:
+        """Apply caller admission in bounded batches, with the graph's own deadline between them."""
         from .published_admission import admission_of, deciding
-        from .vault_store import mode as store_mode
         from .vault_store import read as store_read
 
-        resolver = self._shared_resolver()
-        keep = self.keep
-        if keep is None:
-            return set()
-        offered = admission_of(keep)
-        identity = offered.identity() if offered is not None else None
-        if identity is None or not store_mode.store_mode_for_reads(self.vault_root):
-            return _dependency_changed_keys({
-                f"{path}.md" for path in resolver.full_paths if not keep(f"{path}.md")
-            }, resolver)
-        # Read the revision from the connection that holds the graph rows, never a newer snapshot.
-        revision = self.conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()[0]
-        policy = recall_policy.recall_policy_identity(self.vault_root)
-        key = (self.vault_root, revision, policy, identity)
-        with _WITHHELD_NAMES_LOCK:
-            names = _WITHHELD_NAMES.get(key)
-            if names is not None:
-                _WITHHELD_NAMES.move_to_end(key)
-        if names is None:
-            paths = [f"{path}.md" for path in resolver.full_paths]
-            held = store_read.held_lookup(self.vault_root, paths)
-            verdicts, live = {}, []
-            batched = store_read.request_memo(self.vault_root) is not None
-            with deciding(paths) if batched else nullcontext():
-                for path in paths:
+        wanted = list(dict.fromkeys(paths))
+        offered = admission_of(self.keep)
+        batched = store_read.request_memo(self.vault_root) is not None
+        result = {}
+        with deciding(wanted) if batched else nullcontext():
+            if batched and offered is not None:
+                for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
                     self._check()
-                    if held(path):
-                        allowed, local = offered.decide(path, True)
-                        if local:
-                            verdicts[path] = allowed
-                            continue
-                    live.append(path)
-            names = _WithheldNames(
-                verdicts,
-                frozenset(_dependency_changed_keys({
-                    path for path, allowed in verdicts.items() if not allowed
-                }, resolver)),
-                tuple(live),
-            )
-            # Only a request-pinned snapshot proves one revision; a direct call is never kept.
-            if (batched and store_read.current_revision(self.vault_root) == revision
-                    and offered.identity() == identity
-                    and recall_policy.recall_policy_identity(self.vault_root) == key[2]):
-                with _WITHHELD_NAMES_LOCK:
-                    _WITHHELD_NAMES[key] = names
-                    _WITHHELD_NAMES.move_to_end(key)
-                    while len(_WITHHELD_NAMES) > _WITHHELD_NAMES_MAX:
-                        _WITHHELD_NAMES.popitem(last=False)
+                    result.update({path: verdict[0] for path, verdict in offered.decide_many(
+                        wanted[start:start + store_read.KEYS_PER_QUERY]
+                    ).items()})
+            else:
+                for path in wanted:
+                    self._check()
+                    result[path] = self.keep is None or self.keep(path)
+        return result
 
-        def visible(path):
-            known = names.verdicts.get(path)
-            return keep(path) if known is None else known
+    def _withheld_name_keys(self) -> set[str]:
+        """Decide only names that can change this reader's link resolution.
 
-        self.keep = visible
-        return set(names.keys) | _dependency_changed_keys({
-            path for path in names.live if not keep(path)
-        }, resolver)
+        A reader that drops placeholders needs a mixed visible/withheld group; a unique page
+        cannot change a link. File mode and readers of placeholders retain the whole-corpus rule.
+        """
+        from .vault_store import mode as store_mode
+
+        resolver = self._shared_resolver()
+        if self.keep is None:
+            return set()
+        paths = set()
+        if not store_mode.store_mode_for_reads(self.vault_root) or self.reads_placeholders:
+            paths = {f"{path}.md" for path in resolver.full_paths}
+        else:
+            names = resolver.full_paths | resolver.stems.keys() | resolver.titles.keys()
+            for name in names:
+                self._check()
+                candidates = _link_candidates_for_key(resolver, name)
+                if len(candidates) > 1:
+                    paths.update(candidates)
+        verdicts = self._kept_many(paths)
+        withheld = set()
+        for path, allowed in verdicts.items():
+            self._check()
+            if not allowed:
+                withheld.add(path)
+        return _dependency_changed_keys(withheld, resolver)
 
     def changed_sources(self) -> set[str]:
         """Every visible page whose links can resolve differently because of a withheld name."""

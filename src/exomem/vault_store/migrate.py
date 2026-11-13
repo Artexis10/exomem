@@ -32,6 +32,7 @@ from .. import (
 )
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
+from ..governance import page_admission
 from . import availability, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
@@ -112,6 +113,7 @@ def create_owner_schema(
     memory_refs.create_identity_schema(conn)
     refs_done = schema_objects(conn)
     vault.create_inbound_schema(conn)
+    page_admission.create_schema(conn)
     after = schema_objects(conn)
     return (
         {n: t for n, t in middle.items() if n not in before},
@@ -147,6 +149,7 @@ def _derive_links(vault_root: Path, conn: sqlite3.Connection) -> None:
     conn.execute("BEGIN IMMEDIATE")
     try:
         vault.derive_inbound_rows(vault_root, conn)
+        page_admission.derive_files(vault_root, conn)
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")

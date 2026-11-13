@@ -4,9 +4,9 @@ Selectors read frontmatter the pipeline already holds (path globs, projects,
 tags, types, author-declared classes, explicit refs), minus a scope's
 `exclude` selectors. A page is a member of a scope when ANY selector kind
 matches and no exclude selector catches it (design D4). Results are memoized
-per `(policy fingerprint, path, mtime_ns, size)` in a bounded LRU — never an
-index-time table, so a policy change invalidates by fingerprint mismatch
-alone, adding no component to the deletion/upsert fan-out.
+per `(policy fingerprint, path, mtime_ns, size)` in a bounded LRU, rather than a
+membership table. In store mode the commit stores caller-independent selector inputs;
+membership still evaluates the current policy at read time, so a policy edit needs no rebuild.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .policy import Policy, Scope
 from .policy import load as load_policy
 
 _MEMO_MAX = 4096
-#: The frontmatter fields `_evaluate_markdown_scopes` reads, through `ParsedPage`
+#: The frontmatter fields `markdown_subject` reads, through `ParsedPage`
 #: and `find_corpus.all_projects`. A stored summary keeps these for membership.
 FRONTMATTER_INPUTS = ("type", "project", "projects", "tags", "classes", memory_refs.ID_FIELD)  # nosemgrep: ep-word-set -- the closed frontmatter fields this kernel reads
 _MEMO: OrderedDict[tuple[str, str, int, int, bool, str, frozenset[str] | None], frozenset[str]] = OrderedDict()
@@ -233,58 +233,78 @@ def _is_directory(vault_root: Path | None, rel_path: str) -> bool:
     return vault_root is not None and (Path(vault_root) / rel_path).is_dir()
 
 
-def _page_membership(
-    page: ParsedPage, policy: Policy, assigned: frozenset[str] | None,
+@dataclass(frozen=True, slots=True)
+class MarkdownSubject(MetadataSubject):
+    """The normalized selector inputs and validity flags of one Markdown page."""
+
+    frontmatter_valid: bool = True
+    identity_valid: bool = True
+
+
+def markdown_subject(page: ParsedPage) -> MarkdownSubject:
+    """Normalize the page's selector inputs once, for scalar and stored-fact readers alike."""
+    classes = page.frontmatter.get("classes") or []
+    identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+    return MarkdownSubject(
+        path=page.rel_path,
+        refs=(memory_refs.memory_ref(identity),) if identity is not None else (),
+        projects=tuple(sorted(p.lower() for p in find_corpus.all_projects(page.frontmatter))),
+        tags=tuple(page.tags),
+        types=(page.page_type.lower(),) if page.page_type is not None else (),
+        classes=tuple(str(value).lower() for value in classes) if isinstance(classes, list) else (),
+        frontmatter_valid=page.frontmatter_valid,
+        identity_valid=memory_refs.ID_FIELD not in page.frontmatter or identity is not None,
+    )
+
+
+def evaluate_subject(
+    root: Path | None, subject: MarkdownSubject, policy: Policy,
+    assigned: frozenset[str] | None = None,
 ) -> frozenset[str]:
-    """A page's own scopes, its registry assignment, and the residual scope when nothing else applies."""
-    matched = _evaluate_markdown_scopes(page, policy) | (assigned or frozenset())
+    """The page's own scopes, current registry assignment and residual completion."""
+    if policy.empty or not policy.scopes:
+        return frozenset()
+    if assigned is None:
+        assigned = _registry_assignment(root, subject.path, policy)
+    matched = _evaluate_markdown_scopes(subject, policy) | (assigned or frozenset())
     if policy.residual_scope_id is None or matched:
         return matched
     return _complete(
         policy, matched,
-        classified=_classified_by_registry(page.vault_root, page.rel_path, assigned, policy),
+        classified=_classified_by_registry(root, subject.path, assigned, policy),
     )
 
 
-def _evaluate_markdown_scopes(page: ParsedPage, policy: Policy) -> frozenset[str]:
-    if page.frontmatter_valid:
-        classes = page.frontmatter.get("classes") or []
-        identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
-        if memory_refs.ID_FIELD in page.frontmatter and identity is None and any(
+def _page_membership(
+    page: ParsedPage, policy: Policy, assigned: frozenset[str] | None,
+) -> frozenset[str]:
+    return evaluate_subject(page.vault_root, markdown_subject(page), policy, assigned)
+
+
+def _evaluate_markdown_scopes(subject: MarkdownSubject, policy: Policy) -> frozenset[str]:
+    if subject.frontmatter_valid:
+        if not subject.identity_valid and any(
             memory_refs.parse_memory_ref(ref) is not None
             for scope in policy.scopes.values() for ref in (*scope.refs, *scope.exclude_refs)
         ):
             # Only identity selectors require valid identity; legacy IDs must
             # not block unrelated path or metadata membership.
             raise MembershipUnresolved("malformed governed identity leaves membership unresolved")
-        return evaluate_metadata_selectors(
-            MetadataSubject(
-                path=page.rel_path,
-                refs=(memory_refs.memory_ref(identity),) if identity is not None else (),
-                projects=tuple(p.lower() for p in find_corpus.all_projects(page.frontmatter)),
-                tags=tuple(page.tags),
-                types=(page.page_type.lower(),) if page.page_type is not None else (),
-                classes=tuple(str(value).lower() for value in classes) if isinstance(classes, list) else (),
-            ),
-            policy,
-        )
+        return evaluate_metadata_selectors(subject, policy)
 
     matched: set[str] = set()
     for scope_id, scope in policy.scopes.items():
-        if _path_ref_excludes(scope, page.rel_path):
+        if _path_ref_excludes(scope, subject.path):
             continue
-        # Invalid metadata cannot disprove a protected identity; only this
-        # malformed page becomes unavailable until its author repairs it.
         if any(memory_refs.parse_memory_ref(ref) is not None
                for ref in (*scope.refs, *scope.exclude_refs)):
             raise MembershipUnresolved("malformed frontmatter leaves canonical identity unresolved")
-        if _path_ref_matches(scope, page.rel_path):
+        if _path_ref_matches(scope, subject.path):
             matched.add(scope_id)
             continue
         if _needs_frontmatter(scope):
             raise MembershipUnresolved(
-                f"malformed frontmatter leaves scope membership unresolved for "
-                f"{page.rel_path!r}"
+                f"malformed frontmatter leaves scope membership unresolved for {subject.path!r}"
             )
     return frozenset(matched)
 

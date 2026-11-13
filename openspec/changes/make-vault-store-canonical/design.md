@@ -331,6 +331,22 @@ The rehearsal (task 9.13) adds two checks that `--verify` does not run. It compa
 - **Obsidian homonyms.** A bare `[[Name]]` may resolve in Obsidian to a homonym in `_trash` or `_archive`. Writers count every Obsidian-visible file when they choose the short form.
 - **Old builds.** An older build pointed at a `root` vault could create a fresh wrapper folder. The vault-side marker (D8) refuses a build that carries the check; a build from before it ignores the marker, so each host must upgrade before the switch.
 
+### D13. Store page facts; decide admission by scope set
+
+Store mode derives a governance-owned `page_admission` row with each page's bytes. The row holds its path, SHA-256, facts version, simple-page flag and normalized selector subject. It holds no caller verdict or policy membership. The commit reuses its parsed page; moves and deletes replace or remove the row in that transaction.
+
+The normalized subject comes from the membership kernel's own subject function. Scalar and batch membership share selectors, exclusions, registry assignments and residual completion. The batch joins facts to canonical page hashes at the request's snapshot. It decides each distinct scope set through the scalar release kernel and the connector ceiling's scope predicate.
+
+A simple page has no container claim, extracted-text or frame parent, bridge shape or RAW mark. The existing bridge parser checks the parsed frontmatter. It lies outside payload trees and collection placement layers. Missing facts, a mismatched hash or version, unresolved membership, exceptions and unnameable caller views retain the scalar chain. Emitted content retains its scalar release check and disclosure receipt.
+
+Migration derives these rows and verification compares them with a fresh derivation. The owner pass fills older stores; a pass that predates the table restarts its cursor. Complete version-1 inbound rows stay available during a facts-only upgrade. Rollback drops the table through `store_mode_objects`. A facts-version change needs an owner-pass version that rebuilds existing rows.
+
+Restricted graph reads that drop placeholders decide only pages sharing a link name. They retain the resolver's stem, title and path rules. Readers of placeholders retain the full candidate set. File mode keeps scalar admission.
+
+This reuses the collection reader's pattern: normalize a subject, establish its scopes, then apply the existing kernels. Collections do not cover page-specific container, bridge and RAW dependencies. The added maintenance is one derived table, its version and the migration proof. A retained per-caller verdict map would still make restarts, policy edits and grant changes run the scalar chain across the corpus.
+
+The load target remains 20,000 pages, about 100,000 units and 120,000 edges, including a hub with 10,000 links. Restricted first reads after a commit target about one second. Ranking on slim rows and hydrating only emitted hits remain a separate slice.
+
 ## Estimate
 
 **Evidence.**

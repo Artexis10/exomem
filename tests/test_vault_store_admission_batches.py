@@ -23,6 +23,7 @@ from exomem import (
     find_types,
     lexstore,
     preserve,
+    published_admission,
     recall_policy,
     state_paths,
 )
@@ -156,6 +157,18 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                 binding = document_containers.parent_binding_for_path(vault, child)
                 assert binding.path == source.path
                 actual = answers(keep)
+                offered = published_admission.admission_of(keep)
+                assert offered is not None
+                safe_paths = [path for path in paths if ".." not in path and path != child]
+                assert {path: verdict[0] for path, verdict in offered.decide_many(safe_paths).items()} == {
+                    path: actual[path] for path in safe_paths
+                }
+                if isinstance(actual[child], str):
+                    with pytest.raises(AttributeError) as refused:
+                        offered.decide_many([child])
+                    assert str(refused.value) == actual[child]
+                else:
+                    assert offered.decide_many([child])[child][0] == actual[child]
                 # Disable only the new set proof; the existing per-page policy is the oracle.
                 with monkeypatch.context() as patch:
                     patch.setattr(document_containers, "_stored_unclaimed", lambda *args: False)
@@ -227,7 +240,20 @@ def test_direct_store_find_pins_connector_constants_and_rechecks_the_next_reques
         return current(*args, **kwargs)
 
     monkeypatch.setattr(connector_boundary, "_current_snapshot", counted)
+
+    def batch_answers():
+        with read.request_snapshot(vault):
+            keep = egress.edge_view(vault, egress.content_admission(vault, who))
+            expected = {path: keep(path) for path in (PUBLIC, PRIVATE)}
+            offered = published_admission.admission_of(keep)
+            assert offered.identity() is not None
+            actual = offered.decide_many([PUBLIC, PRIVATE])
+            assert {path: answer[0] for path, answer in actual.items()} == expected
+            return expected
+
     with request_scope(who):
+        assert batch_answers() == {PUBLIC: True, PRIVATE: False}
+        snapshots.clear()
         find.clear_cache()
         hits = find.find(vault, query="", mode="keyword", graph=False, limit=50)
         assert PUBLIC in {hit.path for hit in hits} and PRIVATE not in {hit.path for hit in hits}
@@ -235,6 +261,7 @@ def test_direct_store_find_pins_connector_constants_and_rechecks_the_next_reques
         data = json.loads(config.read_text())
         data["clients"][0].update(denied_scope_ids=[], writable_scope_ids=[])
         config.write_text(json.dumps(data))
+        assert batch_answers() == {PUBLIC: True, PRIVATE: True}
         snapshots.clear()
         find.clear_cache()
         assert PRIVATE in {hit.path for hit in find.find(vault, query="", mode="keyword", graph=False, limit=50)}

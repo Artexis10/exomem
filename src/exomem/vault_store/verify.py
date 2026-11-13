@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import epistemic_graph, lexstore, memory_refs, vault
+from ..governance import page_admission
 from . import projection
 
 #: How many differing keys a refusal names per table.
@@ -43,10 +44,12 @@ def derive_expected(vault_root: Path, path: Path) -> None:
         epistemic_graph.create_row_schema(conn, publication=False)
         memory_refs.create_identity_schema(conn)
         vault.create_inbound_schema(conn)
+        page_admission.create_schema(conn)
         lexstore.derive_catalogue_rows(vault_root, conn)
         epistemic_graph.derive_row_tables(vault_root, conn)
         memory_refs.derive_identities(vault_root, conn)
         vault.derive_inbound_rows(vault_root, conn)
+        page_admission.derive_files(vault_root, conn)
         conn.execute("COMMIT")
     finally:
         conn.close()

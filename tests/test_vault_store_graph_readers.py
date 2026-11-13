@@ -397,17 +397,25 @@ GENERATED = int(os.environ.get("EXOMEM_READERS_DRILL_PAGES", "40"))
 
 def linked_page(index):
     """A generated note that links to the claim and to its neighbour, as a vault's notes link."""
+    units = "".join(
+        f"- [constraint] The keeper logs observation {unit} of lantern {index}. ^observation-{unit}\n"
+        for unit in range(int(os.environ.get("EXOMEM_ADMISSION_DRILL_UNITS", "0")))
+    )
     return (
         f"Knowledge Base/Notes/Gen/Page-{index:04d}.md",
         (
-            f"---\ntitle: Page {index}\ntype: note\n"
-            "created: 2026-01-01\nupdated: 2026-06-01\nproject: harbour\n"
-            "tags: [navigation, fieldwork]\naliases: []\nstatus: active\n"
+            f"---\nexomem_id: 00000000-0000-4000-8000-{index:012d}\n"
+            f"title: Page {index}\ntype: note\n"
+            f"created: 2026-01-{index % 28 + 1:02d}\n"
+            f"updated: 2026-06-{index % 28 + 1:02d}\nproject: harbour\n"
+            f"tags: [navigation, fieldwork, cohort-{index % 10}]\n"
+            "aliases: []\nstatus: active\n"
             "summary: Observations from the lighthouse survey\n"
             "sources: []\nrelated: []\n---\n"
             f"# Page {index}\n\n"
             f"The lantern number {index} burns at the lighthouse, as [[Lantern Claim]] says; "
             f"see [[Page-{(index + 1) % max(GENERATED, 1):04d}]].\n"
+            + (f"\n## Observations\n{units}" if units else "")
         ).encode(),
     )
 
@@ -514,7 +522,7 @@ def test_each_graph_and_link_statement_finds_its_rows_through_an_index(
         patch.setattr(connection, "store_reader", tracing)
         graph_and_link_reads(stored)
 
-    owned = ("graph_", "inbound_")
+    owned = ("graph_", "inbound_", "page_admission")
     selects = sorted({
         sql for sql in statements
         if sql.lstrip().upper().startswith(("SELECT", "WITH")) and any(t in sql for t in owned)
@@ -931,3 +939,144 @@ def test_a_repeated_restricted_hub_does_not_recheck_unchanged_pages(
         assert participants().paths
         # Every endpoint still passes recall admission; its stable release verdict needs no new read.
         assert not any("/Gen/" in path for path in checked)
+
+
+def admission_sample(root, caller, operation):
+    """One graph-reader sample, including the scalar work hidden by an elapsed time."""
+    import time
+
+    import yaml
+
+    from exomem import find_corpus
+    from exomem.governance.principal import library_scope
+
+    counters = {"scalar_decisions": 0, "page_parses": 0, "yaml_decodes": 0,
+                "ordinary_scalar_decisions": 0, "ordinary_page_parses": 0}
+
+    def counted(name, real):
+        def call(*args, **kwargs):
+            counters[name] += 1
+            if name != "yaml_decodes":
+                path = str(args[1] if name == "scalar_decisions" else args[0])
+                if path.startswith(str(root) + "/"):
+                    path = path[len(str(root)) + 1:]
+                if path.startswith("Knowledge Base/Notes/"):
+                    counters["ordinary_" + name] += 1
+            return real(*args, **kwargs)
+        return call
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(egress, "_decide_path", counted("scalar_decisions", egress._decide_path))
+        patch.setattr(find_corpus, "_parse_page_after_checkpoint",
+                      counted("page_parses", find_corpus._parse_page_after_checkpoint))
+        # Both safe_load and the vault's libyaml loader call this decoder entry.
+        patch.setattr(yaml, "load", counted("yaml_decodes", yaml.load))
+        with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
+            started = time.perf_counter()
+            if operation == "participants":
+                with read.request_snapshot(root):
+                    answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
+                        [], anchor=CLAIM, keep=egress.edge_view(root, find.caller_admission(root)),
+                        resolver=lambda: find.recall_resolver_snapshot(root),
+                    )
+                size = len(answer.paths)
+            else:
+                size = len(GRAPH_CALLS["find relation_of"](root))
+            elapsed = (time.perf_counter() - started) * 1000
+    return {"ms": elapsed, "result_count": size, **counters, "load": os.getloadavg()}
+
+
+@pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
+@pytest.mark.timeout(1800)
+def test_restricted_admission_drill(stored, writer):  # noqa: F811
+    """Measure a realistic hub before and after commits and owner-pass revision bumps."""
+    import subprocess
+
+    from exomem.governance import membership
+
+    links = int(os.environ.get("EXOMEM_ADMISSION_DRILL_LINKS", str(GENERATED)))
+    for rel in (CLAIM, EVIDENCE, RIVAL):
+        write.commit(writer, put(rel, PAGES[rel].encode()))
+    for start in range(0, GENERATED, 200):
+        puts = []
+        for index in range(start, min(GENERATED, start + 200)):
+            rel, body = linked_page(index)
+            if index >= links:
+                body = body.replace(b"[[Lantern Claim]]", b"the keeper")
+            puts.append(write.PagePut(rel, body))
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "drill", puts=tuple(puts)))
+    restrict_external(stored, 'tags: ["cohort-0"]')
+    report = {"pages": GENERATED, "hub_links": links,
+              "units_per_page": int(os.environ.get("EXOMEM_ADMISSION_DRILL_UNITS", "0")), "samples": {}}
+    report_path = Path(os.environ["EXOMEM_ADMISSION_DRILL_REPORT"])
+    repeats = int(os.environ.get("EXOMEM_ADMISSION_DRILL_REPEATS", "3"))
+    callers = os.environ.get("EXOMEM_ADMISSION_DRILL_CALLERS", "owner,few withheld,most withheld,homonym").split(",")
+    operations = os.environ.get("EXOMEM_ADMISSION_DRILL_OPERATIONS", "participants,find").split(",")
+    states = os.environ.get("EXOMEM_ADMISSION_DRILL_STATES", "cold process,first after commit,registry pass,warm").split(",")
+    for caller in callers:
+        scope = stored / "Knowledge Base/_Governance/scopes/secret.yaml"
+        selector = '["cohort-0"]' if caller != "most withheld" else (
+            '[' + ', '.join(f'"cohort-{i}"' for i in range(9)) + ']'
+        )
+        scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
+        if caller == "homonym":
+            write.commit(writer, put("Knowledge Base/Notes/Hidden/Page-0001.md", (
+                b"---\ntitle: Page 1\ntype: note\ntags: [cohort-0]\n---\n# Hidden twin\n"
+            )))
+        for operation in operations:
+            for state in states:
+                samples = []
+                for repeat in range(repeats):
+                    if state == "cold process":
+                        result = subprocess.run([
+                            sys.executable, "-c",
+                            "import json,sys; from pathlib import Path; "
+                            "from test_vault_store_graph_readers import admission_sample; "
+                            "print(json.dumps(admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3])))",
+                            str(stored), caller, operation,
+                        ], check=True, capture_output=True, text=True, timeout=180)
+                        samples.append(json.loads(result.stdout.splitlines()[-1]))
+                        continue
+                    if state == "first after commit":
+                        write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\n{repeat}\n".encode()))
+                    elif state == "registry pass":
+                        if repeat == 0:
+                            with writer.handle.transaction() as tx:
+                                rederive._set(tx, rederive.OVERLAY_REVISION, str(read.current_revision(stored)))
+                        rederive.settle(stored, writer)
+                    else:
+                        admission_sample(stored, caller, operation)
+                    membership.clear_memo()
+                    samples.append(admission_sample(stored, caller, operation))
+                report["samples"][f"{caller}/{operation}/{state}"] = samples
+                report_path.write_text(json.dumps(report, indent=2))
+    with read.snapshot(stored) as snapshot:
+        report["rows"] = {table: snapshot.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                          for table in ("store_pages", "graph_nodes", "graph_edges")}
+        if snapshot.connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'page_admission'").fetchone():
+            import time
+
+            from exomem.governance import page_admission, policy
+
+            facts = snapshot.connection.execute("SELECT path, simple, subject FROM page_admission").fetchall()
+            subjects = [page_admission._subject(raw, path) for path, simple, raw in facts if simple]
+            compiled = policy.load(stored)
+            started = time.perf_counter()
+            sets = {membership.evaluate_metadata_selectors(subject, compiled) for subject in subjects}
+            report["census"] = {
+                "facts": len(facts), "simple": len(subjects), "exceptions": len(facts) - len(subjects),
+                "distinct_selector_sets": len(sets),
+                "selector_us_per_page": (time.perf_counter() - started) * 1e6 / len(subjects),
+            }
+    if profile_path := os.environ.get("EXOMEM_ADMISSION_DRILL_PROFILE"):
+        import cProfile
+        import pstats
+
+        write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + b"\nProfile revision.\n"))
+        find.clear_cache()
+        with cProfile.Profile() as profiler:
+            report["profile_sample"] = admission_sample(stored, "few withheld", "find")
+        profiler.dump_stats(profile_path + ".pstats")
+        with Path(profile_path).open("w") as output:
+            pstats.Stats(profiler, stream=output).sort_stats("cumulative").print_stats(65)
+    report_path.write_text(json.dumps(report, indent=2))
