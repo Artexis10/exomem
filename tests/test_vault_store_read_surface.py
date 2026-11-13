@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import datetime as dt
 import json
 import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from test_episode_memory_command import KEY as EPISODE
@@ -36,6 +39,7 @@ from exomem import (
     freshness,
     lexstore,
     schema,
+    semantic_writes,
     temporal,
     working_set_runtime,
 )
@@ -43,7 +47,7 @@ from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.governance import egress, operations
 from exomem.governance.principal import request_scope
-from exomem.vault_store import ownership
+from exomem.vault_store import mode, ownership, read
 from exomem.writer_lease import invoke_command
 
 pytestmark = [
@@ -144,10 +148,6 @@ OWNER_REFUSALS = {
 # These are the remaining observed command cases after the shared read fixes, not a blanket xfail.
 # A new command is unmarked; an invalid sample raises an ordinary assertion, not this failure.
 KNOWN_FAILURES = {
-    "coordination_status": "Status still probes graph-sidecar ownership",
-    "edit_memory": "Validation mints a fresh transition token and hashes even in unchanged file mode",
-    "observe_memory": "Validation mints a fresh transition token and hashes even in unchanged file mode",
-    "replace_memory": "Replacement validation's navigation plan still scans projected indexes",
     "viewer_map": "Payloads match; store revision identity intentionally differs from file generation metadata",
 }
 
@@ -195,6 +195,22 @@ def clear_reader_caches(root):
     find.evict_resolver_caches(root)
     vaults.clear_inbound_index()
     working_set_runtime.reset_caches_for_tests()
+
+
+@pytest.fixture
+def validation_clock(monkeypatch):
+    """Compare identical prospective writes, including their history and transition identity."""
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            instant = cls(2026, 1, 1, tzinfo=UTC)
+            return instant.replace(tzinfo=None) if tz is None else instant.astimezone(tz)
+
+    monkeypatch.setattr(temporal, "now", lambda: Clock.now(UTC))
+    monkeypatch.setattr(semantic_writes, "dt", SimpleNamespace(**{**vars(dt), "datetime": Clock}))
+    monkeypatch.setattr(semantic_writes, "uuid", SimpleNamespace(
+        **{**vars(semantic_writes.uuid), "uuid4": lambda: UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")}
+    ))
 
 
 def answer(command, root, arguments, source_schema, *, store=False):
@@ -247,7 +263,7 @@ def comparable(value):
     ))
     for name in sorted(READ_COMMANDS)
 ])
-def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property, name):  # noqa: F811
+def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property, request, name):  # noqa: F811
     """Lost content, changed refusals, projection I/O, sidecars, extra snapshots and repairs."""
     assert name in SAMPLES, f"registered reader {name} has no sample"
     selector = (
@@ -255,9 +271,8 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         if name in PATH_POLICY_SAMPLES else 'tags: ["secret"]'
     )
     restrict_external(vault, selector)
-    if SAMPLES[name].get("validate_only"):
-        # Validation renders authored timestamps; a fixed clock compares the same prospective bytes.
-        monkeypatch.setattr(temporal, "now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
+    if SAMPLES[name].get("validate_only") or name == "observe_memory":
+        request.getfixturevalue("validation_clock")
     write_pages(vault)
     write_pages(vault, UNIT_PAGES)
     write_pages(vault, {
@@ -304,6 +319,22 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         if item.ownership is ownership.Ownership.PAGE
     }
     assert migrate_apply(vault) == 0
+    if name == "coordination_status":
+        # Migration takes a lease and changes contention counters. Observe the same operational
+        # state through file mode before comparing backend-specific diagnostics.
+        with monkeypatch.context() as file_mode:
+            file_mode.setattr(mode, "store_mode_for_reads", lambda _root: False)
+            for caller, scope in callers.items():
+                with scope():
+                    before[caller] = comparable(answer(command, vault, arguments, source_schema))
+    expected = copy.deepcopy(before)
+    if name == "coordination_status":
+        # Sidecar synchronization does not exist in store mode; assert the canonical revision instead.
+        with read.snapshot(vault) as snapshot:
+            revision = snapshot.revision
+        for value in expected.values():
+            value["graph_sync"] = {"state": "not_applicable", "generation": None}
+            value["vault_store"] = {"state": "available", "revision": revision}
     for sidecar in (epistemic_graph.sidecar_path(vault), lexstore.lexical_path(vault)):
         sidecar.unlink(missing_ok=True)
         sidecar.write_bytes(SENTINEL)
@@ -322,7 +353,7 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
             with scope(), record_store_reads(vault, monkeypatch, page_paths=owned) as events:
                 actual = comparable(answer(command, vault, arguments, source_schema, store=True))
             violations = []
-            if actual != before[caller]:
+            if actual != expected[caller]:
                 violations.append("answer differs")
             if events["page_io"]:
                 violations.append("page filesystem read")
@@ -334,7 +365,8 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
                 violations.append("file-mode machinery")
             observations.append({
                 "caller": caller, "damage": damage, "violations": violations,
-                "events": events, "file_answer": before[caller], "store_answer": actual,
+                "events": events, "file_answer": before[caller], "expected_answer": expected[caller],
+                "store_answer": actual,
             })
     record_property("read_surface", json.dumps(observations, default=str))
     failures = [row for row in observations if row["violations"]]

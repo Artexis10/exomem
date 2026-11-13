@@ -10063,12 +10063,13 @@ def plan_log_entries(
     """
     log_file = kb_root(vault_root) / "log.md"
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     if not required and not connector_boundary.effect_admission(vault_root)(log_file):
         # A restricted writer's entry is skipped like every effect outside its ceiling, so the
         # plan neither reads the log nor reports a rotation that would not happen.
         return LogWritePlan(())
-    if not log_file.is_file():
+    if not store_read.holds_file(vault_root, relative_posix(log_file, vault_root)):
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
     updated = current

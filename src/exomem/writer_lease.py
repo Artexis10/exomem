@@ -7645,11 +7645,20 @@ class LeaseManager:
     def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
         diagnostics: dict[str, Any] = {"idempotency": self.idempotency.status_summary()}
         if vault_or_cell is not None:
+            store_mode = False
             try:
                 from . import epistemic_graph, graph_sync
+                from .vault_store import mode, read
 
                 vault_root = Path(vault_or_cell)
-                graph_status = graph_sync.status(vault_root)
+                store_mode = mode.store_mode_for_reads(vault_root)
+                if store_mode:
+                    # Store commits derive graph rows atomically; sidecar sync has no generation here.
+                    graph_status = {"state": "not_applicable", "generation": None}
+                    with read.snapshot(vault_root) as view:
+                        diagnostics["vault_store"] = {"state": "available", "revision": view.revision}
+                else:
+                    graph_status = graph_sync.status(vault_root)
                 if graph_status["state"] == "current":
                     # A status probe reports; it never pays the O(corpus)
                     # source-bytes proof. It reads the remembered verdict, or
@@ -7665,7 +7674,11 @@ class LeaseManager:
                         }
                 diagnostics["graph_sync"] = graph_status
             except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
-                diagnostics["graph_sync"] = {"state": "unavailable", "generation": 0}
+                if store_mode:
+                    diagnostics["graph_sync"] = {"state": "not_applicable", "generation": None}
+                    diagnostics["vault_store"] = {"state": "unavailable", "revision": None}
+                else:
+                    diagnostics["graph_sync"] = {"state": "unavailable", "generation": 0}
         if self._collection_store is not None:
             try:
                 diagnostics["collection_store"] = self._collection_store.status()
