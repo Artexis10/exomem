@@ -12,10 +12,10 @@ def _digest(*parts: str) -> str:
     return hashlib.sha256(":".join(parts).encode("utf-8")).hexdigest()
 
 
-def stable_id(prefix: str, *parts: str) -> str:
-    """Deterministic id such as ``SRC-T01-1A2B3C4D`` from stable parts."""
+def stable_id(prefix: str, *parts: str, digest_chars: int = 8) -> str:
+    """A deterministic id. The default keeps existing ids; ``digest_chars=64`` uses full SHA-256."""
 
-    return f"{prefix}-{_digest(prefix, *parts)[:8].upper()}"
+    return f"{prefix}-{_digest(prefix, *parts)[:digest_chars].upper()}"
 
 
 def child_seed(master_seed: int, template_id: str, variant: int) -> int:

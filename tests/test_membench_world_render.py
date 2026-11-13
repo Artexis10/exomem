@@ -321,3 +321,118 @@ def test_the_loader_refuses_a_form_that_serves_nothing_a_repeated_text_and_an_un
         ("duplicate-pattern", "form decision-stated-1"),
         ("undeclared-value", "form result-stated-1"),
     }
+
+
+def test_relation_snapshots_preserve_original_text_and_never_repeat_endpoint_content() -> None:
+    """Relation evidence must not restate an implicit statement at the stated level."""
+    from membench.ids import sentinel, sentinels_in, stable_id
+
+    from exomem.markdown_relations import parse_markdown_relations
+    from exomem.semantic_units import parse_semantic_units
+
+    rendering = render(PLAN, CATALOGUE, BANK, "unmarked")
+    world = PLAN.world()
+    for artefact in world.artefacts.values():
+        document = rendering.documents[artefact.id]
+        assert not sentinels_in(document.text.splitlines()[0])
+        for line in document.lines:
+            if line.ref in world.statements:
+                token = sentinel(stable_id("SRC", line.ref, digest_chars=64))
+                assert f"{line.text} {token}" in document.text.splitlines()
+        units = parse_semantic_units(document.text, path="source.txt")
+        relations = parse_markdown_relations(document.text)
+        assert not units.units and not units.errors
+        assert not relations.relations and not relations.errors
+        for ref in artefact.relations:
+            assert artefact.by is None and document.level == STATED
+            if isinstance(ref, core.EdgeRef):
+                assert artefact.at == max(world.statements[s].at for s in (ref.source, ref.target))
+                assert document.lines[0].text == next(
+                    f.text for f in BANK.forms if f.id == document.forms[0]
+                ).format(
+                    source=sentinel(stable_id("SRC", ref.source, digest_chars=64)),
+                    target=sentinel(stable_id("SRC", ref.target, digest_chars=64)),
+                )
+                for endpoint in (ref.source, ref.target):
+                    original = rendering.documents[f"{endpoint}.doc"]
+                    assert original.lines[0].text not in document.text
+            else:
+                assert artefact.at == week_date(1)
+                assert PLAN.backbone.context_names[ref.child] in document.lines[0].text
+                assert (
+                    PLAN.backbone.context_names[world.contexts[ref.child].parent]
+                    in document.lines[0].text
+                )
+
+
+def test_a_removed_relation_sentence_fails_source_coverage_even_when_references_remain(
+    monkeypatch: Any,
+) -> None:
+    """Opaque refs alone do not convey support, defeat or context containment."""
+    from benchmarks.membench.world.render import _Renderer
+
+    original = _Renderer.document
+
+    def omit(self: Any, artefact: Any, level: str) -> Any:
+        document, items = original(self, artefact, level)
+        if artefact.relations:
+            anchors = " ".join(a for item in items for a in item.anchors)
+            document = dataclasses.replace(
+                document, text=document.text.splitlines()[0] + "\n" + anchors + "\n"
+            )
+        return document, items
+
+    monkeypatch.setattr(_Renderer, "document", omit)
+    assert "source-coverage" in refused_codes(BANK, level=STATED)
+
+
+def test_edge_endpoints_in_one_original_have_distinct_citations_on_their_actual_statement_lines(
+    monkeypatch: Any,
+) -> None:
+    """A shared document must preserve the direction of a link between its two statement records."""
+    from membench.ids import sentinels_in
+
+    from benchmarks.membench.world.manifest import artefact_hashes
+    from benchmarks.membench.world.mechanisms import Oracle
+    from benchmarks.membench.world.proof import Prover, artefacts
+    from benchmarks.membench.world.validator import validate
+
+    plan = dataclasses.replace(PLAN, threads=(), facts=())
+    world = core.World(plan.name, VOCABULARY)
+    plan.backbone.declare(world)
+    about = next(iter(plan.backbone.attributes))
+    first, second = plan.backbone.values(plan.backbone.attributes[about].schema.domain)[:2]
+    holders = plan.backbone.holders()
+    at = week_date(1)
+    world.op_state("source-record", by=holders[0], about=about, value=first, kind="fact", at=at)
+    world.op_state("target-record", by=holders[1], about=about, value=second, kind="fact", at=at)
+    world.op_support(None, **{"from": "source-record", "to": "target-record"})
+    shared = world.add_artefact(
+        "shared-original",
+        at,
+        carries=("source-record", "target-record"),
+        kind="note",
+        by=holders[0],
+    )
+    ref = core.EdgeRef("source-record", "target-record", None)
+    link = world.add_artefact("link-snapshot", at, kind="register", relations=(ref,))
+    assert world.resolve_artefact(ref.source) == world.resolve_artefact(ref.target) == shared
+    assert validate(world) == []
+    assert {a["id"] for a in artefact_hashes(world)} == {shared.id, link.id}
+    monkeypatch.setattr(plan, "world", lambda: world)
+    rendering = render(plan, CATALOGUE, BANK, STATED)
+    original = rendering.documents[shared.id]
+    relation = rendering.documents[link.id]
+    lines = {line.ref: line for line in original.lines}
+    assert len(sentinels_in(relation.lines[0].text)) == 2
+    source, target = core.source_ref(ref.source), core.source_ref(ref.target)
+    assert source != target
+    for endpoint, token in ((ref.source, source), (ref.target, target)):
+        assert f"{lines[endpoint].text} {token}" in original.text.splitlines()
+        assert token not in lines[endpoint].text
+    assert not sentinels_in(original.text.splitlines()[0])
+    form = next(f for f in BANK.forms if f.id == relation.forms[0])
+    assert relation.lines[0].text == form.text.format(source=source, target=target)
+    assert ref.source not in relation.text and ref.target not in relation.text
+    selected = Prover(Oracle(world)).expand((ref.target,), at=at)
+    assert set(artefacts(world, selected, at=at)) == {shared.id, link.id}

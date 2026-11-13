@@ -31,8 +31,8 @@
 ## 5. Slice 1: first round
 
 - [ ] 5.1 After the owner answers open question 4, state the cost and the question. Then play the hand-written f38 development project and one generated project in one window, with the arms `N`, `G`, `H`, `F` and `P`.
-- [ ] 5.2 Read the gates on the generated project: `H` solves at least 90% of the probes, and `N` fails at least 80% of the position probes. Repair or drop each recipe and surface form that they flag, and record the repair rate.
-- [ ] 5.3 Check each repair on the probes that exposed it. Then judge the next round on a fresh development world.
+- [ ] 5.2 Read the gates on the generated project: `H` solves at least 90% of the probes, and `N` fails at least 80% of the position probes. Repair or drop each recipe and surface form that they flag, and record the repair rate. Source-observability repair adds typed canonical relation references, dated unsigned snapshots, opaque endpoint citations and generic evidence closure. Model-free checks must preserve semantic keys and rubrics while evidence references expand. Successor amendment 1 also replaces both premise surface forms, adds one data-owned simulated-date frame and clarifies listed-trap reliance in the shared registry. The successor round retires both forms of `scope.one-client` through its entry list; the catalogue stays unchanged and `scope.exception` retains coverage. Record the source reasons and the repair or removal rate before fresh outputs. Actor gate acceptance remains open.
+- [ ] 5.3 Check each repair on the probes that exposed it. Then judge the next round on a fresh development world. Before that round, prove source-to-render-to-session-to-G/H coverage with zero drops. Check sentence removal with anchors intact, reversed endpoint dates, requested sibling contexts and absent future references. Retain prior generated worlds unchanged; do not infer actor acceptance from model-free checks.
 - [ ] 5.4 Record the pooled comparison of the two projects as description, with its counts.
 
 ## 6. Slice 2: implied change, the model-free layer and seeds
