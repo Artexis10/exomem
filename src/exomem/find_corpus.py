@@ -364,7 +364,7 @@ def stored_relative(path: Path, vault_root: Path) -> str | None:
     microseconds a call (a stat of the manifest and the placement lookup), and the path rule then
     runs only in store mode.
     """
-    from .vault_store import ownership
+    from .vault_store import read
 
     if not store_serves(vault_root):
         return None
@@ -372,7 +372,7 @@ def stored_relative(path: Path, vault_root: Path) -> str | None:
         rel = path.absolute().relative_to(vault_root.absolute()).as_posix()
     except ValueError:
         return None
-    return rel if ownership.classify(rel) is ownership.Ownership.PAGE else None
+    return rel if read.owned_as_page(vault_root, rel) else None
 
 
 CACHE = FrontmatterCache()

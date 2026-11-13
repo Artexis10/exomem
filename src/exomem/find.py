@@ -8478,21 +8478,24 @@ def recall_resolver_snapshot(
             # graph rebuild performs its stronger direct before/after proof
             # around sidecar publication.
             if _RECALL_RESOLVER_GENERATIONS.get(root) == generation:
-                _RECALL_RESOLVER_CACHE[root] = (identity, resolver, object())
+                resolver.publication = object()
+                _RECALL_RESOLVER_CACHE[root] = (identity, resolver, resolver.publication)
                 if checkpoint is not None:
                     _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
                 else:
                     _RECALL_RESOLVER_CHECKPOINTS.pop(root, None)
+            # A publisher patches the published maps in place under this lock, so the copy is taken here.
+            with call_spans.span(
+                "resolver.fork", {"build_returns": 1, "paths": len(resolver.full_paths)}
+            ):
+                forked = resolver.fork()
     finally:
         if leader:
             with _RECALL_REBUILD_LOCK:
                 done = _RECALL_RESOLVER_BUILDS.pop(root, None)
             if done is not None:
                 done.set()
-    with call_spans.span(
-        "resolver.fork", {"build_returns": 1, "paths": len(resolver.full_paths)}
-    ):
-        return resolver.fork()
+    return forked
 
 
 def recall_resolver_snapshot_at_checkpoint(
@@ -8909,10 +8912,11 @@ def on_resolver_files_changed(
             ):
                 return
             projected.on_entries_changed(entries, projected_deleted_rels)
+            projected.publication = object()
             _RECALL_RESOLVER_CACHE[root] = (
                 _recall_checkpoint_identity(delta.to),
                 projected,
-                object(),
+                projected.publication,
             )
             _RECALL_RESOLVER_CHECKPOINTS[root] = delta.to
     except Exception:  # noqa: BLE001 - a partial resolver must never publish.

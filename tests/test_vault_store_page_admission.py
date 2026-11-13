@@ -245,6 +245,52 @@ def test_a_request_never_uses_facts_from_a_newer_commit(stored, writer):  # noqa
             assert not published_admission.admission_of(keep).decide_many([CLAIM])[CLAIM][0]
 
 
+def test_an_armed_binding_prepares_its_storage_once_per_store_request(stored, monkeypatch):  # noqa: F811
+    """Defect: each page that a restricted request admits builds every binding's overlay and history
+    paths again, about a millisecond a page with the shipped registries, so an armed vault's hub read
+    grows by seconds. The answers must not depend on whether a store request prepared them."""
+    from types import SimpleNamespace
+
+    from exomem import registry_history
+    from exomem.governance import connector_boundary
+    from exomem.vocabulary import instances, registry_specs
+    from exomem.vocabulary.registry import RegistryError
+
+    private = {"namespace": "Knowledge Base/_Schema/private", "history": "private"}
+    requirement = {"version": 2, "vocabulary": {
+        "public": {"namespace": "Knowledge Base/_Schema/public", "history": "public", "overrides": {}},
+        "private": {"scope-a": private},
+    }}
+    monkeypatch.setattr(connector_boundary, "read_requirement", lambda root: requirement)
+    spec = next(iter(registry_specs().values()))
+    overlay = instances.storage(spec, private)[0]
+    expected = {
+        private["namespace"]: frozenset({"scope-a"}),
+        overlay: frozenset({"scope-a"}),
+        overlay.upper(): frozenset({"scope-a"}),
+        f"{overlay}/inside.md": None,
+        f"Knowledge Base/_Schema/history/private/{spec.stem}/kept.md": frozenset({"scope-a"}),
+        f"Knowledge Base/_Schema/history/public/{spec.stem}/kept.md": frozenset(),
+        "Knowledge Base/Notes/Gen/Page-0001.md": None,
+    }
+    compiled = SimpleNamespace(scopes={"scope-a": object()})
+    assert {path: instances.bound_scopes(stored, path, compiled) for path in expected} == expected
+    with pytest.raises(RegistryError):
+        instances.bound_scopes(stored, "Knowledge Base/Notes/Gen/Page-0001.md", SimpleNamespace(scopes={}))
+
+    real, calls = registry_history.history_dir, []
+    monkeypatch.setattr(registry_history, "history_dir", lambda *args: calls.append(args) or real(*args))
+    counts = []
+    for size in (10, 100):
+        calls.clear()
+        with read.request_snapshot(stored):
+            assert {path: instances.bound_scopes(stored, path, compiled) for path in expected} == expected
+            for index in range(size):
+                assert instances.bound_scopes(stored, f"Knowledge Base/Notes/Gen/Page-{index:04d}.md", compiled) is None
+        counts.append(len(calls))
+    assert counts[0] == counts[1], counts
+
+
 def test_normalized_subject_has_a_versioned_stable_format(tmp_path):
     """Changing facts without changing their version must not let old stores supply a new kernel's inputs."""
     from dataclasses import asdict

@@ -12219,8 +12219,8 @@ class LexicalStore:
         stored: dict[str, bool] = {}
         # A collection store decides its pages on one thread, so the pages it owns share one store request.
         with deciding(plan.missing):
-            for path in plan.missing:
-                allowed, page_local = admission.decide(path, True)
+            # The predicate's set rule decides each ordinary scope class once; the rest stay scalar.
+            for path, (allowed, page_local) in admission.decide_many(plan.missing, True).items():
                 decided[path] = allowed
                 if page_local and path not in plan.live and plan.signatures is not None:
                     signature = plan.signatures.get(path)

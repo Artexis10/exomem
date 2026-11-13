@@ -10,6 +10,7 @@ import os
 import pickle
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -223,6 +224,84 @@ def test_noncanonical_platform_and_reference_spellings_are_refused(raw: str) -> 
 
     assert result.disposition is reserved_paths.PathDisposition.INVALID
     assert result.blocked
+
+
+def test_more_fresh_ordinary_paths_run_no_more_descriptor_matchers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defect: each fresh ordinary path runs every descriptor's matcher, so the first read of a hub's
+    endpoints pays the registry's size once per endpoint."""
+    original = reserved_paths.InternalStateDescriptor.matches
+    calls: list[tuple[str, ...]] = []
+
+    def counted(descriptor: reserved_paths.InternalStateDescriptor, parts: tuple[str, ...]) -> bool:
+        calls.append(parts)
+        return original(descriptor, parts)
+
+    monkeypatch.setattr(reserved_paths.InternalStateDescriptor, "matches", counted)
+    run = uuid.uuid4().hex
+    counts = []
+    for size in (20, 200):
+        calls.clear()
+        for index in range(size):
+            result = reserved_paths.classify_logical(f"Knowledge Base/Notes/{run} {size} {index}.md")
+            assert result.disposition is reserved_paths.PathDisposition.ORDINARY
+        counts.append(len(calls))
+    assert counts[0] == counts[1], counts
+
+
+_HEX32 = "0123456789abcdef" * 2
+#: One name that each registry pattern accepts; the test below fails when a pattern has none.
+_PATTERN_SAMPLES = (
+    ".embeddings.0123456789abcdef.sqlite-wal",
+    "..review-state.json.abc123_4.tmp",
+    "..due-state-candidates.json.abc123_4.tmp",
+    f".lexical.sqlite.rebuild-{_HEX32}.tmp-shm",
+    f".lexical.sqlite-shm.quarantine-{_HEX32}",
+    f".graph-rebuild-{'a' * 64}-{'b' * 24}.sqlite",
+    f".graph-reset-{'c' * 24}",
+    "collections-derived.sqlite.exported-20260101t120000z",
+    f".exomem-held-publish-{_HEX32}",
+    f".exomem-collection-stage-{_HEX32}",
+    f".exomem-collection-aside-{_HEX32}-1",
+    f".exomem-collection-snapshot-{_HEX32}.sqlite-journal",
+    f".exomem-collection-audit-{_HEX32}.sqlite",
+    f".exomem-batch-{_HEX32}",
+    f".exomem-held-probe-{_HEX32}-directory",
+    f".exomem-collection-migration-{_HEX32}",
+)
+
+
+def test_a_path_is_ordinary_exactly_when_no_descriptor_matches_it() -> None:
+    """Defect: the shortcut that skips the descriptor matchers for an ordinary path skips one that
+    matches, so private state reads as an ordinary page.
+
+    Every exact path, tree and pattern of the registry appears at the head, in the middle and as the
+    leaf, beside lookalikes that only share a first component or a name.
+    """
+    registry = reserved_paths.internal_state_registry()
+    patterns = [
+        pattern
+        for descriptor in registry
+        for pattern in (
+            *descriptor.patterns, *descriptor.tree_patterns,
+            *descriptor.leaf_patterns, *descriptor.component_tree_patterns,
+        )
+    ]
+    unsampled = [pattern.pattern for pattern in patterns if not any(map(pattern.fullmatch, _PATTERN_SAMPLES))]
+    assert not unsampled, f"add a name each new pattern accepts to _PATTERN_SAMPLES: {unsampled}"
+    names = [
+        *(path for descriptor in registry for path in (*descriptor.exact, *descriptor.trees)),
+        *_PATTERN_SAMPLES,
+    ]
+    reserved = set()
+    for name in names:
+        for raw in (name, f"{name}/child.md", f"notes/{name}", f"notes/{name}/child.md", f"{name}.md", f"x{name}"):
+            parts = tuple(raw.split("/"))
+            matched = [descriptor.id for descriptor in registry if descriptor.matches(parts)]
+            result = reserved_paths.classify_logical(raw)
+            assert (result.disposition is reserved_paths.PathDisposition.ORDINARY) == (not matched), (raw, matched)
+            if matched:
+                reserved.add(name)
+    assert reserved == set(names)
 
 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:

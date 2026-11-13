@@ -14079,6 +14079,37 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     return _link_candidates_for_key(resolver, cleaned)
 
 
+#: The pages that share a link name with another page, for the resident resolver publication whose
+#: token the entry holds. Which reader sees them is decided per request, so the entry holds nothing
+#: of a caller. Like the topology digests, it keeps the token, never the resolver's maps.
+_HOMONYM_PATHS: dict[Path, tuple[object, str, frozenset[str]]] = {}
+
+
+def _homonym_paths(
+    vault_root: Path, resolver: vault_module.WikilinkResolver, check: Callable[[], None],
+) -> frozenset[str]:
+    """Every page whose name a link can share with another page.
+
+    A resolver copied from a resident publication carries its token, and every patch to its
+    maps drops it, so a kept entry describes exactly these maps. A resolver without a token is
+    read again.
+    """
+    key, publication, prefix = Path(vault_root), resolver.publication, kb_prefix()
+    cached = _HOMONYM_PATHS.get(key)
+    if publication is not None and cached is not None and cached[:2] == (publication, prefix):
+        return cached[2]
+    paths = set()
+    for name in resolver.full_paths | resolver.stems.keys() | resolver.titles.keys():
+        check()
+        candidates = _link_candidates_for_key(resolver, name)
+        if len(candidates) > 1:
+            paths.update(candidates)
+    homonyms = frozenset(paths)
+    if publication is not None and resolver.publication is publication:
+        _HOMONYM_PATHS[key] = (publication, prefix, homonyms)
+    return homonyms
+
+
 def _link_candidates_for_key(resolver: vault_module.WikilinkResolver, cleaned: str) -> set[str]:
     """Read a normalized resolver key without consuming its extension or link syntax again."""
     if not cleaned:
@@ -14863,16 +14894,10 @@ class GraphView:
         resolver = self._shared_resolver()
         if self.keep is None:
             return set()
-        paths = set()
         if not store_mode.store_mode_for_reads(self.vault_root) or self.reads_placeholders:
             paths = {f"{path}.md" for path in resolver.full_paths}
         else:
-            names = resolver.full_paths | resolver.stems.keys() | resolver.titles.keys()
-            for name in names:
-                self._check()
-                candidates = _link_candidates_for_key(resolver, name)
-                if len(candidates) > 1:
-                    paths.update(candidates)
+            paths = _homonym_paths(self.vault_root, resolver, self._check)
         verdicts = self._kept_many(paths)
         withheld = set()
         for path, allowed in verdicts.items():
