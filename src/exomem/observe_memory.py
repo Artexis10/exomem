@@ -32,6 +32,7 @@ from . import (
     temporal,
     vault,
 )
+from .cli_ops import OpError
 from .governance import egress
 from .mutation_timings import MutationTimings, write_timings_enabled
 
@@ -194,13 +195,20 @@ def observe_memory(
             "remove accepts only the parent, unit reference, and drift guards",
         )
     proposal_mode = "update" if op == "validate" and (unit_ref or unit) else op
-    if proposal_mode in {"add", "update"} and (
-        category is None or not str(category).strip() or content is None
-    ):
-        raise ObserveMemoryError(
-            "INVALID_OBSERVE_INPUT",
-            f"{op} requires non-empty category and content fields",
-        )
+    if proposal_mode in {"add", "update"}:
+        # These are the closed required argument fields, spelled by the serving surface.
+        missing = {}
+        if category is None or not str(category).strip():
+            missing["category"] = "<category>"
+        if content is None:
+            missing["content"] = "<text>"
+        if missing:
+            raise OpError(
+                "INVALID_OBSERVE_INPUT",
+                "The observation is missing required fields.",
+                "Provide the missing fields shown in the retry call.",
+                details={"retry_with": missing},
+            )
 
     origin_block = None
     if content is not None:
@@ -674,10 +682,7 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
             ),
         }
     return [
-        {
-            "id": unit_id(unit), "anchor": unit.anchor,
-            "category": unit.category, "text": unit.content,
-        }
+        {"id": unit_id(unit), "category": unit.category, "text": unit.content}
         for unit in selected.document.units if unit.unit_ref
     ]
 

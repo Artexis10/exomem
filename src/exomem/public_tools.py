@@ -908,6 +908,12 @@ def _tool(name, title, description, model, effect, translate, routes, **kw) -> W
 
 _NOTE_INVERSE = {"validate_only": "preview", "response_detail": "detail"}
 
+# The closed field spellings shared by existing-unit edits and their previews.
+_OBSERVATION_EDIT_INVERSE = {
+    "path": "note", "unit": "observation", "unit_ref": "observation",
+    "content": "text", "reason": "why", **_NOTE_INVERSE,
+}
+
 TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict -- the closed set of typed tool names the surface lists.
     _tool("search_memory", "Search memory",
           "Search notes, sources and evidence for what recall_context missed. Hits are named by title; open one with read_page. A miss covers this query only.",
@@ -944,7 +950,11 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           EditNote, "write", _edit_note,
           [Route("edit_memory", reverse=_spell_edit),
            Route("observe_memory", when={"operation": "update"}, add={"action": "edit_observation"},
-                 inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "content": "text", "reason": "why", **_NOTE_INVERSE},
+                 inverse=_OBSERVATION_EDIT_INVERSE,
+                 derived=frozenset({"expected_hash"})),
+           Route("observe_memory", when={"operation": "validate"},
+                 add={"action": "edit_observation", "preview": True},
+                 inverse=_OBSERVATION_EDIT_INVERSE,
                  derived=frozenset({"expected_hash"})),
            Route("observe_memory", when={"operation": "remove"}, add={"action": "remove_observation"},
                  inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "reason": "why", **_NOTE_INVERSE},

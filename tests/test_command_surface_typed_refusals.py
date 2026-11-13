@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from _public_call import public_call
 
 from exomem import server
@@ -101,6 +102,50 @@ def _merge_retry(arguments: dict, retry_arguments: dict) -> dict:
             _merge_retry(current, value) if isinstance(value, dict) and isinstance(current, dict) else value
         )
     return merged
+
+
+@pytest.mark.parametrize("missing", ["category", "text"])
+def test_an_existing_observation_preview_names_only_its_missing_public_field(
+    tmp_path: Path, monkeypatch, missing: str,
+) -> None:
+    """An agent can follow a missing-field retry without losing its unit or preview."""
+    _, call = _serve(tmp_path, monkeypatch)
+    call("save_source", {
+        "title": "Release timing source", "source_kind": "session",
+        "content": "The release ships on Friday.",
+    })
+    call("create_note", {
+        "title": "Release timing", "type": "insight",
+        "content": "## Claim\n- id: release-day\n\nThe release ships on Friday.\n",
+        "sources": ["Release timing source"],
+        "unlinked_reason": "No other conclusion concerns this release schedule.",
+    })
+    before = call("read_page", {"page": "Release timing", "part": "units"})
+    proposal = {
+        "note": before["id"], "why": "The release day changed.",
+        "action": "edit_observation", "observation": before["units"][0]["id"],
+        "category": "claim", "text": "The release ships on Monday.", "preview": True,
+        "unlinked_reason": "No other conclusion concerns this release schedule.",
+    }
+    value = proposal.pop(missing)
+
+    refused = call("edit_note", proposal)["error"]
+
+    assert refused["code"] == "INVALID_OBSERVE_INPUT"
+    retry = refused["retry"]
+    assert retry["tool"] == "edit_note"
+    assert set(retry["arguments"]) == {missing}
+    corrected = _merge_retry(proposal, retry["arguments"])
+    corrected[missing] = value
+    preview = call(retry["tool"], corrected)
+    assert "error" not in preview, preview
+    unchanged = call("read_page", {"page": "Release timing", "part": "units"})
+    assert unchanged["units"][0]["text"] == "The release ships on Friday."
+    corrected["preview"] = False
+    saved = call(retry["tool"], corrected)
+    assert "error" not in saved, saved
+    reread = call("read_page", {"page": "Release timing", "part": "units"})
+    assert reread["units"][0]["text"] == "The release ships on Monday."
 
 
 def test_a_refused_observe_commits_when_its_retry_is_followed_as_written(
