@@ -660,6 +660,64 @@ def _requeue_every_page(vault: Path) -> dict[str, str]:
         conn.close()
 
 
+@pytest.mark.parametrize("phase", ("removed", "read", "apply"))
+def test_foreground_halt_keeps_the_tick_out_of_error(tmp_path: Path, monkeypatch, phase) -> None:
+    sf.enable(monkeypatch)
+    vault = sf.build(tmp_path)
+    sf.settle(vault)
+    conn = sensed_model.open_readonly(vault)
+    seen = dict(conn.execute("SELECT path, sig FROM pages"))
+    conn.close()
+    requested = phase != "apply"
+    if phase == "removed":
+        seen = {}
+    else:
+        seen[sf.WINTER] += "-changed"
+    if phase == "apply":
+        original = sensed_model.page_facts
+
+        def become_active_after_read(*args, **kwargs):
+            nonlocal requested
+            facts = original(*args, **kwargs)
+            requested = True
+            return facts
+
+        monkeypatch.setattr(sensed_model, "page_facts", become_active_after_read)
+    report = sensed_model.run_tick(vault, seen=seen, halt=lambda: "foreground" if requested else None)
+    assert report.stop == "foreground"
+
+
+def test_large_removal_finishes_in_bounded_pair_and_relation_batches(tmp_path: Path, monkeypatch) -> None:
+    from exomem import sensing_llm
+
+    sf.enable(monkeypatch)
+    monkeypatch.setattr(sensing_llm, "active_instruments", lambda: {sf.STUB.instrument_id: sf.STUB})
+    vault = tmp_path / "vault"
+    store = _ready_shared_queue(vault)
+    conn = store.connect()
+    paths = [f"gone-{index:03d}.md" for index in range(sensed_model.PAGES_PER_TICK + 3)]
+    conn.executemany(
+        "INSERT INTO pages(path, sig, knowledge_date, lifecycle, supersession_json) "
+        "VALUES (?, 'old', '', '', '[]')", ((path,) for path in paths),
+    )
+    conn.executemany(
+        "INSERT INTO relation_sensed(request_key, source_path, target_path, kind, menu_digest, input_key, source_hash, target_hash) "
+        "VALUES (?, ?, 'target.md', 'wikilink', 'menu', 'input', 'source', 'target')",
+        ((path, path) for path in paths),
+    )
+    conn.close()
+    sensed_model.run_tick(vault, seen={}, halt=lambda: None)
+    conn = sensed_model.open_readonly(vault)
+    assert conn.execute("SELECT path FROM pages ORDER BY path").fetchall() == [(path,) for path in paths[-3:]]
+    assert conn.execute("SELECT source_path FROM relation_sensed ORDER BY source_path").fetchall() == [(path,) for path in paths[-3:]]
+    conn.close()
+    sensed_model.run_tick(vault, seen={}, halt=lambda: None)
+    conn = sensed_model.open_readonly(vault)
+    assert conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM relation_sensed").fetchone()[0] == 0
+    conn.close()
+
+
 def test_a_budget_spent_by_the_pass_still_applies_the_pages_it_was_read_for(
     tmp_path: Path, monkeypatch
 ) -> None:

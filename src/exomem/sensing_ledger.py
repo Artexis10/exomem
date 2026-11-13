@@ -286,14 +286,34 @@ def open_readonly(vault_root: Path) -> sqlite3.Connection | None:
 
 
 def by_input_key(conn: sqlite3.Connection, question_type: str, key: str) -> list[StoredReading]:
-    return [
-        _row(row)
-        for row in conn.execute(
-            f"SELECT {_COLUMNS} FROM readings WHERE question_type=? AND input_key=? "
-            "ORDER BY reading_id",
-            (question_type, key),
-        )
-    ]
+    return by_input_keys(conn, question_type, [key])[key]
+
+
+def by_input_keys(
+    conn: sqlite3.Connection,
+    question_type: str,
+    keys: Iterable[str],
+    *,
+    instrument_ids: Iterable[str] | None = None,
+) -> dict[str, list[StoredReading]]:
+    """One indexed lookup for a caller-bounded set of content keys."""
+    found: dict[str, list[StoredReading]] = {key: [] for key in keys}
+    if not found:
+        return found
+    params = [question_type, *found]
+    marks = ",".join("?" for _ in found)
+    where = f"question_type=? AND input_key IN ({marks})"
+    if instrument_ids is not None:
+        instruments = tuple(instrument_ids)
+        if not instruments:
+            return found
+        marks = ",".join("?" for _ in instruments)
+        where += f" AND instrument_id IN ({marks})"
+        params.extend(instruments)
+    for raw in conn.execute(f"SELECT {_COLUMNS} FROM readings WHERE {where} ORDER BY reading_id", params):
+        reading = _row(raw)
+        found[reading.input_key].append(reading)
+    return found
 
 
 def since(conn: sqlite3.Connection, seq: int, *, limit: int = 512) -> list[StoredReading]:

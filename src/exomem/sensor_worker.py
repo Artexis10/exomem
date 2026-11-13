@@ -527,6 +527,11 @@ def question_admission_evidence(vault_root: Path, question_type: str) -> list[An
                     )
                 except OSError:
                     evidence.append([relative, None])
+    if question_type == sensing.RELATION_TYPE:
+        from . import sensing_llm
+
+        identity = sensing_llm.admission_identity()
+        evidence.append(["sensor-model", identity["pins"], identity["evidence"]])
     entry = sensing.question(question_type)
     evidence.append([entry.fixture_set, repr(sensing.LABEL_MAPS.get(entry.label_map_version))])
     from . import sensed_model
@@ -575,6 +580,10 @@ def admit_question(vault_root: Path, question_type: str) -> Any:
         from . import sensing_nli
 
         return sensing_nli.admit(evidence_path=_state_file(vault_root, ADMISSION_FILE))
+    if question_type == sensing.RELATION_TYPE:
+        from . import sensing_llm
+
+        return sensing_llm.admit(env=os.environ)
     raise ValueError("question has no admitted instrument")
 
 
@@ -727,7 +736,8 @@ def run_child(
                 readings = []
                 for job, result in zip(batch, results, strict=True):
                     if isinstance(result, Mapping):
-                        vectors, reason = result.get("vectors"), result.get("abstain_reason")
+                        vectors = result.get("vectors")
+                        reason = result.get("abstain_reason")
                     else:
                         ab, ba, reason = result
                         vectors = None if reason is not None else {"ab": ab, "ba": ba}
