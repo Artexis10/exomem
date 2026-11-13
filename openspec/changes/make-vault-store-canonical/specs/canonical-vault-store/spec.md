@@ -13,10 +13,20 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **THEN** the file stays on disk and is durable before the transaction that records its path and content hash commits
 - **AND** the store records that path and hash in the same transaction as the page that cites it
 
-#### Scenario: A governed move of a binary renames it, then records it
+#### Scenario: A governed move of a binary records it, then renames it
 - **WHEN** a delete, a move or a recovery in store mode moves a binary file
-- **THEN** the file is renamed on disk first, and one transaction records it at its new path and removes its old record, bound to the old record as read and to an empty new path
-- **AND** a refused transaction renames the file back, and a kill before the transaction leaves the old record to the next sweep, which pairs it with the moved file by its hash
+- **THEN** one transaction moves the binary's record to its new path, bound to the old record as read and to an empty new path, and queues a move intent there that names the old path
+- **AND** the writer renames the file right after the transaction, so the caller finds it at its new path on return
+- **AND** a refused transaction moves no file
+
+#### Scenario: A lifecycle write killed around its transaction converges
+- **WHEN** the process is killed while a store-mode trash, move or recovery runs, before its transaction, inside it, or after it and before the writer's last rename
+- **THEN** a fresh start finds every page and binary of the write on one side, its old paths or its new ones, with each binary's record naming the file at its path, whether the projector or the importer runs first
+- **AND** the projector renames each binary whose move is queued, and never unlinks or replaces a binary to finish a move
+- **AND** the importer records no file at the old path of a queued binary move
+- **AND** the projector removes each folder that its own move or removal left empty, and no folder that holds anything
+- **AND** a file or folder that the store does not own may stay at its old path, with none of its bytes lost
+- **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
 A governed write in store mode SHALL commit every file it changes, the lexical catalogue rows, the graph nodes, edges and dependencies derived from those files, one audit row per file and one projection intent per file in one `BEGIN IMMEDIATE` transaction. The write SHALL acknowledge only after that transaction is durable. Derivation SHALL run from the bytes being written, before the transaction, with the same derivation code that file mode uses. When a write adds a title that makes links on other pages resolve, the same transaction SHALL update those pages' graph rows.

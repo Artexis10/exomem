@@ -1,51 +1,58 @@
-"""Move files on disk, then record the move in one store commit (store task 2.5, design D1).
+"""Record a lifecycle write's file moves in its store commit, then move the files (design D2, D4).
 
-A binary's bytes stay on disk, so the store has no binary move: a writer renames each file first,
-then commits in one transaction a record at each new path and the removal of each old record. The
-commit binds the old record as the writer read it (revision and hash) and the new path as empty.
-It is the change that the importer commits for a rename it finds (``importer._commit_rename``),
-made by a governed writer.
+A binary's bytes stay on disk, so the store records the move and the file follows it: the commit
+moves each binary's record to its new path and queues a ``move`` intent there, and the writer
+renames the file right after the commit (``relocated``). The commit is the only decision, and
+nothing that the store owns changes on disk before it:
 
-The window between the renames and the commit, for every writer that uses this module:
+- A kill before the commit changes nothing that the store owns. A new file that the commit
+  records (a trash entry's sidecar, ``Placement``) waits in a temporary that the store does not own
+  until the commit moves it into place; a kill before the commit leaves only that temporary.
+- A kill after the commit leaves each unfinished binary move queued, and the projector renames the
+  file when its old path still holds the recorded bytes and the new path is free. It never unlinks
+  a binary. The importer leaves the old path of a queued move alone, and reads a missing file at
+  its new path as the queued intent's, so it reads none of this as a person's change, whichever
+  runs first after the restart.
+- A page's dot folder of parts moves with the page's own queued move (``projector._move_parts``).
+  Any other file or folder that the store does not own (a dot file, a sync conflict copy) moves
+  right after the commit; a kill before its rename leaves it at the source, with no byte lost.
 
-- A kill after a rename and before the commit leaves a record at the old path whose file is now
-  at the new one. The next sweep judges the old path gone and the new file unrecorded, pairs the
-  two by their bytes (``importer._pair_renames``) and commits the same change as an outside
-  rename. No byte is lost, and no record stays dangling past one sweep. The writer's retry finds
-  the file at its new path. A folder's renames that ran before the kill resolve the same way, one
-  file each, and the pages that the commit would have moved have not moved. A dot folder of parts
-  holds nothing that the store records, so no sweep pairs it: its parts stay at the new path, and
-  reconcile rebuilds the parts at their page.
-- A commit that refuses renames each file back (``relocated``). When a rename back fails too, the
-  file stays at its new path and ``Stranded`` says so; the next sweep records it there.
-- A kill after the commit leaves nothing to do: the commit is the last step.
-
-A file that the store does not own (a dot folder's part, a sync conflict copy) and a folder that
-holds nothing the store owns move the same way with no record. A Markdown file among them has its
-rows derived again at its new path and dropped at its old one (``Moved.refresh``).
+A commit that refuses leaves every file where it was. A file that the store does not own and that
+holds Markdown has its rows derived again at its new path and dropped at its old one, after its
+rename, in a second commit. A folder that the renames left empty goes, by the projector's rule.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import secrets
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import ownership, read
-from .write import BinaryDelete, BinaryRecord, Expect
+from .write import BinaryMove, BinaryRecord, Expect
 
-#: The sentence a writer adds when a refused commit could not put a moved file back.
-STRANDED = "the file moved, and the next sweep records it"
+if TYPE_CHECKING:
+    from ..collection_store.writer import CollectionWriter
+
+log = logging.getLogger(__name__)
+
+#: The sentence a writer adds for a file that did not move right after the commit.
+LEFT = "did not move yet; the projector moves a binary, and a file the store does not own stays"
+#: Each placement's temporary: a dot name beside its path, which the store does not own.
+_PENDING = ".exomem-pending-"
 
 
-class Stranded(Exception):
-    """A commit refused and a file it had moved could not move back: it stays at its new path."""
+class Unreadable(Exception):
+    """A binary could not be read before the commit, so the write cannot record its move."""
 
     def __init__(self, path: str) -> None:
-        super().__init__(f"{path}: {STRANDED}")
+        super().__init__(f"{path}: the file could not be read")
         self.path = path
 
 
@@ -59,16 +66,21 @@ class Entry:
 
 
 @dataclass(frozen=True, slots=True)
+class Placement:
+    """A new file that the commit records at ``dst``, such as a trash entry's sidecar."""
+
+    dst: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class Relocation:
-    """The renames of one commit and the binary records that the caller's snapshot holds for them."""
+    """The renames and placements of one commit, and the records that the caller's snapshot holds
+    for the binaries among them."""
 
     entries: tuple[Entry, ...]
     recorded: Mapping[str, read.BinaryMeta] = field(default_factory=dict)
-
-    @property
-    def binary_deletes(self) -> tuple[BinaryDelete, ...]:
-        """The removal of each old record: its file has moved, so nothing is left to unlink."""
-        return tuple(BinaryDelete(rel, on_disk=True) for rel in self.recorded)
+    placements: tuple[Placement, ...] = ()
 
     def expect(self, linked_from: Mapping[str, frozenset[str]] | None = None) -> dict[str, Expect]:
         """Each old record as it was read, and each new binary path empty.
@@ -83,121 +95,277 @@ class Relocation:
         for entry in self.entries:
             if not entry.folder and _binary(entry.dst):
                 expect[entry.dst] = Expect(absent=True)
+        for placement in self.placements:
+            expect[placement.dst] = Expect(absent=True)
         return expect
 
 
-def plan(view: read.StoreSnapshot, entries: Iterable[Entry]) -> Relocation:
+def plan(
+    view: read.StoreSnapshot, entries: Iterable[Entry], placements: Iterable[Placement] = ()
+) -> Relocation:
     """The relocation of ``entries``, with the record of each binary source read in ``view``.
 
-    A binary that the store records nothing for yet (bytes that nothing imported) gets a record at
-    its new path and binds nothing at its old one, as file mode binds nothing there.
+    A binary that the store records nothing for yet (bytes that nothing imported) moves as a
+    recorded one does: the commit records it at its new path.
     """
     entries = tuple(entries)
     sources = [entry.src for entry in entries if not entry.folder and _binary(entry.src)]
-    return Relocation(entries, view.binary_records(sources))
+    return Relocation(entries, view.binary_records(sources), tuple(placements))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class Moved:
-    """What the renames put on disk, for the commit to record and derive."""
+    """What the commit records, and after it, what did not move."""
 
-    records: tuple[BinaryRecord, ...]
-    refresh: tuple[str, ...]
+    binary_moves: tuple[BinaryMove, ...]
+    #: The entries left at their source after the commit, which the projector or a person moves.
+    left: list[str] = field(default_factory=list)
+
+    @property
+    def records(self) -> tuple[BinaryRecord, ...]:
+        """The record that the commit makes at each new path: the bytes read before the commit."""
+        return tuple(BinaryRecord(move.dst, move.sha256, move.size) for move in self.binary_moves)
 
 
 @contextmanager
-def relocated(vault_root: Path, relocation: Relocation) -> Iterator[Moved]:
-    """Rename every entry, and rename them back when the body raises.
+def relocated(
+    vault_root: Path, relocation: Relocation, writer: CollectionWriter
+) -> Iterator[Moved]:
+    """Read what moves, let the body commit it, then move the files.
 
-    The caller commits inside the body. A rename that fails undoes the ones before it and raises
-    its ``ReservedPathLeafError`` (``CROSS_DEVICE`` for a move between filesystems). A rename back
-    that fails raises ``Stranded`` from the body's error.
+    Before the body: each binary's bytes are read where they are, a placement's bytes go to a
+    durable temporary beside its path, and a rename between two filesystems refuses with
+    ``CROSS_DEVICE``. The body commits ``Moved.binary_moves`` with the rest of its change. After a
+    commit, every entry and placement moves; what cannot is named in ``Moved.left`` and stays for
+    the projector, or at its source when the store does not own it. When the body raises before its
+    commit, the temporaries go and nothing else has changed. ``writer`` drops the intent of each
+    binary move that the writer finished and derives the rows of moved Markdown that the store does
+    not own.
     """
     from .. import reserved_paths
 
     root = Path(vault_root)
-    done: list[Entry] = []
-    refresh: list[str] = []
+    for entry in relocation.entries:
+        _require_one_filesystem(root, entry)
+    read_at: dict[str, tuple[int, int]] = {}
+    moves = [
+        _planned(root, entry, read_at) for entry in relocation.entries if _moves_a_binary(entry)
+    ]
+    staged: list[tuple[str, str]] = []
     try:
-        for entry in relocation.entries:
-            # A folder's Markdown files are named before the rename, so both paths can refresh.
-            names = _markdown_below(root, entry.src) if entry.folder else ()
-            reserved_paths.move_generic_path(
-                root,
-                entry.src,
-                entry.dst,
-                source_kind="directory" if entry.folder else "file",
-                physical=True,
+        for placement in relocation.placements:
+            folder = placement.dst.rpartition("/")[0]
+            if (root / placement.dst).exists():
+                from ..vault import CreateOnlyConflict
+
+                raise CreateOnlyConflict(placement.dst)
+            # The name keeps no part of the leaf, so no listing of sidecars or binaries reads it.
+            temporary = f"{folder}/{_PENDING}{secrets.token_hex(16)}"
+            (root / folder).mkdir(parents=True, exist_ok=True)
+            reserved_paths.publish_generic_bytes(
+                root, temporary, placement.data, expected_identity=None
             )
-            done.append(entry)
-            if entry.folder:
-                refresh.extend(
-                    path for name in names for path in (f"{entry.src}/{name}", f"{entry.dst}/{name}")
+            staged.append((temporary, placement.dst))
+            moves.append(
+                BinaryMove(
+                    temporary,
+                    placement.dst,
+                    hashlib.sha256(placement.data).hexdigest(),
+                    len(placement.data),
                 )
-            elif ownership.classify(entry.dst) is ownership.Ownership.NONE and (
-                ownership.is_markdown(entry.dst)
-            ):
-                refresh.extend((entry.src, entry.dst))
-        records = tuple(
-            _record(root, entry.dst)
-            for entry in relocation.entries
-            if not entry.folder and _binary(entry.dst)
-        )
-        yield Moved(records, tuple(refresh))
+            )
+        moved = Moved(tuple(moves))
+        yield moved
     except BaseException:
-        _undo(root, done)
+        landed = _landed(root, moves, relocation.recorded)
+        if landed:
+            # The commit is durable and something after it failed: its files still move.
+            _finish(root, relocation, staged, moves, read_at, writer)
+        elif landed is False:
+            for temporary, _dst in staged:
+                _discard(root, temporary)
         raise
+    moved.left.extend(_finish(root, relocation, staged, moves, read_at, writer))
+
+
+def _finish(
+    root: Path,
+    relocation: Relocation,
+    staged: list[tuple[str, str]],
+    moves: list[BinaryMove],
+    read_at: Mapping[str, tuple[int, int]],
+    writer: CollectionWriter,
+) -> list[str]:
+    """Move every entry and placement after the commit; return the sources that stayed.
+
+    The commit is durable, so nothing here refuses the write: a rename that fails, the drop of a
+    finished move's intent and the rows of moved Markdown are left to the projector and the
+    importer, which finish them.
+    """
+    from . import projector, write
+
+    planned = {move.src: move for move in moves}
+    finished: list[BinaryMove] = []
+    refresh: list[str] = []
+    left: list[str] = []
+    for temporary, dst in staged:
+        if _rename(root, Entry(temporary, dst), planned[temporary], None):
+            finished.append(planned[temporary])
+        else:
+            left.append(dst)
+    for entry in relocation.entries:
+        move = planned.get(entry.src) if _moves_a_binary(entry) else None
+        names = _markdown_below(root, entry.src) if entry.folder else ()
+        if not _rename(root, entry, move, read_at.get(entry.src)):
+            left.append(entry.src)
+            continue
+        if move is not None:
+            finished.append(move)
+        elif entry.folder:
+            refresh.extend(
+                path for name in names for path in (f"{entry.src}/{name}", f"{entry.dst}/{name}")
+            )
+        elif ownership.is_markdown(entry.dst):
+            refresh.extend((entry.src, entry.dst))
+    _prune_emptied(root, {entry.src.rpartition("/")[0] for entry in relocation.entries})
+    try:
+        if finished:
+            with writer.handle.transaction() as tx:
+                for move in finished:
+                    projector.drop_binary_move(tx, move.dst, move.src)
+        if refresh:
+            reason = "moved files that the store does not own"
+            write.commit(
+                writer, write.StoreChange(write.Origin.GOVERNED, reason, refresh=tuple(refresh))
+            )
+    except Exception:  # noqa: BLE001 - durable already; the projector and the importer finish it
+        log.warning("a lifecycle commit's bookkeeping is left to the next pass", exc_info=True)
+    return left
+
+
+def _rename(
+    root: Path, entry: Entry, move: BinaryMove | None, seen: tuple[int, int] | None
+) -> bool:
+    """Rename one entry while its source is what the commit planned and its new path is free.
+
+    A binary's source must still show the size and modification time that its planned read saw;
+    otherwise the projector, which hashes it, decides. True when the file sits at its new path,
+    the projector having moved it first included.
+    """
+    from .. import reserved_paths
+    from ..cli_ops import OpError
+
+    if move is not None and seen is not None and _stat(root, entry.src) != seen:
+        return _sha256(root, entry.dst) == move.sha256
+    try:
+        reserved_paths.move_generic_path(
+            root,
+            entry.src,
+            entry.dst,
+            source_kind="directory" if entry.folder else "file",
+            physical=True,
+        )
+    except (OpError, reserved_paths.ReservedPathLeafError, OSError):
+        if move is not None:
+            return _sha256(root, entry.dst) == move.sha256
+        return not (root / entry.src).exists() and (root / entry.dst).exists()
+    return True
+
+
+def _planned(root: Path, entry: Entry, read_at: dict[str, tuple[int, int]]) -> BinaryMove:
+    """The move of a binary file, with the bytes that its source holds now."""
+    from .. import reserved_paths
+
+    before = _stat(root, entry.src)
+    try:
+        raw = reserved_paths.read_generic_bytes(root, entry.src, physical=True).data
+    except reserved_paths.ReservedPathLeafError as error:
+        raise Unreadable(entry.src) from error
+    if before is not None and _stat(root, entry.src) == before:
+        read_at[entry.src] = before
+    return BinaryMove(entry.src, entry.dst, hashlib.sha256(raw).hexdigest(), len(raw))
+
+
+def _stat(root: Path, rel: str) -> tuple[int, int] | None:
+    try:
+        found = os.stat(root / rel, follow_symlinks=False)
+    except OSError:
+        return None
+    return found.st_size, found.st_mtime_ns
+
+
+def _landed(
+    root: Path, moves: list[BinaryMove], recorded: Mapping[str, read.BinaryMeta]
+) -> bool | None:
+    """Whether the commit that names ``moves`` is durable: the store records each new path with
+    its bytes and none of the recorded old paths. One snapshot read of those paths.
+
+    None when the store cannot say; the caller then leaves every file as it is.
+    """
+    if not moves:
+        return False
+    try:
+        with read.snapshot(root) as view:
+            found = view.binary_records([*(move.dst for move in moves), *recorded])
+    except Exception:  # noqa: BLE001 - an unreadable store decides nothing either way
+        return None
+    return not any(rel in found for rel in recorded) and all(
+        move.dst in found and found[move.dst].sha256 == move.sha256 for move in moves
+    )
+
+
+def _require_one_filesystem(root: Path, entry: Entry) -> None:
+    """Refuse a rename between two filesystems before the commit, as the rename itself would."""
+    from .. import reserved_paths
+
+    target = root / entry.dst
+    while not target.exists() and target != root:
+        target = target.parent
+    try:
+        if os.stat(root / entry.src).st_dev != os.stat(target).st_dev:
+            raise reserved_paths.ReservedPathLeafError("CROSS_DEVICE")
+    except FileNotFoundError:
+        return  # the planned read of the source names a missing file
+
+
+def _sha256(root: Path, rel: str) -> str | None:
+    from .. import reserved_paths
+
+    try:
+        raw = reserved_paths.read_generic_bytes(root, rel, physical=True).data
+    except (reserved_paths.ReservedPathLeafError, OSError):
+        return None
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _discard(root: Path, rel: str) -> None:
+    from .. import reserved_paths
+
+    try:
+        reserved_paths.unlink_generic_file(root, rel)
+    except (reserved_paths.ReservedPathLeafError, OSError):
+        return  # a temporary that stays is a dot file that the store does not own
+
+
+def _moves_a_binary(entry: Entry) -> bool:
+    return not entry.folder and _binary(entry.src)
 
 
 def refusal(error: BaseException, failed_code: str, failed: str) -> tuple[str, str]:
     """The code and reason that a writer raises when its relocation did not commit.
 
-    ``failed_code`` and ``failed`` are the writer's own. A file left at its new path adds what the
-    next sweep does, and a rename across filesystems has its own code, as file mode names it.
+    ``failed_code`` and ``failed`` are the writer's own. A rename across filesystems has its own
+    code, as file mode names it.
     """
     from .. import reserved_paths
 
-    if isinstance(error, Stranded):
-        return failed_code, f"{failed}; {STRANDED}"
     if isinstance(error, reserved_paths.ReservedPathLeafError) and error.code == "CROSS_DEVICE":
         return "CROSS_DEVICE_MOVE", "the destination is on another filesystem than the source"
     return failed_code, failed
 
 
-def _undo(root: Path, done: list[Entry]) -> None:
-    """Rename each moved entry back, the last first; raise ``Stranded`` for the first that stays."""
-    from .. import reserved_paths
-    from ..cli_ops import OpError
-
-    stranded: list[tuple[Entry, Exception]] = []
-    for entry in reversed(done):
-        try:
-            reserved_paths.move_generic_path(
-                root,
-                entry.dst,
-                entry.src,
-                source_kind="directory" if entry.folder else "file",
-                physical=True,
-                rollback=True,
-            )
-        except (OpError, reserved_paths.ReservedPathLeafError) as failed:
-            stranded.append((entry, failed))
-    if stranded:
-        entry, failed = stranded[-1]
-        raise Stranded(entry.dst) from failed
-
-
 def _binary(rel: str) -> bool:
     return ownership.classify(rel) is ownership.Ownership.BINARY
-
-
-def _record(root: Path, rel: str) -> BinaryRecord:
-    """The record of the file that now sits at ``rel``: the bytes that moved, read once, as file
-    mode's trash manifest reads them."""
-    from .. import reserved_paths
-
-    raw = reserved_paths.read_generic_bytes(root, rel).data
-    return BinaryRecord(rel, hashlib.sha256(raw).hexdigest(), len(raw))
 
 
 def _markdown_below(root: Path, folder: str) -> tuple[str, ...]:
@@ -212,10 +380,23 @@ def _markdown_below(root: Path, folder: str) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def _prune_emptied(root: Path, folders: Iterable[str]) -> None:
+    """Remove each folder that the renames left empty, by the projector's own rule."""
+    from .. import held_fs
+    from . import projector
+
+    acquired = held_fs.acquire(projector.anchor(root))
+    if not acquired.ok:
+        return  # an emptied folder then stays, as file mode leaves one; no bytes are lost
+    with acquired.require() as filesystem:
+        for folder in sorted(folders, reverse=True):
+            projector.prune_emptied(filesystem, folder)
+
+
 def prune_empty(folder: Path) -> None:
     """Remove the folders below and at ``folder`` that the renames emptied, the deepest first, as a
     rename of the whole folder would leave none. A folder that still holds a page's file, which the
-    projector moves later, stays until then."""
+    projector moves later, stays until then, and the projector removes it once it is empty."""
     for current, _dirs, _files in os.walk(folder, topdown=False):
         try:
             os.rmdir(current)

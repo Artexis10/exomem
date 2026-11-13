@@ -423,15 +423,17 @@ class Projector:
         intent = facts.intent
         assert intent is not None
         owner = ownership.classify(intent.path)
-        if intent.operation == "delete":
-            allowed = owner is not ownership.Ownership.NONE
-        else:
-            # A move's destination and a write are text the store holds, so only a page path fits.
+        if intent.operation == "write":
+            # A write is text the store holds, so only a page path fits.
             allowed = owner is ownership.Ownership.PAGE
+        else:
+            allowed = owner is not ownership.Ownership.NONE
         if not allowed:
             raise Deferred("the store does not own this path")
         if intent.operation == "delete":
             self._project_delete(filesystem, facts, report)
+        elif intent.operation == "move" and owner is ownership.Ownership.BINARY:
+            self._project_binary_move(filesystem, facts, report)
         elif intent.operation == "move":
             self._project_move(filesystem, facts, report)
         else:
@@ -496,6 +498,8 @@ class Projector:
             self._record_removed(intent.path, intent.revision)
             if report.removed == removed:
                 report.dropped += 1  # no file of Exomem's was there
+            else:
+                prune_emptied(filesystem, _split(intent.path)[0])
 
     def _remove(
         self,
@@ -552,6 +556,8 @@ class Projector:
             renamed = _rename(filesystem, old.path, intent.path, old_disk)
             self._record_moved(intent, page, old.path, renamed)
             report.projected += 1
+            _move_parts(filesystem, old.path, intent.path)
+            prune_emptied(filesystem, _split(old.path)[0])
             return
         verdict = _judge_write(facts, new_disk)
         if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
@@ -561,7 +567,52 @@ class Projector:
         if not self._remove(filesystem, old, old_disk, report, store_revision=None):
             return
         self._record_move_split(intent, old.path)
+        _move_parts(filesystem, old.path, intent.path)
+        prune_emptied(filesystem, _split(old.path)[0])
         self._project(filesystem, intent.path, report)
+
+    def _project_binary_move(
+        self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
+    ) -> None:
+        """Finish a binary's move: rename its file when the old path still holds the recorded bytes
+        and the new path is free, or find that the writer already did.
+
+        The store holds no bytes of a binary, so the projector never unlinks or replaces one. In
+        any other state a person has changed, removed or put a file at one of the paths: the intent
+        is dropped, and the importer judges both paths as the outside changes that they are.
+        """
+        intent, binary = facts.intent, facts.binary
+        assert intent is not None and intent.from_path is not None
+        old_disk = observe(filesystem, intent.from_path)
+        new_disk = observe(filesystem, intent.path)
+        if (
+            binary is not None
+            and old_disk is not None
+            and old_disk.sha256 == binary.sha256
+            and new_disk is None
+        ):
+            try:
+                _rename(filesystem, intent.from_path, intent.path, old_disk)
+            except (Deferred, held_fs.HeldFsError, OSError):
+                # The writer renames the same file right after its commit and may have won.
+                old_disk = observe(filesystem, intent.from_path)
+                new_disk = observe(filesystem, intent.path)
+                if old_disk is not None:
+                    raise
+            else:
+                old_disk, new_disk = None, observe(filesystem, intent.path)
+        moved = (
+            binary is not None
+            and new_disk is not None
+            and new_disk.sha256 == binary.sha256
+            and old_disk is None
+        )
+        self._run(lambda writer: _settle_binary_move(writer, intent))
+        if moved:
+            report.projected += 1
+            prune_emptied(filesystem, _split(intent.from_path)[0])
+        else:
+            report.dropped += 1
 
     # -- holds ------------------------------------------------------------------------------------
 
@@ -874,6 +925,25 @@ def record_file(
     )
 
 
+def drop_binary_move(tx: Connection, dst: str, src: str) -> None:
+    """The file of a binary's move is at ``dst``, or the move was given up: drop its intent.
+
+    The writer calls it after its own rename, and the projector after it finishes a move. An intent
+    that a later commit replaced names another source, or another operation, and stays.
+    """
+    tx.execute(
+        "DELETE FROM store_projection_queue WHERE path = ? AND operation = 'move' "
+        "AND from_path = ?",
+        (dst, src),
+    )
+
+
+def _settle_binary_move(writer: CollectionWriter, intent: Intent) -> None:
+    assert intent.from_path is not None
+    with writer.handle.transaction() as tx:
+        drop_binary_move(tx, intent.path, intent.from_path)
+
+
 def _turn_into_write(tx: Connection, intent: Intent) -> None:
     """A move whose bytes need a rewrite is a write of its new path, unless a commit changed it."""
     tx.execute(
@@ -1134,6 +1204,54 @@ def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> N
                 raise Deferred("the file changed before it was removed")
             _retrying(lambda: filesystem.unlink(file))
         _flush(filesystem, parent)
+
+
+def prune_emptied(filesystem: held_fs.HeldFilesystem, folder: str) -> None:
+    """Remove ``folder`` and each folder above it that is left empty, the deepest first.
+
+    The projector calls it on the folder that its own move or removal just took a file or folder
+    from. Removing a folder refuses while it holds anything, a person's file included, so the walk
+    stops at the first folder that is not empty, and it never reaches the Knowledge Base folder.
+    """
+    from ..kbdir import kb_dirname
+
+    kb = kb_dirname()
+    while folder.startswith(f"{kb}/"):
+        opened = _parent(filesystem, folder, access="mutate")
+        if not opened.ok:
+            return
+        with opened.require() as directory:
+            if not filesystem.unlink_directory(directory).ok:
+                return
+        folder = _split(folder)[0]
+
+
+def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str) -> None:
+    """Move a page's dot folder of parts beside the page's new path, as the page's move left it.
+
+    The writer renames the folder right after its commit; a kill before that leaves it here. The
+    store owns nothing in a dot folder, so the folder moves only to a free name, and a folder that
+    a person put there stays. A raw-marked page's parts are pages and move by their own intents.
+    """
+    from ..extraction_parts import folder_for
+
+    old_parts = folder_for(Path(old_page)).as_posix()
+    new_parts = folder_for(Path(new_page)).as_posix()
+    if ownership.owns_folder(old_parts):
+        return
+    new_folder, new_leaf = _split(new_parts)
+    source = _parent(filesystem, old_parts, access="mutate")
+    if _missing(source):
+        return
+    with source.require() as held:
+        opened, created = _open_creating(filesystem, new_folder)
+        with opened.require() as new_parent:
+            # A name that is taken refuses the rename: a person's folder there stays, and so does
+            # this one.
+            if not filesystem.rename_directory(held, new_parent, new_leaf).ok:
+                return
+            _flush_above(filesystem, created)
+    _flush_folder(filesystem, _split(old_parts)[0])
 
 
 def _rename(filesystem: held_fs.HeldFilesystem, old: str, new: str, expected: OnDisk) -> OnDisk:

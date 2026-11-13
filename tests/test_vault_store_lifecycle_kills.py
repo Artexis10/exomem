@@ -1,11 +1,12 @@
 """Hard kills of the store-mode lifecycle writers, each followed by a fresh process and a write.
 
 OpenSpec make-vault-store-canonical task 2.4. Each case runs one lifecycle write in a spawned
-interpreter that the operating system kills (SIGKILL) at one durable step: a rename, the store
-commit, or a step after it. A second fresh interpreter then starts as the service starts, does what
-a served start does (the projector's temporary sweep and pass, the importer's sweep, the maintenance
-reconcile) and makes the next write that a caller would make, each through the service's door to
-the store thread. The parent only reads the store and the disk.
+interpreter that the operating system kills (SIGKILL) at one durable step: a file placed before the
+store commit, the commit, a rename after it, or a later step. A second fresh interpreter then starts
+as the service starts, does what a served start does (the projector's temporary sweep and pass and
+the importer's sweep, in either order, then the maintenance reconcile) and makes the next write
+that a caller would make, each through the service's door to the store thread. The parent only
+reads the store and the disk.
 
 Every case of one test shares one vault and works on its own folder with its own bytes, so the
 importer cannot pair a file of one case with a record of another.
@@ -330,12 +331,18 @@ def _after(module, name: str, *, nth: int = 1, counts: Callable[..., bool] | Non
 def _arm(kill: str, handle) -> None:
     """Make ``kill`` the step after which the process dies.
 
-    ``rename N``: the Nth forward rename of the relocation has returned. ``commit``: the store
-    transaction has written its rows and is at its revision step, before it commits. ``committed``:
-    the store commit has returned. ``pruned``, ``media`` and ``governed``: the step after the
-    commit of that name has returned.
+    ``placed``: a file that the commit records (a trash sidecar) sits in its temporary.
+    ``begun``: a governed deletion's tombstone and receipt intent are written. ``commit``: the
+    store transaction has written its rows and is at its revision step, before it commits.
+    ``committed``: the store commit has returned, before any file moves. ``rename N``: the Nth
+    rename after the commit has returned. ``pruned``, ``media`` and ``governed``: the step after
+    the commit of that name has returned.
     """
-    if kill.startswith("rename "):
+    if kill == "placed":
+        _after(reserved_paths, "publish_generic_bytes")
+    elif kill == "begun":
+        _after(governed, "begin_deletion")
+    elif kill.startswith("rename "):
         _after(
             reserved_paths,
             "move_generic_path",
@@ -371,9 +378,12 @@ def _write_and_die(environment: dict[str, str], root: Path, case: Case) -> None:
     os._exit(0)
 
 
-def _start_fresh(environment: dict[str, str], root: Path, cases: list[Case], report: str) -> None:
+def _start_fresh(
+    environment: dict[str, str], root: Path, cases: list[Case], report: str, order: str
+) -> None:
     """A fresh interpreter that starts as the service starts (``start_server_lifecycle``), so its
-    projector, importer, reconcile and next writes reach the store as a served process's do."""
+    projector, importer, reconcile and next writes reach the store as a served process's do. With
+    ``order`` "importer first", the importer sweeps before the projector's first pass."""
     _as_the_vault_fixture_runs(environment)
     from exomem import writer_lease
     from exomem.collection_store import runtime
@@ -386,6 +396,8 @@ def _start_fresh(environment: dict[str, str], root: Path, cases: list[Case], rep
             assert time.monotonic() < deadline, "the store thread did not open the store"
             time.sleep(0.05)
         with library_scope():
+            if order == "importer first":
+                importer.Importer(root).sweep()
             settle(root)
         reconciled = [reconcile(root)]
         with library_scope():
@@ -400,6 +412,12 @@ def _start_fresh(environment: dict[str, str], root: Path, cases: list[Case], rep
         for case in cases:
             found[case.name]["after the next write"] = findings(root, case.name)
             found[case.name]["reconcile"] = reconciled
+        # What a kill before a commit leaves: a placed file's temporary, a dot name the store does
+        # not own, which no case's side counts.
+        found["temporaries"] = sorted(
+            path.relative_to(root).as_posix()
+            for path in (root / KB).rglob(".exomem-pending-*")
+        )
     finally:
         manager.close()
     Path(report).write_text(json.dumps(found, indent=1, sort_keys=True), encoding="utf-8")
@@ -504,10 +522,10 @@ def kill_each(root: Path, cases: list[Case]) -> None:
         assert child.exitcode == -signal.SIGKILL, f"{case.name}: the kill at {case.kill!r} landed"
 
 
-def restart(root: Path, cases: list[Case], tmp_path: Path) -> dict:
+def restart(root: Path, cases: list[Case], tmp_path: Path, order: str) -> dict:
     report = tmp_path / "restart.json"
     child = multiprocessing.get_context("spawn").Process(
-        target=_start_fresh, args=(dict(os.environ), root, cases, str(report))
+        target=_start_fresh, args=(dict(os.environ), root, cases, str(report), order)
     )
     child.start()
     child.join(600)
@@ -543,8 +561,9 @@ def prepare(root: Path, plan: list[tuple[str, str, bool]]) -> list[Case]:
 
 def problems(found: dict) -> list[str]:
     """Each way one case still needs a person after a fresh start: its pages, records or files on
-    more than one side, the store and the disk disagreeing, a governance marker left pending, or a
-    next write that refuses. An empty folder left behind is not counted here."""
+    more than one side, a side left as empty folders alone, the store and the disk disagreeing, a
+    governance marker left pending, or a next write that refuses. The fixture makes a move's
+    destination folder before the move, so that side's empty folder is the fixture's own."""
     out: list[str] = []
     for phase in ("after the restart", "after the next write"):
         state = found[phase]
@@ -553,6 +572,11 @@ def problems(found: dict) -> list[str]:
         )
         if len(holding) != 1:
             out.append(f"{phase}: split across {holding}")
+        out.extend(
+            f"{phase}: empty folders left at {side}: {where['empty folders']}"
+            for side, where in state["sides"].items()
+            if set(where) == {"empty folders"} and side != "moved"
+        )
         out.extend(f"{phase}: {disagreement}" for disagreement in state["disagree"])
         out.extend(
             f"{phase}: governance {marker}"
@@ -565,10 +589,12 @@ def problems(found: dict) -> list[str]:
     return out
 
 
-def kill_restart_and_judge(root: Path, tmp_path: Path, plan) -> dict[str, list[str]]:
+def kill_restart_and_judge(
+    root: Path, tmp_path: Path, plan, order: str = "projector first"
+) -> dict[str, list[str]]:
     cases = prepare(root, plan)
     kill_each(root, cases)
-    found = restart(root, cases, tmp_path)
+    found = restart(root, cases, tmp_path, order)
     judged = {
         f"{'governed ' if governs else ''}{case.kind} killed at {case.kill}": problems(
             found[case.name]
@@ -580,26 +606,29 @@ def kill_restart_and_judge(root: Path, tmp_path: Path, plan) -> dict[str, list[s
     return judged
 
 
+ORDERS = ("projector first", "importer first")
+
+
+@pytest.mark.parametrize("order", ORDERS)
 @pytest.mark.timeout(600)
 def test_a_lifecycle_write_killed_at_or_after_its_commit_converges_in_a_fresh_process(
-    stored, tmp_path
+    stored, tmp_path, order
 ):
     """A step after the store commit that a kill leaves undone and that nothing redoes: a trashed
-    folder's files left at its source, a receipt left pending, a record that names no file, or a
-    next write through the served door that refuses. Also a lone binary trash killed in its
-    commit, which the importer's rename pairing completes."""
+    folder's files left at its source, a receipt left pending, a record that names no file, an
+    importer sweep that records a file whose move is queued, or a next write through the served
+    door that refuses."""
     plan = [
         ("trash folder", "committed", False),
         ("trash folder", "pruned", False),
         ("trash folder", "media", False),
         ("trash folder", "committed", True),
         ("trash folder", "governed", True),
-        ("trash file", "commit", False),
         ("trash file", "committed", False),
         ("move artifact", "committed", False),
     ]
 
-    judged = kill_restart_and_judge(stored, tmp_path, plan)
+    judged = kill_restart_and_judge(stored, tmp_path, plan, order)
 
     assert judged == dict.fromkeys(judged, [])
 
@@ -617,6 +646,7 @@ def test_a_folder_recovery_killed_after_its_commit_converges_and_can_be_undone(s
     whose undo, a trash of the recovered folder through the served door, refuses."""
     plan = [
         ("recover folder", "committed", False),
+        ("recover folder", "rename 1", False),
         ("recover folder", "pruned", False),
         ("recover folder", "committed", True),
     ]
@@ -626,27 +656,54 @@ def test_a_folder_recovery_killed_after_its_commit_converges_and_can_be_undone(s
     assert judged == dict.fromkeys(judged, [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a rename before the store commit splits the write (vault_store.binaries); the fix "
-    "waits for a ruling on committing first and moving the files after",
-)
+@pytest.mark.parametrize("order", ORDERS)
 @pytest.mark.timeout(600)
-def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(stored, tmp_path):
-    """A kill after a write renamed some of its files and before its store commit: the folder is
-    split between its source and the trash, a recovery's retry refuses with DEST_EXISTS, a lone
-    binary sits in the trash with no sidecar to recover it by, a governed tombstone stays pending,
-    and a moved artifact's page names a binary that is no longer at that path."""
+def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(
+    stored, tmp_path, order
+):
+    """A kill before the store commit, in it, or between it and the writer's last rename: a folder
+    split between its source and the trash, a binary that a sweep records at a path its queued move
+    leaves, a trash slot with no sidecar to recover it by, a governed tombstone left pending, or a
+    moved artifact's page that names a binary no longer at that path. A folder trash killed before
+    its commit, and a recovery killed after it, retry or undo with a recursive folder trash, so they
+    are in the two tests that the served door's refusal of that trash holds back."""
     plan = [
         ("trash folder", "rename 1", False),
-        ("trash folder", "commit", False),
-        ("recover folder", "rename 1", False),
+        ("trash folder", "rename 2", False),
         ("trash folder", "rename 1", True),
+        ("trash file", "placed", False),
+        ("trash file", "commit", False),
         ("trash file", "rename 1", False),
+        ("move artifact", "commit", False),
         ("move artifact", "rename 1", False),
     ]
 
-    judged = kill_restart_and_judge(stored, tmp_path, plan)
+    judged = kill_restart_and_judge(stored, tmp_path, plan, order)
+
+    assert judged == dict.fromkeys(judged, [])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="a served store-mode process refuses the owner's recursive folder delete with "
+    "AUDIENCE_RESTRICTED (`op_delete`: `egress.restricted_release_filter` filters every caller "
+    "while a writer is bound), so the retry of a folder trash refuses",
+)
+@pytest.mark.parametrize("order", ORDERS)
+@pytest.mark.timeout(600)
+def test_a_folder_trash_killed_before_its_commit_converges_and_its_retry_succeeds(
+    stored, tmp_path, order
+):
+    """A folder trash killed before its store commit, or in it, that moves a file before the
+    commit, leaves a governed tombstone pending, or whose retry through the served door refuses."""
+    plan = [
+        ("trash folder", "placed", False),
+        ("trash folder", "commit", False),
+        ("trash folder", "begun", True),
+        ("trash folder", "commit", True),
+    ]
+
+    judged = kill_restart_and_judge(stored, tmp_path, plan, order)
 
     assert judged == dict.fromkeys(judged, [])

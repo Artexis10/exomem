@@ -50,7 +50,7 @@ from exomem import vault as vault_module
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import most_restrictive_principal, request_scope
-from exomem.vault_store import batch, importer, ownership, read, write
+from exomem.vault_store import batch, importer, ownership, projector, read, write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -112,8 +112,8 @@ def test_trash_of_a_recorded_binary_moves_its_file_and_its_record_together(serve
 
 
 def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monkeypatch):
-    """A refused commit after the rename that leaves the file moved while the store still records
-    it at its old path."""
+    """A refused commit that leaves the file moved, or the sidecar in the trash, while the store
+    still records the file at its old path."""
     race_after_check(
         monkeypatch,
         writer,
@@ -127,7 +127,7 @@ def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monke
 
     assert refused.value.code == "STALE_DELETE"
     assert revision(served) == start + 1, "only the competing commit may have committed"
-    assert tree(served) == before, "the file is back and the sidecar is rolled back"
+    assert tree(served) == before, "nothing moved, and no sidecar or temporary stays"
 
 
 def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
@@ -222,41 +222,61 @@ def test_a_page_trash_refuses_a_page_that_changed_after_it_was_judged(
     assert read.owned_bytes(served, JUDGED) == superseded
 
 
-def test_a_trash_that_cannot_put_the_binary_back_says_so_and_one_sweep_records_it(
+def test_a_trash_whose_rename_fails_after_its_commit_says_so_and_the_projector_moves_it(
     served, writer
 ):
-    """A refused commit whose rename back also fails, leaving a record that names a path with no
-    file, or a held item, after the next sweep; or a refusal that does not say the file moved."""
+    """A rename that fails after the commit and leaves a record naming a path with no file, a
+    caller who is not told that the file stayed, a sweep that records the file at its old path
+    again, or a projector that does not finish the move."""
     original_move = reserved_paths.move_generic_path
 
-    def refuse(*arguments, **options):
-        raise write.StoreConflict(DIAGRAM, "a competing writer changed it")
-
-    def move_forward_only(*arguments, rollback=False, **options):
-        if rollback:
+    def refuse_the_binary(root, source, destination, **options):
+        if source == DIAGRAM:
             raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
-        return original_move(*arguments, rollback=rollback, **options)
+        return original_move(root, source, destination, **options)
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(batch, "commit_batch", refuse)
-        patch.setattr(reserved_paths, "move_generic_path", move_forward_only)
-        with pytest.raises(delete_file.DeleteFileError) as refused:
-            delete_file.delete_file(served, path=DIAGRAM, confirm=True)
+        patch.setattr(reserved_paths, "move_generic_path", refuse_the_binary)
+        result = delete_file.delete_file(served, path=DIAGRAM, confirm=True, force_orphan=True)
 
-    assert refused.value.code == "DELETE_FAILED"
-    assert "the file moved, and the next sweep records it" in refused.value.reason
-    moved_to = [
-        path.relative_to(served).as_posix()
-        for path in (served / "Knowledge Base/_trash").rglob("*diagram.bin")
-    ]
-    assert len(moved_to) == 1
-    assert binary_record(served, DIAGRAM), "until the sweep, the store still names the old path"
+    assert [warning for warning in result.warnings if warning.startswith(DIAGRAM)]
+    assert (served / DIAGRAM).read_bytes() == DIAGRAM_BYTES
+    assert binary_record(served, result.trash_path) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
+    run = lambda work: work(writer)  # noqa: E731 - the store thread's runner, by hand
 
-    importer.Importer(served, run=lambda work: work(writer)).sweep()
+    importer.Importer(served, run=run).sweep()
+    assert binary_record(served, DIAGRAM) == [], "the sweep leaves a queued move's source alone"
 
-    assert binary_record(served, DIAGRAM) == []
-    assert binary_record(served, moved_to[0]) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
+    projector.Projector(served, run=run).run_pass()
+
+    assert (served / result.trash_path).read_bytes() == DIAGRAM_BYTES
+    assert not (served / DIAGRAM).exists()
+    moves = "SELECT path FROM store_projection_queue WHERE operation = 'move'"
+    assert store_rows(served, moves) == []
     assert held(served) == []
+
+
+def test_a_binary_that_a_person_changes_before_its_queued_move_stays_and_keeps_their_bytes(
+    served, writer
+):
+    """A projector that finishes a queued binary move over a person's change: it renames bytes
+    that the record does not name, or unlinks or replaces a file to make the move."""
+    moved = "Knowledge Base/Notes/moved.bin"
+    move = write.BinaryMove(DIAGRAM, moved, sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", binary_moves=(move,)))
+    (served / DIAGRAM).write_bytes(b"a person's new diagram")
+    run = lambda work: work(writer)  # noqa: E731 - the store thread's runner, by hand
+
+    projector.Projector(served, run=run).run_pass()
+
+    assert (served / DIAGRAM).read_bytes() == b"a person's new diagram"
+    assert not (served / moved).exists()
+    assert store_rows(served, "SELECT 1 FROM store_projection_queue WHERE path = ?", moved) == []
+
+    importer.Importer(served, run=run).sweep()
+
+    assert binary_record(served, DIAGRAM) == [(sha(b"a person's new diagram"), 22)]
+    assert binary_record(served, moved) == []
 
 
 REPORT = "Knowledge Base/Notes/report.bin"
@@ -310,8 +330,8 @@ def test_a_paired_artifact_moves_its_bytes_and_its_page_in_one_commit(served, wr
         [
             (REPORT_PAGE, "move"),
             (result.new_path, "move"),
-            (REPORT, "delete"),
-            (MOVED_REPORT, "write"),
+            (REPORT, "move"),
+            (MOVED_REPORT, "move"),
             # The move's log entry commits in the same transaction.
             ("Knowledge Base/log.md", "write"),
         ]
@@ -373,7 +393,7 @@ def test_a_folder_trash_refuses_a_note_nothing_imported_and_a_page_added_after_i
 
     assert raced.value.code == "PATH_GUARD_CHANGED"
     assert revision(served) == start + 1, "only the competing commit may have committed"
-    assert tree(served) == before, "every rename is undone and the sidecar rolled back"
+    assert tree(served) == before, "nothing moved, and no sidecar or temporary stays"
 
 
 def test_a_folder_trash_moves_pages_in_the_store_and_files_on_disk(served, writer):

@@ -107,6 +107,13 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
     binary's hold keeps no bytes, so it settles nothing.
     """
     page = ownership.classify(facts.path) is ownership.Ownership.PAGE
+    if not page and facts.moves_away and not facts.held:
+        # The file at a queued binary move's source is the projector's to move: the writer renames
+        # it after the commit, so a sweep between the two must not record it here again. The
+        # projector moves only the bytes that the move recorded and drops the intent otherwise,
+        # and the next sweep judges the file then. A missing file at the move's new path is OWN
+        # below, for the same reason, because its intent is queued.
+        return Verdict.OWN
     if disk is None:
         # A removal that Exomem queued or made, whose manifest write a kill lost, is not an outside
         # delete: ``removed`` is the audit trail's own word for it. A page that the store dropped

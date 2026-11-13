@@ -164,6 +164,23 @@ class BinaryDelete:
 
 
 @dataclass(frozen=True, slots=True)
+class BinaryMove:
+    """A binary's record moved to a path that the store does not hold, before its file moves.
+
+    ``sha256`` and ``size`` are the bytes that the file at ``src`` holds, read before the commit:
+    the record at ``dst`` names them, so a source that the store records nothing for (bytes that
+    nothing imported, or a temporary that holds a new file's bytes) moves the same way. The commit
+    queues one ``move`` intent at ``dst`` with ``src`` in ``from_path``. The writer renames the
+    file right after the commit, and the projector finishes a move that a kill left undone.
+    """
+
+    src: str
+    dst: str
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
 class HeldRow:
     """A held outside change that the commit resolves, named as the caller read its row.
 
@@ -218,6 +235,7 @@ class StoreChange:
     moves: tuple[PageMove, ...] = ()
     binaries: tuple[BinaryRecord, ...] = ()
     binary_deletes: tuple[BinaryDelete, ...] = ()
+    binary_moves: tuple[BinaryMove, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
     resolves_held: tuple[HeldRow, ...] = ()
     files_seen: tuple[FileSeen, ...] = ()
@@ -232,6 +250,7 @@ class StoreChange:
             *(path for move in self.moves for path in (move.src, move.dst)),
             *(record.rel for record in self.binaries),
             *(delete.rel for delete in self.binary_deletes),
+            *(path for move in self.binary_moves for path in (move.src, move.dst)),
         )
 
     def __post_init__(self) -> None:
@@ -321,6 +340,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
             _delete_binary(tx, binary, audit)
+        for move in change.binary_moves:
+            _move_binary(tx, move, revision, audit)
         derive.apply(tx, writer.root, change, existing)
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
@@ -359,12 +380,18 @@ def _require_owned(change: StoreChange) -> None:
     binaries = (
         *(record.rel for record in change.binaries),
         *(delete.rel for delete in change.binary_deletes),
+        *(move.dst for move in change.binary_moves),
     )
     for rels, kind in ((pages, ownership.Ownership.PAGE), (binaries, ownership.Ownership.BINARY)):
         for rel in rels:
             _require_safe(rel)
             if ownership.classify(rel) is not kind:
                 raise OpError(NOT_OWNED, f"the store holds no {kind.value} at {rel}")
+    for move in change.binary_moves:
+        # A move's source may be a temporary that the store does not own, never a page.
+        _require_safe(move.src)
+        if ownership.classify(move.src) is ownership.Ownership.PAGE:
+            raise OpError(NOT_OWNED, f"the store holds a page at {move.src}, not a binary")
 
 
 def _require_safe(rel: str) -> None:
@@ -535,6 +562,15 @@ class _Trail:
         if queue:
             self.intents[rel] = ("delete", None)
 
+    def moved_binary(self, move: BinaryMove, old_sha256: str | None) -> None:
+        # A source that the store recorded ends its life here; one it never recorded had none.
+        if old_sha256 is not None:
+            self.record(move.src, "move", old_sha256)
+            self.deleted.append(move.src)
+        self.record(move.dst, "move", move.sha256, from_path=move.src)
+        self.written.append(move.dst)
+        self.intents[move.dst] = ("move", move.src)
+
     def moved(self, move: PageMove, old_sha256: str, new_sha256: str) -> None:
         # Each side has its own row, so a read of either path's trail meets the move; the new path's
         # row names the old path. Each row holds the bytes that its path held or now holds.
@@ -645,6 +681,20 @@ def _delete_binary(tx: Connection, binary: BinaryDelete, audit: _Trail) -> None:
     audit.removed(binary.rel, row[0], queue=not binary.on_disk)
 
 
+def _move_binary(tx: Connection, move: BinaryMove, revision: int, audit: _Trail) -> None:
+    if _stored(tx, move.dst) is not None:
+        raise StoreConflict(move.dst, "the store already holds it")
+    recorded = tx.execute(
+        "SELECT sha256 FROM store_binaries WHERE path = ?", (move.src,)
+    ).fetchone()
+    tx.execute("DELETE FROM store_binaries WHERE path = ?", (move.src,))
+    tx.execute(
+        "INSERT INTO store_binaries(path, sha256, size, revision) VALUES (?, ?, ?, ?)",
+        (move.dst, move.sha256, move.size, revision),
+    )
+    audit.moved_binary(move, None if recorded is None else recorded[0])
+
+
 def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     """Turn each queued move that touches ``paths`` into the delete and the write it stands for.
 
@@ -652,6 +702,11 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     old one must not leave the old file behind, and must not let the projector rename a page that
     now lives at the old path. So a touched move becomes a delete of its old path and a write of
     its new path, and the later change then replaces either row as it would any other.
+
+    A binary's move cannot split that way: the store holds no bytes to write, and the delete would
+    take away the only copy. Such a change refuses until the move reaches the disk, which the
+    writer does right after its commit and the projector after a kill: it prevents the loss of a
+    binary's bytes, and a wrong refusal costs the caller one retry.
     """
     marks = ",".join("?" * len(paths))
     touched = tx.execute(
@@ -660,6 +715,8 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
         (*paths, *paths),
     ).fetchall()
     for path, from_path, revision, queued_at in touched:
+        if ownership.classify(path) is ownership.Ownership.BINARY:
+            raise StoreConflict(path, "its file has not moved yet; retry once it has")
         tx.execute(
             "UPDATE store_projection_queue SET operation = 'write', from_path = NULL WHERE path = ?",
             (path,),
