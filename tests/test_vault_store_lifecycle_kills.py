@@ -1,0 +1,594 @@
+"""Hard kills of the store-mode lifecycle writers, each followed by a fresh process and a write.
+
+OpenSpec make-vault-store-canonical task 2.4. Each case runs one lifecycle write in a spawned
+interpreter that the operating system kills (SIGKILL) at one durable step: a rename, the store
+commit, or a step after it. A second fresh interpreter then does what a served start does (the
+projector's temporary sweep and pass, the importer's sweep, governance reconcile) and makes the next
+write that a caller would make. The parent only reads the store and the disk.
+
+Every case of one test shares one vault and works on its own folder with its own bytes, so the
+importer cannot pair a file of one case with a record of another.
+"""
+
+from __future__ import annotations
+
+import functools
+import hashlib
+import json
+import multiprocessing
+import os
+import signal
+import sys
+from collections.abc import Callable
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+import test_vault_store_read_write as read_write
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_migration import RELEASED, vault  # noqa: F401
+
+from exomem import (
+    delete_directory,
+    delete_file,
+    extraction_parts,
+    move_file,
+    recover_from_trash,
+    reserved_paths,
+)
+from exomem.collection_store import capability, connection, preview
+from exomem.collection_store.writer import CollectionWriter
+from exomem.governance import membership, policy
+from exomem.governance.principal import library_scope
+from exomem.vault_store import binaries, governed, importer, ownership, projector, write
+from exomem.vault_store import media as store_media
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
+)
+
+stored = read_write.stored
+
+KB = "Knowledge Base"
+TRASH = f"{KB}/_trash/"
+CASES = f"{KB}/Kills"
+SIDECAR = ".meta.json"
+
+
+# -- the vault of one case ---------------------------------------------------------------------
+
+
+def folder_of(case: str) -> str:
+    return f"{CASES}/{case}"
+
+
+def moved_folder_of(case: str) -> str:
+    return f"{CASES}/{case}-moved"
+
+
+def _record(root: Path, rel: str) -> write.BinaryRecord:
+    raw = (root / rel).read_bytes()
+    return write.BinaryRecord(rel, hashlib.sha256(raw).hexdigest(), len(raw))
+
+
+def build_folder(root: Path, writer: CollectionWriter, case: str) -> None:
+    """A folder of one stored page, a recorded binary, a binary that nothing imported and a dot
+    folder holding one part of the page's extraction, each with bytes of this case alone."""
+    folder = folder_of(case)
+    plan = f"{folder}/Plan.md"
+    chart = f"{folder}/chart.bin"
+    (root / folder / "drafts").mkdir(parents=True)
+    (root / chart).write_bytes(f"chart of {case}".encode())
+    (root / folder / "drafts/sketch.bin").write_bytes(f"sketch of {case}".encode())
+    body = f"---\ntitle: Plan {case}\ntype: note\n---\n# Plan {case}\n\nThe works plan.\n"
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED,
+            "a case folder",
+            puts=(write.PagePut(plan, body.encode()),),
+            binaries=(_record(root, chart),),
+        ),
+    )
+    part = root / extraction_parts.part_path(Path(plan), 2)
+    part.parent.mkdir(parents=True)
+    part.write_text(f"the second part of {case}\n", encoding="utf-8")
+
+
+def build_binary(root: Path, writer: CollectionWriter, case: str) -> None:
+    """A folder that holds one recorded binary and nothing else."""
+    chart = f"{folder_of(case)}/chart.bin"
+    (root / chart).parent.mkdir(parents=True)
+    (root / chart).write_bytes(f"chart of {case}".encode())
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED, "a case binary", binaries=(_record(root, chart),)
+        ),
+    )
+
+
+def build_artifact(root: Path, writer: CollectionWriter, case: str) -> None:
+    """A paired artifact: a recorded binary, the stored page that names it, and a dot folder that
+    holds one part of the page's extraction."""
+    folder = folder_of(case)
+    report = f"{folder}/report.bin"
+    (root / folder).mkdir(parents=True)
+    (root / moved_folder_of(case)).mkdir(parents=True)
+    (root / report).write_bytes(f"report of {case}".encode())
+    page = (
+        f"---\ntitle: Report {case}\ntype: note\nevidence_file: {report}\n---\n# Report {case}\n"
+    )
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.GOVERNED,
+            "a case artifact",
+            puts=(write.PagePut(f"{report}.md", page.encode()),),
+            binaries=(_record(root, report),),
+        ),
+    )
+    part = root / extraction_parts.part_path(Path(f"{report}.md"), 2)
+    part.parent.mkdir(parents=True)
+    part.write_text(f"the second part of {case}\n", encoding="utf-8")
+
+
+def govern(root: Path, cases: list[str]) -> None:
+    """A real policy file pair that restricts each case's page."""
+    governance = root / KB / "_Governance"
+    (governance / "scopes").mkdir(parents=True)
+    (governance / "rules").mkdir(parents=True)
+    paths = ", ".join(f'"Kills/{case}/Plan.md"' for case in cases)
+    (governance / "scopes/lifecycle.yaml").write_text(
+        f"governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: [{paths}]\n",
+        encoding="utf-8",
+    )
+    (governance / "rules/lifecycle.yaml").write_text(
+        "governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n"
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: external\nceiling: 4\n',
+        encoding="utf-8",
+    )
+    policy._CACHE.clear()
+    membership.clear_memo()
+
+
+@contextmanager
+def store_writer(root: Path):
+    """The store's writer as the store thread holds it, bound so a store-mode batch may commit."""
+    with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+        writer = CollectionWriter(root, handle)
+        token = preview._BOUND.set((root.resolve(), writer, False))
+        try:
+            yield writer
+        finally:
+            preview._BOUND.reset(token)
+
+
+def settle(root: Path, writer: CollectionWriter) -> None:
+    """What a served start runs: the projector's sweep and pass, then the importer's sweep, twice
+    so that a change the first round made is settled too."""
+    run = functools.partial(_run_on, writer)
+    projecting = projector.Projector(root, run=run)
+    projecting.sweep_temporaries()
+    for _ in range(2):
+        projecting.run_pass()
+        importer.Importer(root, run=run).sweep()
+
+
+def _run_on(writer: CollectionWriter, work: Callable[[CollectionWriter], None]) -> None:
+    work(writer)
+
+
+def reconcile(root: Path) -> None:
+    """The governance settling that the maintenance reconcile runs: receipts, lifecycle markers
+    and the governance tool's own operations."""
+    from exomem.governance import receipts
+    from exomem.governance.recovery import reconcile_governance_operations
+
+    receipts.reconcile(root, dry_run=False)
+    reconcile_governance_operations(root)
+
+
+# -- the writes ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Case:
+    """One write of one case, killed at ``kill``. ``kind`` names the write: ``trash folder``,
+    ``recover folder``, ``trash file`` or ``move artifact``."""
+
+    name: str
+    kind: str
+    kill: str
+    slot: str | None = None
+
+    def run(self, root: Path) -> None:
+        folder = folder_of(self.name)
+        if self.kind == "trash folder":
+            delete_directory.delete_directory(
+                root, path=folder, confirm=True, recursive=True, force_orphan=True
+            )
+        elif self.kind == "recover folder":
+            assert self.slot is not None
+            recover_from_trash.recover_from_trash(root, trash_path=self.slot)
+        elif self.kind == "trash file":
+            delete_file.delete_file(
+                root, path=f"{folder}/chart.bin", confirm=True, force_orphan=True
+            )
+        elif self.kind == "move artifact":
+            move_file.move_file(
+                root,
+                old_path=f"{folder}/report.bin",
+                new_path=f"{moved_folder_of(self.name)}/report.bin",
+            )
+        else:
+            raise ValueError(self.kind)
+
+
+def next_write(root: Path, case: Case) -> str:
+    """The write a caller makes next: the same write again while the store still holds what it
+    moves at its source, else the write that undoes it. ``ok`` or the refusal's code."""
+    with closing(connection.open_reader(connection.store_path(root))) as store:
+        held = [
+            path
+            for (path,) in store.execute(
+                "SELECT path FROM store_pages UNION ALL SELECT path FROM store_binaries"
+            )
+        ]
+    sides = {(_side(case.name, rel) or ("",))[0] for rel in held} - {""}
+    if case.kind == "recover folder":
+        again = case.slot is not None and any(rel.startswith(f"{case.slot}/") for rel in held)
+    elif case.kind == "trash file":
+        again = f"{folder_of(case.name)}/chart.bin" in held
+    else:
+        again = "source" in sides
+    try:
+        if again:
+            case.run(root)
+            return "again: ok"
+        if case.kind == "recover folder":
+            delete_directory.delete_directory(
+                root, path=folder_of(case.name), confirm=True, recursive=True
+            )
+        elif case.kind == "move artifact":
+            move_file.move_file(
+                root,
+                old_path=f"{moved_folder_of(case.name)}/report.bin",
+                new_path=f"{folder_of(case.name)}/report.bin",
+            )
+        else:
+            slots = sorted(side.removeprefix("trash ") for side in sides if side != "source")
+            if len(slots) != 1:
+                return f"undo: no single trash slot ({slots})"
+            dated = next(rel for rel in held if f"/{slots[0]}" in rel)
+            recover_from_trash.recover_from_trash(
+                root, trash_path="/".join(dated.split("/")[:4])
+            )
+        return "undo: ok"
+    except Exception as error:  # noqa: BLE001 - the code is the finding
+        verb = "again" if again else "undo"
+        return f"{verb}: {getattr(error, 'code', repr(error))}"
+
+
+# -- the two child interpreters -----------------------------------------------------------------
+
+
+def _as_the_vault_fixture_runs(environment: dict[str, str]) -> None:
+    """The process state that the vault fixture sets with ``monkeypatch``, which a spawned
+    interpreter does not inherit."""
+    os.environ.clear()
+    os.environ.update(environment)
+    from exomem import records
+
+    capability.RELEASED = RELEASED
+    records._capture_sweep_carrier = lambda *a, **kw: None
+    records._due_state_carrier = lambda *a, **kw: None
+
+
+def _die() -> None:
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _after(module, name: str, *, nth: int = 1, counts: Callable[..., bool] | None = None) -> None:
+    """Kill the process when the ``nth`` counted call of ``module.name`` has returned."""
+    real = getattr(module, name)
+    seen = [0]
+
+    def wrapped(*arguments, **options):
+        result = real(*arguments, **options)
+        if counts is None or counts(*arguments, **options):
+            seen[0] += 1
+            if seen[0] == nth:
+                _die()
+        return result
+
+    setattr(module, name, wrapped)
+
+
+def _arm(kill: str, handle) -> None:
+    """Make ``kill`` the step after which the process dies.
+
+    ``rename N``: the Nth forward rename of the relocation has returned. ``commit``: the store
+    transaction has written its rows and is at its revision step, before it commits. ``committed``:
+    the store commit has returned. ``pruned``, ``media`` and ``governed``: the step after the
+    commit of that name has returned.
+    """
+    if kill.startswith("rename "):
+        _after(
+            reserved_paths,
+            "move_generic_path",
+            nth=int(kill.split()[1]),
+            counts=lambda *a, rollback=False, **k: not rollback,
+        )
+    elif kill == "commit":
+
+        def trace(statement: str) -> None:
+            if statement.startswith("UPDATE store_mode SET revision"):
+                _die()
+
+        handle.connection.set_trace_callback(trace)
+    elif kill == "committed":
+        _after(write, "commit")
+    elif kill == "pruned":
+        _after(binaries, "prune_empty")
+    elif kill == "media":
+        for name in ("after_removal", "derive"):
+            _after(store_media, name)
+    elif kill == "governed":
+        _after(governed, "settle")
+    else:
+        raise ValueError(kill)
+
+
+def _write_and_die(environment: dict[str, str], root: Path, case: Case) -> None:
+    """One lifecycle write in a fresh interpreter that the operating system kills at its step."""
+    _as_the_vault_fixture_runs(environment)
+    with library_scope(), store_writer(root) as writer:
+        _arm(case.kill, writer.handle)
+        case.run(root)
+    os._exit(0)
+
+
+def _start_fresh(environment: dict[str, str], root: Path, cases: list[Case], report: str) -> None:
+    """A fresh interpreter: settle as a served start does, then make each case's next write."""
+    _as_the_vault_fixture_runs(environment)
+    found: dict[str, dict] = {}
+    with library_scope(), store_writer(root) as writer:
+        settle(root, writer)
+        reconcile(root)
+        settle(root, writer)
+        for case in cases:
+            found[case.name] = {"kill": case.kill, "after the restart": findings(root, case.name)}
+        for case in cases:
+            found[case.name]["next write"] = next_write(root, case)
+        settle(root, writer)
+        reconcile(root)
+        for case in cases:
+            found[case.name]["after the next write"] = findings(root, case.name)
+    Path(report).write_text(json.dumps(found, indent=1, sort_keys=True), encoding="utf-8")
+    os._exit(0)
+
+
+# -- what a case finds --------------------------------------------------------------------------
+
+
+def _side(case: str, rel: str) -> tuple[str, str] | None:
+    """Which side of the case a path is on, and the path below that side's root: ``source`` is the
+    case's folder, ``moved`` a move's destination folder, and ``trash <slot>`` each trash slot that
+    names the case (the date folder left out)."""
+    for side, folder in (("source", folder_of(case)), ("moved", moved_folder_of(case))):
+        if rel.startswith(f"{folder}/"):
+            return side, rel[len(folder) + 1 :]
+        if rel == folder:
+            return side, "(itself)"
+    mark = folder_of(case).removeprefix(f"{KB}/").replace("/", "__")
+    if not rel.startswith(TRASH):
+        return None
+    _date, slot, *below = rel[len(TRASH) :].split("/")
+    name = slot.removesuffix(SIDECAR)
+    if not (name.endswith(mark) or f"{mark}__" in name or f"{mark}-" in name):
+        return None
+    if not below and slot.endswith(SIDECAR):
+        return f"trash {name}", "(sidecar)"
+    return f"trash {slot}", "/".join(below) or "(the slot itself)"
+
+
+def findings(root: Path, case: str) -> dict:
+    """What a case's folders and trash slots hold in the store and on disk, and each way the store
+    and the disk disagree there."""
+    with closing(connection.open_reader(connection.store_path(root))) as store:
+        pages = [path for (path,) in store.execute("SELECT path FROM store_pages")]
+        records = dict(store.execute("SELECT path, sha256 FROM store_binaries"))
+        held = [path for (path,) in store.execute("SELECT path FROM store_held")]
+        queued = [path for (path,) in store.execute("SELECT path FROM store_projection_queue")]
+    disk: dict[str, str] = {}
+    empty: list[str] = []
+    for path in (root / KB).rglob("*"):
+        if path.is_file():
+            disk[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        elif path.is_dir() and not any(path.iterdir()):
+            empty.append(path.relative_to(root).as_posix())
+    sides: dict[str, dict[str, list[str]]] = {}
+
+    def note(where: str, rel: str) -> None:
+        side = _side(case, rel)
+        if side is not None:
+            sides.setdefault(side[0], {}).setdefault(where, []).append(side[1])
+
+    for rel in pages:
+        note("store pages", rel)
+    for rel in records:
+        note("store records", rel)
+    for rel in disk:
+        note("disk", rel)
+    for rel in empty:
+        note("empty folders", rel)
+    mine = [rel for rel in {*pages, *records, *disk} if _side(case, rel) is not None]
+    disagree = sorted(
+        [
+            f"record, no file: {rel}"
+            for rel in mine
+            if rel in records and disk.get(rel) != records[rel]
+        ]
+        + [
+            f"file, no record: {rel}"
+            for rel in mine
+            if rel in disk
+            and rel not in records
+            and ownership.classify(rel) is ownership.Ownership.BINARY
+        ]
+        + [f"held: {rel}" for rel in held if rel in mine]
+        + [f"queued: {rel}" for rel in queued if rel in mine]
+    )
+    mark = folder_of(case).removeprefix(f"{KB}/").replace("/", "__")
+    markers = []
+    for path in sorted((root / KB / "_Governance/deletion-tombstones").glob("*.json")):
+        text = path.read_text(encoding="utf-8")
+        if folder_of(case) in text or mark in text:
+            marker = json.loads(text)
+            markers.append(f"{marker.get('operation', '?')}: {marker.get('state', '?')}")
+    return {
+        "sides": {side: {k: sorted(v) for k, v in held_.items()} for side, held_ in sides.items()},
+        "disagree": disagree,
+        "governance markers": markers,
+    }
+
+
+# -- the harness --------------------------------------------------------------------------------
+
+
+def kill_each(root: Path, cases: list[Case]) -> None:
+    """Run each case's write in its own interpreter and check that the kill landed."""
+    context = multiprocessing.get_context("spawn")
+    for case in cases:
+        child = context.Process(target=_write_and_die, args=(dict(os.environ), root, case))
+        child.start()
+        child.join(300)
+        assert child.exitcode == -signal.SIGKILL, f"{case.name}: the kill at {case.kill!r} landed"
+
+
+def restart(root: Path, cases: list[Case], tmp_path: Path) -> dict:
+    report = tmp_path / "restart.json"
+    child = multiprocessing.get_context("spawn").Process(
+        target=_start_fresh, args=(dict(os.environ), root, cases, str(report))
+    )
+    child.start()
+    child.join(600)
+    assert child.exitcode == 0
+    return json.loads(report.read_text(encoding="utf-8"))
+
+
+def prepare(root: Path, plan: list[tuple[str, str, bool]]) -> list[Case]:
+    """One case for each ``(kind, kill, governed)``: its folder or artifact built, a governed
+    case's page restricted by policy, and a recovery's folder trashed first, all settled before
+    the kills."""
+    names = [f"case-{number:02d}" for number in range(len(plan))]
+    slots: dict[str, str | None] = dict.fromkeys(names)
+    with library_scope(), store_writer(root) as writer:
+        for name, (kind, _kill, _governed) in zip(names, plan, strict=True):
+            builders = {"move artifact": build_artifact, "trash file": build_binary}
+            builders.get(kind, build_folder)(root, writer, name)
+        governed_names = [name for name, (*_, governs) in zip(names, plan, strict=True) if governs]
+        if governed_names:
+            govern(root, governed_names)
+        settle(root, writer)
+        for name, (kind, *_rest) in zip(names, plan, strict=True):
+            if kind == "recover folder":
+                slots[name] = delete_directory.delete_directory(
+                    root, path=folder_of(name), confirm=True, recursive=True, force_orphan=True
+                ).trash_path
+        settle(root, writer)
+    return [
+        Case(name, kind, kill, slots[name])
+        for name, (kind, kill, _governed) in zip(names, plan, strict=True)
+    ]
+
+
+def problems(found: dict) -> list[str]:
+    """Each way one case still needs a person after a fresh start: its pages, records or files on
+    more than one side, the store and the disk disagreeing, a governance marker left pending, or a
+    next write that refuses. An empty folder left behind is not counted here."""
+    out: list[str] = []
+    for phase in ("after the restart", "after the next write"):
+        state = found[phase]
+        holding = sorted(
+            side for side, where in state["sides"].items() if set(where) - {"empty folders"}
+        )
+        if len(holding) != 1:
+            out.append(f"{phase}: split across {holding}")
+        out.extend(f"{phase}: {disagreement}" for disagreement in state["disagree"])
+        out.extend(
+            f"{phase}: governance {marker}"
+            for marker in state["governance markers"]
+            if marker.endswith("pending")
+        )
+    if not found["next write"].endswith(": ok"):
+        out.append(f"next write: {found['next write']}")
+    return out
+
+
+def kill_restart_and_judge(root: Path, tmp_path: Path, plan) -> dict[str, list[str]]:
+    cases = prepare(root, plan)
+    kill_each(root, cases)
+    found = restart(root, cases, tmp_path)
+    judged = {
+        f"{'governed ' if governs else ''}{case.kind} killed at {case.kill}": problems(
+            found[case.name]
+        )
+        for case, (_kind, _kill, governs) in zip(cases, plan, strict=True)
+    }
+    assert len(judged) == len(plan), "each case is judged under its own name"
+    return judged
+
+
+@pytest.mark.timeout(600)
+def test_a_lifecycle_write_killed_at_or_after_its_commit_converges_in_a_fresh_process(
+    stored, tmp_path
+):
+    """A step after the store commit that a kill leaves undone and that nothing redoes: a trashed
+    folder's files left at its source, a receipt left pending, a record that names no file. Also
+    a lone binary trash killed in its commit, which the importer's rename pairing completes."""
+    plan = [
+        ("trash folder", "committed", False),
+        ("trash folder", "pruned", False),
+        ("trash folder", "media", False),
+        ("recover folder", "committed", False),
+        ("recover folder", "pruned", False),
+        ("trash folder", "committed", True),
+        ("trash folder", "governed", True),
+        ("recover folder", "committed", True),
+        ("trash file", "commit", False),
+        ("trash file", "committed", False),
+        ("move artifact", "committed", False),
+    ]
+
+    judged = kill_restart_and_judge(stored, tmp_path, plan)
+
+    assert judged == dict.fromkeys(judged, [])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="a rename before the store commit splits the write (vault_store.binaries); the fix "
+    "waits for a ruling on committing first and moving the files after",
+)
+@pytest.mark.timeout(600)
+def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(stored, tmp_path):
+    """A kill after a write renamed some of its files and before its store commit: the folder is
+    split between its source and the trash, a recovery's retry refuses with DEST_EXISTS, a lone
+    binary sits in the trash with no sidecar to recover it by, a governed tombstone stays pending,
+    and a moved artifact's page names a binary that is no longer at that path."""
+    plan = [
+        ("trash folder", "rename 1", False),
+        ("trash folder", "commit", False),
+        ("recover folder", "rename 1", False),
+        ("trash folder", "rename 1", True),
+        ("trash file", "rename 1", False),
+        ("move artifact", "rename 1", False),
+    ]
+
+    judged = kill_restart_and_judge(stored, tmp_path, plan)
+
+    assert judged == dict.fromkeys(judged, [])
