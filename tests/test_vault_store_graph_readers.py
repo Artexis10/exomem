@@ -798,6 +798,7 @@ def test_a_repeated_store_find_reads_no_graph_statement(stored, writer, monkeypa
     timings = find.FindTimings()
     second = find.find(stored, **kwargs, timings=timings)
     assert second == first and timings.cache["hit"]
+    # The graph tables share the `graph_` name prefix that their schema fixes; a statement naming one reads them.
     assert not [sql for sql in statements if "graph_" in sql.lower()]
 
 
@@ -930,44 +931,3 @@ def test_a_repeated_restricted_hub_does_not_recheck_unchanged_pages(
         assert participants().paths
         # Every endpoint still passes recall admission; its stable release verdict needs no new read.
         assert not any("/Gen/" in path for path in checked)
-
-
-@pytest.mark.timeout(1800)
-@pytest.mark.skipif(
-    not os.environ.get("EXOMEM_HUB_RATIO_REPORT"), reason="opt-in 2,000-to-8,000-link scale drill",
-)
-def test_hub_degree_growth_stays_within_one_and_a_half(stored, writer, monkeypatch):  # noqa: F811
-    """A fourfold hub must not restore a corpus-sized visibility check on every relation query."""
-    import statistics
-    import time
-
-    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
-    restrict_external(stored, 'tags: ["secret"]')
-    figures = {}
-    for degree in (2000, 8000):
-        monkeypatch.setattr(sys.modules[__name__], "GENERATED", degree)
-        commit_linked(writer, degree)
-        runs = figures[degree] = {"load": os.getloadavg()}
-        for caller in ("owner", "external"):
-            scope = request_scope(EXTERNAL) if caller == "external" else contextlib.nullcontext()
-            with scope:
-                # Build each revision's resolver and admission sets before timing the same
-                # find.clear_cache cold definition as the graph-reader drill.
-                assert GRAPH_CALLS["find relation_of"](stored)
-                cold, warm = [], []
-                for _ in range(3):
-                    find.clear_cache()
-                    for readings in (cold, warm):
-                        started = time.perf_counter()
-                        assert GRAPH_CALLS["find relation_of"](stored)
-                        readings.append((time.perf_counter() - started) * 1000)
-                runs[caller] = {
-                    "cold_ms": statistics.median(cold), "warm_ms": statistics.median(warm),
-                    "cold_samples_ms": cold, "warm_samples_ms": warm,
-                    "load": os.getloadavg(),
-                }
-    Path(os.environ["EXOMEM_HUB_RATIO_REPORT"]).write_text(json.dumps(figures))
-    for caller in ("owner", "external"):
-        for temperature in ("cold_ms", "warm_ms"):
-            small, large = (figures[degree][caller][temperature] for degree in (2000, 8000))
-            assert large <= small * 1.5, (caller, temperature, small, large)

@@ -8085,11 +8085,7 @@ def page_filter_over(
         return lambda rel_path: decide(rel_path)[0]
     # A non-page reference is kept whatever the page verdicts say, so the
     # catalogue publishes only the pages `decide` hands on to the release verdict.
-    def identity():
-        known = offered.identity()
-        return None if known is None else ("page-filter", known, held)
-
-    return AdmittedPredicate(Admission(identity, decide))
+    return AdmittedPredicate(Admission(offered.identity, decide))
 
 
 def edge_view(

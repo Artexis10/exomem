@@ -14092,10 +14092,12 @@ class GraphView:
             from .published_admission import deciding
             from .vault_store import read as store_read
 
-            with deciding(rel_paths) if store_read.request_memo(self.vault_root) is not None else nullcontext():
+            batched = store_read.request_memo(self.vault_root) is not None
+            with deciding(rel_paths) if batched else nullcontext():
                 admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
                 return {
-                    rel_path: rel_path in admitted_paths and (self.keep is None or self.keep(rel_path))
+                    rel_path: rel_path in admitted_paths
+                    and (self.keep is None or self.keep(rel_path))
                     for rel_path in rel_paths
                 }
 
@@ -14777,7 +14779,8 @@ class GraphView:
             }, resolver)
         # Read the revision from the connection that holds the graph rows, never a newer snapshot.
         revision = self.conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()[0]
-        key = (self.vault_root, revision, recall_policy.recall_policy_identity(self.vault_root), identity)
+        policy = recall_policy.recall_policy_identity(self.vault_root)
+        key = (self.vault_root, revision, policy, identity)
         with _WITHHELD_NAMES_LOCK:
             names = _WITHHELD_NAMES.get(key)
             if names is not None:
@@ -14786,7 +14789,8 @@ class GraphView:
             paths = [f"{path}.md" for path in resolver.full_paths]
             held = store_read.held_lookup(self.vault_root, paths)
             verdicts, live = {}, []
-            with deciding(paths) if store_read.request_memo(self.vault_root) is not None else nullcontext():
+            batched = store_read.request_memo(self.vault_root) is not None
+            with deciding(paths) if batched else nullcontext():
                 for path in paths:
                     self._check()
                     if held(path):
@@ -14802,8 +14806,8 @@ class GraphView:
                 }, resolver)),
                 tuple(live),
             )
-            # A direct library caller may lack a request snapshot; never retain a mixed revision.
-            if (store_read.current_revision(self.vault_root) == revision
+            # Only a request-pinned snapshot proves one revision; a direct call is never kept.
+            if (batched and store_read.current_revision(self.vault_root) == revision
                     and offered.identity() == identity
                     and recall_policy.recall_policy_identity(self.vault_root) == key[2]):
                 with _WITHHELD_NAMES_LOCK:
@@ -14828,7 +14832,9 @@ class GraphView:
         keys = self._withheld_name_keys()
         return {
             source
-            for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(self.conn, keys)
+            for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
+                self.conn, keys
+            )
             if self.keep(source) and self.target_changes(raw_target)
         }
 
