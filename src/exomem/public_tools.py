@@ -200,8 +200,8 @@ class FileHandle(Wire):
     file_name: str | None = None
 
 
-_UNLINKED = Field(default=None, description="The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text.")
-_PREVIEW = Field(default=None, description="Validate the proposed content without saving it.")
+_UNLINKED = Field(default=None, description="Why your review found no useful link; never added to note text.")
+_PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
 
 
@@ -914,7 +914,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           SearchMemory, "read", _search,
           [Route("ask_memory", inverse={"continuation": "more"}, bag="options")], idempotent=True),
     _tool("read_page", "Read page",
-          "Read one page by title or id: text, type, date and links. Unit ids are versioned edit handles and refresh after text changes. An authored '- id:' row is the stable unit anchor; preserve it on updates.",
+          "Read a page. Unit ids change after edits; keep authored '- id:' anchors.",
           ReadPage, "read", _read_page,
           [Route("read_memory", reverse=_spell_read)], idempotent=True,
           claims=(("read_memory", "page"),)),
@@ -923,14 +923,14 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           ReadInstructions, "read", _read_instructions, [Route("bootstrap")], idempotent=True,
           claims=(("bootstrap", "instructions"),)),
     _tool("create_note", "Create note",
-          "Save a lasting conclusion as a new note. Raw material goes in save_source, proof in save_evidence. Link a page, or give unlinked_reason.",
+          "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
           CreateNote, "write", _create_note,
           [Route("remember", inverse={"note_type": "type", "suggestions": "suggest_links", **_NOTE_INVERSE},
                  bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],
           example={"title": "Weekly releases beat batch releases", "type": "insight", "content": "Weekly releases cut rollback size.\n\n## Observations\n- [finding] Weekly releases halved rollback size #release\n\n## Relations\n- supports [[Release cadence]]"},
           captures=True),
     _tool("add_observation", "Add observation",
-          "Add one observation to an existing note; nothing existing changes.",
+          "Append an observation.",
           AddObservation, "write", _add_observation,
           [Route("observe_memory", when={"operation": "add"},
                  inverse={"path": "note", "content": "text", "id": "anchor", "relations": "links", **_NOTE_INVERSE}),
@@ -940,7 +940,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("observe_memory", "observation"), ("observe_memory", "add")),
           captures=True),
     _tool("edit_note", "Edit note",
-          "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate a current note, preview replace_body using the id and body returned by read_page.",
+          "Edit a note; supersede changed conclusions. Validate via preview replace_body with read_page's id and body.",
           EditNote, "write", _edit_note,
           [Route("edit_memory", reverse=_spell_edit),
            Route("observe_memory", when={"operation": "update"}, add={"action": "edit_observation"},
@@ -954,7 +954,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("observe_memory", "update"), ("observe_memory", "remove")),
           captures=True),
     _tool("supersede_note", "Supersede note",
-          "Replace a note whose conclusion changed. The old note stays readable and points to the new one.",
+          "Replace a changed conclusion; keep the old note linked and readable.",
           SupersedeNote, "write", _supersede_note,
           [Route("replace_memory", inverse={"old_path": "note", "reason": "why", "note_type": "type", **_NOTE_INVERSE},
                  bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],

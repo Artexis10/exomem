@@ -1,6 +1,6 @@
 {
   "add_observation": {
-    "description": "Add one observation to an existing note; nothing existing changes.",
+    "description": "Append an observation.",
     "inputSchema": {
       "properties": {
         "note": {
@@ -69,11 +69,10 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
+          "description": "Why your review found no useful link; never added to note text."
         },
         "preview": {
-          "type": "boolean",
-          "description": "Validate the proposed content without saving it."
+          "type": "boolean"
         },
         "detail": {
           "enum": [
@@ -171,7 +170,7 @@
     }
   },
   "create_note": {
-    "description": "Save a lasting conclusion as a new note. Raw material goes in save_source, proof in save_evidence. Link a page, or give unlinked_reason.",
+    "description": "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -214,7 +213,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
+          "description": "Why your review found no useful link; never added to note text."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -247,8 +246,7 @@
           "description": "Also return pages to link."
         },
         "preview": {
-          "type": "boolean",
-          "description": "Validate the proposed content without saving it."
+          "type": "boolean"
         },
         "detail": {
           "enum": [
@@ -345,7 +343,7 @@
     }
   },
   "edit_note": {
-    "description": "Change part of an existing note and say why. A changed conclusion goes to supersede_note. `action` picks the change; each action takes its own fields. To validate a current note, preview replace_body using the id and body returned by read_page.",
+    "description": "Edit a note; supersede changed conclusions. Validate via preview replace_body with read_page's id and body.",
     "inputSchema": {
       "properties": {
         "note": {
@@ -485,11 +483,10 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
+          "description": "Why your review found no useful link; never added to note text."
         },
         "preview": {
-          "type": "boolean",
-          "description": "Validate the proposed content without saving it."
+          "type": "boolean"
         },
         "detail": {
           "enum": [
@@ -1003,7 +1000,7 @@
     }
   },
   "read_page": {
-    "description": "Read one page by title or id: text, type, date and links. Unit ids are versioned edit handles and refresh after text changes. An authored '- id:' row is the stable unit anchor; preserve it on updates.",
+    "description": "Read a page. Unit ids change after edits; keep authored '- id:' anchors.",
     "inputSchema": {
       "properties": {
         "page": {
@@ -1418,7 +1415,7 @@
     }
   },
   "supersede_note": {
-    "description": "Replace a note whose conclusion changed. The old note stays readable and points to the new one.",
+    "description": "Replace a changed conclusion; keep the old note linked and readable.",
     "inputSchema": {
       "properties": {
         "note": {
@@ -1463,7 +1460,7 @@
         },
         "unlinked_reason": {
           "type": "string",
-          "description": "The writing agent's bounded review decision when the available context provides no useful relation. It adds no link or note text."
+          "description": "Why your review found no useful link; never added to note text."
         },
         "vocabulary_decision": {
           "additionalProperties": false,
@@ -1492,8 +1489,7 @@
           "type": "object"
         },
         "preview": {
-          "type": "boolean",
-          "description": "Validate the proposed content without saving it."
+          "type": "boolean"
         },
         "detail": {
           "enum": [
