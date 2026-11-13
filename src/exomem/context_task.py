@@ -226,7 +226,7 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
     else:
         with runtime_resources.semantic_preparation(root, path, check=check, expected_hash=expected_hash) as prepared:
             raw = prepared.source.encode("utf-8")
-            page = find_corpus.parse_page(path, path.stat().st_mtime, root, content=raw)
+            page = find_corpus.parse_page(path, prepared.mtime_ns / 1e9, root, content=raw)
             if page is None:
                 raise ValueError("task source is unavailable")
             who = principal.effective_principal().with_purpose(caller.purpose)

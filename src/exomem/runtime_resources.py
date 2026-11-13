@@ -488,6 +488,7 @@ class SemanticPreparation:
         self.reserved = 0
         self.source = ""
         self.signature: Any = None
+        self.mtime_ns: int | None = None
         self.guard: Any = None
         self.source_bytes = source_bytes
         self.parser_bytes = 0
@@ -596,22 +597,30 @@ def semantic_preparation(
 ):
     """Reserve before source/parse allocations; never wait for memory capacity."""
     from . import freshness, vault
+    from .vault_store import read
 
     if check is not None:
         check()
-    signature = freshness.stat_signature(path)
-    source_bytes = path.stat().st_size
-    with parser_preparation(source_bytes, limit_bytes=limit_bytes, check=check) as preparation:
-        preparation.reserve_source(source_bytes, source_limit=source_limit)
-        source, preparation.guard = vault.read_bounded_guarded_bytes(
-            vault_root, path.relative_to(vault_root).as_posix(), limit=source_bytes,
-            **({"expected_hash": expected_hash} if expected_hash is not None else {}),
-        )
-        if len(source) != source_bytes or freshness.stat_signature(path) != signature:
-            raise OSError("semantic input changed during preparation")
-        preparation.signature = signature
-        preparation.hold(source)
-        yield preparation
+    with read.request_snapshot(vault_root):
+        rel = path.relative_to(vault_root).as_posix()
+        stored = read.owned_meta(vault_root, rel)
+        signature = None if stored is not None else freshness.stat_signature(path)
+        info = None if stored is not None else path.stat()
+        source_bytes = stored.size if stored is not None else info.st_size
+        with parser_preparation(source_bytes, limit_bytes=limit_bytes, check=check) as preparation:
+            preparation.reserve_source(source_bytes, source_limit=source_limit)
+            source, preparation.guard = vault.read_bounded_guarded_bytes(
+                vault_root, rel, limit=source_bytes,
+                **({"expected_hash": expected_hash} if expected_hash is not None else {}),
+            )
+            if len(source) != source_bytes or (
+                stored is None and freshness.stat_signature(path) != signature
+            ):
+                raise OSError("semantic input changed during preparation")
+            preparation.signature = signature
+            preparation.mtime_ns = stored.mtime_ns if stored is not None else info.st_mtime_ns
+            preparation.hold(source)
+            yield preparation
 
 
 def semantic_preparation_status() -> dict[str, int]:

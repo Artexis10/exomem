@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -173,7 +174,9 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
     Keep the graph test and the registry surface test on the same instrument. Repair seams
     record intent without starting a background repair against deliberately damaged files.
     """
-    events = {name: [] for name in ("page_io", "sidecars", "snapshots", "machinery")}
+    events = {name: [] for name in (
+        "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
+    )}
 
     def watching(real, operation):
         def watched(path, *arguments, **keywords):
@@ -193,9 +196,19 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
 
     real_reader = connection.store_reader
     real_connect = sqlite3.connect
+    real_request = read.request_snapshot
+
+    @contextlib.contextmanager
+    def requesting(*arguments, **keywords):
+        with real_request(*arguments, **keywords):
+            scope = read._REQUEST.get()
+            if scope is not None and scope.thread not in events["request_threads"]:
+                events["request_threads"].append(scope.thread)
+            yield
 
     def counting(*arguments, **keywords):
         events["snapshots"].append(1)
+        events["snapshot_threads"].append(threading.get_ident())
         return real_reader(*arguments, **keywords)
 
     def connecting(database, *arguments, **keywords):
@@ -224,6 +237,7 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
         ):
             patch.setattr(owner_module, name, watching(getattr(owner_module, name), name))
         patch.setattr(connection, "store_reader", counting)
+        patch.setattr(read, "request_snapshot", requesting)
         patch.setattr(sqlite3, "connect", connecting)
         yield events
 

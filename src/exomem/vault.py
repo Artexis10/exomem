@@ -1401,6 +1401,13 @@ class PathGuard:
     expected_content_size: int | None = field(default=None, init=False)
     expected_generation: tuple[int, int, int] | None = field(default=None, init=False)
 
+    @property
+    def expects_absence(self) -> bool:
+        """Whether this guard binds a missing leaf in its canonical backend."""
+        return self.leaf_policy == "absent" or (
+            self.leaf_policy == "store" and self.expected_content_hash is None
+        )
+
     @classmethod
     def capture_store(cls, vault_root: Path, target: str) -> PathGuard:
         """Guard a path that the store serves: bind its stored hash, or its absence there."""

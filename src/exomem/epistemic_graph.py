@@ -14740,7 +14740,7 @@ class GraphView:
                     else None
                 )
                 if prepared is not None:
-                    raw, mtime = prepared.source, path.stat().st_mtime
+                    raw, mtime = prepared.source, prepared.mtime_ns / 1e9
                 elif in_store:
                     if source is None:
                         raise FileNotFoundError(rel_path)

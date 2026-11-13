@@ -22,10 +22,14 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _vault_backend import backend_writer, initialize_backend, page_bytes, prepare_vault, write_page
+from _vault_backend import coordinator_url as coordinator_url
+from _vault_backend import vault_backend as vault_backend
 
 from exomem import commands, epistemic_graph, graph_sync, writer_lease
 from exomem import find as find_module
@@ -38,6 +42,7 @@ from exomem.governance.principal import (
     owner_principal,
     request_scope,
 )
+from exomem.vault_store import read as store_read
 
 KB = "Knowledge Base"
 NOTES = f"{KB}/Notes"
@@ -121,9 +126,11 @@ def _materialize(
         for name in filenames:
             os.utime(os.path.join(dirpath, name), (FIXED_MTIME, FIXED_MTIME))
     _reset()
+    initialize_backend(vault)
     with library_scope():
         epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
     _reset()
+    prepare_vault(vault)
     return vault
 
 
@@ -197,6 +204,12 @@ def _arm(vault: Path) -> None:
 
 def _call(vault: Path, principal: RequestPrincipal | None, command: str, **kwargs: Any) -> Any:
     _reset()
+    read_only = commands.invocation_is_read_only(_COMMANDS[command], kwargs)
+    with nullcontext() if read_only else backend_writer(vault):
+        return _call_bound(vault, principal, command, **kwargs)
+
+
+def _call_bound(vault: Path, principal: RequestPrincipal | None, command: str, **kwargs: Any) -> Any:
     try:
         if principal is None:
             with library_scope():
@@ -642,7 +655,7 @@ def _written(vault: Path, principal: RequestPrincipal | None) -> dict[str, Any]:
     capture_sweep.reset_state()
     answer = _call(vault, principal, "remember", content=_GUESSES, title="Probe Page", note_type="insight")
     assert "__error__" not in answer, answer
-    body = (vault / answer["path"]).read_text(encoding="utf-8").split("\n---\n", 1)[1]
+    body = page_bytes(vault, answer["path"]).decode().split("\n---\n", 1)[1]
     sweep = answer.get("capture_sweep") or {}
     return {
         "path": answer["path"],
@@ -707,7 +720,7 @@ def _remember_reviewed(
     block in every variant, which would make the twin comparison vacuous.
     """
     scope = library_scope() if principal is None else request_scope(principal)
-    with scope:
+    with scope, backend_writer(vault):
         answer = writer_lease.invoke_command(
             _COMMANDS["remember"], vault,
             content=_note(content), title=title, slug=slug, note_type="insight",
@@ -727,7 +740,7 @@ def _candidate_world(vault: Path, variant: str, scenario: str) -> None:
     if variant != "A":
         return
     if scenario == "withheld-entity":
-        with library_scope():
+        with library_scope(), backend_writer(vault):
             writer_lease.invoke_command(
                 _COMMANDS["connect_memory"], vault, operation="create-entity",
                 entity_type="organization", name=_CANDIDATE_NAME, summary="Withheld body text.",
@@ -1310,7 +1323,7 @@ def test_a_write_door_answers_a_withheld_target_as_an_absent_one(
             tmp_path / "A" / "vault", {**base, **withheld}, audience, scope=_WRITE_SCOPE
         ),
     }
-    before = {rel: (vaults["A"] / rel).read_bytes() for rel in withheld}
+    before = {rel: page_bytes(vaults["A"], rel) for rel in withheld}
     command, kwargs = _WRITE_DOORS[door]
 
     answers = {
@@ -1319,7 +1332,7 @@ def test_a_write_door_answers_a_withheld_target_as_an_absent_one(
     }
 
     assert _text(answers["A"]) == _text(answers["B"])
-    assert {rel: (vaults["A"] / rel).read_bytes() for rel in withheld} == before
+    assert {rel: page_bytes(vaults["A"], rel) for rel in withheld} == before
 
 
 _OCCUPANT = "occupied.md"
@@ -1375,7 +1388,7 @@ def test_a_withheld_occupant_is_refused_as_any_occupied_path(
 
     assert withheld == visible
     assert "WRITE_REFUSED: target is unavailable" in withheld
-    assert (withheld_vault / WITHHELD_DIR / _OCCUPANT).read_text(encoding="utf-8") == occupant
+    assert page_bytes(withheld_vault, f"{WITHHELD_DIR}/{_OCCUPANT}").decode() == occupant
 
 
 @pytest.mark.parametrize("audience", AUDIENCES)
@@ -1399,7 +1412,7 @@ def test_an_entity_destination_a_withheld_entity_holds_is_refused_as_any_occupie
             entity_type="person",
             summary="A person.",
         )
-        assert (vault / person).read_text(encoding="utf-8") == text
+        assert page_bytes(vault, person).decode() == text
 
     assert answers["withheld"] == answers["visible"]
     assert answers["withheld"]["message"].startswith("WRITE_REFUSED: target is unavailable")
@@ -1428,7 +1441,7 @@ def test_a_slug_destination_a_withheld_entity_holds_is_refused_as_any_occupied_o
             entity_type="person",
             summary="A person.",
         )
-        assert (vault / occupied).read_text(encoding="utf-8") == entity
+        assert page_bytes(vault, occupied).decode() == entity
 
     assert answers["withheld"] == answers["visible"]
     assert answers["withheld"]["message"].startswith("WRITE_REFUSED: target is unavailable")
@@ -1465,6 +1478,7 @@ def test_a_restricted_writer_deletes_no_folder(
     (vault / NOTES / "Mixed" / "hidden.md").write_text(
         _page("Hidden Draft", "Withheld body text."), encoding="utf-8"
     )
+    write_page(vault, f"{NOTES}/Mixed/hidden.md", _page("Hidden Draft", "Withheld body text.").encode())
     principal = _writer(audience)
 
     def delete(folder: str, **kwargs: Any) -> Any:
@@ -1496,9 +1510,9 @@ def test_a_restricted_writer_deletes_no_folder(
         listed = _call(vault, principal, "browse_memory", mode="list", path=WITHHELD_DIR)
         assert "NOT_FOUND" in _text(listed), listed
     assert sorted(p.name for p in (vault / NOTES / "Mixed").iterdir()) == ["hidden.md", "open.md"]
-    assert (vault / WITHHELD_DIR / "hidden.md").is_file()
+    assert store_read.holds_file(vault, f"{WITHHELD_DIR}/hidden.md")
     _call(vault, principal, "manage_memory_file", operation="delete", path=f"{NOTES}/alpha.md", confirm=True)
-    assert not (vault / NOTES / "alpha.md").exists()  # the writer's own page is trashed
+    assert not store_read.holds_file(vault, f"{NOTES}/alpha.md")  # the writer's own page is trashed
 
 
 #: Run-specific values in a write's answer: request and receipt ids, hashes,
@@ -1525,7 +1539,7 @@ def test_a_restricted_move_reports_the_links_it_may_see(
     hidden = f"{WITHHELD_DIR}/hidden-linker.md"
     withheld = {hidden: _page("Hidden Draft", "Also [[Knowledge Base/Notes/alpha]] and [[alpha]].")}
     vaults = _twins(tmp_path, base, withheld, audience)
-    hidden_before = (vaults["A"] / hidden).read_text(encoding="utf-8")
+    hidden_before = page_bytes(vaults["A"], hidden).decode()
 
     answers = {
         variant: _VOLATILE_TEXT.sub(
@@ -1547,7 +1561,7 @@ def test_a_restricted_move_reports_the_links_it_may_see(
 
     assert '"__error__"' not in answers["A"], answers["A"]
     assert answers["A"] == answers["B"] == answers["C"]
-    assert (vaults["A"] / hidden).read_text(encoding="utf-8") == hidden_before
+    assert page_bytes(vaults["A"], hidden).decode() == hidden_before
 
 
 INSIGHTS = f"{NOTES}/Insights"
@@ -1595,7 +1609,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
         for variant, files in variants.items()
     }
     extra = {} if detail is None else {"response_detail": detail}
-    hidden_before = (vaults["A"] / hidden).read_text(encoding="utf-8")
+    hidden_before = page_bytes(vaults["A"], hidden).decode()
 
     moves = (("gamma", "gamma-x"), ("gamma-x", "gamma-y"), ("solo", "solo-x"))
 
@@ -1626,7 +1640,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     for step in range(len(moves) + 1):
         assert answers["A"][step] == answers["B"][step], step
         assert answers["C"][step] == answers["B"][step], step
-    assert (vaults["A"] / hidden).read_text(encoding="utf-8") == hidden_before
+    assert page_bytes(vaults["A"], hidden).decode() == hidden_before
 
 
 _CLOSURE_TARGETS = {
@@ -1737,7 +1751,7 @@ def test_a_withheld_page_the_move_does_not_rewrite_never_blocks_it(
                 ),
             )
             if variant != "B":
-                assert (vault / hidden).read_text(encoding="utf-8") == files[hidden]
+                assert page_bytes(vault, hidden).decode() == files[hidden]
         assert '"__error__"' not in answers["B"], (detail, answers["B"])
         assert answers["A"] == answers["B"], (detail, answers["A"])
         assert answers["C"] == answers["B"], detail
@@ -1807,7 +1821,7 @@ def test_a_restricted_move_skips_a_withheld_linker_it_cannot_rewrite_cleanly(
                 for old, new in moves
             ]
             if variant == "A":
-                assert (vault / hidden).read_text(encoding="utf-8") == text
+                assert page_bytes(vault, hidden).decode() == text
                 if guess == _GUESSED and detail is None:
                     _reset()
                     with library_scope():
@@ -1872,7 +1886,7 @@ def test_a_restricted_file_delete_counts_the_links_it_may_see(
                 for step in steps
             ]
             if variant == "A" and guess == _GUESSED and detail is None:
-                assert (vault / hidden).read_text(encoding="utf-8") == files[hidden]
+                assert page_bytes(vault, hidden).decode() == files[hidden]
                 _reset()
                 with library_scope():
                     report = audit_module.audit(
@@ -1904,7 +1918,7 @@ def test_the_owner_is_still_refused_a_linker_it_cannot_rewrite(tmp_path: Path) -
             update_wikilinks=True,
         )
         assert answer.get("__error__"), (linker, answer)
-        assert (vault / hidden).read_text(encoding="utf-8") == text
+        assert page_bytes(vault, hidden).decode() == text
 
 
 def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -> None:
@@ -1915,7 +1929,7 @@ def test_the_owner_still_writes_to_a_page_withheld_from_others(tmp_path: Path) -
     answer = _call(vault, None, command, **kwargs)
 
     assert "__error__" not in answer, answer
-    assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")
+    assert "More text." in page_bytes(vault, _WITHHELD_TARGET).decode()
 
 
 def test_an_unbound_call_needs_explicit_library_authority_to_write(tmp_path: Path) -> None:
@@ -1927,14 +1941,14 @@ def test_an_unbound_call_needs_explicit_library_authority_to_write(tmp_path: Pat
 
     assert egress.restricted_release_filter(vault) is None
     assert egress.write_target_withheld(vault, _WITHHELD_TARGET) is False
-    before = (vault / _WITHHELD_TARGET).read_bytes()
-    with pytest.raises(ValueError, match="WRITE_REFUSED"):
+    before = page_bytes(vault, _WITHHELD_TARGET)
+    with backend_writer(vault), pytest.raises(ValueError, match="WRITE_REFUSED"):
         writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
-    assert (vault / _WITHHELD_TARGET).read_bytes() == before
-    with library_scope():
+    assert page_bytes(vault, _WITHHELD_TARGET) == before
+    with library_scope(), backend_writer(vault):
         writer_lease.invoke_command(_COMMANDS[command], vault, **kwargs)
 
-    assert "More text." in (vault / _WITHHELD_TARGET).read_text(encoding="utf-8")
+    assert "More text." in page_bytes(vault, _WITHHELD_TARGET).decode()
 
 
 # ---------------------------------------------------------------------------
@@ -2567,7 +2581,7 @@ def test_a_guest_deletes_a_page_a_marked_page_links_as_if_the_linker_were_absent
     guest = {variant: delete(vault, _principal("external")) for variant, vault in vaults.items()}
     assert "__error__" not in guest["absent"], guest["absent"]
     assert "__error__" not in guest["present"], guest["present"]
-    assert not (vaults["present"] / alpha).exists()
+    assert not store_read.holds_file(vaults["present"], alpha)
 
 
 def test_a_guest_deletes_no_folder_whether_or_not_it_holds_a_marked_page(
@@ -2594,7 +2608,7 @@ def test_a_guest_deletes_no_folder_whether_or_not_it_holds_a_marked_page(
 
     assert guest["present"] == guest["absent"]
     assert guest["present"]["message"].startswith("AUDIENCE_RESTRICTED"), guest["present"]
-    assert (vaults["present"] / marked).exists()
+    assert store_read.holds_file(vaults["present"], marked)
 
 
 def test_a_guest_moves_a_page_a_marked_page_links_as_if_the_linker_were_absent(
@@ -2626,7 +2640,7 @@ def test_a_guest_moves_a_page_a_marked_page_links_as_if_the_linker_were_absent(
 
     assert "__error__" not in guest["absent"], guest["absent"]
     assert guest["present"] == guest["absent"]
-    assert "alpha-moved" in (vaults["present"] / linker).read_text(encoding="utf-8")
+    assert "alpha-moved" in page_bytes(vaults["present"], linker).decode()
 
 
 def test_a_marked_entity_destination_is_refused_as_any_occupied_one(tmp_path: Path) -> None:
@@ -2651,7 +2665,7 @@ def test_a_marked_entity_destination_is_refused_as_any_occupied_one(tmp_path: Pa
             name=name, entity_type="person", summary="A person.",
         )
         answers[which] = _text(answer).replace(name, "<name>")
-        assert (vault / occupant).read_text(encoding="utf-8") == text
+        assert page_bytes(vault, occupant).decode() == text
 
     assert answers["marked"] == answers["visible"]
     assert "ENTITY_EXISTS" in answers["marked"], answers["marked"]
@@ -2728,9 +2742,11 @@ def test_raw_recall_admits_before_selection_and_keeps_owner_cache_separate(tmp_p
         )
     answers = []
     for root in roots:
+        initialize_backend(root)
         _reset()
         freshness.rebaseline(root)
         assert lexstore.get_store(root).rebuild_atomic()
+        prepare_vault(root)
         with request_scope(guest):
             first = commands.op_ask_memory(root, query=query, mode="keyword", limit=1, graph=False)
         with library_scope():
@@ -2763,10 +2779,12 @@ def test_owner_session_closure_rechecks_raw_admission_before_ranking(tmp_path: P
     (folder / "__exomem_raw_v1__original.md").write_text(
         _page("Protected", "orchard original", type="insight", updated="2026-10-01")
     )
+    initialize_backend(root)
     _reset()
     freshness.rebaseline(root)
     assert lexstore.get_store(root).rebuild_atomic()
     epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+    prepare_vault(root)
     owner = owner_principal(surface="library")
     database = tmp_path / "sessions.sqlite"
     connection, migration = _file_connection(database)
@@ -2842,11 +2860,13 @@ def test_raw_hidden_term_frequencies_do_not_reorder_guest_hybrid_hits(tmp_path, 
                 (folder / name).write_text(
                     _page("Protected", "- [fact] apple apple apple apple apple apple ^fruit", type="insight", **fields)
                 )
+        initialize_backend(root)
         _reset()
         bm25._INDEX.clear()
         freshness.rebaseline(root)
         if backend == "fts5":
             assert lexstore.get_store(root).rebuild_atomic()
+        prepare_vault(root)
         with request_scope(guest):
             result = commands.op_ask_memory(
                 root, query="apple pear", mode="hybrid", limit=2, graph=False, rerank=False,
@@ -2871,9 +2891,11 @@ def test_recall_does_not_emit_a_scene_child_of_a_protected_parent(tmp_path: Path
         media_type="image", evidence_file=f"{NOTES}/frame.jpg",
     ))
     (folder / "alpha.md").write_text(_page("Alpha", "orchard public", type="insight"))
+    initialize_backend(root)
     _reset()
     freshness.rebaseline(root)
     assert lexstore.get_store(root).rebuild_atomic()
+    prepare_vault(root)
     guest = RequestPrincipal("principal:" + "ab" * 32, surface="mcp", issuer_family="mcp-oauth:synthetic")
     with request_scope(guest):
         result = commands.op_ask_memory(root, query="orchard", mode=mode, limit=1, graph=False)
@@ -2897,9 +2919,11 @@ def test_recall_authorizes_a_declared_missing_parent_without_hiding_public_orpha
         "Frame", "orchard scene", type="source", parent_media=f"{NOTES}/{parent}",
         media_type="image", evidence_file=f"{NOTES}/frame.jpg",
     ))
+    initialize_backend(tmp_path)
     _reset()
     freshness.rebaseline(tmp_path)
     assert lexstore.get_store(tmp_path).rebuild_atomic()
+    prepare_vault(tmp_path)
     args = dict(query=query, mode=mode, limit=1, graph=False)
     with library_scope():
         owner = commands.op_ask_memory(tmp_path, **args)
@@ -3307,4 +3331,4 @@ def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_
     assert not any('"graph_sync' in answer for answer in answers["B"]), answers["B"]
     assert answers["A"] == answers["B"]
     assert answers["C"] == answers["B"]
-    assert f"[[{source[:-3]}]]" in (vaults["A"] / hidden).read_text(encoding="utf-8")
+    assert f"[[{source[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()

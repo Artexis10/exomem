@@ -12,6 +12,9 @@ from pathlib import Path
 import pytest
 import yaml
 from _public_call import public_call
+from _vault_backend import coordinator_url as coordinator_url
+from _vault_backend import delete_page, initialize_backend, prepare_vault, write_page
+from _vault_backend import vault_backend as vault_backend
 from starlette.testclient import TestClient
 from test_connector_boundary import SCOPE
 from test_connector_boundary import configured_boundary as configured_boundary
@@ -29,8 +32,11 @@ from exomem import (
     vault,
 )
 from exomem.__main__ import main
+from exomem.collection_store import connection as store_connection
 from exomem.governance import egress
 from exomem.governance.principal import library_scope, request_scope
+from exomem.vault_store import mode as store_mode
+from exomem.vault_store import read as store_read
 from exomem.vocabulary import instances, registry_spec
 
 NOTES = "Knowledge Base/Notes/Insights"
@@ -40,11 +46,15 @@ def _write(root: Path, path: str, body: str) -> None:
     target = root / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(body, encoding="utf-8")
+    write_page(root, path, body.encode())
 
 
 def _build(root: Path) -> epistemic_graph.EpistemicGraphIndex:
+    initialize_backend(root)
     index = epistemic_graph.EpistemicGraphIndex(root)
-    index.rebuild_all()
+    if not store_mode.store_mode_for_reads(root):
+        index.rebuild_all()
+    prepare_vault(root)
     assert index.available()  # Maintenance proves the snapshot before an interactive read.
     find.evict_resolver_caches(root)
     find.recall_resolver_snapshot(root)  # Maintenance warms the exact resolver too.
@@ -174,7 +184,7 @@ def test_hidden_pages_and_authored_edges_do_not_change_counts_or_rank(
     _build(root)
     with request_scope(_external()):
         present = commands.op_viewer_map(root)
-    (root / hidden).unlink()
+    delete_page(root, hidden)
     warm_managed_cell(root)
     _build(root)
     with request_scope(_external()):
@@ -202,7 +212,7 @@ def test_hidden_rows_do_not_spend_the_three_admitted_inspection_slots(
     _build(root)
     with request_scope(_external()):
         present = commands.op_viewer_map(root)
-    (root / hidden).unlink()
+    delete_page(root, hidden)
     warm_managed_cell(root)
     _build(root)
     with request_scope(_external()):
@@ -227,7 +237,7 @@ def test_hidden_link_candidates_resolve_as_if_absent(tmp_path: Path, warm_manage
     _build(root)
     with request_scope(_external()):
         present = commands.op_viewer_map(root)
-    (root / hidden).unlink()
+    delete_page(root, hidden)
     warm_managed_cell(root)
     _build(root)
     with request_scope(_external()):
@@ -277,7 +287,7 @@ def test_source_byte_boundary_accepts_supported_work_and_keeps_partial_pages(
 
 
 def test_changed_source_bytes_cannot_be_rederived_against_an_old_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, vault_backend,
 ) -> None:
     root = tmp_path / "vault"
     _small(root)
@@ -305,6 +315,12 @@ def test_changed_source_bytes_cannot_be_rederived_against_an_old_snapshot(
     with request_scope(_external()):
         result = commands.op_viewer_map(root)
     assert changed
+    if vault_backend == "store":
+        # Changing a projection cannot change the store's source bytes or invalidate its graph rows.
+        assert result["state"] == "complete", result
+        assert result["counts"]["drawn_nodes"] == 3
+        assert not any(item["reason"] == "source_changed" for item in result["truncation"])
+        return
     assert result["state"] == "partial", result
     assert result["counts"]["eligible_edges"] is None
     assert result["counts"]["drawn_nodes"] == 3
@@ -419,7 +435,7 @@ def test_cold_restricted_resolver_returns_partial_without_a_walk_or_rebuild(
     assert sentinel.count == 0, sentinel.report()
 
 
-def test_cold_registry_is_unavailable_without_walking_notes(tmp_path: Path, walk_sentinel) -> None:
+def test_cold_registry_is_unavailable_without_walking_notes(tmp_path: Path, walk_sentinel, vault_backend) -> None:
     root = tmp_path / "vault"
     _small(root)
     freshness.clear()  # A restarted process has not seeded its live registry yet.
@@ -427,9 +443,14 @@ def test_cold_registry_is_unavailable_without_walking_notes(tmp_path: Path, walk
     sentinel = walk_sentinel(root / "Knowledge Base/Notes", current_thread_only=True)
     with library_scope():
         result = commands.op_viewer_map(root)
-    assert result["state"] == "unavailable"
-    assert result["counts"]["eligible_nodes"] is None
-    assert result["counts"]["eligible_edges"] is None
+    if vault_backend == "store":
+        assert result["state"] == "complete"
+        assert result["counts"]["eligible_nodes"] == 3
+        assert result["counts"]["eligible_edges"] == 2
+    else:
+        assert result["state"] == "unavailable"
+        assert result["counts"]["eligible_nodes"] is None
+        assert result["counts"]["eligible_edges"] is None
     assert sentinel.count == 0, sentinel.report()
 
 
@@ -455,7 +476,7 @@ def test_checkpointless_proved_snapshot_uses_live_projection_without_a_walk(
 
 @pytest.mark.parametrize("loss", ["opening", "validated"])
 def test_registry_loss_refuses_without_walking_notes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, walk_sentinel, loss: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, walk_sentinel, loss: str, vault_backend,
 ) -> None:
     root = tmp_path / "vault"
     _small(root)
@@ -480,14 +501,19 @@ def test_registry_loss_refuses_without_walking_notes(
     sentinel = walk_sentinel(root / "Knowledge Base/Notes", current_thread_only=True)
     with library_scope():
         result = commands.op_viewer_map(root)
-    assert result["state"] == "unavailable", result
-    assert result["counts"]["eligible_nodes"] is None
-    assert result["counts"]["eligible_edges"] is None
+    if vault_backend == "store":
+        assert result["state"] == "complete", result
+        assert result["counts"]["eligible_nodes"] == 3
+        assert result["counts"]["eligible_edges"] == 2
+    else:
+        assert result["state"] == "unavailable", result
+        assert result["counts"]["eligible_nodes"] is None
+        assert result["counts"]["eligible_edges"] is None
     assert sentinel.count == 0, sentinel.report()
 
 
 def test_proved_inherited_snapshot_uses_current_resident_topology(
-    tmp_path: Path, warm_managed_cell, walk_sentinel,
+    tmp_path: Path, warm_managed_cell, walk_sentinel, vault_backend,
 ) -> None:
     root = tmp_path / "vault"
     _small(root)
@@ -505,9 +531,10 @@ def test_proved_inherited_snapshot_uses_current_resident_topology(
     warm_managed_cell(root)
     assert index.adopt_published_snapshot().adopted is True
     with request_scope(_external()):
-        assert commands.op_viewer_map(root)["state"] == "unavailable"
+        assert commands.op_viewer_map(root)["state"] == ("complete" if vault_backend == "store" else "unavailable")
     assert index.available()  # Adoption alone does not remember the public reader's proof.
-    live = freshness.live_recall_checkpoint(root, "vault")
+    live = (store_read.recall_checkpoint(root, "vault") if vault_backend == "store"
+            else freshness.live_recall_checkpoint(root, "vault"))
     assert live is not None and live != stored
     assert find.recall_resolver_snapshot_at_checkpoint(root, live) is not None
     sentinel = walk_sentinel(root / "Knowledge Base/Notes", current_thread_only=True)
@@ -554,21 +581,33 @@ def test_topology_change_during_reduction_withholds_edges_and_exact_totals(
 
 
 @pytest.mark.query_deadline
-def test_sqlite_contention_is_unavailable_within_the_viewer_deadline(tmp_path: Path) -> None:
+def test_sqlite_contention_is_unavailable_within_the_viewer_deadline(tmp_path: Path, vault_backend) -> None:
     root = tmp_path / "vault"
     _small(root)
-    with sqlite3.connect(epistemic_graph.sidecar_path(root)) as publisher:
-        publisher.execute("PRAGMA journal_mode=DELETE")
-        publisher.execute("BEGIN EXCLUSIVE")
+    database = (store_connection.store_path(root) if vault_backend == "store"
+                else epistemic_graph.sidecar_path(root))
+    with sqlite3.connect(database) as publisher:
+        if vault_backend == "store":
+            # WAL readers serve the committed snapshot while the writer holds an uncommitted change.
+            publisher.execute("BEGIN IMMEDIATE")
+            publisher.execute("UPDATE store_pages SET body = ?", (b"uncommitted projection",))
+        else:
+            publisher.execute("PRAGMA journal_mode=DELETE")
+            publisher.execute("BEGIN EXCLUSIVE")
         started = time.monotonic()
         with library_scope():
             result = commands.op_viewer_map(root)
         elapsed = time.monotonic() - started
         publisher.rollback()
     assert elapsed < 5
-    assert result["state"] == "unavailable", result
-    assert result["counts"]["eligible_nodes"] is None
-    assert result["counts"]["eligible_edges"] is None
+    if vault_backend == "store":
+        assert result["state"] == "complete", result
+        assert result["counts"]["eligible_nodes"] == 3
+        assert result["counts"]["eligible_edges"] == 2
+    else:
+        assert result["state"] == "unavailable", result
+        assert result["counts"]["eligible_nodes"] is None
+        assert result["counts"]["eligible_edges"] is None
 
 
 @pytest.mark.query_deadline
@@ -621,7 +660,7 @@ def test_stopped_inspection_never_claims_exact_totals(
 
 @pytest.mark.parametrize("failure", ["missing", "incompatible", "unproven", "stale"])
 def test_unavailable_snapshot_is_not_an_empty_vault(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, vault_backend,
 ) -> None:
     root = tmp_path / "vault"
     if failure != "missing":
@@ -633,10 +672,19 @@ def test_unavailable_snapshot_is_not_an_empty_vault(
             epistemic_graph.clear_snapshot_proofs()
             monkeypatch.setattr(freshness, "recall_is_live", lambda *_a, **_k: False)
         else:
-            _write(root, f"{NOTES}/source.md", "---\ntype: insight\n---\n# Changed\n")
+            # This is an outside edit of the projection, not a governed store commit.
+            (root / NOTES / "source.md").write_text("---\ntype: insight\n---\n# Changed\n")
             freshness.on_files_changed(root, [root / f"{NOTES}/source.md"])
     with library_scope():
         result = commands.op_viewer_map(root)
+    if vault_backend == "store" and failure != "missing":
+        # These file publication witnesses cannot invalidate a canonical store revision.
+        assert result["state"] == "complete", result
+        assert result["available"] is True
+        assert result["counts"]["eligible_nodes"] == 3
+        assert result["counts"]["eligible_edges"] == 2
+        assert result["snapshot"]["generation"] == str(store_read.current_revision(root))
+        return
     assert result["state"] == "unavailable"
     assert result["available"] is False
     assert result["counts"]["eligible_nodes"] is None
@@ -651,6 +699,7 @@ def test_large_managed_vault_bounds_transport_without_a_source_walk(
     tmp_path: Path, warm_managed_cell, walk_sentinel,
 ) -> None:
     root = tmp_path / "vault"
+    initialize_backend(root)
     for number in range(4000):
         next_number = (number + 1) % 4000
         _write(root, f"{NOTES}/page-{number:04d}.md",

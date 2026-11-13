@@ -145,13 +145,6 @@ OWNER_REFUSALS = {
     "observe_transfer": "CLOUD_GATEWAY_REQUIRED:",
 }
 
-# These are the remaining observed command cases after the shared read fixes, not a blanket xfail.
-# A new command is unmarked; an invalid sample raises an ordinary assertion, not this failure.
-KNOWN_FAILURES = {
-    "viewer_map": "Payloads match; store revision identity intentionally differs from file generation metadata",
-}
-
-
 class ReadSurfaceViolation(AssertionError):
     """A recorded store contract failure, distinct from a bad sample or setup."""
 
@@ -256,13 +249,7 @@ def comparable(value):
     return result
 
 
-@pytest.mark.parametrize("name", [
-    pytest.param(name, marks=(
-        pytest.mark.xfail(strict=True, raises=ReadSurfaceViolation, reason=KNOWN_FAILURES[name])
-        if name in KNOWN_FAILURES else ()
-    ))
-    for name in sorted(READ_COMMANDS)
-])
+@pytest.mark.parametrize("name", sorted(READ_COMMANDS))
 def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property, request, name):  # noqa: F811
     """Lost content, changed refusals, projection I/O, sidecars, extra snapshots and repairs."""
     assert name in SAMPLES, f"registered reader {name} has no sample"
@@ -335,6 +322,13 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         for value in expected.values():
             value["graph_sync"] = {"state": "not_applicable", "generation": None}
             value["vault_store"] = {"state": "available", "revision": revision}
+    if name == "viewer_map":
+        with read.snapshot(vault) as snapshot:
+            revision = snapshot.revision
+        for value in expected.values():
+            # The static graph identity survives migration; volatile file witnesses do not.
+            value["snapshot"].pop("recall_projection_identity")
+            value["snapshot"]["generation"] = str(revision)
     for sidecar in (epistemic_graph.sidecar_path(vault), lexstore.lexical_path(vault)):
         sidecar.unlink(missing_ok=True)
         sidecar.write_bytes(SENTINEL)
@@ -361,6 +355,8 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
                 violations.append("sidecar connection")
             if len(events["snapshots"]) != 1:
                 violations.append(f"snapshots={len(events['snapshots'])}")
+            if set(events["snapshot_threads"]) != set(events["request_threads"]):
+                violations.append("off-thread snapshot")
             if events["machinery"]:
                 violations.append("file-mode machinery")
             observations.append({

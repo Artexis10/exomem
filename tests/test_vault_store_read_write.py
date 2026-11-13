@@ -14,7 +14,9 @@ import os
 import signal
 import sqlite3
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from contextvars import copy_context
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -71,6 +73,30 @@ def rows(root, sql, *arguments):
 
 def stored_body(root, rel):
     return rows(root, "SELECT body FROM store_pages WHERE path = ?", rel)[0][0]
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_inherited_worker_snapshot_cannot_mix_revisions(stored, writer, committed):
+    """A worker may join only the request's revision; a raced read retries on its pinned thread."""
+    with read.request_snapshot(stored):
+        def body():
+            with read.snapshot(stored) as view:
+                return view.revision, view.page(ALPHA).body
+
+        pinned = body()
+        if committed:
+            write.commit(writer, put(ALPHA, EDITED))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(copy_context().run, body)
+            if committed:
+                with pytest.raises(connection.CollectionStoreError) as refused:
+                    future.result()
+                assert refused.value.code == "VAULT_STORE_SNAPSHOT_CHANGED"
+                assert body() == pinned  # The retry reads the request's original bytes and revision.
+            else:
+                assert future.result() == pinned
+    if committed:
+        assert body() == (pinned[0] + 1, EDITED)
 
 
 def test_path_resolution_uses_stored_files_and_folders_without_probing_projections(

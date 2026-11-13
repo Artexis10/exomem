@@ -2609,8 +2609,8 @@ def _commit_existing_locked(
         if admission is not None:
             if not admission(relation_review.lifecycle_prepared_path(root, preflight.after.identity).relative_to(root).as_posix()):
                 raise ValueError("WRITE_REFUSED: target is unavailable")
-            if publication_entered:
-                # The completion seam binds the after image, never the replaced before guard.
+            if publication_entered and preflight.primary_guard.leaf_policy != "store":
+                # Files publish before this call; the store publishes every after-image atomically later.
                 source, _ = vault.read_guarded_text(root, root / preflight.path)
                 if vault.content_hash(source) != vault.content_hash(preflight.after_source):
                     raise ValueError("WRITE_REFUSED: target is unavailable")

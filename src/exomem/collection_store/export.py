@@ -746,7 +746,8 @@ def completed_retirement_binding(root, fence_client, store_id=None):
         if authority.read_marker(root) is not None:
             return None
         fence = fence_client.collection_store_fence()
-        if fence.enrolled:
+        # The coordinator's generation zero means never enrolled: no retired export can exist.
+        if fence.enrolled or fence.generation == 0:
             return None
         if store_id is None:
             store_id = fence_client.retired_collection_store_fence().store_id

@@ -133,6 +133,10 @@ class StoreSnapshot:
         """Read the supplied pages' metadata in batches before checking each page."""
         metadata = self.memo.setdefault("page_metadata", {})
         missing = set(rels) - metadata.keys()
+        if "corpus_sources" in self.memo:
+            # The completed corpus read proves absence too, at this same pinned revision.
+            metadata.update(dict.fromkeys(missing))
+            return
         found = {row[0]: PageMeta(*row) for row in self._each(missing, _META_COLUMNS)}
         metadata.update((rel, found.get(rel)) for rel in missing)
 
@@ -156,7 +160,10 @@ class StoreSnapshot:
 
     def page_metas(self, rels: Iterable[str]) -> dict[str, PageMeta]:
         """The requested pages' metadata, in bounded reads that avoid body overflow pages."""
-        return {row[0]: PageMeta(*row) for row in self._each(rels, _META_COLUMNS, source=_META_FROM)}
+        wanted = tuple(rels)
+        self.prime_page_metadata(wanted)
+        metadata = self.memo["page_metadata"]
+        return {rel: metadata[rel] for rel in wanted if metadata[rel] is not None}
 
     def pages(self, prefix: str = "") -> Iterator[PageMeta]:
         """The metadata of every page whose path starts with ``prefix``, in path order."""
@@ -556,7 +563,7 @@ class _RequestScope:
 
 
 #: The open request scope of this context. A connection cannot cross threads, so a worker thread
-#: that inherits the context still opens its own snapshot (see ``snapshot``).
+#: that inherits the context opens its own snapshot at the same revision (see ``snapshot``).
 _REQUEST: ContextVar[_RequestScope | None] = ContextVar(
     "vault_store_request_snapshot", default=None
 )
@@ -601,8 +608,8 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
     mode answer, at no cost beyond this query: when the row disagrees, the kept answer is dropped,
     so a read that runs again meets the mode the records now show.
 
-    Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned
-    and nothing is opened.
+    Inside ``request_snapshot`` on the same thread and vault, the request's own view is returned.
+    A worker with inherited context must see that revision too, or retry on the request thread.
     """
     root = Path(vault_root)
     scope = _REQUEST.get()
@@ -617,6 +624,12 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
             if row is None or row[0] != mode.STORE_MODE:
                 mode.forget_read_mode(vault_root)
                 raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
+            if scope is not None and scope.root == root and row[1] != scope.view.revision:
+                # Mixing revisions corrupts a read; a false refusal costs one retry on the pinned thread.
+                raise connection.CollectionStoreError(
+                    "VAULT_STORE_SNAPSHOT_CHANGED",
+                    "the worker read a different store revision; rerun on the request thread",
+                )
             yield StoreSnapshot(revision=row[1], connection=reader)
         finally:
             if reader.in_transaction:
