@@ -107,6 +107,10 @@ class StoreSnapshot:
         ).fetchone()
         return None if row is None else PageMeta(*row)
 
+    def page_metas(self, rels: Iterable[str]) -> dict[str, PageMeta]:
+        """The requested pages' metadata, in bounded reads that avoid body overflow pages."""
+        return {row[0]: PageMeta(*row) for row in self._each(rels, _META_COLUMNS, source=_META_FROM)}
+
     def pages(self, prefix: str = "") -> Iterator[PageMeta]:
         """The metadata of every page whose path starts with ``prefix``, in path order."""
         select = f"SELECT {_META_COLUMNS} FROM {_META_FROM}"
@@ -149,12 +153,14 @@ class StoreSnapshot:
         """The exact bytes of each page in ``rels`` that the store holds, read in a few queries."""
         return dict(self._each(rels, "path, body"))
 
-    def _each(self, rels: Iterable[str], columns: str) -> Iterator[tuple]:
+    def _each(
+        self, rels: Iterable[str], columns: str, *, source: str = "store_pages",
+    ) -> Iterator[tuple]:
         wanted = list(dict.fromkeys(rels))
         for start in range(0, len(wanted), KEYS_PER_QUERY):
             chunk = wanted[start : start + KEYS_PER_QUERY]
             yield from self.connection.execute(
-                f"SELECT {columns} FROM store_pages WHERE path IN ({', '.join('?' * len(chunk))})",
+                f"SELECT {columns} FROM {source} WHERE path IN ({', '.join('?' * len(chunk))})",
                 chunk,
             )
 
@@ -782,9 +788,26 @@ def held_lookup(vault_root: Path, rels: Iterable[str]) -> Callable[[str], bool |
     if not mode.store_mode_for_reads(root):
         return _not_served
     page = ownership.Ownership.PAGE
+    classified = {rel: ownership.classify(rel) is page for rel in rels}
+    owned = frozenset(rel for rel, served in classified.items() if served)
     with snapshot(root) as view:
-        held = view.held_pages(rel for rel in rels if ownership.classify(rel) is page)
-    return lambda rel: rel in held if ownership.classify(rel) is page else None
+        held = view.held_pages(owned)
+
+    def lookup(rel: str) -> bool | None:
+        served = classified.get(rel)
+        if served is None:
+            served = ownership.classify(rel) is page
+        return rel in held if served else None
+
+    return lookup
+
+
+def request_memo(vault_root: Path) -> dict | None:
+    """The current thread's pinned store request memo, or None outside that request."""
+    scope = _REQUEST.get()
+    if scope is None or scope.thread != threading.get_ident() or scope.root != Path(vault_root):
+        return None
+    return scope.view.memo
 
 
 def _not_served(_rel: str) -> None:

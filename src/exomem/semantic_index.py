@@ -492,9 +492,21 @@ class Interpretations:
 
     def __init__(self, vault_root: Path) -> None:
         self.root = Path(vault_root)
-        self.selection = instances.DefinitionsSelection(self.root, INTERPRETATION_SUBJECTS)
+        try:
+            self._configuration = instances.configuration(self.root)
+        except (ValueError, OSError) as error:
+            self._configuration = error
+        self.selection = instances.DefinitionsSelection(
+            self.root, INTERPRETATION_SUBJECTS, configured=self.configuration,
+        )
         self._snapshots: dict[str | None, Mapping[str, Any] | None] = {}
         self._parents: dict[tuple[str, str], SelectedParent] = {}
+
+    def configuration(self) -> dict[str, Any] | None:
+        """One binding read per interpretation; other definition selections keep their live reads."""
+        if isinstance(self._configuration, (ValueError, OSError)):
+            raise self._configuration.with_traceback(None)
+        return self._configuration
 
     def snapshots(self, scope: str | None) -> Mapping[str, Any] | None:
         """One instance's admitted snapshots, or None when this caller cannot use it."""
@@ -531,7 +543,7 @@ class Interpretations:
         shared core meaning; each page still keeps its own selected meaning.
         """
         try:
-            document = instances.configuration(self.root)
+            document = self.selection.configuration()
         except (ValueError, OSError):
             return ()
         scopes = [None, *sorted((document or {}).get("private", {}))]
@@ -544,7 +556,9 @@ class Interpretations:
     def definitions(self, path: str, frontmatter: Mapping[str, Any]) -> instances.PageDefinitions | None:
         """The page's admitted definitions, or None when its instance is unavailable."""
         try:
-            scope = instances.page_scope(self.root, path, dict(frontmatter))
+            scope = instances.page_scope(
+                self.root, path, dict(frontmatter), configured=self.selection.configuration,
+            )
         except (ValueError, OSError):
             return None
         selected = self.snapshots(scope)
@@ -633,14 +647,7 @@ class AdmittedParents:
 
     def prefetch(self, paths: Iterable[str]) -> None:
         asked = {str(path) for path in paths if path}
-        if self._allowed_many is not None:
-            unknown = [
-                path for path in asked
-                if path not in self._admitted and path not in self._parents
-                and path not in self._stored
-            ]
-            if len(unknown) > 1:
-                self._admitted.update(self._allowed_many(unknown))
+        self.admit(asked)
         wanted = sorted({
             path for path in asked
             if path not in self._parents and path not in self._stored and self.allowed(path)
@@ -648,6 +655,17 @@ class AdmittedParents:
         if wanted:
             self._stored.update(dict.fromkeys(wanted))
             self._stored.update(self._load(wanted))
+
+    def admit(self, paths: Iterable[str]) -> None:
+        """Decide a batch's admission without loading its structural summaries."""
+        if self._allowed_many is not None:
+            unknown = [
+                path for path in set(paths)
+                if path not in self._admitted and path not in self._parents
+                and path not in self._stored
+            ]
+            if unknown:
+                self._admitted.update(self._allowed_many(unknown))
 
     def parent(self, path: str) -> SelectedParent | None:
         """The admitted page's selected interpretation, or None when unavailable."""
