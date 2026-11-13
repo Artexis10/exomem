@@ -295,11 +295,9 @@ def _guard_expect(guard: vault.PathGuard) -> Expect:
     A guard that was captured from the disk says what the projection held then, which the store may
     be ahead of; a mismatch refuses the write, and the caller reads the page again from the store.
     """
-    if guard.leaf_policy == "absent" or (
-        guard.leaf_policy == "store" and guard.expected_content_hash is None
-    ):
+    if guard.expects_absence:
         return Expect(absent=True)
-    if guard.leaf_policy in {"store", "content"}:
+    if guard.binds_bytes:
         return Expect(sha256=guard.expected_content_hash)
     return Expect()  # "stable" and "generation" bind a file's identity: the page must exist
 

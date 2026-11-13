@@ -5275,14 +5275,13 @@ def _resolve_eligible_filter_paths(
     full-scan oracle. A CLI user with a cold catalogue must still get an
     answer, including for the fields no index can evaluate.
 
-    A store-mode vault's rows are the request's snapshot, so a plan that the
-    columns answer takes the managed route; any other plan keeps the offline
-    ladder below, so a store-mode answer never turns into a refusal.
+    Served store-mode requests keep the managed route's refusals. An offline caller
+    still takes the exact oracle for plans that the store's columns cannot answer.
     """
-    from . import lexstore
+    from . import lexstore, readiness
 
     if _managed_reader() or (
-        lexstore.store_rows_serve(vault_root) and _index_answers(plan)
+        lexstore.store_rows_serve(vault_root) and (readiness.runtime_managed() or _index_answers(plan))
     ):
         return _managed_eligible_filter_paths(
             vault_root,

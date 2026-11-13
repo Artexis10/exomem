@@ -34,6 +34,7 @@ import re
 import threading
 import time
 from collections.abc import Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,8 @@ _STALE = "STALE_TAG_VARIANT_PLAN: the vault changed since the preview; preview a
 #: Edge whitespace a written form drops; the SQL aggregate trims the same set.
 _WHITESPACE = " \t\n\r\f\v"
 _EXCLUDE_LIMIT = 256
+# Bound transient corpus bytes; the returned write batch remains bounded by BATCH_PAGES.
+_READ_BATCH_BYTES = 16 * 1024 * 1024
 
 
 def written_form(spelling: str) -> str:
@@ -211,19 +214,46 @@ def _catalogue_aggregate(vault_root: Path) -> tuple[dict[str, int], dict[str, in
         return None
 
 
+def _page_batch(root: Path, paths: Iterable[str]):
+    """Prime canonical metadata and reuse the shared bounded body reader."""
+    from .vault_store import read
+
+    with read.snapshot(root) as view:
+        metadata = view.page_metas(paths)
+    batch = read.PageBatch(root, max_batch_files=BATCH_PAGES)
+    batch.prefetch(list(metadata.values()), max_files=BATCH_PAGES, max_bytes=_READ_BATCH_BYTES)
+    return batch, metadata
+
+
 def _visible_rows(vault_root: Path, keep: Any) -> list[tuple[str, frozenset[str]]] | None:
     """Catalogued tags of pages outside owned trees that ``keep`` releases."""
-    rows = _catalogue_rows(vault_root)
-    if rows is None:
-        return None
-    out: list[tuple[str, frozenset[str]]] = []
-    for path, members in rows:
-        if _owned_elsewhere(path) or (keep is not None and not keep(path)):
-            continue
-        found = _spellings(members)
-        if found:
-            out.append((path, found))
-    return out
+    from .vault_store import mode, read
+
+    stored = mode.store_mode_for_reads(vault_root)
+    with read.request_snapshot(vault_root) if stored else nullcontext():
+        rows = _catalogue_rows(vault_root)
+        if rows is None:
+            return None
+        rows = [(path, members) for path, members in rows if not _owned_elsewhere(path)]
+        batch, metadata = (
+            _page_batch(vault_root, (path for path, _ in rows))
+            if stored and keep is not None else (None, {})
+        )
+        out: list[tuple[str, frozenset[str]]] = []
+        try:
+            for path, members in rows:
+                if batch is not None and path in metadata:
+                    # Membership reads canonical frontmatter through the existing byte reader.
+                    batch.body(metadata[path], max_files=BATCH_PAGES, max_bytes=_READ_BATCH_BYTES)
+                if keep is not None and not keep(path):
+                    continue
+                found = _spellings(members)
+                if found:
+                    out.append((path, found))
+        finally:
+            if batch is not None:
+                batch.clear()
+        return out
 
 
 def _usage(vault_root: Path, keep: Any, keys: frozenset[str] | None = None) -> Usage | None:
@@ -493,6 +523,14 @@ def _exclusions(value: object) -> frozenset[str]:
 
 
 def _plan(root: Path, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
+    from .vault_store import mode, read
+
+    # Counts and hashes name one revision; apply verifies again under its mutation guard.
+    with read.request_snapshot(root) if mode.store_mode_for_reads(root) else nullcontext():
+        return _build_plan(root, exclude=exclude)
+
+
+def _build_plan(root: Path, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
     from .governance import egress
 
     # Candidate pages need per-page rows, so the plan counts from the same rows;
@@ -515,8 +553,14 @@ def _plan(root: Path, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any
     }
     pending: list[dict[str, Any]] = []
     unrewritable: list[str] = []
-    for rel in sorted(path for path, spellings in rows if spellings & replaced):
+    candidates = sorted(path for path, spellings in rows if spellings & replaced)
+    from .vault_store import mode
+
+    reader, metadata = _page_batch(root, candidates) if mode.store_mode_for_reads(root) else (None, {})
+    for rel in candidates:
         try:
+            if reader is not None and rel in metadata:
+                reader.body(metadata[rel], max_files=BATCH_PAGES, max_bytes=_READ_BATCH_BYTES)
             text, _guard = vault.read_guarded_text(root, root / rel)
         except (OSError, UnicodeDecodeError, vault.PathGuardError):
             unrewritable.append(rel)
@@ -535,6 +579,10 @@ def _plan(root: Path, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any
             continue
         pending.append({"path": rel, "hash": vault.content_hash(text), "from": tags, "to": after})
     batch = pending[:BATCH_PAGES]
+    if reader is not None:
+        # The terminal filter rechecks this protocol-bounded response batch from its canonical bytes.
+        selected = [metadata[item["path"]] for item in batch if item["path"] in metadata]
+        reader.prefetch(selected, max_files=BATCH_PAGES, max_bytes=sum(page.size for page in selected))
     plan_id = hashlib.sha256(
         json.dumps(
             {"decided": sorted(decided.items()), "exclude": sorted(exclude), "batch": batch},

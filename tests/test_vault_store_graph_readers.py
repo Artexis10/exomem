@@ -8,11 +8,14 @@ is poisoned, so a reader that still takes either fails or serves the poison.
 
 from __future__ import annotations
 
+import builtins
 import contextlib
+import io
 import json
 import os
 import sqlite3
 import sys
+import threading
 from contextlib import closing
 from pathlib import Path
 
@@ -46,7 +49,7 @@ from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance import egress
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
 
@@ -164,6 +167,81 @@ def answers_for_both_callers(root):
     return {"owner": owner, "external": external}
 
 
+@contextlib.contextmanager
+def record_store_reads(root, monkeypatch, *, page_paths=None):
+    """Record page filesystem reads, sidecar connections, repair and store snapshots.
+
+    Keep the graph test and the registry surface test on the same instrument. Repair seams
+    record intent without starting a background repair against deliberately damaged files.
+    """
+    events = {name: [] for name in (
+        "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
+    )}
+
+    def watching(real, operation):
+        def watched(path, *arguments, **keywords):
+            try:
+                rel = Path(path).relative_to(root).as_posix()
+            except (TypeError, ValueError):
+                rel = None  # A descriptor, or a path outside the vault.
+            page_owned = (
+                rel in page_paths if page_paths is not None
+                else rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
+            )
+            if page_owned:
+                events["page_io"].append((operation, rel))
+            return real(path, *arguments, **keywords)
+
+        return watched
+
+    real_reader = connection.store_reader
+    real_connect = sqlite3.connect
+    real_request = read.request_snapshot
+
+    @contextlib.contextmanager
+    def requesting(*arguments, **keywords):
+        with real_request(*arguments, **keywords):
+            scope = read._REQUEST.get()
+            if scope is not None and scope.thread not in events["request_threads"]:
+                events["request_threads"].append(scope.thread)
+            yield
+
+    def counting(*arguments, **keywords):
+        events["snapshots"].append(1)
+        events["snapshot_threads"].append(threading.get_ident())
+        return real_reader(*arguments, **keywords)
+
+    def connecting(database, *arguments, **keywords):
+        # These are the two retired sidecar filename suffixes, not a semantic vocabulary.
+        if any(suffix in str(database) for suffix in (".graph.sqlite", ".lexical.sqlite")):
+            events["sidecars"].append(str(database))
+        return real_connect(database, *arguments, **keywords)
+
+    with monkeypatch.context() as patch:
+        for owner_module, name in (
+            (epistemic_graph, "graph_lag"),
+            (epistemic_graph, "schedule_background_rebuild"),
+            (graph_read_publication, "published"),
+            (vaults, "_build_inbound_index"),
+            (find, "schedule_inbound_rebuild"),
+            (lexstore, "_schedule_repair"),
+            (epistemic_graph, "_sqlite_connect_owned"),
+        ):
+            patch.setattr(
+                owner_module, name,
+                lambda *a, _name=name, **k: events["machinery"].append(_name),
+            )
+        for owner_module, name in (
+            (os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
+            (builtins, "open"), (io, "open"),
+        ):
+            patch.setattr(owner_module, name, watching(getattr(owner_module, name), name))
+        patch.setattr(connection, "store_reader", counting)
+        patch.setattr(read, "request_snapshot", requesting)
+        patch.setattr(sqlite3, "connect", connecting)
+        yield events
+
+
 @pytest.mark.timeout(500)
 def test_each_graph_reader_answers_from_the_store_as_it_answers_in_file_mode(
     vault, monkeypatch  # noqa: F811
@@ -193,51 +271,46 @@ def test_each_graph_reader_answers_from_the_store_as_it_answers_in_file_mode(
     sidecar.write_bytes(SENTINEL)  # a read of the file-built graph fails
     vaults.clear_inbound_index()
     find.clear_cache()
-    machinery, stats, opened = [], [], []
-    for owner_module, name in (
-        (epistemic_graph, "graph_lag"),
-        (epistemic_graph, "schedule_background_rebuild"),
-        (graph_read_publication, "published"),
-        (vaults, "_build_inbound_index"),
-        (find, "schedule_inbound_rebuild"),
-        (lexstore, "_schedule_repair"),
-        (epistemic_graph, "_sqlite_connect_owned"),
-    ):
-        monkeypatch.setattr(
-            owner_module, name, lambda *a, _name=name, **k: machinery.append(_name)
-        )
+    with record_store_reads(vault, monkeypatch) as events:
+        in_store_mode = answers_for_both_callers(vault)
+        assert in_store_mode == in_file_mode
+        assert SENTINEL.decode().strip() not in json.dumps(in_store_mode, default=str)
+        assert events["machinery"] == []
+        # Retain this regression's original stat contract; the surface test also checks opens.
+        assert not [event for event in events["page_io"] if event[0] in ("stat", "lstat")]
+        assert events["sidecars"] == []
+        events["snapshots"].clear()
+        commands.op_graph_context(vault, path=CLAIM, depth=2)
+        commands.op_list_inbound_links(vault, target=CLAIM)
+        assert len(events["snapshots"]) == 2, "one snapshot for each tool call"
 
-    def watching(real):
-        def watched(path, *arguments, **keywords):
-            try:
-                rel = Path(path).relative_to(vault).as_posix()
-            except (TypeError, ValueError):
-                rel = None  # a descriptor, or a path outside the vault
-            if rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE:
-                stats.append(rel)
-            return real(path, *arguments, **keywords)
 
-        return watched
+def test_a_store_commit_expires_vocabulary_continuations_and_advances_census(vault):  # noqa: F811
+    """A binary-record commit advances the store revision without rewriting graph rows."""
+    from test_vault_store_migration import DIAGRAM
+    from test_vocabulary_projection import fixture_many_edges
 
-    real_reader = connection.store_reader
+    from exomem import relation_census, vocabulary_projection
+    from exomem.collection_store.writer import CollectionWriter
 
-    def counting(*arguments, **keywords):
-        opened.append(1)
-        return real_reader(*arguments, **keywords)
-
-    monkeypatch.setattr(os, "stat", watching(os.stat))
-    monkeypatch.setattr(os, "lstat", watching(os.lstat))
-    monkeypatch.setattr(connection, "store_reader", counting)
-    in_store_mode = answers_for_both_callers(vault)
-
-    assert in_store_mode == in_file_mode
-    assert SENTINEL.decode().strip() not in json.dumps(in_store_mode, default=str)
-    assert machinery == []
-    assert stats == []
-    opened.clear()
-    commands.op_graph_context(vault, path=CLAIM, depth=2)
-    commands.op_list_inbound_links(vault, target=CLAIM)
-    assert len(opened) == 2, "one snapshot for each tool call"
+    path = fixture_many_edges(vault)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    with library_scope(), read.request_snapshot(vault):
+        first = vocabulary_projection.for_write(vault, path=path)
+        generation = relation_census.census(vault)["graph_generation"]
+        with read.snapshot(vault) as view:
+            record = view.binary_records((DIAGRAM,))[DIAGRAM]
+    assert first["continuation"]
+    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
+        write.commit(CollectionWriter(vault, handle), write.StoreChange(
+            write.Origin.GOVERNED, "test",
+            binaries=(write.BinaryRecord(record.path, record.sha256, record.size),),
+        ))
+    with library_scope(), read.request_snapshot(vault):
+        with pytest.raises(ValueError, match="VOCABULARY_CONTINUATION_STALE"):
+            vocabulary_projection.for_write(vault, path=path, continuation=first["continuation"])
+        assert relation_census.census(vault)["graph_generation"] == generation + 1
 
 
 def test_a_graph_read_borrows_the_request_snapshot_and_hands_it_back_unchanged(
