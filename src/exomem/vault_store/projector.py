@@ -13,8 +13,10 @@ left alone, and so is a projected file that has gone missing, unless the audit t
 Exomem removed it. A held path stays unprojected until something resolves the hold. This module
 does not resolve holds.
 
-Every manifest, queue and hold write runs as store-thread work, one short transaction each, and
-the projector thread holds no mutation boundary while it waits for the store thread.
+Every manifest, queue and hold write runs as store-thread work, one short transaction each, inside
+the vault mutation guard that the store thread takes for it (``store_thread_runner``). The
+projector thread holds no mutation boundary while it waits for the store thread. A busy boundary
+leaves the intent queued for the next pass.
 """
 
 from __future__ import annotations
@@ -26,14 +28,15 @@ import os
 import stat
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from sqlite3 import Connection
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs, vault
+from .. import held_fs, mutation_lock, vault
 from ..collection_store import preview, runtime
 from . import mode, ownership, read, write
 
@@ -68,11 +71,38 @@ class Deferred(Exception):
     """This intent cannot be judged or finished now; it stays queued and the next pass retries."""
 
 
-def store_thread_runner(vault_root: Path) -> Runner:
-    """The runner that sends bookkeeping to the collection store's thread, without a wake-up."""
+class BoundaryBusy(Exception):
+    """Another holder has the vault's mutation boundary, an interactive writer waits for it, or
+    foreground requests kept the store thread for the mutation timeout, so the store thread did not
+    run the bookkeeping. For background work this is ordinary contention: the caller leaves its
+    intent queued, or its path to the next sweep, and logs no error."""
+
+
+class HopUnderBoundary(RuntimeError):
+    """A caller sent bookkeeping to the store thread while its own thread holds a mutation boundary.
+
+    The store thread takes the vault boundary for the work, so it would wait for this caller, which
+    waits for the store thread, until the mutation timeout. Take the boundary inside the hopped work
+    instead (``media.on_store_thread`` runs a whole guarded unit there).
+    """
+
+
+def store_thread_runner(vault_root: Path, *, operation: str = "vault_store_bookkeeping") -> Runner:
+    """The runner that sends bookkeeping to the collection store's thread, without a wake-up.
+
+    The work runs there inside the vault mutation guard, which the store's lease check requires of
+    the thread that writes (``CollectionStoreRuntime._authority``): a manifest record, an import or
+    a media commit orders with every other store mutation. One call is one hold, so the caller
+    bounds what one ``work`` does. ``operation`` names the hold in the boundary's holder record.
+    """
     root = Path(vault_root).resolve()
 
     def run(work: Callable[[CollectionWriter], None]) -> None:
+        if mutation_lock.current_thread_holds_boundary():
+            raise HopUnderBoundary(
+                f"{operation}: this thread holds a mutation boundary, which the store thread "
+                "would wait for; take the boundary inside the hopped work"
+            )
         # The one door to the store thread, as the collection store's own edit-back route uses it.
         server = runtime._server(root)
         if server is None:
@@ -82,11 +112,47 @@ def store_thread_runner(vault_root: Path) -> Runner:
             writer = preview.bound_writer(root)
             if writer is None:
                 raise StoreNotServed("the store thread holds no writer for this vault")
-            work(writer)
+            with _holding_boundary(root, operation):
+                work(writer)
 
-        server.call(on_store_thread, wake_maintenance=False)
+        def not_taken(_completion_deadline: float) -> float | None:
+            # Foreground requests go first, so under their load the store may not take this in the
+            # mutation timeout. The queue drops a request it did not take: nothing of it ran.
+            raise BoundaryBusy(f"{operation}: the store thread did not take it in time")
+
+        server.call(on_store_thread, wake_maintenance=False, extend=not_taken)
 
     return run
+
+
+#: How long one store-thread job of a batch settles units under one hold before it ends that hold,
+#: so a writer that waits for the vault boundary waits for this and one unit at most. The batch's
+#: other units take the next hold (``importer.Importer._in_holds``). The projector records one
+#: intent per hold, so it needs no budget.
+HOLD_BUDGET_SECONDS = 0.25
+
+
+@contextmanager
+def _holding_boundary(root: Path, operation: str) -> Iterator[None]:
+    """Hold the vault mutation guard on the store thread for one unit of bookkeeping, or raise
+    ``BoundaryBusy`` having waited for nothing.
+
+    Bookkeeping is background work. It never waits here, because a wait on the store thread holds
+    back every store request queued behind it, and it goes after an interactive writer that waits
+    (``waiter_count``). The guard re-enters the zero-wait hold, so it adds writer authority and the
+    commit generation bump that every store mutation takes.
+    """
+    from ..writer_lease import active_manager
+
+    manager = active_manager()
+    mutation = manager._mutation_coordinator_for(root)
+    if mutation.waiter_count():
+        raise BoundaryBusy(f"{operation}: a writer waits for the vault boundary")
+    with mutation.try_hold(operation=operation, holder_kind="background") as held:
+        if not held:
+            raise BoundaryBusy(f"{operation}: another holder has the vault boundary")
+        with manager.mutation_guard(root, operation=operation, holder_kind="background"):
+            yield
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +269,9 @@ class PassReport:
     #: Delete intents that removed nothing, because no file of Exomem's was at the path.
     dropped: int = 0
     deferred: dict[str, str] = field(default_factory=dict)
+    #: The pass stopped at a busy vault boundary (``BoundaryBusy``); what it had not recorded stays
+    #: queued, and the next pass retries it.
+    busy: bool = False
 
     @property
     def settled(self) -> int:
@@ -220,7 +289,7 @@ class Projector:
         self, vault_root: Path, *, run: Runner | None = None, poll_seconds: float | None = None
     ) -> None:
         self._root = Path(vault_root)
-        self._run = run or store_thread_runner(self._root)
+        self._run = run or store_thread_runner(self._root, operation="vault_store_projection")
         self._poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
         #: A temporary older than this process belongs to a publication that died with its owner.
         self._born_ns = time.time_ns()
@@ -268,7 +337,7 @@ class Projector:
                     self._last_failure = failure
             if report is not None:
                 self._note_deferred(report)
-                if report.settled:
+                if report.settled and not report.busy:
                     continue  # more may have queued while this pass ran
             self._stop.wait(self._poll_seconds)
 
@@ -296,7 +365,12 @@ class Projector:
                     for intent in batch:
                         if self._stop.is_set():
                             break
-                        self._project(filesystem, intent.path, report)
+                        try:
+                            self._project(filesystem, intent.path, report)
+                        except BoundaryBusy:
+                            # Every later record needs the same boundary, so the pass ends here.
+                            report.busy = True
+                            return report
                     cursor = (batch[-1].queued_at, batch[-1].path)
         return report
 

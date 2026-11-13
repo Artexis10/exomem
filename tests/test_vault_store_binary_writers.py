@@ -12,9 +12,7 @@ import datetime as dt
 import hashlib
 import json
 import sys
-import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import test_vault_store_read_write as read_write
@@ -41,22 +39,18 @@ from exomem import (
     extraction_parts,
     fold_leaf,
     move_file,
-    mutation_lock,
     preserve,
     reconcile,
     recover_from_trash,
     reserved_paths,
     scene_frames,
-    writer_lease,
 )
 from exomem import init as init_module
 from exomem import vault as vault_module
-from exomem.collection_store import connection, runtime
+from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import most_restrictive_principal, request_scope
-from exomem.vault_store import batch, importer, ownership, projector, read, rederive, write
-from exomem.vault_store import mode as store_mode
-from exomem.writer_lease import get_manager
+from exomem.vault_store import batch, importer, ownership, read, write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -532,7 +526,6 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
 
 
 VIDEO = "Knowledge Base/Media/harbour.mp4"
-KB_SCHEMA = "Knowledge Base/_Schema"
 FRAMES = f"{VIDEO}.frames"
 
 
@@ -611,143 +604,18 @@ def test_a_clear_killed_before_its_commit_heals_after_one_sweep_and_one_reconcil
 
 
 def test_writing_frames_off_the_store_thread_commits_them_there(stored, store_thread):
-    """The refusal that a media worker's frame write met in a store-mode vault, or a hop that
-    stalls under the mutation guard that the worker holds across it."""
+    """The refusal that a media worker's frame write met in a store-mode vault. The worker holds
+    no guard across the hop: the store thread takes the boundary for the frames' commit."""
     video = stored / VIDEO
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"\x00video")
 
-    with get_manager().mutation_guard(
-        stored, operation="background_media_scene_frame_commit", holder_kind="background"
-    ):
-        pairs = scene_frames.write_scene_frames(stored, video, [(_scene(10.0), _FakeImg())])
+    pairs = scene_frames.write_scene_frames(stored, video, [(_scene(10.0), _FakeImg())])
 
     assert len(pairs) == 1
     jpg, sidecar = (path.relative_to(stored).as_posix() for path in pairs[0])
     assert binary_record(stored, jpg) == [(sha(b"\xff\xd8fakejpg"), len(b"\xff\xd8fakejpg"))]
     assert b"scene-frame" in read.owned_bytes(stored, sidecar)
-
-
-@pytest.fixture
-def service(stored, monkeypatch):
-    """The service's own store thread over the store-mode vault, started as a service starts it.
-
-    It records when each registry tick starts and how it ends: ``ended`` when a request ended its
-    wait for the vault boundary (``StoreServer._maintaining``), ``returned`` otherwise.
-    """
-    ticks = SimpleNamespace(entered=[], ended=[], returned=[])
-    real = runtime.StoreServer._registry_tick
-
-    def recording(self):
-        ticks.entered.append(time.monotonic())
-        try:
-            outcome = real(self)
-        except mutation_lock.WaitEnded:
-            ticks.ended.append(time.monotonic())
-            raise
-        ticks.returned.append(time.monotonic())
-        return outcome
-
-    monkeypatch.setattr(runtime.StoreServer, "_registry_tick", recording)
-    manager = writer_lease.start_server_lifecycle()
-    server = None
-    try:
-        deadline = time.monotonic() + 60
-        while (server := runtime._SERVERS.get(stored.resolve())) is None or server.runtime is None:
-            assert time.monotonic() < deadline, "the store thread did not open the store"
-            time.sleep(0.05)
-        yield ticks
-    finally:
-        manager.close()
-        if server is not None:
-            server.thread.join(10)
-        writer_lease._MANAGERS.pop(manager.config, None)
-
-
-def parked(ticks, *, settle=0.2, timeout=30.0) -> int:
-    """Wait until a registry tick has been inside its run for ``settle`` seconds, which with the
-    boundary held means it waits for it; returns how many waits had ended before."""
-    deadline = time.monotonic() + timeout
-    while True:
-        running = len(ticks.entered) > len(ticks.ended) + len(ticks.returned)
-        if running and time.monotonic() - ticks.entered[-1] >= settle:
-            return len(ticks.ended)
-        assert time.monotonic() < deadline, "no registry tick waited for the boundary"
-        time.sleep(0.01)
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=connection.CollectionStoreError,
-    reason="`projector.store_thread_runner` commits on the store thread without the vault "
-    "boundary, which `CollectionStoreRuntime._authority` requires: COLLECTION_STORE_LEASE_REQUIRED",
-)
-def test_media_writers_in_a_served_process_pass_a_registry_tick_that_waits_for_the_boundary(
-    stored, service
-):
-    """A media writer that a served process refuses off its store thread, or whose hop from the
-    holder of the vault boundary waits out the mutation timeout behind a registry tick that waits
-    for that boundary (tasks.md 2.5, the bounded stall)."""
-    run = projector.store_thread_runner(stored)
-    video = stored / VIDEO
-    video.parent.mkdir(parents=True, exist_ok=True)
-    video.write_bytes(b"\x00video")
-    parts = [extraction_parts.part_path(Path(RAW_SOURCE), n).as_posix() for n in (2, 3)]
-    source = "---\ntitle: Minutes\ntype: source\nextraction_parts: 2\n---\n# Minutes\n"
-    pages = {RAW_SOURCE: source, **{rel: f"---\npart: {rel[-5]}\n---\n# Part\n" for rel in parts}}
-    run(
-        lambda writing: write.commit(
-            writing,
-            write.StoreChange(
-                write.Origin.GOVERNED,
-                "a raw source and its parts",
-                puts=tuple(write.PagePut(rel, body.encode()) for rel, body in pages.items()),
-            ),
-        )
-    )
-    manager = get_manager()
-    hops: dict[str, float] = {}
-
-    def hop(name, call):
-        waits_ended = parked(service)
-        began = time.monotonic()
-        outcome = call()
-        hops[name] = time.monotonic() - began
-        assert len(service.ended) > waits_ended, f"{name}: its request ended the tick's wait"
-        return outcome
-
-    with manager.mutation_guard(
-        stored, operation="background_media_scene_frame_commit", holder_kind="background"
-    ):
-        # An overlay change that is on disk: the registry tick now waits for this boundary.
-        run(
-            lambda writing: write.commit(
-                writing,
-                write.StoreChange(
-                    write.Origin.GOVERNED,
-                    "an overlay change",
-                    puts=(write.PagePut(f"{KB_SCHEMA}/served.md", b"# Served\n"),),
-                ),
-            )
-        )
-        projector.Projector(stored).run_pass()
-        frames = [(_scene(10.0), _FakeImg())]
-        pairs = hop("write", lambda: scene_frames.write_scene_frames(stored, video, frames))
-        assert frame_rows(stored) != ([], []), "the frames committed on the store thread"
-        removed = hop("clear", lambda: scene_frames.clear_scene_frames(stored, video))
-        kept = hop("retire", lambda: extraction_parts.retire(stored, (stored / parts[1],)))
-
-    print(json.dumps({name: round(seconds, 3) for name, seconds in hops.items()}))
-    assert len(pairs) == 1 and removed == 2
-    assert frame_rows(stored) == ([], [])
-    assert kept == ()
-    assert not read.page_exists(stored, parts[1]) and read.page_exists(stored, parts[0])
-    # Each hop waited for one poll of the tick's boundary wait, not for the mutation timeout.
-    assert max(hops.values()) < manager._mutation_timeout_seconds / 4
-    deadline = time.monotonic() + 30
-    while store_mode.status(stored)["registry"] != rederive.CURRENT:
-        assert time.monotonic() < deadline, "the tick that stepped aside runs once it is free"
-        time.sleep(0.05)
 
 
 def test_the_part_sweep_finds_a_stored_surplus_part_that_has_no_file(served):

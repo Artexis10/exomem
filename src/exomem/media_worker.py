@@ -93,6 +93,15 @@ from .writer_lease import TRANSIENT_WRITER_CODES, get_manager
 
 log = logging.getLogger(__name__)
 
+#: What a guarded unit (``MediaWorker._holding_boundary``) returns when it stopped before its
+#: commit, and when a failure commit should try again. ``_BUSY`` is the helper's own answer when the
+#: vault boundary stayed busy in a store-mode vault, which leaves the work for a later pass.
+_STOPPED = object()
+_RETRY = object()
+_BUSY = object()
+#: The boundary operation of every pending-page write.
+_PRESENTATION = "background_media_pending_presentation"
+
 _MEDIA_TYPE_RE = re.compile(r"(?m)^media_type:\s*(\S+)\s*$")
 _EVIDENCE_FILE_RE = re.compile(r"(?m)^evidence_file:\s*(.+?)\s*$")
 _PENDING_MARKER = "extracted_by: pending"
@@ -1095,9 +1104,10 @@ class MediaWorker:
     def present_runtime_requeue(self, job: _Job) -> bool:
         """Show the media of a job that `requeue_runtime_block` is about to return as pending.
 
-        Call this holding `_presentation_guard`, once a read under it found the row still blocked: a
-        write after the claim would make the child's extraction stale. A completed transcript never
-        showed the block (`mark_processing_unavailable` leaves it alone), so it stays as it is.
+        Call this holding the presentation boundary (`_holding_boundary`), once a read under it
+        found the row still blocked: a write after the claim would make the child's extraction
+        stale. A completed transcript never showed the block (`mark_processing_unavailable` leaves
+        it alone), so it stays as it is.
         """
         try:
             return self._holds_completed_transcript(job) or self._show_pending(job)
@@ -1154,12 +1164,17 @@ class MediaWorker:
         that point leaves it.
         """
         try:
+            def present():
+                current = store.current_runtime_block(job)
+                if current is None:
+                    return _STOPPED
+                self.present_runtime_requeue(current)
+                return current
+
             try:
-                with self._presentation_guard():
-                    current = store.current_runtime_block(job)
-                    if current is None:
-                        return False
-                    self.present_runtime_requeue(current)
+                # A boundary that stays busy shows nothing: the row returns with its blocked page.
+                if self._holding_boundary(_PRESENTATION, present) is _STOPPED:
+                    return False
             except (OSError, OpError):
                 # No page was written: the guard was refused, or the read failed before the page.
                 log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
@@ -1171,27 +1186,37 @@ class MediaWorker:
             log.warning("media worker: requeue of %s deferred to the next start", job.sidecar_path.name, exc_info=True)
             return False
 
-    def _presentation_guard(self) -> contextlib.AbstractContextManager[Any]:
-        """The guard of every pending-page write."""
-        return get_manager().mutation_guard(
-            self._vault_root,
-            operation="background_media_pending_presentation",
-            holder_kind="background",
-        )
+    def _holding_boundary(self, operation: str, unit: Any) -> Any:
+        """Run ``unit`` holding the vault mutation boundary (``vault_store.media.holding_boundary``,
+        on the store thread in a store-mode vault) and return what it returns, or ``_BUSY`` with
+        nothing of ``unit`` run when the boundary stays busy."""
+        from .vault_store import media as store_media
+        from .vault_store import projector as store_projector
+
+        def guard() -> contextlib.AbstractContextManager[Any]:
+            return get_manager().mutation_guard(
+                self._vault_root, operation=operation, holder_kind="background"
+            )
+
+        try:
+            return store_media.holding_boundary(self._vault_root, operation, unit, guard)
+        except store_projector.BoundaryBusy:
+            return _BUSY
 
     def _present_pending(self, job: _Job) -> bool:
         """Show a blocked job's media as pending. True once no sidecar shows the block."""
         try:
-            with self._presentation_guard():
-                return self._show_pending(job)
+            shown = self._holding_boundary(_PRESENTATION, lambda: self._show_pending(job))
         except (OSError, UnicodeError, OpError, preserve.PreserveError):
             # The page keeps its blocked text. The engine caller then keeps the job blocked, so the next
             # start shows it again.
             log.warning("media worker: pending presentation deferred for %s", job.sidecar_path.name, exc_info=True)
             return False
+        # A boundary that stays busy leaves the page as a refused guard does.
+        return False if shown is _BUSY else shown
 
     def _show_pending(self, job: _Job) -> bool:
-        """`_present_pending` for a caller that holds `_presentation_guard`."""
+        """`_present_pending` for a caller that holds the presentation boundary."""
         if not job.sidecar_path.exists() or not self._is_recall_admitted_media_sidecar(job.sidecar_path):
             return True
         return preserve.update_sidecar_processing_pending(
@@ -1358,17 +1383,13 @@ class MediaWorker:
                 binary_identity=_result_binary_identity(expected_binary),
                 payload=payload,
             )
-        with get_manager().mutation_guard(
-            self._vault_root,
-            operation="background_media_extraction_commit",
-            holder_kind="background",
-        ):
+        def commit():
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                return False
+                return _STOPPED
             try:
                 before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
             except (OSError, UnicodeError, PathGuardError):
-                return False
+                return _STOPPED
             from . import media_processing
 
             if (
@@ -1382,11 +1403,11 @@ class MediaWorker:
                 )
             ):
                 log.warning("extraction result stale for %s; newer canonical input preserved", job.sidecar_path.name)
-                return False
+                return _STOPPED
             if replaces is None and media_processing.has_completed_transcript(
                 before, media_type=job.media_type
             ):
-                return False
+                return _STOPPED
             writes, surplus = self._extraction_writes(
                 job,
                 before,
@@ -1411,12 +1432,18 @@ class MediaWorker:
                     defer_graph_completion=True,
                 )
             except ContentHashMismatchError:
-                return False
+                return _STOPPED
             except PathGuardError as error:
                 if error.code != "PATH_GUARD_CONTENT":
                     raise
-                return False
+                return _STOPPED
             assert isinstance(handoff, DeferredGraphCompletion)
+            return handoff, receipts, surplus
+
+        committed = self._holding_boundary("background_media_extraction_commit", commit)
+        if committed is _STOPPED or committed is _BUSY:
+            return False
+        handoff, receipts, surplus = committed
         self._complete_deferred_graph_completion(handoff, receipts)
         self._retire_surplus_parts(surplus)
         return True
@@ -1552,17 +1579,14 @@ class MediaWorker:
                 blocked_context=blocked_context,
             )
         for _attempt in range(3):
-            with get_manager().mutation_guard(
-                self._vault_root,
-                operation="background_media_failure_commit",
-                holder_kind="background",
-            ):
+
+            def commit():
                 if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                    return False
+                    return _STOPPED
                 try:
                     before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
                 except (OSError, UnicodeError, PathGuardError):
-                    return False
+                    return _STOPPED
                 from . import media_processing
 
                 if (
@@ -1570,9 +1594,9 @@ class MediaWorker:
                     or not _sidecar_input_matches(before, expected_sidecar, expected_evidence_version)
                 ):
                     log.warning("processing failure stale for %s; newer canonical input preserved", job.sidecar_path.name)
-                    return False
+                    return _STOPPED
                 if media_processing.has_completed_transcript(before, media_type=job.media_type):
-                    return False
+                    return _STOPPED
                 if presented_pending:
                     target = preserve.render_sidecar_processing_pending(
                         before, attempts=max(1, job.attempts), next_action=next_action
@@ -1598,12 +1622,20 @@ class MediaWorker:
                         defer_graph_completion=True,
                     )
                 except ContentHashMismatchError:
-                    continue
+                    return _RETRY
                 except PathGuardError as conflict:
                     if conflict.code != "PATH_GUARD_CONTENT":
                         raise
-                    continue
+                    return _RETRY
                 assert isinstance(handoff, DeferredGraphCompletion)
+                return handoff, receipts
+
+            committed = self._holding_boundary("background_media_failure_commit", commit)
+            if committed is _RETRY:
+                continue
+            if committed is _STOPPED or committed is _BUSY:
+                return False
+            handoff, receipts = committed
             self._complete_deferred_graph_completion(handoff, receipts)
             return True
         return False
@@ -1832,21 +1864,17 @@ class MediaWorker:
         OCR jobs go through the normal queue (`do_clip=False` — frame children never
         get their own ClipIndex rows; the parent video's vectors own visual search).
         """
-        with get_manager().mutation_guard(
-            self._vault_root,
-            operation="background_media_scene_frame_commit",
-            holder_kind="background",
-        ):
+        def persist():
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                return
+                return None
             if expected_binary is not None and _binary_identity(job.binary_path) != expected_binary:
                 log.warning(
                     "scene-frame result stale for %s; changed media was not persisted",
                     job.binary_path.name,
                 )
-                return
+                return None
             try:
-                written = scene_frames.write_scene_frames(
+                return scene_frames.write_scene_frames(
                     self._vault_root,
                     job.binary_path,
                     pairs,
@@ -1854,7 +1882,16 @@ class MediaWorker:
                 )
             except Exception:  # noqa: BLE001 — persistence is strictly additive
                 log.exception("scene frame persistence failed for %s", job.binary_path.name)
-                return
+                return None
+
+        written = self._holding_boundary("background_media_scene_frame_commit", persist)
+        if written is _BUSY:
+            log.info(
+                "scene frames for %s skipped: the vault boundary stayed busy", job.binary_path.name
+            )
+            return
+        if written is None:
+            return
         for jpg, sidecar in written:
             self.enqueue(
                 binary_path=jpg,
@@ -2442,18 +2479,16 @@ class MediaWorker:
             return
         terminal_error: str | None = None
         terminal_state = media_jobs.BLOCKED
-        with get_manager().mutation_guard(
-            self._vault_root,
-            operation="background_media_parent_publication",
-            holder_kind="background",
-        ):
+        def publish():
+            nonlocal terminal_error, terminal_state
+            receipts = None
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                return
+                return _STOPPED
             before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
             if _result_binary_identity(_binary_identity(job.binary_path) or ((-1,) * 5, None)) != result.binary_identity:
-                return
+                return _STOPPED
             if not basis_holds(before):
-                return
+                return _STOPPED
             writes: tuple[PlannedWrite, ...] = ()
             surplus: tuple[Path, ...] = ()
             try:
@@ -2516,7 +2551,7 @@ class MediaWorker:
                     receipt_revision=receipt.revision,
                 ):
                     deferred_index.clear_full_receipts(self._vault_root, receipts)
-                    return
+                    return _STOPPED
                 handoff = preserve.commit_media_sidecar_writes(
                     self._vault_root,
                     writes,
@@ -2525,6 +2560,12 @@ class MediaWorker:
                     publication_intents_out=publication_intents,
                 )
                 assert isinstance(handoff, DeferredGraphCompletion)
+            return handoff, receipts, surplus
+
+        published = self._holding_boundary("background_media_parent_publication", publish)
+        if published is _STOPPED or published is _BUSY:
+            return  # a busy boundary leaves the prepared result for the next drain
+        handoff, receipts, surplus = published
         if terminal_error is not None:
             self._store.terminalize_result(
                 result, state=terminal_state, error=terminal_error
@@ -2578,17 +2619,13 @@ class MediaWorker:
         if expected_sidecar is None:
             return False
         publication_intents: list[object] = []
-        with get_manager().mutation_guard(
-            self._vault_root,
-            operation="background_media_parent_pending_publication",
-            holder_kind="background",
-        ):
+        def publish():
             try:
                 before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
             except (OSError, UnicodeError, PathGuardError):
-                return False
+                return _STOPPED
             if content_hash(before) != expected_sidecar:
-                return False
+                return _STOPPED
             target = preserve.render_sidecar_processing_failure(
                 before,
                 state=media_jobs.PENDING,
@@ -2607,7 +2644,7 @@ class MediaWorker:
                 receipt_revision=receipt.revision,
             ):
                 deferred_index.clear_full_receipts(self._vault_root, [receipt])
-                return False
+                return _STOPPED
             handoff = preserve.commit_media_sidecar_writes(
                 self._vault_root,
                 (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
@@ -2616,6 +2653,12 @@ class MediaWorker:
                 publication_intents_out=publication_intents,
             )
             assert isinstance(handoff, DeferredGraphCompletion)
+            return handoff, receipt
+
+        published = self._holding_boundary("background_media_parent_pending_publication", publish)
+        if published is _STOPPED or published is _BUSY:
+            return False
+        handoff, receipt = published
         if not self._complete_deferred_graph_completion(
             handoff,
             [receipt],

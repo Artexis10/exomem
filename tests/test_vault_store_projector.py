@@ -328,7 +328,9 @@ def test_the_service_starts_the_projector_only_for_a_store_mode_vault(vault, mon
         with connection.open_writer(path, lease_check=lambda: True) as handle:
             work(CollectionWriter(vault, handle))
 
-    monkeypatch.setattr(projector, "store_thread_runner", lambda _root: on_a_writer_of_its_own)
+    monkeypatch.setattr(
+        projector, "store_thread_runner", lambda _root, **_options: on_a_writer_of_its_own
+    )
     monkeypatch.setattr(projector, "POLL_SECONDS", 0.05)
     # The store has one writer connection, so the commit finishes before the projector thread
     # opens its own.

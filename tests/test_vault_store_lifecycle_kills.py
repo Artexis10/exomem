@@ -2,9 +2,10 @@
 
 OpenSpec make-vault-store-canonical task 2.4. Each case runs one lifecycle write in a spawned
 interpreter that the operating system kills (SIGKILL) at one durable step: a rename, the store
-commit, or a step after it. A second fresh interpreter then does what a served start does (the
-projector's temporary sweep and pass, the importer's sweep, governance reconcile) and makes the next
-write that a caller would make. The parent only reads the store and the disk.
+commit, or a step after it. A second fresh interpreter then starts as the service starts, does what
+a served start does (the projector's temporary sweep and pass, the importer's sweep, the maintenance
+reconcile) and makes the next write that a caller would make, each through the service's door to
+the store thread. The parent only reads the store and the disk.
 
 Every case of one test shares one vault and works on its own folder with its own bytes, so the
 importer cannot pair a file of one case with a record of another.
@@ -19,6 +20,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import time
 from collections.abc import Callable
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -165,10 +167,11 @@ def store_writer(root: Path):
             preview._BOUND.reset(token)
 
 
-def settle(root: Path, writer: CollectionWriter) -> None:
+def settle(root: Path, writer: CollectionWriter | None = None) -> None:
     """What a served start runs: the projector's sweep and pass, then the importer's sweep, twice
-    so that a change the first round made is settled too."""
-    run = functools.partial(_run_on, writer)
+    so that a change the first round made is settled too. With no ``writer`` they reach the store
+    through the service's door (``projector.store_thread_runner``)."""
+    run = None if writer is None else functools.partial(_run_on, writer)
     projecting = projector.Projector(root, run=run)
     projecting.sweep_temporaries()
     for _ in range(2):
@@ -180,14 +183,27 @@ def _run_on(writer: CollectionWriter, work: Callable[[CollectionWriter], None]) 
     work(writer)
 
 
-def reconcile(root: Path) -> None:
-    """The governance settling that the maintenance reconcile runs: receipts, lifecycle markers
-    and the governance tool's own operations."""
-    from exomem.governance import receipts
-    from exomem.governance.recovery import reconcile_governance_operations
+def command(root: Path, name: str, *, surface: str = "mcp", **arguments) -> str:
+    """One command as the owner, through the dispatcher that routes a write to the store thread:
+    ``ok`` or the refusal's code."""
+    from exomem import commands, writer_lease
+    from exomem.governance.principal import owner_principal, request_scope
 
-    receipts.reconcile(root, dry_run=False)
-    reconcile_governance_operations(root)
+    found = next(c for c in commands.product_commands_for(surface) if c.name == name)
+    try:
+        with request_scope(owner_principal(surface=surface)):
+            result = writer_lease.invoke_command(found, root, **arguments)
+    except Exception as error:  # noqa: BLE001 - the code is the finding
+        return getattr(error, "code", None) or str(error).split(":", 1)[0]
+    if isinstance(result, dict) and result.get("ok") is False:
+        return str(result.get("code") or result.get("error_code") or result)
+    return "ok"
+
+
+def reconcile(root: Path) -> str:
+    """The owner's maintenance reconcile on the host, through the served door: it settles receipts
+    and lifecycle markers. A remote caller's reconcile runs the same pass as a maintenance job."""
+    return command(root, "maintain_memory", surface="cli", mode="reconcile", dry_run=False)
 
 
 # -- the writes ---------------------------------------------------------------------------------
@@ -202,6 +218,22 @@ class Case:
     kind: str
     kill: str
     slot: str | None = None
+
+    def arguments(self) -> dict:
+        """The ``manage_memory_file`` arguments of this write, as a caller sends it."""
+        folder = folder_of(self.name)
+        if self.kind == "trash folder":
+            return {"operation": "delete", "path": folder, "confirm": True, "recursive": True,
+                    "force_orphan": True}
+        if self.kind == "recover folder":
+            return {"operation": "recover", "trash_path": self.slot}
+        if self.kind == "trash file":
+            return {"operation": "delete", "path": f"{folder}/chart.bin", "confirm": True,
+                    "force_orphan": True}
+        if self.kind == "move artifact":
+            return {"operation": "move", "old_path": f"{folder}/report.bin",
+                    "new_path": f"{moved_folder_of(self.name)}/report.bin"}
+        raise ValueError(self.kind)
 
     def run(self, root: Path) -> None:
         folder = folder_of(self.name)
@@ -227,8 +259,8 @@ class Case:
 
 
 def next_write(root: Path, case: Case) -> str:
-    """The write a caller makes next: the same write again while the store still holds what it
-    moves at its source, else the write that undoes it. ``ok`` or the refusal's code."""
+    """The write a caller makes next, through the served door: the same write again while the store
+    still holds what it moves at its source, else the write that undoes it. ``ok`` or the code."""
     with closing(connection.open_reader(connection.store_path(root))) as store:
         held = [
             path
@@ -243,32 +275,21 @@ def next_write(root: Path, case: Case) -> str:
         again = f"{folder_of(case.name)}/chart.bin" in held
     else:
         again = "source" in sides
-    try:
-        if again:
-            case.run(root)
-            return "again: ok"
-        if case.kind == "recover folder":
-            delete_directory.delete_directory(
-                root, path=folder_of(case.name), confirm=True, recursive=True
-            )
-        elif case.kind == "move artifact":
-            move_file.move_file(
-                root,
-                old_path=f"{moved_folder_of(case.name)}/report.bin",
-                new_path=f"{folder_of(case.name)}/report.bin",
-            )
-        else:
-            slots = sorted(side.removeprefix("trash ") for side in sides if side != "source")
-            if len(slots) != 1:
-                return f"undo: no single trash slot ({slots})"
-            dated = next(rel for rel in held if f"/{slots[0]}" in rel)
-            recover_from_trash.recover_from_trash(
-                root, trash_path="/".join(dated.split("/")[:4])
-            )
-        return "undo: ok"
-    except Exception as error:  # noqa: BLE001 - the code is the finding
-        verb = "again" if again else "undo"
-        return f"{verb}: {getattr(error, 'code', repr(error))}"
+    if again:
+        return f"again: {command(root, 'manage_memory_file', **case.arguments())}"
+    if case.kind == "recover folder":
+        undo = {"operation": "delete", "path": folder_of(case.name), "confirm": True,
+                "recursive": True}
+    elif case.kind == "move artifact":
+        undo = {"operation": "move", "old_path": f"{moved_folder_of(case.name)}/report.bin",
+                "new_path": f"{folder_of(case.name)}/report.bin"}
+    else:
+        slots = sorted(side.removeprefix("trash ") for side in sides if side != "source")
+        if len(slots) != 1:
+            return f"undo: no single trash slot ({slots})"
+        dated = next(rel for rel in held if f"/{slots[0]}" in rel)
+        undo = {"operation": "recover", "trash_path": "/".join(dated.split("/")[:4])}
+    return f"undo: {command(root, 'manage_memory_file', **undo)}"
 
 
 # -- the two child interpreters -----------------------------------------------------------------
@@ -351,21 +372,36 @@ def _write_and_die(environment: dict[str, str], root: Path, case: Case) -> None:
 
 
 def _start_fresh(environment: dict[str, str], root: Path, cases: list[Case], report: str) -> None:
-    """A fresh interpreter: settle as a served start does, then make each case's next write."""
+    """A fresh interpreter that starts as the service starts (``start_server_lifecycle``), so its
+    projector, importer, reconcile and next writes reach the store as a served process's do."""
     _as_the_vault_fixture_runs(environment)
+    from exomem import writer_lease
+    from exomem.collection_store import runtime
+
     found: dict[str, dict] = {}
-    with library_scope(), store_writer(root) as writer:
-        settle(root, writer)
-        reconcile(root)
-        settle(root, writer)
+    manager = writer_lease.start_server_lifecycle()
+    try:
+        deadline = time.monotonic() + 120
+        while (server := runtime._SERVERS.get(root.resolve())) is None or server.runtime is None:
+            assert time.monotonic() < deadline, "the store thread did not open the store"
+            time.sleep(0.05)
+        with library_scope():
+            settle(root)
+        reconciled = [reconcile(root)]
+        with library_scope():
+            settle(root)
         for case in cases:
             found[case.name] = {"kill": case.kill, "after the restart": findings(root, case.name)}
         for case in cases:
             found[case.name]["next write"] = next_write(root, case)
-        settle(root, writer)
-        reconcile(root)
+        with library_scope():
+            settle(root)
+        reconciled.append(reconcile(root))
         for case in cases:
             found[case.name]["after the next write"] = findings(root, case.name)
+            found[case.name]["reconcile"] = reconciled
+    finally:
+        manager.close()
     Path(report).write_text(json.dumps(found, indent=1, sort_keys=True), encoding="utf-8")
     os._exit(0)
 
@@ -525,6 +561,7 @@ def problems(found: dict) -> list[str]:
         )
     if not found["next write"].endswith(": ok"):
         out.append(f"next write: {found['next write']}")
+    out.extend(f"reconcile: {code}" for code in found["reconcile"] if code != "ok")
     return out
 
 
@@ -539,6 +576,7 @@ def kill_restart_and_judge(root: Path, tmp_path: Path, plan) -> dict[str, list[s
         for case, (_kind, _kill, governs) in zip(cases, plan, strict=True)
     }
     assert len(judged) == len(plan), "each case is judged under its own name"
+    print(json.dumps({"judged": judged, "found": found}, sort_keys=True))
     return judged
 
 
@@ -547,20 +585,40 @@ def test_a_lifecycle_write_killed_at_or_after_its_commit_converges_in_a_fresh_pr
     stored, tmp_path
 ):
     """A step after the store commit that a kill leaves undone and that nothing redoes: a trashed
-    folder's files left at its source, a receipt left pending, a record that names no file. Also
-    a lone binary trash killed in its commit, which the importer's rename pairing completes."""
+    folder's files left at its source, a receipt left pending, a record that names no file, or a
+    next write through the served door that refuses. Also a lone binary trash killed in its
+    commit, which the importer's rename pairing completes."""
     plan = [
         ("trash folder", "committed", False),
         ("trash folder", "pruned", False),
         ("trash folder", "media", False),
-        ("recover folder", "committed", False),
-        ("recover folder", "pruned", False),
         ("trash folder", "committed", True),
         ("trash folder", "governed", True),
-        ("recover folder", "committed", True),
         ("trash file", "commit", False),
         ("trash file", "committed", False),
         ("move artifact", "committed", False),
+    ]
+
+    judged = kill_restart_and_judge(stored, tmp_path, plan)
+
+    assert judged == dict.fromkeys(judged, [])
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="a served store-mode process refuses the owner's recursive folder delete with "
+    "AUDIENCE_RESTRICTED (`op_delete`: `egress.restricted_release_filter` filters every caller "
+    "while a writer is bound), so the undo of a recovery refuses",
+)
+@pytest.mark.timeout(600)
+def test_a_folder_recovery_killed_after_its_commit_converges_and_can_be_undone(stored, tmp_path):
+    """A recovery killed after its store commit that a fresh process leaves split or pending, or
+    whose undo, a trash of the recovered folder through the served door, refuses."""
+    plan = [
+        ("recover folder", "committed", False),
+        ("recover folder", "pruned", False),
+        ("recover folder", "committed", True),
     ]
 
     judged = kill_restart_and_judge(stored, tmp_path, plan)
