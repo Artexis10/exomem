@@ -11,7 +11,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import epistemic_graph, lexstore, memory_refs
+from .. import epistemic_graph, lexstore, memory_refs, vault
 from . import projection
 
 #: How many differing keys a refusal names per table.
@@ -35,16 +35,18 @@ class Difference:
 
 
 def derive_expected(vault_root: Path, path: Path) -> None:
-    """Derive the lexical, graph and reference rows from the files with the owners' own builders into a new database."""
+    """Derive the lexical, graph, reference and inbound-link rows from the files with the owners' own builders into a new database."""
     conn = sqlite3.connect(path, isolation_level=None)
     try:
         conn.execute("BEGIN")
         lexstore.create_catalogue_schema(conn)
         epistemic_graph.create_row_schema(conn, publication=False)
         memory_refs.create_identity_schema(conn)
+        vault.create_inbound_schema(conn)
         lexstore.derive_catalogue_rows(vault_root, conn)
         epistemic_graph.derive_row_tables(vault_root, conn)
         memory_refs.derive_identities(vault_root, conn)
+        vault.derive_inbound_rows(vault_root, conn)
         conn.execute("COMMIT")
     finally:
         conn.close()

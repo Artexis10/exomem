@@ -22,7 +22,7 @@ from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, ownership, rederive
-from .read import AFTER, NOT_ACTIVE, inbound_sources_many
+from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -52,8 +52,9 @@ class Expect:
     match the stored page or binary record. ``projected`` says that the file on disk is the stored
     page: the projection manifest records the page's own revision, no projection intent is queued
     for the path and no outside change is held for it. ``linked_from`` names every page that may
-    link to the path: a link from a page outside it, in the graph rows at commit time, refuses the
-    commit. A delete reads its inbound links and commits on that reading through it.
+    link to the path: a link from a page outside it, in the inbound-link rows at commit time (the
+    rule that ``list_inbound_links`` and a move's rewrite use), refuses the commit. A delete reads
+    its inbound links and commits on that reading through it.
 
     ``pages_below`` and ``binaries_below`` bind a folder: the number of stored pages, and of binary
     records, whose path starts with ``rel + "/"``. A folder write binds the counts it read, so a page
@@ -201,9 +202,10 @@ class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
 
     ``refresh`` names files that the store does not own (a Markdown file outside the Knowledge Base
-    folder, say) and that a caller made durable on disk before the commit: the commit derives their
-    rows from the file's bytes, so a search sees them at the same revision as the pages. The store
-    keeps no page, record or audit row for them.
+    folder, or one at a page path the store holds no row for, say) and that a caller made durable
+    on disk before the commit: the commit derives their rows from the file's bytes, so a search
+    sees them at the same revision as the pages. The store keeps no page, record or audit row for
+    them.
 
     ``resolves_held`` and ``files_seen`` are the bookkeeping of resolving a held item, and
     ``commit`` applies them in the same transaction as the page changes.
@@ -300,6 +302,11 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
         check(tx, change.expect)
+        for rel in change.refresh:
+            if tx.execute(
+                "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
+            ).fetchone():
+                raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
         _degrade_moves(tx, change.paths)
         existing = _held_pages(tx, change)
         now = timestamp()
@@ -339,7 +346,10 @@ def _require_owned(change: StoreChange) -> None:
     """Refuse, before any write, a path that the store cannot hold as its operation needs."""
     for rel in change.refresh:
         _require_safe(rel)
-        if ownership.classify(rel) is not ownership.Ownership.NONE:
+        # ``PAGE`` is refused inside ``commit``'s transaction, where the store_pages probe and the
+        # derived rows it guards are one atomic step: a file at a page path that the store holds no
+        # row for is disk-owned and refreshes like an unowned file.
+        if ownership.classify(rel) is ownership.Ownership.BINARY:
             raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
     pages = (
         *(put.rel for put in change.puts),
@@ -412,8 +422,9 @@ def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
 
 def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
     """Raise ``StoreConflict`` for the first path that does not hold what ``expect`` says."""
-    # One graph read binds the linking pages of every path: a folder's delete binds hundreds.
-    linked = inbound_sources_many(
+    # One read of the inbound rows binds the linking pages of every path: a folder's delete binds
+    # hundreds.
+    linked = vault.store_inbound_wikilinks(
         tx, [rel for rel, want in expect.items() if want.linked_from is not None]
     )
     for rel, want in expect.items():
@@ -434,7 +445,7 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
         if want.projected and not _projected(tx, rel, *have):
             raise StoreConflict(rel, "its file on disk is not the stored page")
         if want.linked_from is not None:
-            gained = linked[rel] - want.linked_from
+            gained = {link.path for link in linked[rel]} - want.linked_from
             if gained:
                 # No name: the page that linked may be one the caller is not allowed to see.
                 raise StoreConflict(rel, "a page now links to it")

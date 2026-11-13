@@ -246,6 +246,35 @@ def test_the_rows_of_a_move_equal_a_cold_derivation_from_the_files(served, tmp_p
     assert differences_from_a_cold_build(served, tmp_path) == []
 
 
+@pytest.mark.parametrize("removal", ["delete", "move"])
+def test_a_typed_link_to_a_page_that_a_commit_removes_lands_as_a_cold_derivation_lands_it(
+    served, tmp_path, removal
+):
+    """A commit that removes a page while its file waits for the projector, and re-derives a page
+    that links to it against that file: the link stays a link to a file after the file goes."""
+    claim = "Knowledge Base/Notes/Tide Claim.md"
+    claim_text = (
+        "---\ntitle: Tide Claim\ntype: note\n---\n# Tide Claim\n\n"
+        "- supports [[Knowledge Base/Notes/Gamma]]\n"
+    )
+    store_gamma(served)
+    vault_module.batch_atomic_write(
+        [planned(served, claim, claim_text, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    project_by_hand(served)
+
+    if removal == "delete":
+        delete_file.delete_file(served, path=GAMMA, confirm=True, force_orphan=True)
+    else:
+        move_file.move_file(served, old_path=GAMMA, new_path=MOVED, update_wikilinks=False)
+    assert (served / GAMMA).is_file(), "the removed page's file waits for the projector"
+    (served / GAMMA).unlink()  # the projector's step for the page that the commit removed
+
+    assert differences_from_a_cold_build(served, tmp_path) == []
+
+
 def test_a_moves_store_reads_do_not_grow_with_its_linking_pages(served, monkeypatch):
     """A move that opens a store snapshot per linking page: its cost grows with the page's links,
     and its reads may mix revisions in one plan."""

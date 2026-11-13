@@ -2909,6 +2909,12 @@ class EpistemicGraphIndex:
             **kwargs,
         )
 
+    def _rows_exist(self) -> bool:
+        """Whether there are graph rows to read: the store's, or else the sidecar file's."""
+        from .vault_store import mode as store_mode
+
+        return store_mode.store_mode_for_reads(self.vault_root) or self.path.exists()
+
     def available(self) -> bool:
         conn = self._open_read_snapshot()
         if conn is None:
@@ -2941,6 +2947,10 @@ class EpistemicGraphIndex:
         path. Admitting unexplained rows could disclose a withheld mutation.
         The canonical hold ends before query or source hydration starts.
         """
+        from .vault_store import mode as store_mode
+
+        if store_mode.store_mode_for_reads(self.vault_root):
+            return None  # a store publishes nothing: the caller's live path reads the snapshot
         publication = graph_read_publication.published(self.vault_root)
         if publication is None or not graph_enabled() or time.monotonic() >= deadline:
             return None
@@ -3167,6 +3177,15 @@ class EpistemicGraphIndex:
             if refusal_out is not None:
                 refusal_out.append("graph_disabled")
             return None
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        if store_mode.store_mode_for_reads(self.vault_root):
+            # Each commit derives its pages' graph rows in its own transaction, so the request's
+            # snapshot is current by construction: nothing below proves, defers or repairs it.
+            lent = store_read.lend(self.vault_root)
+            if lent is not None:
+                return lent
         if require_current_projection and freshness.external_pending(self.vault_root):
             # For a restricted caller the marks decide per-path: a batch naming
             # only pages it may not see changes nothing it can read. An unscoped
@@ -8947,7 +8966,11 @@ class EpistemicGraphIndex:
         (`_open_read_snapshot`), and the rows' links resolve as they were
         derived (`_reader_resolver`, chosen before the read transaction
         opens). Without such a resolver the read is temporarily unavailable.
+        In store mode the rows and the request's resolver read one store
+        snapshot, so there is no lag to bridge (`_store_reader_resolver`).
         """
+        from .vault_store import mode as store_mode
+
         requested_keys = [str(k) for k in keys if k]
         anchor_rel = _page_rel(anchor) if anchor else None
         # GraphView shares this operation's combined path and caller verdicts,
@@ -8971,13 +8994,19 @@ class EpistemicGraphIndex:
             return RelationFilterResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return RelationFilterResult(status="warming")
         expected_meta: tuple[str | None, str | None] | None = None
         if keep is None:
             link_resolver = None
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
+        elif store_mode.store_mode_for_reads(self.vault_root):
+            link_resolver = self._store_reader_resolver(resolver)
+            if link_resolver is None:
+                return RelationFilterResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
         else:
             decided = self._reader_resolver(resolver)
             if decided is None:
@@ -9179,7 +9208,7 @@ class EpistemicGraphIndex:
             return RelationEdgeResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return RelationEdgeResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -9215,6 +9244,23 @@ class EpistemicGraphIndex:
             seen.add(edge)
             edges.append(edge)
         return RelationEdgeResult(status="available", edges=tuple(edges))
+
+    def _store_reader_resolver(
+        self, request: Callable[[], vault_module.WikilinkResolver] | None
+    ) -> vault_module.WikilinkResolver | None:
+        """A restricted reader's link resolver in store mode, or None while the recall index warms.
+
+        The sidecar's lag bridge (`_reader_resolver`) has nothing to bridge here: the rows and the
+        request's resolver read one store snapshot, so the snapshot's own resolver fits its rows.
+        """
+        try:
+            return (
+                request()
+                if request is not None
+                else find_module.recall_resolver_snapshot(self.vault_root)
+            )
+        except find_module.RetrievalIndexWarming:
+            return None
 
     def _reader_resolver(
         self,
@@ -9308,7 +9354,30 @@ class EpistemicGraphIndex:
         sidecar that trails the live checkpoint only by such pages is read (`_open_read_snapshot`),
         and the rows' links resolve as they were derived (`_reader_resolver`, chosen before the
         read transaction opens). Without such a resolver the edges are temporarily unavailable.
+
+        In store mode the rows and the resolver read one store snapshot (`request_snapshot`, which
+        joins the request's own). Its rows are current at its revision, so there is no lag to
+        bridge, and the request's resolver is the one at that revision: a resolver of another
+        revision is another `find.recall_resolver_snapshot` identity.
         """
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        if not store_mode.store_mode_for_reads(self.vault_root):
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=False)
+        with store_read.request_snapshot(self.vault_root):
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=True)
+
+    def _unit_edges(
+        self,
+        keys: Iterable[str],
+        pages: Collection[str] | None,
+        keep: Callable[[str], bool] | None,
+        resolver: Callable[[], vault_module.WikilinkResolver] | None,
+        reader: Callable[[str], bool] | None,
+        *,
+        stored: bool,
+    ) -> UnitEdgeResult:
         requested_keys = [str(k) for k in keys if k]
         if not requested_keys or (pages is not None and not pages):
             return UnitEdgeResult(status="available")
@@ -9325,13 +9394,19 @@ class EpistemicGraphIndex:
 
         if not graph_enabled():
             return UnitEdgeResult(status="temporarily_unavailable", reason="graph_index_disabled")
-        if not self.path.exists():
+        if not self._rows_exist():
             return UnitEdgeResult(status="warming")
         expected_meta: tuple[str | None, str | None] | None = None
         if keep is None:
             link_resolver = None
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
+        elif stored:
+            link_resolver = self._store_reader_resolver(resolver)
+            if link_resolver is None:
+                return UnitEdgeResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
         else:
             decided = self._reader_resolver(resolver)
             if decided is None:
@@ -9432,7 +9507,7 @@ class EpistemicGraphIndex:
             return DependencySourcesResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return DependencySourcesResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -10757,8 +10832,12 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+        from .vault_store import mode as store_mode
+
         lag = None
-        if include_lag:
+        # A store-mode graph is unavailable only when it is disabled, and its rows have no sync
+        # queue to report: the tool attaches the registry notice instead.
+        if include_lag and not store_mode.store_mode_for_reads(Path(vault_root)):
             try:
                 lag = graph_lag(vault_root)
             except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
@@ -11402,6 +11481,18 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     proof. An unproven sidecar answers `("unproven",)`, a key of its own, since
     that request serves without the graph lane.
     """
+    from .collection_store import connection as store_connection
+    from .vault_store import mode as store_mode
+    from .vault_store import read as store_read
+
+    root = Path(vault_root)
+    if graph_enabled() and store_mode.store_mode_for_reads(root):
+        # Every commit and registry batch moves the store revision with the graph rows it writes.
+        try:
+            return ("store", store_read.current_revision(root))
+        except store_connection.CollectionStoreError as error:
+            if error.code != store_read.NOT_ACTIVE:
+                raise  # otherwise the records stopped saying store mode: the sidecar decides
     idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
     outcome: list[str] = []
     conn = idx._open_read_snapshot(outcome_out=outcome)
@@ -13934,10 +14025,19 @@ class GraphView:
         self.seed_keep = seed_keep if seed_keep is not None else keep
         self._unit_parents: dict[str, tuple[list[str], bool]] = {}
         self.interpretations = interpretations or semantic_index.Interpretations(vault_root)
+
+        def admitted_many(rel_paths: list[str]) -> dict[str, bool]:
+            admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
+            return {
+                rel_path: rel_path in admitted_paths and (keep is None or keep(rel_path))
+                for rel_path in rel_paths
+            }
+
         self.parents = semantic_index.AdmittedParents(
             self._summaries,
             allowed=lambda rel_path: _recall_path_allowed(self.vault_root, rel_path)
             and (keep is None or keep(rel_path)),
+            allowed_many=admitted_many,
             interpretations=self.interpretations,
             admitted=admitted,
         )
@@ -14487,14 +14587,36 @@ class GraphView:
         try:
             with preparation as prepared:
                 self._check()
-                raw = (
-                    prepared.source if prepared is not None
-                    else vault_module.read_bytes_without_pinning(
+                from .vault_store import mode as store_mode
+                from .vault_store import read as store_read
+
+                in_store = store_mode.store_mode_for_reads(self.vault_root)
+                # In store mode the page's bytes and time, and each link's target, are the ones
+                # its rows were derived from (`page_source`, `link_target_exists`), read from the
+                # snapshot that holds those rows: a stored page's file may be absent or stale.
+                source = (
+                    store_read.page_source(self.conn, self.vault_root, rel_path)
+                    if in_store and prepared is None
+                    else None
+                )
+                target_exists = (
+                    (lambda rel: store_read.link_target_exists(self.conn, self.vault_root, rel))
+                    if in_store
+                    else None
+                )
+                if prepared is not None:
+                    raw, mtime = prepared.source, path.stat().st_mtime
+                elif in_store:
+                    if source is None:
+                        raise FileNotFoundError(rel_path)
+                    raw, mtime = source[0].decode("utf-8"), source[1] / 1e9
+                else:
+                    raw = vault_module.read_bytes_without_pinning(
                         path, vault_root=self.vault_root
                     ).decode("utf-8")
-                )
+                    mtime = path.stat().st_mtime
                 page = find_module._parse_page(
-                    path, path.stat().st_mtime, self.vault_root,
+                    path, mtime, self.vault_root,
                     content=raw.encode("utf-8"), resolved_relative=rel_path,
                 )
                 if page is None:
@@ -14502,7 +14624,9 @@ class GraphView:
                         self._interrupt(rel_path, "selected_interpretation_unavailable")
                     return []
                 self._check()
-                state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
+                state = semantic_index.current_parent_index_state(
+                    self.vault_root, rel_path if source is not None else path, source=raw
+                )
                 self._check()
                 edges = _structural_edges_for_page(
                     self.vault_root, page, state,
@@ -14510,6 +14634,7 @@ class GraphView:
                     resolver=self._shared_resolver(), visible=self.keep,
                     check=self._check if bounded else None,
                     landing=self._snapshot_landing if bounded else None,
+                    target_exists=target_exists,
                 )
                 evidence = {}
                 rows = []
