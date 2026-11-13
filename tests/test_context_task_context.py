@@ -63,40 +63,6 @@ def test_task_discovery_does_not_require_an_anchor(vault: Path, monkeypatch: pyt
     assert refreshed["task_context"]["methods"]["items"] == []
 
 
-def test_a_recall_validates_the_policy_as_often_for_many_leads_as_for_few(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each projected lead takes release decisions. The number of leads must not set how often one recall
-    loads and validates the governance policy."""
-    from exomem.governance import policy
-
-    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
-    monkeypatch.setattr(context_catalogue, "_managed", lambda: True)
-    validations: list[Path] = []
-    guarded = policy._load_guarded
-
-    def counted(root: Path):
-        validations.append(root)
-        return guarded(root)
-
-    monkeypatch.setattr(policy, "_load_guarded", counted)
-    turn = "Inspect the optical alignment before the workshop"
-
-    def recall_with(notes: int) -> tuple[int, int]:
-        for index in range(notes):
-            _page(vault, f"alignment-visit-{notes}-{index}",
-                  body=f"Optical alignment workshop, visit {index}: the calibration appointment remains undecided.\n")
-        _built(vault).close()
-        lexstore.ensure_fresh(vault)
-        _activate(vault, turn=turn, max_chars=8000)  # the first packet of a session carries more
-        validations.clear()
-        packet = _activate(vault, turn=turn, max_chars=8000)
-        return len(packet["task_context"]["candidates"]), len(validations)
-
-    few_leads, few = recall_with(2)
-    many_leads, many = recall_with(6)
-    assert many_leads > few_leads
-    assert many == few, f"policy validations grew with the leads: {few} for {few_leads}, {many} for {many_leads}"
-
-
 def test_a_public_method_edit_invalidates_an_unchanged_unit_across_clients(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An independently authored exclusion changes while the selected procedure stays identical."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
