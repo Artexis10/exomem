@@ -383,6 +383,10 @@ class Command:
     #: because every page parameter takes those. A command whose subject is a file keeps `path`:
     #: a file tool takes no title or id.
     names_pages: bool = False
+    #: Resolve read-only handles before writer admission; the leaf revalidates the bound guards.
+    prepare_arguments: Callable[..., dict[str, typing.Any]] | None = field(
+        default=None, compare=False, hash=False
+    )
 
     def __post_init__(self) -> None:
         if self.renderings and self.argument_rules is None:
