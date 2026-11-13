@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Reuse complete tested-tree evidence and merge release PRs after checked preflights.
-
-A refused preflight delays the release until its source and proof agree. It
-prevents a stale-source release; it adds no manual approval requirement.
-"""
+"""Record authentic Full evidence, select matching trees and refresh release checks."""
 
 from __future__ import annotations
 
@@ -14,7 +10,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -24,8 +19,8 @@ WORKFLOW = ".github/workflows/ci.yml"
 AUTOMATION = ".github/workflows/release-evidence-automation.yml"
 RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
-INTENT_ARTIFACT = "release-intent"
-INTENT_FILE = "release-intent.json"
+# Full's required package-build job checks lock, Cloud output and committed plugin content/version.
+PACKAGE_CHECKS = "release-packages-v1"
 # Release PR checks take about 2 minutes after a re-run; 20 minutes bounds a stuck one.
 CHECK_POLLS, CHECK_POLL_SECONDS = 60, 20
 
@@ -38,7 +33,12 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
         not isinstance(pr, dict) or not isinstance(pr.get("head"), dict)
     ):
         raise ValueError("pull request scope requires the GitHub PR schema")
-    release = event_name == "pull_request" and pr.get("head", {}).get("ref") == RELEASE_BRANCH
+    base = pr.get("base", {}).get("ref", "")
+    head = pr.get("head", {}).get("ref", "")
+    release = event_name == "pull_request" and (
+        head == RELEASE_BRANCH
+        or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
+    )
     return {"full": event_name in FULL_EVENTS, "release": release}
 
 
@@ -47,8 +47,8 @@ def event_payload() -> dict:
     return json.loads(Path(path).read_text()) if path else {}
 
 
-def command(*args: str, env: dict | None = None) -> bytes:
-    return subprocess.check_output(args, env=env)
+def command(*args: str, env: dict | None = None, cwd: Path | None = None) -> bytes:
+    return subprocess.check_output(args, env=env, cwd=cwd, timeout=180)
 
 
 def api(path: str, *, pages: bool = False):
@@ -175,8 +175,7 @@ def read_receipt(run: dict, repository: str) -> dict | None:
     raise ValueError("no authentic Full receipt remains for this run")
 
 
-def select_evidence(source: str, repository: str) -> dict | None:
-    workflow_id = api("actions/workflows/ci.yml")["id"]
+def evidence_sources(source: str, repository: str) -> tuple[str, set[str]]:
     commit = api(f"commits/{source}")
     tree = commit["commit"]["tree"]["sha"]
     candidates = {source}
@@ -188,6 +187,29 @@ def select_evidence(source: str, repository: str) -> dict | None:
             and (pr["head"].get("repo") or {}).get("full_name") == repository
         ):
             candidates.add(pr["head"]["sha"])
+    return tree, candidates
+
+
+def full_inflight(source: str, repository: str) -> bool:
+    """A matching source-PR producer also prevents a duplicate fallback after squash."""
+    workflow_id = api("actions/workflows/ci.yml")["id"]
+    tree, candidates = evidence_sources(source, repository)
+    for candidate in candidates:
+        if candidate != source and api(f"commits/{candidate}")["commit"]["tree"]["sha"] != tree:
+            continue
+        if any(
+            trusted_full(run, repository, workflow_id)
+            and run["head_sha"] == candidate
+            and run["status"] in ("queued", "in_progress")
+            for run in runs(candidate)
+        ):
+            return True
+    return False
+
+
+def select_evidence(source: str, repository: str) -> dict | None:
+    workflow_id = api("actions/workflows/ci.yml")["id"]
+    tree, candidates = evidence_sources(source, repository)
     for candidate in sorted(candidates):
         for run in runs(candidate):
             if run.get("head_sha") != candidate or not trusted_full(run, repository, workflow_id):
@@ -238,14 +260,12 @@ def select_evidence(source: str, repository: str) -> dict | None:
 
 
 def release_pr(number: int, base: str, head: str | None = None) -> dict:
-    if api("commits/main")["sha"] != base:
-        raise ValueError("main moved from the expected source; refresh the release PR and evidence")
     pr = api(f"pulls/{number}")
     if (
         pr["state"] != "open"
-        or pr["base"]["ref"] != "main"
+        or pr["base"]["ref"] != cut_branch(base)
         or pr["base"]["sha"] != base
-        or pr["head"]["ref"] != RELEASE_BRANCH
+        or pr["head"]["ref"] != f"release-please--branches--{cut_branch(base)}"
         or pr["head"]["repo"]["full_name"] != os.environ["GH_REPO"]
         or (head is not None and pr["head"]["sha"] != head)
     ):
@@ -253,197 +273,151 @@ def release_pr(number: int, base: str, head: str | None = None) -> dict:
     return pr
 
 
-def check_release_files(number: int) -> None:
-    files = [
-        file for page in api(f"pulls/{number}/files?per_page=100", pages=True) for file in page
+def cut_branch(source: str) -> str:
+    """The full Git object name is the cut's immutable, collision-free identity."""
+    # Git's SHA-1 wire format is fixed by this repository's object format.
+    if len(source) != 40 or any(char not in "0123456789abcdef" for char in source):
+        raise ValueError("select a full lowercase source commit SHA")
+    return f"release-cuts/{source}"
+
+
+def optional_api(path: str):
+    result = subprocess.run(
+        ("gh", "api", f"repos/{os.environ['GH_REPO']}/{path}"),
+        capture_output=True,
+        timeout=60,
+    )
+    if result.returncode:
+        # gh's documented HTTP diagnostic distinguishes absence from denied or failed reads.
+        if "HTTP 404" in result.stderr.decode(errors="replace"):
+            return None
+        raise ValueError(result.stderr.decode(errors="replace").strip())
+    return json.loads(result.stdout)
+
+
+def main_check_policy() -> list[dict]:
+    """The public branch endpoint exposes classic required contexts and App identities."""
+    protection = api("branches/main").get("protection", {})
+    checks = protection.get("required_status_checks", {}).get("checks", [])
+    policy = [{"context": check["context"], "app_id": check.get("app_id")} for check in checks]
+    if not policy:
+        raise ValueError("main has no readable required-check policy; no cut can land")
+    return sorted(policy, key=lambda check: (check["context"], check.get("app_id") or -1))
+
+
+def inherited_checks(head: str, policy: list[dict]) -> list[dict] | None:
+    """An absent context or foreign App is pending, never an empty-list success."""
+    if not policy:
+        raise ValueError("required-check policy is empty")
+    checks = [
+        check
+        for page in api(f"commits/{head}/check-runs?per_page=100", pages=True)
+        for check in page["check_runs"]
     ]
-    root = Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory(prefix="release-files-") as temporary:
-        listing = Path(temporary) / "files.jsonl"
-        listing.write_text("".join(json.dumps(file) + "\n" for file in files))
-        command(
-            sys.executable,
-            str(root / "scripts/check_release_pr_files.py"),
-            str(root / "release-please-config.json"),
-            str(listing),
-        )
+    statuses = [
+        status
+        for page in api(f"commits/{head}/status?per_page=100", pages=True)
+        for status in page["statuses"]
+    ]
+    result = []
+    for required in policy:
+        matches = [
+            check
+            for check in checks
+            if check["name"] == required["context"]
+            and (
+                required.get("app_id") in (None, -1)
+                or check.get("app", {}).get("id") == required["app_id"]
+            )
+        ]
+        if matches:
+            latest = max(matches, key=lambda check: check.get("id", 0))
+            if latest["status"] != "completed":
+                return None
+            bucket = "pass" if latest["conclusion"] == "success" else "fail"
+        else:
+            matching_statuses = [
+                status
+                for status in statuses
+                if status["context"] == required["context"] and required.get("app_id") in (None, -1)
+            ]
+            if not matching_statuses:
+                return None
+            latest = max(matching_statuses, key=lambda status: status.get("id", 0))
+            if latest["state"] == "pending":
+                return None
+            bucket = "pass" if latest["state"] == "success" else "fail"
+        result.append({"name": required["context"], "bucket": bucket})
+    return result
+
+
+def bind_evidence(intent: dict, selected: dict) -> dict:
+    previous = intent.get("evidence")
+    # Producer identity stays fixed even if GitHub later reports another successful retry.
+    identity = (
+        "repository",
+        "workflow",
+        "run_id",
+        "run_attempt",
+        "tested_commit",
+        "tested_tree",
+        "source_commit",
+        "artifact_id",
+        "contract",
+        "package_checks",
+    )
+    if previous is not None and any(previous.get(key) != selected.get(key) for key in identity):
+        raise ValueError("the cut already names a different Full producer")
+    return previous if previous is not None else selected
+
+
+def validate_predecessor(source: str, version: str, previous: dict) -> None:
+    try:
+        if version != previous["version"]:
+            raise ValueError("version differs")
+        command("git", "merge-base", "--is-ancestor", previous["reconciliation_commit"], source)
+    except (ValueError, subprocess.CalledProcessError) as error:
+        raise ValueError("source must contain the preceding reconciliation and version") from error
 
 
 def require_evidence(source: str, repository: str) -> dict:
     selected = select_evidence(source, repository)
     if selected is None:
-        raise ValueError(
-            f"no complete Full evidence for {source}; dispatch ci.yml on main and retry"
-        )
+        raise ValueError(f"no complete Full evidence for {source}; resume its selected release cut")
     return selected
 
 
 def refresh_checks(repository: str) -> None:
-    owner = repository.split("/", 1)[0]
-    for pr in api(f"pulls?state=open&head={owner}:{RELEASE_BRANCH}"):
-        source = pr["base"]["sha"]
-        if api("commits/main")["sha"] != source or select_evidence(source, repository) is None:
-            continue
-        for run in runs(pr["head"]["sha"]):
-            if (
-                run["event"] == "pull_request"
-                and run["head_sha"] == pr["head"]["sha"]
-                and run["status"] == "completed"
-                and run["conclusion"] == "failure"
-            ):
-                command("gh", "run", "rerun", str(run["id"]), "--failed")
-                print(f"re-ran failed release checks from run {run['id']}")
-                break
-
-
-def merge_release(number: int, base: str, head: str, repository: str, token: str = "") -> None:
-    """Merge the reviewed head after the final checks, evidence and source preflight."""
-    command("gh", "pr", "checks", str(number), "--required")
-    print(json.dumps(require_evidence(base, repository)))
-    release_pr(number, base, head)
-    print(
-        "GitHub pins the reviewed head; a base update after this final read can still race the merge."
-    )
-    merge = ("gh", "pr", "merge", str(number), "--squash", "--match-head-commit", head)
-    # A merge made with the workflow token starts no workflow, so Release Please would not tag it.
-    command(*merge, env={**os.environ, "GH_TOKEN": token} if token else None)
-
-
-def intent_record(pr: dict) -> dict:
-    return {
-        "pr": pr["number"],
-        "expected_base": pr["base"]["sha"],
-        "expected_head": pr["head"]["sha"],
-    }
-
-
-def intended(pr: dict, repository: str) -> bool:
-    """True when a release intent dispatched on main named exactly this PR, source and head."""
-    workflow_runs = api(
-        f"actions/workflows/{Path(AUTOMATION).name}/runs"
-        "?event=workflow_dispatch&branch=main&status=success&per_page=30"
-    )["workflow_runs"]
-    for run in workflow_runs:
-        if (
-            run.get("path") != AUTOMATION
-            or run.get("event") != "workflow_dispatch"
-            or run.get("head_branch") != "main"
-            or run.get("conclusion") != "success"
-            or (run.get("head_repository") or {}).get("full_name") != repository
-        ):
-            continue
-        for artifact in api(f"actions/runs/{run['id']}/artifacts?name={INTENT_ARTIFACT}")[
-            "artifacts"
-        ]:
-            if artifact["expired"]:
+    for page in api("pulls?state=open&per_page=100", pages=True):
+        for pr in page:
+            source = pr["base"]["sha"]
+            branch = pr["base"]["ref"]
+            if pr["head"]["ref"] != f"release-please--branches--{branch}":
                 continue
-            archive = command(
-                "gh", "api", f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"
-            )
-            try:
-                with zipfile.ZipFile(io.BytesIO(archive)) as files:
-                    named = json.loads(files.read(INTENT_FILE))
-            except (KeyError, ValueError, zipfile.BadZipFile) as error:
-                print(
-                    f"artifact {artifact['id']} holds no readable release intent: {error}",
-                    file=sys.stderr,
-                )
+            if branch != cut_branch(source) and branch != "main":
                 continue
-            if named == intent_record(pr):
-                return True
-    return False
-
-
-def intended_release(repository: str, intent_path: Path | None) -> dict | None:
-    """The open release PR that a release intent named at its exact source and head, if any."""
-    owner = repository.split("/", 1)[0]
-    for pr in api(f"pulls?state=open&head={owner}:{RELEASE_BRANCH}"):
-        if (
-            json.loads(intent_path.read_text()) == intent_record(pr)
-            if intent_path
-            else intended(pr, repository)
-        ):
-            return pr
-        print(
-            f"no release intent names release PR #{pr['number']} at {pr['head']['sha']}; "
-            "the release session merges it"
-        )
-    return None
-
-
-def required_checks(number: int) -> list[dict]:
-    """The required checks gh reports for the PR head; a failed or empty read raises with gh's error."""
-    result = subprocess.run(
-        ("gh", "pr", "checks", str(number), "--required", "--json", "name,bucket"),
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        reason = result.stderr.decode(errors="replace").strip() or "gh listed no required checks"
-        raise ValueError(f"could not read the required checks of release PR #{number}: {reason}")
-    return json.loads(result.stdout)
-
-
-def settled_checks(pr: dict) -> list[dict] | None:
-    """The head's required checks once its CI run exists and has finished; None until then."""
-    head = pr["head"]["sha"]
-    ci = [run for run in runs(head) if run["event"] == "pull_request" and run["head_sha"] == head]
-    # gh lists only checks that exist, and the gate's check appears only when the jobs it needs
-    # finish, so wait for the CI run itself before reading the list.
-    if not ci or any(run["status"] != "completed" for run in ci):
-        return None
-    checks = required_checks(pr["number"])
-    # gh's documented bucket values: pass, fail, pending, skipping, cancel.
-    if any(check["bucket"] == "pending" for check in checks):
-        return None
-    return checks
-
-
-def land(repository: str, intent_path: Path | None, token: str) -> None:
-    """Merge the open release PR when a release intent named its exact source and head."""
-    pr = intended_release(repository, intent_path)
-    if pr is None:
-        return
-    number, base, head = pr["number"], pr["base"]["sha"], pr["head"]["sha"]
-    for _ in range(CHECK_POLLS):
-        time.sleep(CHECK_POLL_SECONDS)
-        checks = settled_checks(pr)
-        if checks is not None:
-            break
-    else:
-        raise ValueError(
-            f"no completed CI run with settled required checks on {head} after "
-            f"{CHECK_POLLS * CHECK_POLL_SECONDS // 60} minutes; release PR #{number} was not merged"
-        )
-    failed = [check["name"] for check in checks if check["bucket"] in ("fail", "cancel")]
-    if failed:
-        raise ValueError(
-            f"required checks failed ({', '.join(failed)}); release PR #{number} was not merged"
-        )
-    if api(f"pulls/{number}").get("merged"):
-        print(f"release PR #{number} was merged while its checks ran; nothing to land")
-        return
-    release_pr(number, base, head)
-    check_release_files(number)
-    merge_release(number, base, head, repository, token)
-    print(f"merged release PR #{number} at {head}")
+            if select_evidence(source, repository) is None:
+                continue
+            for run in runs(pr["head"]["sha"]):
+                if (
+                    run["event"] == "pull_request"
+                    and run["head_sha"] == pr["head"]["sha"]
+                    and run["status"] == "completed"
+                    and run["conclusion"] == "failure"
+                ):
+                    command("gh", "run", "rerun", str(run["id"]), "--failed")
+                    print(f"re-ran failed release checks from run {run['id']}")
+                    break
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     # The command names are this helper's closed CLI protocol.
-    parser.add_argument(
-        "command", choices=("scope", "record", "select", "intent", "refresh", "merge", "land")
-    )
+    parser.add_argument("command", choices=("scope", "record", "select", "refresh"))
     parser.add_argument("--source")
-    parser.add_argument("--pr", type=int)
-    parser.add_argument("--expected-base")
-    parser.add_argument("--expected-head")
     parser.add_argument("--run-id", type=int)
     parser.add_argument("--attempt", type=int)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--intent", type=Path)
-    parser.add_argument("--find", action="store_true")
     args = parser.parse_args()
     repository = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     os.environ["GH_REPO"] = repository
@@ -463,6 +437,7 @@ def main() -> int:
             "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "event": os.environ["GITHUB_EVENT_NAME"],
             "scope": "full",
+            "package_checks": PACKAGE_CHECKS,
             "tested_commit": command("git", "rev-parse", "HEAD").decode().strip(),
             "tested_tree": command("git", "rev-parse", "HEAD^{tree}").decode().strip(),
         }
@@ -473,53 +448,6 @@ def main() -> int:
         if not args.source:
             parser.error("select requires --source")
         print(json.dumps(require_evidence(args.source, repository)))
-    elif args.command in ("merge", "intent"):
-        if (
-            not args.pr
-            or not args.expected_base
-            or (args.command == "merge" and not args.expected_head)
-        ):
-            parser.error(
-                "merge/intent require --pr and --expected-base; merge also requires --expected-head"
-            )
-        pr = release_pr(args.pr, args.expected_base, args.expected_head)
-        check_release_files(args.pr)
-        if args.command == "intent":
-            if args.expected_head and args.output:
-                # The named head binds the intent: a later head or source never matches it.
-                args.output.write_text(json.dumps(intent_record(pr)) + "\n")
-            selected = select_evidence(args.expected_base, repository)
-            if selected:
-                print(json.dumps(selected))
-                refresh_checks(repository)
-                if os.environ.get("GITHUB_OUTPUT"):
-                    with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-                        output.write("reused=true\n")
-            elif any(
-                trusted_full(run, repository, api("actions/workflows/ci.yml")["id"])
-                and run["head_sha"] == args.expected_base
-                and run["head_branch"] == "main"
-                and run["status"] in ("queued", "in_progress")
-                for run in runs(args.expected_base)
-            ):
-                print("Full evidence is already in flight")
-            else:
-                release_pr(args.pr, args.expected_base)
-                command("gh", "workflow", "run", "ci.yml", "--ref", "main")
-                print(f"dispatched Full evidence on main for {args.expected_base}")
-        else:
-            merge_release(args.pr, args.expected_base, args.expected_head, repository)
-    elif args.command == "land" and args.find:
-        # Lets the workflow mint the release App token only when there is a release to land.
-        found = intended_release(repository, args.intent) is not None
-        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-            output.write(f"intended={str(found).lower()}\n")
-    elif args.command == "land":
-        token = os.environ.get("RELEASE_MERGE_TOKEN", "")
-        if not token:
-            # Without the release App token the merge would start no Release Please run and no tag.
-            parser.error("land requires RELEASE_MERGE_TOKEN, the release App installation token")
-        land(repository, args.intent, token)
     else:
         if not args.run_id or not args.attempt:
             parser.error("refresh requires --run-id and --attempt")

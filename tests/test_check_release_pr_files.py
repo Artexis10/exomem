@@ -51,9 +51,24 @@ def _check(tmp_path: Path, files: list[dict], capsys: pytest.CaptureFixture) -> 
     return status, capsys.readouterr().err
 
 
-def test_a_release_please_pr_passes(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+def test_a_release_please_pr_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture, monkeypatch
+) -> None:
+    # The pinned updater's real transport is covered by the disposable two-cut proof.
+    monkeypatch.setattr(
+        check_release_pr_files,
+        "version_updates",
+        lambda config, files, version: {
+            path: content.replace("1.2.3", version) for path, content in files.items()
+        },
+    )
     files = [
-        {"filename": ".release-please-manifest.json", "patch": "@@\n-1\n+2\n"},
+        {
+            "filename": ".release-please-manifest.json",
+            "patch": "@@\n-1\n+2\n",
+            "before": '{".": "1.2.3"}',
+            "after": '{".": "1.3.0"}',
+        },
         {"filename": "CHANGELOG.md", "patch": "@@\n+## 1.3.0\n"},
         {"filename": "pyproject.toml", "patch": VERSION_BUMP},
         {"filename": "uv.lock", "patch": VERSION_BUMP},
@@ -67,6 +82,8 @@ def test_a_release_please_pr_passes(tmp_path: Path, capsys: pytest.CaptureFixtur
         {
             "filename": "server.json",
             "patch": '@@\n-  "version": "1.2.3",\n+  "version": "1.3.0",\n',
+            "before": '{"version": "1.2.3", "name": "example"}',
+            "after": '{"version": "1.3.0", "name": "example"}',
         },
         {"filename": "plugins/cloud/generated/release.json", "patch": "@@\n-a\n+b\n"},
         {"filename": "plugins/cloud/generated/claude.zip"},
@@ -141,7 +158,7 @@ def test_a_versioned_file_without_a_diff_is_refused(
         (
             "pyproject.toml",
             '-version = "1.2.3" # x-release-please-version\n'
-            ' [tool.example]\n'
+            " [tool.example]\n"
             '+version = "1.3.0" # x-release-please-version\n',
         ),
     ],

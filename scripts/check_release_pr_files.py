@@ -3,12 +3,11 @@
 The release PR runs no CI test job (`.github/workflows/ci.yml`). That is sound
 only while its diff is release-please's own work: its manifest, the changelog,
 the version lines of the configured extra files, and the Cloud packages that
-`release-please.yml`'s sync job regenerates. Any other change must land through
+the fixed-source controller regenerates. Any other change must land through
 its own pull request, which runs the test jobs.
 
-A JSON extra file is checked per file, because release-please rewrites it
-through its JSON updater; this repository's one (`server.json`) is registry
-metadata that no runtime code reads.
+JSON values must match the pinned Release Please updaters. An allowed path
+never permits arbitrary content.
 
 Usage: check_release_pr_files.py <release-please-config.json> <pr-files.jsonl>
 Each line of the second file is one entry of GitHub's "list pull request files"
@@ -17,8 +16,10 @@ response.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -27,7 +28,7 @@ from pathlib import Path
 _MANIFEST = ".release-please-manifest.json"
 #: Files release-please itself writes besides the configured extra files.
 _RELEASE_PLEASE_FILES = frozenset({_MANIFEST, "CHANGELOG.md"})
-#: The directories that release-please.yml's sync-cloud-artifacts job commits.
+#: The directories that the fixed-source controller regenerates.
 _REGENERATED_PACKAGES = ("plugins/cloud/generated/", "plugins/claude-code/")
 #: release-please's generic updater rewrites only lines that carry this marker.
 _VERSION_MARKER = "x-release-please-version"
@@ -48,7 +49,9 @@ def _version_value(path: str, line: str) -> str | None:
             statements = ast.parse(line).body
             if len(statements) != 1 or not isinstance(statement := statements[0], ast.Assign):
                 return None
-            if len(statement.targets) != 1 or not isinstance(target := statement.targets[0], ast.Name):
+            if len(statement.targets) != 1 or not isinstance(
+                target := statement.targets[0], ast.Name
+            ):
                 return None
             # Python release metadata assigns only this public package attribute.
             if target.id != "__version__" or not isinstance(statement.value, ast.Constant):
@@ -65,12 +68,40 @@ def _version_value(path: str, line: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def version_updates(config: dict, files: dict[str, str], version: str) -> dict[str, str]:
+    result = subprocess.run(
+        ("node", str(Path(__file__).with_name("release_metadata.cjs"))),
+        input=json.dumps({"config": config, "files": files, "version": version}),
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=60,
+    )
+    return json.loads(result.stdout)
+
+
 def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
     """Each change in `files` that release-please did not make, as a reason."""
     extra = _extra_files(config)
     managed = _RELEASE_PLEASE_FILES | {entry["path"] for entry in extra}
     generic = {entry["path"] for entry in extra if entry.get("type") == "generic"}
+    json_files = {_MANIFEST} | {entry["path"] for entry in extra if entry.get("type") == "json"}
     problems = []
+    manifest = next((file for file in files if file["filename"] == _MANIFEST), {})
+    expected = {}
+    if "after" in manifest:
+        try:
+            expected = version_updates(
+                config,
+                {
+                    file["filename"]: file["before"]
+                    for file in files
+                    if file["filename"] in managed and "before" in file
+                },
+                json.loads(manifest["after"])["."],
+            )
+        except (KeyError, ValueError, subprocess.CalledProcessError) as error:
+            problems.append(f"configured version updates cannot be verified: {error}")
     if not any(file["filename"] == _MANIFEST for file in files):
         # An empty or partial listing is an unexpected state, not a clean PR.
         problems.append(f"{_MANIFEST}: the release PR does not change it")
@@ -78,8 +109,18 @@ def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
         for path in filter(None, (file["filename"], file.get("previous_filename"))):
             if not (path in managed or path.startswith(_REGENERATED_PACKAGES)):
                 problems.append(f"{path}: release-please does not manage this file")
+        if file["filename"] in json_files:
+            try:
+                if json.loads(expected[file["filename"]]) != json.loads(file["after"]):
+                    raise ValueError("undeclared value changed")
+            except (KeyError, ValueError, StopIteration, subprocess.CalledProcessError) as error:
+                problems.append(
+                    f"{file['filename']}: cannot verify only configured versions: {error}"
+                )
         if file["filename"] not in generic:
             continue
+        if "after" in file and file.get("after") != expected.get(file["filename"]):
+            problems.append(f"{file['filename']}: differs from the selected version update")
         patch = file.get("patch")
         if patch is None:
             problems.append(f"{file['filename']}: GitHub returned no diff to verify")
@@ -104,12 +145,28 @@ def unreleased_changes(config: dict, files: list[dict]) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    config = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", type=Path)
+    parser.add_argument("listing", type=Path)
+    parser.add_argument("--base")
+    parser.add_argument("--head")
+    args = parser.parse_args(argv)
+    config = json.loads(args.config.read_text(encoding="utf-8"))
     files = [
         json.loads(line)
-        for line in Path(argv[1]).read_text(encoding="utf-8").splitlines()
+        for line in args.listing.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    if args.base and args.head:
+        managed = {_MANIFEST} | {entry["path"] for entry in _extra_files(config)}
+        for file in files:
+            if file["filename"] in managed:
+                for key, ref in (("before", args.base), ("after", args.head)):
+                    file[key] = subprocess.check_output(
+                        ("git", "show", f"{ref}:{file['filename']}"),
+                        text=True,
+                        timeout=30,
+                    )
     problems = unreleased_changes(config, files)
     if not problems:
         print(f"the release PR changes only what release-please writes ({len(files)} files)")
