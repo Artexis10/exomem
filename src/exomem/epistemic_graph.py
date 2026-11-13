@@ -2909,6 +2909,12 @@ class EpistemicGraphIndex:
             **kwargs,
         )
 
+    def _rows_exist(self) -> bool:
+        """Whether there are graph rows to read: the store's, or else the sidecar file's."""
+        from .vault_store import mode as store_mode
+
+        return store_mode.store_mode_for_reads(self.vault_root) or self.path.exists()
+
     def available(self) -> bool:
         conn = self._open_read_snapshot()
         if conn is None:
@@ -2941,6 +2947,10 @@ class EpistemicGraphIndex:
         path. Admitting unexplained rows could disclose a withheld mutation.
         The canonical hold ends before query or source hydration starts.
         """
+        from .vault_store import mode as store_mode
+
+        if store_mode.store_mode_for_reads(self.vault_root):
+            return None  # a store publishes nothing: the caller's live path reads the snapshot
         publication = graph_read_publication.published(self.vault_root)
         if publication is None or not graph_enabled() or time.monotonic() >= deadline:
             return None
@@ -3167,6 +3177,15 @@ class EpistemicGraphIndex:
             if refusal_out is not None:
                 refusal_out.append("graph_disabled")
             return None
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        if store_mode.store_mode_for_reads(self.vault_root):
+            # Each commit derives its pages' graph rows in its own transaction, so the request's
+            # snapshot is current by construction: nothing below proves, defers or repairs it.
+            lent = store_read.lend(self.vault_root)
+            if lent is not None:
+                return lent
         if require_current_projection and freshness.external_pending(self.vault_root):
             # For a restricted caller the marks decide per-path: a batch naming
             # only pages it may not see changes nothing it can read. An unscoped
@@ -8947,7 +8966,11 @@ class EpistemicGraphIndex:
         (`_open_read_snapshot`), and the rows' links resolve as they were
         derived (`_reader_resolver`, chosen before the read transaction
         opens). Without such a resolver the read is temporarily unavailable.
+        In store mode the rows and the request's resolver read one store
+        snapshot, so there is no lag to bridge (`_store_reader_resolver`).
         """
+        from .vault_store import mode as store_mode
+
         requested_keys = [str(k) for k in keys if k]
         anchor_rel = _page_rel(anchor) if anchor else None
         # GraphView shares this operation's combined path and caller verdicts,
@@ -8957,9 +8980,20 @@ class EpistemicGraphIndex:
         def _path_allowed(rel_path: str) -> bool:
             allowed = allowed_paths.get(rel_path)
             if allowed is None:
-                allowed = _recall_path_allowed(self.vault_root, rel_path) and (
-                    keep is None or keep(rel_path)
-                )
+                from .published_admission import admission_of
+                from .vault_store import read as store_read
+
+                allowed = _recall_path_allowed(self.vault_root, rel_path)
+                if allowed and keep is not None:
+                    offered = admission_of(keep)
+                    allowed = (
+                        offered.decide_many([rel_path])[rel_path][0]
+                        if (
+                            offered is not None
+                            and store_read.request_memo(self.vault_root) is not None
+                        )
+                        else keep(rel_path)
+                    )
                 allowed_paths[rel_path] = allowed
             return allowed
 
@@ -8971,13 +9005,19 @@ class EpistemicGraphIndex:
             return RelationFilterResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return RelationFilterResult(status="warming")
         expected_meta: tuple[str | None, str | None] | None = None
         if keep is None:
             link_resolver = None
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
+        elif store_mode.store_mode_for_reads(self.vault_root):
+            link_resolver = self._store_reader_resolver(resolver)
+            if link_resolver is None:
+                return RelationFilterResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
         else:
             decided = self._reader_resolver(resolver)
             if decided is None:
@@ -9024,7 +9064,7 @@ class EpistemicGraphIndex:
             if not plan.exact_keys and anchor_rel is None:
                 return RelationFilterResult(status="available")
             candidates = (
-                _relation_candidates(conn, view, plan, registry)
+                _relation_candidates(conn, view, plan, registry, slim=True)
                 if plan.exact_keys
                 else _anchor_candidates(conn, anchor_rel)
             )
@@ -9041,7 +9081,7 @@ class EpistemicGraphIndex:
                         if not plan.exact_keys and anchor_rel not in (src_path, dst_path):
                             continue
                         candidates.append((src_path, dst_path, (page, index), edge))
-            rows = _matched_rows(view, candidates, plan if plan.exact_keys else None)
+            rows = _matched_rows(view, candidates, plan if plan.exact_keys else None, slim=True)
         except sqlite3.Error:
             return RelationFilterResult(status="warming")
         finally:
@@ -9179,7 +9219,7 @@ class EpistemicGraphIndex:
             return RelationEdgeResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return RelationEdgeResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -9197,7 +9237,9 @@ class EpistemicGraphIndex:
             )
             if not plan.exact_keys:
                 return RelationEdgeResult(status="available")
-            rows = _matched_rows(view, _relation_candidates(conn, view, plan, registry), plan)
+            rows = _matched_rows(
+                view, _relation_candidates(conn, view, plan, registry, slim=True), plan, slim=True,
+            )
         except sqlite3.Error:
             return RelationEdgeResult(status="warming")
         finally:
@@ -9215,6 +9257,23 @@ class EpistemicGraphIndex:
             seen.add(edge)
             edges.append(edge)
         return RelationEdgeResult(status="available", edges=tuple(edges))
+
+    def _store_reader_resolver(
+        self, request: Callable[[], vault_module.WikilinkResolver] | None
+    ) -> vault_module.WikilinkResolver | None:
+        """A restricted reader's link resolver in store mode, or None while the recall index warms.
+
+        The sidecar's lag bridge (`_reader_resolver`) has nothing to bridge here: the rows and the
+        request's resolver read one store snapshot, so the snapshot's own resolver fits its rows.
+        """
+        try:
+            return (
+                request()
+                if request is not None
+                else find_module.recall_resolver_snapshot(self.vault_root)
+            )
+        except find_module.RetrievalIndexWarming:
+            return None
 
     def _reader_resolver(
         self,
@@ -9308,7 +9367,30 @@ class EpistemicGraphIndex:
         sidecar that trails the live checkpoint only by such pages is read (`_open_read_snapshot`),
         and the rows' links resolve as they were derived (`_reader_resolver`, chosen before the
         read transaction opens). Without such a resolver the edges are temporarily unavailable.
+
+        In store mode the rows and the resolver read one store snapshot (`request_snapshot`, which
+        joins the request's own). Its rows are current at its revision, so there is no lag to
+        bridge, and the request's resolver is the one at that revision: a resolver of another
+        revision is another `find.recall_resolver_snapshot` identity.
         """
+        from .vault_store import mode as store_mode
+        from .vault_store import read as store_read
+
+        if not store_mode.store_mode_for_reads(self.vault_root):
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=False)
+        with store_read.request_snapshot(self.vault_root):
+            return self._unit_edges(keys, pages, keep, resolver, reader, stored=True)
+
+    def _unit_edges(
+        self,
+        keys: Iterable[str],
+        pages: Collection[str] | None,
+        keep: Callable[[str], bool] | None,
+        resolver: Callable[[], vault_module.WikilinkResolver] | None,
+        reader: Callable[[str], bool] | None,
+        *,
+        stored: bool,
+    ) -> UnitEdgeResult:
         requested_keys = [str(k) for k in keys if k]
         if not requested_keys or (pages is not None and not pages):
             return UnitEdgeResult(status="available")
@@ -9325,13 +9407,19 @@ class EpistemicGraphIndex:
 
         if not graph_enabled():
             return UnitEdgeResult(status="temporarily_unavailable", reason="graph_index_disabled")
-        if not self.path.exists():
+        if not self._rows_exist():
             return UnitEdgeResult(status="warming")
         expected_meta: tuple[str | None, str | None] | None = None
         if keep is None:
             link_resolver = None
         elif reader is None:
             link_resolver = resolver() if resolver is not None else None
+        elif stored:
+            link_resolver = self._store_reader_resolver(resolver)
+            if link_resolver is None:
+                return UnitEdgeResult(
+                    status="temporarily_unavailable", reason="resolver_unavailable"
+                )
         else:
             decided = self._reader_resolver(resolver)
             if decided is None:
@@ -9432,7 +9520,7 @@ class EpistemicGraphIndex:
             return DependencySourcesResult(
                 status="temporarily_unavailable", reason="graph_index_disabled"
             )
-        if not self.path.exists():
+        if not self._rows_exist():
             return DependencySourcesResult(status="warming")
         conn = self._open_read_snapshot()
         if conn is None:
@@ -10571,6 +10659,7 @@ def _relation_candidates(
     registry: relation_registry.RelationRegistry,
     *,
     pages: Collection[str] | None = None,
+    slim: bool = False,
 ) -> list[_RelationCandidate]:
     """Stored edges that could match `plan` under some authoring page's own meaning.
 
@@ -10578,8 +10667,9 @@ def _relation_candidates(
     label. `_matched_rows` interprets each one before it is ranked. `pages`, when
     given, keeps only the edges with an end on one of those pages.
     """
+    columns = _RELATION_MATCH_COLUMNS if slim else EDGE_COLUMNS
     select = (
-        f"SELECT s.path, d.path, e.rowid, {EDGE_COLUMNS} FROM graph_edges e "
+        f"SELECT s.path, d.path, e.rowid, {columns} FROM graph_edges e "
         "JOIN graph_nodes s ON s.node_key = e.src_key "
         "JOIN graph_nodes d ON d.node_key = e.dst_key "
     )
@@ -10615,7 +10705,7 @@ def _relation_candidates(
         )
         params.extend((CANDIDATE_STATUS, *labels, *near_params))
     raw_rows = conn.execute(" UNION ".join(branches), params).fetchall() if branches else []
-    return _stored_candidates(raw_rows)
+    return _stored_candidates(raw_rows, conn=conn if slim else None)
 
 
 def _anchor_candidates(
@@ -10630,7 +10720,7 @@ def _anchor_candidates(
         return []
     marks = ",".join("?" for _ in anchor_node_keys)
     select = (
-        f"SELECT s.path, d.path, e.rowid, {EDGE_COLUMNS} FROM graph_edges e "
+        f"SELECT s.path, d.path, e.rowid, {_RELATION_MATCH_COLUMNS} FROM graph_edges e "
         "JOIN graph_nodes s ON s.node_key = e.src_key "
         "JOIN graph_nodes d ON d.node_key = e.dst_key "
         "WHERE (e.relation_type IS NOT NULL OR e.registry_status = ?) "
@@ -10639,13 +10729,40 @@ def _anchor_candidates(
         f"{select}AND e.src_key IN ({marks}) UNION {select}AND e.dst_key IN ({marks})",
         (CANDIDATE_STATUS, *anchor_node_keys, CANDIDATE_STATUS, *anchor_node_keys),
     ).fetchall()
-    return _stored_candidates(raw_rows)
+    return _stored_candidates(raw_rows, conn=conn)
 
 
-def _stored_candidates(raw_rows: list[tuple[Any, ...]]) -> list[_RelationCandidate]:
+# Only schema columns needed to match a core row; candidate rows still need the full edge.
+_RELATION_MATCH_COLUMNS = "e.source_path, e.relation_type, e.parent_relation, e.registry_status"
+
+
+def _stored_candidates(
+    raw_rows: list[tuple[Any, ...]], *, conn: sqlite3.Connection | None = None,
+) -> list[_RelationCandidate]:
+    full = {}
+    if conn is not None:
+        candidate_ids = [row[2] for row in raw_rows if row[-1] == CANDIDATE_STATUS]
+        if candidate_ids:
+            full = {
+                rowid: _edge_row_to_dict(edge_row)
+                for rowid, *edge_row in conn.execute(
+                    f"SELECT e.rowid, {EDGE_COLUMNS} FROM graph_edges e "
+                    "WHERE e.rowid IN (SELECT value FROM json_each(?))",
+                    (json.dumps(candidate_ids),),
+                )
+            }
     candidates: list[_RelationCandidate] = []
     for src_path, dst_path, rowid, *edge_row in raw_rows:
-        edge = _edge_row_to_dict(edge_row)
+        if conn is None:
+            edge = _edge_row_to_dict(edge_row)
+        elif rowid in full:
+            edge = full[rowid]
+        else:
+            source_path, relation_type, parent_relation, registry_status = edge_row
+            edge = {
+                "source_path": source_path, "relation_type": relation_type,
+                "parent_relation": parent_relation, "registry_status": registry_status,
+            }
         candidates.append(
             (str(src_path), str(dst_path), (str(edge.get("source_path") or ""), int(rowid)), edge)
         )
@@ -10659,6 +10776,8 @@ def _matched_rows(
     view: GraphView,
     candidates: list[_RelationCandidate],
     plan: traversal_profiles.RelationQueryPlan | None,
+    *,
+    slim: bool = False,
 ) -> list[_MatchedRow]:
     """Interpret each candidate with its authoring page's meaning, then match and order.
 
@@ -10668,18 +10787,31 @@ def _matched_rows(
     match slot.
     """
     matched: list[tuple[int, tuple[str, int], _MatchedRow]] = []
-    view.prefetch(
+    paths = {
         str(path)
         for src_path, dst_path, (source_path, _place), _edge in candidates
         for path in (src_path, dst_path, source_path)
-    )
+        if path
+    }
+    if slim:
+        view.parents.admit(paths)
+        view.prefetch(
+            path for src, dst, position, edge in candidates
+            if edge.get("registry_status") == CANDIDATE_STATUS
+            for path in (src, dst, position[0])
+        )
+    else:
+        view.prefetch(paths)
+    core = relation_registry.core_registry()
     for src_path, dst_path, position, stored in candidates:
-        edge = view.edge(stored)
+        # Non-candidate rows carry fixed core meaning, independent of page vocabulary instances.
+        fixed = slim and stored.get("registry_status") != CANDIDATE_STATUS
+        edge = stored if fixed else view.edge(stored)
         if edge is None or edge.get("relation_type") is None:
             continue
         relation_type = str(edge["relation_type"])
         parent = edge.get("parent_relation")
-        authored = view.registry_for(str(edge.get("source_path") or ""))
+        authored = core if fixed else view.registry_for(str(edge.get("source_path") or ""))
         definition = authored.definition(relation_type)
         symmetric = definition is not None and definition.direction == "symmetric"
         if plan is None:
@@ -10757,8 +10889,12 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+        from .vault_store import mode as store_mode
+
         lag = None
-        if include_lag:
+        # A store-mode graph is unavailable only when it is disabled, and its rows have no sync
+        # queue to report: the tool attaches the registry notice instead.
+        if include_lag and not store_mode.store_mode_for_reads(Path(vault_root)):
             try:
                 lag = graph_lag(vault_root)
             except Exception:  # noqa: BLE001 - the refusal must not fail on its explanation
@@ -11402,6 +11538,18 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     proof. An unproven sidecar answers `("unproven",)`, a key of its own, since
     that request serves without the graph lane.
     """
+    from .collection_store import connection as store_connection
+    from .vault_store import mode as store_mode
+    from .vault_store import read as store_read
+
+    root = Path(vault_root)
+    if graph_enabled() and store_mode.store_mode_for_reads(root):
+        # Every commit and registry batch moves the store revision with the graph rows it writes.
+        try:
+            return ("store", store_read.current_revision(root))
+        except store_connection.CollectionStoreError as error:
+            if error.code != store_read.NOT_ACTIVE:
+                raise  # otherwise the records stopped saying store mode: the sidecar decides
     idx = EpistemicGraphIndex(vault_root, prove_cold_snapshots=prove)
     outcome: list[str] = []
     conn = idx._open_read_snapshot(outcome_out=outcome)
@@ -13886,6 +14034,11 @@ def _link_candidates(resolver: vault_module.WikilinkResolver, raw_target: str) -
     cleaned = vault_module._strip_wikilink_brackets(raw_target)
     cleaned = cleaned.split("|", 1)[0].split("#", 1)[0].strip()
     cleaned = cleaned.removesuffix(".md").strip().strip("/")
+    return _link_candidates_for_key(resolver, cleaned)
+
+
+def _link_candidates_for_key(resolver: vault_module.WikilinkResolver, cleaned: str) -> set[str]:
+    """Read a normalized resolver key without consuming its extension or link syntax again."""
     if not cleaned:
         return set()
     found = {
@@ -13908,7 +14061,7 @@ class GraphView:
     the meaning its authoring page selects. For a reader other than the owner
     it also re-resolves exactly the links whose candidate set includes a page
     that reader may not see, as the vault without those pages would resolve
-    them. Nothing it computes is written back or shared with another caller.
+    them. Store-mode selection reads byte-bound facts through the current caller's admission kernel.
     """
 
     def __init__(
@@ -13934,10 +14087,22 @@ class GraphView:
         self.seed_keep = seed_keep if seed_keep is not None else keep
         self._unit_parents: dict[str, tuple[list[str], bool]] = {}
         self.interpretations = interpretations or semantic_index.Interpretations(vault_root)
+
+        def admitted_many(rel_paths: list[str]) -> dict[str, bool]:
+            from .published_admission import deciding
+            from .vault_store import read as store_read
+
+            batched = store_read.request_memo(self.vault_root) is not None
+            with deciding(rel_paths) if batched else nullcontext():
+                admitted_paths = recall_policy.admitted_among(self.vault_root, rel_paths)
+                kept = self._kept_many([path for path in rel_paths if path in admitted_paths])
+                return {path: path in admitted_paths and kept[path] for path in rel_paths}
+
         self.parents = semantic_index.AdmittedParents(
             self._summaries,
             allowed=lambda rel_path: _recall_path_allowed(self.vault_root, rel_path)
-            and (keep is None or keep(rel_path)),
+            and (self.keep is None or self.keep(rel_path)),
+            allowed_many=admitted_many,
             interpretations=self.interpretations,
             admitted=admitted,
         )
@@ -14394,7 +14559,16 @@ class GraphView:
         changed = self._changes.get(raw_target)
         if changed is None:
             candidates = sorted(_link_candidates(self._shared_resolver(), raw_target))
-            if self.check is None:
+            from .vault_store import read as store_read
+
+            if store_read.request_memo(self.vault_root) is not None:
+                verdicts = self._kept_many(candidates)
+                seen_count = sum(verdicts.values())
+                changed = (
+                    seen_count < len(candidates)
+                    if self.reads_placeholders else 0 < seen_count < len(candidates)
+                )
+            elif self.check is None:
                 if self.reads_placeholders:
                     changed = any(not self.keep(candidate) for candidate in candidates)
                 else:
@@ -14487,14 +14661,36 @@ class GraphView:
         try:
             with preparation as prepared:
                 self._check()
-                raw = (
-                    prepared.source if prepared is not None
-                    else vault_module.read_bytes_without_pinning(
+                from .vault_store import mode as store_mode
+                from .vault_store import read as store_read
+
+                in_store = store_mode.store_mode_for_reads(self.vault_root)
+                # In store mode the page's bytes and time, and each link's target, are the ones
+                # its rows were derived from (`page_source`, `link_target_exists`), read from the
+                # snapshot that holds those rows: a stored page's file may be absent or stale.
+                source = (
+                    store_read.page_source(self.conn, self.vault_root, rel_path)
+                    if in_store and prepared is None
+                    else None
+                )
+                target_exists = (
+                    (lambda rel: store_read.link_target_exists(self.conn, self.vault_root, rel))
+                    if in_store
+                    else None
+                )
+                if prepared is not None:
+                    raw, mtime = prepared.source, path.stat().st_mtime
+                elif in_store:
+                    if source is None:
+                        raise FileNotFoundError(rel_path)
+                    raw, mtime = source[0].decode("utf-8"), source[1] / 1e9
+                else:
+                    raw = vault_module.read_bytes_without_pinning(
                         path, vault_root=self.vault_root
                     ).decode("utf-8")
-                )
+                    mtime = path.stat().st_mtime
                 page = find_module._parse_page(
-                    path, path.stat().st_mtime, self.vault_root,
+                    path, mtime, self.vault_root,
                     content=raw.encode("utf-8"), resolved_relative=rel_path,
                 )
                 if page is None:
@@ -14502,7 +14698,9 @@ class GraphView:
                         self._interrupt(rel_path, "selected_interpretation_unavailable")
                     return []
                 self._check()
-                state = semantic_index.current_parent_index_state(self.vault_root, path, source=raw)
+                state = semantic_index.current_parent_index_state(
+                    self.vault_root, rel_path if source is not None else path, source=raw
+                )
                 self._check()
                 edges = _structural_edges_for_page(
                     self.vault_root, page, state,
@@ -14510,6 +14708,7 @@ class GraphView:
                     resolver=self._shared_resolver(), visible=self.keep,
                     check=self._check if bounded else None,
                     landing=self._snapshot_landing if bounded else None,
+                    target_exists=target_exists,
                 )
                 evidence = {}
                 rows = []
@@ -14564,22 +14763,66 @@ class GraphView:
             self._node_paths[key] = str(row[0]) if row is not None else None
         return self._node_paths[key]
 
-    def changed_sources(self) -> set[str]:
-        """Every page the reader sees with a link that resolves differently here.
+    def _kept_many(self, paths: Iterable[str]) -> dict[str, bool]:
+        """Apply caller admission in bounded batches, with the graph's own deadline between them."""
+        from .published_admission import admission_of, deciding
+        from .vault_store import read as store_read
 
-        Such a link has a withheld candidate, so the pages that name a withheld
-        page's path, stem or title hold every one of them.
+        wanted = list(dict.fromkeys(paths))
+        offered = admission_of(self.keep)
+        batched = store_read.request_memo(self.vault_root) is not None
+        result = {}
+        with deciding(wanted) if batched else nullcontext():
+            if batched and offered is not None:
+                for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
+                    self._check()
+                    result.update({path: verdict[0] for path, verdict in offered.decide_many(
+                        wanted[start:start + store_read.KEYS_PER_QUERY]
+                    ).items()})
+            else:
+                for path in wanted:
+                    self._check()
+                    result[path] = self.keep is None or self.keep(path)
+        return result
+
+    def _withheld_name_keys(self) -> set[str]:
+        """Decide only names that can change this reader's link resolution.
+
+        A reader that drops placeholders needs a mixed visible/withheld group; a unique page
+        cannot change a link. File mode and readers of placeholders retain the whole-corpus rule.
         """
+        from .vault_store import mode as store_mode
+
+        resolver = self._shared_resolver()
         if self.keep is None:
             return set()
-        resolver = self._shared_resolver()
-        withheld = {
-            f"{path}.md" for path in resolver.full_paths if not self.keep(f"{path}.md")
-        }
+        paths = set()
+        if not store_mode.store_mode_for_reads(self.vault_root) or self.reads_placeholders:
+            paths = {f"{path}.md" for path in resolver.full_paths}
+        else:
+            names = resolver.full_paths | resolver.stems.keys() | resolver.titles.keys()
+            for name in names:
+                self._check()
+                candidates = _link_candidates_for_key(resolver, name)
+                if len(candidates) > 1:
+                    paths.update(candidates)
+        verdicts = self._kept_many(paths)
+        withheld = set()
+        for path, allowed in verdicts.items():
+            self._check()
+            if not allowed:
+                withheld.add(path)
+        return _dependency_changed_keys(withheld, resolver)
+
+    def changed_sources(self) -> set[str]:
+        """Every visible page whose links can resolve differently because of a withheld name."""
+        if self.keep is None:
+            return set()
+        keys = self._withheld_name_keys()
         return {
             source
             for source, raw_target in EpistemicGraphIndex._dependency_sources_for_keys(
-                self.conn, _dependency_changed_keys(withheld, resolver)
+                self.conn, keys
             )
             if self.keep(source) and self.target_changes(raw_target)
         }

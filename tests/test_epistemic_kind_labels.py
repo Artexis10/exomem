@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from exomem import commands, semantic_language_registry, semantic_units
-from exomem import vault as vault_module
 from exomem.governance.principal import library_scope
 
 FINNISH = {
@@ -242,18 +241,28 @@ def test_a_finnish_heading_is_a_claim_in_a_search_hit(vault: Path) -> None:
 
 
 @library_scope()
-def test_an_update_to_a_unit_under_a_vault_label_says_to_edit_the_page_body(vault: Path) -> None:
-    """observe_memory parses with the shipped kinds (task 6.3), so it cannot find this unit."""
+@pytest.mark.parametrize(
+    ("proposal", "heading", "kind"),
+    [(CLAIM_IN_FINNISH, "Väite", "claim"), (FINNISH, "Pöytäkirja", "protocol")],
+)
+def test_a_labelled_unit_keeps_its_address_through_read_validate_and_update(
+    vault: Path, proposal: dict, heading: str, kind: str,
+) -> None:
+    """A unit found through a vault label can be edited with either public address form."""
     from exomem import find as find_module
     from exomem import freshness, lexstore
 
-    page = vault / "Knowledge Base" / "Notes" / "julkaisu.md"
+    page = vault / "Knowledge Base" / "Notes" / "Insights" / "julkaisu.md"
+    path = page.relative_to(vault).as_posix()
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
-        "---\ntype: insight\n---\n\n# Julkaisu\n\n## Väite\n\nThe release ships on Friday.\n",
+        "---\ntype: insight\nstatus: active\n"
+        "exomem_id: 11111111-1111-4111-8111-111111111111\n---\n\n"
+        f"# Julkaisu\n\n## {heading}\n- id: release-day\n- source_note: Keep this row.\n\n"
+        "The release ships on Friday.\n",
         encoding="utf-8",
     )
-    semantic_language_registry.save_registry(vault, CLAIM_IN_FINNISH)
+    semantic_language_registry.save_registry(vault, proposal)
     entries = [(str(path), freshness.stat_signature(path)) for path in vault.rglob("*.md")]
     freshness.seed(vault, "kb", entries)
     freshness.seed(vault, "vault", entries)
@@ -262,21 +271,75 @@ def test_an_update_to_a_unit_under_a_vault_label_says_to_edit_the_page_body(vaul
         hit for hit in find_module.find(
             vault, query="release ships", scope="kb-only", result_level="unit", limit=10,
         )
-        if hit.parent_path == "Knowledge Base/Notes/julkaisu.md"
+        if hit.parent_path == path
     )
+    exact = commands.op_read_memory(vault, path=path, unit_ref=hit.unit_ref)
+    listed = commands.op_read_memory(vault, path=path, units=True)
+    assert exact["status"] == "found"
+    assert exact["unit"]["kind"] == kind
+    assert len(listed["units"]) == 1
+    assert listed["units"][0]["category"] == exact["unit"]["category"]
+    assert listed["units"][0]["text"] == "The release ships on Friday."
+    arguments = {
+        "path": path, "category": "claim", "content": "The release ships on Monday.",
+    }
+    validated = commands.op_observe_memory(
+        vault, operation="validate", unit_ref=hit.unit_ref,
+        expected_fingerprint=exact["unit"]["fingerprint"],
+        expected_hash=listed["content_hash"], **arguments,
+    )
+    assert validated["mutated"] is False
+    assert "Friday" in page.read_text(encoding="utf-8")
+    updated = commands.op_observe_memory(
+        vault, operation="update", unit=listed["units"][0]["id"],
+        transition_token=validated["semantic"]["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=validated["semantic"]["transition_hash"],
+        relation_review_reason="This release schedule has no related conclusion.", **arguments,
+    )
+    assert updated["unit"]["kind"] == kind
+    assert updated["unit"]["unit_ref"] == hit.unit_ref
+    assert updated["unit"]["fingerprint"] == validated["unit"]["fingerprint"]
+    assert updated["unit"]["metadata"]["source_note"] == "Keep this row."
+    reread = commands.op_read_memory(vault, path=path, unit_ref=hit.unit_ref)
+    assert reread["unit"]["content"] == "The release ships on Monday."
+    found = find_module.find(
+        vault, query="release ships", scope="kb-only", mode="keyword", graph=False,
+        result_level="unit", limit=10,
+    )
+    assert [hit.excerpt for hit in found if hit.parent_path == path] == [
+        "The release ships on Monday.",
+    ]
 
-    with pytest.raises(ValueError, match="^UNIT_NOT_FOUND") as refused:
-        commands.op_observe_memory(
-            vault, path="Knowledge Base/Notes/julkaisu.md", operation="update",
-            category="claim", content="The release ships on Monday.", unit_ref=hit.unit_ref,
-            expected_fingerprint=_parse(
-                page.read_text(encoding="utf-8"), semantic_language_registry.load_registry(vault)
-            ).units[0].fingerprint,
-            expected_hash=vault_module.content_hash(page.read_text(encoding="utf-8")),
-        )
 
-    assert "vault kind or a vault label" in str(refused.value)
-    assert "Edit the unit in the page body with edit_memory" in str(refused.value)
+@library_scope()
+def test_a_label_change_updates_unit_ids_without_rebuilding_neutral_rows(vault: Path) -> None:
+    """A new label must not need a parent reparse or lexical rebuild to become addressable."""
+    from exomem import freshness, lexstore, semantic_index
+
+    path = "Knowledge Base/Notes/Insights/label-change.md"
+    (vault / path).write_text(
+        "---\ntype: insight\n---\n# Label change\n\n"
+        "## Pöytäkirja\n- id: local-protocol\n\nFollow the release protocol.\n",
+        encoding="utf-8",
+    )
+    saved = semantic_language_registry.save_registry(vault, {
+        "schema_version": 1, "categories": {},
+        "kinds": {"protocol": {"description": "A repeatable protocol"}},
+    })
+    assert all(freshness.rebaseline(vault).values())
+    lexstore.ensure_fresh(vault)
+    neutral = semantic_index.current_parent_index_state(vault, path)
+    assert commands.op_read_memory(vault, path=path, units=True)["units"] == []
+
+    semantic_language_registry.save_registry(vault, FINNISH, expected_hash=saved["content_hash"])
+
+    selected = commands.op_read_memory(vault, path=path, units=True)["units"]
+    assert len(selected) == 1
+    assert selected[0]["text"] == "Follow the release protocol."
+    unchanged = semantic_index.current_parent_index_state(vault, path)
+    assert unchanged.parent_generation == neutral.parent_generation
+    assert unchanged.document.units == neutral.document.units == ()
 
 
 # ---------------------------------------------------------------------------

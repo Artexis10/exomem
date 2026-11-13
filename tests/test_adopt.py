@@ -70,6 +70,36 @@ def test_adopt_scan_only_is_read_only_before_init(tmp_path: Path) -> None:
     assert {a["action"] for a in report["next_actions"]} == {"scan-only", "initialize-kb"}
 
 
+def test_semantic_census_reports_strict_reserved_row_errors_and_no_migration_warnings(
+    tmp_path: Path,
+) -> None:
+    """The census must stop presenting malformed units as tolerated migration warnings."""
+    vault = _legacy_vault(tmp_path, kb=False)
+    notes = vault / "Legacy Notes"
+    notes.mkdir()
+    for name in ("first.md", "second.md"):
+        (notes / name).write_text(
+            "# Release outlook\n\n## Claim\n### Detail\n- modality: should\n", encoding="utf-8",
+        )
+    (notes / "malformed.md").write_text("- [bad/category] malformed candidate\n", encoding="utf-8")
+    before = _snapshot(vault)
+
+    census = semantic_census.scan(vault, path="Legacy Notes", example_limit=1)
+
+    assert _snapshot(vault) == before
+    assert census["coverage"]["complete"] is True
+    diagnostics = census["diagnostics"]
+    assert diagnostics["malformed_candidates"] == 3
+    assert diagnostics["counts"] == {"empty_rich_unit": 2, "invalid_compact_category": 1}
+    assert diagnostics["examples_omitted"] == 2
+    [example] = diagnostics["examples"]
+    assert example["severity"] == "error"
+    assert example["line"] > 0
+    assert diagnostics["warnings"] == {
+        "count": 0, "pages": 0, "counts": {}, "examples": [], "examples_omitted": 0,
+    }
+
+
 def test_adopt_scan_only_reports_bounded_semantic_census_without_fabrication(
     tmp_path: Path,
 ) -> None:

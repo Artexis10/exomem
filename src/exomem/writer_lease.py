@@ -7571,7 +7571,8 @@ class LeaseManager:
             f"writer lease fencing token {fencing_token} is no longer current",
         )
 
-    def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+    def _readiness_status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+        """Measure the real boundary and lease without waiting on owner diagnostics."""
         # Without a boundary identity there is nothing to probe: the answer can
         # only cover this process, so it is reported as `unknown`, never as a
         # verified `free`.
@@ -7604,35 +7605,7 @@ class LeaseManager:
             "renewer_alive": renewer_alive,
             "last_renew_age_seconds": last_renew_age_seconds,
             "last_coordinator_error": None,
-            "idempotency": self.idempotency.status_summary(),
         }
-        if vault_or_cell is not None:
-            try:
-                from . import epistemic_graph, graph_sync
-
-                vault_root = Path(vault_or_cell)
-                graph_status = graph_sync.status(vault_root)
-                if graph_status["state"] == "current":
-                    # A status probe reports; it never pays the O(corpus)
-                    # source-bytes proof. It reads the remembered verdict, or
-                    # says that nothing has proved the sidecar yet (#1454).
-                    availability = epistemic_graph.EpistemicGraphIndex(
-                        vault_root,
-                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
-                    ).availability_state()
-                    if availability != "available":
-                        graph_status = {
-                            "state": availability,
-                            "generation": graph_status["generation"],
-                        }
-                base["graph_sync"] = graph_status
-            except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
-                base["graph_sync"] = {"state": "unavailable", "generation": 0}
-        if self._collection_store is not None:
-            try:
-                base["collection_store"] = self._collection_store.status()
-            except Exception:  # noqa: BLE001 - a status probe reports, never raises
-                base["collection_store"] = {"status": "unavailable"}
         if not self.config.enabled:
             return base
         assert self.client is not None
@@ -7668,6 +7641,38 @@ class LeaseManager:
                 "age_seconds": round(time.monotonic() - at, 3),
             }
         return base
+
+    def status(self, vault_or_cell: os.PathLike[str] | str | None = None) -> dict[str, Any]:
+        diagnostics: dict[str, Any] = {"idempotency": self.idempotency.status_summary()}
+        if vault_or_cell is not None:
+            try:
+                from . import epistemic_graph, graph_sync
+
+                vault_root = Path(vault_or_cell)
+                graph_status = graph_sync.status(vault_root)
+                if graph_status["state"] == "current":
+                    # A status probe reports; it never pays the O(corpus)
+                    # source-bytes proof. It reads the remembered verdict, or
+                    # says that nothing has proved the sidecar yet (#1454).
+                    availability = epistemic_graph.EpistemicGraphIndex(
+                        vault_root,
+                        mutation_coordinator=self._mutation_coordinator_for(vault_root),
+                    ).availability_state()
+                    if availability != "available":
+                        graph_status = {
+                            "state": availability,
+                            "generation": graph_status["generation"],
+                        }
+                diagnostics["graph_sync"] = graph_status
+            except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
+                diagnostics["graph_sync"] = {"state": "unavailable", "generation": 0}
+        if self._collection_store is not None:
+            try:
+                diagnostics["collection_store"] = self._collection_store.status()
+            except Exception:  # noqa: BLE001 - a status probe reports, never raises
+                diagnostics["collection_store"] = {"status": "unavailable"}
+        # Measure authority after diagnostics, so a slow diagnostic cannot age the reported lease.
+        return {**diagnostics, **self._readiness_status(vault_or_cell)}
 
     def start_renewer(self) -> None:
         if not self.config.enabled or self._renewer is not None:
@@ -8993,6 +8998,12 @@ def invoke_command(
 
         call_ledger.note_released_items(released_item_count(collector, result))
         return result
+
+
+def _coordination_readiness_status(
+    vault_or_cell: os.PathLike[str] | str | None = None,
+) -> dict[str, Any]:
+    return get_manager()._readiness_status(vault_or_cell)
 
 
 def coordination_status(

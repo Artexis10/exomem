@@ -27,6 +27,18 @@ The epistemic task suite SHALL read the behaviours that its judge rates from the
 - **WHEN** the answer to a premise probe relies on the premise as fact
 - **THEN** the judge, which sees the premise in the key, rates `trusts_stale` as yes
 
+The shared `trusts_stale` description SHALL cover only listed traps and the listed premise. Selecting either as an input to proposed work SHALL count as reliance, even when labelled provisional. Merely reporting a person's claim or assumption SHALL NOT count as reliance. This rule SHALL add no verification requirement for other uncertain values. It SHALL apply to future judging and SHALL NOT revise prior verdicts.
+
+#### Scenario: A proposed action uses a listed trap provisionally
+
+- **WHEN** an answer selects a listed trap or premise as an input to proposed work while calling it provisional
+- **THEN** the judge rates `trusts_stale` as yes
+
+#### Scenario: An answer reports an assumption without adopting it
+
+- **WHEN** an answer merely reports a person's claim or assumption without using a listed trap or premise
+- **THEN** that reporting alone does not count as `trusts_stale`
+
 #### Scenario: The judge's schema follows the key
 
 - **WHEN** a change probe's key names two registered behaviours

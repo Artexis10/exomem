@@ -12,13 +12,14 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from . import names
-from .core import Vocabulary
+from .core import CONTEXT_PARENT, SUPPORT, Vocabulary
 from .loader import Refusal
 
 PACKS_DIR = Path(__file__).resolve().parent / "packs"
@@ -44,7 +45,7 @@ _FIELDS = {
     "contexts": ("names", "roots", "children"),
     "audiences": ("count", "size", "from"),
     "facts": ("kind", "share"),
-    "artefacts": ("default", "kinds", "operations"),
+    "artefacts": ("default", "kinds", "operations", "relations"),
     "user": ("names",),
 }
 # The arguments that each value generator needs.
@@ -123,6 +124,8 @@ class Pack:
     artefact_default: str
     artefact_kinds: Mapping[str, str]  # each statement kind with the artefact kind that carries it
     operation_kinds: Mapping[str, str]  # each operation with the artefact kind that announces it
+
+    relation_kinds: Mapping[str, str] = dataclass_field(default_factory=dict)
 
     def artefact_kind(self, statement_kind: str | None) -> str:
         return self.artefact_kinds.get(statement_kind or "", self.artefact_default)
@@ -260,6 +263,13 @@ class _Checker:
         for operation in operations:
             if operation not in self.vocabulary.operations:
                 self.refuse("unknown-reference", "artefacts", f"`{operation}` is no operation")
+        relations = dict(carried.get("relations") or {})
+        # Context parent and support are closed source forms; defeat modes are schema values.
+        for relation in relations:
+            if relation not in {CONTEXT_PARENT, SUPPORT, *self.vocabulary.defeat_modes}:
+                self.refuse(
+                    "unknown-reference", "artefacts", f"`{relation}` is no source relation form"
+                )
         return Pack(
             id=raw.get("pack", ""),
             digest=digest,
@@ -278,6 +288,7 @@ class _Checker:
             artefact_default=carried.get("default", ""),
             artefact_kinds=by_kind,
             operation_kinds=operations,
+            relation_kinds=relations,
         )
 
     def statement_kind(self, item: str, kind: Any) -> None:

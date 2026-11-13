@@ -210,18 +210,44 @@ def test_participant_validation_is_bounded_by_unique_endpoints(tmp_path: Path, m
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
 
-    original = epistemic_graph._recall_path_allowed
+    from exomem import recall_policy
+
+    original = recall_policy._admitted_relative
     calls: list[str] = []
 
-    def _counting_allowed(root: Path, rel: str) -> bool:
-        calls.append(rel)
-        return original(root, rel)
+    # The per-path decision that a single check and a batch of endpoints both make.
+    def _counting_admission(root, path, *arguments, **keywords):
+        calls.append(Path(path).relative_to(root).as_posix())
+        return original(root, path, *arguments, **keywords)
 
-    monkeypatch.setattr(epistemic_graph, "_recall_path_allowed", _counting_allowed)
+    monkeypatch.setattr(recall_policy, "_admitted_relative", _counting_admission)
 
     assert idx.relation_participants(["supports"]).paths == frozenset(rels)
     assert set(calls) == set(rels)
     assert len(calls) == len(rels)
+
+
+def test_recall_excluded_endpoints_do_not_receive_release_decisions(tmp_path: Path) -> None:
+    """Structured records must not add release work or disclosure receipts to a graph read."""
+    from test_records_recall_policy import _manifest
+
+    vault = tmp_path / "vault"
+    record = "Knowledge Base/Records/Measurements/items/raw.md"
+    _write(vault, A, "---\ntype: insight\n---\nBody.\n")
+    _write(vault, "Knowledge Base/Records/Measurements/_collection.md", _manifest())
+    _write(vault, record, "Structured record only.\n")
+    decisions = []
+
+    def keep(path):
+        decisions.append(path)
+        return True
+
+    with sqlite3.connect(":memory:") as conn:
+        view = epistemic_graph.GraphView(vault, conn, keep=keep)
+        view.parents.admit([A, record])
+        assert view.parents.allowed(A)
+        assert not view.parents.allowed(record)
+    assert decisions == [A]
 
 
 # ---------------------------------------------------------------- relation_edges

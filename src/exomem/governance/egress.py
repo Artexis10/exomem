@@ -2215,7 +2215,9 @@ def content_admission(vault_root: Path, who: RequestPrincipal) -> AdmittedPredic
         allowed = content_permits(root, rel_path, who)
         return allowed, publish and _page_local_path(root, rel_path, withheld=not allowed)
 
-    return AdmittedPredicate(Admission(identity, decide))
+    return AdmittedPredicate(Admission(identity, decide, lambda paths, publish: _stored_admission_many(
+        root, paths, publish, policy=compiled, who=who, identity=identity, scalar=decide, content_only=True,
+    )))
 
 
 def name_lookup_required(vault_root: Path) -> bool:
@@ -2283,6 +2285,62 @@ def _page_bytes(vault_root: Path, rel_path: str) -> bytes:
 
     stored = read.owned_bytes(vault_root, rel_path)
     return (vault_root / rel_path).read_bytes() if stored is None else stored
+
+
+def _decision_from_scopes(
+    scope_ids: Iterable[str], *, policy: Policy, audience: str, purpose: str | None,
+    active_grants: Iterable[policy_module.StandingGrant],
+) -> Decision:
+    """The shared release kernel after scalar or stored-fact membership is established."""
+    return decide(scope_ids, audience=audience, purpose=purpose, policy=policy, active_grants=active_grants)
+
+
+def _stored_admission_many(
+    root: Path, paths: list[str], publish: bool, *, policy: Policy, who: RequestPrincipal,
+    identity: Callable[[], object], scalar: Callable[[str, bool], tuple[bool, bool]],
+    purpose: str | None = None, tombstones: frozenset[str] = frozenset(), content_only: bool = False,
+    record_outcomes: bool = False,
+) -> dict[str, tuple[bool, bool]]:
+    """Decide each ordinary scope class once; unknown facts and caller views remain scalar."""
+    from ..vault_store import read as store_read
+    from . import page_admission
+
+    memo = store_read.request_memo(root)
+    if memo is None:
+        return {path: scalar(path, publish) for path in paths}
+    named = identity()
+    scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
+    classes = memo.setdefault(("scope-admission", named, content_only), {})
+    denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
+    answers = {}
+    for path in paths:
+        scopes = scope_sets.get(path)
+        if scopes is None:
+            answers[path] = scalar(path, publish)
+            continue
+        if scopes not in classes:
+            permitted = connector_boundary.permits_scopes(denied, scopes)
+            decision = None
+            if permitted and not content_only:
+                decision = _decision_from_scopes(
+                    scopes, policy=policy, audience=who.audience_id, purpose=purpose,
+                    active_grants=policy.grants,
+                )
+                # A simple page has no bridge; resolving L4 can only lower it below the release floor.
+                permitted = decision.level >= RELEASE_FLOOR
+            classes[scopes] = (permitted, decision)
+        permitted, decision = classes[scopes]
+        tombstoned = not content_only and lifecycle.is_tombstoned_in(tombstones, path)
+        allowed = permitted and not tombstoned
+        if record_outcomes and not tombstoned and decision is not None and _collector() is not None:
+            content_hash, size = page_admission.evidence(root, path)
+            _outcome_for_decision(
+                root, path, decision=_resolve_l4_bridge(root, decision, policy=policy, audience=who.audience_id),
+                policy=policy, audience=who.audience_id, outcome="released" if allowed else "withheld",
+                purpose=purpose, content_hash=content_hash, size=size,
+            )
+        answers[path] = (allowed, publish)
+    return answers
 
 
 @canonical_read(projection=True, unavailable=lambda: Decision(DISCLOSURE_MIN), batch=_DECIDE_PATH_BATCH)
@@ -2449,7 +2507,7 @@ def _decide_path(
             policy=policy,
             audience=audience,
         )
-    decision = decide(
+    decision = _decision_from_scopes(
         scope_ids,
         audience=audience,
         purpose=purpose,
@@ -3242,6 +3300,8 @@ def guard_graph_context(
     (or an unresolved-but-expected principal) -> an empty, available-shaped
     neighborhood, since L0 must not even reveal that a neighborhood exists.
     """
+    from ..vault_store import read as store_read
+
     vault_root = Path(vault_root)
     policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
@@ -3284,7 +3344,7 @@ def guard_graph_context(
                 continue
             for field_name in ("src_key", "dst_key"):
                 key = str(edge.get(field_name) or "")
-                if key.startswith("file:") and (vault_root / key[5:]).is_file():
+                if key.startswith("file:") and store_read.holds_file(vault_root, key[5:]):
                     candidate_paths.add(key[5:])
     withheld = {
         rel_path
@@ -3618,6 +3678,12 @@ def page_release_filter(
             root, policy, who, declared_purpose, grants_hash, tombstones,
         ),
         released,
+        lambda paths, publish: _stored_admission_many(
+            root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
+            tombstones=tombstones, identity=lambda: _release_admission_identity(
+                root, policy, who, declared_purpose, grants_hash, tombstones,
+            ), scalar=released,
+        ),
     ))
 
 
@@ -7750,7 +7816,10 @@ def release_walk_filter(
             vault_root, policy, who, declared_purpose, grants_hash, tombstones,
         )
 
-    keep = AdmittedPredicate(Admission(identity, judge))
+    keep = AdmittedPredicate(Admission(identity, judge, lambda paths, publish: _stored_admission_many(
+        vault_root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
+        tombstones=tombstones, identity=identity, scalar=judge, record_outcomes=True,
+    )))
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
@@ -8040,6 +8109,8 @@ def page_filter_over(
     vault_root: Path, keep: Callable[[str], bool], *, withheld: frozenset[str] | None = None
 ) -> Callable[[str], bool]:
     """`visible_page_filter` over a release decision `keep` that the caller already built."""
+    from ..vault_store import read as store_read
+
     root = Path(vault_root)
     offered = admission_of(keep)
     # Read as the filter is built: the pin's own filter is built before the set exists, and decides what it holds.
@@ -8066,12 +8137,12 @@ def page_filter_over(
             if tombstoned:
                 return False, False
             try:
-                return not (root / rel).is_file(), False
+                return not store_read.holds_file(root, rel), False
             except OSError:
                 return False, False
         if not tombstoned:
             try:
-                if not (root / rel).is_file():
+                if not store_read.holds_file(root, rel):
                     return True, False
             except OSError:
                 return False, False
@@ -8081,7 +8152,16 @@ def page_filter_over(
         return lambda rel_path: decide(rel_path)[0]
     # A non-page reference is kept whatever the page verdicts say, so the
     # catalogue publishes only the pages `decide` hands on to the release verdict.
-    return AdmittedPredicate(Admission(offered.identity, decide))
+    def decide_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
+        if store_read.request_memo(root) is None:
+            return {path: decide(path, publish) for path in paths}
+        held_page = store_read.held_lookup(root, paths)
+        ordinary = [path for path in paths if path not in held and held_page(path)]
+        answers = offered.decide_many(ordinary, publish)
+        answers.update({path: decide(path, publish) for path in paths if path not in answers})
+        return answers
+
+    return AdmittedPredicate(Admission(offered.identity, decide, decide_many))
 
 
 def edge_view(
@@ -8098,7 +8178,30 @@ def edge_view(
     visible = visible_page_filter(vault_root)
     if visible is None or admission is None:
         return admission if visible is None else visible
-    return lambda path: admission(path) and visible(path)
+    content, release = admission_of(admission), admission_of(visible)
+    if content is None or release is None:
+        return lambda path: admission(path) and visible(path)
+
+    def identity():
+        left, right = content.identity(), release.identity()
+        return None if left is None or right is None else ("edge-view", left, right)
+
+    def decide(path, publish=False):
+        allowed, local = content.decide(path, publish)
+        if not allowed:
+            return False, local
+        released, release_local = release.decide(path, publish)
+        return released, local and release_local
+
+    def decide_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
+        answers = content.decide_many(paths, publish)
+        releases = release.decide_many([path for path in paths if answers[path][0]], publish)
+        return {
+            path: (releases[path][0], local and releases[path][1]) if allowed else (False, local)
+            for path, (allowed, local) in answers.items()
+        }
+
+    return AdmittedPredicate(Admission(identity, decide, decide_many))
 
 
 class ReaderViewUnavailable(RuntimeError):

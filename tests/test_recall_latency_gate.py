@@ -1567,6 +1567,7 @@ def paired_fragments(tmp_path, monkeypatch):
             self.calls = []
             self.environment = {
                 "corpus": {"pages": 6500, "chunks": 45000, "units": 9500, "unit_pages": 3250,
+                           "reference": {"paths": 6500, "pages": 6500, "units": 9500, "unit_pages": 3250},
                            "vector_units": 9500, "spot_checks": 6, "median_page_bytes": 2500,
                            "vocabulary_terms": 6000, "wikilinks_min": 5, "wikilinks_max": 25,
                            "transcript_pages": 325, "content_digest": "c" * 64},
@@ -1640,11 +1641,7 @@ def test_raw_case_shards_preserve_unsharded_order_warmup_and_one_comparison(
     assert aggregate["state"] == unsharded["state"]
     assert aggregate["raw_fragments"] == fragments
     gate.validate_document(aggregate, "summary.schema.json")
-    from jsonschema import Draft202012Validator
-
-    schema = json.loads((gate.BENCHMARK / "summary.schema.json").read_text())
-    Draft202012Validator(schema).validate(aggregate)
-    Draft202012Validator({"$defs": schema["$defs"], "$ref": "#/$defs/paired_fragment"}).validate(fragments[0])
+    gate.validate_document(fragments[0], "summary.schema.json", definition="paired_fragment")
 
 
 @pytest.mark.parametrize("corrupt", [False, True])

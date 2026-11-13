@@ -19,7 +19,6 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,8 +35,9 @@ from .. import (
     vault,
 )
 from ..find_types import ParsedPage
+from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
-from . import ownership
+from . import read
 
 if TYPE_CHECKING:
     from .write import StoreChange
@@ -100,25 +100,21 @@ class _Derivation:
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
         self.written, self.removed, self.refreshed = written, removed, refreshed
+        # A store that an older build set up has no link tables until the registry pass creates
+        # them and derives every page's rows (``rederive``), so a commit before then writes none.
+        self.links = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'inbound_links'"
+        ).fetchone() is not None
+
+        self.admission = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_admission'"
+        ).fetchone() is not None
 
     # ------------------------------------------------------------------ sources
 
     def source(self, rel: str) -> tuple[bytes, int] | None:
-        """The exact bytes and modification time of the page at ``rel``, or None when it has none.
-
-        The store holds an owned page; the disk holds any other, as the store does not own it.
-        """
-        if ownership.classify(rel) is ownership.Ownership.PAGE:
-            row = self.tx.execute(
-                "SELECT body, mtime_ns FROM store_pages WHERE path = ?", (rel,)
-            ).fetchone()
-            return None if row is None else (bytes(row[0]), row[1])
-        path = self.root / rel
-        try:
-            raw = vault.read_disk_bytes_without_pinning(path)
-            return raw, os.stat(path).st_mtime_ns
-        except OSError:
-            return None
+        """The exact bytes and modification time of the page at ``rel`` (``read.page_source``)."""
+        return read.page_source(self.tx, self.root, rel)
 
     def page_bytes(self, rel: str) -> bytes:
         found = self.source(rel)
@@ -127,18 +123,15 @@ class _Derivation:
         return found[0]
 
     def target_exists(self, rel: str) -> bool:
-        if ownership.classify(rel) is ownership.Ownership.PAGE:
-            return (
-                self.tx.execute("SELECT 1 FROM store_pages WHERE path = ?", (rel,)).fetchone()
-                is not None
-            )
-        return (self.root / rel).exists()
+        return read.link_target_exists(self.tx, self.root, rel)
 
     # ------------------------------------------------------------------ run
 
     def run(self) -> None:
         before = self._resolver_entries()
         derived = self._write_lexical_and_identity()
+        if self.links:
+            self._write_inbound()
         after_entries = {
             rel: title for rel, (title, in_resolver) in derived.items() if in_resolver
         }
@@ -180,17 +173,22 @@ class _Derivation:
         for rel in self.removed:
             lexstore.delete_page_rows(self.tx, rel)
             memory_refs.replace_identity_row(self.tx, rel, None)
+            if self.admission:
+                page_admission.replace_row(self.tx, rel, None)
         derived: dict[str, tuple[str | None, bool]] = {}
         for rel in (*self.written, *self.refreshed):
             found = self.source(rel)
             lexstore.delete_page_rows(self.tx, rel)
             if found is None:
                 memory_refs.replace_identity_row(self.tx, rel, None)
+                if self.admission:
+                    page_admission.replace_row(self.tx, rel, None)
                 derived[rel] = (None, False)
                 continue
             raw, mtime_ns = found
             in_kb, in_vault = lexstore.page_membership(rel)
             rows = None
+            page = None
             if in_kb or in_vault:
                 page, state = self.parse(rel, raw, mtime_ns)
                 rows = lexstore.page_rows(
@@ -199,6 +197,12 @@ class _Derivation:
                 )
             if rows is not None:
                 lexstore.write_page_rows(self.tx, rows)
+            if self.admission:
+                if page is None and not (in_kb or in_vault) and rel.lower().endswith(".md"):
+                    page = find_corpus.parse_page(
+                        self.root / rel, mtime_ns / 1e9, self.root, content=raw, resolved_relative=rel,
+                    )
+                page_admission.replace_row(self.tx, rel, raw, page)
             identity = memory_refs.identity_row(self.root, rel, raw)
             memory_refs.replace_identity_row(self.tx, rel, identity)
             derived[rel] = (
@@ -206,6 +210,18 @@ class _Derivation:
                 rows is not None and in_vault,
             )
         return derived
+
+    def _write_inbound(self) -> None:
+        """Replace the inbound-link rows of each page that the commit gives bytes to or removes.
+
+        A page's link rows depend on its own bytes alone, so no dependent page is touched. The
+        index holds every page that the vault walk reaches, inside the Knowledge Base or not.
+        """
+        for rel in self.removed:
+            vault.replace_inbound_rows(self.tx, rel, None)
+        for rel in (*self.written, *self.refreshed):
+            found = self.source(rel) if read.walk_member(rel) else None
+            vault.replace_inbound_rows(self.tx, rel, None if found is None else found[0])
 
     def parse(self, rel: str, raw: bytes, mtime_ns: int) -> _Parsed:
         """The parsed page and its parent state, as file mode derives them from the same bytes."""

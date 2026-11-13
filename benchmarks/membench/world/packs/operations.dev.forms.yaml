@@ -27,15 +27,22 @@ frames:
   message: {signed: "Message from {by}, {date}", unsigned: "Message, {date}"}
   log: {signed: "Log entry by {by}, {date}", unsigned: "Log entry, {date}"}
 
+  directory: {signed: "Directory snapshot by {by}, {date}", unsigned: "Directory snapshot, {date}"}
+  register: {signed: "Source register snapshot by {by}, {date}", unsigned: "Source register snapshot, {date}"}
+
 forms:
+  - {id: context-parent-stated, serves: [relation.context-parent], level: stated, text: "The directory lists {child} within {parent}."}
+  - {id: support-stated, serves: [relation.support], level: stated, text: "The statement identified by {source} provides a reason for the statement identified by {target}."}
+  - {id: rebut-stated, serves: [relation.rebut], level: stated, text: "The statement identified by {source} supports the opposite conclusion to the statement identified by {target}."}
+  - {id: undercut-stated, serves: [relation.undercut], level: stated, text: "The statement identified by {source} challenges the grounds for the statement identified by {target}, without asserting the opposite."}
   # --- statements that give a value for an attribute ---
-  - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} confirms that the {about} for {subject} is {value}."}
+  - {id: fact-stated-1, serves: [statement.fact], level: stated, text: "{by} states that the {about} for {subject} is {value}."}
   - {id: fact-stated-2, serves: [statement.fact], level: stated, text: "For the record, {by} states that the {about} for {subject} is {value}."}
   - {id: fact-paraphrased-1, serves: [statement.fact], level: paraphrased, text: "{by} mentions that {subject} has {about} of {value}."}
   - {id: fact-paraphrased-2, serves: [statement.fact], level: paraphrased, text: "According to {by}, {subject} stands at {value} for {about}."}
   - {id: fact-unmarked-1, serves: [statement.fact], level: unmarked, text: "{subject} - {about}: {value}"}
   - {id: fact-unmarked-2, serves: [statement.fact], level: unmarked, text: "{about}, {subject}: {value}"}
-  - {id: decision-stated-1, serves: [statement.decision], level: stated, text: "{by} decides that the {about} for {subject} will be {value}."}
+  - {id: decision-stated-1, serves: [statement.decision], level: stated, text: "{by} decides that the {about} for {subject} is set to {value}."}
   - {id: decision-stated-2, serves: [statement.decision], level: stated, text: "Decision by {by}: the {about} for {subject} is set to {value}."}
   - {id: decision-paraphrased-1, serves: [statement.decision], level: paraphrased, text: "{by} has settled on {value} as the {about} for {subject}."}
   - {id: decision-paraphrased-2, serves: [statement.decision], level: paraphrased, text: "{by} picks {value} for {about} on {subject}."}
@@ -139,8 +146,8 @@ forms:
   - {id: probe-act-2, serves: [probe.act], text: "Prepare the next step that involves {subject}."}
   - {id: probe-act-3, serves: [probe.act], text: "Prepare the next step for {subject} at {where}, which depends on its {about}."}
   - {id: probe-act-4, serves: [probe.act], text: "Prepare the next step that involves {subject} for {where}, based on its {about}."}
-  - {id: probe-premise-1, serves: [probe.premise], text: "Carry on with {subject} on the basis of the earlier setting for {about}."}
-  - {id: probe-premise-2, serves: [probe.premise], text: "Carry on with {subject} as the earlier notes have it."}
+  - {id: probe-premise-1, serves: [probe.premise], text: "Plan the follow-up work for {subject}, using its {about}."}
+  - {id: probe-premise-2, serves: [probe.premise], text: "Arrange the follow-up work that involves {subject}."}
   - {id: probe-stable-1, serves: [probe.stable], text: "Remind me of the {about} for {subject}."}
   - {id: probe-stable-2, serves: [probe.stable], text: "Remind me what {subject} is."}
   - {id: probe-abstain-1, serves: [probe.abstain], text: "Is anything on file about the {about} for {subject}?"}

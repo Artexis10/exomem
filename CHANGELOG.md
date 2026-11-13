@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.177.1](https://github.com/Artexis10/exomem/compare/v0.177.0...v0.177.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **benchmarks:** preserve statement provenance and calibration gates ([#2787](https://github.com/Artexis10/exomem/issues/2787)) ([3396b59](https://github.com/Artexis10/exomem/commit/3396b5906d1ac786bb5fef407d49f8a5e5a385f3))
+* **semantic:** enforce selected kinds and strict governed rows ([#2784](https://github.com/Artexis10/exomem/issues/2784)) ([e6d48b8](https://github.com/Artexis10/exomem/commit/e6d48b8737d8d5225c796caff987fcb2bab410fa))
+
+
+### Performance
+
+* **graph:** filter relations on a hub without interpreting every linking page ([#2789](https://github.com/Artexis10/exomem/issues/2789)) ([9a976be](https://github.com/Artexis10/exomem/commit/9a976bec7a25d885ca968b0565d503bef784fc1a))
+
+## [0.177.0](https://github.com/Artexis10/exomem/compare/v0.176.0...v0.177.0) (2026-11-13)
+
+
+### Features
+
+* **vault-store:** answer store-mode graph and link reads from derived inbound tables ([#2753](https://github.com/Artexis10/exomem/issues/2753)) ([64992e5](https://github.com/Artexis10/exomem/commit/64992e5fcee0f604dedbc277564d712405538cfa))
+
+
+### Bug Fixes
+
+* **readiness:** measure lease proof without owner diagnostics ([#2782](https://github.com/Artexis10/exomem/issues/2782)) ([c79559b](https://github.com/Artexis10/exomem/commit/c79559b83745537aac3709ac475bb3ce2c6ed20a))
+* **review:** resolve a review item before taking the vault write boundary ([#2780](https://github.com/Artexis10/exomem/issues/2780)) ([6ce4e18](https://github.com/Artexis10/exomem/commit/6ce4e1853d26830cc127b2ba1e18d006d399ac8d))
+
 ## [0.176.0](https://github.com/Artexis10/exomem/compare/v0.175.1...v0.176.0) (2026-11-12)
 
 

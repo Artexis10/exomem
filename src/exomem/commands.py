@@ -2655,6 +2655,21 @@ _PRE_ADMISSION_SIGNALS = (
 _Tool = TypeVar("_Tool", bound=Callable[..., Any])
 
 
+def _store_registry_lag(vault_root: Path, restricted: bool) -> dict | None:
+    """The registry notice (``notice`` and ``lag``) that a store-mode reader's result carries, or None.
+
+    A store-mode vault serves its search, graph and link rows while a registry pass re-derives them,
+    and every reader says so in the same words. The revisions count the vault's writes, which a
+    restricted caller is not shown.
+    """
+    from .vault_store import read as store_read
+
+    found = store_read.request_registry_notice(vault_root)
+    if found is not None and restricted:
+        return {"notice": found["notice"]}
+    return found
+
+
 def _reads_one_store_snapshot(operation: _Tool) -> _Tool:
     """Run a recall tool in one store snapshot: its search and its release decisions then read one
     revision, and open one snapshot for the call instead of one per page. A vault that is not in
@@ -3310,15 +3325,10 @@ def op_find(
     # (~30s per process start; minutes on a first-ever model download).
     warming: dict | None = None
     from .collection_store import preview as store_preview
-    from .vault_store import read as store_read
 
     if store_preview.pages_unavailable(vault_root):
         degraded.append(find_module._STORE_UNAVAILABLE_COMPONENT)
-    # A store-mode vault serves its rows while a registry pass re-derives them, and says so.
-    registry_lag = store_read.request_registry_notice(vault_root)
-    if registry_lag is not None and restricted:
-        # The revisions count the vault's writes, which a restricted caller is not shown.
-        registry_lag = {"notice": registry_lag["notice"]}
+    registry_lag = _store_registry_lag(vault_root, restricted)
     if restricted:
         # These internal status tokens disclose pending writes before RAW admission.
         hidden_freshness = {find_module._PENDING_VISIBILITY_COMPONENT, find_module._RECALL_PROJECTION_STALE_COMPONENT}
@@ -3804,6 +3814,7 @@ def op_suggest_links(
     return [s.as_dict() for s in suggestions]
 
 
+@_reads_one_store_snapshot
 def op_graph_context(
     vault_root: Path,
     path: str | None = None,
@@ -3881,7 +3892,11 @@ def op_graph_context(
     )
     # A neighborhood is provenance: a sub-notice page must not appear as a
     # seed, a node, or an edge endpoint (design D4 / graph-find-ranking).
-    return egress_module.guard_graph_context(vault_root, context, purpose=purpose)
+    guarded = egress_module.guard_graph_context(vault_root, context, purpose=purpose)
+    registry_lag = _store_registry_lag(vault_root, egress_module.caller_restricted(vault_root))
+    if registry_lag is not None:
+        guarded.update(registry_lag)
+    return guarded
 
 
 def op_suggest_relations(
@@ -6596,6 +6611,7 @@ def op_recover_from_trash(
     return result.as_dict()
 
 
+@_reads_one_store_snapshot
 def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     """Tier 2: find files whose wikilinks resolve to `target`. Read-only.
 
@@ -6678,6 +6694,9 @@ def op_list_inbound_links(vault_root: Path, target: str) -> dict:
         # knowledge, so it is not held.
         if unseen:
             projection_timing_module.floor_restricted_outcome()
+    registry_lag = _store_registry_lag(vault_root, visible is not None)
+    if registry_lag is not None:
+        payload.update(registry_lag)
     return payload
 
 
@@ -6694,9 +6713,18 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
     """
     if not isinstance(target, str) or not target.strip():
         return []
+    from .vault_store import read as store_read
+
     clean = target.strip().replace("\\", "/").strip("/")
     if "/" in clean:
         for candidate in (clean,) if clean.lower().endswith(".md") else (clean, f"{clean}.md"):
+            # A page that the store serves is decided at its store key, never by its projection.
+            try:
+                key = store_read.served_key(vault_root, candidate)
+            except FileNotFoundError:
+                continue  # the store serves the path and holds no page there
+            if key is not None:
+                return [key]
             try:
                 candidate_abs, confined = resolve_under_vault(vault_root, candidate)
             except VaultPathError:
@@ -6704,13 +6732,20 @@ def _link_target_pages(vault_root: Path, target: object) -> list[str]:
                 # under the vault at all is: not the release plane's
                 # business, and never stat'd or read to get there.
                 continue
-            if candidate_abs.is_file():
+            # Only a Markdown file is a page the target can name: a binary at the
+            # path is a vault item, but not one the release plane judges as a page.
+            if candidate_abs.is_file() and confined.lower().endswith(".md"):
                 return [confined]
         return []
     # Bare basename: resolve it the way the matcher does — by filename across
     # the vault. Ambiguity fails closed; a name that matches nothing is simply
     # not a vault item.
     stem = clean[: -len(".md")] if clean.lower().endswith(".md") else clean
+    from .vault import store_pages_named
+
+    named = store_pages_named(vault_root, stem)
+    if named is not None:
+        return named  # the pages that the store's link rows count under the name, files or not
     return [
         str(p.relative_to(Path(vault_root))).replace("\\", "/")
         for p in Path(vault_root).rglob(f"{stem}.md")

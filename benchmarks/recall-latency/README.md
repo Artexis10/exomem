@@ -92,6 +92,10 @@ The reference uses real query encodes. Only corpus vectors use deterministic
 normalized vectors through the product's index build, with the resident encoder identity.
 The worker restores the real encode function before warm-up.
 Stored row counts and spot checks establish the reference before measurement.
+The corpus report keeps whole-KB page and unit counts as the actual workload.
+Its `reference` object records frozen path membership and the matching stored pages, units and unit parents.
+Qualification requires every reference path and applies composition fractions to that cohort.
+Supporting backend pages remain visible load without changing the reference fractions.
 
 The reference prose comes from the official CPython 3.13.0 documentation, pinned
 to commit `60403a5409ff2c3f3b07dd2ca91a7a3e096839c7`. The snapshot retains the

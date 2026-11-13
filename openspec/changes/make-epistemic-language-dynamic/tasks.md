@@ -27,7 +27,7 @@
 - [x] 4.2 Add `asserted_by` and `modality`, with context that presents attributed claims and keeps modalities apart.
 - [x] 4.3 Add `occurred_at`, the three quantity keys and `inference_mode` with its registry.
 - [x] 4.4 Reserve the new keys, with warnings for one release on pages that already use them.
-- [ ] 4.5 One release after slice 4 ships, turn the first-release warnings into errors. First, extend `semantic_census`, which counts errors only, to list the pages that carry first-release warnings, and repair or report each one. Then set `_FIRST_RELEASE_SEVERITY` to error, and delete `_RESERVED_BEFORE_UNIT_ROW_KEYS` and the placeholder-belief leniency.
+- [ ] 4.5 One release after slice 4 ships, turn the first-release warnings into errors. First, extend `semantic_census`, which counts errors only, to list the pages that carry first-release warnings, and repair or report each one. Then use error severity, delete `_RESERVED_BEFORE_UNIT_ROW_KEYS` and the placeholder-belief leniency, and invalidate older parser summaries through the existing parser version. Prove validation/commit rejection, source/stored/search exclusion of empty units, and unchanged updates to valid units. Keep this task unchecked until merge evidence is available.
 
 ## 5. Dimensions
 
@@ -42,7 +42,7 @@
 
 - [x] 6.1 Add labels per language to the kind, verdict, modality, belief-level, inference-mode and dimension registries, and parse labels as aliases. Verdicts, belief levels, modalities and inference modes took them in slices 3 and 4, dimensions in slice 5a and kinds in slice 6.
 - [x] 6.2 Teach the language from the shipped pack in bootstrap and the skill scaffold, keeping the scaffold generic. Rewrite the no-credence teaching in the scaffold's frontmatter, skill and vault-care references, the verdict-set comment and the `observe_memory` verdict docstring, and say that `credence` is a unit row, never frontmatter.
-- [ ] 6.3 Make `observe_memory`, the parent index and the lexical store's vault-neutral parse read the page's registry, so that a unit of a vault kind or under a vault label can be addressed and updated.
+- [ ] 6.3 Make `observe_memory` use the selected parent adapter for unit lookup, returned units and page short IDs. Validate kind and verdict with the page's admitted definitions. Keep the parent index and lexical sidecars neutral. Prove read, validate and update for vault kinds and labels. Prove that label changes need no rebuild. Unavailable definitions must never become an exact empty list or a dependent unit miss.
 
 ## 7. Proof and delivery
 

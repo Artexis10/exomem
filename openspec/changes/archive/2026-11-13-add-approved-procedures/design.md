@@ -86,15 +86,29 @@ Approval is a label, not a command. The owner endorsed this version as their way
 
 Agents never approve or revoke, and never write, move or delete under `_Approvals`, unless the user, in their own turn, asks for that exact procedure. The rule covers the MCP tool, the CLI and a direct file write.
 
-The boundary has two parts. On an MCP-only client, the host's per-tool prompt for `approve_procedure` protects the ledger. On a client with shell access, an agent that runs as the vault owner's OS user can reach the CLI and the key file. Approval there is as strong as any other write that the owner's account can make, and the skill rule is the only guard. The design claims no stronger boundary than that.
+The server enforces owner-only authorization and unrestricted content access for every approval action. The later [tool-surface change](https://github.com/Artexis10/exomem/pull/2677) routes MCP approval actions through `manage_memory`. Host permissions based on tool names therefore share that administration boundary; they cannot separate approval from other administration operations. Tool annotations provide hints, not mandatory confirmation. The skill requires an explicit user request for the exact procedure; the server does not independently enforce conversational intent.
+
+On a client with shell access, an agent running as the vault owner's OS user can reach the CLI and key file. Approval there is as strong as any other owner write, and the skill rule is the only guard against an unauthorized endorsement. The design claims no stronger boundary than that.
 
 The ledger can also roll back by deletion. Deleting a `revoke` file, or restoring an older vault backup on the same host, restores the earlier approval, because the earlier entries still verify. An agent with file access can do this as it can any owner write. The skill rule therefore covers write, move and delete. This change adds no high-water mark.
 
 ### Why a new operation
 
-`approve_procedure` is its own tool so that a host can allow edits and still prompt for approvals. It is owner-only: the command registry classifies it in row 4 of the credential matrix of `authorization-session-binding`. It is not admitted on Cloud in this change. Its MCP annotations are not read-only, not destructive and idempotent. A repeat call appends nothing when the latest verified entry already holds the same action and version.
+`approve_procedure` remains the stable internal operation and generated CLI route. It is owner-only: the command registry classifies it in row 4 of the credential matrix of `authorization-session-binding`. It is not admitted on Cloud in this change.
+
+The later `replace-agent-tool-surface` change exposes `procedures.approve`, `procedures.revoke` and `procedures.quarantine` through the shared `manage_memory` tool. Its conservative hints are `readOnlyHint: false`, `destructiveHint: true` and `idempotentHint: false`. Each approval action remains idempotent: a repeat appends nothing when the latest verified entry already holds the same action and version.
 
 The approve result shows what changed in the page since the last version approved for that ref, taken from the page's retained history. It says when that version is not recoverable. The owner then sees what the endorsement newly covers.
+
+### Proof environment
+
+Persistent host memory can hide a missing Exomem read. Controlled behavioural proof therefore uses a fresh Claude Code or Codex conversation. Disable persistent memory generation and use. Exclude personal instruction files, saved harness context and unrelated installed hooks, plugins and MCP servers. Keep the Exomem components under test, the native model scaffold and native permission controls.
+
+Record the effective configuration, instruction provenance, source turns, Exomem tool calls and raw answers. Reusing an approved profile or warm fixture is allowed when those records verify context isolation. A failed isolation check leaves the affected result unverified; it does not change ordinary users' access.
+
+Verify public tool discovery and the packaged contract on the installed release. Track client action-cache refresh as separate compatibility work. Memory or background guidance from a chat application cannot supply behavioural acceptance evidence. Historical observations retain their original scope and establish isolation only when their records show it.
+
+The recorded real-model observations cover approval semantics through the applicable public routes. They do not establish mandatory host confirmation enforcement.
 
 ## Controls
 
@@ -106,8 +120,8 @@ The approve result shows what changed in the page since the last version approve
 ## Risks and trade-offs
 
 - **Server-made rewrites mark approval stale.** A link rewrite or an `updated:` stamp changes bytes. We accept this and show `stale` to the owner. Excluding such fields from the version would make the version depend on which bytes the server may touch.
-- **The tool surface changes.** The new tool changes the surface digest. Release needs the ChatGPT schema refresh, the schema budget bump and regenerated capabilities documentation.
-- **A model may call approve on injected text.** The hostile real-model run decides this, with a shell-capable agent and with host prompts on. If deciding agents call `approve_procedure`, run the CLI or write a ledger file on injected text, remove the tool from MCP and from the generated CLI. Approval then goes through the terminal UI only, `exomem tui`, which requires a terminal. That route stops an agent that acts by tool call or by accident. It does not stop an agent that reads the key and writes an entry by hand, which is the boundary above. The ledger, the verdict and the delivery stay as specified.
+- **The tool surface changes.** The public routing contract changes the surface digest. Release needs the schema budget update, regenerated capabilities documentation and native discovery verification. Client action caches may need a separate refresh; their state does not prove procedure behaviour.
+- **A model may call approve on injected text.** The hostile real-model run decides this, with a shell-capable agent and with host prompts on. If deciding agents invoke an approval action, run its CLI route or write a ledger file on injected text, remove the approval operations from MCP and the generated CLI. Keep unrelated `manage_memory` operations available. Approval then goes through the terminal UI only, `exomem tui`, which requires a terminal. That route stops an agent that acts by tool call or by accident. It does not stop an agent that reads the key and writes an entry by hand, which is the boundary above. The ledger, the verdict and the delivery stay as specified.
 - **Ledger growth.** The ledger grows by one file per owner action, so no compaction is planned. The verdict reads the entry files of the refs that a request names.
 - **Store mode.** The open change `make-vault-store-canonical` makes a SQLite store canonical for pages and projects Markdown from it. The entry files are not pages. That change needs a store-mode rule for these non-page reserved files, so that they stay plain files that the projector neither imports as pages nor overwrites. Until that rule exists, the ledger is file-backed in both modes.
 - **Sequencing.** The serving work extends the method projection of `recognize-situations-and-project-methods`. The `context-activation` delta adds a requirement and names none of that change's text, so either change can archive first.

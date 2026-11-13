@@ -26,6 +26,26 @@ def reader_view(root: Path, purpose: str | None = None) -> Callable[[str], bool]
     return egress.reader_view(root, purpose=purpose)
 
 
+def _store_checkpoint(root: Path) -> freshness.RecallFreshnessCheckpoint | None:
+    """The store checkpoint at this request's snapshot, or None when the vault is in file mode.
+
+    The snapshot is the checkpoint: the graph rows that the lend reads are current at the same
+    revision, so nothing is re-proven after the read.
+    """
+    from .collection_store import connection
+    from .vault_store import mode
+    from .vault_store import read as store_read
+
+    if not mode.store_mode_for_reads(root):
+        return None
+    try:
+        return store_read.recall_checkpoint(root, "vault")
+    except connection.CollectionStoreError as error:
+        if error.code != store_read.NOT_ACTIVE:
+            raise
+        return None  # the records stopped saying store mode: the file-mode path decides
+
+
 @egress.proven_withheld_scope(reuse=True)
 def discover(
     root: Path,
@@ -68,6 +88,7 @@ def discover(
         index = epistemic_graph.EpistemicGraphIndex(root)
         publication = None
         authority = None
+        stored = None
         current_reader = keep.fresh(withheld=frozenset()) if isinstance(keep, egress.ReaderView) else None
         if current_reader is not None and (admission := admission_of(current_reader)) is not None:
             authority = admission.identity()
@@ -84,7 +105,10 @@ def discover(
             if current_reader is None or current_admission is None or current_admission.identity() != authority:
                 return result("unavailable")
         else:
-            checkpoint = freshness.live_recall_checkpoint(root, "vault")
+            stored = _store_checkpoint(root)
+            checkpoint = (
+                stored if stored is not None else freshness.live_recall_checkpoint(root, "vault")
+            )
             if checkpoint is None:
                 return result("unavailable")
             resolver = find.recall_resolver_snapshot_at_checkpoint(root, checkpoint)
@@ -235,7 +259,7 @@ def discover(
             check_deadline()
             if not proof_current:
                 return result("unavailable")
-        elif (
+        elif stored is None and (
             freshness.external_pending(root)
             or not freshness.recall_checkpoint_is_current(root, "vault", checkpoint)
             or not index._snapshot_instance_is_current(snapshot_instance, deadline=deadline)

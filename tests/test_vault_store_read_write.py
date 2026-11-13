@@ -489,6 +489,36 @@ def test_a_path_the_store_does_not_own_is_refused_before_anything_is_written(sto
     assert read.current_revision(stored) == revision
 
 
+def test_a_refresh_of_a_page_path_the_store_holds_no_row_for_derives_the_files_rows(
+    stored, writer
+):
+    """A refresh refused for every page path: a file at a page path that no ``store_pages`` row
+    holds is disk-owned, so its refresh derives rows from the file as an unowned file's does. Once
+    a governed write holds the page, a refresh for it is refused again."""
+    loose = "Knowledge Base/Notes/Loose.md"
+    (stored / loose).write_bytes(b"# Loose\n\nA page file the store never took, citing [[Alpha]].\n")
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR,
+            "an outside change to a file that the store does not own",
+            refresh=(loose,),
+        ),
+    )
+    assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", loose) == []
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", loose) != []
+    assert rows(
+        stored, "SELECT raw_target FROM inbound_links WHERE source_path = ?", loose
+    ) == [("Alpha",)]
+
+    write.commit(writer, put(loose, b"# Loose\n\nOwned now, citing nobody.\n"))
+    with pytest.raises(OpError, match=write.NOT_OWNED):
+        write.commit(
+            writer,
+            write.StoreChange(write.Origin.OUTSIDE_EDITOR, "same", refresh=(loose,)),
+        )
+
+
 def test_a_path_that_spells_a_parent_a_backslash_or_an_empty_folder_is_refused_before_a_write(
     stored, writer
 ):
