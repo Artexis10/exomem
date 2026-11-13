@@ -278,6 +278,7 @@ def test_a_labelled_unit_keeps_its_address_through_read_validate_and_update(
     assert exact["status"] == "found"
     assert exact["unit"]["kind"] == kind
     assert len(listed["units"]) == 1
+    assert listed["units"][0]["anchor"] == "release-day"
     assert listed["units"][0]["category"] == exact["unit"]["category"]
     assert listed["units"][0]["text"] == "The release ships on Friday."
     arguments = {
@@ -303,6 +304,9 @@ def test_a_labelled_unit_keeps_its_address_through_read_validate_and_update(
     assert updated["unit"]["metadata"]["source_note"] == "Keep this row."
     reread = commands.op_read_memory(vault, path=path, unit_ref=hit.unit_ref)
     assert reread["unit"]["content"] == "The release ships on Monday."
+    current = commands.op_read_memory(vault, path=path, units=True)["units"][0]
+    assert current["anchor"] == listed["units"][0]["anchor"]
+    assert current["id"] != listed["units"][0]["id"]
     found = find_module.find(
         vault, query="release ships", scope="kb-only", mode="keyword", graph=False,
         result_level="unit", limit=10,

@@ -674,7 +674,10 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
             ),
         }
     return [
-        {"id": unit_id(unit), "category": unit.category, "text": unit.content}
+        {
+            "id": unit_id(unit), "anchor": unit.anchor,
+            "category": unit.category, "text": unit.content,
+        }
         for unit in selected.document.units if unit.unit_ref
     ]
 
