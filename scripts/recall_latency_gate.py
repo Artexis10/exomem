@@ -887,11 +887,14 @@ def validate_document(document: dict, schema: str, *, directory: Path = BENCHMAR
                       definition: str | None = None) -> None:
     """Validate stored evidence using the project's maintained JSON Schema engine."""
     from jsonschema import Draft202012Validator, FormatChecker
+    from referencing import Registry, Resource
 
     shape = json.loads((directory / schema).read_text())
+    reference_shape = json.loads((directory / "reference-corpus.schema.json").read_text())
+    registry = Registry().with_resource(reference_shape["$id"], Resource.from_contents(reference_shape))
     if definition is not None:
         shape = {"$defs": shape["$defs"], "$ref": f"#/$defs/{definition}"}
-    validator = Draft202012Validator(shape, format_checker=FormatChecker())
+    validator = Draft202012Validator(shape, format_checker=FormatChecker(), registry=registry)
     validator.validate(document)
     if schema == "summary.schema.json" and definition in (None, "paired_fragment"):
         if any(sample["repeat"] >= PAIRING["repeats"] for sample in document["samples"]):
@@ -1212,13 +1215,24 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
     from synth_vault import reference_source
 
     from exomem import find_results, lexstore, vault
+    from exomem.vault_store import mode as store_mode
     from exomem.vault_store import read as store_read
 
-    borrowed = store_read.lend(vault_root)
+    borrowed = store_read.lend(vault_root) if store_mode.store_mode_for_reads(vault_root) else None
     with closing(borrowed if borrowed is not None else sqlite3.connect(lexstore.lexical_path(vault_root))) as conn:
         pages = conn.execute("SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0").fetchone()[0]
         units, unit_pages = conn.execute(
             "SELECT count(*), count(DISTINCT parent_path) FROM semantic_units WHERE in_kb=1"
+        ).fetchone()
+        # Supporting backend pages contribute load, but not generated reference composition.
+        reference_paths = json.dumps(rels)
+        reference_pages = conn.execute(
+            "SELECT count(*) FROM pages WHERE in_kb=1 AND is_nav=0 "
+            "AND path IN (SELECT value FROM json_each(?))", (reference_paths,),
+        ).fetchone()[0]
+        reference_units, reference_unit_pages = conn.execute(
+            "SELECT count(*), count(DISTINCT parent_path) FROM semantic_units WHERE in_kb=1 "
+            "AND parent_path IN (SELECT value FROM json_each(?))", (reference_paths,),
         ).fetchone()
         for rel in (rels[0], rels[len(rels) // 2], rels[-1]):
             digest = conn.execute("SELECT content_hash FROM pages WHERE path=?", (rel,)).fetchone()
@@ -1255,17 +1269,21 @@ def _stored_corpus(vault_root: Path, index: Any, rels: list[str], profile: dict)
             transcript_sizes.append(len(raw))
     vocabulary = len((terms & source_terms) - {""})
     median = statistics.median(sizes)
-    if (pages < REFERENCE["pages_min"]
+    if (len(rels) != profile["pages"] or reference_pages != len(rels)
+        or reference_pages < REFERENCE["pages_min"] or pages < REFERENCE["pages_min"]
         or (index is not None and (chunks < REFERENCE["chunks_min"] or vector_units < units))
-        or units < REFERENCE["units_min"] or unit_pages < pages * profile["unit_page_fraction"]
+        or units < REFERENCE["units_min"] or reference_units < REFERENCE["units_min"]
+        or reference_unit_pages < len(rels) * profile["unit_page_fraction"]
         or vocabulary < profile["vocabulary_min"]
         or min(links) < profile["links_min"] or max(links) > profile["links_max"]
-        or len(transcript_sizes) < pages * profile["transcript_fraction"]
+        or len(transcript_sizes) < len(rels) * profile["transcript_fraction"]
         or any(not profile["transcript_bytes"][0] <= size <= profile["transcript_bytes"][1]
                for size in transcript_sizes)
         or not profile["median_page_bytes"][0] <= median <= profile["median_page_bytes"][1]):
         raise MeasurementRefused("stored-corpus-below-reference-profile")
     return {"pages": pages, "chunks": chunks, "units": units, "unit_pages": unit_pages,
+            "reference": {"paths": len(rels), "pages": reference_pages,
+                          "units": reference_units, "unit_pages": reference_unit_pages},
             "vector_units": vector_units, "median_page_bytes": median,
             "spot_checks": 3 if index is None else 6,
             "vocabulary_terms": vocabulary, "wikilinks_min": min(links), "wikilinks_max": max(links),
