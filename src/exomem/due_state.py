@@ -4408,18 +4408,6 @@ def stored_identity(vault_root: Path, review_id: str) -> tuple[str, str, str] | 
     return _fingerprints_for(vault_root).get(review_state_module.review_ref(review_id))
 
 
-def build_when_absent(vault_root: Path) -> None:
-    """Build the projection now when this vault has none. A vault that has one is not read.
-
-    A read that finds no projection starts the rebuild in the background and serves nothing
-    meanwhile. A decision that names a due entry cannot do that: the entry's id binds only from
-    the stored entry, so the decision would be refused for a signal the vault still holds. A vault
-    lacks a projection only before its first rebuild, so this runs once.
-    """
-    if _projection_token(vault_root) is None and str(vault_root) not in _UNPERSISTED:
-        reconcile(vault_root)
-
-
 #: `short-id head -> refs` per vault, valid for the one `_fingerprints_for` index it was built from.
 _HEADS: dict[str, tuple[dict[str, tuple[str, str, str]], dict[str, list[str]]]] = {}
 

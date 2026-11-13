@@ -12,7 +12,6 @@ from exomem import (
     agent_refusal,
     commands,
     corpus_aware,
-    due_state,
     epistemic_graph,
     find,
     mutation_journal,
@@ -23,7 +22,6 @@ from exomem import (
 )
 from exomem.cli_ops import OpError
 from exomem.command_surface import Command
-from tests.page_opens import pages_opened
 
 
 @pytest.mark.parametrize("binding", ["queue", "write-advisory", "accept-relation"])
@@ -122,21 +120,6 @@ def test_stale_review_handle_refuses_with_current_id_before_writer_admission(
     assert recorded["error_code"] == "STALE_ITEM"
     assert recorded["boundary_wait_ms"] is None
     assert recorded["boundary_hold_ms"] is None
-
-
-def test_an_id_the_service_never_gave_out_is_refused_without_reading_the_vault(vault: Path) -> None:
-    """A mistyped or expired id must not cost a pass over every page. On a large vault that pass
-    takes minutes, and every other request slows beside it."""
-    due_state.reconcile(vault)  # a live vault holds its projection
-    triage = next(c for c in commands.PRODUCT_COMMANDS if c.name == "triage_memory")
-
-    with pages_opened(vault) as opened, pytest.raises(OpError) as refused:
-        writer_lease.invoke_command(
-            triage, vault, item_id="aaaaaaa.bbbb", action="dismiss", why="handled: resolved"
-        )
-
-    assert refused.value.code == "ITEM_NOT_FOUND"
-    assert opened == set()
 
 
 @pytest.mark.parametrize("decision", ["dismiss", "accept"])

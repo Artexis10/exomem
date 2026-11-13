@@ -11081,16 +11081,11 @@ def _bind_triage_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]
         def read(**kw: Any) -> Any:
             return op_review_memory(vault_root, **kw)
 
-        def surfaced() -> dict[str, Any]:
-            return review_state_module.ReviewStateStore(vault_root).load()["surfaced"]
-
         if egress_module.visible_page_filter(vault_root) is None:
-            due_state_module.build_when_absent(vault_root)
             bound = review_ids_module.bind_decision(
                 read,
                 item=item_id,
                 stored=due_state_module.stored_by_head(vault_root, item_id.partition(".")[0]),
-                surfaced=surfaced,
             )
         else:
             # A restricted audience is served fingerprints recomposed over what it may see, and the

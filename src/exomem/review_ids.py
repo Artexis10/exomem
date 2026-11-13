@@ -3,8 +3,8 @@
 A review item carries a `ref` that names it and a `fingerprint` that names the signal as read. The
 id is `<head of ref>.<tail of fingerprint>`. Triage binds it before writer admission: the item that
 still holds the ref and the fingerprint supplies the guards the decision needs, and a stale id is
-refused with the current one. A stored due entry binds its own id (`bind_decision`); a review queue
-is read only for an id that stored state cannot settle (`bind`).
+refused with the current one. A stored due entry binds its own id (`bind_decision`); the review
+queues are read for any other id (`bind`).
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import functools
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from . import page_ids, relation_queue, review_state
+from . import page_ids, relation_queue
 from .cli_ops import OpError
 from .public_tools import REVIEW_QUEUES
 
@@ -21,15 +21,6 @@ from .public_tools import REVIEW_QUEUES
 #: listing gave is found where it came from. One source: the listing's own queue table.
 QUEUE_MODES: tuple[str, ...] = tuple(dict.fromkeys(REVIEW_QUEUES.values()))
 RELATION_QUEUE_MODES: tuple[str, ...] = (REVIEW_QUEUES["relation_suggestions"],)
-#: The queues that `attention` and `activation` rebuild from the vault on every read. Each stamps
-#: the items it returns on the first-surfaced ledger, so the ledger knows every id they gave out.
-#: A closed subset of the listing's own queue table: the modes that `op_review_memory` routes there.
-_LISTED_QUEUES = ("due", "activation", "stale", "contradiction", "unprocessed_sources", "unlinked")  # nosemgrep: ep-word-set -- the closed queue names of REVIEW_QUEUES whose modes op_review_memory routes to attention and activation.
-LISTED_QUEUE_MODES: tuple[str, ...] = tuple(REVIEW_QUEUES[queue] for queue in _LISTED_QUEUES)
-#: The queues that read their own store. Their items are not on the ledger, and one read is cheap.
-UNLISTED_QUEUE_MODES: tuple[str, ...] = tuple(
-    mode for mode in QUEUE_MODES if mode not in LISTED_QUEUE_MODES
-)
 _SCAN_LIMIT = 200
 
 
@@ -117,57 +108,20 @@ def bind(
     )
 
 
-def _listed(surfaced: Mapping[str, Any], item: str, *, exact: bool) -> bool:
-    """Whether a review listing showed an item with this id's head, or (`exact`) this very id.
-
-    `surfaced` is the first-surfaced ledger, keyed `<review id>:<fingerprint>`. Every listing of a
-    `LISTED_QUEUE_MODES` queue stamps the items it returns there with the `review` surface.
-    """
-    head = item.partition(".")[0]
-    for key, row in surfaced.items():
-        if not isinstance(row, Mapping) or row.get("surface") != "review":
-            continue
-        review_id, _, fingerprint = key.partition(":")
-        try:
-            ref = review_state.review_ref(review_id)
-        except ValueError:
-            continue
-        if page_ids.part_head(ref) == head and (
-            not exact or page_ids.part_id(ref, fingerprint) == item
-        ):
-            return True
-    return False
-
-
 def bind_decision(
-    read: Callable[..., Any],
-    *,
-    item: str,
-    stored: list[tuple[str, str]],
-    surfaced: Callable[[], Mapping[str, Any]],
+    read: Callable[..., Any], *, item: str, stored: list[tuple[str, str]]
 ) -> dict[str, str]:
-    """What a triage decision's `item` stands for, read from stored state before any queue.
+    """What a triage decision's `item` stands for: its stored due entry, else what `bind` finds.
 
     `stored` holds the `(ref, fingerprint)` of each stored due entry with the id's head
     (`due_state.stored_by_head`). A due entry's id is given out by responses that are not review
-    listings, for families that no listing holds, so only the stored entry can bind it. An entry
-    that holds the head with another fingerprint makes the id stale, unless a listing showed this
-    very id: a listed item can fuse the entry with other signals of its page.
+    listings, for families that no listing holds, so only the stored entry can bind it.
 
-    A queue is read only for an id that stored state cannot settle. The queues that rebuild their
-    items from the vault are read only for an id the ledger says a listing showed, so an id the
-    service never gave out is refused without a pass over the vault.
+    Only the entry's own id binds here. A listed item can fuse a stored entry with other signals
+    of its page under the same reference, and only its queue knows that fingerprint, so an id
+    that is not a stored entry's exact id binds from the queues as before.
     """
     for ref, fingerprint in stored:
         if page_ids.part_id(ref, fingerprint) == item:
             return {"ref": ref, "expected_fingerprint": fingerprint}
-    listed = _listed(surfaced(), item, exact=bool(stored))
-    if stored and not listed:
-        current = page_ids.part_id(*stored[0])
-        raise OpError(
-            "STALE_ITEM",
-            f"review item {item} is stale; it now has id {current}. Retry with the current id.",
-            details={"current_id": current},
-        )
-    return bind(read, item=item, modes=QUEUE_MODES if listed else UNLISTED_QUEUE_MODES)
-
+    return bind(read, item=item)

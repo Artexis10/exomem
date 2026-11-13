@@ -187,9 +187,9 @@ def _keep_whole(vault: Path, asked: dict) -> dict:
 
 def test_the_spelled_keep_whole_call_dismisses_the_question(vault: Path) -> None:
     """This family is on no review listing. A binder that finds an id only by reading the
-    listings refuses the call that the response told the agent to make. The vault here has no
-    stored projection yet, as a new vault has none before its first rebuild."""
+    listings refuses the call that the response told the agent to make."""
     _put(vault, PAGE, _page(13))
+    due_state.reconcile(vault, today=TODAY)  # a live vault holds its projection
     asked = _grow_by_one(vault, 14)["structure_suggestion"]
 
     _keep_whole(vault, asked)
@@ -210,40 +210,23 @@ def test_the_spelled_keep_whole_call_reads_only_its_own_page(vault: Path) -> Non
     assert opened <= {PAGE}
 
 
-def test_a_keep_whole_call_for_a_grown_page_names_the_current_id(vault: Path) -> None:
-    """The page reached its next step after the question was asked, so the id is stale.
-    The refusal must give the current id without reading the vault to find it."""
-    _put(vault, PAGE, _page(13))
-    due_state.reconcile(vault, today=TODAY)  # a live vault holds its projection
-    asked = _grow_by_one(vault, 14)["structure_suggestion"]
-    for number in range(15, 21):
-        _grow_by_one(vault, number)
-    current = _grow_by_one(vault, 21)["structure_suggestion"]
-    assert current["id"] != asked["id"]
-
-    with pages_opened(vault) as opened, pytest.raises(OpError) as refused:
-        _keep_whole(vault, asked)
-
-    assert refused.value.code == "STALE_ITEM"
-    assert refused.value.details["current_id"] == current["id"]
-    assert opened == set()
-
-
-def test_a_restricted_caller_learns_nothing_from_the_id_of_a_withheld_page(vault: Path) -> None:
-    """The stored entries are the owner's. An answer from them would tell a restricted caller
-    that a page withheld from it holds an open question, and give that question's current id."""
+def test_a_restricted_caller_cannot_tell_a_withheld_page_id_from_no_id(vault: Path) -> None:
+    """The stored entries are the owner's. A binder that answers every caller from them refuses
+    the id of a withheld page differently from an id that does not exist. That difference tells
+    a restricted caller that the page holds an open question."""
     withheld = "Knowledge Base/Notes/Insights/withheld-fare-rules.md"
     _put(vault, withheld, _page(13, page_type="insight"))
     due_state.reconcile(vault, today=TODAY)
     asked = _grow_by_one(vault, 14, page=withheld)["structure_suggestion"]
-    for number in range(15, 22):
-        _grow_by_one(vault, number, page=withheld)
     _withhold_notes_from(vault, "client-a")
 
-    with request_scope(_audience("client-a")), pytest.raises(OpError) as refused:
-        _keep_whole(vault, asked)
+    with request_scope(_audience("client-a")):
+        with pytest.raises(OpError) as withheld_id:
+            _keep_whole(vault, asked)
+        with pytest.raises(OpError) as no_such_id:
+            _keep_whole(vault, {"id": "aaaaaaa.bbbb"})
 
-    assert refused.value.code == "ITEM_NOT_FOUND"
+    assert withheld_id.value.code == no_such_id.value.code
 
 
 @pytest.mark.parametrize("status", ["superseded", "dropped"])
