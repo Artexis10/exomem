@@ -105,6 +105,11 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
     (vault / mixed_fence).write_bytes(
         b"---\n\r---\rcontainer_member: {version: 1}\n---\nA beacon links to [[Beacon]].\n"
     )
+    # Only the normalised parse sees this bridge; the page must stay on the per-page rule.
+    lone_cr_bridge = "Knowledge Base/Notes/Lone-cr-bridge.md"
+    (vault / lone_cr_bridge).write_bytes(
+        b"---\rtitle: Cr bridge\rtype: insight\rbridge_of: []\rbridge_scope: navigation\r---\rBody.\r"
+    )
     records = vault / "Knowledge Base/Records/Measurements"
     (records / "items").mkdir(parents=True)
     (records / "_collection.md").write_text(_manifest())
@@ -130,7 +135,7 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
     if store_mode:
         build_indexes(vault)
         assert migrate_apply(vault) == 0
-    paths = list(pages) + [mixed_fence, child, source.sidecar_path,
+    paths = list(pages) + [mixed_fence, lone_cr_bridge, child, source.sidecar_path,
         "Knowledge Base/Records/Measurements/_collection.md",
         "Knowledge Base/Records/Measurements/items/raw.md",
         "Knowledge Base/Notes/Missing.md", "Knowledge Base/Notes/../Notes/Open.md"]
