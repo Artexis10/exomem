@@ -2,16 +2,16 @@
 
 ### Requirement: Managed installation uses copied qualification
 
-A managed installation SHALL use a rehearsal on an isolated copy of the serving vault and state. The target SHALL become ready in less than 120000 milliseconds after the previous worker stops. Readiness SHALL remain ready for 45 minutes after the handoff completes and the target is ready. During each repair in that window, one MCP read and one MCP write SHALL succeed without caller `MUTATION_BUSY` or `VAULT_LOCK_TIMEOUT`.
+A managed installation SHALL use a rehearsal on an isolated copy of the serving vault and state. The target SHALL become ready in less than 120000 milliseconds after the previous worker stops. Readiness SHALL remain ready for 45 minutes after the handoff completes and the target is ready. During each full lexical repair in that window, one MCP read and one MCP write SHALL succeed without caller `MUTATION_BUSY` or `VAULT_LOCK_TIMEOUT`.
 
 #### Scenario: Handoff or availability check fails
 
 - **WHEN** the handoff fails its limit or a readiness observation fails inside the fixed window
 - **THEN** installation remains held and the report retains the failure
 
-#### Scenario: A caller cannot read or write during repair
+#### Scenario: A caller cannot read or write during a full lexical repair
 
-- **WHEN** a repair has no successful read and write during its duration, or a caller receives either refusal
+- **WHEN** a full lexical repair has no successful read and write during its duration, or a caller receives either refusal
 - **THEN** installation remains held even when later readiness is healthy
 
 ### Requirement: Copied qualification proves recovery

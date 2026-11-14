@@ -195,7 +195,7 @@ whether a repair runs. Install the release only when all four pass:
   these can happen in separate repair steps. The final in-window health
   observation must report retrieval ready and admitted, and repair idle, with
   no observed target recovery left unresolved.
-- During each repair in that window, one MCP read and one MCP write succeed,
+- During each full lexical repair in that window, one MCP read and one MCP write succeed,
   and neither returns `MUTATION_BUSY` or `VAULT_LOCK_TIMEOUT`.
 
 A failed check holds the install. A repair that holds `/health/ready` at
