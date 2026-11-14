@@ -39,14 +39,31 @@ def layer_folders():
     return tuple(vault.kb_dirname() + "/" + profile.placement_layer for profile in collection_profiles.PROFILES.values())
 
 
+#: The portable keys of `layer_folders`, with the folder name and the profiles object they were read from.
+_LAYER_ROOTS: tuple[str, object, tuple[str, ...]] = ("", None, ())
+
+
+def _layer_roots():
+    """`layer_folders` as portable keys, read again only when the folder name or the profiles change.
+
+    The profiles are an immutable mapping of frozen profiles, so their identity names their value.
+    """
+    global _LAYER_ROOTS
+    kb, profiles = vault.kb_dirname(), collection_profiles.PROFILES
+    cached = _LAYER_ROOTS
+    if cached[0] != kb or cached[1] is not profiles:
+        cached = (kb, profiles, tuple(collections._portable_path_key(folder) for folder in layer_folders()))
+        _LAYER_ROOTS = cached
+    return cached[2]
+
+
 def relevant(path, *, ancestors=False):
     """Profile placement proves disjoint knowledge without consulting collection SQL."""
     if path is None:
         return True
     key = collections._portable_path_key(str(path).replace("\\", "/").strip("/"))
-    roots = tuple(collections._portable_path_key(folder) for folder in layer_folders())
     return any(key == root or key.startswith(root + "/") or ancestors and
-               (not key or root.startswith(key + "/")) for root in roots)
+               (not key or root.startswith(key + "/")) for root in _layer_roots())
 
 
 def enrollment(root):
