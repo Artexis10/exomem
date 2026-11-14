@@ -1501,6 +1501,8 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
 
 # The outcomes of one eviction attempt, a closed set that `evict_to_target` branches on (D3, M3).
 EVICTED, KEPT, PRUNED, UNAVAILABLE = "evicted", "kept", "pruned", "unavailable"
+# A unit that needed the vault boundary found it busy (`STORE_BUSY_CODE`): ordinary contention.
+BUSY = "busy"
 # A claimed job keeps its original until it completes, fails or is blocked (D3, M4).
 _JOB_PINS = "jobs.pinned = 1 AND jobs.state IN ('pending', 'running')"
 _PINNING_JOB = f"SELECT 1 FROM jobs WHERE jobs.binary_rel = ? AND {_JOB_PINS}"
@@ -1600,7 +1602,12 @@ def _evict_one(vault: Path, path: Path) -> str:
                 _publish_reference(vault, snapshot, None)
                 enqueue_offload(vault, path)
 
-        _publishing(vault, "media_store_absent_version", release)
+        try:
+            _publishing(vault, "media_store_absent_version", release)
+        except MediaStoreError as error:
+            if error.code != STORE_BUSY_CODE:
+                raise
+            return BUSY
         return KEPT
     with _guard(vault, "media_store_evict"):
         conn = ledger._connect()
@@ -1952,8 +1959,10 @@ def evict_to_target(vault: Path) -> int:
             if not any(needed(shutil.disk_usage(vault).used)):
                 break
             outcome = _evict_one(vault, vault / relative)
-            if outcome == UNAVAILABLE:
-                return count  # Each later candidate would wait for the same store; the next pass asks again.
+            if outcome in (UNAVAILABLE, BUSY):
+                # Each later candidate would wait for the same store or boundary: the next pass
+                # asks again.
+                return count
             # An evicted or pruned row leaves the candidates; a kept one stays, so the next page starts after it.
             count += outcome == EVICTED
             kept += outcome == KEPT

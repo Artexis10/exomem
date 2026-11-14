@@ -29,7 +29,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -49,6 +49,11 @@ POLL_SECONDS = 1.0
 #: Intents listed per query. A listing carries no bodies, so this bounds only the rows in memory.
 LISTING_PAGE = 128
 STOP_TIMEOUT_SECONDS = 15.0
+#: How long a clean service stop lets the projector work through the queue before it stops
+#: (``Projector.stop``). At about 70 ms an intent that is some 70 intents. It ends inside the stop
+#: timeout above and leaves room in a managed service's 30 s stop for the other workers. What is
+#: still queued then stays queued, and the next start projects it.
+DRAIN_ON_STOP_SECONDS = 5.0
 #: The most that a hold copies into the store. A held edit is one SQLite blob; a file above this
 #: stays on disk, untouched, and is held by its hash alone. The hash, not the size, says whose.
 HELD_BODY_LIMIT = 64 * 1024 * 1024
@@ -294,6 +299,10 @@ class Projector:
         #: A temporary older than this process belongs to a publication that died with its owner.
         self._born_ns = time.time_ns()
         self._stop = threading.Event()
+        #: Wakes the thread from its poll wait: a stop, or a stop that drains first.
+        self._wake = threading.Event()
+        #: When a stop that drains first ends its drain (``stop``); None while no stop drains.
+        self._drain_until: float | None = None
         self._pass_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_failure: str | None = None
@@ -305,27 +314,45 @@ class Projector:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._drain_until = None
         self._thread = threading.Thread(
             target=self._loop, name="exomem-vault-projector", daemon=True
         )
         self._thread.start()
 
-    def stop(self, timeout: float = STOP_TIMEOUT_SECONDS) -> None:
-        """Ask the thread to stop after its current intent and wait for it, bounded."""
-        self._stop.set()
+    def stop(self, timeout: float = STOP_TIMEOUT_SECONDS, *, drain: float = 0.0) -> None:
+        """Ask the thread to stop after its current intent and wait for it, bounded.
+
+        With ``drain`` seconds, the thread first works through the queue: it runs passes back to
+        back while each settles something, and stops after the intent in hand once a pass
+        settles nothing, finds the boundary busy or fails, or ``drain`` seconds have passed. What is
+        left stays queued, and the next start projects it. A clean service stop drains
+        (``DRAIN_ON_STOP_SECONDS``), so the files match the store and an offline rollback can run.
+        """
         thread = self._thread
+        if drain > 0 and thread is not None and thread is not threading.current_thread():
+            self._drain_until = time.monotonic() + drain
+            self._wake.set()
+            thread.join(drain)  # the drain ends by itself, after the intent in hand at the latest
+        self._stop.set()
+        self._wake.set()
         if thread is None or thread is threading.current_thread():
             return
         thread.join(timeout)
         if thread.is_alive():
             log.warning("the vault projector did not stop within %s seconds", timeout)
 
+    def _stopping(self) -> bool:
+        return self._stop.is_set() or (
+            self._drain_until is not None and time.monotonic() >= self._drain_until
+        )
+
     def _loop(self) -> None:
         try:
             self.sweep_temporaries()
         except Exception:  # noqa: BLE001 - a failed sweep must not stop projection; the next start sweeps again
             log.warning("the vault projector's startup sweep failed", exc_info=True)
-        while not self._stop.is_set():
+        while not self._stopping():
             report = None
             try:
                 report = self.run_pass()
@@ -337,9 +364,15 @@ class Projector:
                     self._last_failure = failure
             if report is not None:
                 self._note_deferred(report)
-                if report.settled and not report.busy:
-                    continue  # more may have queued while this pass ran
-            self._stop.wait(self._poll_seconds)
+            settled = report is not None and report.settled and not report.busy
+            if self._drain_until is not None:
+                if not settled:
+                    return  # a stop drains only while a pass still settles something
+                continue
+            if settled:
+                continue  # more may have queued while this pass ran
+            self._wake.wait(self._poll_seconds)
+            self._wake.clear()
 
     def _note_deferred(self, report: PassReport) -> None:
         if report.deferred != self._last_deferred:
@@ -358,12 +391,12 @@ class Projector:
                 raise Deferred(f"the held filesystem route is unavailable ({acquired.error.code})")
             with acquired.require() as filesystem:
                 cursor = ("", "")
-                while not self._stop.is_set():
+                while not self._stopping():
                     batch = self._list(cursor)
                     if not batch:
                         break
                     for intent in batch:
-                        if self._stop.is_set():
+                        if self._stopping():
                             break
                         try:
                             self._project(filesystem, intent.path, report)
@@ -406,6 +439,9 @@ class Projector:
 
     def _project(self, filesystem: held_fs.HeldFilesystem, rel: str, report: PassReport) -> None:
         try:
+            if write.is_folder_intent(rel):
+                self._project_folder(filesystem, rel, report)
+                return
             facts = self._facts(rel)
             if facts.intent is None or facts.held:
                 return  # a commit or a hold settled the path after the listing
@@ -498,8 +534,6 @@ class Projector:
             self._record_removed(intent.path, intent.revision)
             if report.removed == removed:
                 report.dropped += 1  # no file of Exomem's was there
-            else:
-                prune_emptied(filesystem, _split(intent.path)[0])
 
     def _remove(
         self,
@@ -557,7 +591,6 @@ class Projector:
             self._record_moved(intent, page, old.path, renamed)
             report.projected += 1
             _move_parts(filesystem, old.path, intent.path)
-            prune_emptied(filesystem, _split(old.path)[0])
             return
         verdict = _judge_write(facts, new_disk)
         if verdict in (Judgement.HOLD_DELETE, Judgement.HOLD_EDIT):
@@ -568,8 +601,51 @@ class Projector:
             return
         self._record_move_split(intent, old.path)
         _move_parts(filesystem, old.path, intent.path)
-        prune_emptied(filesystem, _split(old.path)[0])
         self._project(filesystem, intent.path, report)
+
+    def _project_folder(
+        self, filesystem: held_fs.HeldFilesystem, rel: str, report: PassReport
+    ) -> None:
+        """Remove a folder that a folder trash or recovery moved away, as file mode's rename of the
+        folder leaves none at its old path.
+
+        The folder waits, quietly, while any queued intent below it is still to move or remove a
+        file: its own subfolders' intents included, so the deepest folder goes first. Then the
+        folder goes when it is empty, and its intent is dropped when it holds something that no
+        queued intent will move, which stays where it is, as anything a person put there does.
+        """
+        folder = rel[:-1]
+        below, end = f"{folder}/", f"{folder}0"  # "0" sorts right after "/": the folder's range
+        with read.snapshot(self._root) as view:
+            queued = view.connection.execute(
+                "SELECT revision FROM store_projection_queue WHERE path = ?", (rel,)
+            ).fetchone()
+            waiting = view.connection.execute(
+                "SELECT 1 FROM store_projection_queue WHERE (path > ? AND path < ?) "
+                "OR (from_path >= ? AND from_path < ?) LIMIT 1",
+                (below, end, below, end),
+            ).fetchone()
+        if queued is None or waiting is not None:
+            return
+        opened = _parent(filesystem, folder, access="mutate")
+        removed = False
+        if not _missing(opened):
+            with opened.require() as directory:
+                unlinked = filesystem.unlink_directory(directory)
+                if unlinked.ok:
+                    removed = True
+                else:
+                    with closing(filesystem.iter_names(directory)) as names:
+                        holds = next(names, None) is not None
+                    if not holds:
+                        unlinked.require()  # an empty folder that refuses: the intent stays
+        if removed:
+            _flush_folder(filesystem, _split(folder)[0])
+        self._run(lambda writer: _drop_intent(writer, rel, queued[0]))
+        if removed:
+            report.removed += 1
+        else:
+            report.dropped += 1
 
     def _project_binary_move(
         self, filesystem: held_fs.HeldFilesystem, facts: Facts, report: PassReport
@@ -610,7 +686,6 @@ class Projector:
         self._run(lambda writer: _settle_binary_move(writer, intent))
         if moved:
             report.projected += 1
-            prune_emptied(filesystem, _split(intent.from_path)[0])
         else:
             report.dropped += 1
 
@@ -938,6 +1013,14 @@ def drop_binary_move(tx: Connection, dst: str, src: str) -> None:
     )
 
 
+def _drop_intent(writer: CollectionWriter, path: str, revision: int) -> None:
+    # A later commit that queued the path again holds a later revision, and its intent stays.
+    with writer.handle.transaction() as tx:
+        tx.execute(
+            "DELETE FROM store_projection_queue WHERE path = ? AND revision = ?", (path, revision)
+        )
+
+
 def _settle_binary_move(writer: CollectionWriter, intent: Intent) -> None:
     assert intent.from_path is not None
     with writer.handle.transaction() as tx:
@@ -1204,26 +1287,6 @@ def _unlink(filesystem: held_fs.HeldFilesystem, rel: str, expected: OnDisk) -> N
                 raise Deferred("the file changed before it was removed")
             _retrying(lambda: filesystem.unlink(file))
         _flush(filesystem, parent)
-
-
-def prune_emptied(filesystem: held_fs.HeldFilesystem, folder: str) -> None:
-    """Remove ``folder`` and each folder above it that is left empty, the deepest first.
-
-    The projector calls it on the folder that its own move or removal just took a file or folder
-    from. Removing a folder refuses while it holds anything, a person's file included, so the walk
-    stops at the first folder that is not empty, and it never reaches the Knowledge Base folder.
-    """
-    from ..kbdir import kb_dirname
-
-    kb = kb_dirname()
-    while folder.startswith(f"{kb}/"):
-        opened = _parent(filesystem, folder, access="mutate")
-        if not opened.ok:
-            return
-        with opened.require() as directory:
-            if not filesystem.unlink_directory(directory).ok:
-                return
-        folder = _split(folder)[0]
 
 
 def _move_parts(filesystem: held_fs.HeldFilesystem, old_page: str, new_page: str) -> None:

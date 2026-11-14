@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import shutil
 import statistics
 import sys
 import threading
@@ -21,8 +23,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import test_media_store as media_store_suite
 import test_vault_store_read_write as read_write
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_media_store import _offload, _volume
 from test_scene_frames import _FakeImg, _scene
 from test_vault_store_binary_writers import VIDEO, frame_rows
 from test_vault_store_bypass_writers import RAW_SOURCE
@@ -35,14 +39,18 @@ from exomem import (
     extract,
     extraction_parts,
     media_jobs,
+    media_store,
     media_worker,
     mutation_lock,
+    reserved_paths,
     scene_frames,
+    server_runtime,
     writer_lease,
 )
 from exomem.collection_store import runtime
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import importer, projector, read, rederive, write
+from exomem.vault_store import binaries, importer, projector, read, rederive, write
+from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
 
@@ -52,6 +60,7 @@ pytestmark = [
 ]
 
 stored = read_write.stored
+selected_store = media_store_suite.selected_store
 
 SCHEMA = "Knowledge Base/_Schema"
 NOTES = "Knowledge Base/Notes"
@@ -324,6 +333,239 @@ def test_a_media_job_result_commits_through_the_served_door(stored, service, mon
 
     assert jobs.pending_result_count() == 0
     assert words.encode() in read.owned_bytes(stored, f"{PICTURE}.md")
+
+
+def test_a_served_start_gives_a_media_file_dropped_on_disk_its_companion_page(
+    stored, service, monkeypatch, caplog
+):
+    """A served start whose media pass hops from under its own boundary
+    (``HopUnderBoundary``), so a media file that arrived on disk with no companion page gets
+    none, and its content stays out of search and recall."""
+    dropped = f"{NOTES}/dropped.png"
+    (stored / dropped).write_bytes(PICTURE_BYTES)
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    caplog.set_level("WARNING")
+
+    assert server_runtime._start_media_worker(stored) is None
+
+    assert sha(PICTURE_BYTES).encode() in read.owned_bytes(stored, f"{dropped}.md")
+    assert [r for r in caplog.records if "HopUnderBoundary" in r.getMessage()] == []
+    assert [r for r in caplog.records if "media reconciliation failed" in r.getMessage()] == []
+
+
+def test_the_media_workers_own_frame_write_commits_through_the_served_door(stored, service):
+    """A worker whose scene-frame unit hops from under its own boundary, or that a served process
+    refuses, so a video keeps no viewable frames and its frames get no OCR jobs."""
+    video = stored / VIDEO
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"\x00video")
+    importer.Importer(stored).import_paths([VIDEO])  # the video gets its companion page
+    job = media_jobs.MediaJob(
+        binary_path=video, sidecar_path=stored / f"{VIDEO}.md", media_type="video"
+    )
+    worker = media_worker.MediaWorker(stored, execution_mode="process")
+
+    # No CLIP pass ran, so there are no parent samples to bind, as the direct write takes it.
+    worker._persist_scene_frames(job, [(_scene(10.0), _FakeImg())], parent_clip_samples=None)
+
+    pages, records = frame_rows(stored)
+    assert len(pages) == 1 and len(records) == 1
+    queued_frames = media_jobs.MediaJobStore(stored).get_by_binary(stored / records[0][0])
+    assert queued_frames is not None and queued_frames.do_ocr
+
+
+def test_a_media_store_offload_publishes_its_reference_through_the_served_door(
+    stored, service, selected_store
+):
+    """An offload whose reference unit a served process refuses, or that hops from under its own
+    boundary, so the original never records its stored copy and can never be evicted."""
+    (stored / PICTURE).write_bytes(PICTURE_BYTES)
+    importer.Importer(stored).import_paths([PICTURE])
+
+    reference = _offload(stored, stored / PICTURE)
+
+    assert reference is not None
+    assert reference.object.encode() in read.owned_bytes(stored, f"{PICTURE}.md")
+    assert media_store.original_state(stored, PICTURE).state == "cached"
+
+
+def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_next_one_releases(
+    stored, service, selected_store, monkeypatch, caplog
+):
+    """An eviction whose absent stored version must be released while another holder keeps the
+    vault boundary: ``MEDIA_STORE_BUSY`` escapes to the worker, which logs a failure or (at start)
+    skips the rest of its scan, or the reference to the lost copy is never released."""
+    (stored / PICTURE).write_bytes(PICTURE_BYTES)
+    importer.Importer(stored).import_paths([PICTURE])
+    reference = _offload(stored, stored / PICTURE)
+    # The stored copy is gone, so the eviction must release the reference instead of evicting.
+    (Path(selected_store[0]["root"]) / reference.object / reference.version).unlink()
+    monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, stored / PICTURE))
+    monkeypatch.setattr(store_media, "BUSY_WAIT_SECONDS", 0.5)
+    caplog.set_level("WARNING")
+
+    with held_elsewhere(stored):
+        assert media_store.evict_to_target(stored) == 0
+        media_worker._evict(stored)
+
+    assert reference.object.encode() in read.owned_bytes(stored, f"{PICTURE}.md")
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+    media_worker._evict(stored)
+
+    assert reference.object.encode() not in read.owned_bytes(stored, f"{PICTURE}.md")
+    assert (stored / PICTURE).read_bytes() == PICTURE_BYTES
+
+
+def idle_service_projector(root, poll_seconds=60.0):
+    """The service's projector loop, started as the service starts it and then idle in its poll."""
+    loop = projector.Projector(root, poll_seconds=poll_seconds)
+    loop.start()
+    deadline = time.monotonic() + 30
+    while queued(root):
+        assert time.monotonic() < deadline, "the start drained the queue"
+        time.sleep(0.05)
+    time.sleep(0.5)  # its pass has ended; it now waits out the poll
+    return loop
+
+
+def test_a_clean_stop_projects_what_is_queued_so_the_files_match_the_store(stored, service):
+    """A clean service stop that leaves committed pages queued, so their files lag the store and an
+    offline rollback refuses until the next start."""
+    activation = server_runtime.LocalRuntimeActivation(stored, deferred=True)
+    activation.vault_projector = idle_service_projector(stored)
+    created = [f"{NOTES}/Stopping {n}.md" for n in range(5)]
+    commit(stored, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in created))
+
+    activation._stop_background_workers()
+
+    assert queued(stored) == set()
+    assert all((stored / rel).read_bytes() == f"# {rel}\n".encode() for rel in created)
+
+
+def test_a_stop_drains_no_longer_than_its_bound_and_the_next_start_projects_the_rest(
+    stored, service, monkeypatch
+):
+    """A stop whose drain outlasts its bound and holds up the service's shutdown, or that loses
+    the intents it did not reach."""
+    monkeypatch.setattr(projector, "DRAIN_ON_STOP_SECONDS", 0.3)
+    activation = server_runtime.LocalRuntimeActivation(stored, deferred=True)
+    activation.vault_projector = idle_service_projector(stored)
+    created = [f"{NOTES}/Bounded {n:03d}.md" for n in range(150)]  # about 12 s of drain
+    commit(stored, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in created))
+
+    began = time.monotonic()
+    activation._stop_background_workers()
+    stopped_in = time.monotonic() - began
+
+    left = queued(stored)
+    assert stopped_in < 4.0 and left and left <= set(created)
+    projector.Projector(stored).run_pass()  # the next start
+    assert queued(stored) == set()
+
+
+def trashed_once(root, rel, body):
+    """Where a trashed binary's bytes are now: every file under the trash that holds them."""
+    return [
+        path.relative_to(root).as_posix()
+        for path in (root / "Knowledge Base/_trash").rglob("*")
+        if path.is_file() and path.read_bytes() == body
+    ]
+
+
+def test_a_served_projector_that_renames_a_trashed_binary_before_its_writer_does_converges(
+    stored, service, monkeypatch
+):
+    """The writer's rename after its commit racing a served projector that renames the same file
+    first: the trash refuses or warns, the file ends at both paths or neither, or a record or an
+    intent is left naming the wrong path."""
+    projector_moved = threading.Event()
+    real_rename = binaries._rename
+
+    def after_the_projector(root, entry, move, seen):
+        if entry.src == DIAGRAM:  # the writer waits until the served projector has moved the file
+            deadline = time.monotonic() + 10
+            while (stored / DIAGRAM).exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not (stored / DIAGRAM).exists():
+                projector_moved.set()
+        return real_rename(root, entry, move, seen)
+
+    monkeypatch.setattr(binaries, "_rename", after_the_projector)
+    loop = idle_service_projector(stored, poll_seconds=0.02)
+    try:
+        result = call(
+            stored, "manage_memory_file", operation="delete", path=DIAGRAM, confirm=True,
+            force_orphan=True,
+        )
+        deadline = time.monotonic() + 30
+        while queued(stored):
+            assert time.monotonic() < deadline, "the projector drained the queue"
+            time.sleep(0.05)
+    finally:
+        loop.stop()
+
+    assert projector_moved.is_set() and not (stored / DIAGRAM).exists(), result
+    (trashed,) = trashed_once(stored, DIAGRAM, DIAGRAM_BYTES)
+    assert result.get("ok") is not False and not result.get("warnings")
+    assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
+        (sha(DIAGRAM_BYTES),)
+    ]
+    assert store_rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM) == []
+    assert store_rows(stored, "SELECT path FROM store_held") == []
+
+
+def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_converges(
+    stored, service, monkeypatch, caplog
+):
+    """The served projector judging a queued binary move, then finding that the writer moved the
+    file between its look and its rename: it defers the move, logs it, or renames something."""
+    picture = f"{NOTES}/raced.png"
+    (stored / picture).write_bytes(PICTURE_BYTES)
+    importer.Importer(stored).import_paths([picture])
+    at_rename, writer_moved = threading.Event(), threading.Event()
+    real_rename, real_move = projector._rename, reserved_paths.move_generic_path
+
+    def renaming_late(filesystem, old, new, expected):
+        if old == picture:  # the projector has judged the move; the writer now moves the file
+            at_rename.set()
+            writer_moved.wait(10)
+        return real_rename(filesystem, old, new, expected)
+
+    def renaming_first(root, source, destination, **options):
+        if source == picture:
+            at_rename.wait(10)
+            try:
+                return real_move(root, source, destination, **options)
+            finally:
+                writer_moved.set()
+        return real_move(root, source, destination, **options)
+
+    monkeypatch.setattr(projector, "_rename", renaming_late)
+    monkeypatch.setattr(reserved_paths, "move_generic_path", renaming_first)
+    caplog.set_level("WARNING", logger="exomem.vault_store")
+    loop = idle_service_projector(stored, poll_seconds=0.02)
+    try:
+        result = call(
+            stored, "manage_memory_file", operation="delete", path=picture, confirm=True,
+            force_orphan=True,
+        )
+        deadline = time.monotonic() + 30
+        while queued(stored):
+            assert time.monotonic() < deadline, "the projector drained the queue"
+            time.sleep(0.05)
+    finally:
+        loop.stop()
+
+    assert at_rename.is_set() and writer_moved.is_set(), result
+    (trashed,) = trashed_once(stored, picture, PICTURE_BYTES)
+    assert result.get("ok") is not False and not (stored / picture).exists()
+    assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
+        (sha(PICTURE_BYTES),)
+    ]
+    assert store_rows(stored, "SELECT path FROM store_binaries WHERE path = ?", picture) == []
+    assert store_rows(stored, "SELECT path FROM store_held") == []
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 @pytest.mark.timeout(900)

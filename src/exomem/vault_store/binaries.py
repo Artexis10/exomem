@@ -19,7 +19,8 @@ nothing that the store owns changes on disk before it:
 
 A commit that refuses leaves every file where it was. A file that the store does not own and that
 holds Markdown has its rows derived again at its new path and dropped at its old one, after its
-rename, in a second commit. A folder that the renames left empty goes, by the projector's rule.
+rename, in a second commit. A folder trash or recovery names the folders that it vacates
+(``vacated``), and the projector removes them once the files below them have moved.
 """
 
 from __future__ import annotations
@@ -227,7 +228,6 @@ def _finish(
             )
         elif ownership.is_markdown(entry.dst):
             refresh.extend((entry.src, entry.dst))
-    _prune_emptied(root, {entry.src.rpartition("/")[0] for entry in relocation.entries})
     try:
         if finished:
             with writer.handle.transaction() as tx:
@@ -380,17 +380,17 @@ def _markdown_below(root: Path, folder: str) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def _prune_emptied(root: Path, folders: Iterable[str]) -> None:
-    """Remove each folder that the renames left empty, by the projector's own rule."""
-    from .. import held_fs
-    from . import projector
-
-    acquired = held_fs.acquire(projector.anchor(root))
-    if not acquired.ok:
-        return  # an emptied folder then stays, as file mode leaves one; no bytes are lost
-    with acquired.require() as filesystem:
-        for folder in sorted(folders, reverse=True):
-            projector.prune_emptied(filesystem, folder)
+def vacated(folder: str, moved: Iterable[str]) -> tuple[str, ...]:
+    """The folders that a move of ``folder`` as a whole takes away, when its contents move one by
+    one: ``folder`` itself and each folder between it and a moved path, as file mode's rename of
+    the folder leaves none of them (``write.StoreChange.vacated_folders``)."""
+    found = {folder}
+    for rel in moved:
+        parent = rel.rpartition("/")[0]
+        while parent.startswith(f"{folder}/"):
+            found.add(parent)
+            parent = parent.rpartition("/")[0]
+    return tuple(sorted(found))
 
 
 def prune_empty(folder: Path) -> None:

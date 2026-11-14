@@ -1046,6 +1046,7 @@ def _recover_in_store(
         parts_moves: dict[str, str] = {}
         parts_hashes: dict[str, str] = {}
         entries: list[binaries.Entry] = []
+        vacated: tuple[str, ...] = ()
         expect: dict[str, Expect] = {}
         companion: tuple[str, str] | None = None
         keep_metadata = False
@@ -1073,6 +1074,8 @@ def _recover_in_store(
                     *(binaries.Entry(rel, restored(rel)) for rel in listing.files),
                     *(binaries.Entry(rel, restored(rel), folder=True) for rel in listing.folders),
                 ]
+                # The trash slot empties one file at a time; the projector removes its folders.
+                vacated = binaries.vacated(trash_rel, (*stored, *listing.files, *listing.folders))
             else:
                 # The store refers to nothing below the folder, so it moves back whole.
                 entries = [binaries.Entry(trash_rel, restore_rel, folder=True)]
@@ -1233,6 +1236,7 @@ def _recover_in_store(
             deletes=() if companion is None else (PageDelete(companion[0]),),
             binary_deletes=(BinaryDelete(sidecar_rel),) if drop_sidecar else (),
             expect=expect,
+            vacated_folders=vacated,
         )
         try:
             with binaries.relocated(root, relocation, writer) as moved:

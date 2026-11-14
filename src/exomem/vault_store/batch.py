@@ -64,7 +64,8 @@ class Lifecycle:
     the commit runs: a stale source refuses the whole commit with its ``StoreConflict``.
 
     ``binary_moves`` move binary records whose files the writer renames right after the commit
-    (``binaries.relocated``).
+    (``binaries.relocated``). ``vacated_folders`` are the folders that a folder trash or recovery
+    moves away as a whole (``StoreChange.vacated_folders``).
     """
 
     moves: tuple[PageMove, ...] = ()
@@ -72,6 +73,7 @@ class Lifecycle:
     binary_deletes: tuple[BinaryDelete, ...] = ()
     binary_moves: tuple[BinaryMove, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
+    vacated_folders: tuple[str, ...] = ()
 
 
 def commit_batch(
@@ -406,6 +408,7 @@ def _commit(
             binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
             binary_deletes=plan.lifecycle.binary_deletes,
             binary_moves=plan.lifecycle.binary_moves,
+            vacated_folders=plan.lifecycle.vacated_folders,
             refresh=tuple(plan.refresh),
             expect=plan.expectations(),
         )

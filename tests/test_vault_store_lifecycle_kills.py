@@ -437,8 +437,8 @@ def _side(case: str, rel: str) -> tuple[str, str] | None:
         if rel == folder:
             return side, "(itself)"
     mark = folder_of(case).removeprefix(f"{KB}/").replace("/", "__")
-    if not rel.startswith(TRASH):
-        return None
+    if not rel.startswith(TRASH) or "/" not in rel[len(TRASH) :]:
+        return None  # a date folder, which file mode keeps too, belongs to no case
     _date, slot, *below = rel[len(TRASH) :].split("/")
     name = slot.removesuffix(SIDECAR)
     if not (name.endswith(mark) or f"{mark}__" in name or f"{mark}-" in name):
@@ -559,11 +559,15 @@ def prepare(root: Path, plan: list[tuple[str, str, bool]]) -> list[Case]:
     ]
 
 
-def problems(found: dict) -> list[str]:
+FOLDER_WRITES = ("trash folder", "recover folder")
+
+
+def problems(found: dict, kind: str) -> list[str]:
     """Each way one case still needs a person after a fresh start: its pages, records or files on
-    more than one side, a side left as empty folders alone, the store and the disk disagreeing, a
-    governance marker left pending, or a next write that refuses. The fixture makes a move's
-    destination folder before the move, so that side's empty folder is the fixture's own."""
+    more than one side, the store and the disk disagreeing, a governance marker left pending, or a
+    next write that refuses. A folder write and its undo move a folder as a whole, which file mode
+    leaves nothing of at its old path, so a side that they leave as empty folders alone counts too.
+    A single file's write leaves its folder, as file mode does."""
     out: list[str] = []
     for phase in ("after the restart", "after the next write"):
         state = found[phase]
@@ -575,7 +579,7 @@ def problems(found: dict) -> list[str]:
         out.extend(
             f"{phase}: empty folders left at {side}: {where['empty folders']}"
             for side, where in state["sides"].items()
-            if set(where) == {"empty folders"} and side != "moved"
+            if kind in FOLDER_WRITES and set(where) == {"empty folders"}
         )
         out.extend(f"{phase}: {disagreement}" for disagreement in state["disagree"])
         out.extend(
@@ -597,7 +601,7 @@ def kill_restart_and_judge(
     found = restart(root, cases, tmp_path, order)
     judged = {
         f"{'governed ' if governs else ''}{case.kind} killed at {case.kill}": problems(
-            found[case.name]
+            found[case.name], case.kind
         )
         for case, (_kind, _kill, governs) in zip(cases, plan, strict=True)
     }

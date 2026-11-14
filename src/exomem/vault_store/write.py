@@ -240,6 +240,11 @@ class StoreChange:
     resolves_held: tuple[HeldRow, ...] = ()
     files_seen: tuple[FileSeen, ...] = ()
     refresh: tuple[str, ...] = ()
+    #: Folders that this change moves away as a whole, as file mode's rename of a folder does: a
+    #: folder trash's source tree, or a recovery's trash slot. Each is queued as a folder intent
+    #: (``folder_intent``), and the projector removes the folder once nothing queued below it is
+    #: left to move and it is empty.
+    vacated_folders: tuple[str, ...] = ()
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -346,6 +351,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
+        _enqueue_folders(tx, change.vacated_folders, revision, now)
         for held in change.resolves_held:
             _drop_held(tx, held)
         for seen in change.files_seen:
@@ -392,6 +398,33 @@ def _require_owned(change: StoreChange) -> None:
         _require_safe(move.src)
         if ownership.classify(move.src) is ownership.Ownership.PAGE:
             raise OpError(NOT_OWNED, f"the store holds a page at {move.src}, not a binary")
+    for folder in change.vacated_folders:
+        _require_safe(folder)
+
+
+def folder_intent(folder: str) -> str:
+    """The queue path of a folder that a change vacated: the folder's path and a closing slash.
+
+    A queue row names a page or a binary by its path, which never ends in a slash, so the slash
+    tells a folder intent apart in the existing columns, and its path sorts before every path
+    below the folder.
+    """
+    return f"{folder}/"
+
+
+def is_folder_intent(path: str) -> bool:
+    return path.endswith("/")
+
+
+def _enqueue_folders(
+    tx: Connection, folders: tuple[str, ...], revision: int, now: str
+) -> None:
+    tx.executemany(
+        "INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at) "
+        "VALUES (?, ?, 'delete', NULL, ?) ON CONFLICT(path) DO UPDATE SET "
+        "revision = excluded.revision, operation = 'delete', from_path = NULL",
+        [(folder_intent(folder), revision, now) for folder in dict.fromkeys(folders)],
+    )
 
 
 def _require_safe(rel: str) -> None:

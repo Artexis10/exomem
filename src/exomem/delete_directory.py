@@ -824,9 +824,13 @@ def _delete_in_store(
                 *(binaries.Entry(rel, trashed(rel)) for rel in listing.files),
                 *(binaries.Entry(rel, trashed(rel), folder=True) for rel in listing.folders),
             ]
+            # Its contents move one by one, so the commit names the folders that file mode's
+            # rename of the folder takes away, and the projector removes them once emptied.
+            vacated = binaries.vacated(rel_path, (*pages, *listing.files, *listing.folders))
         else:
             # The store refers to nothing below the folder, so it moves as file mode moves it.
             entries = [binaries.Entry(rel_path, trash_rel, folder=True)]
+            vacated = ()
         with store_read.snapshot(root) as view:
             relocation = binaries.plan(view, entries)
         counts = {"files": file_count, "md_files": len(pages), "inbound": inbound_total}
@@ -902,6 +906,7 @@ def _delete_in_store(
                         moves=tuple(PageMove(source, moves[source]) for source in pages),
                         binary_moves=moved.binary_moves,
                         expect=expect,
+                        vacated_folders=vacated,
                     ),
                 )
     except StoreConflict as conflict:
