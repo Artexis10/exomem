@@ -21,7 +21,7 @@ import logging
 import sqlite3
 import time
 import uuid
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, suppress
 from functools import partial
 from pathlib import Path
 
@@ -89,6 +89,20 @@ def _held_workspace(directory, *, create=False):
         if create:
             filesystem.flush_directory(state).require()
         yield filesystem, state, staging, check
+
+
+@contextmanager
+def _deletable(filesystem, parent, leaf, held):
+    """``held`` reopened with delete authority, once the SQLite connection to it is closed.
+
+    SQLite opens a file without sharing delete access, and Windows refuses that open beside a handle
+    that has it. A candidate store is held for identity while SQLite uses it and reopened here to be
+    renamed or removed; the reopened file must be the one held.
+    """
+    with filesystem.file(parent, leaf, access="mutate").require() as current:
+        if not held_fs._same_file_identity(held.identity, current.identity):
+            raise CollectionStoreError("COLLECTION_STORE_BUSY", "the replacement staging store changed during refresh")
+        yield current
 
 
 @contextmanager
@@ -320,10 +334,9 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
                             # The snapshot already proved and closed this live base; move its one file into our workspace.
                             filesystem.rename(source, parent, leaf, replace=False).require()
                             live = _copied(copied)
-                    candidate_file = stack.enter_context(filesystem.file(parent, leaf, access="mutate").require())
+                    candidate_file = stack.enter_context(filesystem.file(parent, leaf).require())
                 else:
-                    candidate_file = stack.enter_context(filesystem.file(parent, leaf, create=True, exclusive=True,
-                                                                          access="mutate").require())
+                    candidate_file = stack.enter_context(filesystem.file(parent, leaf, create=True, exclusive=True).require())
                 staging = sql.enter_context(connection.staging_store(candidate))
                 sql.enter_context(legacy_import.checked_sql(staging, check))
                 # Retain SQLite custody while authorization reads release identity coordination; cleanup skips busy candidates.
@@ -399,7 +412,8 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
                 if donor is not None:
                     donor_reader.close()
                     donor_check()
-                    filesystem.rename(candidate_file, parent, _STAGING, replace=True).require()
+                    with _deletable(filesystem, parent, leaf, candidate_file) as installable:
+                        filesystem.rename(installable, parent, _STAGING, replace=True).require()
                     filesystem.flush_directory(parent).require()
                 installed = True
                 return report, directory
@@ -408,8 +422,10 @@ def _stage(root, *, base=True, deadline=None, donor=None, ownership_proof=None):
                 with _migration_scope(root):
                     sql.close()
                     if not installed:
-                        # This attempt owns this exact file; held unlink preserves a replacement at its name.
-                        filesystem.unlink(candidate_file)
+                        # This attempt owns this exact file; a replacement at its name is left in place.
+                        with suppress(held_fs.HeldFsError, CollectionStoreError), \
+                                _deletable(filesystem, parent, leaf, candidate_file) as removable:
+                            filesystem.unlink(removable)
                         if donor is None and not set(filesystem.iter_names(parent)):
                             # Only this attempt's freshly created, now-empty directory can be removed here.
                             with held_fs.acquire(directory.parent).require() as state_fs, \
