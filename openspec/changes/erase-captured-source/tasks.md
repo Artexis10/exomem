@@ -9,7 +9,7 @@
 
 - [ ] 2.1 Register erasure and authenticated policy qualification with default-off host configuration, namespace authority and exact incarnation preconditions.
 - [ ] 2.2 Persist bounded target-qualified progress and implement owned file, original, staging, activity/navigation and private recovery cleanup.
-- [ ] 2.3 Agree the canonical store owner's purge/provenance API, then integrate its bounded page, held, audit, projection and recovery cleanup.
+- [ ] 2.3 Agree the canonical store owner's purge/provenance API, then integrate bounded page, held, audit, projection, recovery and managed-replica cleanup.
 - [ ] 2.4 Require actual derived-owner completion and fence delayed index, projection, rollback and cache publication against replacement incarnations.
 - [ ] 2.5 Extend settlement custody reporting and explicit residue cleanup; retain unresolved attempt recovery links through collection.
 

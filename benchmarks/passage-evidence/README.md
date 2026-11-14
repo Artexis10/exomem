@@ -19,6 +19,12 @@ Both limits have a strict p95 bar below 200 ms under two CPUs, 3 GiB, no swap an
 The route has no previous latency baseline; zero and speedup claims would misrepresent unavailable evidence.
 The inventory reference covers file mode. Store HTTP startup remains unsupported and unqualified.
 
+[The 14 November inventory reference](inventory-qualification-2026-11-14.json) records the independently audited frozen candidate.
+All 600 timed calls completed, with 9 SQL statements and no observed request Source reads or encoding.
+For limits two and 200, p95 was 14.244 ms and 53.859 ms; one call at limit two reached 475.992 ms.
+The run reached its 3 GiB memory cap without OOM. It establishes no spare capacity or production qualification.
+The result names later-change limits and retains cold readiness separately from timed calls.
+
 Future worker readiness must use ordinary public inventory calls and the normal watcher and proof drain.
 Warm-up traverses every limit-200 page, waiting for exact indexed items before advancing.
 Retain the successful traversal receipt with 20,000 distinct generated identities and all warm-up responses separately.

@@ -26,7 +26,7 @@
 
 ## 5. Qualification and delivery
 
-- [ ] 5.1 Add the inventory reference to the existing latency contract and qualify the public instrument on generated production-sized data; record the new route's baseline as unavailable.
+- [x] 5.1 Add the inventory reference to the existing latency contract and qualify the public instrument on generated production-sized data; record the new route's baseline as unavailable.
 - [x] 5.2 Prove constant query count for 2 and 200 returned items, with file and store coverage named separately.
 - [ ] 5.3 Run scoped and completion checks, exact-content independent review, privacy checks and strict OpenSpec validation.
 - [ ] 5.4 Deliver the coherent reviewed batch through green CI and the ordinary release; keep separate activation authority unchanged.

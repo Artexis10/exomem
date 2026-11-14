@@ -69,6 +69,17 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **WHEN** another Source's entry contains an owned excerpt from the target's earlier activity
 - **THEN** cleanup removes that target fragment from every managed version while preserving the other Source's record
 
+#### Scenario: Store audit retains the target's earlier paths
+- **WHEN** target projection and vector cleanup have finished for an incarnation with exact move lineage
+- **THEN** cleanup redacts its identifying audit fields while retaining sequence, revision and operation facts
+- **AND** it preserves a replacement incarnation's audit facts at a reused path
+- **AND** path fields use non-path opaque tokens, preserving existing null move origins without producing a null path
+
+#### Scenario: Managed store replica predates retirement
+- **WHEN** a managed reusable snapshot or published replica contains state older than the purge revision
+- **THEN** retirement remains pending until its owner replaces or retires that copy
+- **AND** an unrelated collection transaction sequence cannot substitute for the store revision acknowledgement
+
 ### Requirement: Retirement exposes honest resumable progress
 
 The result SHALL name the target reference, status and target_retired. Status SHALL be complete, pending, failed or unknown. Only complete acknowledged cleanup SHALL set target_retired true. Progress SHALL survive restart and remain bounded per invocation. Missing reads and partial owner evidence MUST NOT become empty success.

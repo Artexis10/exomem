@@ -112,6 +112,34 @@ Each derived owner compares its retained identity, hash or generation inside the
 A canonical path check before dispatch cannot authorize a later path-only delete.
 Each owner checks its bounded target set; database work does not grow with unrelated Sources.
 
+### D4b. Preserve store sequencing while retiring identifying material
+
+The store owner retains existing store, projection, rollback and replica-publication modules.
+This change owns the new `vault_store/purge.py` after the merged projector baseline.
+Its only existing store-schema edit narrows the audit trigger through one migration, reviewed by the schema owner.
+The integration uses existing guarded store commits: compare the target revision and hash inside the delete transaction.
+Store-wide monotonic revisions distinguish a replacement page even when its path or bytes match an earlier incarnation.
+Resolve only held rows proved to belong to the target; an unrelated person's edit is not erasure authority.
+
+After target-qualified projection and vector cleanup finish, redact identifying audit fields rather than deleting audit rows.
+Replace `path`, and `from_path` when set, with an opaque per-row token outside every classified vault namespace.
+Keep a null `from_path` null: audit readers use that distinction to identify move halves.
+Never make `path` null: vector readers interpret that value as a vault-wide reset.
+Set `sha256` null and replace the unstructured `reason` with fixed redaction text.
+Retain `seq`, `revision`, `operation`, the closed origin token and timestamp so existing cursors keep their order.
+Follow exact move lineage for the target's life; do not redact a replacement incarnation's later life at a reused path.
+The schema migration must permit only this qualified redaction update before this step can run.
+
+Managed reusable store snapshots and published replicas must retire or replace versions older than the purge revision.
+The component receipt binds the physical store and purge revision, including held content, projection and replica publication acknowledgements.
+Collection transaction sequence alone cannot prove freshness because page commits advance the store revision separately.
+An active overlapping reader may finish; a managed snapshot must not later republish the retired data.
+
+The guarantee excludes forensic remnants in SQLite free pages and WAL storage, as it excludes filesystem free blocks.
+Do not add `secure_delete`, checkpoint or vacuum work to claim physical erasure that this contract does not promise.
+The store owner has agreed this contract; implementation still requires the merged projector baseline.
+Run the projector, migration and served-store suites before delivery because each reads this audit trail.
+
 ### D4a. Qualify configured erasure policy separately from discovery
 
 Static operation features prove implementation, not that a configured identity system is enabled.
