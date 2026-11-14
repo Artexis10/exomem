@@ -24,7 +24,7 @@
 
 ## 4. Latency
 
-- [ ] 4.1 Build the declared reference and measure the passage path with one caller and with four, on disk scoring and on a resident matrix; record the run files.
+- [ ] 4.1 Build the declared reference and qualify disk scoring with one caller and with four; record all attempts and runtime receipts. Design and compare a bounded resident mode only if disk qualification fails.
 - [ ] 4.2 Choose the scoring mode from the measurement, report the mode in the reply, and add the reference and the bars to `request_latency_contract.json`; verify the contract check fails on a missed bar.
 
 ## 5. Delivery

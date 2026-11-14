@@ -2484,6 +2484,12 @@ class EmbeddingIndex:
             defer_cold_load=defer_cold_load, incomplete_out=incomplete_out,
         ))
 
+    @property
+    def chunk_scoring_mode(self) -> str:
+        """Name the existing backend that selects chunks for this resource profile."""
+        # These are the two scoring backend names, not classifications of content.
+        return "disk" if cloud_cell.resource_policy() == "service-v1" else "resident"
+
     def select_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
@@ -2527,7 +2533,7 @@ class EmbeddingIndex:
                 # The unit lane's witness: an empty answer here proves nothing, so it is no miss.
                 incomplete_out.append(".")
             return []
-        if cloud_cell.resource_policy() == "service-v1":
+        if self.chunk_scoring_mode == "disk":
             # SQLite row fetches release the GIL; cooperative bulk graph work
             # must yield during this read-only scan, which never waits on it.
             # Batched advisory scoring marks only its actual foreground caller.

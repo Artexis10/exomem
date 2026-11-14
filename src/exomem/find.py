@@ -4941,6 +4941,7 @@ def _resolve_relation_filter(
     relation_direction: str,
     snapshot: FreshnessSnapshot,
     keep: Callable[[str], bool] | None = None,
+    anchor_visible: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
     plus per-path provenance and advisory findings. `keep` is the request's content
@@ -4949,6 +4950,8 @@ def _resolve_relation_filter(
     would hold them. A caller with such a view re-derives the links that resolve
     differently for it, with the resolver of the request's `snapshot`.
     A withheld anchor yields an authoritative empty before registry selection.
+    `anchor_visible` can supply an existing namespace-authority check without
+    opening an unselected anchor. It does not replace graph freshness or release.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -4965,7 +4968,12 @@ def _resolve_relation_filter(
 
     if relation_of:
         relation_of = epistemic_graph._page_rel(relation_of)
-        if not egress.quick_page_visible(vault_root, relation_of):
+        visible = (
+            anchor_visible(relation_of)
+            if anchor_visible is not None
+            else egress.quick_page_visible(vault_root, relation_of)
+        )
+        if not visible:
             return frozenset(), {}, ()
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     # An anchored filter inherits its anchor page's instance; otherwise public.

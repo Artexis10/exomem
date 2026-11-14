@@ -121,5 +121,6 @@ Each hit returns a Source `ref`, optional `source_identity`, `passage_key`, one-
 The span uses character offsets in the Source body after frontmatter. Its fields are `start` and `length`.
 The hash covers the complete declared passage as UTF-8, including when a hit covers only one chunk.
 Several passages from one Source can rank. Hits contain no passage text; callers resolve their own records through the opaque key.
-The reply also identifies the embedding `recall_space` and counts `withheld_chunks` whose indexed text no longer matches their Source.
+The reply identifies the embedding `recall_space` and the `scoring_mode`, either `disk` or `resident` for the active resource profile.
+It counts `withheld_chunks` whose indexed text no longer matches their Source.
 Exomem does not refill withheld hits. A request reads at most `limit` distinct selected Sources; terminal checks can reread those Sources.

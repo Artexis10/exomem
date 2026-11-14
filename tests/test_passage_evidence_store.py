@@ -115,6 +115,7 @@ def test_bound_store_passages_read_only_the_selected_sources(
     """A corpus scan or candidate admission must not hydrate every stored Source."""
     saved = commands.op_capture_source(
         served, schema.load_source_schema(served), title="Stored reference", source_kind="session",
+        tags=["readers"],
         passages=[{"key": "record", "text": "The lantern burns oil."}],
     )
     path = saved["source"]["path"]
@@ -157,7 +158,7 @@ def test_bound_store_passages_read_only_the_selected_sources(
         patch.setattr(read.StoreSnapshot, "page", counted_one)
         patch.setattr(read.StoreSnapshot, "page_sources", counted_many)
         patch.setattr(read, "page_source", counted_source)
-        reply = call(query="lantern", limit=5, result_level="passage")
+        reply = call(query="lantern", tags=["readers"], limit=5, result_level="passage")
     assert "error" not in reply, reply
     assert len(reply["hits"]) == 5
     assert len(set(reads)) <= 5, reads

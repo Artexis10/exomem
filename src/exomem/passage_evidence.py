@@ -216,8 +216,7 @@ def declared_sources(vault_root: Path, publication) -> frozenset[str]:
         return paths
 
 
-def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
-    """Resolve eligibility first, select chunks once, then verify their byte binding."""
+def _require_authority(vault_root: Path) -> None:
     from . import source_capture
 
     # Whole-namespace authority avoids per-candidate body admission; non-owners retain page search.
@@ -230,6 +229,18 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
             "Use an authorized service connection, or use ordinary page search.",
         ) from None
 
+
+def _anchor_visible(vault_root: Path, path: str) -> bool:
+    from .governance import lifecycle
+
+    # Namespace authority replaces per-page admission; the anchor's bytes are not result evidence.
+    _require_authority(vault_root)
+    return not lifecycle.is_tombstoned(vault_root, path)
+
+
+def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
+    """Resolve eligibility first, select chunks once, then verify their byte binding."""
+    _require_authority(vault_root)
     limit = request["limit"]
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
         raise ValueError("INVALID_PASSAGE_LIMIT: set limit to an integer from 1 to 200")
@@ -293,6 +304,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         relation_direction=request["relation_direction"],
         keep=admit,
         snapshot=snapshot,
+        anchor_visible=lambda path: _anchor_visible(vault_root, path),
     )
     if relations is not None:
         eligible = set(relations) if eligible is None else eligible & relations
@@ -351,5 +363,6 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         "user_summary": summary,
         "hits": hits,
         "recall_space": asdict(space),
+        "scoring_mode": index.chunk_scoring_mode,
         "withheld_chunks": withheld,
     }

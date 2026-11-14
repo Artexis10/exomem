@@ -148,7 +148,10 @@ A new Source attribute would need its own indexed column, registry entry and mig
 
 A Cloud cell scores vectors from sidecar rows on disk today. The measured page path spends about 230 ms at p50 in that stage.
 If the passage path cannot meet the bar that way, it holds the active space's passage matrix in memory when the resource policy admits its size, and it reports which mode served the request.
-The implementation measures both modes on the reference before it chooses.
+The implementation first qualifies existing disk scoring on the reference.
+Only a failed disk qualification justifies designing a resource-bounded resident mode and comparing both modes.
+Amendment 1 precedes the run: the current service profile explicitly unloads matrices, so a resident comparison requires broader retention and publication changes.
+Those changes have no demonstrated value if existing disk scoring already meets both bars.
 
 The maintained MCP read runner already supplies the managed worker, isolated lease coordinator and terminal-response observer.
 Its general fixture does not declare passages or issue concurrent calls; a passage-specific driver adds only those missing pieces.
@@ -156,11 +159,15 @@ The reference profile lives in `benchmarks/passage-evidence/profile.json` and re
 It generates 1,500 Sources with 27 short passages each, verifies the stored declaration and chunk counts, and records corpus and runtime digests.
 As in the recall reference, deterministic corpus vectors avoid spending preparation time on model throughput; every measured query uses the real served encoder.
 This proves latency and availability, not retrieval quality. Gate A remains the separate quality evidence.
-The same 40 queries run three times in each mode and caller condition, after untimed warm-up.
-Both modes use the same corpus, encoder, two-CPU limit and MCP worker-socket boundary.
-Each four-caller batch starts together, and its caller times include execution waiting. Every terminal outcome stays in the sample set.
-A mode passes only if all calls succeed and both strict p95 bars pass. The report includes per-query mode differences and their case-level confidence interval.
-Mode order alternates between repeats. Failed preparation or incomplete samples remain visible and cannot establish a passing mode.
+The same 40 queries run three times in each caller condition, after untimed warm-up.
+The runner freezes query bytes and arguments before measurement and verifies the container's two-CPU and 3 GiB limits.
+Each four-caller batch starts four independent MCP clients together, and its caller times include execution waiting.
+Every terminal outcome stays in the sample set: 120 single-caller attempts and 480 four-caller attempts.
+Qualification requires all 600 attempts, 30 verified hits and zero withheld chunks per response, and both strict p95 bars.
+The report records encoder, publication, scoring-mode and concurrent-dispatch evidence.
+If a resident comparison becomes necessary, it keeps the same service policy, corpus, encoder and MCP boundary.
+That comparison alternates mode order and reports per-query differences with a case-level confidence interval.
+Failed preparation or incomplete samples remain visible and cannot establish a passing mode.
 The added driver is maintenance for this capability's fixture and concurrency protocol; it reuses the existing observer and worker rather than creating another instrument.
 
 ## Risks / Trade-offs

@@ -278,7 +278,7 @@ def test_stale_published_chunk_is_withheld_and_counted(vault, passage_tools):
     assert "Withheld 1" in after["user_summary"]
 
 
-def test_tag_eligibility_precedes_selection_and_fills_limit(vault, passage_tools):
+def test_tag_eligibility_precedes_selection_and_fills_limit(vault, passage_tools, monkeypatch):
     """Filtering only the top chunks after ranking would leave fewer eligible matches."""
     call, _encoder = passage_tools
     for tag, text, key in (
@@ -302,17 +302,96 @@ def test_tag_eligibility_precedes_selection_and_fills_limit(vault, passage_tools
         "search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
     )
     assert all_hits["hits"][0]["passage_key"] == "best"
-    reply = call(
-        "search_memory",
-        {
-            "query": "lantern",
-            "limit": 2,
-            "tags": ["readers"],
-            "options": {"result_level": "passage"},
-        },
-    )
+    reads = []
+    original = reserved_paths.read_generic_bytes
+
+    def counted(root, path, **kwargs):
+        if "Sources/" in str(path):
+            reads.append(str(path))
+        return original(root, path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(reserved_paths, "read_generic_bytes", counted)
+        reply = call(
+            "search_memory",
+            {
+                "query": "lantern",
+                "limit": 2,
+                "tags": ["readers"],
+                "options": {"result_level": "passage"},
+            },
+        )
     assert "error" not in reply, reply
     assert {hit["passage_key"] for hit in reply["hits"]} == {"allowed-1", "allowed-2"}
+    assert len(set(reads)) == 2, reads
+    assert set(reads) == {
+        memory_refs.resolve_identifier_read_only(vault, hit["ref"]) for hit in reply["hits"]
+    }
+
+
+@pytest.mark.parametrize("anchor_state", ["visible", "tombstoned", "revoked"])
+def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
+    vault, passage_tools, monkeypatch, anchor_state
+):
+    """An unselected Source anchor must not add a canonical read to the result limit."""
+    from exomem import epistemic_graph
+
+    from exomem import source_capture
+    from exomem.governance import lifecycle
+
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, encoder = passage_tools
+    target = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Related record", source_kind="session",
+        passages=[{"key": "target", "text": "The lantern burns oil."}],
+    )["source"]["path"]
+    anchor = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Anchor record", source_kind="session",
+        passages=[{"key": "anchor", "text": f"## Relations\n- supports [[{target}]]"}],
+    )["source"]["path"]
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    reads = []
+    original = reserved_paths.read_generic_bytes
+
+    def counted(root, path, **kwargs):
+        if str(path) in (anchor, target):
+            reads.append(str(path))
+        return original(root, path, **kwargs)
+
+    authority = source_capture.require_authority
+    checks = 0
+
+    def revoke_before_anchor(root):
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise source_capture.SourceCaptureError("SOURCE_IDENTITY_FORBIDDEN")
+        return authority(root)
+
+    tombstoned = lifecycle.is_tombstoned
+    before = len(encoder.texts)
+    with monkeypatch.context() as patch:
+        patch.setattr(reserved_paths, "read_generic_bytes", counted)
+        if anchor_state == "revoked":
+            patch.setattr(source_capture, "require_authority", revoke_before_anchor)
+        elif anchor_state == "tombstoned":
+            patch.setattr(lifecycle, "is_tombstoned", lambda root, path: path == anchor or tombstoned(root, path))
+        reply = call(
+            "search_memory",
+            {"query": "lantern", "limit": 1, "options": {
+                "result_level": "passage", "relations": ["supports"], "relation_of": anchor,
+            }},
+        )
+    if anchor_state == "revoked":
+        assert "PASSAGE_AUTHORITY_REQUIRED" in str(reply), reply
+        assert reads == [] and len(encoder.texts) == before
+        return
+    assert "error" not in reply, reply
+    expected = ["target"] if anchor_state == "visible" else []
+    assert [hit["passage_key"] for hit in reply["hits"]] == expected, reply
+    assert set(reads) == ({target} if expected else set()), reads
 
 
 def test_identical_passage_retry_reuses_but_changed_key_conflicts(vault, passage_tools):
