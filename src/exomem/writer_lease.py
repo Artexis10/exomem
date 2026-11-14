@@ -7547,6 +7547,12 @@ class LeaseManager:
         """
         with self._lock:
             if self._fencing_token != fencing_token:
+                logger.warning(
+                    "TEMPDIAG fenced locally: command token %s, local token %s, last renew %.1f s ago",
+                    fencing_token, self._fencing_token,
+                    -1.0 if self._last_renew_monotonic is None
+                    else time.monotonic() - self._last_renew_monotonic,
+                )
                 self._raise_fenced(fencing_token)
             if _PROGRESS_CHECK.get() and self._grant_fresh():
                 return
@@ -7559,6 +7565,14 @@ class LeaseManager:
             )
             if still_current and coordinator_current:
                 return
+            logger.warning(
+                "TEMPDIAG fenced by status: command token %s, local token %s, coordinator holder %s token %s "
+                "granted %s expires_at %s, last renew %.1f s ago",
+                fencing_token, self._fencing_token, record.holder, record.fencing_token,
+                getattr(record, "granted", None), getattr(record, "expires_at", None),
+                -1.0 if self._last_renew_monotonic is None
+                else time.monotonic() - self._last_renew_monotonic,
+            )
             if self._fencing_token == fencing_token:
                 self._fencing_token = None
                 self._expires_at = None
@@ -7972,6 +7986,14 @@ class LeaseManager:
             return
         self._log_lease_event("lease_reclaimed")
 
+    _tick_previous: float | None = None
+
+    def _renew_tick_diag(self, started: float) -> None:
+        """TEMPDIAG: report a renewal tick that ran late, which a blocked or starved renewer causes."""
+        previous, self._tick_previous = self._tick_previous, started
+        if previous is not None and started - previous > self._renew_interval_seconds() + 1.0:
+            logger.warning("TEMPDIAG renewer tick late: %.1f s since the previous tick", started - previous)
+
     def _maybe_idle_release(self, token: int) -> bool:
         """Hand writer authority back when idle. Returns True if it released
         (the caller should skip renewing this tick).
@@ -8037,6 +8059,11 @@ class LeaseManager:
         interval = self._renew_interval_seconds()
         stop = self._stop if stop is None else stop
         while not stop.wait(interval):
+            _tick_started = time.monotonic()
+            try:
+                self._renew_tick_diag(_tick_started)
+            except Exception:  # noqa: BLE001 - TEMPDIAG
+                pass
             with self._lock:
                 token = self._fencing_token
                 if fencing_token is not None and (
@@ -8073,6 +8100,12 @@ class LeaseManager:
                         self._log_lease_event("lease_renew_rejected")
             except OpError as error:
                 # Mutations still revalidate synchronously and fail closed.
+                logger.warning(
+                    "TEMPDIAG renew failed: %s %s; tick took %.0f ms; last renew %.1f s ago",
+                    error.code, error, (time.monotonic() - _tick_started) * 1000,
+                    -1.0 if self._last_renew_monotonic is None
+                    else time.monotonic() - self._last_renew_monotonic,
+                )
                 with self._lock:
                     self._note_renewal_failed()
                 self._record_coordinator_error(error.code)
