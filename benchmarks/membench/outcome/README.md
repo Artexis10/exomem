@@ -308,10 +308,16 @@ A resume keeps the estimate unless you supply a replacement. The run's billing d
 A session is billed to a subscription login or to API credits. It is the same model either way,
 so the source is a run condition to record, not a defect. A run declares its source with
 `EXOMEM_OUTCOME_BILLING` (`subscription`, the default, or `credits`). The declaration decides the
-environment of every actor and judge session: under `subscription` the sessions get no
-`ANTHROPIC_API_KEY`, even from a shell that holds one; under `credits` they get it, and the run
-refuses before its first session when the shell holds none. A credit run starts from a shell whose
-`ANTHROPIC_API_KEY` is a Console org's key, for example the one that `harness claude-credits run` uses.
+environment of every actor and judge session. Under `subscription`, sessions receive no
+`ANTHROPIC_API_KEY`, even when the shell holds one. Under `credits`, the default credential
+transport requires the shell's Console key before the first session.
+
+Set `EXOMEM_OUTCOME_CREDIT_AUTH=launcher` only when a managed launcher supplies the credit key
+inside its child process. The runner then drops any inherited key and permits a parent environment
+without one. The billing declaration stays `credits`, and each session must still report
+`apiKeySource=ANTHROPIC_API_KEY`. The launcher owns account selection, key retrieval and its spending
+ledger. An unset credential transport, or `environment`, keeps the existing environment-key path.
+An unknown transport refuses before the first session.
 
 - Faults. A session whose `init` event reports another `apiKeySource` than the declared one (`none` for
   `subscription`, `ANTHROPIC_API_KEY` for `credits`) is a harness fault. A source outside that

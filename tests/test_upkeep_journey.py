@@ -213,6 +213,38 @@ def test_b_a_false_positive_is_held_until_the_evidence_changes(tmp_path: Path) -
     assert again["fingerprint"] != first_fingerprint
 
 
+def test_dimension_filter_uses_the_upkeep_subject_instead_of_its_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import file_watcher, lexstore
+
+    vault = fx.build(tmp_path)
+    fx.edit(vault, fx.ENTITY, fx.entity(extra=(
+        "\n## Open question\n- id: pump-question\n\nWhat causes the pressure change?\n"
+    )))
+    start = time.time()
+    _quiet(vault, start)
+    _quiet(vault, start + 2 * HOUR)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    assert lexstore.ensure_fresh(vault)
+
+    listed = _tool(vault, "review_memory", mode="upkeep", categories=[dreamer_families.HYDRATION_FAMILY])
+    assert len(listed["items"]) == 1
+    assert listed["items"][0]["dimension_status"] == "known"
+    matched = _tool(
+        vault, "review_memory", mode="upkeep", categories=[dreamer_families.HYDRATION_FAMILY],
+        filters={"unit.dimension": {"$eq": "uncertainty"}},
+    )
+    assert [item["ref"] for item in matched["items"]] == [listed["items"][0]["ref"]]
+    excluded = _tool(
+        vault, "review_memory", mode="upkeep", categories=[dreamer_families.HYDRATION_FAMILY],
+        filters={"unit.dimension": {"$ne": "uncertainty"}},
+    )
+    assert excluded["items"] == []
+    assert excluded["dimension_coverage"]["filter_unresolved"] == 0
+
+
 def test_the_hook_line_names_a_ref_its_own_advice_accepts(tmp_path: Path) -> None:
     """The session-start line says "Review with inspect_memory review.item_context" and ends in
     a ref: that ref must resolve there, and the item's id must dispose of the item."""

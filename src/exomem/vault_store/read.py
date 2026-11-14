@@ -21,7 +21,7 @@ from pathlib import Path
 from sqlite3 import Connection
 from typing import TypeVar
 
-from .. import find_corpus, reserved_paths, vault
+from .. import find_corpus, reserved_paths, semantic_index, vault
 from ..collection_store import connection, runtime
 from . import mode, ownership
 
@@ -85,6 +85,15 @@ class Child:
     is_dir: bool
 
 
+@dataclass
+class _PageBatch:
+    paths: list[str]
+    positions: dict[str, int]
+    metadata: dict[str, PageMeta]
+    current: int = -1
+    bodies: dict[str, bytes] = field(default_factory=dict)
+
+
 @dataclass(frozen=True, slots=True)
 class StoreSnapshot:
     """One read-only view of the store at ``revision``; it ends when ``snapshot`` returns.
@@ -107,6 +116,17 @@ class StoreSnapshot:
         prefetched = self.memo.get("pages", {})
         if rel in prefetched:
             return prefetched[rel]
+        batch = self.memo.get("page_batch")
+        if batch is not None and rel in batch.positions:
+            meta = batch.metadata.get(rel)
+            if meta is None:
+                return None
+            chunk = batch.positions[rel] // KEYS_PER_QUERY
+            if batch.current != chunk:
+                # Only an actual byte read loads bodies; moving through a collision bucket releases the previous batch.
+                batch.bodies = self.bodies(batch.paths[chunk * KEYS_PER_QUERY:(chunk + 1) * KEYS_PER_QUERY])
+                batch.current = chunk
+            return StoredPage(batch.bodies[rel], meta)
         row = self.connection.execute(
             f"SELECT {_META_COLUMNS}, body FROM store_pages WHERE path = ?", (rel,)
         ).fetchone()
@@ -123,6 +143,9 @@ class StoreSnapshot:
         if rel in prefetched:
             page = prefetched[rel]
             return None if page is None else page.meta
+        batch = self.memo.get("page_batch")
+        if batch is not None and rel in batch.positions:
+            return batch.metadata.get(rel)
         row = self.connection.execute(
             f"SELECT {_META_COLUMNS} FROM {_META_FROM} WHERE path = ?", (rel,)
         ).fetchone()
@@ -164,6 +187,21 @@ class StoreSnapshot:
         self.prime_page_metadata(wanted)
         metadata = self.memo["page_metadata"]
         return {rel: metadata[rel] for rel in wanted if metadata[rel] is not None}
+
+    @contextmanager
+    def prefetch(self, rels: Iterable[str]) -> Iterator[None]:
+        """Batch existing page readers' requested metadata and lazily bound their body cache."""
+        paths = list(dict.fromkeys(rels))
+        metadata = self.page_metas(paths)
+        previous = self.memo.get("page_batch")
+        self.memo["page_batch"] = _PageBatch(paths, {path: index for index, path in enumerate(paths)}, metadata)
+        try:
+            yield
+        finally:
+            if previous is None:
+                self.memo.pop("page_batch", None)
+            else:
+                self.memo["page_batch"] = previous
 
     def pages(self, prefix: str = "") -> Iterator[PageMeta]:
         """The metadata of every page whose path starts with ``prefix``, in path order."""
@@ -374,8 +412,51 @@ def require_link_rows(conn: Connection) -> None:
     between the batches of its pass the tables exist, but the pages after its cursor lack rows."""
     from . import rederive
 
-    if rederive.owner_schema_behind(conn, required_version=rederive.LINK_ROWS_VERSION):
+    if rederive.owner_schema_behind(conn, required_version=rederive.INBOUND_LINKS_OWNER_VERSION):
         raise derived_behind()
+
+
+def snapshot_for_connection(conn: Connection) -> StoreSnapshot | None:
+    """The active snapshot owning this connection; a raw connection alone proves no cache lifetime."""
+    return conn._view if isinstance(conn, _Lend) else next(
+        (view for view in reversed(_SNAPSHOTS.get()) if view.connection is conn), None,
+    )
+
+
+def snapshot_active(view: StoreSnapshot | None) -> bool:
+    """Whether the current reader still holds this exact snapshot."""
+    return view is not None and any(active is view for active in _SNAPSHOTS.get())
+
+
+def derived_registry(conn: Connection):
+    """Generation records read once through the exact stored snapshot, never a writer's partial rows."""
+    from . import rederive
+
+    view = snapshot_for_connection(conn)
+    if view is None:
+        return None
+    key = ("derived_registry", semantic_index.PARSER_VERSION)
+    if key not in view.memo:
+        view.memo[key] = rederive.read(view.connection)
+    return view.memo[key]
+
+
+def require_current_parser(conn: Connection) -> None:
+    """Withhold dependent answers until every stored page has current parser inputs.
+
+    Partial parser rows can falsely exclude live units. A wrong refusal delays only semantic
+    readers until the existing background pass finishes; raw pages and complete links remain usable.
+    """
+    from ..cli_ops import OpError
+
+    registry = derived_registry(conn)
+    if registry is not None and registry.parser_behind:
+        raise OpError(
+            DERIVED_BEHIND,
+            "The stored semantic rows are not yet qualified for the current parser, so this answer is not available yet.",
+            "Start the Exomem service to finish the background pass. Check `exomem store-mode status` "
+            "until `parser_version` equals `required_parser_version`.",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,7 +464,7 @@ class StoreReadiness:
     """How current the derived rows of one snapshot are: what a store reader serves and shows.
 
     The snapshot's revision proves the rows current for the pages: every commit derives its pages'
-    rows in its own transaction. The registries are the one input that can lag them (``rederive``):
+    rows in its own transaction. Parser inputs and registries can lag them (``rederive``):
     ``registry`` is that module's closed state, ``current``, ``rebuilding`` or ``unknown``.
     """
 
@@ -406,7 +487,7 @@ def readiness(vault_root: Path) -> StoreReadiness:
     with snapshot(root) as view:
         found = view.memo.get("readiness")
         if found is None:
-            registry = rederive.read(view.connection)
+            registry = derived_registry(view.connection)
             waiting = 0 if registry.state == rederive.CURRENT else rederive.waiting_on(
                 view.connection, root
             )
@@ -450,7 +531,7 @@ _REBUILDING_NOTICE = (
 )
 _UNKNOWN_NOTICE = (
     "Exomem has not yet confirmed that the search, graph and link rows of every stored page "
-    "follow the current schema and access policy; a background pass is checking them."
+    "follow the current parser, schema and access policy; a background pass is checking them."
 )
 
 
@@ -500,10 +581,13 @@ def scope_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
     """
     statement = _VAULT_PAGES if scope == "vault" else _KB_PAGES
     with snapshot(_as_path(vault_root)) as view:
-        found = view.memo.get(statement)
+        key = (statement, semantic_index.PARSER_VERSION)
+        found = view.memo.get(key)
         if found is None:
             count, rows = view.connection.execute(statement).fetchone()
-            found = view.memo[statement] = (count, view.revision, f"store:{view.revision}:{rows}")
+            found = view.memo[key] = (
+                count, view.revision, f"store:{view.revision}:{rows}:parser:{semantic_index.PARSER_VERSION}",
+            )
         return found
 
 
@@ -567,6 +651,8 @@ class _RequestScope:
 _REQUEST: ContextVar[_RequestScope | None] = ContextVar(
     "vault_store_request_snapshot", default=None
 )
+# This stack identifies borrowed read connections without treating writer-side derivation as a read.
+_SNAPSHOTS: ContextVar[tuple[StoreSnapshot, ...]] = ContextVar("vault_store_snapshots", default=())
 
 
 @contextmanager
@@ -630,7 +716,12 @@ def snapshot(vault_root: Path) -> Iterator[StoreSnapshot]:
                     "VAULT_STORE_SNAPSHOT_CHANGED",
                     "the worker read a different store revision; retry the request",
                 )
-            yield StoreSnapshot(revision=row[1], connection=reader)
+            view = StoreSnapshot(revision=row[1], connection=reader)
+            token = _SNAPSHOTS.set((*_SNAPSHOTS.get(), view))
+            try:
+                yield view
+            finally:
+                _SNAPSHOTS.reset(token)
         finally:
             if reader.in_transaction:
                 reader.execute("ROLLBACK")

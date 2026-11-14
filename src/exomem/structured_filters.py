@@ -241,12 +241,21 @@ class FilterPlan:
     dimensions: DimensionSource | None = dataclasses.field(
         default=None, compare=False, repr=False
     )
+    #: Request-local candidate projections; the original root still decides selected membership.
+    index_dimensions: Mapping[str, FilterNode] = dataclasses.field(
+        default_factory=dict, compare=False, repr=False
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return _node_to_dict(self.root) if self.root is not None else {}
 
-    def with_dimensions(self, source: DimensionSource) -> FilterPlan:
-        return dataclasses.replace(self, dimensions=source)
+    def with_dimensions(
+        self, source: DimensionSource, *, index_expressions: Mapping[str, FilterNode] | None = None,
+    ) -> FilterPlan:
+        return dataclasses.replace(
+            self, dimensions=source,
+            index_dimensions=self.index_dimensions if index_expressions is None else index_expressions,
+        )
 
 
 @dataclass(slots=True)
@@ -443,15 +452,12 @@ def requested_groups(
 
 
 def membership_expression(
-    *, kinds: Collection[str], every_kind: bool, keys: Collection[str]
+    *, kinds: Collection[str], every_kind: bool, keys: Collection[str], families: Collection[str] = ()
 ) -> FilterNode | None:
-    """Indexed predicates that hold for exactly the units of a dimension with these members, or
-    None when the index cannot answer one of them.
+    """Candidate predicates for a dimension's kinds and authored governed row keys.
 
-    A member kind becomes `unit.kind $in`, a member key `unit.<key> $exists true`, and the kind
-    wildcard `unit.kind $exists true`, which every unit satisfies. A key with no filter field has
-    no index column; for the rest, `plan_index_eligibility` decides whether the index answers the
-    expression exactly.
+    `unit.row_keys` is an internal projection field, never accepted by the filter grammar.
+    Presence proposes a unit; selected interpretation decides whether its row actually carries a value.
     """
     kind_field = FieldReference("unit.kind", "unit", "$.unit.kind")
     if every_kind:
@@ -464,11 +470,16 @@ def membership_expression(
                 for kind in sorted(kinds)
             )
             children.append(Predicate(kind_field, (("$in", operand),)))
-        for key in sorted(keys):
-            name = f"unit.{key}"
-            if name not in _UNIT_FIELDS:
-                return None
-            children.append(Predicate(FieldReference(name, "unit", f"$.{name}"), (("$exists", True),)))
+        if keys:
+            children.append(Predicate(
+                FieldReference("unit.row_keys", "unit", "$.unit.dimension"),
+                (("$in", tuple(TypedScalar("string", key) for key in sorted(keys))),),
+            ))
+        if families:
+            children.append(Predicate(
+                FieldReference("unit.edge_families", "unit", "$.unit.dimension"),
+                (("$in", tuple(TypedScalar("string", family) for family in sorted(families))),),
+            ))
         if not children:
             return None
         node = children[0] if len(children) == 1 else AnyOf(tuple(children))
@@ -481,8 +492,8 @@ def rewrite_dimensions(plan: FilterPlan, expressions: Mapping[str, FilterNode]) 
     (`membership_expression`) replaced by those expressions.
 
     `$eq` and `$in` become the expression, or the `$or` of several, and `$ne` becomes its `$not`.
-    The rewrite is exact, so it holds anywhere in the plan, under `$or` and `$not` too. A predicate
-    that names a dimension with no expression stays as it is.
+    The SQL renderer preserves unknown selected membership through `$or` and `$not`.
+    A predicate that names a dimension with no expression stays as it is.
     """
 
     def rewrite(node: FilterNode) -> FilterNode:
@@ -531,21 +542,27 @@ class CheckedDimensions:
     nested: tuple[str, ...]
 
 
-def split_checked_dimensions(plan: FilterPlan) -> CheckedDimensions:
+def split_checked_dimensions(
+    plan: FilterPlan, *, only: Collection[str] | None = None,
+) -> CheckedDimensions:
+    """Split only the named dimensions when `only` is supplied; retain the others for selected evaluation."""
     root = plan.root
     if root is None:
         return CheckedDimensions(plan, None, ())
     top = root.children if isinstance(root, AllOf) else (root,)
-    checked = tuple(
-        node for node in top
-        if isinstance(node, Predicate) and node.field.name in _MEMBERSHIP_FIELDS
-    )
+    def checked_predicate(node: FilterNode) -> bool:
+        return (
+            isinstance(node, Predicate) and node.field.name in _MEMBERSHIP_FIELDS
+            and (only is None or bool(named_dimensions(dataclasses.replace(plan, root=node)) & set(only)))
+        )
+
+    checked = tuple(node for node in top if checked_predicate(node))
     rest = tuple(node for node in top if node not in checked)
     nested: list[str] = []
 
     def visit(node: FilterNode) -> None:
         if isinstance(node, Predicate):
-            if node.field.name in _MEMBERSHIP_FIELDS:
+            if checked_predicate(node):
                 nested.append(node.field.path)
         elif isinstance(node, Not):
             visit(node.child)
@@ -972,6 +989,28 @@ class EligibilityPlan:
         return self.expr != ELIGIBILITY_TRUE
 
     @property
+    def requires_row_keys(self) -> bool:
+        """Whether the simplified proposal consumes the authored row-key projection."""
+        return self._requires_axis("unit.row_keys")
+
+    @property
+    def requires_edge_families(self) -> bool:
+        """Whether the proposal consumes the neutral graph resolver inputs."""
+        return self._requires_axis("unit.edge_families")
+
+    def _requires_axis(self, axis: str) -> bool:
+        def visit(expr: EligibilityExpr) -> bool:
+            if isinstance(expr, AxisTest):
+                return expr.axis == axis
+            if isinstance(expr, EligibilityNot):
+                return visit(expr.child)
+            if isinstance(expr, (EligibilityAll, EligibilityAny)):
+                return any(visit(child) for child in expr.children)
+            return False
+
+        return visit(self.expr)
+
+    @property
     def refuses(self) -> bool:
         """A complement the columns cannot express, with nothing to fall back on.
 
@@ -1018,7 +1057,8 @@ class _EligibilityIssues:
 def plan_index_eligibility(plan: FilterPlan) -> EligibilityPlan:
     """Classify a compiled plan for index-backed eligibility resolution."""
     issues = _EligibilityIssues()
-    expr, exact, _reasons = _eligibility_expr(plan.root, issues)
+    projected = rewrite_dimensions(plan, plan.index_dimensions)
+    expr, exact, _reasons = _eligibility_expr(projected.root, issues)
     if issues.fields:
         return EligibilityPlan("unsupported", tuple(sorted(set(issues.fields))))
     return EligibilityPlan(
@@ -1115,6 +1155,10 @@ def _eligibility_predicate(
     predicate: Predicate, issues: _EligibilityIssues
 ) -> tuple[EligibilityExpr, bool, _Reasons]:
     field = predicate.field.name
+    if field in {"unit.row_keys", "unit.edge_families"}:
+        # Internal schema field: SQL keeps uncertain presence through Boolean complements.
+        values = tuple(str(item.value) for item in predicate.operators[0][1])
+        return AxisTest(field, "in", values), True, ()
     if predicate.field.pointer is not None or field not in INDEX_ANSWERABLE_FIELDS:
         # `page.frontmatter:/<pointer>` is open-ended by construction: there is
         # no column, and no index answer to give.

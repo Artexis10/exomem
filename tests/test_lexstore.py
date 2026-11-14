@@ -20,8 +20,17 @@ from pathlib import Path
 
 import pytest
 
-from exomem import duplicates, find_corpus, lexstore
+from exomem import (
+    bm25,
+    duplicates,
+    find_corpus,
+    freshness,
+    lexstore,
+    lifecycle_statuses,
+    request_budget,
+)
 from exomem import find as find_module
+from exomem.vault_store import verify
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5/trigram"
@@ -70,6 +79,167 @@ def _fresh_lex_state(monkeypatch: pytest.MonkeyPatch):
     yield
     lexstore.reset_memo()
     lexstore.clear_stores()
+
+
+def test_title_contacts_count_admitted_titles_before_two_without_body_or_statistics(tmp_path, monkeypatch):
+    """Body matches and an early withheld title must not hide a later naming competitor."""
+    paths = {
+        _write_page(tmp_path, f"Knowledge Base/{index:02d}.md", "Cobalt background", title=f"Background {index}")
+        for index in range(20)
+    }
+    first = _write_page(tmp_path, "Knowledge Base/first.md", "No body contact.", title="Cobalt guide")
+    first.write_text(first.read_text().replace("type: insight", "type: insight\nstatus: superseded"))
+    hidden = _write_page(tmp_path, "Knowledge Base/hidden.md", "No body contact.", title="Cobalt guide")
+    middle = _write_page(tmp_path, "Knowledge Base/middle.md", "No body contact.", title="Cobalt guide")
+    last = _write_page(tmp_path, "Knowledge Base/zz-last.md", "No body contact.", title="Cobalt guide")
+    paths.update((first, hidden, middle, last))
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    allowed = {path.relative_to(tmp_path).as_posix() for path in paths}
+    hidden_rel, middle_rel, last_rel = (path.relative_to(tmp_path).as_posix() for path in (hidden, middle, last))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("title existence must not discover or rank the full admitted corpus")
+
+    monkeypatch.setattr(store, "_request_admitted_paths", forbidden)
+    monkeypatch.setattr(store, "_admitted_corpus_statistics", forbidden)
+    monkeypatch.setattr(store, "_bm25_query", forbidden)
+    basis = lifecycle_statuses.Basis(tmp_path)
+    result = store.title_contact_paths_result(
+        bm25.token_units("cobalt", query=True), "kb", freshness.triple(tmp_path, "kb"), allowed,
+        visible=None, status_basis=basis,
+    )
+    assert result.readiness.complete and len(result.value) == 2
+    assert set(result.value) <= {hidden_rel, middle_rel, last_rel}
+    visible = store.title_contact_paths_result(
+        bm25.token_units("cobalt", query=True), "kb", freshness.triple(tmp_path, "kb"), allowed,
+        visible=lambda path: path != hidden_rel, status_basis=basis,
+    )
+    assert visible.readiness.complete and set(visible.value) == {middle_rel, last_rel}
+    inflected = store.title_contact_paths_result(
+        bm25.token_units("guides", query=True), "kb", freshness.triple(tmp_path, "kb"), allowed,
+        visible=lambda path: path != hidden_rel, status_basis=basis,
+    )
+    assert inflected.readiness.complete and set(inflected.value) == {middle_rel, last_rel}
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=0))
+    try:
+        expired = store.title_contact_paths_result(
+            bm25.token_units("cobalt", query=True), "kb", freshness.triple(tmp_path, "kb"), allowed,
+            visible=None, status_basis=basis,
+        )
+    finally:
+        request_budget.reset_current(token)
+    assert not expired.readiness.complete and expired.readiness.status == lexstore.DEADLINE_STATUS
+    assert expired.value is None
+
+
+def test_title_contact_keeps_an_unspaced_runs_strict_majority(tmp_path):
+    """Two weak early bigram contacts cannot fill the title window ahead of a real run match."""
+    paths = [
+        _write_page(tmp_path, f"Knowledge Base/{index}.md", "Unrelated body.", title=title)
+        for index, title in enumerate(("調査案内", "調査場所", "紅色灯台"))
+    ]
+    lexstore.ensure_fresh(tmp_path)
+    result = lexstore.get_store(tmp_path).title_contact_paths_result(
+        bm25.token_units("紅色灯台調査", query=True), "kb", freshness.triple(tmp_path, "kb"),
+        {path.relative_to(tmp_path).as_posix() for path in paths}, visible=None,
+        status_basis=lifecycle_statuses.Basis(tmp_path),
+    )
+    assert result.readiness.complete
+    assert result.value == [paths[-1].relative_to(tmp_path).as_posix()]
+
+
+def test_family_target_proofs_preserve_precedence_and_admitted_physical_ambiguity(tmp_path):
+    """Stem precedence, null titles and withheld collisions cannot become a false unique title."""
+    from exomem import vault
+
+    paths = [
+        _write_page(tmp_path, "Knowledge Base/Notes/Alpha.md", "First.", title="Different title"),
+        _write_page(tmp_path, "Knowledge Base/Notes/dated.md", "Second.", title="Alpha"),
+        _write_page(tmp_path, "Knowledge Base/Notes/unicode.md", "Third.", title="Ångström"),
+        *(_write_page(tmp_path, f"Knowledge Base/Notes/collision-{n}.md", "Collision.", title="Shared title")
+          for n in range(4)),
+    ]
+    opaque = tmp_path / "Knowledge Base/Notes/opaque.md"
+    opaque.write_bytes(b"\xff")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    hidden = {path.relative_to(tmp_path).as_posix() for path in paths[-4:-2]}
+    admitted = set()
+
+    def allowed(path):
+        return path not in hidden
+    targets = {"Alpha", "Notes/Alpha", "Knowledge Base/Notes/Alpha.md", "A\u030angstro\u0308m", "opaque", "Shared title", "Missing"}
+    with closing(sqlite3.connect(store.path)) as conn:
+        complete = vault.WikilinkResolver.from_entries(tmp_path, conn.execute("SELECT path, title FROM pages WHERE in_vault = 1"))
+        statements = []
+        conn.set_trace_callback(statements.append)
+        selected = store.family_target_resolutions(conn, targets, admit=admitted.update, allowed=allowed, proofs={})
+        conn.set_trace_callback(None)
+        assert selected["Shared title"].status == "ambiguous"
+        assert selected["Shared title"].diagnostics["match_count_lower_bound"] == 2
+        assert "match_count" not in selected["Shared title"].diagnostics
+        assert not hidden & set(selected["Shared title"].diagnostics["witnesses"])
+        assert selected["Missing"].status == "missing"
+        for target in targets - {"Shared title", "Missing"}:
+            assert selected[target].status == "resolved"
+            assert selected[target].canonical == vault.normalize_wikilink(
+                target, tmp_path, resolver=complete, visible=allowed, retired=lambda _target: None,
+            )[0]
+        assert selected["Alpha"].candidate.path == paths[0].relative_to(tmp_path).as_posix()
+        assert selected["opaque"].candidate.path == opaque.relative_to(tmp_path).as_posix()
+        from test_vault_store_readers import full_reads
+
+        assert not {table for sql in statements if sql.startswith("SELECT")
+                    for table in full_reads(conn, sql)} & {"pages", "wikilink_keys"}
+
+
+@pytest.mark.parametrize("damage", ["missing", "swapped"])
+@pytest.mark.parametrize("projection", ["title_fts", "wikilink_keys"])
+def test_title_projection_custody_and_offline_verification_reject_missing_or_swapped_text(tmp_path, damage, projection):
+    """A published page hash cannot retire custody for incomplete or wrong title/contact resolver keys."""
+    first = _write_page(tmp_path, "Knowledge Base/first.md", "First body.", title="Beacon guide")
+    _write_page(tmp_path, "Knowledge Base/second.md", "Second body.", title="Harbour survey")
+    lexstore.ensure_fresh(tmp_path)
+    store = lexstore.get_store(tmp_path)
+    rel = first.relative_to(tmp_path).as_posix()
+    expected = {rel: hashlib.sha256(first.read_bytes()).hexdigest()}
+    assert store.holds_content_identities(expected) == {rel: True}
+    with closing(sqlite3.connect(store.path)) as conn, conn:
+        rowid = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()[0]
+        if projection == "wikilink_keys":
+            if damage == "missing":
+                conn.execute("DELETE FROM wikilink_keys WHERE path = ?", (rel,))
+            else:
+                other = conn.execute("SELECT path_key, stem_key, title_key FROM wikilink_keys WHERE path != ?", (rel,)).fetchone()
+                conn.execute("UPDATE wikilink_keys SET path_key = ?, stem_key = ?, title_key = ? WHERE path = ?", (*other, rel))
+        elif damage == "missing":
+            conn.execute("DELETE FROM title_fts WHERE rowid = ?", (rowid,))
+        else:
+            other = conn.execute("SELECT stemmed FROM title_fts WHERE rowid != ?", (rowid,)).fetchone()[0]
+            conn.execute("UPDATE title_fts SET stemmed = ? WHERE rowid = ?", (other, rowid))
+    assert store.holds_content_identities(expected) == {rel: False}
+    cold_path = tmp_path / "expected.sqlite"
+    with closing(sqlite3.connect(cold_path)) as cold, cold:
+        lexstore.create_catalogue_schema(cold)
+        lexstore.derive_catalogue_rows(tmp_path, cold)
+    with closing(sqlite3.connect(store.path)) as conn:
+        differences = verify.compare_tables(conn, cold_path).differences
+        assert projection in {difference.table for difference in differences}
+    assert store.upsert_paths([first])
+    assert store.holds_content_identities(expected) == {rel: True}
+    changed = first.read_text().replace("Beacon guide", "Lantern procedure")
+    first.write_text(changed)
+    assert store.upsert_paths([first])
+    with closing(sqlite3.connect(store.path)) as conn:
+        assert conn.execute("SELECT stemmed FROM title_fts WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
+                            (rel,)).fetchone() == (" ".join(bm25.tokenize("Lantern procedure")),)
+        assert conn.execute("SELECT title_key FROM wikilink_keys WHERE path = ?", (rel,)).fetchone() == ("lantern procedure",)
+    first.unlink()
+    lexstore.delete_after_remove(tmp_path, [rel])
+    assert store.holds_content_identities({rel: None}) == {rel: True}
+    with closing(sqlite3.connect(store.path)) as conn:
+        assert conn.execute(f"SELECT COUNT(*) FROM {projection}").fetchone() == (1,)
 
 
 # ---------------------------------------------------------------- env reader

@@ -255,6 +255,7 @@ def review(
     limit: int = DEFAULT_ITEM_LIMIT,
     execution_budget: int = DEFAULT_EXECUTION_BUDGET,
     motivation_budget: int = DEFAULT_MOTIVATION_BUDGET,
+    dimensions=None,
 ) -> dict[str, Any]:
     """Present authored intent next to what its evidence and motivation name.
 
@@ -290,6 +291,16 @@ def review(
     selected = order_items(matched_rows)
     items_matched = len(selected)
     retained = selected[:item_limit]
+    dimension_coverage = None
+    if dimensions is not None:
+        from .review_dimensions import ReviewTarget
+
+        classifications = dimensions.classify([ReviewTarget(None)] * len(retained))
+        dimension_coverage = dimensions.coverage(
+            classifications, unsearched=None if query_truncated else items_matched - len(retained),
+        )
+        if dimensions.filtered:
+            retained = []
 
     # Motivation targets are collected across the RETAINED items, after
     # ordering and truncation: collected earlier, the budget would be spent on
@@ -392,7 +403,8 @@ def review(
         "motivation_consulted": motivation_consulted,
         "motivation_truncated": motivation_truncated,
         "unavailable": unavailable,
-        "items": items,
+        "items": [dict(item, dimension_status="not_applicable") for item in items] if dimensions is not None else items,
+        **({"dimension_coverage": dimension_coverage} if dimension_coverage is not None else {}),
     }
 
 

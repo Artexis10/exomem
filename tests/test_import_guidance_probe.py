@@ -297,6 +297,72 @@ def drive(scenario: Scenario, fake: FakeClaude, out: Path, judge_model: str = "j
     )
 
 
+def test_a_rejected_unavailable_tool_does_not_discard_the_recorded_answer(tmp_path: Path) -> None:
+    """A native no-handler error adds no information beyond the replayed context."""
+    [case] = runner.load_scenarios("01")
+    events = [json.loads(line) for line in stream(SERVER_UP).splitlines()]
+    events[0]["tools"] = [f"mcp__exomem__{name}" for name in case.served_tools]
+    events[1:1] = [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "attempt-1", "name": "mcp__exomem__missing", "input": {}}
+        ]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "attempt-1", "is_error": True, "content": "unavailable"}
+        ]}},
+    ]
+    row = drive(case, FakeClaude(case, "\n".join(json.dumps(e) for e in events)), tmp_path)
+    assert row["verdict"] == checks.PASS
+    assert row["rejected_unavailable_tools"] == ["mcp__exomem__missing"]
+
+
+def test_a_rejected_attempt_cannot_cover_a_second_unaccounted_attempt() -> None:
+    events = [
+        {"type": "system", "subtype": "init", "tools": ["mcp__exomem__manage_memory"]},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "first", "name": "mcp__exomem__missing"},
+            {"type": "tool_use", "id": "second", "name": "mcp__exomem__missing"},
+        ]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "first", "is_error": True}
+        ]}},
+    ]
+    rejected = checks.unavailable_tools(map(json.dumps, events), ("manage_memory",), ())
+    observed = checks.Evidence((), ("mcp__exomem__missing",), {}, rejected_tools=rejected)
+    assert checks.only_scripted_tools({}, observed, served=("manage_memory",), builtin=()).verdict == checks.FAIL
+
+
+def test_an_unlisted_success_is_not_exempted_by_the_advertised_catalogue() -> None:
+    events = [
+        {"type": "system", "subtype": "init", "tools": ["mcp__exomem__manage_memory"]},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "rejected", "name": "mcp__exomem__missing"},
+            {"type": "tool_use", "id": "attempt", "name": "mcp__exomem__missing"}
+        ]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "rejected", "is_error": True},
+            {"type": "tool_result", "tool_use_id": "attempt", "is_error": False}
+        ]}},
+    ]
+    rejected = checks.unavailable_tools(map(json.dumps, events), ("manage_memory",), ())
+    observed = checks.Evidence((), ("mcp__exomem__missing", "mcp__exomem__missing"), {}, rejected_tools=rejected)
+    assert checks.only_scripted_tools({}, observed, served=("manage_memory",), builtin=()).verdict == checks.FAIL
+
+
+def test_an_available_unlisted_tool_error_can_still_carry_external_information() -> None:
+    events = [
+        {"type": "system", "subtype": "init", "tools": ["mcp__exomem__manage_memory", "Read"]},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "attempt", "name": "Read"}
+        ]}},
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "attempt", "is_error": True, "content": "partial file content"}
+        ]}},
+    ]
+    rejected = checks.unavailable_tools(map(json.dumps, events), ("manage_memory",), ())
+    observed = checks.Evidence((), ("Read",), {}, rejected_tools=rejected)
+    assert checks.only_scripted_tools({}, observed, served=("manage_memory",), builtin=()).verdict == checks.FAIL
+
+
 def test_a_second_run_into_the_same_folder_does_not_pass_on_the_first_runs_calls(
     tmp_path: Path,
 ) -> None:

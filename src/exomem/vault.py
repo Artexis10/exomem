@@ -8885,7 +8885,67 @@ class WikilinkCandidate:
 
 def _wikilink_path_key(path: str) -> str:
     """Keep the legacy canonical key separate from the indexed physical path."""
-    return path.removesuffix(".md")
+    return wikilink_keys(path, None)[0]
+
+
+def wikilink_keys(path: str, title: str | None) -> tuple[str, str, str | None]:
+    """One physical page's resolver keys, shared by the full resolver and indexed projection."""
+    path_key = path.removesuffix(".md")
+    return path_key, path_key.rsplit("/", 1)[-1], _keyed_title(title)[0]
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkMatches:
+    """Admitted physical witnesses; exhaustion proves zero/one, two witnesses prove ambiguity."""
+
+    candidates: tuple[WikilinkCandidate, ...]
+    complete: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WikilinkResolution:
+    """A pure selector's outcome, including the next lookup needed by an incomplete selection."""
+
+    status: Literal["resolved", "ambiguous", "missing", "incomplete"]
+    canonical: str = ""
+    matches: WikilinkMatches | None = None
+    axis: str = ""
+    key: str = ""
+
+    @property
+    def candidate(self) -> WikilinkCandidate | None:
+        return self.matches.candidates[0] if self.status == "resolved" and self.matches else None
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        witnesses = self.matches.candidates if self.matches else ()
+        count = "match_count" if self.matches is not None and self.matches.complete else "match_count_lower_bound"
+        return {"status": self.status, count: len(witnesses), "witnesses": [item.path for item in witnesses]}
+
+
+def select_wikilink(
+    target: str, lookup: Callable[[str, str], WikilinkMatches | None],
+) -> WikilinkResolution:
+    """Apply normalizer precedence to prepared proofs without I/O or legacy fallbacks."""
+    cleaned, anchor = split_wikilink_target(target)
+    cleaned = wikilink_page_key(cleaned)
+    if not cleaned:
+        return WikilinkResolution("missing")
+    stages = [("path", cleaned), ("path", kb_prefix() + cleaned)]
+    if "/" not in cleaned:
+        stages.extend((("stem", cleaned), ("title", title_key(cleaned))))
+    for axis, key in stages:
+        matches = lookup(axis, key)
+        if matches is None:
+            return WikilinkResolution("incomplete", axis=axis, key=key)
+        if len(matches.candidates) >= 2:
+            return WikilinkResolution("ambiguous", matches=matches, axis=axis, key=key)
+        if not matches.complete:
+            return WikilinkResolution("incomplete", matches=matches, axis=axis, key=key)
+        if matches.candidates:
+            return WikilinkResolution("resolved", _wikilink_path_key(matches.candidates[0].path) + anchor,
+                                      matches, axis, key)
+    return WikilinkResolution("missing")
 
 
 def wikilink_candidates(
@@ -9074,7 +9134,7 @@ class WikilinkResolver:
         )
         self.full_paths.add(no_ext)
         self.kb_stripped.add(no_ext.removeprefix(kb_prefix()))
-        _insert_into_bucket(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
+        _insert_into_bucket(self.stems, wikilink_keys(rel_path, None)[1], no_ext)
         if title_lower:
             _insert_into_bucket(self.titles, title_lower, no_ext)
 
@@ -9366,46 +9426,37 @@ def _normalize_wikilink(
         resolver = resolver_factory() if resolver_factory is not None else WikilinkResolver(vault_root)
     contains = targeted_namespace_contains if targeted else resolver.full_paths.__contains__
 
-    def _matches(keys: Iterable[str], *, title_key: str | None = None) -> list[WikilinkCandidate]:
-        return wikilink_candidates(
-            resolver.candidates_by_key, keys, title_key=title_key, visible=visible
-        )
-
-    def _selected(
-        matches: list[WikilinkCandidate], kind: str,
-    ) -> tuple[str, str | None, WikilinkCandidate | None]:
-        if len(matches) == 1:
-            candidate = matches[0]
-            return _wikilink_path_key(candidate.path) + anchor, None, candidate
-        paths = [candidate.path for candidate in matches]
-        if strict:
-            raise AmbiguousWikilinkError(
-                f"wikilink {target!r} matches {len(matches)} files by {kind}: {paths}"
-            )
-        return cleaned + anchor, (
-            f"wikilink {target!r} matches {len(matches)} files "
-            f"by {kind}; left unchanged. Files: {paths}"
-        ), None
-
-    # Full paths take precedence over Knowledge-Base-relative paths.
-    for key in (cleaned, kb_prefix() + cleaned):
-        if contains(key):
-            if targeted:
+    if targeted:
+        for key in (cleaned, kb_prefix() + cleaned):
+            if contains(key):
                 return key + anchor, None, None
-            matches = _matches((key,))
-            if matches:
-                return _selected(matches, "path")
+    else:
+        def prepared(axis: str, key: str) -> WikilinkMatches:
+            if axis == "path":
+                keys = (key,) if contains(key) else ()
+            elif axis == "stem":
+                keys = resolver.stems.get(key, ())
+            else:
+                keys = resolver.titles.get(key, ())
+            return WikilinkMatches(tuple(wikilink_candidates(
+                resolver.candidates_by_key, keys,
+                title_key=key if axis == "title" else None, visible=visible,
+            )), True)
 
-    # 3. Bare name (no `/`): stem match first, then frontmatter title.
-    if "/" not in cleaned:
-        stem_matches = _matches(resolver.stems.get(cleaned, ()))
-        if stem_matches:
-            return _selected(stem_matches, "stem")
-        title_matches = _matches(
-            resolver.titles.get(title_key(cleaned), ()), title_key=title_key(cleaned)
-        )
-        if title_matches:
-            return _selected(title_matches, "title")
+        selected = select_wikilink(target, prepared)
+        if selected.status == "resolved":
+            return selected.canonical, None, selected.candidate
+        if selected.status == "ambiguous":
+            matches = selected.matches.candidates
+            paths = [candidate.path for candidate in matches]
+            if strict:
+                raise AmbiguousWikilinkError(
+                    f"wikilink {target!r} matches {len(matches)} files by {selected.axis}: {paths}"
+                )
+            return cleaned + anchor, (
+                f"wikilink {target!r} matches {len(matches)} files "
+                f"by {selected.axis}; left unchanged. Files: {paths}"
+            ), None
 
     # A path that a converted collection retired names its stored row. A strict
     # caller needs a file, which that path no longer has.

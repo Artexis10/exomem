@@ -101,6 +101,66 @@ def test_turn_analysis_is_nfkc_casefolded_with_ngrams() -> None:
     assert analysis.text == analysis.text.casefold()
 
 
+@pytest.mark.parametrize("spelling", [
+    "Ｎorthern Valley Water Transfer Project",
+    "Northern Valley Water Transfer Project’s",
+])
+def test_a_fully_spelled_long_registered_name_resolves(spelling: str) -> None:
+    """A project's complete name must not become partial because it exceeds the n-gram window."""
+    row = _row("project.md", "Northern Valley Water Transfer Project", kind="project")
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn(f"What changed in the {spelling} schedule?"), (row,),
+    )
+
+    assert candidates[0].exact_alias_phrases == {"northern valley water transfer project"}
+    assert resolve_module.resolve(candidates).anchors[0].status == "resolved"
+
+
+def test_a_long_alias_survives_names_only_narrowing_without_content_terms() -> None:
+    """Conversation narrowing must retain a literal registered alias made entirely of function words."""
+    row = replace(_row("project.md", "Stage Project"), aliases=("to be or not to be",))
+    analyses = [resolve_module.analyze_turn("Discuss to be or not to be today")]
+
+    (candidates,) = resolve_module.candidates_for_each(analyses, (row,))
+    assert candidates[0].exact_alias_phrases == {"to be or not to be"}
+    assert resolve_module.entry_named_anchors(analyses, (row,)) == {row.anchor_id}
+
+
+def test_long_name_audience_matching_preserves_segment_and_dependency_boundaries() -> None:
+    """Joining conversation words must never invent a name or attribute focus contact to the current turn."""
+    from exomem import working_set_conversation as conversation_module
+
+    row = _row("project.md", "To Be Or Not To Be")
+    turn = resolve_module.analyze_turn("to be or")
+    split = conversation_module.analyze(conversation_module.bound({"focus": "not to be"}))
+    _rows, _counts, decided = resolve_module.audience_view(
+        split.union(turn), (row,), {}, lambda _path: True,
+    )
+    assert decided == set()
+
+    named = resolve_module.analyze_turn("to be or not to be")
+    focus = conversation_module.analyze(conversation_module.bound({"focus": named.text}))
+    dependencies: set[str] = set()
+    _rows, _counts, decided = resolve_module.audience_view(
+        focus.union(turn), (row,), {}, lambda _path: True,
+        dependency_analysis=turn, admitted_dependencies=dependencies,
+    )
+    assert decided == {row.anchor_id}
+    assert dependencies == set()
+    resolve_module.audience_view(named, (row,), {}, lambda _path: True,
+                                 dependency_analysis=named, admitted_dependencies=dependencies)
+    assert dependencies == {row.anchor_id}
+
+
+def test_a_long_name_does_not_fold_a_stopword_contraction_into_exact_contact() -> None:
+    """An ordinary contraction must not become the first word of a registered long name."""
+    row = _row("project.md", "It Northern Valley Transfer Project")
+    candidates = resolve_module.candidates_for(
+        resolve_module.analyze_turn("It's Northern Valley Transfer Project today"), (row,),
+    )
+    assert all("exact_alias" not in candidate.evidence for candidate in candidates)
+
+
 def test_analyze_turn_is_deterministic() -> None:
     """`TurnAnalysis` carries no `cues` field (`make-activation-conventions-
     vault-owned`, decision 1: the cue vocabulary now lives in the vault's
@@ -1364,15 +1424,15 @@ def test_r1_identical_exact_alias_phrase_pair_stays_ambiguous() -> None:
 
 
 def test_r2_a_word_inside_a_spelled_multiword_name_earns_no_rare_term_for_a_different_anchor() -> None:
-    """Problem 2: turn "alpha hosted" spells project "Alpha Hosted" in full
+    """Problem 2: the turn spells a long project name in full
     (`exact_alias`, a MULTI-token phrase covering both "alpha" and "hosted").
     An unrelated hub sharing only the single name term "hosted" must not
     leak `rare_term` from a word the turn only ever used as part of a
     DIFFERENT anchor's own spelled-out name.
     """
-    named = _term_row("hosted.md", "Alpha Hosted", terms=("alpha", "hosted"))
+    named = _term_row("hosted.md", "Alpha Northern Valley Hosted Project", terms=("alpha", "hosted"))
     stranger = _term_row("stranger.md", "Hosted Roster", terms=("hosted", "roster"))
-    analysis = resolve_module.analyze_turn("alpha hosted")
+    analysis = resolve_module.analyze_turn("alpha northern valley hosted project")
     candidates = resolve_module.candidates_for(
         analysis, (named, stranger), term_anchor_counts={"hosted": 2}
     )
@@ -1402,13 +1462,13 @@ def test_r2_the_consuming_anchor_keeps_its_own_evidence() -> None:
 
 
 def test_r2_a_term_that_also_occurs_outside_the_covered_span_still_earns_rare_term() -> None:
-    """"hosted" occurs twice: once inside "Alpha Hosted"'s own spelled name
+    """"hosted" occurs twice: once inside a long project's own spelled name
     (covered) and once standing alone (not covered) -- not every occurrence
     is consumed, so the stranger still earns `rare_term` for it.
     """
-    named = _term_row("hosted.md", "Alpha Hosted", terms=("alpha", "hosted"))
+    named = _term_row("hosted.md", "Alpha Northern Valley Hosted Project", terms=("alpha", "hosted"))
     stranger = _term_row("stranger.md", "Hosted Roster", terms=("hosted", "roster"))
-    analysis = resolve_module.analyze_turn("compare alpha hosted with the hosted setup")
+    analysis = resolve_module.analyze_turn("compare alpha northern valley hosted project with the hosted setup")
     candidates = resolve_module.candidates_for(
         analysis, (named, stranger), term_anchor_counts={"hosted": 2}
     )

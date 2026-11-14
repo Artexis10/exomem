@@ -18,6 +18,9 @@ KEY_VARIABLE = "ANTHROPIC_API_KEY"
 #: The declaration: the billing name that this run's sessions must report. Absent means subscription.
 ENV_VAR = "EXOMEM_OUTCOME_BILLING"
 
+#: How a credit run supplies its key: inherited environment or a managed launcher.
+CREDIT_AUTH_ENV_VAR = "EXOMEM_OUTCOME_CREDIT_AUTH"
+
 #: Billing name -> the ``apiKeySource`` that a session on it reports. The CLI fixes these values:
 #: ``none`` for a subscription login, and the key's variable name when ``ANTHROPIC_API_KEY`` pays
 #: (the CLI's ``init`` event reports ``apiKeySource``; ``benchmarks/import_guidance`` records it and
@@ -46,11 +49,16 @@ def claude_session_env(env: Mapping[str, str]) -> dict[str, str]:
     """``env`` as every Claude actor and judge session gets it: the declaration decides who pays.
 
     A subscription declaration drops ``ANTHROPIC_API_KEY``, so a shell that holds a key never bills it.
-    A credits declaration needs the key, and refuses here, before any session, when it is absent.
+    Credits use the environment key by default. An explicit managed launcher supplies its own key
+    after this boundary, so the runner drops any inherited key and still declares credits.
     """
     name = declared()
+    credit_auth = os.environ.get(CREDIT_AUTH_ENV_VAR) or "environment"
+    # These are the two credential transports this runner implements, not user vocabulary.
+    if credit_auth not in ("environment", "launcher"):
+        raise SystemExit(f"{CREDIT_AUTH_ENV_VAR} is {credit_auth!r}; it takes environment or launcher")
     out = {k: v for k, v in env.items() if k != KEY_VARIABLE}
-    if KEY_SOURCES[name] == KEY_VARIABLE:
+    if KEY_SOURCES[name] == KEY_VARIABLE and credit_auth == "environment":
         if not env.get(KEY_VARIABLE):
             raise SystemExit(
                 f"the run declares {ENV_VAR}={name}, but {KEY_VARIABLE} is not set: "

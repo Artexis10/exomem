@@ -567,6 +567,115 @@ def test_a_served_search_rewrites_a_dimension_the_index_answers_anywhere_in_the_
         assert sentinel.count == 0, f"{name}: {sentinel.report()}"
 
 
+@pytest.mark.parametrize("mode", ["keyword", "hybrid", "vector"])
+def test_a_served_row_dimension_fills_its_limit_before_each_lane_cap(
+    tmp_path, warm_managed_cell, walk_sentinel, monkeypatch, mode,
+) -> None:
+    """Better-ranked nonmembers and invalid rows cannot consume the requested member slots."""
+    import numpy as np
+    from test_semantic_unit_recall import _vector
+
+    from exomem import embeddings, semantic_index
+
+    vault = _outlook_vault(tmp_path)
+    overlay = language_registry.registry_path(vault)
+    overlay.write_text(
+        REGULATION + "  measured:\n    labels: {en: Measured}\n"
+        "    description: A stated degree of belief\n    members: {keys: [credence]}\n"
+        "kinds:\n  local_estimate:\n    description: A local estimate\n    traits: [credence]\n",
+        encoding="utf-8",
+    )
+    body = "\n".join(
+        f"## Claim\n- id: noise-{n}\n\nBeacon.\n" for n in range(24)
+    )
+    body += "\n## Local estimate\n- id: invalid\n- credence: nonsense\n\nBeacon.\n"
+    for n in range(3):
+        body += (
+            f"\n## Local estimate\n- id: member-{n}\n- credence: likely\n"
+            "- credence_holder: Survey team\n\n"
+            f"The beacon survey gives estimate {n} with additional supporting context.\n"
+        )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=body))
+    state = semantic_index.build_parent_index_state(vault, vault / FORECAST)
+    index = embeddings.get_embedding_index(vault)
+    vectors = [_vector(1.0, n / 100) for n in range(25)] + [_vector(0.1, 1.0)] * 3
+    index.upsert_semantic_units(state, np.stack(vectors), 1.0)
+    warm_managed_cell(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda *_a, **_k: np.stack([_vector(1.0)]))
+    sentinel = walk_sentinel(vault, vault / "Knowledge Base")
+
+    checked = {}
+    hits = find_module.find(
+        vault, query="beacon", scope="kb-only", mode=mode, graph=False, rerank=False,
+        result_level="unit", filters={"unit.dimension": {"$eq": "measured"}}, limit=2,
+        dimension_check_out=checked,
+    )
+
+    assert len(hits) == 2
+    assert {hit.source_anchor for hit in hits} <= {"member-0", "member-1", "member-2"}
+    assert checked == {}, "row dimensions must not run the after-limit edge check"
+    assert sentinel.count == 0, sentinel.report()
+
+
+def test_a_served_row_dimension_preserves_complements_and_registry_edits(
+    tmp_path, warm_managed_cell, walk_sentinel,
+) -> None:
+    """Negating authored presence must keep an invalid row; registry edits need no rebuild."""
+    vault = _outlook_vault(tmp_path)
+    overlay = language_registry.registry_path(vault)
+    text = REGULATION + (
+        "  attributed:\n    labels: {en: Attributed}\n    description: A statement with a holder\n"
+        "    members: {keys: [modality]}\n"
+    )
+    overlay.write_text(text, encoding="utf-8")
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=(
+        "## Claim\n- id: valid\n- modality: must\n\nThe signal is required.\n\n"
+        "## Claim\n- id: invalid\n- modality: nonsense\n\nThe signal is unqualified.\n\n"
+        "## Decision\n- id: other\n\nKeep the signal.\n"
+    )))
+    expressions = [
+        {"unit.dimension": {"$ne": "attributed"}},
+        {"$not": {"unit.dimension": {"$eq": "attributed"}}},
+        {"$or": [{"unit.dimension": {"$eq": "attributed"}}, {"unit.kind": {"$eq": "decision"}}]},
+    ]
+    expected = [_recall_texts(vault, expression) for expression in expressions]
+    assert ("Forecast", "The signal is unqualified.") in expected[0]
+    assert ("Forecast", "The signal is required.") not in expected[0]
+    warm_managed_cell(vault)
+    sentinel = walk_sentinel(vault, vault / "Knowledge Base")
+
+    for expression, wanted in zip(expressions, expected, strict=True):
+        assert _recall_texts(vault, expression) == wanted
+    overlay.write_text(text.replace("keys: [modality]", "kinds: [decision]"), encoding="utf-8")
+    language_registry.clear_cache()
+    find_module.clear_cache()
+    assert _recall_texts(vault, {"unit.dimension": {"$eq": "attributed"}}) == [
+        ("Forecast", "Keep the signal."),
+    ]
+    assert sentinel.count == 0, sentinel.report()
+
+
+def test_a_served_dimension_reads_selected_verdict_and_calendar_rows(tmp_path, warm_managed_cell):
+    """A selected structural unit must carry legacy governed rows as well as statement rows."""
+    vault = _outlook_vault(tmp_path)
+    language_registry.registry_path(vault).write_text(
+        REGULATION + "  checked:\n    labels: {en: Checked}\n"
+        "    description: A verdict or check date\n    members: {keys: [verdict, check_by]}\n",
+        encoding="utf-8",
+    )
+    _write(vault, FORECAST, PAGE.format(title="Forecast", body=(
+        "## Claim\n- verdict: confirmed\n\nThe signal passed.\n\n"
+        "## Claim\n- check_by: 2026-12-01\n\nCheck the signal.\n\n"
+        "## Claim\n- check_by: invalid\n\nThe signal has no date.\n"
+    )))
+    warm_managed_cell(vault)
+
+    assert set(_recall_texts(vault, {"unit.dimension": {"$eq": "checked"}})) == {
+        ("Forecast", "The signal passed."), ("Forecast", "Check the signal."),
+    }
+
+
 def test_a_served_search_checks_an_edge_dimension_on_its_hits_with_one_graph_read(
     served_vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -701,7 +810,7 @@ def test_a_dimension_that_needs_edges_reports_unknown_and_its_repair_when_the_gr
 
 
 def test_the_report_counts_no_kind_of_another_instance_as_the_filter_does(
-    private_instances, vault: Path
+    private_instances, vault: Path, warm_managed_cell,
 ) -> None:
     """Catches a report row that counts a unit by a kind key that its page's vocabulary instance
     defines, while the filter treats that kind as the other instance's own entry: the row says 2
@@ -732,6 +841,9 @@ def test_the_report_counts_no_kind_of_another_instance_as_the_filter_does(
 
     assert hits == [("Release rules", "policy")]
     assert (row["unit_count"], row["page_count"]) == (1, 1)
+    warm_managed_cell(vault)
+    with principal.request_scope(private_instances("full")):
+        assert _recall_units(vault, {"unit.dimension": {"$eq": "regulation"}}) == hits
 
 
 # ---------------------------------------------------------------------------

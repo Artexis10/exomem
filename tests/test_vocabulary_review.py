@@ -23,6 +23,45 @@ def test_explicit_review_honors_off_without_hiding_quiet_work(tmp_path, disposit
     assert VocabularyState(tmp_path).get(item.ref)["ref"] == item.ref
 
 
+def test_dimension_filter_keeps_the_authorized_prefix_and_an_unfiltered_continuation(vault, monkeypatch):
+    from exomem import epistemic_graph, file_watcher, lexstore
+    from exomem.review_dimensions import ReviewDimensions
+
+    template, paths = setup_item(vault, observe=False)
+    target = vault / paths["a"]
+    target.write_text("---\ntype: insight\n---\n## Claim\n\nA recorded measurement.\n")
+    version = hashlib.sha256(target.read_bytes()).hexdigest()
+    owner = VocabularyState(vault)
+    offered = []
+    for index in range(4):
+        item = make_item(
+            family="entity-instance/v1", signal="entity-lifecycle", logical_identity=f"entity-candidate:{index}",
+            targets={paths["a"]: version}, evidence=list(template.evidence),
+            registry_hashes=dict(template.registry_hashes), projection_status="current",
+            projection_currency=origin_currency(index),
+        )
+        owner.observe(item)
+        offered.append(item.ref)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    file_watcher.FileWatcher(vault)._reconcile_once(seed=True)
+    assert lexstore.ensure_fresh(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    with library_scope():
+        first = review.review(vault, limit=1, dimensions=ReviewDimensions(
+            vault, {"unit.dimension": {"$eq": "uncertainty"}},
+        ))
+        assert first["items"] == []
+        assert first["continuation"] is not None
+        assert first["dimension_coverage"]["window"] == 1
+        assert first["dimension_coverage"]["unsearched"] is None
+        continued = review.review(vault, limit=1, continuation=first["continuation"], dimensions=ReviewDimensions(
+            vault, {"unit.dimension": {"$eq": "kind"}},
+        ))
+    assert [item["ref"] for item in continued["items"]] == sorted(offered)[1:2]
+    assert continued["items"][0]["dimension_status"] == "known"
+
+
 @pytest.mark.parametrize("family", ["entity_recurrence", "vocabulary_entity_instances"])
 @pytest.mark.parametrize("disposition", ["off", "quiet"])
 def test_family_dispositions_compose_for_fresh_and_continued_pages(

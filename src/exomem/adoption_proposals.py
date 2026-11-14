@@ -883,6 +883,7 @@ def build_queue(
     state: str = "open",
     limit: int = 25,
     today: dt.date | None = None,
+    dimensions=None,
 ) -> dict:
     """Per-run grouped adoption proposal queue with effective review state.
 
@@ -901,6 +902,11 @@ def build_queue(
     total = 0
     cap = max(0, int(limit))
     remaining = cap
+    classifications = []
+    if dimensions is not None:
+        from .review_dimensions import ReviewTarget
+
+        classification = dimensions.classify([ReviewTarget(None)])[0]
 
     for rid in _run_ids(store, run_id):
         try:
@@ -932,6 +938,11 @@ def build_queue(
                 continue
             view = _item_view(proposal, fingerprint)
             view["state"] = effective
+            if dimensions is not None:
+                classifications.append(classification)
+                if not dimensions.keep(classification):
+                    continue
+                view.update(classification.fields())
             items.append(view)
             flat_items.append(view)
         if items:
@@ -960,6 +971,7 @@ def build_queue(
         "shown": shown,
         "total": total,
         "filtered": filtered,
+        **({"dimension_coverage": dimensions.coverage(classifications)} if dimensions is not None else {}),
     }
 
 

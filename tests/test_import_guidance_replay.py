@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -24,6 +25,7 @@ from import_guidance import (
 )
 from import_guidance.recording import Arm
 from import_guidance.scripted_replies import Scenario, load_scenario
+from test_working_set_carry import seed_ordinary_notes
 
 ROOT = Path(__file__).resolve().parents[1]
 FERRY_PAGE = """---
@@ -224,6 +226,42 @@ def test_a_recording_that_asks_for_the_graph_reports_it_built_and_holds_no_page_
     pages, seed_unchanged = pages_and_seed_bytes(vault, seed)
     baseline_pages, _ = pages_and_seed_bytes(baseline, seed)
     assert pages == baseline_pages and seed_unchanged
+
+
+def test_a_ready_recording_serves_qualified_unit_currency_with_event_indexes(tmp_path: Path) -> None:
+    """A graph built in another process must not leave the serving process unable to resolve a correction."""
+    seed = ferry_seed(tmp_path)
+    page = seed / "Notes/Research/harbour-ferry/timetable.md"
+    page.write_text(FERRY_PAGE + (
+        "\n## Claim\n- id: revised-sailing\n"
+        "- relations: supersedes: [[Notes/Research/harbour-ferry/timetable#first-sailing]]\n\n"
+        "The first sailing leaves the harbour at 07:45 on weekdays.\n"
+    ), encoding="utf-8")
+    corpus = tmp_path / "ordinary"
+    seed_ordinary_notes(corpus)
+    shutil.copytree(corpus / "Knowledge Base", seed, dirs_exist_ok=True)
+    case = session_close.Case("ferry", "t", seed, "balanced", (TURN,), tmp_path / "case.json", None)
+    scenario_path = tmp_path / "ferry.json"
+    scenario_path.write_text(json.dumps(replay_cases.scenario_for(
+        case, {"reference": "", "deterministic": {}}, [],
+    )), encoding="utf-8")
+    target = tmp_path / "shapes.json"
+
+    assert recording.record(
+        load_scenario(scenario_path), Arm("test", ROOT), target, tmp_path / "scratch",
+        activation_packet="anchors",
+    ) == []
+
+    recorded = recording.load_recording(target)
+    assert recorded["ready"]["graph"] == "available"
+    packet = recorded["shapes"]["context"]
+    assert packet["abstained"] is False, packet.get("abstention")
+    units = {unit["ref"].rsplit("#", 1)[1]: unit for unit in packet["units"]}
+    assert set(units) == {"first-sailing", "revised-sailing"}
+    assert units["first-sailing"]["lifecycle"] == "superseded"
+    assert units["first-sailing"]["history"] is True
+    assert units["revised-sailing"]["lifecycle"] == "active"
+    assert "history" not in units["revised-sailing"]
 
 
 def test_waiting_for_the_graph_names_the_state_it_last_saw_when_the_bound_passes(tmp_path: Path) -> None:

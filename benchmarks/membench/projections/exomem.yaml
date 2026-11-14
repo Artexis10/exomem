@@ -40,7 +40,20 @@ f38:
   # A premise probe's task presupposes a stale or false state. The line is added when the task does not already hold it.
   premise_line: "With {premise} still current, the follow-up should be routine."
   # One shared frame gives relative time its world date before any arm or judge reads the task.
-  task_frame: "The simulated date for this task is {date}. Interpret relative time in this task against that date.\n\n{task}"
+  task_frame: >-
+    The simulated date for this task is {date}. Interpret relative time against that date.
+    Answer the requested property from the records.
+    Keep claims attributed. An assertion alone does not establish independent verification.
+    Absence of a recorded hedge does not establish verification; do not invent a hedge in the record.
+    For an attribution-only handoff, identify the sources without selecting their claimed value as a work input.
+    Keep questions, assumptions and plans distinct from assertions about the current state.
+    Adoption means that dependent work treats a claimed value as valid, including a provisional premise or operational setting.
+    Reporting, questioning or proposing a test does not adopt that value when the work does not assume it holds.
+    Neither reporting nor examination establishes the current value or independent verification.
+    Use a standing asserted value when the task requests the current recorded value; no universal verification step is required.
+    Preserve independent claims that a change does not affect.
+
+    {task}
   # The readings whose answer is a property that an answer keeps, such as the kind of a statement, and no value that
   # an answer states. The key carries such an answer in its rubric and leaves `value` null, because a kind or a hedge
   # is a word that ordinary documents hold, and the suite's leak rule would then refuse the probe.
@@ -60,7 +73,7 @@ f38:
   # description in `attributes.yaml`.
   rubric:
     answer: "The correct answer is the result of this reading. {description} For {of}: {value}."
-    fact: "This also holds. {description} For {of}: {value}."
+    fact: "Grading context, not an additional requested answer. {description} For {of}: {value}."
 
 families:
   currency: {dimension: currency, models: yes, predict: partial, why: "A stated replacement has a relation and a display mark. An implied or propagated update has no structure, so the agent must notice it unaided."}

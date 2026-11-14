@@ -48,7 +48,18 @@ def install(conn: sqlite3.Connection) -> None:
         info = _columns(conn, table)
         names = [row[1] for row in info]
         primary = _primary_key(info)
-        saved = _quote(_saved_table(table))
+        saved_name = _saved_table(table)
+        saved = _quote(saved_name)
+        saved_info = _columns(conn, saved_name)
+        if saved_info and [row[1] for row in saved_info[2:]] != names:
+            # New owner columns have no complete old publication; the normal full rebuild publishes their replacement.
+            withdraw(conn)
+            for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?", (table,),
+            ).fetchall():
+                if name.startswith(saved_name + "_"):
+                    conn.execute(f"DROP TRIGGER {_quote(name)}")
+            conn.execute(f"DROP TABLE {saved}")
         definitions = ", ".join(f"{_quote(row[1])} {row[2]}" for row in info)
         conn.execute(
             f"CREATE TABLE IF NOT EXISTS main.{saved} "

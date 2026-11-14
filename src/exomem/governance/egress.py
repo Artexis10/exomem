@@ -41,7 +41,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -74,6 +74,7 @@ from ..published_admission import (
     AdmittedPredicate,
     admission_of,
     announce,
+    deciding,
     request_decisions,
 )
 from . import (
@@ -2859,16 +2860,239 @@ def visible_memory_ref_paths(
         )
     if found is None:
         return None
-    out: dict[str, str] = {}
-    for value, memory_id in wanted.items():
-        visible = _visible_candidates(
-            Path(vault_root),
-            found.get(memory_id, ()),
-            principal=principal,
-            purpose=purpose,
-        )
-        if len(visible) == 1:
-            out[value] = visible[0]
+    from ..vault_store import mode as store_mode
+    from ..vault_store import read as store_read
+
+    paths = tuple(dict.fromkeys(path for memory_id in wanted.values() for path in found.get(memory_id, ())))
+    with store_read.request_snapshot(vault_root), ExitStack() as reads, deciding(paths):
+        if store_mode.store_mode_for_reads(vault_root):
+            snapshot = reads.enter_context(store_read.snapshot(vault_root))
+            # Identity owners share one metadata/body batch before their individual visibility checks.
+            reads.enter_context(snapshot.prefetch(paths))
+        out: dict[str, str] = {}
+        for value, memory_id in wanted.items():
+            visible = _visible_candidates(
+                Path(vault_root),
+                found.get(memory_id, ()),
+                principal=principal,
+                purpose=purpose,
+            )
+            if len(visible) == 1:
+                out[value] = visible[0]
+        return out
+
+
+# nosemgrep: ep-word-set -- The governed unit metadata schema fixes these two holder prose fields.
+HOLDER_PROVENANCE_FIELDS = ("asserted_by", "credence_holder")
+
+
+def project_holder(holder: str | None, *, restricted: bool) -> str | None:
+    """Keep holder prose without links for a restricted caller, independent of their targets."""
+    if not restricted or holder is None:
+        return holder
+    value = without_wikilinks(holder)
+    return value if value.strip() else None
+
+
+def project_holder_provenance(provenance: Mapping[str, Any], *, restricted: bool) -> dict[str, Any]:
+    """Project only the schema's holder prose, leaving every other metadata value intact."""
+    out = dict(provenance)
+    for key in HOLDER_PROVENANCE_FIELDS:
+        value = out.get(key)
+        if isinstance(value, str):
+            value = project_holder(value, restricted=restricted)
+            if value is None:
+                out.pop(key, None)
+            else:
+                out[key] = value
+    return out
+
+
+def project_display_metadata(
+    display: Mapping[str, Any] | None, *, restricted: bool,
+    reference: Callable[[str], str | None] | None = None,
+) -> dict[str, Any] | None:
+    """Project only the dimension display wire schema, without changing its unit."""
+    if not display:
+        return None
+    out = copy.deepcopy(dict(display))
+    if not restricted:
+        return out
+    # These fields and their different roles are fixed by the dimension display wire schema.
+    origin = out.get("origin")
+    if isinstance(origin, Mapping):
+        origin = dict(origin)
+        holder = origin.get("by")
+        if isinstance(holder, str):
+            holder = project_holder(holder, restricted=True)
+            if holder is not None:
+                origin["by"] = holder
+            else:
+                origin.pop("by", None)
+        elif "by" in origin:
+            origin.pop("by")
+        sources = origin.get("from")
+        if isinstance(sources, (list, tuple)):
+            kept = [value if reference is None else reference(value)
+                    for value in sources if isinstance(value, str)]
+            kept = [value for value in kept if value is not None]
+            if kept:
+                origin["from"] = kept
+            else:
+                origin.pop("from", None)
+        elif "from" in origin:
+            origin.pop("from")
+        # A displayed prefix cannot prove how much of the unseen tail is still admitted.
+        origin.pop("more", None)
+        if origin:
+            out["origin"] = origin
+        else:
+            out.pop("origin", None)
+    replaced = out.get("replaced")
+    if isinstance(replaced, Mapping) and reference is not None:
+        successor = replaced.get("by")
+        allowed = reference(successor) if isinstance(successor, str) else None
+        if allowed is None:
+            out.pop("replaced", None)
+        else:
+            out["replaced"] = {**replaced, "by": allowed}
+    return out or None
+
+
+def release_display_metadata(
+    vault_root: Path, displays: Sequence[Mapping[str, Any] | None], *,
+    purpose: str | None = None, references_admitted: bool = False,
+) -> list[dict[str, Any] | None]:
+    """Release a batch of optional display annotations; units and ordinary prose stay intact."""
+    root = Path(vault_root)
+    who = effective_principal()
+    restricted = caller_restricted(root, principal=who)
+    references: set[str] = set()
+
+    def collect(value: str) -> str:
+        references.add(value)
+        return value
+
+    prepared = [project_display_metadata(value, restricted=restricted, reference=collect)
+                for value in displays]
+    # Producers pass the caller-admitted graph's evidence; terminal consumers recheck one batch.
+    if not restricted or references_admitted or not references:
+        return prepared
+    from ..vault_store import mode as store_mode
+    from ..vault_store import read as store_read
+
+    with store_read.request_snapshot(root), ExitStack() as reads:
+        parents = {value: value.split("#", 1)[0] for value in references
+                   if memory_refs.parse_memory_ref(value.split("#", 1)[0]) is not None}
+        visible = (visible_memory_ref_paths(root, parents.values(), principal=who, purpose=purpose, _optional=True) or {}
+                   if parents else {})
+        readings = {value: _interpretations_for(value) for value in references if value not in parents}
+        paths = {path for values in readings.values() for path in values} | set(visible.values())
+        if store_mode.store_mode_for_reads(root):
+            snapshot = reads.enter_context(store_read.snapshot(root))
+            held = snapshot.held_pages(paths)
+            # The admission loop reads each target's metadata and bytes through this snapshot.
+            reads.enter_context(snapshot.prefetch(paths))
+            existing = {path for path in paths if path in held or
+                        not store_read.serves(root, path) and (root / path).is_file()}
+        else:
+            existing = {path for path in paths if (root / path).is_file()}
+        policy, gate = gate_state(root)
+        # Announced targets share the existing container and release-decision batches.
+        with deciding(paths):
+            ctx = _packet_release(
+                root, {"pointers": [{"ref": path} for path in paths]}, AnnotatedHits(hits=[]),
+                policy=policy, release_gate_active=gate, who=who, purpose=purpose, record="all",
+            )
+
+        def admitted(value: str) -> str | None:
+            candidates = {visible[parents[value]]} if value in parents and parents[value] in visible else (
+                set() if value in parents else set(readings[value]) & existing
+            )
+            if not candidates or ctx is not None and any(
+                path in ctx.withheld or path in ctx.invalid_refs for path in candidates
+            ):
+                return None
+            return value
+
+        return [project_display_metadata(value, restricted=True, reference=admitted) for value in prepared]
+
+
+def project_grouped_displays(
+    vault_root: Path, hits: Sequence[Any], groups: Sequence[dict[str, Any]], *, purpose: str | None = None,
+) -> None:
+    """Project full and duplicate group marks before a pack or serializer consumes them."""
+    slots = [(hit, None) for hit in hits if getattr(hit, "display", None)]
+    slots.extend((entry, "display") for group in groups for entry in group.get("units", ())
+                 if isinstance(entry, dict) and entry.get("display"))
+    projected = release_display_metadata(
+        vault_root, [slot.display if key is None else slot[key] for slot, key in slots],
+        purpose=purpose, references_admitted=True,
+    )
+    for (slot, key), display in zip(slots, projected, strict=True):
+        if key is None:
+            slot.display = display
+        elif display:
+            slot[key] = display
+        else:
+            slot.pop(key, None)
+
+
+def _display_result_items(result: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
+    """The display-bearing items in the fixed response envelopes, never arbitrary nested data."""
+    for section in ("units", "hits"):
+        yield from (item for item in result.get(section, ()) if isinstance(item, dict))
+    yield from (item for item in result.get("items", ())
+                if isinstance(item, dict) and item.get("kind") == "units")
+    for group in result.get("dimension_groups") or ():
+        yield from (item for item in group.get("units", ()) if isinstance(item, dict))
+    pack = result.get("pack")
+    if isinstance(pack, Mapping):
+        for page in pack.get("semantic_units", {}).values():
+            yield from (item for item in page.get("units", ()) if isinstance(item, dict))
+
+
+def _project_result_displays(vault_root: Path, result: Mapping[str, Any], purpose: str | None) -> dict[str, Any]:
+    """Release display slots of the fixed activation, search, profile and pack envelopes."""
+    if not caller_restricted(vault_root):
+        return result
+    if not any(item.get("display") or isinstance(item.get("provenance"), Mapping) and any(
+        key in item["provenance"] for key in HOLDER_PROVENANCE_FIELDS
+    ) for item in _display_result_items(result)):
+        return result
+    from .. import dimension_display, lifecycle_statuses, working_set, working_set_conversation
+
+    out = copy.deepcopy(result)
+    items = list(_display_result_items(out))
+    slots = [item for item in items if item.get("display")]
+    groups = out.get("dimension_groups") or ()
+    before = sum(working_set.served_chars("units", item) for item in out.get("units", ()))
+    displays = release_display_metadata(vault_root, [item["display"] for item in slots], purpose=purpose)
+    for item, display in zip(slots, displays, strict=True):
+        if display:
+            item["display"] = display
+        else:
+            item.pop("display", None)
+    for item in items:
+        provenance = item.get("provenance")
+        if isinstance(provenance, Mapping):
+            item["provenance"] = project_holder_provenance(provenance, restricted=True)
+    if isinstance(out.get("budget"), Mapping):
+        if isinstance(out, working_set_conversation.InferredPacket):
+            out["budget"]["used_chars"] = sum(_recent_entry_chars(item) for item in out.get("recent_context", ())) + (
+                working_set_conversation.subject_chars(out, status_basis=lifecycle_statuses.Basis(vault_root))
+            )
+        elif isinstance(out["budget"].get("used_chars"), int):
+            after = sum(working_set.served_chars("units", item) for item in out.get("units", ()))
+            out["budget"]["used_chars"] -= before - after
+    hits = {hit["unit_ref"]: hit for hit in out.get("hits", ()) if isinstance(hit, Mapping) and hit.get("unit_ref")}
+    for group in groups:
+        for key in dimension_display.COUNTED_MARKS.values():
+            if key in group:
+                group[key] = sum(key in (
+                    entry.get("display", {}) if "shown_in" in entry
+                    else hits.get(entry.get("unit_ref"), {}).get("display") or {}
+                ) for entry in group.get("units", ()))
     return out
 
 
@@ -3914,6 +4138,11 @@ def _unit_verdict(
     A removed unit is `UNIT_WITHHELD_NOTICED` when a path it names was withheld
     at a notice level, so its removal may be reported; otherwise silently.
     """
+    provenance = unit.get("provenance")
+    if isinstance(provenance, Mapping):
+        unit = {**unit, "provenance": project_holder_provenance(
+            provenance, restricted=caller_restricted(ctx.vault_root, principal=ctx.who),
+        )}
     kept = _guarded_unit(unit, ctx.frozen, ctx.decisions, ctx.invalid_refs)
     if kept is not None:
         return kept, UNIT_KEPT
@@ -5258,8 +5487,11 @@ def _guarded_unit(
         out["provenance"] = {
             key: value
             for key, value in provenance.items()
-            if not _names_withheld(value, withheld, reference_field=True)
-            and not _value_names_an_invalid_reference(value, invalid_refs)
+            # Sanitized holder prose is not a typed reference, even when it equals a filename.
+            if key in HOLDER_PROVENANCE_FIELDS or (
+                not _names_withheld(value, withheld, reference_field=True)
+                and not _value_names_an_invalid_reference(value, invalid_refs)
+            )
         }
     decision = decisions.get(path)
     if decision is not None and decision.release_strip:
@@ -6182,6 +6414,9 @@ def _postfilter(
         if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
             view_purpose = (request_kwargs or {}).get("purpose")
             result = guard_view_response(vault_root, result, purpose=view_purpose)
+    # nosemgrep: ep-word-set -- These dispatcher operations have fixed display-bearing response envelopes.
+    if command_name in {"activate_context", "find", "ask_memory", "read_memory"} and isinstance(result, Mapping):
+        result = _project_result_displays(vault_root, result, (request_kwargs or {}).get("purpose"))
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.

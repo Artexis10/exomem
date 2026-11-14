@@ -20,7 +20,12 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from test_connector_boundary import SCOPE
+from test_connector_boundary import configured_boundary as configured_boundary  # noqa: F401
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_private_vocabulary_instances import private_instances as private_instances  # noqa: F401
+from test_vault_store_embeddings import catch_up
+from test_vault_store_embeddings import encoder as encoder  # noqa: F401
 from test_vault_store_migration import (  # noqa: F401
     build_indexes,
     migrate_apply,
@@ -34,7 +39,8 @@ from test_vault_store_readers import (
     damage_every_owned_projection,
     restrict_external,
 )
-from test_vault_store_rederive import PROFILES, project, settle_to_the_end
+from test_vault_store_rederive import PROFILES, project, settle_to_the_end, store_writer
+from test_vault_store_write_path import served as served  # noqa: F401
 
 from exomem import (
     access,
@@ -787,6 +793,393 @@ def test_the_correction_context_of_a_unit_reads_the_store_snapshot(vault):  # no
         in_store_mode = unit_corrections.discover(vault, [reference], accept=lambda _row: True)
 
     assert in_store_mode == in_file_mode
+
+
+@pytest.mark.parametrize("mode", ["keyword", "hybrid", "vector"])
+def test_stored_family_dimensions_fill_the_limit_before_ranking(stored, writer, encoder, mode):  # noqa: F811
+    """Better-ranked nonmembers cannot hide the units whose authored relations qualify them."""
+    source = "Knowledge Base/Notes/Family source.md"
+    target = "Knowledge Base/Notes/Family target.md"
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: noise-{index}\n\nSignal signal signal signal.\n"
+        for index in range(24)
+    )
+    body += "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"The signal has qualifying source material for outcome {index}.\n"
+        for index in range(3)
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(source, body.encode()), write.PagePut(target, b"# Family target\n\nSurvey material.\n"),
+    )))
+    if mode != "keyword":
+        catch_up(stored)
+    result = commands.op_ask_memory(
+        stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+    assert len(result["hits"]) == 2
+    assert all("qualifying source material" in hit["excerpt"] for hit in result["hits"])
+    if mode == "keyword":
+        positive = {"unit.dimension": {"$eq": "provenance"}}
+        for expression in (
+            {"$not": positive},
+            {"unit.dimension": {"$ne": "provenance"}},
+            {"$and": [{"unit.dimension": {"$eq": "kind"}}, {"$not": positive}]},
+        ):
+            negative = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+                filters=expression, limit=2, graph=False,
+            )
+            assert len(negative["hits"]) == 2
+            assert all("Signal signal signal signal." in hit["excerpt"] for hit in negative["hits"])
+        nested = commands.op_ask_memory(
+            stored, query="signal", scope="kb-only", mode=mode, result_level="unit",
+            filters={"$or": [positive, {"unit.kind": {"$eq": "question"}}]}, limit=2, graph=False,
+        )
+        assert len(nested["hits"]) == 2
+        assert all("qualifying source material" in hit["excerpt"] for hit in nested["hits"])
+        from exomem import request_budget
+
+        for expression in (positive, {"$not": positive}):
+            token = request_budget.set_current(request_budget.RequestBudget(seconds=0))
+            try:
+                with pytest.raises(find.RetrievalIndexWarming):
+                    commands.op_ask_memory(
+                        stored, query="signal qualifying", scope="kb-only", mode=mode, result_level="unit",
+                        filters=expression, limit=2, graph=False,
+                    )
+            finally:
+                request_budget.reset_current(token)
+
+
+def test_stored_family_dimensions_keep_the_authors_private_meaning(vault, private_instances):  # noqa: F811
+    """The query's same-named extension cannot replace a private author's family."""
+    from exomem import relation_registry, semantic_language_registry
+    from exomem.vocabulary import instances
+
+    dimension = (
+        "schema_version: 1\ndimensions:\n  family_view:\n    labels: {en: Family view}\n"
+        "    description: Selected relation families\n    members: {families: [derivation]}\n"
+    )
+    categories = instances.select(vault, semantic_language_registry.CATEGORY_SPEC).overlay(vault)
+    categories.parent.mkdir(parents=True, exist_ok=True)
+    categories.write_text(dimension)
+    for scope, parent in ((None, "contradicts"), (SCOPE, "derived_from")):
+        overlay = instances.select(vault, relation_registry.SPEC, scope).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text(
+            "schema_version: 1\nextensions:\n"
+            f"  x.explains: {{parent: {parent}, description: Explains an observation}}\n"
+            "  x.old_explanation: {parent: contradicts, description: Previous wording, "
+            "status: deprecated, replaced_by: x.explains}\n",
+        )
+    source = "Knowledge Base/Notes/Private explanation.md"
+    target = "Knowledge Base/Notes/Family survey.md"
+    write_pages(vault, {
+        source: (
+            f"---\ntype: insight\nprojects: [private-project]\nregistry_scope: {SCOPE}\n---\n"
+            "# Private explanation\n\n## Claim\n- id: private-origin\n"
+            "- relations: x.explains: [[Family survey#landing]]\n\nSignal from a private origin.\n\n"
+            "## Claim\n- id: core-origin\n- relations: core.derived_from: [[Family survey#landing]]\n\n"
+            "Signal from a qualified core origin.\n\n"
+            "## Claim\n- id: old-origin\n- relations: x.old_explanation: [[Family survey#landing]]\n\n"
+            "Signal from an old private origin.\n\n"
+            "## Claim\n- id: self\n- relations: core.derived_from: [[#self]]\n\nSignal from a self reference.\n"
+        ),
+        target: (
+            "---\ntype: note\n---\n# Family survey\n\n## Claim\n- id: landing\n\nA survey target.\n\n"
+            "## Claim\n- id: other\n\nAn unrelated survey target.\n"
+        ),
+    })
+    relation_registry.clear_cache()
+    with request_scope(private_instances("full")):
+        build_indexes(vault)
+        assert migrate_apply(vault) == 0
+        answer = commands.op_ask_memory(
+            vault, query="signal", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"$and": [
+                {"unit.dimension": {"$eq": "provenance"}}, {"page.type": {"$eq": "insight"}},
+            ]}, limit=3, graph=False,
+        )
+        landed = commands.op_ask_memory(
+            vault, query="survey", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"$and": [
+                {"unit.dimension": {"$eq": "provenance"}}, {"page.type": {"$eq": "note"}},
+            ]}, limit=10, graph=False,
+        )
+        before = commands.op_ask_memory(
+            vault, query="", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.dimension": {"$eq": "family_view"}}, limit=100, graph=False,
+        )
+        with store_writer(vault) as editing:
+            write.commit(editing, put(categories.relative_to(vault).as_posix(),
+                                      dimension.replace("[derivation]", "[contradiction]").encode()))
+        semantic_language_registry.clear_cache()
+        find.clear_cache()
+        after = commands.op_ask_memory(
+            vault, query="", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.dimension": {"$eq": "family_view"}}, limit=100, graph=False,
+        )
+    assert len(answer["hits"]) == 3
+    assert {hit["excerpt"] for hit in answer["hits"]} == {
+        "Signal from a private origin.", "Signal from a qualified core origin.", "Signal from an old private origin.",
+    }
+    assert all(hit["display"]["origin"]["from"] for hit in answer["hits"])
+    assert [hit["excerpt"] for hit in landed["hits"]] == ["A survey target."]
+    assert {hit["excerpt"] for hit in before["hits"]} == {
+        "Signal from a private origin.", "Signal from a qualified core origin.", "Signal from an old private origin.",
+        "A survey target.",
+    }
+    assert after["hits"] == []
+
+
+def test_stored_dimension_resolves_an_unreturned_author_without_parsing_its_page(
+    stored, writer, monkeypatch, record_testsuite_property,  # noqa: F811
+):
+    """Withholding a title competitor reveals an incoming edge without reopening its author."""
+    source = "Knowledge Base/Notes/Survey explanation.md"
+    target = "Knowledge Base/Notes/Survey results.md"
+    twin = "Knowledge Base/Notes/Hidden survey.md"
+    restrict_external(stored, 'tags: ["secret"]')
+    target_body = (
+        b"---\ntitle: Shared survey\n---\n# Survey results\n\n"
+        b"## Claim\n- id: first\n\nBeacon output increased.\n\n"
+        b"## Claim\n- id: second\n\nBeacon output stayed stable.\n"
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "notes", puts=(
+        write.PagePut(source, b"# Survey explanation\n\n## Claim\n- relations: derived_from: [[Shared survey]]\n\nAn explanation.\n"),
+        write.PagePut(target, target_body),
+        write.PagePut(twin, b"---\ntitle: Shared survey\ntags: [secret]\n---\n# Hidden survey\n\nA competitor.\n"),
+    )))
+    from exomem import call_spans
+
+    parsed, family_parsed = [], []
+    phase, prepared = 0, 0
+    parse_page = find.find_corpus.parse_page
+    real_span = call_spans.span
+
+    @contextlib.contextmanager
+    def observing_span(name, fields=None):
+        nonlocal phase, prepared
+        family = name in {"dimension.prepare", "dimension.display"}
+        if family:
+            phase += 1
+            prepared += 1
+        try:
+            with real_span(name, fields) as measured:
+                yield measured
+        finally:
+            if family:
+                phase -= 1
+
+    def parsing(path, *args, **kwargs):
+        parsed.append(kwargs.get("resolved_relative") or Path(path).relative_to(stored).as_posix())
+        if phase:
+            family_parsed.append(parsed[-1])
+        return parse_page(path, *args, **kwargs)
+
+    monkeypatch.setattr(call_spans, "span", observing_span)
+    monkeypatch.setattr(find.find_corpus, "parse_page", parsing)
+    monkeypatch.setattr(find, "_parse_page", parsing)
+    with request_scope(EXTERNAL):
+        answer = commands.op_ask_memory(
+            stored, query="beacon", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+        )
+    assert len(answer["hits"]) == 2
+    assert {hit["parent_path"] for hit in answer["hits"]} == {target}
+    record_testsuite_property("stored_dimension_whole_call_parsed_pages", len(parsed))
+    record_testsuite_property("stored_dimension_family_phase_parsed_pages", len(family_parsed))
+    assert prepared > 0
+    assert set(family_parsed) <= {target}
+
+
+def test_dimension_preparation_reuses_facts_only_inside_the_same_live_snapshot(stored, writer):  # noqa: F811
+    """A second borrowed preparation cannot reuse a closed view or a preceding snapshot's positive membership."""
+    from exomem import epistemic_dimensions, relation_registry, semantic_language_registry
+
+    source = "Knowledge Base/Notes/Origin.md"
+    target = "Knowledge Base/Notes/Stable target.md"
+    other = "Knowledge Base/Notes/Other target.md"
+    body = b"# Stable target\n\n## Claim\n- id: stable\n\nA stable claim.\n"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "notes", puts=(
+        write.PagePut(source, b"# Origin\n\n## Relations\n- derived_from [[Stable target]]\n- derived_from [[Other target]]\n"),
+        write.PagePut(target, body), write.PagePut(other, body.replace(b"Stable", b"Other")),
+    )))
+    dimensions = epistemic_dimensions.StoredUnitDimensions(
+        stored, epistemic_dimensions.membership(semantic_language_registry.core_registry(),
+                                                relation_registry.load_registry(stored), only=("provenance",)),
+        keep=None, needs_edges=True,
+    )
+    page = {"path": target}
+    # The incoming edge ends at the page, so its membership does not depend on the target's unchanged occurrence.
+    unit = {"kind": "claim", "form": "rich", "row_keys": ()}
+    with read.request_snapshot(stored):
+        dimensions.prepare({target})
+        dimensions.prepare({other})
+        assert "provenance" in dimensions(page, unit)
+    write.commit(writer, put(source, b"# Origin\n\nThe origin no longer cites either target.\n"))
+    with read.request_snapshot(stored):
+        dimensions.prepare({target})
+        assert "provenance" not in dimensions(page, unit)
+
+
+def test_a_retired_collection_alias_cannot_supply_an_ordinary_family_endpoint(served, writer):  # noqa: F811
+    """A legacy alias still resolves to its row but cannot qualify a unit through a removed item file."""
+    from test_collection_store_migration import WORK
+
+    from exomem.collection_store import aliases, conversion
+
+    (retired,) = writer.connection.execute(
+        "SELECT i.view_path FROM items i JOIN collections c USING(collection_id) WHERE c.manifest_path = ? LIMIT 1",
+        (WORK,),
+    ).fetchone()
+    assert conversion.convert(served, WORK, why="Retire item files for a boundary check")["phase"] == "complete"
+    assert not (served / retired).exists()
+    assert aliases.retired(writer.connection, retired) is not None
+    with read.request_snapshot(served):
+        canonical, warning = vaults.normalize_wikilink(
+            retired.removesuffix(".md"), served,
+            resolver=vaults.WikilinkResolver.from_entries(served, ()),
+        )
+    assert (canonical, warning) == (retired.removesuffix(".md"), None)
+    source = "Knowledge Base/Notes/Retired origin.md"
+    write.commit(writer, put(source, (
+        "# Retired origin\n\n## Claim\n- relations: derived_from: [[" + retired + "]]\n\n"
+        "The archived signal has no ordinary page endpoint.\n"
+    ).encode()))
+    unfiltered = commands.op_ask_memory(
+        served, query="archived signal", mode="keyword", scope="kb-only", result_level="unit", limit=2, graph=False,
+    )
+    assert source in {hit["parent_path"] for hit in unfiltered["hits"]}
+    answer = commands.op_ask_memory(
+        served, query="archived signal", mode="keyword", scope="kb-only", result_level="unit",
+        filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+    )
+    assert answer["hits"] == []
+
+
+def test_review_kind_filter_stays_exact_when_only_its_optional_edge_annotation_is_unavailable(
+    stored, writer, monkeypatch,  # noqa: F811
+):
+    from exomem import attention, audit
+    from exomem.vault_store import rederive
+
+    path = "Knowledge Base/Notes/Review generation.md"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(path, b"# Review generation\n\n## Claim\n\nThe measurement is repeatable.\n"),
+    )))
+    finding = audit.AuditFinding("relation_debt", "info", path, "Review the connection.")
+    monkeypatch.setattr(attention.audit_module, "audit", lambda *args, **kwargs: audit.AuditReport(
+        findings=[finding], summary={"relation_debt": 1},
+    ))
+    with writer.handle.transaction() as tx:
+        tx.execute("UPDATE store_meta SET value = '1' WHERE key = ?", (rederive.OWNER_SCHEMA,))
+
+    kind = commands.op_review_memory(
+        stored, mode="attention", categories=["relation_debt"], limit=1,
+        filters={"unit.dimension": {"$eq": "kind"}},
+    )
+    assert [item["path"] for item in kind["items"]] == [path]
+    assert kind["items"][0]["dimension_status"] == "unknown"
+    assert "dimensions" not in kind["items"][0]
+    assert kind["dimension_coverage"]["filter_matches"] == 1
+    assert kind["dimension_coverage"]["filter_unresolved"] == 0
+    assert kind["dimension_coverage"]["annotation_unknown"] == 1
+
+    negative = {"$not": {"unit.dimension": {"$eq": "provenance"}}}
+    pending = commands.op_review_memory(
+        stored, mode="attention", categories=["relation_debt"], limit=1, filters=negative,
+    )
+    assert pending["items"] == []
+    assert pending["dimension_coverage"]["filter_unresolved"] == 1
+    unfiltered = commands.op_review_memory(stored, mode="attention", categories=["relation_debt"], limit=1)
+    assert unfiltered["items"][0]["dimension_status"] == "unknown"
+
+    while rederive.settle(stored, writer) == rederive.ADVANCED:
+        pass
+    current = commands.op_review_memory(
+        stored, mode="attention", categories=["relation_debt"], limit=1, filters=negative,
+    )
+    assert [item["path"] for item in current["items"]] == [path]
+    assert current["items"][0]["dimension_status"] == "known"
+
+
+def test_optional_review_annotation_deadline_does_not_demote_a_proven_family_match(
+    stored, writer, monkeypatch,  # noqa: F811
+):
+    from exomem import attention, audit, epistemic_dimensions, request_budget
+
+    source, target = "Knowledge Base/Notes/Review origin.md", "Knowledge Base/Notes/Review evidence.md"
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(source, b"# Review origin\n\n## Claim\n- relations: derived_from: [[Review evidence]]\n\nA sourced measurement.\n"),
+        write.PagePut(target, b"# Review evidence\n\nMeasured source material.\n"),
+    )))
+    finding = audit.AuditFinding("relation_debt", "info", source, "Review the connection.")
+    monkeypatch.setattr(attention.audit_module, "audit", lambda *args, **kwargs: audit.AuditReport(
+        findings=[finding], summary={"relation_debt": 1},
+    ))
+    original = epistemic_dimensions.read_edges
+    families = []
+    budget = request_budget.RequestBudget(seconds=60)
+
+    def expire_after_required(root, lookups, **kwargs):
+        families.append(set(lookups.by_family))
+        edges = original(root, lookups, **kwargs)
+        if len(families) == 1:
+            assert edges.status == "available" and edges.edges
+            budget.deadline = 0
+        return edges
+
+    monkeypatch.setattr(epistemic_dimensions, "read_edges", expire_after_required)
+    token = request_budget.set_current(budget)
+    try:
+        result = commands.op_review_memory(
+            stored, categories=["relation_debt"], filters={"unit.dimension": {"$eq": "provenance"}},
+        )
+    finally:
+        request_budget.reset_current(token)
+    assert [item["path"] for item in result["items"]] == [source]
+    assert result["items"][0]["dimension_status"] == "unknown"
+    assert "dimensions" not in result["items"][0]
+    assert result["dimension_coverage"]["filter_matches"] == 1
+    assert result["dimension_coverage"]["filter_unresolved"] == 0
+    assert len(families) == 2 and families[0].isdisjoint(families[1])
+
+
+def test_review_dimension_edits_do_not_change_a_dismissed_items_identity(stored, writer, monkeypatch):  # noqa: F811
+    from exomem import attention, audit, semantic_language_registry
+    from exomem.vocabulary import instances
+
+    path = "Knowledge Base/Notes/Review identity.md"
+    overlay = instances.select(stored, semantic_language_registry.CATEGORY_SPEC).overlay(stored)
+    document = (
+        "schema_version: 1\ndimensions:\n  review_focus:\n    labels: {en: Review focus}\n"
+        "    description: A selected review dimension\n    members: {kinds: [claim]}\n"
+    )
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(path, b"# Review identity\n\n## Claim\n\nThe measurement stays unchanged.\n"),
+        write.PagePut(overlay.relative_to(stored).as_posix(), document.encode()),
+    )))
+    semantic_language_registry.clear_cache()
+    finding = audit.AuditFinding("relation_debt", "info", path, "Review the connection.")
+    monkeypatch.setattr(attention.audit_module, "audit", lambda *args, **kwargs: audit.AuditReport(
+        findings=[finding], summary={"relation_debt": 1},
+    ))
+    before = commands.op_review_memory(stored, categories=["relation_debt"])["items"][0]
+    assert "review_focus" in before["dimensions"]
+    commands.op_triage_memory(
+        stored, ref=before["ref"], expected_fingerprint=before["fingerprint"], action="dismiss",
+        why="intentional: this connection needs no further work",
+    )
+    write.commit(writer, put(overlay.relative_to(stored).as_posix(), document.replace("[claim]", "[open_question]").encode()))
+    semantic_language_registry.clear_cache()
+    after = commands.op_review_memory(stored, categories=["relation_debt"], state="all")["items"][0]
+    assert (after["ref"], after["fingerprint"]) == (before["ref"], before["fingerprint"])
+    assert after["state"] == "dismissed"
+    assert "review_focus" not in after["dimensions"]
+    assert commands.op_review_memory(stored, categories=["relation_debt"])["items"] == []
 
 
 def test_a_relation_filter_answers_from_the_store_when_the_sidecar_file_is_gone(

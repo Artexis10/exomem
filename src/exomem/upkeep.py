@@ -331,6 +331,7 @@ def review(
     state: str = "open",
     categories: list[str] | None = None,
     limit: int | None = None,
+    dimensions=None,
 ) -> dict[str, Any]:
     """The explicit, bounded upkeep list. Counts are taken after egress and triage."""
     from . import dreamer
@@ -359,7 +360,7 @@ def review(
     if payload is None:
         return {**base, "status": "review_state_unavailable"}
     delivered = _deliveries(view)
-    collected: list[tuple[tuple, dict[str, Any]]] = []
+    collected: list[tuple[tuple, dict[str, Any], str]] = []
     families: dict[str, int] = {}
     integrity: dict[str, int] = {}
     ctx = _request_context(Path(vault_root))
@@ -392,7 +393,7 @@ def review(
             if state != "all" and decision != state:
                 continue
             key = (_family_rank(family), _order_time(row, withheld=withheld), str(row["id"]))
-            collected.append((key, served))
+            collected.append((key, served, str(row["subject_path"])))
         for category, paths, fold_key in view.integrity:
             if fold_key:
                 # A name ambiguity is judged from the pages this caller may see.
@@ -405,11 +406,19 @@ def review(
             elif all(_visible(keep, path) for path in paths):
                 integrity[category] = integrity.get(category, 0) + 1
     collected.sort(key=lambda pair: pair[0])
+    items = [item for _key, item, _subject in collected]
+    dimension_coverage = None
+    if dimensions is not None:
+        from .review_dimensions import ReviewTarget
+
+        items, dimension_coverage = dimensions.select(
+            items, [ReviewTarget(subject) for _key, _item, subject in collected],
+        )
     complete = view.health.get("evidence_complete") or {}
     return {
         **base,
         "status": "available",
-        "items": [item for _key, item in collected[:bound]],
+        "items": items[:bound],
         "families": families,
         "evidence_complete": {
             family: bool(flag)
@@ -417,7 +426,8 @@ def review(
             if not wanted or family in wanted
         },
         "integrity": integrity,
-        "truncated": len(collected) > bound,
+        "truncated": len(items) > bound,
+        **({"dimension_coverage": dimension_coverage} if dimension_coverage is not None else {}),
     }
 
 

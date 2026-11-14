@@ -2890,8 +2890,9 @@ def test_a_catalogue_from_another_release_is_rebuilt_whole(
 
 
 @pytest.mark.skipif(not lexstore.fts5_available(), reason="searches the FTS5 lane")
+@pytest.mark.parametrize("table", ["fts", "title_fts"])
 def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, table: str,
 ) -> None:
     _kb_file(tmp_path, "lost.md", "- [config] lostword ^u1")
     _kb_file(tmp_path, "other.md", "- [config] steadyword ^u1")
@@ -2902,11 +2903,12 @@ def test_a_catalogue_missing_a_full_text_row_is_rebuilt_whole(
     conn = sqlite3.connect(store.path)
     with conn:
         conn.execute(
-            "DELETE FROM fts WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
+            f"DELETE FROM {table} WHERE rowid = (SELECT rowid FROM pages WHERE path = ?)",
             ("Knowledge Base/lost.md",),
         )
     conn.close()
-    assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
+    if table == "fts":
+        assert lexstore.search_bm25(tmp_path, "lostword", k=5, scope="kb") == []
     parsed = _record_parsed_pages(store, tmp_path, monkeypatch)
     assert store.rebuild_atomic() is True
 
