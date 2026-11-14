@@ -625,3 +625,47 @@ def test_a_writer_validates_a_revision_whose_log_rotation_is_due_as_the_revision
         committed.value.reason,
     )
     assert "title: Planning work" in (vault / collection).read_text(encoding="utf-8")
+
+
+def test_a_writer_validates_a_revision_whose_history_an_archive_withholds_as_the_revision_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's create rotates the log into an archive withheld from the writer, so the writer
+    sees no continuous audit history. The revision commit refuses that; validation must too."""
+    from granted_writer import grant_writer
+
+    from exomem.planning import create_collection, revise, validate
+    from exomem.structured_collections import CollectionError
+
+    vault = tmp_path / "vault"
+    _rotation_due_with_its_archive_withheld(vault, monkeypatch)
+    writer = grant_writer(
+        vault, tmp_path, monkeypatch,
+        writable_paths=["Planning/**"], capture_paths=["Knowledge Base/Planning"],
+        writable_scopes=[LOG_SCOPE_ID],
+    )("external")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    with request_scope(owner_principal(surface="library")):
+        create_collection(vault, collection, _manifest(), why="create planning collection")
+        proposal = (vault / collection).read_text(encoding="utf-8").replace(
+            "title: Planning work", "title: Product programme", 1
+        )
+        guards = validate(vault, mode="revision", collection=collection, manifest_text=proposal)[
+            "lifecycle_guards"
+        ]
+    assert list((vault / "Knowledge Base" / "_archive" / "logs").glob("*.md"))
+    # No rotation is due for the writer's calls, so the withheld history is their one refusal.
+    monkeypatch.setenv("EXOMEM_LOG_ROTATE_BYTES", "100000000")
+
+    with request_scope(writer):
+        with pytest.raises(CollectionError) as committed:
+            revise(vault, collection, manifest_text=proposal, **guards, why="rename the programme")
+        with pytest.raises(CollectionError) as validated:
+            validate(vault, mode="revision", collection=collection, manifest_text=proposal)
+
+    assert committed.value.code == "RECORD_AUDIT_GAP"
+    assert (validated.value.code, validated.value.reason) == (
+        committed.value.code,
+        committed.value.reason,
+    )
+    assert "title: Planning work" in (vault / collection).read_text(encoding="utf-8")

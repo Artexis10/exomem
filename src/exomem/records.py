@@ -2424,6 +2424,8 @@ def _validate_collection_revision_for_profile(
             "INVALID_COLLECTION_MANIFEST", "manifest is not UTF-8"
         ) from error
     current_guard.recheck(root)
+    # The commit's own continuity check, at the commit's place before the manifest is validated.
+    _lifecycle_audit_chain(root, current, revise=True)
     proposed = _validate_revision_manifest(
         root,
         current,
@@ -2716,14 +2718,8 @@ def _lifecycle_mutation(
         guards = lifecycle_guards(current, snapshot)
         _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
         _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
-        chain = _inspect_audit_chain(
-            root, current, authorize_path=record_governance.full_release_filter(root)
-        )
+        chain = _lifecycle_audit_chain(root, current, revise=action == "revise")
         if action == "revise":
-            if chain.status not in {"baseline", "ok", "acknowledged_gap"}:
-                raise collections.CollectionError(
-                    "RECORD_AUDIT_GAP", "revision requires continuous audit history"
-                )
             assert manifest_text is not None
             proposed = _validate_revision_manifest(
                 root,
@@ -3331,6 +3327,21 @@ def agent_audit_history(
             else {}
         ),
     }
+
+
+def _lifecycle_audit_chain(
+    root: Path, current: collections.CollectionManifest, *, revise: bool
+) -> _AuditChain:
+    """The audit chain as this caller's release sees it. A revision, validated or committed,
+    refuses without continuous history."""
+    chain = _inspect_audit_chain(
+        root, current, authorize_path=record_governance.full_release_filter(root)
+    )
+    if revise and chain.status not in {"baseline", "ok", "acknowledged_gap"}:
+        raise collections.CollectionError(
+            "RECORD_AUDIT_GAP", "revision requires continuous audit history"
+        )
+    return chain
 
 
 def _inspect_audit_chain(

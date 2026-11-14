@@ -791,6 +791,8 @@ def audit_fix(
         # Other categories are propose-only by category-level policy.
         if f not in report.proposed:
             report.proposed.append(f)
+    # Path order: a walk's order is the file system's (the store's is its key's), not a contract.
+    report.proposed.sort(key=lambda finding: finding.path)
 
     # ---- Optional full rebuild of the embedding sidecar ----
     if rebuild_embeddings and not dry_run:

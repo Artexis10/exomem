@@ -486,15 +486,6 @@ def comparable(value, *, inbound_links=False):
     return result
 
 
-def same_but_proposed_order(actual, expected):
-    """Whether two answers differ only in the order of their `proposed` findings (a gap below)."""
-    def ordered(value):
-        if not isinstance(value, dict) or not isinstance(value.get("proposed"), list):
-            return value
-        return {**value, "proposed": sorted(value["proposed"], key=lambda row: json.dumps(row, sort_keys=True))}
-    return ordered(actual) == ordered(expected)
-
-
 def test_comparison_ignores_only_inbound_order_and_keeps_duplicate_links():
     """Filesystem walk order must not produce false parity failures or hide a missing link."""
     first = {"path": "Notes/First.md", "line_number": 2}
@@ -522,8 +513,7 @@ def prepare_sample(root, monkeypatch, request, sample):
     if sample_arguments.get("validate_only") or name == "observe_memory" or dated:
         request.getfixturevalue("validation_clock")
     if sample == "maintain_memory:reconcile":
-        # Every call appends a boundary receipt, and reconcile verifies that journal, so a later
-        # observation would verify a longer chain: each one verifies the journal as prepared.
+        # Reconcile verifies the receipt journal, which each call extends: keep it as prepared.
         monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
     if sample == "schema_memory:census":
         from exomem import relation_census
@@ -573,14 +563,8 @@ HELD_LISTING_PROBES = (
 #: it may show. Its marker is strict, so a fix that makes the read pass fails here until its entry
 #: goes, and any other violation fails it as a regression.
 STORE_READ_GAPS = {
-    "maintain_memory:fix": (
-        "the store answer holds the same findings, but `proposed` keeps the audit's raw order: file "
-        "mode's walk order (directory enumeration), the store's path order; and its audit lists "
-        f"folders, so: {HELD_LISTING_PROBES[0]}",
-        frozenset({"proposed order differs", *HELD_LISTING_PROBES[1]}),
-    ),
     **dict.fromkeys((
-        "audit", "browse_memory", "list_directory", "maintain_memory:audit",
+        "audit", "browse_memory", "list_directory", "maintain_memory:audit", "maintain_memory:fix",
         "manage_memory_file:list", "review_memory:audit",
     ), HELD_LISTING_PROBES),
 }
@@ -683,9 +667,7 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
                 actual = comparable(answer(command, vault, arguments, source_schema, store=True), inbound_links=links)
             violations = []
             if actual != expected[caller]:
-                violations.append(
-                    "proposed order differs" if same_but_proposed_order(actual, expected[caller]) else "answer differs"
-                )
+                violations.append("answer differs")
             if events["page_io"]:
                 violations.append("page filesystem read")
             if events["sidecars"]:

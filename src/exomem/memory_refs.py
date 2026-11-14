@@ -1357,7 +1357,7 @@ def _backfill_candidates(vault_root: Path) -> Iterator[tuple[str, Path]]:
     if mode.store_mode_for_reads(root):
         try:
             with read.snapshot(root) as view:
-                # `rglob("*.md")` below matches the suffix case-sensitively; stored pages keep its rule.
+                # `rglob("*.md")` below matches the suffix case-sensitively; stored pages do too.
                 stored = {
                     root / meta.path: meta.path for meta in view.pages(f"{kb_dirname()}/")
                     if meta.path.endswith(".md") and is_scanned_page(meta.path)
