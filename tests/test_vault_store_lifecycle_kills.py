@@ -637,13 +637,6 @@ def test_a_lifecycle_write_killed_at_or_after_its_commit_converges_in_a_fresh_pr
     assert judged == dict.fromkeys(judged, [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a served store-mode process refuses the owner's recursive folder delete with "
-    "AUDIENCE_RESTRICTED (`op_delete`: `egress.restricted_release_filter` filters every caller "
-    "while a writer is bound), so the undo of a recovery refuses",
-)
 @pytest.mark.timeout(600)
 def test_a_folder_recovery_killed_after_its_commit_converges_and_can_be_undone(stored, tmp_path):
     """A recovery killed after its store commit that a fresh process leaves split or pending, or
@@ -687,13 +680,6 @@ def test_a_lifecycle_write_killed_between_its_renames_and_its_commit_converges(
     assert judged == dict.fromkeys(judged, [])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="a served store-mode process refuses the owner's recursive folder delete with "
-    "AUDIENCE_RESTRICTED (`op_delete`: `egress.restricted_release_filter` filters every caller "
-    "while a writer is bound), so the retry of a folder trash refuses",
-)
 @pytest.mark.parametrize("order", ORDERS)
 @pytest.mark.timeout(600)
 def test_a_folder_trash_killed_before_its_commit_converges_and_its_retry_succeeds(
