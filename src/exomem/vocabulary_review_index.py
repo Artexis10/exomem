@@ -47,12 +47,24 @@ class PublicContinuationError(ValueError):
     """A deliberate public cursor refusal, never a malformed sidecar leak."""
 
 
+def _sqlite_integer(value: int) -> int:
+    """Map an unsigned 64-bit file number into SQLite's signed INTEGER range, one to one."""
+    # Windows reports st_dev and st_ino as unsigned 64-bit values that can exceed 2**63 - 1.
+    return value - (1 << 64) if value >= (1 << 63) else value
+
+
 def _signature(path: Path) -> tuple[int, int, int, int, int] | None:
     try:
         stat = path.lstat()
     except FileNotFoundError:
         return None
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    return (
+        _sqlite_integer(stat.st_dev),
+        _sqlite_integer(stat.st_ino),
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
