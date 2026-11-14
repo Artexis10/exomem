@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import os
+import sqlite3
 import sys
 import traceback
+from ctypes import wintypes
 
 import pytest
-from test_collection_store_migration import OPERATOR, legacy_vault, stop_writer
+from test_collection_store_migration import (
+    OPERATOR,
+    env,  # noqa: F401
+    legacy_vault,
+    stop_writer,
+)
+from test_collection_store_migration import (
+    test_offline_migrate_routes_every_records_and_planning_collection_without_changing_a_vault_byte as _real,
+)
 from test_vault_store_migration import (
     ALPHA,
     BETA,
@@ -17,7 +29,8 @@ from test_vault_store_migration import (
     coordinator_url,  # noqa: F401
 )
 
-from exomem.collection_store import admission, capability, custody
+from exomem import held_fs
+from exomem.collection_store import admission, capability, custody, legacy
 from exomem.governance.principal import library_scope
 
 pytestmark = pytest.mark.skipif(
@@ -49,6 +62,90 @@ def _route(tmp_path, monkeypatch, url, step):
     pytest.fail(f"DIAG {step}: {outcome}")
 
 
-@pytest.mark.parametrize("step", ["dry-run", "prepare", "apply"])
+@pytest.mark.parametrize("step", ["apply"])
 def test_route(tmp_path, monkeypatch, coordinator_url, step):  # noqa: F811
     _route(tmp_path, monkeypatch, coordinator_url, step)
+
+
+class _Process(ctypes.Structure):
+    _fields_ = [("pid", wintypes.DWORD), ("start", wintypes.FILETIME)]
+
+
+class _Info(ctypes.Structure):
+    _fields_ = [
+        ("process", _Process),
+        ("app", wintypes.WCHAR * 256),
+        ("service", wintypes.WCHAR * 64),
+        ("kind", wintypes.DWORD),
+        ("status", wintypes.ULONG),
+        ("session", wintypes.DWORD),
+        ("restartable", wintypes.BOOL),
+    ]
+
+
+def _holders(path):
+    """The processes that the Restart Manager says hold ``path`` open."""
+    manager = ctypes.WinDLL("Rstrtmgr")
+    session = wintypes.DWORD(0)
+    key = (wintypes.WCHAR * 33)()
+    if manager.RmStartSession(ctypes.byref(session), 0, key):
+        return "RmStartSession failed"
+    try:
+        files = (wintypes.LPCWSTR * 1)(str(path))
+        if manager.RmRegisterResources(session, 1, files, 0, None, 0, None):
+            return "RmRegisterResources failed"
+        needed, count, reasons = wintypes.UINT(0), wintypes.UINT(0), wintypes.DWORD(0)
+        code = manager.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None, ctypes.byref(reasons))
+        if code == 0 and needed.value == 0:
+            return "no holder"
+        if code != 234:
+            return f"RmGetList {code}"
+        infos = (_Info * needed.value)()
+        count = wintypes.UINT(needed.value)
+        code = manager.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), infos, ctypes.byref(reasons))
+        return f"{code}: " + ", ".join(f"{i.process.pid} {i.app}" for i in infos[: count.value]) + f" (self {os.getpid()})"
+    finally:
+        manager.RmEndSession(session)
+
+
+DIAGS = []
+
+
+def _live_connections():
+    found = []
+    for candidate in gc.get_objects():
+        if isinstance(candidate, sqlite3.Connection):
+            try:
+                found.append(str(candidate.execute("PRAGMA database_list").fetchall()))
+            except sqlite3.Error:
+                pass
+    return found
+
+
+def test_instrumented_preflight(env, capsys, monkeypatch):  # noqa: F811
+    original = legacy.LegacyAuditSpool.__exit__
+
+    def wrapped(self, *exc):
+        path, directory = self._path, self._staging_directory
+        try:
+            return original(self, *exc)
+        except BaseException as error:
+            DIAGS.append(f"spool exit failed: {error!r}")
+            DIAGS.append(f"holders: {_holders(path)}")
+            DIAGS.append(f"live connections: {_live_connections()}")
+            gc.collect()
+            DIAGS.append(f"after gc: holders {_holders(path)}")
+            with held_fs.acquire(directory).require() as filesystem, filesystem.parent(".").require() as parent:
+                again = filesystem.file(parent, path.name, access="mutate")
+                DIAGS.append(f"after gc: mutate open ok={again.ok}")
+                if again.ok:
+                    again.value.close()
+            raise
+
+    monkeypatch.setattr(legacy.LegacyAuditSpool, "__exit__", wrapped)
+    try:
+        _real(env, capsys)
+        outcome = "the real test passed"
+    except BaseException:  # noqa: BLE001 - diagnostic
+        outcome = "RAISED " + traceback.format_exc()[-2500:]
+    pytest.fail("DIAG " + "\n".join(DIAGS) + "\n" + outcome)
