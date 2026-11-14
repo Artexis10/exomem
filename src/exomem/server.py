@@ -353,7 +353,9 @@ class ExomemFastMCP(FastMCP):
         Raised as an exception here instead, the signal unwinds through that hold, which runs the
         teardown. Then the SIGTERM meets the action that was installed before serving, as uvicorn's
         own replay did: a handler runs, an ignored signal is ignored, and the default action ends
-        the process by the signal.
+        the process by the signal. A SIGTERM at another time meets that action at once, and a
+        process that survives it still converts the later replay. An action that Python cannot
+        name, such as one installed from C, is taken as the default action.
         """
         if threading.current_thread() is not threading.main_thread():
             await super().run_http_async(*args, **kwargs)  # only the main thread takes signals
@@ -366,8 +368,13 @@ class ExomemFastMCP(FastMCP):
             if frame is None or frame.f_code is not replay:
                 # Any other SIGTERM, such as one while the lifespan starts, does what it did
                 # before: raised here, it could land in the event loop and end the process with 1.
+                # The earlier action runs inside `raise_signal`. A process that survives it re-arms
+                # this handler, which uvicorn then captures, so its later replay is still converted.
                 signal.signal(signal.SIGTERM, previous)
-                signal.raise_signal(signal.SIGTERM)
+                try:
+                    signal.raise_signal(signal.SIGTERM)
+                finally:
+                    signal.signal(signal.SIGTERM, end_after_teardown)
                 return
             # A second SIGTERM while the teardown runs ends the process at once, as one did before.
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
