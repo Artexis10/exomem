@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import copy
 import enum
 import functools
 import hashlib
@@ -616,18 +617,27 @@ def _ranking_metadata_json(page: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
-def _ranking_metadata(raw: str) -> RankingPage:
+def _ranking_metadata(
+    raw: str, frontmatter_memo: dict[str, dict] | None = None,
+) -> RankingPage:
     import yaml
 
     from . import vault
 
     payload = json.loads(raw)
+    authored = payload.pop("frontmatter_yaml")
     try:
-        frontmatter = vault.yaml_safe_load(payload.pop("frontmatter_yaml"))
+        frontmatter = None if frontmatter_memo is None else frontmatter_memo.get(authored)
+        if frontmatter is None:
+            frontmatter = vault.yaml_safe_load(authored)
     except yaml.YAMLError as error:
         raise ValueError("invalid ranking frontmatter") from error
     if not isinstance(frontmatter, dict):
         raise ValueError("invalid ranking frontmatter")
+    if frontmatter_memo is not None:
+        # Exact serialized metadata can repeat across pages; each page still owns its mutable values.
+        frontmatter_memo[authored] = frontmatter
+        frontmatter = copy.deepcopy(frontmatter)
     for key in ("stem_set", "outbound_targets", "superseded_by"):  # nosemgrep: ep-word-set -- fixed ranking payload fields
         if not isinstance(payload[key], list) or not all(isinstance(value, str) for value in payload[key]):
             raise ValueError("invalid ranking text projection")
@@ -4507,6 +4517,7 @@ def _eligibility_metadata_query(
         (json.dumps(sorted(paths), ensure_ascii=False),),
     ).fetchall()
     result = {}
+    frontmatter_memo: dict[str, dict] = {}
     try:
         for path, payload, parent, updated, ranking, content_hash in rows:
             payload = None if payload is None else json.loads(payload)
@@ -4523,7 +4534,7 @@ def _eligibility_metadata_query(
                 updated,
                 None if payload is None else payload["media_file"],
                 None if payload is None else payload["frame_ts"],
-                ranking=None if ranking is None else _ranking_metadata(ranking),
+                ranking=None if ranking is None else _ranking_metadata(ranking, frontmatter_memo),
                 content_hash=content_hash,
             )
         if not (include_units or include_occurrences or include_structure):
@@ -11770,6 +11781,21 @@ class LexicalStore:
             self._note_query_failure(error, "lexical unit probe declined (%s)")
             return None
 
+    @contextlib.contextmanager
+    def _tag_usage_connection(self):
+        """Read canonical tags even with the Python retrieval backend; keep file reads fresh."""
+        from .vault_store import mode as store_mode
+
+        stored = store_mode.store_mode_for_reads(self.vault_root)
+        if not stored and self._sidecar_unreadable():
+            yield None
+            return
+        with self._store_connection() if stored else contextlib.closing(self._connect()) as conn:
+            if conn is None or not stored and not self._schema_is_current(conn):
+                yield None
+            else:
+                yield conn
+
     def tag_members_by_page(self) -> list[tuple[str, list[str]]] | None:
         """Each Knowledge Base page's stored `page.tags` members, by path.
 
@@ -11778,25 +11804,17 @@ class LexicalStore:
         when the catalogue is absent or stale, so a caller fails open instead
         of treating an unbuilt sidecar as an empty vocabulary.
         """
-        if self._sidecar_unreadable():
-            return None
         try:
-            conn = self._connect()
+            with self._tag_usage_connection() as conn:
+                if conn is None:
+                    return None
+                rows = conn.execute(
+                    "SELECT path, tags_json FROM pages "
+                    "WHERE in_kb = 1 AND tags_json IS NOT NULL AND tags_json != '[]'"
+                ).fetchall()
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
             return None
-        try:
-            if not self._schema_is_current(conn):
-                return None
-            rows = conn.execute(
-                "SELECT path, tags_json FROM pages "
-                "WHERE in_kb = 1 AND tags_json IS NOT NULL AND tags_json != '[]'"
-            ).fetchall()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
-            return None
-        finally:
-            conn.close()
         out: list[tuple[str, list[str]]] = []
         for path, members in rows:
             try:
@@ -11889,8 +11907,6 @@ class LexicalStore:
         as `-`, as the tag writers do. None when the catalogue is absent or
         stale, so a caller fails open.
         """
-        if self._sidecar_unreadable():
-            return None
         names = sorted({f"/{name.lower()}/" for name in excluded_dirs})
         owned = " OR ".join("instr(lower('/' || path), ?) > 0" for _ in names) or "0"
         sql = (
@@ -11906,19 +11922,13 @@ class LexicalStore:
             "GROUP BY form"
         )
         try:
-            conn = self._connect()
+            with self._tag_usage_connection() as conn:
+                if conn is None:
+                    return None
+                rows = conn.execute(sql, [*names, whitespace, whitespace]).fetchall()
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
             return None
-        try:
-            if not self._schema_is_current(conn):
-                return None
-            rows = conn.execute(sql, [*names, whitespace, whitespace]).fetchall()
-        except sqlite3.Error as error:
-            self._note_query_failure(error, "lexical tag-usage probe declined (%s)")
-            return None
-        finally:
-            conn.close()
         spellings: dict[str, int] = {}
         forms: dict[str, int] = {}
         for kind, value, count in rows:

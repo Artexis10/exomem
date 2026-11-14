@@ -107,7 +107,7 @@ def parse_frame_ts(name: str) -> float | None:
     return int(m.group(2)) / 1000.0
 
 
-def _stored_frames_folder(vault_root: Path, frames: Path) -> str | None:
+def stored_frames_folder(vault_root: Path, frames: Path) -> str | None:
     """The vault-relative frames folder when a store-mode vault owns it, else None (file mode)."""
     from .vault_store import mode, ownership
 
@@ -135,21 +135,13 @@ def _clear_in_store(vault_root: Path, frames: Path, frames_rel: str) -> int:
 
     if store_media.off_store_thread(vault_root):
         return store_media.on_store_thread(
-            vault_root, lambda: _clear_in_store(vault_root, frames, frames_rel)
+            vault_root,
+            lambda: _clear_in_store(vault_root, frames, frames_rel),
+            operation="vault_store_clear_scene_frames",
         )
     writer = availability.page_writer(vault_root)
-    prefix = f"{frames_rel}/"
     with read.snapshot(vault_root) as view:
-        sidecars = [
-            meta.path
-            for meta in view.pages(prefix)
-            if parse_frame_ts(meta.path[len(prefix):].removesuffix(".md")) is not None
-        ]
-        recorded = {
-            meta.path
-            for meta in view.binaries(prefix)
-            if parse_frame_ts(meta.path[len(prefix):]) is not None
-        }
+        sidecars, recorded = _stored_frames(view, frames_rel)
     unlinked: list[str] = []
     if frames.is_dir():
         for jpg in sorted(frames.iterdir()):
@@ -176,6 +168,23 @@ def _clear_in_store(vault_root: Path, frames: Path, frames_rel: str) -> int:
     return len(unlinked) + len(sidecars)
 
 
+def _stored_frames(view, frames_rel: str) -> tuple[list[str], set[str]]:
+    """The frame sidecar pages that the store holds below ``frames_rel``, and the frame JPEGs that
+    it records there, from two range reads of ``view``."""
+    prefix = f"{frames_rel}/"
+    sidecars = [
+        meta.path
+        for meta in view.pages(prefix)
+        if parse_frame_ts(meta.path[len(prefix):].removesuffix(".md")) is not None
+    ]
+    recorded = {
+        meta.path
+        for meta in view.binaries(prefix)
+        if parse_frame_ts(meta.path[len(prefix):]) is not None
+    }
+    return sidecars, recorded
+
+
 def _on_disk(frames: Path) -> set[str]:
     """The names of the entries still in a frames folder."""
     try:
@@ -192,7 +201,7 @@ def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
     embedding index so stale rows don't linger. Returns the number of files removed.
     """
     d = frames_dir_for(video_path)
-    frames_rel = _stored_frames_folder(vault_root, d)
+    frames_rel = stored_frames_folder(vault_root, d)
     if frames_rel is not None:
         return _clear_in_store(vault_root, d, frames_rel)
     if not d.is_dir():
@@ -231,6 +240,14 @@ def list_scene_frame_children(vault_root: Path, video_path: Path) -> list[str]:
     (empty list) when no `.frames/` directory exists.
     """
     d = frames_dir_for(video_path)
+    frames_rel = stored_frames_folder(vault_root, d)
+    if frames_rel is not None:
+        # The store holds each sidecar page and records each JPEG; the folder on disk may trail it.
+        from .vault_store import read
+
+        with read.snapshot(vault_root) as view:
+            sidecars, recorded = _stored_frames(view, frames_rel)
+        return sorted({*sidecars, *recorded})
     if not d.is_dir():
         return []
     out: list[str] = []
@@ -361,7 +378,7 @@ def write_scene_frames(
 
     if store_media.off_store_thread(vault_root):
         # A store-mode vault commits the frames and their sidecars on the store thread, as the
-        # media sidecar commit does; the caller's mutation guard stays held across the hop.
+        # media sidecar commit does, inside the vault boundary that the store thread takes.
         return store_media.on_store_thread(
             vault_root,
             lambda: write_scene_frames(
@@ -371,6 +388,7 @@ def write_scene_frames(
                 parent_clip_samples=parent_clip_samples,
                 today=today,
             ),
+            operation="background_media_scene_frame_commit",
         )
     root = Path(os.path.abspath(vault_root))
     try:

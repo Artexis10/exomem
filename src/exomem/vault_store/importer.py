@@ -35,7 +35,7 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -62,6 +62,10 @@ CHANGED_WHILE_READ = "the file changed after it was read"
 #: What ``ImportReport.unjudged`` says of a missing binary when the media store cannot say whether
 #: it evicted it: the record stays until a later sweep can tell.
 MEDIA_STORE_UNREADABLE = "the media store could not say whether this original was evicted"
+
+#: What ``ImportReport.unjudged`` says of a path whose commit met a busy vault boundary: ordinary
+#: contention, which the next event or sweep settles.
+BOUNDARY_BUSY = "the vault boundary was busy; the next event or sweep settles it"
 
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
@@ -103,6 +107,13 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
     binary's hold keeps no bytes, so it settles nothing.
     """
     page = ownership.classify(facts.path) is ownership.Ownership.PAGE
+    if not page and facts.moves_away and not facts.held:
+        # The file at a queued binary move's source is the projector's to move: the writer renames
+        # it after the commit, so a sweep between the two must not record it here again. The
+        # projector moves only the bytes that the move recorded and drops the intent otherwise,
+        # and the next sweep judges the file then. A missing file at the move's new path is OWN
+        # below, for the same reason, because its intent is queued.
+        return Verdict.OWN
     if disk is None:
         # A removal that Exomem queued or made, whose manifest write a kill lost, is not an outside
         # delete: ``removed`` is the audit trail's own word for it. A page that the store dropped
@@ -193,7 +204,9 @@ class Importer:
 
     def __init__(self, vault_root: Path, *, run: Runner | None = None) -> None:
         self._root = Path(vault_root)
-        self._run = run or projector.store_thread_runner(self._root)
+        self._run = run or projector.store_thread_runner(
+            self._root, operation="vault_store_import"
+        )
         # One settle at a time: two that overlap could each commit bytes that the other has since
         # replaced. The store thread never takes this lock, so a settle that waits on it cannot
         # deadlock with the job that it waits for.
@@ -426,17 +439,42 @@ class Importer:
     ) -> list[_Rename]:
         """Commit each rename; return the ones that the store refused."""
         refused: list[_Rename] = []
-        for chunk in _chunks(renames, APPLY_BATCH):
 
-            def work(writer: CollectionWriter, chunk: list[_Rename] = chunk) -> None:
-                for rename in chunk:
-                    if self._commit_rename(writer, filesystem, rename):
-                        report.moved[rename.dst] = rename.src
-                    else:
-                        refused.append(rename)
+        def settle(writer: CollectionWriter, rename: _Rename) -> None:
+            if self._commit_rename(writer, filesystem, rename):
+                report.moved[rename.dst] = rename.src
+            else:
+                refused.append(rename)
 
-            self._run(work)
+        for rename in self._in_holds(renames, settle):
+            # Neither half was settled; both stay for the next event or sweep, as one rename.
+            report.unjudged[rename.src] = report.unjudged[rename.dst] = BOUNDARY_BUSY
         return refused
+
+    def _in_holds(
+        self, units: list[_Item], settle: Callable[[CollectionWriter, _Item], None]
+    ) -> list[_Item]:
+        """Settle each unit on the store thread, as many to one hold of the vault boundary as
+        ``projector.HOLD_BUDGET_SECONDS`` allows; return the units that a busy boundary left."""
+        left = list(units)
+        while left:
+            settled = 0
+
+            def work(writer: CollectionWriter, batch: list[_Item] = left) -> None:
+                nonlocal settled
+                began = time.monotonic()
+                for unit in batch:
+                    settle(writer, unit)
+                    settled += 1
+                    if time.monotonic() - began >= projector.HOLD_BUDGET_SECONDS:
+                        return
+
+            try:
+                self._run(work)
+            except projector.BoundaryBusy:
+                return left
+            left = left[settled:]
+        return []
 
     def _commit_rename(
         self, writer: CollectionWriter, filesystem: held_fs.HeldFilesystem, rename: _Rename
@@ -493,12 +531,11 @@ class Importer:
         units: list[tuple[str, OnDisk | None]],
         report: ImportReport,
     ) -> None:
-        def work(writer: CollectionWriter) -> None:
-            for rel, disk in units:
-                self._settle_one(writer, filesystem, rel, disk, report)
+        def settle(writer: CollectionWriter, unit: tuple[str, OnDisk | None]) -> None:
+            self._settle_one(writer, filesystem, *unit, report)
 
-        if units:
-            self._run(work)
+        for rel, _disk in self._in_holds(units, settle):
+            report.unjudged[rel] = BOUNDARY_BUSY
 
     def _settle_one(
         self,
@@ -711,6 +748,11 @@ class Importer:
 
         try:
             self._run(work)
+        except projector.BoundaryBusy:
+            # Remembered again, so the next settle refreshes them.
+            for rel in rels:
+                self._note_refresh(rel, noted[rel])
+                report.unjudged[rel] = BOUNDARY_BUSY
         except OpError as refusal:
             if len(rels) > 1:
                 # A refusal names no path: ask for each, so one bad path holds back no other.
@@ -781,9 +823,12 @@ class Importer:
         """
         with read.snapshot(self._root) as view:
             rows = view.connection.execute(_RECORDED_HASHES).fetchall()
+            held = frozenset(
+                row[0] for row in view.connection.execute("SELECT path FROM store_pages")
+            )
         judged: set[str] = set()
         for rel, content_hash in rows:
-            if self._owned_or_not_markdown(rel):
+            if self._owned_or_not_markdown(rel, held):
                 continue
             judged.add(rel)
             disk = self._observe(filesystem, rel, report)
@@ -796,7 +841,7 @@ class Importer:
         report.corpus_files = len(corpus)
         walked = [vault.relative_posix(path, self._root) for path in corpus]
         for rel in (*walked, *self._layer_pages()):
-            if rel in judged or self._owned_or_not_markdown(rel):
+            if rel in judged or self._owned_or_not_markdown(rel, held):
                 continue
             judged.add(rel)  # both walks reach a layer page that the corpus holds
             disk = self._observe(filesystem, rel, report)
@@ -825,7 +870,10 @@ class Importer:
                     (read.UNOWNED_SWEEP, json.dumps(record, sort_keys=True)),
                 )
 
-        self._run(work)
+        try:
+            self._run(work)
+        except projector.BoundaryBusy:
+            pass  # The previous record stands; it is still the oldest any unowned row can be.
 
     def _layer_pages(self) -> list[str]:
         """The pages of the collection layers that the reference scan reads, by a walk of each layer."""
@@ -838,10 +886,14 @@ class Importer:
         return sorted(found)
 
     @staticmethod
-    def _owned_or_not_markdown(rel: str) -> bool:
-        return ownership.classify(rel) is not ownership.Ownership.NONE or not ownership.is_markdown(
-            rel
-        )
+    def _owned_or_not_markdown(rel: str, held: frozenset[str]) -> bool:
+        """Whether the store owns ``rel``, so the disk is not the source of its rows.
+
+        Held means a ``store_pages`` row, not a ``PAGE`` spelling: a file at a page path that the
+        store holds no row for is a file the disk still owns, and the sweep judges it like any
+        unowned file so its derived rows track its bytes.
+        """
+        return rel in held or not ownership.is_markdown(rel)
 
     def _check_unowned(
         self, rel: str, disk: OnDisk | None, content_hash: str | None, report: ImportReport

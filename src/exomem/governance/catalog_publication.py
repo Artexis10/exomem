@@ -300,9 +300,11 @@ def mutation_from_planned_write(
             raise CatalogPublicationError(
                 "catalog publication guard does not bind its Markdown target"
             )
-        if guard.leaf_policy == "absent":
+        if guard.expects_absence:
             guarded_expected = None
-        elif guard.leaf_policy == "content":
+        elif guard.binds_bytes:
+            # PathGuard's leaf policies are a closed set; a stored page's guard binds its stored
+            # hash, or its absence by None, as a file's content guard binds the file's.
             guarded_expected = guard.expected_content_hash
         else:
             guarded_expected = expected

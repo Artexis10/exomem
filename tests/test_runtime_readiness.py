@@ -396,7 +396,7 @@ def test_runtime_readiness_measures_the_configured_vault(
         }
 
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
-    monkeypatch.setattr(writer_lease, "coordination_status", fake_coordination_status)
+    monkeypatch.setattr(writer_lease, "_coordination_readiness_status", fake_coordination_status)
     monkeypatch.setattr(
         readiness,
         "retrieval_admission",
@@ -446,7 +446,7 @@ def _block_coordination_status(
         }
 
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
-    monkeypatch.setattr(writer_lease, "coordination_status", blocked_coordination_status)
+    monkeypatch.setattr(writer_lease, "_coordination_readiness_status", blocked_coordination_status)
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
     monkeypatch.setattr(
@@ -574,7 +574,7 @@ def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
     """A normal large-vault snapshot must not trip the fail-fast ceiling.
 
     The 2.4k-note Windows service takes about 0.27 seconds to read the mutation
-    boundary and graph epoch under memory pressure.  The former 0.25-second
+    boundary under memory pressure. The former 0.25-second
     ceiling therefore alternated 503 and 200 as each late result was reused by
     the following probe.  Preserve sub-second failure for a genuinely blocked
     snapshot while leaving measured steady-state work enough headroom.
@@ -595,7 +595,7 @@ def test_runtime_readiness_admits_a_slow_but_bounded_real_vault_snapshot(
         }
 
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
-    monkeypatch.setattr(writer_lease, "coordination_status", slow_coordination_status)
+    monkeypatch.setattr(writer_lease, "_coordination_readiness_status", slow_coordination_status)
     monkeypatch.setattr(session_validation_cache, "session_store_readiness", lambda: {})
     monkeypatch.setattr(readiness_module, "_measure_observability", lambda: {})
     monkeypatch.setattr(

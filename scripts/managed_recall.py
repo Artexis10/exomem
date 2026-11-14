@@ -23,7 +23,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from exomem import lexstore, readiness  # noqa: E402
+from exomem import readiness  # noqa: E402
 
 
 def enter_managed_recall(
@@ -49,6 +49,7 @@ def enter_managed_recall(
 
     Installed write acceptance requests `full_startup` to run the product's
     complete startup, including graph handoff and writer resolver priming.
+    Managed warmup owns catalogue proof and repair through its existing repair worker.
 
     `EXOMEM_EAGER_BOOT` is set for the call because a benchmark needs the
     synchronous contract: without it, an incomplete catalogue is delegated to
@@ -65,7 +66,6 @@ def enter_managed_recall(
     """
     from exomem import warmup
 
-    lexstore.ensure_fresh(vault_root)
     readiness.manage_runtime()
     previous_eager = os.environ.get("EXOMEM_EAGER_BOOT")
     os.environ["EXOMEM_EAGER_BOOT"] = "1"

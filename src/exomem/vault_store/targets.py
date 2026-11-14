@@ -71,98 +71,50 @@ class InboundCheck(NamedTuple):
 
 
 def inbound_links(vault_root: Path, rels: Iterable[str]) -> dict[str, InboundCheck]:
-    """The links to each stored page in ``rels``, from the store and from the files, each counted
-    once.
+    """The links to each stored page in ``rels``: the store's inbound rows, then each file that the
+    store holds no rows for, read off the disk.
 
-    Neither source sees the whole vault. The graph rows are derived in each commit, so they name
-    the linking pages as of the current revision, including a page that has no file yet; they hold
-    nothing for a note that nothing has imported. The file index finds a note outside the store's
-    pages, as file mode does, and misses a page that has no file. A page that the store holds is
-    read from the store, and its file is only a projection, which may trail it. A graph source with
-    no stored page comes from the index or, failing that, is reported at line 0 (a link by title or
-    alias), never dropped. A file in the Knowledge Base that the store holds no page for is read
-    off the disk, because the index reads it through the store and skips it; a bare ``[[name]]``
-    in it counts even when another page shares the name. A file that a queued delete has not
-    removed yet counts until the projector catches up. Each wrong count costs one ``force_orphan``.
-    ``bound`` is every graph source: the commit refuses a source outside it.
-
-    A folder's pages share one walk of the disk, one read of the file index and one read of the
-    graph rows, so the cost grows with the links and not with the pages times the vault.
-
-    The graph keeps no edge to a binary, which is no page. A binary's linking pages are the stored
-    pages whose recorded link targets name it (``epistemic_graph.dependent_paths``), each read
-    once; ``bound`` holds no source for it, so its commit binds no link gained after this read.
+    The rows answer for every page that the store holds and every file that the importer's sweep
+    reached, as of the snapshot, by the file index's own rule (``vault.store_inbound_wikilinks``),
+    with line and context: a page that has no file yet counts, and a file that a queued delete has
+    not removed yet does not. A file with no rows (a note that nothing has imported or swept yet)
+    is read off the disk, and a bare ``[[name]]`` in it counts even when another page shares the
+    name. Such a note outside what the store owns counts as a link; one in the Knowledge Base goes
+    to ``unimported``. Each wrong count costs one ``force_orphan``. ``bound`` is every page that
+    the rows name: the commit binds the same rule (``write.check``) and refuses a link from a page
+    outside it. A folder's pages share one read of the rows and one walk of the disk, so the cost
+    grows with the links and not with the pages times the vault.
     """
-    from .. import epistemic_graph
-
     root = Path(vault_root)
     targets = list(dict.fromkeys(rels))
-    files = [rel for rel in targets if ownership.classify(rel) is not ownership.Ownership.PAGE]
     # A form names the pages that a link in that form reaches: two pages may share a basename.
     reached: dict[str, set[str]] = {}
     for rel in targets:
         for form in vault._inbound_target_forms(rel)[1:]:
             reached.setdefault(form, set()).add(rel)
-
-    def matching(source: str, text: str) -> dict[str, list[vault.InboundLink]]:
-        found: dict[str, list[vault.InboundLink]] = {}
-        for line, context, raw in vault._scan_wikilinks(text):
-            for rel in reached.get(vault._inbound_bucket_key(raw), ()):
-                if rel != source:
-                    found.setdefault(rel, []).append(vault.InboundLink(source, line, context, raw))
-        return found
-
-    # A stored page may have no file yet, and the index reads a bare `[[name]]` by counting files.
-    on_disk = vault.find_inbound_wikilinks_many(root, targets, held=True)
-    links: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     unimported: dict[str, list[vault.InboundLink]] = {rel: [] for rel in targets}
     with read.snapshot(root) as view:
-        sources = view.inbound_sources_many(targets)
-        naming = (
-            epistemic_graph.dependent_paths(view.connection, files, ()) if files else set()
-        )
-        # One chunk of linking pages' bodies at a time: a folder's linkers may be thousands.
-        linkers = sorted(set().union(*sources.values()) | naming)
-        found_in: dict[str, dict[str, list[vault.InboundLink]]] = {}
-        for start in range(0, len(linkers), read.KEYS_PER_QUERY):
-            for source, body in view.bodies(linkers[start : start + read.KEYS_PER_QUERY]).items():
-                found_in[source] = matching(source, body.decode("utf-8", errors="replace"))
-        for rel in targets:
-            for source in sorted(sources[rel] & found_in.keys()):
-                links[rel].extend(
-                    found_in[source].get(rel) or [vault.InboundLink(source, 0, "", "")]
-                )
-        for rel in files:
-            for source in sorted(naming & found_in.keys()):
-                links[rel].extend(found_in[source].get(rel, ()))
-        indexed = view.held_pages(link.path for found in on_disk.values() for link in found)
-        for rel, found in on_disk.items():
-            links[rel].extend(link for link in found if link.path not in indexed)
-        candidates: dict[str, Path] = {}
-        for path in vault.walk_vault_md(root):
-            source = vault.relative_posix(path, root)
-            if ownership.classify(source) is ownership.Ownership.PAGE:
-                candidates[source] = path
-        stored = view.held_pages(candidates)
+        links = vault.store_inbound_wikilinks(view.connection, targets)
+        candidates = {vault.relative_posix(path, root): path for path in vault.walk_vault_md(root)}
+        derived = vault.store_inbound_sources(view.connection, candidates)
+    bound = {rel: frozenset(link.path for link in links[rel]) for rel in targets}
     for source, path in candidates.items():
-        if source in stored:
+        if source in derived:
             continue
+        owned = ownership.classify(source) is ownership.Ownership.PAGE
         try:
             # The descriptor read refuses a symlink, which a file swapped after the walk could be;
             # `read_guarded_text` would look for the file in the store instead.
             raw, _guard = vault._read_bounded_guarded_snapshot(root, source, path.lstat().st_size)
         except (OSError, vault.PathGuardError):
             continue
-        for rel, found in matching(source, raw.decode("utf-8", errors="replace")).items():
-            unimported[rel].extend(found)
-    checks: dict[str, InboundCheck] = {}
-    for rel in targets:
-        shown = {link.path for link in links[rel]}
-        links[rel].extend(
-            vault.InboundLink(source, 0, "", "") for source in sorted(sources[rel] - shown)
-        )
-        checks[rel] = InboundCheck(links[rel], unimported[rel], sources[rel])
-    return checks
+        for line, context, target in vault._scan_wikilinks(raw.decode("utf-8", errors="replace")):
+            for rel in reached.get(vault._inbound_bucket_key(target), ()):
+                if rel != source:
+                    (unimported if owned else links)[rel].append(
+                        vault.InboundLink(source, line, context, target)
+                    )
+    return {rel: InboundCheck(links[rel], unimported[rel], bound[rel]) for rel in targets}
 
 
 def visible_links(
@@ -200,24 +152,11 @@ def caller_is_owner(vault_root: Path) -> bool:
 
 
 #: The reasons a store form refuses, each named once for the page and the folder forms.
-_GOVERNED = "a governance policy is declared, and its tombstones and receipts go to files"
 _LINKED = "the folder holds a symbolic link, which a folder write does not follow; remove it"
 _NOT_HELD = (
     "the folder holds a Markdown file that the store holds no page for, and moving the folder "
     "would leave it behind; retry once the store has imported or removed it"
 )
-
-
-def governed_gap(vault_root: Path) -> str | None:
-    """Why a store-mode vault cannot delete, move or recover a file yet, or None when it can.
-
-    A vault that declares a governance policy writes tombstones and receipts around a lifecycle
-    write, which the store form does not carry yet, so the writer refuses before it changes
-    anything.
-    """
-    from ..governance import lifecycle
-
-    return _GOVERNED if lifecycle.policy_governs_anything(vault_root) else None
 
 
 def evicted_original(vault_root: Path, rel: str):
@@ -337,52 +276,61 @@ def _gone_reason(vault_root: Path, gone: list[str]) -> str:
     )
 
 
-def active_catalog_gap(
+def prepare_catalog(
     vault_root: Path,
-    operation: str,
     *,
     error_class: Callable[..., Exception],
     writes: tuple[vault.PlannedWrite, ...] = (),
     removals: tuple = (),
     content_paths: tuple[str, ...] = (),
-) -> None:
-    """Refuse a store-mode lifecycle write while the vault's catalog publication is active.
+    graph_replacement_provider: Callable[[], tuple] | None = None,
+    part_folders: Mapping[str, str] | None = None,
+) -> object | None:
+    """The catalog publication that a store-mode lifecycle write must publish after its commit, or
+    None when the vault publishes none (design D8).
 
-    The catalog publishes a removal or a write in files after the change commits, and the store has
-    no form for them, so a change that committed would leave the catalog naming pages that moved.
-    It prevents that, and a wrong refusal costs a rollback of store mode. It is the same call that
-    file mode makes before it changes anything, with no log or graph writes: they matter only to a
-    publication that the store never carries, and an enrolled vault is refused with or without them.
-    ``error_class`` is the writer's own error, raised with the catalog's code when it cannot tell.
+    It is the preparation that file mode makes before it changes anything, with the same writes
+    and removals, so the catalog names exactly what the commit holds. It reads only the bytes that
+    it is given and the governance stores. The writer prepares it before its validation returns,
+    commits, then publishes it with ``publish_catalog``. A catalog that cannot take the change
+    raises ``error_class`` with GOVERNANCE_CATALOG_PUBLICATION_BLOCKED before anything changes.
     """
     from ..governance import catalog_publication
 
     try:
-        target = catalog_publication.prepare_catalog_membership_batch(
+        return catalog_publication.prepare_catalog_membership_batch(
             vault_root,
             writes=writes,
             removals=removals,
             content_paths=content_paths,
+            graph_replacement_provider=graph_replacement_provider,
             now=int(time.time()),
+            part_folders=part_folders or {},
         )
     except catalog_publication.CatalogPublicationError as error:
         raise error_class(
             code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", reason=str(error)
         ) from error
-    if target is not None:
-        raise availability.unrouted(
-            operation, "the vault's active catalog publication has no store form"
-        )
 
 
-def refuse_in_store_mode(vault_root: Path, operation: str, why: str) -> None:
-    """Refuse ``operation`` while the vault is in store mode, for a writer whose paths are pages.
+def publish_catalog(target: object | None, *, error_class: Callable[..., Exception], what: str) -> None:
+    """Publish a prepared catalog after the commit that it names, as file mode does.
 
-    It is the form for a writer that has no path to test with ``owns_any`` before it starts, so it
-    costs a rollback to run that writer on files.
+    The commit is durable, so a publication that fails raises ``error_class`` with
+    GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN; reconcile's catalog acknowledgement repairs it.
+    ``what`` names the committed change in that error ("the file was trashed").
     """
-    if mode.store_mode_active(vault_root):
-        raise availability.unrouted(operation, why)
+    from ..governance import catalog_publication
+
+    if target is None:
+        return
+    try:
+        catalog_publication.publish_markdown_batch(target)
+    except Exception as error:  # noqa: BLE001 - the canonical change already committed
+        raise error_class(
+            code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+            reason=f"{what} but its active catalog publication did not reach a verified terminal",
+        ) from error
 
 
 def relative(vault_root: Path, path: str) -> str:

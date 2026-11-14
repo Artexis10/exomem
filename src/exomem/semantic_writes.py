@@ -2609,8 +2609,8 @@ def _commit_existing_locked(
         if admission is not None:
             if not admission(relation_review.lifecycle_prepared_path(root, preflight.after.identity).relative_to(root).as_posix()):
                 raise ValueError("WRITE_REFUSED: target is unavailable")
-            if publication_entered:
-                # The completion seam binds the after image, never the replaced before guard.
+            if publication_entered and preflight.primary_guard.leaf_policy != "store":
+                # Files publish before this call; the store publishes every after-image atomically later.
                 source, _ = vault.read_guarded_text(root, root / preflight.path)
                 if vault.content_hash(source) != vault.content_hash(preflight.after_source):
                     raise ValueError("WRITE_REFUSED: target is unavailable")
@@ -3629,23 +3629,6 @@ def _move_evaluation_pairs(
     return tuple((pairs[path], path) for path in sorted(pairs))
 
 
-def _binds_bytes(guard: vault.PathGuard | None, sha256: str | None) -> bool:
-    """Whether ``guard`` binds the exact bytes with this hash, on disk or in the store."""
-    return (
-        guard is not None
-        and guard.leaf_policy in ("content", "store")
-        and guard.expected_content_hash is not None
-        and (sha256 is None or guard.expected_content_hash == sha256)
-    )
-
-
-def _binds_absence(guard: vault.PathGuard) -> bool:
-    """Whether ``guard`` binds an absent path, on disk or in the store."""
-    return guard.leaf_policy == "absent" or (
-        guard.leaf_policy == "store" and guard.expected_content_hash is None
-    )
-
-
 def preflight_move(
     vault_root: Path,
     *,
@@ -3672,9 +3655,10 @@ def preflight_move(
     rewrite_tuple = tuple(rewrites)
     if (
         source_guard.target != old_path
-        or not _binds_bytes(source_guard, vault.content_hash(source))
+        or not source_guard.binds_bytes
+        or source_guard.expected_content_hash != vault.content_hash(source)
         or destination_guard.target != new_path
-        or not _binds_absence(destination_guard)
+        or not destination_guard.expects_absence
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -3692,7 +3676,7 @@ def preflight_move(
             else "moved source is not the exact declared derivation of the move",
         )
     for write in rewrite_tuple:
-        if not _binds_bytes(write.guard, None):
+        if not (write.guard is not None and write.guard.binds_bytes):
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "move rewrite is not bound to exact source bytes",
@@ -4079,7 +4063,7 @@ def preflight_recovery(
             "recovery contains duplicate restore paths",
         )
     root_destination = destination_root_guard or bound_entries[0].destination_guard
-    if not _binds_absence(root_destination):
+    if not root_destination.expects_absence:
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
             "recovery root destination guard must bind absence",
@@ -4088,10 +4072,11 @@ def preflight_recovery(
     for item in bound_entries:
         if (
             item.source_guard.target != item.trash_path
-            or not _binds_bytes(item.source_guard, vault.content_hash(item.source))
+            or not item.source_guard.binds_bytes
+            or item.source_guard.expected_content_hash != vault.content_hash(item.source)
             or item.destination_guard.target != item.restore_path
-            or not _binds_absence(item.destination_guard)
-            or (item.sidecar_guard is not None and not _binds_bytes(item.sidecar_guard, None))
+            or not item.destination_guard.expects_absence
+            or (item.sidecar_guard is not None and not item.sidecar_guard.binds_bytes)
             or (item.sidecar_guard is None) != (item.sidecar_source is None)
             or (
                 item.restore_path != root_destination.target
@@ -4394,13 +4379,79 @@ def _plan_recovery_lifecycle(
     return tuple(writes), tuple(guards), tuple(states)
 
 
+def prepare_recovery_catalog(
+    vault_root: Path,
+    preflight: RecoveryPreflight,
+    *,
+    lifecycle_writes: tuple[vault.PlannedWrite, ...] = (),
+    destination_guards: tuple[vault.PathGuard | None, ...] | None = None,
+) -> Any:
+    """The catalog publication that a recovery's commit publishes, or None when the vault has none.
+
+    ``commit_recovery`` prepares it after its rechecks, with the review slots it writes and the
+    guards that bind each restored page; a validation prepares the same batch without them, so a
+    recovery that validates is one whose catalog accepts it. A catalog that cannot take the change
+    raises GOVERNANCE_CATALOG_PUBLICATION_BLOCKED.
+    """
+    from . import extraction_parts
+    from .governance import catalog_publication, graph_producer
+
+    root = Path(vault_root)
+    guards = destination_guards or (None,) * len(preflight.entries)
+    catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
+    catalog_writes.extend(
+        vault.PlannedWrite(
+            root / item.restore_path,
+            item.source,
+            create_only=True,
+            guard=destination_guard,
+        )
+        for item, destination_guard in zip(preflight.entries, guards, strict=True)
+    )
+    semantic_states = {item.after.path: item.after for item in preflight.evaluations}
+
+    def graph_replacement_provider():
+        return graph_producer.replacements_for_semantic_transition(
+            root,
+            before_corpus=preflight.before_corpus,
+            after_corpus=preflight.after_corpus,
+            writes=tuple(catalog_writes),
+            semantic_states=semantic_states,
+        )
+
+    try:
+        return catalog_publication.prepare_catalog_membership_batch(
+            root,
+            writes=tuple(catalog_writes),
+            content_paths=preflight.catalog_content_paths,
+            graph_replacement_provider=graph_replacement_provider,
+            now=preflight.catalog_publication_now,
+            # A restored page's part pages leave Trash only after the catalog is ready.
+            part_folders={
+                item.restore_path: extraction_parts.folder_for(Path(item.trash_path)).as_posix()
+                for item in preflight.entries
+            },
+        )
+    except catalog_publication.CatalogPublicationError as error:
+        raise SemanticWriteError(
+            "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
+            str(error),
+        ) from error
+
+
 def commit_recovery(
     vault_root: Path,
     *,
     preflight: RecoveryPreflight,
     mutate: RecoveryMutation,
+    auxiliaries_in_mutate: bool = False,
 ) -> RecoveryCommit:
-    """Prepare lifecycle auxiliaries, then perform one exact restore mutation."""
+    """Prepare lifecycle auxiliaries, then perform one exact restore mutation.
+
+    ``auxiliaries_in_mutate`` says that ``mutate`` commits the catalog's auxiliary writes itself,
+    in the restore's own transaction, as a store-mode recovery commits its log entry; they are then
+    not written again after it.
+    """
     root = Path(vault_root)
     try:
         with vault.vault_creation_lock(root, "semantic-creation"):
@@ -4452,57 +4503,21 @@ def commit_recovery(
                     census_guard.recheck(root)
                 if preflight.recovery_sidecar_guard is not None:
                     preflight.recovery_sidecar_guard.recheck(root)
-            from . import extraction_parts
-            from .governance import catalog_publication, graph_producer
+            from .governance import catalog_publication
 
-            catalog_writes = [*lifecycle_writes, *preflight.catalog_auxiliary_writes]
-            catalog_writes.extend(
-                vault.PlannedWrite(
-                    root / item.restore_path,
-                    item.source,
-                    create_only=True,
-                    guard=destination_guard,
-                )
-                for item, destination_guard in zip(
-                    preflight.entries, destination_guards, strict=True
-                )
-            )
-            semantic_states = {item.after.path: item.after for item in preflight.evaluations}
             # The batch seam wants index states, not contract states, and it is
             # the only place a governed page in this batch can be named for
             # derived custody. Declare them on every batch this function owns.
             batch_semantic_states = {
-                path: semantic_index.from_semantic_page_state(state)
-                for path, state in semantic_states.items()
+                item.after.path: semantic_index.from_semantic_page_state(item.after)
+                for item in preflight.evaluations
             }
-
-            def graph_replacement_provider():
-                return graph_producer.replacements_for_semantic_transition(
-                    root,
-                    before_corpus=preflight.before_corpus,
-                    after_corpus=preflight.after_corpus,
-                    writes=tuple(catalog_writes),
-                    semantic_states=semantic_states,
-                )
-
-            try:
-                catalog_target = catalog_publication.prepare_catalog_membership_batch(
-                    root,
-                    writes=tuple(catalog_writes),
-                    content_paths=preflight.catalog_content_paths,
-                    graph_replacement_provider=graph_replacement_provider,
-                    now=preflight.catalog_publication_now,
-                    # A restored page's part pages leave Trash only after the catalog is ready.
-                    part_folders={
-                        item.restore_path: extraction_parts.folder_for(Path(item.trash_path)).as_posix()
-                        for item in preflight.entries
-                    },
-                )
-            except catalog_publication.CatalogPublicationError as error:
-                raise SemanticWriteError(
-                    "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
-                    str(error),
-                ) from error
+            catalog_target = prepare_recovery_catalog(
+                root,
+                preflight,
+                lifecycle_writes=lifecycle_writes,
+                destination_guards=destination_guards,
+            )
             if lifecycle_writes:
                 vault.batch_atomic_write(
                     lifecycle_writes,
@@ -4515,7 +4530,7 @@ def commit_recovery(
                 for destination_guard in destination_guards:
                     destination_guard.recheck(root)
             mutate()
-            if catalog_target is not None:
+            if catalog_target is not None and not auxiliaries_in_mutate:
                 if preflight.catalog_auxiliary_writes:
                     vault.batch_atomic_write(
                         preflight.catalog_auxiliary_writes,

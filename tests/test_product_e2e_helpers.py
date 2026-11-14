@@ -3,6 +3,7 @@ import importlib.util
 import json
 import socket
 import subprocess
+import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,8 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "e2e_product_loop.py"
 SPEC = importlib.util.spec_from_file_location("e2e_product_loop_under_test", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 e2e_product_loop = importlib.util.module_from_spec(SPEC)
+# Registered before it runs: a dataclass with string annotations looks its module up by name.
+sys.modules[SPEC.name] = e2e_product_loop
 SPEC.loader.exec_module(e2e_product_loop)
 
 

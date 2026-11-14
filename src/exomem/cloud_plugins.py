@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import tomllib
@@ -31,6 +32,13 @@ _CLAUDE_DIRECTORY_SUFFIXES = frozenset(
     (".md", ".txt", ".json", ".yaml", ".yml", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 )
 _CLAUDE_DIRECTORY_NAMES = frozenset(("LICENSE", ".gitignore"))
+# An installer prefix immediately naming the package unpinned (`uvx exomem`,
+# `pip install exomem`) or a floating tag resolves a mutable source at run time;
+# the reviewer's "untrusted or mutable" finding covers both. Only the pinned
+# spellings `exomem@<release>` and `exomem==<release>` admit the suffix.
+_MUTABLE_EXOMEM_INSTALL = re.compile(
+    r"exomem@latest|(?:uvx?|pipx?|pip3?)\s+(?:(?:tool\s+)?install\s+)?[\"']?exomem\b(?![\w=@-])"
+)  # nosemgrep: ep-word-search, ep-lexical-intent -- closed set of pip/uv installer names for a submission lint, not a vocabulary.
 
 
 def _definition(root: Path) -> dict:
@@ -96,6 +104,14 @@ def _validate_openai(root: Path, package: Path) -> None:
         raise ValueError("OpenAI public submission does not support lifecycle hooks")
     if any(declares(manifest, "apps") for manifest in manifests) or any(package.rglob(".app.json")):
         raise ValueError("OpenAI public submission does not support app references")
+    for document in package.rglob("*.md"):
+        if _MUTABLE_EXOMEM_INSTALL.search(
+            document.read_text(encoding="utf-8", errors="replace")
+        ):
+            raise ValueError(
+                "OpenAI public submission must not install code from a mutable source: "
+                + document.relative_to(package).as_posix()
+            )
     for stem, filename in (("plugin", "plugin.json"), ("mcp", "mcp.json")):
         schema = json.loads(
             (root / "plugins/cloud/schemas" / f"{stem}.schema.json").read_text(encoding="utf-8")

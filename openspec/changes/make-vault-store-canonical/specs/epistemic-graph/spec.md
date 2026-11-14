@@ -22,3 +22,11 @@ The system SHALL maintain rebuildable SQLite graph rows derived from page bytes,
 - **WHEN** an operator rebuilds the graph rows of a store-mode vault
 - **THEN** the rebuild derives them from the store's page bytes
 - **AND** the result equals the rows the writes committed, apart from write-time and write-order columns
+
+#### Scenario: Restricted store reads retain scalar admission parity
+- **WHEN** a restricted caller reads a stored graph after a commit, on process start or during an owner pass
+- **THEN** batch admission equals scalar admission for selectors, exclusions, purposes, grants, connector ceilings and tombstones
+- **AND** container, bridge, RAW, unknown-fact and unnameable-caller cases retain the scalar chain
+- **AND** ordinary pages use versioned selector facts bound to the same snapshot's canonical page hash
+- **AND** a withheld homonym changes link resolution exactly as the corpus-wide scalar algorithm does
+- **AND** file-mode answers remain unchanged

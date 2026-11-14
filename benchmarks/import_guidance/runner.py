@@ -294,6 +294,7 @@ def run_once(
     run: Runner = _subprocess_runner,
     arm: Arm | None = None,
     recorded: Path | None = None,
+    activation_packet: str | None = None,
 ) -> dict:
     """One run. `stamp` adds fields to the row (`run_all` gives the repo SHA and the CLI version).
     `arm` and `recorded` (that arm's recording of this scenario) show the agent the arm's own tool text,
@@ -350,6 +351,7 @@ def run_once(
         "repeat": repeat,
         "model": model,
         "judge_model": judge_model,
+        **({"activation_packet": activation_packet} if activation_packet is not None else {}),
         **({"arm": arm.label, "product_sha": recording_data.get("product_sha")} if arm else {}),
         **text_under_test(scenario, root),
         **(stamp or {}),
@@ -487,6 +489,7 @@ def run_all(
     out: Path,
     arms: Sequence[Arm] = (),
     repeat_offset: int = 0,
+    activation_packet: str | None = None,
 ) -> list[dict]:
     """Every scenario `repeats` times, numbered from `repeat_offset` so a later call adds repeats to the same
     folder without reusing a number. With `arms`, each repeat runs the arms one after the other, so a slow
@@ -501,7 +504,7 @@ def run_all(
         for scenario in scenarios:
             if scenario.record:
                 target = out / "shapes" / arm.label / f"{scenario.id}.json"
-                problems = recording.record(scenario, arm, target, out / "scratch" / arm.label)
+                problems = recording.record(scenario, arm, target, out / "scratch" / arm.label, activation_packet=activation_packet)
                 if problems:
                     raise SystemExit("; ".join(problems))
                 recorded[(arm.label, scenario.id)] = target
@@ -521,6 +524,7 @@ def run_all(
                         stamp=stamp,
                         arm=arm,
                         recorded=recorded.get((arm.label, scenario.id)) if arm else None,
+                        activation_packet=activation_packet,
                     )
                     sink.write(json.dumps(row) + "\n")
                     sink.flush()
@@ -563,7 +567,7 @@ async def _list_and_call(
     return listed, reply
 
 
-def dry_run(scenario: Scenario, scratch: Path, arm: Arm | None = None) -> list[str]:
+def dry_run(scenario: Scenario, scratch: Path, arm: Arm | None = None, activation_packet: str | None = None) -> list[str]:
     """Problems found; empty when the scenario file, the served tool list and the logging all hold.
     With an `arm` it also makes the scenario's real calls on that checkout (`recording.py`) and checks that every
     named reply was recorded, every answer check has something to look for, and the server shows the arm's tool text."""
@@ -601,7 +605,7 @@ def dry_run(scenario: Scenario, scratch: Path, arm: Arm | None = None) -> list[s
         env_extra["IG_PRODUCT_ROOT"] = str(root)
     if arm and scenario.record:
         target = scratch / f"{scenario.id}.{arm.label}.shapes.json"
-        problems = recording.record(scenario, arm, target, scratch / f"record-{arm.label}")
+        problems = recording.record(scenario, arm, target, scratch / f"record-{arm.label}", activation_packet=activation_packet)
         if problems:
             return problems
         recorded = recording.load_recording(target)

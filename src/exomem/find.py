@@ -1464,7 +1464,7 @@ def _with_catalog_scope(function):
 
     @wraps(function)
     def scoped(vault_root: Path, *args, **kwargs):
-        from . import lexstore, readiness
+        from . import lexstore, readiness, state_paths
         from .vault_store import read as store_read
 
         # A store-mode request reads one store revision: the parse cache, the corpus and the
@@ -1473,6 +1473,8 @@ def _with_catalog_scope(function):
             lexstore.admitted_catalog_scope(vault_root),
             store_read.request_snapshot(vault_root),
             lexstore.store_catalogue_scope(vault_root),
+            # Direct store readers pin the same host constants as dispatched read commands.
+            state_paths.resolution_scope() if lexstore.store_catalogue() else ExitStack(),
         ):
             if (
                 not _managed_reader() or not freshness.event_indexes_enabled()
@@ -2079,22 +2081,26 @@ def find(
         pending=pending,
     )
 
-    # Resolve the relation filter before any caching so a warming/disabled sidecar
-    # raises the typed outcome instead of being masked by a stale cache hit, and an
-    # unknown relation key is rejected up front. `relation_paths` is None when no
-    # filter is active, a (possibly empty, authoritative) participant set otherwise.
+    # File-mode sidecar freshness must precede caching. Store revisions already key the cache,
+    # so store-mode requests validate keys now and resolve participants only on a cache miss.
     relation_active = bool(relations or relation_of)
+    from .vault_store import mode as store_mode
+
+    deferred_relations = relation_active and store_mode.store_mode_for_reads(vault_root)
     # `_relation_findings` (deprecated-key advisories) is computed but not yet
     # surfaced to the response envelope — a documented follow-up; the deprecated
     # key still resolves and matches correctly.
-    relation_paths, relation_provenance, _relation_findings = _resolve_relation_filter(
-        vault_root,
-        relations=relations,
-        relation_of=relation_of,
-        relation_direction=relation_direction,
-        keep=admit_path,
-        snapshot=snapshot,
-    )
+    def _relations():
+        return _resolve_relation_filter(
+            vault_root, relations=relations, relation_of=relation_of,
+            relation_direction=relation_direction, keep=admit_path, snapshot=snapshot,
+        )
+
+    relation_paths, relation_provenance = None, {}
+    if deferred_relations:
+        _validate_store_relation_filter(vault_root, relations, relation_of, relation_direction)
+    else:
+        relation_paths, relation_provenance, _relation_findings = _relations()
 
     page_memo: dict[str, ParsedPage | None] = {}
     unit_reads = UnitParentReads()
@@ -2220,6 +2226,8 @@ def find(
                 # as unattributed remainder on every hot request.
                 with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
                     return copy.deepcopy(cached_hits)
+        if deferred_relations:
+            relation_paths, relation_provenance, _relation_findings = _relations()
         if _cache_probe:
             return _QueryPreparation(unit=not unit_algebra.definitely_empty, page=False)
         # The edges the groups' display reads, once one read has them, and the filter's own
@@ -2491,6 +2499,9 @@ def find(
                 _set_catalog_timing_profile(timings, cache_hit=True)
             with _span(timings, "cache_copy", source=find_types.SOURCE_CACHE):
                 return copy.deepcopy(cached_hits)
+
+    if deferred_relations:
+        relation_paths, relation_provenance, _relation_findings = _relations()
 
     # Track warm-window degradation even when the caller passed no list —
     # internal callers (suggest_links, evolution, note/add sweeps) must never
@@ -4868,6 +4879,53 @@ def _nearest_relation_keys(registry: object, raw: str, *, limit: int = 3) -> lis
     return difflib.get_close_matches(label, keys, n=limit, cutoff=0.4)
 
 
+def _validate_store_relation_filter(
+    root: Path, relations: list[str] | None, anchor: str | None, direction: str,
+) -> None:
+    """Validate the selected vocabulary without reading graph rows before a store cache hit."""
+    _validate_relation_direction(direction)
+    if not relations:
+        return
+    from . import epistemic_graph, semantic_index
+    from .governance import egress
+
+    anchor = epistemic_graph._page_rel(anchor) if anchor else None
+    if anchor and not egress.quick_page_visible(root, anchor):
+        return
+    interpretations = semantic_index.Interpretations(root)
+    page = _resolve_page(root, anchor) if anchor else None
+    if page is not None:
+        definitions = interpretations.definitions(anchor, page.frontmatter)
+        snapshots = definitions.snapshots if definitions is not None else None
+    else:
+        selected = interpretations.snapshots(None)
+        snapshots = selected["snapshots"] if selected is not None else None
+    if snapshots is None:
+        raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
+    _validate_relation_keys(snapshots["relations"].typed, relations)
+
+
+def _validate_relation_direction(direction: str) -> None:
+    if direction not in _RELATION_DIRECTIONS:
+        raise cli_ops.OpError(
+            "INVALID_RELATION_FILTER",
+            f"relation_direction must be one of {list(_RELATION_DIRECTIONS)}, "
+            f"got {direction!r}",
+        )
+
+
+def _validate_relation_keys(registry: Any, relations: list[str] | None) -> None:
+    for raw in relations or ():
+        resolution = registry.resolve(raw)
+        if resolution.canonical is None or resolution.status == "unregistered":
+            suggestions = _nearest_relation_keys(registry, raw)
+            raise cli_ops.OpError(
+                "INVALID_RELATION_FILTER",
+                f"unknown relation {raw!r}",
+                details={"relation": raw, "suggestions": suggestions, "candidates": suggestions},
+            )
+
+
 def _resolve_relation_filter(
     vault_root: Path,
     *,
@@ -4894,12 +4952,7 @@ def _resolve_relation_filter(
     """
     if not relations and not relation_of:
         return None, {}, ()
-    if relation_direction not in _RELATION_DIRECTIONS:
-        raise cli_ops.OpError(
-            "INVALID_RELATION_FILTER",
-            f"relation_direction must be one of {list(_RELATION_DIRECTIONS)}, "
-            f"got {relation_direction!r}",
-        )
+    _validate_relation_direction(relation_direction)
     from . import epistemic_graph, traversal_profiles
     from .governance import egress
 
@@ -4912,15 +4965,7 @@ def _resolve_relation_filter(
     registry = graph_index.relation_query_registry(anchor=relation_of)
     if registry is None:
         raise RetrievalIndexWarming(site="relation_graph", status="temporarily_unavailable")
-    for raw in relations or ():
-        resolution = registry.resolve(raw)
-        if resolution.canonical is None or resolution.status == "unregistered":
-            suggestions = _nearest_relation_keys(registry, raw)
-            raise cli_ops.OpError(
-                "INVALID_RELATION_FILTER",
-                f"unknown relation {raw!r}",
-                details={"relation": raw, "suggestions": suggestions, "candidates": suggestions},
-            )
+    _validate_relation_keys(registry, relations)
     plan = traversal_profiles.relation_query_plan(registry, relations or [])
     view = egress.edge_view(vault_root, keep)
     result = graph_index.relation_participants(
@@ -4928,7 +4973,8 @@ def _resolve_relation_filter(
         anchor=relation_of,
         direction=relation_direction,
         keep=view,
-        resolver=_request_resolver(vault_root, snapshot)() if view is not None else None,
+        resolver=_request_resolver(vault_root, snapshot) if view is not None else None,
+        reader=egress.visible_page_filter(vault_root) if view is not None else None,
     )
     if result.status == "temporarily_unavailable":
         raise RetrievalIndexWarming(
@@ -5229,14 +5275,13 @@ def _resolve_eligible_filter_paths(
     full-scan oracle. A CLI user with a cold catalogue must still get an
     answer, including for the fields no index can evaluate.
 
-    A store-mode vault's rows are the request's snapshot, so a plan that the
-    columns answer takes the managed route; any other plan keeps the offline
-    ladder below, so a store-mode answer never turns into a refusal.
+    Served store-mode requests keep the managed route's refusals. An offline caller
+    still takes the exact oracle for plans that the store's columns cannot answer.
     """
-    from . import lexstore
+    from . import lexstore, readiness
 
     if _managed_reader() or (
-        lexstore.store_rows_serve(vault_root) and _index_answers(plan)
+        lexstore.store_rows_serve(vault_root) and (readiness.runtime_managed() or _index_answers(plan))
     ):
         return _managed_eligible_filter_paths(
             vault_root,
@@ -6676,33 +6721,28 @@ def _find_semantic(
     clip_set: set[str] = set(clip_ranking)
     graph_set = set(graph_ranking)
     vector_paths: set[str] = set(vector_ranking)
-    # Degraded-corroboration retention flag — LANE-level, never per-page. When
-    # the vector and CLIP lanes produced no candidate at all for this query,
-    # no vector evidence exists for ANY candidate. Either the lane never ran —
-    # embeddings disabled (EXOMEM_DISABLE_EMBEDDINGS), the model warming/
-    # unavailable/failed, or an absent/empty embedding index — or a HEALTHY
-    # lane legitimately returned nothing because none of the eligible pages
-    # have indexed chunks (`available_nonmatching`: the allowed-paths search
-    # had no vectors to score). The relaxed gate deliberately covers that
-    # second case too: for these candidates, vector corroboration is
-    # unsatisfiable either way. In that state the all-stems veto below would
-    # drop every BM25-only candidate for interrogative phrasing ("How many…",
-    # "What is…") whose question words never appear in stored text, returning
-    # nothing even when BM25 ranks the correct page first. Retention then
-    # relaxes to a STRICT MAJORITY of the query's whitespace words being
-    # present, at least one of them a content word (see _stem_word_coverage):
-    # question words may be missing, but half-matched two-word queries,
-    # partially-matched exact-marker compounds, and function-word-only
-    # overlap against long prose all stay vetoed. With the vector lane live,
-    # the strict all-stems veto is unchanged.
-    semantic_lanes_absent = not vector_paths and not clip_set
-    # Loop-invariant for the relaxed gate: tokenize/classify the query's words
-    # once per query, not once per candidate page.
-    degraded_query_words = _query_word_stem_groups(query_norm) if semantic_lanes_absent else []
+    # BM25-only corroboration gate — PER-CANDIDATE, never per-bundle. A
+    # candidate that only the BM25 lane produced is retained when a STRICT
+    # MAJORITY of the query's whitespace words is present in the page's stem
+    # set, at least one of them a content word (see
+    # find_policy.stem_word_coverage): whole-word presence means every BM25
+    # subtoken stem of the word must occur, so compounds need all parts and
+    # punctuation cannot mask a match. The gate applies whether or not the
+    # vector/CLIP lanes produced candidates for this query — another lane's
+    # silence on one page is no evidence against it, and the lanes-absent
+    # case makes semantic corroboration unsatisfiable for every candidate.
+    # The strict majority still vetoes single-token overlaps, half-matched
+    # two-word queries, partially-matched exact-marker compounds, and
+    # function-word-only overlap against long prose; interrogative phrasing
+    # ("How many…", "What is…") whose question words never appear in stored
+    # text no longer hides the page BM25 ranked first.
+    # Loop-invariant: tokenize/classify the query's words once per query,
+    # not once per candidate page.
+    coverage_query_words = _query_word_stem_groups(query_norm)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
-    # BM25-only candidates must still satisfy the keyword all-tokens-present
-    # gate — without it, BM25's word-level tokenizer surfaces files that share
+    # BM25-only candidates must still satisfy the word-majority gate above —
+    # without it, BM25's word-level tokenizer surfaces files that share
     # any single token with the query (false positives). Vector-ranked
     # candidates skip that gate by design: surfacing semantically-similar
     # files that don't contain the literal tokens is the whole point.
@@ -6735,12 +6775,10 @@ def _find_semantic(
     chunk_text_by_path = {path: text for path, text in chunk_text_by_path.items() if isinstance(text, str)}
 
     def _supported_stems(page: ParsedPage | find_types.RankingPage) -> bool:
-        if semantic_lanes_absent:
-            present, total, content_present = find_policy.stem_word_coverage(
-                page.stem_set, degraded_query_words
-            )
-            return 2 * present > total and content_present > 0
-        return _stem_tokens_present(page, query_norm)
+        present, total, content_present = find_policy.stem_word_coverage(
+            page.stem_set, coverage_query_words
+        )
+        return 2 * present > total and content_present > 0
 
     def _needs_corroboration(path: str) -> bool:
         return (
@@ -6836,12 +6874,11 @@ def _find_semantic(
             if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
                 # the keyword scan. Try stem match before dropping — recovers
-                # morphology ("regulation" matching a "regulator" page). With the
-                # semantic lanes absent (see flag above) the gate relaxes from
-                # all-stems to a strict majority of the query's words anchored by
-                # at least one content word, so BM25's own top-ranked evidence
-                # survives interrogative phrasing without function-word overlap
-                # alone retaining junk.
+                # morphology ("regulation" matching a "regulator" page). The
+                # per-candidate gate above requires a strict majority of the
+                # query's words anchored by at least one content word, so
+                # BM25's own top-ranked evidence survives interrogative
+                # phrasing without function-word overlap alone retaining junk.
                 if not _supported_stems(page):
                     continue
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
@@ -7951,7 +7988,8 @@ def _outbound_wikilink_paths(
 
 
 _RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
-_RECALL_RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
+# The publication token names the exact maps, including checkpointless builds and in-place patches.
+_RECALL_RESOLVER_CACHE: dict[Path, tuple[tuple, object, object]] = {}
 # The writer resolver has the same event-stream contract as the projected
 # resolver: it may advance only from the exact broad checkpoint that built it.
 _RESOLVER_CHECKPOINTS: dict[Path, freshness.FreshnessCheckpoint] = {}
@@ -8440,7 +8478,7 @@ def recall_resolver_snapshot(
             # graph rebuild performs its stronger direct before/after proof
             # around sidecar publication.
             if _RECALL_RESOLVER_GENERATIONS.get(root) == generation:
-                _RECALL_RESOLVER_CACHE[root] = (identity, resolver)
+                _RECALL_RESOLVER_CACHE[root] = (identity, resolver, object())
                 if checkpoint is not None:
                     _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
                 else:
@@ -8489,13 +8527,13 @@ def recall_resolver_snapshot_at_checkpoint(
 
 def borrow_recall_resolver(
     vault_root: Path,
-) -> tuple[WikilinkResolver, freshness.RecallFreshnessCheckpoint | None] | None:
-    """A copy of the resident recall resolver and the live checkpoint it stands at, or None when
+) -> tuple[WikilinkResolver, freshness.RecallFreshnessCheckpoint | None, object] | None:
+    """A copy of the resident recall resolver, its checkpoint and publication token, or None when
     none is resident. Never builds.
 
     The checkpoint is None when the resolver was built from a direct disk proof. The caller proves
     that the copy fits what it reads. The copy is taken under the lock, because a publisher patches
-    the resident resolver in place.
+    the resident resolver in place. The token identifies the exact maps copied under that lock.
     """
     root = Path(vault_root)
     with _RESOLVER_LOCK:
@@ -8507,8 +8545,8 @@ def borrow_recall_resolver(
             checkpoint is not None
             and cached[0] == _recall_checkpoint_identity(checkpoint)
         ):
-            return cached[1].fork(), checkpoint
-        return cached[1].fork(), None
+            return cached[1].fork(), checkpoint, cached[2]
+        return cached[1].fork(), None, cached[2]
 
 
 def prime_resolver_from_entries(
@@ -8778,7 +8816,7 @@ def on_resolver_files_changed(
         return
     from . import vault as vault_module
 
-    cached_identity, projected = projected_cached
+    cached_identity, projected, _publication = projected_cached
     checkpoint = _RECALL_RESOLVER_CHECKPOINTS.get(root)
 
     # A supplied event batch can be incomplete or arrive out of order. Advance
@@ -8874,6 +8912,7 @@ def on_resolver_files_changed(
             _RECALL_RESOLVER_CACHE[root] = (
                 _recall_checkpoint_identity(delta.to),
                 projected,
+                object(),
             )
             _RECALL_RESOLVER_CHECKPOINTS[root] = delta.to
     except Exception:  # noqa: BLE001 - a partial resolver must never publish.

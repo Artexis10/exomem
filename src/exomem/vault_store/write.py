@@ -22,7 +22,7 @@ from .. import vault
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, ownership, rederive
-from .read import AFTER, NOT_ACTIVE, inbound_sources_many
+from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
     from ..collection_store.writer import CollectionWriter
@@ -52,8 +52,9 @@ class Expect:
     match the stored page or binary record. ``projected`` says that the file on disk is the stored
     page: the projection manifest records the page's own revision, no projection intent is queued
     for the path and no outside change is held for it. ``linked_from`` names every page that may
-    link to the path: a link from a page outside it, in the graph rows at commit time, refuses the
-    commit. A delete reads its inbound links and commits on that reading through it.
+    link to the path: a link from a page outside it, in the inbound-link rows at commit time (the
+    rule that ``list_inbound_links`` and a move's rewrite use), refuses the commit. A delete reads
+    its inbound links and commits on that reading through it.
 
     ``pages_below`` and ``binaries_below`` bind a folder: the number of stored pages, and of binary
     records, whose path starts with ``rel + "/"``. A folder write binds the counts it read, so a page
@@ -163,6 +164,23 @@ class BinaryDelete:
 
 
 @dataclass(frozen=True, slots=True)
+class BinaryMove:
+    """A binary's record moved to a path that the store does not hold, before its file moves.
+
+    ``sha256`` and ``size`` are the bytes that the file at ``src`` holds, read before the commit:
+    the record at ``dst`` names them, so a source that the store records nothing for (bytes that
+    nothing imported, or a temporary that holds a new file's bytes) moves the same way. The commit
+    queues one ``move`` intent at ``dst`` with ``src`` in ``from_path``. The writer renames the
+    file right after the commit, and the projector finishes a move that a kill left undone.
+    """
+
+    src: str
+    dst: str
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
 class HeldRow:
     """A held outside change that the commit resolves, named as the caller read its row.
 
@@ -201,9 +219,10 @@ class StoreChange:
     """Everything one commit changes. A path appears in at most one of the operations.
 
     ``refresh`` names files that the store does not own (a Markdown file outside the Knowledge Base
-    folder, say) and that a caller made durable on disk before the commit: the commit derives their
-    rows from the file's bytes, so a search sees them at the same revision as the pages. The store
-    keeps no page, record or audit row for them.
+    folder, or one at a page path the store holds no row for, say) and that a caller made durable
+    on disk before the commit: the commit derives their rows from the file's bytes, so a search
+    sees them at the same revision as the pages. The store keeps no page, record or audit row for
+    them.
 
     ``resolves_held`` and ``files_seen`` are the bookkeeping of resolving a held item, and
     ``commit`` applies them in the same transaction as the page changes.
@@ -216,10 +235,16 @@ class StoreChange:
     moves: tuple[PageMove, ...] = ()
     binaries: tuple[BinaryRecord, ...] = ()
     binary_deletes: tuple[BinaryDelete, ...] = ()
+    binary_moves: tuple[BinaryMove, ...] = ()
     expect: Mapping[str, Expect] = field(default_factory=dict)
     resolves_held: tuple[HeldRow, ...] = ()
     files_seen: tuple[FileSeen, ...] = ()
     refresh: tuple[str, ...] = ()
+    #: Folders that this change moves away as a whole, as file mode's rename of a folder does: a
+    #: folder trash's source tree, or a recovery's trash slot. Each is queued as a folder intent
+    #: (``folder_intent``), and the projector removes the folder once nothing queued below it is
+    #: left to move and it is empty.
+    vacated_folders: tuple[str, ...] = ()
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -230,6 +255,7 @@ class StoreChange:
             *(path for move in self.moves for path in (move.src, move.dst)),
             *(record.rel for record in self.binaries),
             *(delete.rel for delete in self.binary_deletes),
+            *(path for move in self.binary_moves for path in (move.src, move.dst)),
         )
 
     def __post_init__(self) -> None:
@@ -300,6 +326,11 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
         revision = row[1] + 1
         check(tx, change.expect)
+        for rel in change.refresh:
+            if tx.execute(
+                "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
+            ).fetchone():
+                raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
         _degrade_moves(tx, change.paths)
         existing = _held_pages(tx, change)
         now = timestamp()
@@ -314,10 +345,13 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
             _delete_binary(tx, binary, audit)
+        for move in change.binary_moves:
+            _move_binary(tx, move, revision, audit)
         derive.apply(tx, writer.root, change, existing)
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
+        _enqueue_folders(tx, change.vacated_folders, revision, now)
         for held in change.resolves_held:
             _drop_held(tx, held)
         for seen in change.files_seen:
@@ -339,7 +373,10 @@ def _require_owned(change: StoreChange) -> None:
     """Refuse, before any write, a path that the store cannot hold as its operation needs."""
     for rel in change.refresh:
         _require_safe(rel)
-        if ownership.classify(rel) is not ownership.Ownership.NONE:
+        # ``PAGE`` is refused inside ``commit``'s transaction, where the store_pages probe and the
+        # derived rows it guards are one atomic step: a file at a page path that the store holds no
+        # row for is disk-owned and refreshes like an unowned file.
+        if ownership.classify(rel) is ownership.Ownership.BINARY:
             raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
     pages = (
         *(put.rel for put in change.puts),
@@ -349,12 +386,45 @@ def _require_owned(change: StoreChange) -> None:
     binaries = (
         *(record.rel for record in change.binaries),
         *(delete.rel for delete in change.binary_deletes),
+        *(move.dst for move in change.binary_moves),
     )
     for rels, kind in ((pages, ownership.Ownership.PAGE), (binaries, ownership.Ownership.BINARY)):
         for rel in rels:
             _require_safe(rel)
             if ownership.classify(rel) is not kind:
                 raise OpError(NOT_OWNED, f"the store holds no {kind.value} at {rel}")
+    for move in change.binary_moves:
+        # A move's source may be a temporary that the store does not own, never a page.
+        _require_safe(move.src)
+        if ownership.classify(move.src) is ownership.Ownership.PAGE:
+            raise OpError(NOT_OWNED, f"the store holds a page at {move.src}, not a binary")
+    for folder in change.vacated_folders:
+        _require_safe(folder)
+
+
+def folder_intent(folder: str) -> str:
+    """The queue path of a folder that a change vacated: the folder's path and a closing slash.
+
+    A queue row names a page or a binary by its path, which never ends in a slash, so the slash
+    tells a folder intent apart in the existing columns, and its path sorts before every path
+    below the folder.
+    """
+    return f"{folder}/"
+
+
+def is_folder_intent(path: str) -> bool:
+    return path.endswith("/")
+
+
+def _enqueue_folders(
+    tx: Connection, folders: tuple[str, ...], revision: int, now: str
+) -> None:
+    tx.executemany(
+        "INSERT INTO store_projection_queue(path, revision, operation, from_path, queued_at) "
+        "VALUES (?, ?, 'delete', NULL, ?) ON CONFLICT(path) DO UPDATE SET "
+        "revision = excluded.revision, operation = 'delete', from_path = NULL",
+        [(folder_intent(folder), revision, now) for folder in dict.fromkeys(folders)],
+    )
 
 
 def _require_safe(rel: str) -> None:
@@ -412,8 +482,9 @@ def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
 
 def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
     """Raise ``StoreConflict`` for the first path that does not hold what ``expect`` says."""
-    # One graph read binds the linking pages of every path: a folder's delete binds hundreds.
-    linked = inbound_sources_many(
+    # One read of the inbound rows binds the linking pages of every path: a folder's delete binds
+    # hundreds.
+    linked = vault.store_inbound_wikilinks(
         tx, [rel for rel, want in expect.items() if want.linked_from is not None]
     )
     for rel, want in expect.items():
@@ -434,7 +505,7 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
         if want.projected and not _projected(tx, rel, *have):
             raise StoreConflict(rel, "its file on disk is not the stored page")
         if want.linked_from is not None:
-            gained = linked[rel] - want.linked_from
+            gained = {link.path for link in linked[rel]} - want.linked_from
             if gained:
                 # No name: the page that linked may be one the caller is not allowed to see.
                 raise StoreConflict(rel, "a page now links to it")
@@ -523,6 +594,15 @@ class _Trail:
         self.deleted.append(rel)
         if queue:
             self.intents[rel] = ("delete", None)
+
+    def moved_binary(self, move: BinaryMove, old_sha256: str | None) -> None:
+        # A source that the store recorded ends its life here; one it never recorded had none.
+        if old_sha256 is not None:
+            self.record(move.src, "move", old_sha256)
+            self.deleted.append(move.src)
+        self.record(move.dst, "move", move.sha256, from_path=move.src)
+        self.written.append(move.dst)
+        self.intents[move.dst] = ("move", move.src)
 
     def moved(self, move: PageMove, old_sha256: str, new_sha256: str) -> None:
         # Each side has its own row, so a read of either path's trail meets the move; the new path's
@@ -634,6 +714,20 @@ def _delete_binary(tx: Connection, binary: BinaryDelete, audit: _Trail) -> None:
     audit.removed(binary.rel, row[0], queue=not binary.on_disk)
 
 
+def _move_binary(tx: Connection, move: BinaryMove, revision: int, audit: _Trail) -> None:
+    if _stored(tx, move.dst) is not None:
+        raise StoreConflict(move.dst, "the store already holds it")
+    recorded = tx.execute(
+        "SELECT sha256 FROM store_binaries WHERE path = ?", (move.src,)
+    ).fetchone()
+    tx.execute("DELETE FROM store_binaries WHERE path = ?", (move.src,))
+    tx.execute(
+        "INSERT INTO store_binaries(path, sha256, size, revision) VALUES (?, ?, ?, ?)",
+        (move.dst, move.sha256, move.size, revision),
+    )
+    audit.moved_binary(move, None if recorded is None else recorded[0])
+
+
 def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     """Turn each queued move that touches ``paths`` into the delete and the write it stands for.
 
@@ -641,6 +735,11 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
     old one must not leave the old file behind, and must not let the projector rename a page that
     now lives at the old path. So a touched move becomes a delete of its old path and a write of
     its new path, and the later change then replaces either row as it would any other.
+
+    A binary's move cannot split that way: the store holds no bytes to write, and the delete would
+    take away the only copy. Such a change refuses until the move reaches the disk, which the
+    writer does right after its commit and the projector after a kill: it prevents the loss of a
+    binary's bytes, and a wrong refusal costs the caller one retry.
     """
     marks = ",".join("?" * len(paths))
     touched = tx.execute(
@@ -649,6 +748,8 @@ def _degrade_moves(tx: Connection, paths: tuple[str, ...]) -> None:
         (*paths, *paths),
     ).fetchall()
     for path, from_path, revision, queued_at in touched:
+        if ownership.classify(path) is ownership.Ownership.BINARY:
+            raise StoreConflict(path, "its file has not moved yet; retry once it has")
         tx.execute(
             "UPDATE store_projection_queue SET operation = 'write', from_path = NULL WHERE path = ?",
             (path,),

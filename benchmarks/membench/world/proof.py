@@ -4,7 +4,7 @@ A reading answers from some statements and operations of the evidence layer. ``P
 them for one reading. ``proof`` holds what the answer rests on, a rule that the reading applied
 included, and ``aside`` holds the statements about the same subject that ended, withdrawn, replaced
 or defeated, with what ended each. A ref is the id of a statement, or of an operation that a
-document announces. ``artefacts`` turns refs into documents.
+document announces, or a canonical relation snapshot. ``artefacts`` turns refs into documents.
 
 A reading that a key reads has a basis here. A reading with none is refused by ``NoBasis``, so no
 key goes out with an empty proof trace by accident.
@@ -12,12 +12,13 @@ key goes out with an empty proof trace by accident.
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from .core import Statement, World
+from .core import ContextParentRef, EdgeRef, Statement, World
 from .mechanisms import Oracle
 from .record import Ended, distinct, order
 
@@ -35,6 +36,14 @@ class Basis:
 class Prover:
     def __init__(self, oracle: Oracle):
         self.oracle, self.rec = oracle, oracle.record
+        self.links: dict[str, list[EdgeRef]] = defaultdict(list)
+        for edge in self.rec.world.edges:
+            ref = EdgeRef(edge.source, edge.target, edge.mode)
+            self.links[edge.source].append(ref)
+            self.links[edge.target].append(ref)
+        self.relations = {
+            ref: a.id for a in self.rec.world.artefacts.values() for ref in a.relations
+        }
         self._bases: dict[str, Callable[..., list[str | None]]] = {
             "corpus_closure.recorded": self._recorded,
             "holder_ledger.holder": self._holder,
@@ -60,7 +69,78 @@ class Prover:
         if reading not in self._bases:
             raise NoBasis(f"`{reading}` has no basis yet")
         proof = tuple(distinct(r for r in self._bases[reading](of, at, **arguments) if r))
-        return Basis(proof, tuple(r for r in self._aside(of, at) if r not in proof))
+        expanded = self.expand(proof, of=of, at=at, where=arguments.get("where"))
+        aside = self.expand(self._aside(of, at), of=of, at=at, where=arguments.get("where"))
+        return Basis(expanded, tuple(r for r in aside if r not in expanded))
+
+    def expand(
+        self, refs: Iterable[str], *, at: date, of: Any = None, where: str | None = None
+    ) -> tuple[str, ...]:
+        """Close selected evidence over source edges and context ancestors, including ended links.
+
+        The oracle's winning paths cannot stand in for the contrary source records that G must read.
+        Each selected edge therefore brings both original endpoints and their endings by this date.
+        """
+        world = self.rec.world
+        selected: dict[str, None] = {}
+        pending: deque[str] = deque()
+        contexts = [] if where is None else [where]
+
+        def add(ref: str) -> None:
+            record = world.statements.get(ref)
+            if record is None and ref in world.operations:
+                record = world.operations[ref][1]
+            if record is None:
+                record = world.artefacts.get(ref)
+            if record is not None and record.at <= at and ref not in selected:
+                selected[ref] = None
+                if ref in world.statements:
+                    pending.append(ref)
+
+        for ref in refs:
+            add(ref)
+        subjects = of if isinstance(of, list | tuple) else (of,)
+        for subject in subjects:
+            if subject in world.statements:
+                if world.statements[subject].at <= at:
+                    pending.append(subject)
+            else:
+                pending.extend(s.id for s in world.statements_about(subject) if s.at <= at)
+        visited: set[str] = set()
+        while pending:
+            ref = pending.popleft()
+            if ref in visited:
+                continue
+            visited.add(ref)
+            statement = world.statements[ref]
+            contexts += [
+                c
+                for c in (statement.scope, statement.rule.context if statement.rule else None)
+                if c is not None
+            ]
+            for edge in self.links.get(ref, ()):
+                if any(world.statements[e].at > at for e in (edge.source, edge.target)):
+                    continue
+                carrier = self.relations.get(edge)
+                if carrier is None or world.artefacts[carrier].at > at:
+                    continue
+                add(carrier)
+                add(edge.source)
+                add(edge.target)
+            if ref in selected:
+                for correction in self.rec.corrections(statement, at):
+                    add(self.rec.op_id(correction))
+                if end := self.rec.end(statement, at):
+                    add(self._ender(statement, end))
+        visited_contexts: set[str] = set()
+        for child in contexts:
+            while child in world.contexts and child not in visited_contexts:
+                visited_contexts.add(child)
+                carrier = self.relations.get(ContextParentRef(child))
+                if carrier is not None:
+                    add(carrier)
+                child = world.contexts[child].parent
+        return tuple(selected)
 
     # -- what ended --------------------------------------------------------------------------------
 
@@ -194,11 +274,13 @@ class Prover:
         return [self.rec.op_id(r) for r in sorted(records, key=order)]
 
 
-def artefacts(world: World, refs: Iterable[str]) -> tuple[str, ...]:
+def artefacts(world: World, refs: Iterable[str], *, at: date | None = None) -> tuple[str, ...]:
     """The documents that carry the statements, or announce the operations, of ``refs``, in the
     order of the calendar and, inside one date, of filing."""
     wanted = set(refs)
     filed = {id_: n for n, id_ in enumerate(world.artefacts)}
     found = {a.id for ref in wanted for a in world.carriers(ref)}
-    found |= {a.id for a in world.artefacts.values() if a.announces in wanted}
+    found |= {a.id for a in world.artefacts.values() if a.announces in wanted or a.id in wanted}
+    if at is not None:
+        found = {ref for ref in found if world.artefacts[ref].at <= at}
     return tuple(sorted(found, key=lambda id_: (world.artefacts[id_].at, filed[id_])))

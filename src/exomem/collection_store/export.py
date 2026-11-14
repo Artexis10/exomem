@@ -734,7 +734,7 @@ def _require_retired_head(fence_client, reader, store_id, generation):
     return retired
 
 
-def completed_retirement_binding(root, fence_client, store_id=None):
+def completed_retirement_binding(root, fence_client, store_id=None, *, fence=None):
     """Prove completed file authority from the paired export and retired head.
 
     A false acceptance can expose stale views; an unresolved proof delays relevant
@@ -745,8 +745,9 @@ def completed_retirement_binding(root, fence_client, store_id=None):
     try:
         if authority.read_marker(root) is not None:
             return None
-        fence = fence_client.collection_store_fence()
-        if fence.enrolled:
+        fence = fence_client.collection_store_fence() if fence is None else fence
+        # The coordinator's generation zero means never enrolled: no retired export can exist.
+        if fence.enrolled or fence.generation == 0:
             return None
         if store_id is None:
             store_id = fence_client.retired_collection_store_fence().store_id

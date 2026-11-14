@@ -256,14 +256,10 @@ def test_the_readiness_probe_never_runs_the_proof(
 
     generation = graph_sync.status(root)["generation"]
     assert manager.status(root)["graph_sync"] == {"state": "unproven", "generation": generation}
-    readiness = readiness_module.runtime_readiness(mcp_tool_surface_sha256="a" * 64)
-    assert readiness["coordination"]["graph_sync"] == {
-        "state": "unproven",
-        "generation": generation,
-    }
+    readiness_module.runtime_readiness(mcp_tool_surface_sha256="a" * 64)
     assert proofs == [], "the readiness probe ran the O(corpus) proof"
 
-    # Once something has proved the sidecar, readiness reports that verdict.
+    # Once something has proved the sidecar, owner status reports that verdict.
     assert EpistemicGraphIndex(root).available() is True
     assert manager.status(root)["graph_sync"] == {"state": "current", "generation": generation}
     assert len(proofs) == 1

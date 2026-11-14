@@ -1260,24 +1260,26 @@ def test_a_key_naming_the_harm_reading_loads_and_one_naming_an_unregistered_read
     assert problems[0].startswith("probe p-second: key.reading names 'dread'")
 
 
-def gate_probe(reading):
+def gate_probe(reading, *, dimension="currency"):
     return {
-        "dimension": "stable",
+        "dimension": dimension,
         "key": {"behaviours": [], **({"reading": reading} if reading else {})},
     }
 
 
-def test_the_memory_needed_gate_skips_a_probe_whose_key_reads_it_as_harm():
-    """N answers an abstention probe correctly by design, so the gate must neither fail it nor count it."""
+def test_the_memory_needed_gate_counts_only_position_probes():
+    """Correct harm and stable controls must not turn a passing memory-needed gate into a failure."""
     outcomes = [
         outcome("N", "a", "abstain-1", 1, True),
         outcome("N", "a", "change-1", 1, False),
         outcome("N", "a", "change-2", 1, False),
+        outcome("N", "a", "recall-control", 1, True),
     ]
     reads_harm = {
         ("a", p): gate_probe(r)
         for p, r in (("abstain-1", "harm"), ("change-1", None), ("change-2", None))
     }
+    reads_harm[("a", "recall-control")] = gate_probe(None, dimension="stable")
     reads_position = {**reads_harm, ("a", "abstain-1"): gate_probe(None)}
 
     skipped = report.dev_gates(outcomes, reads_harm)["memory_needed"]
@@ -1286,8 +1288,10 @@ def test_the_memory_needed_gate_skips_a_probe_whose_key_reads_it_as_harm():
     assert (skipped["rate"], skipped["meets"], skipped["failing_probes"]) == (1.0, True, [])
     assert skipped["skipped_as_harm"] == ["a:abstain-1"]
     assert skipped["answers_judged"] == 2
+    assert skipped["skipped_as_stable"] == ["a:recall-control"]
     assert (counted["meets"], counted["failing_probes"]) == (False, ["a:abstain-1"])
     assert counted["skipped_as_harm"] == []
+    assert counted["skipped_as_stable"] == ["a:recall-control"]
 
 
 def test_the_report_gives_a_probe_read_as_harm_as_harm_against_arm_n_per_arm():

@@ -50,8 +50,7 @@ from exomem import vault as vault_module
 from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import most_restrictive_principal, request_scope
-from exomem.vault_store import batch, importer, ownership, read, write
-from exomem.writer_lease import get_manager
+from exomem.vault_store import batch, importer, ownership, projector, read, write
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="The offline-owner lease is Linux-only"
@@ -113,8 +112,8 @@ def test_trash_of_a_recorded_binary_moves_its_file_and_its_record_together(serve
 
 
 def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monkeypatch):
-    """A refused commit after the rename that leaves the file moved while the store still records
-    it at its old path."""
+    """A refused commit that leaves the file moved, or the sidecar in the trash, while the store
+    still records the file at its old path."""
     race_after_check(
         monkeypatch,
         writer,
@@ -128,7 +127,7 @@ def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monke
 
     assert refused.value.code == "STALE_DELETE"
     assert revision(served) == start + 1, "only the competing commit may have committed"
-    assert tree(served) == before, "the file is back and the sidecar is rolled back"
+    assert tree(served) == before, "nothing moved, and no sidecar or temporary stays"
 
 
 def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
@@ -157,6 +156,35 @@ def test_a_fold_trash_of_a_binary_stops_when_its_verify_refuses(served):
     assert refused.value.code == "CURATION_BINDING_STALE"
     assert tree(served) == before
     assert binary_record(served, DIAGRAM) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
+
+
+@pytest.mark.parametrize("store", [False, True], ids=["file mode", "store mode"])
+def test_a_previewed_binary_trash_refuses_bytes_that_changed_after_the_check(request, store):
+    """A store-mode binary trash that binds the store record, which a rewrite on disk leaves as it
+    was, and so moves to the trash bytes that the preview never hashed."""
+    root = request.getfixturevalue("served" if store else "vault")
+    now = dt.datetime(2026, 11, 11, 3, 14, 37)
+    preview = delete_file.delete_file(root, path=DIAGRAM, confirm=True, validate_only=True, now=now)
+
+    def rewrite():
+        # The file changes after the check, right before the move.
+        (root / DIAGRAM).write_bytes(b"rewritten")
+
+    before = tree(root)
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(
+            root,
+            path=DIAGRAM,
+            confirm=True,
+            now=now,
+            expected_hash=preview.content_hash,
+            _fold=fold_leaf.Placement(preview.result.trash_path, rewrite),
+        )
+
+    assert refused.value.code == "STALE_DELETE"
+    assert new_files(before, root) == {DIAGRAM}, "only the rewrite changed a file; nothing moved"
+    assert (root / DIAGRAM).read_bytes() == b"rewritten"
 
 
 JUDGED = "Knowledge Base/Notes/Judged.md"
@@ -194,41 +222,61 @@ def test_a_page_trash_refuses_a_page_that_changed_after_it_was_judged(
     assert read.owned_bytes(served, JUDGED) == superseded
 
 
-def test_a_trash_that_cannot_put_the_binary_back_says_so_and_one_sweep_records_it(
+def test_a_trash_whose_rename_fails_after_its_commit_says_so_and_the_projector_moves_it(
     served, writer
 ):
-    """A refused commit whose rename back also fails, leaving a record that names a path with no
-    file, or a held item, after the next sweep; or a refusal that does not say the file moved."""
+    """A rename that fails after the commit and leaves a record naming a path with no file, a
+    caller who is not told that the file stayed, a sweep that records the file at its old path
+    again, or a projector that does not finish the move."""
     original_move = reserved_paths.move_generic_path
 
-    def refuse(*arguments, **options):
-        raise write.StoreConflict(DIAGRAM, "a competing writer changed it")
-
-    def move_forward_only(*arguments, rollback=False, **options):
-        if rollback:
+    def refuse_the_binary(root, source, destination, **options):
+        if source == DIAGRAM:
             raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
-        return original_move(*arguments, rollback=rollback, **options)
+        return original_move(root, source, destination, **options)
 
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(batch, "commit_batch", refuse)
-        patch.setattr(reserved_paths, "move_generic_path", move_forward_only)
-        with pytest.raises(delete_file.DeleteFileError) as refused:
-            delete_file.delete_file(served, path=DIAGRAM, confirm=True)
+        patch.setattr(reserved_paths, "move_generic_path", refuse_the_binary)
+        result = delete_file.delete_file(served, path=DIAGRAM, confirm=True, force_orphan=True)
 
-    assert refused.value.code == "DELETE_FAILED"
-    assert "the file moved, and the next sweep records it" in refused.value.reason
-    moved_to = [
-        path.relative_to(served).as_posix()
-        for path in (served / "Knowledge Base/_trash").rglob("*diagram.bin")
-    ]
-    assert len(moved_to) == 1
-    assert binary_record(served, DIAGRAM), "until the sweep, the store still names the old path"
+    assert [warning for warning in result.warnings if warning.startswith(DIAGRAM)]
+    assert (served / DIAGRAM).read_bytes() == DIAGRAM_BYTES
+    assert binary_record(served, result.trash_path) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
+    run = lambda work: work(writer)  # noqa: E731 - the store thread's runner, by hand
 
-    importer.Importer(served, run=lambda work: work(writer)).sweep()
+    importer.Importer(served, run=run).sweep()
+    assert binary_record(served, DIAGRAM) == [], "the sweep leaves a queued move's source alone"
 
-    assert binary_record(served, DIAGRAM) == []
-    assert binary_record(served, moved_to[0]) == [(sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))]
+    projector.Projector(served, run=run).run_pass()
+
+    assert (served / result.trash_path).read_bytes() == DIAGRAM_BYTES
+    assert not (served / DIAGRAM).exists()
+    moves = "SELECT path FROM store_projection_queue WHERE operation = 'move'"
+    assert store_rows(served, moves) == []
     assert held(served) == []
+
+
+def test_a_binary_that_a_person_changes_before_its_queued_move_stays_and_keeps_their_bytes(
+    served, writer
+):
+    """A projector that finishes a queued binary move over a person's change: it renames bytes
+    that the record does not name, or unlinks or replaces a file to make the move."""
+    moved = "Knowledge Base/Notes/moved.bin"
+    move = write.BinaryMove(DIAGRAM, moved, sha(DIAGRAM_BYTES), len(DIAGRAM_BYTES))
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", binary_moves=(move,)))
+    (served / DIAGRAM).write_bytes(b"a person's new diagram")
+    run = lambda work: work(writer)  # noqa: E731 - the store thread's runner, by hand
+
+    projector.Projector(served, run=run).run_pass()
+
+    assert (served / DIAGRAM).read_bytes() == b"a person's new diagram"
+    assert not (served / moved).exists()
+    assert store_rows(served, "SELECT 1 FROM store_projection_queue WHERE path = ?", moved) == []
+
+    importer.Importer(served, run=run).sweep()
+
+    assert binary_record(served, DIAGRAM) == [(sha(b"a person's new diagram"), 22)]
+    assert binary_record(served, moved) == []
 
 
 REPORT = "Knowledge Base/Notes/report.bin"
@@ -282,8 +330,10 @@ def test_a_paired_artifact_moves_its_bytes_and_its_page_in_one_commit(served, wr
         [
             (REPORT_PAGE, "move"),
             (result.new_path, "move"),
-            (REPORT, "delete"),
-            (MOVED_REPORT, "write"),
+            (REPORT, "move"),
+            (MOVED_REPORT, "move"),
+            # The move's log entry commits in the same transaction.
+            ("Knowledge Base/log.md", "write"),
         ]
     )
 
@@ -343,7 +393,7 @@ def test_a_folder_trash_refuses_a_note_nothing_imported_and_a_page_added_after_i
 
     assert raced.value.code == "PATH_GUARD_CHANGED"
     assert revision(served) == start + 1, "only the competing commit may have committed"
-    assert tree(served) == before, "every rename is undone and the sidecar rolled back"
+    assert tree(served) == before, "nothing moved, and no sidecar or temporary stays"
 
 
 def test_a_folder_trash_moves_pages_in_the_store_and_files_on_disk(served, writer):
@@ -495,6 +545,82 @@ def test_a_binary_and_a_folder_trash_and_come_back_with_the_same_answers_in_both
     assert kept_in_trash and (root / FOLDER / "empty" / "nested").is_dir()
 
 
+def folders_under(root, *bases):
+    """Every folder at or below ``bases`` that is on disk, as vault-relative paths."""
+    return {
+        path.relative_to(root).as_posix()
+        for base in bases
+        for path in (root / base, *(root / base).rglob("*"))
+        if path.is_dir()
+    }
+
+
+@pytest.mark.parametrize("store", [False, True], ids=["file mode", "store mode"])
+def test_each_lifecycle_writer_leaves_the_folders_that_file_mode_leaves(request, store):
+    """A store-mode writer that, once the projector drained, removes a folder that file mode keeps
+    (a layer folder that a single-file trash or move emptied, a folder above a trashed folder) or
+    keeps a folder that file mode removes (a trashed or recovered folder's own tree)."""
+    root = request.getfixturevalue("served" if store else "vault")
+    now = dt.datetime(2026, 11, 14, 9, 30, 0)
+    layer, drop = "Knowledge Base/Layer/Only.md", "Knowledge Base/Drop/Moved.md"
+    plan, old = "Knowledge Base/Project/sub/Plan.md", "Knowledge Base/Archive/Old/Note.md"
+    chart = "Knowledge Base/Project/chart.bin"
+    for rel in (layer, drop, plan, old):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(f"---\ntitle: {rel}\ntype: note\n---\n# Note\n", encoding="utf-8")
+    (root / chart).write_bytes(b"chart")
+    (root / "Knowledge Base/Project/empty").mkdir()
+    run = lambda work: work(request.getfixturevalue("writer"))  # noqa: E731 - store mode only
+
+    def drained():
+        if store:
+            for _ in range(10):
+                projector.Projector(root, run=run).run_pass()
+                if not store_rows(root, "SELECT path FROM store_projection_queue"):
+                    return
+            raise AssertionError("the projector drained the queue")
+
+    if store:
+        importer.Importer(root, run=run).import_paths([layer, drop, plan, old, chart])
+    bases = ("Knowledge Base/Layer", "Knowledge Base/Drop", "Knowledge Base/Archive")
+
+    single = delete_file.delete_file(root, path=layer, confirm=True, force_orphan=True, now=now)
+    drained()
+    assert folders_under(root, "Knowledge Base/Layer") == {"Knowledge Base/Layer"}, (
+        "a single-file trash keeps the layer folder that it emptied"
+    )
+    move_file.move_file(root, old_path=drop, new_path="Knowledge Base/Notes/Moved.md")
+    drained()
+    project = delete_directory.delete_directory(
+        root, path="Knowledge Base/Project", confirm=True, recursive=True, now=now
+    )
+    drained()
+    archived = delete_directory.delete_directory(
+        root, path="Knowledge Base/Archive/Old", confirm=True, recursive=True, now=now
+    )
+    drained()
+    assert folders_under(root, *bases) == {
+        "Knowledge Base/Layer", "Knowledge Base/Drop", "Knowledge Base/Archive"
+    }
+    recover_from_trash.recover_from_trash(root, trash_path=archived.trash_path)
+    drained()
+    recover_from_trash.recover_from_trash(root, trash_path=single.trash_path)
+    drained()
+
+    slot = project.trash_path
+    assert folders_under(root, *bases, "Knowledge Base/Project", "Knowledge Base/_trash") == {
+        "Knowledge Base/Layer",
+        "Knowledge Base/Drop",
+        "Knowledge Base/Archive",
+        "Knowledge Base/Archive/Old",
+        "Knowledge Base/_trash",
+        slot.rpartition("/")[0],
+        slot,
+        f"{slot}/sub",
+        f"{slot}/empty",
+    }
+
+
 VIDEO = "Knowledge Base/Media/harbour.mp4"
 FRAMES = f"{VIDEO}.frames"
 
@@ -574,16 +700,13 @@ def test_a_clear_killed_before_its_commit_heals_after_one_sweep_and_one_reconcil
 
 
 def test_writing_frames_off_the_store_thread_commits_them_there(stored, store_thread):
-    """The refusal that a media worker's frame write met in a store-mode vault, or a hop that
-    stalls under the mutation guard that the worker holds across it."""
+    """The refusal that a media worker's frame write met in a store-mode vault. The worker holds
+    no guard across the hop: the store thread takes the boundary for the frames' commit."""
     video = stored / VIDEO
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"\x00video")
 
-    with get_manager().mutation_guard(
-        stored, operation="background_media_scene_frame_commit", holder_kind="background"
-    ):
-        pairs = scene_frames.write_scene_frames(stored, video, [(_scene(10.0), _FakeImg())])
+    pairs = scene_frames.write_scene_frames(stored, video, [(_scene(10.0), _FakeImg())])
 
     assert len(pairs) == 1
     jpg, sidecar = (path.relative_to(stored).as_posix() for path in pairs[0])
@@ -660,6 +783,54 @@ def test_an_offline_overlay_and_schema_reclaim_commit_to_the_store_and_write_no_
     }
     assert written_pages == set(), "the projector, not the CLIs, writes the pages' files"
     assert (stored / legacy).read_bytes() == source.read_bytes(), "the projector removes it"
+
+
+@pytest.mark.parametrize("store", [False, True], ids=["file mode", "store mode"])
+def test_a_schema_reclaim_removes_the_overlay_folders_that_it_empties_as_file_mode_does(
+    request, store
+):
+    """A store-mode reclaim whose emptied `_Schema` folders stay once the projector has removed
+    the files, where file mode's reclaim removes them, or that removes a folder still in use."""
+    root = request.getfixturevalue("stored" if store else "vault")
+    relative = "examples/context-learning/incident-collection.md"
+    source = next(
+        found
+        for found in init_module.shipped_schema_sources()
+        if found.relative_to(init_module._SCAFFOLD).as_posix().endswith(f"/{relative}")
+    )
+    legacy = f"Knowledge Base/_Schema/{relative}"
+    deployed = init_module.shipped_schema_target(root) / relative
+    deployed.parent.mkdir(parents=True, exist_ok=True)
+    deployed.write_bytes(source.read_bytes())
+    (root / legacy).parent.mkdir(parents=True, exist_ok=True)
+    (root / legacy).write_bytes(source.read_bytes())
+    kept = root / "Knowledge Base/_Schema/examples/mine"
+    kept.mkdir()
+    (kept / "note.txt").write_text("a person's file\n", encoding="utf-8")
+
+    def store_writer():
+        return connection.open_writer(connection.store_path(root), lease_check=lambda: True)
+
+    if store:  # the legacy copy is a stored page whose file the projector already wrote
+        with store_writer() as handle:
+            change = write.StoreChange(
+                write.Origin.GOVERNED, "setup", puts=(write.PagePut(legacy, source.read_bytes()),)
+            )
+            write.commit(CollectionWriter(root, handle), change)
+    with pytest.MonkeyPatch.context() as shell:
+        shell.setenv(OPERATOR, OPERATOR_SECRET)
+        applied = init_module.reclaim_legacy_shipped_schema(root, apply=True)
+    if store:
+        with store_writer() as handle:
+            writer = CollectionWriter(root, handle)
+            for _ in range(5):
+                projector.Projector(root, run=lambda work: work(writer)).run_pass()
+
+    assert relative in applied["removed"] and not (root / legacy).exists()
+    assert not (root / "Knowledge Base/_Schema/examples/context-learning").exists()
+    assert (kept / "note.txt").is_file(), "a folder that holds a person's file stays"
+    if store:
+        assert store_rows(root, "SELECT path FROM store_projection_queue") == []
 
 
 def test_an_offline_overlay_writes_nothing_before_admission_and_commits_a_missing_marker(stored):

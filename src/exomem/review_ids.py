@@ -1,9 +1,10 @@
 """The short id an agent names one review item by, and how a decision binds it.
 
 A review item carries a `ref` that names it and a `fingerprint` that names the signal as read. The
-id is `<head of ref>.<tail of fingerprint>`. A decision binds it at the leaf, after admission, by
-reading the review queues once: the item that still holds the ref and the fingerprint supplies the
-guards the decision needs, and a stale id is refused with the current one.
+id is `<head of ref>.<tail of fingerprint>`. Triage binds it before writer admission: the item that
+still holds the ref and the fingerprint supplies the guards the decision needs, and a stale id is
+refused with the current one. A stored due entry binds its own id (`bind_decision`); the review
+queues are read for any other id (`bind`).
 """
 
 from __future__ import annotations
@@ -106,3 +107,21 @@ def bind(
         f"review item {item} is on no review queue; list the review items for the current ids.",
     )
 
+
+def bind_decision(
+    read: Callable[..., Any], *, item: str, stored: list[tuple[str, str]]
+) -> dict[str, str]:
+    """What a triage decision's `item` stands for: its stored due entry, else what `bind` finds.
+
+    `stored` holds the `(ref, fingerprint)` of each stored due entry with the id's head
+    (`due_state.stored_by_head`). A due entry's id is given out by responses that are not review
+    listings, for families that no listing holds, so only the stored entry can bind it.
+
+    Only the entry's own id binds here. A listed item can fuse a stored entry with other signals
+    of its page under the same reference, and only its queue knows that fingerprint, so an id
+    that is not a stored entry's exact id binds from the queues as before.
+    """
+    for ref, fingerprint in stored:
+        if page_ids.part_id(ref, fingerprint) == item:
+            return {"ref": ref, "expected_fingerprint": fingerprint}
+    return bind(read, item=item)

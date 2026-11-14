@@ -42,6 +42,9 @@ SEQUENCE_NINE_ACKNOWLEDGED_REVISION = "69599c346c631a0722c56b1634eb862329a9f09b"
 #: The squash commit on ``main`` that introduced the sequence-10 receipt (#2527),
 #: pinned by the founder at acknowledgment.
 SEQUENCE_TEN_ACKNOWLEDGED_REVISION = "b9b00ab39ec7f562e74d174f8b82972e3a840170"
+#: The squash commit on ``main`` that introduced the sequence-11 receipt (#2744),
+#: pinned by the founder at acknowledgment.
+SEQUENCE_ELEVEN_ACKNOWLEDGED_REVISION = "5a832a10bf8492d92be37d57883669e6f7f58a61"
 SEQUENCE_SIX_ACKNOWLEDGED_REVISION = "5a7915ba0333ec379609d86d508f90341a5df7cd"
 # The commit that recorded the founder acknowledgment of sequence 6 (#1232).
 SEQUENCE_SIX_RELEASE_REVISION = "3677c2e7cd6bf863f0a0149b21bc339adb35ad50"
@@ -711,23 +714,19 @@ def test_acknowledged_amendment_derives_a_complete_typed_identity() -> None:
     assert acknowledged_ten.acknowledgment_status == "acknowledged"
     assert acknowledged_ten.introduced_family_ids == ()
     assert acknowledged_ten.contract.repository_revision == SEQUENCE_TEN_ACKNOWLEDGED_REVISION
-    # Sequence 11 lets held-out runs billed to API credits decide, and adds no family. Its receipt
-    # is pending, so its amended revision is reconstructed from the introduction commit.
-    pending_eleven = identity.amendments[10]
-    assert pending_eleven.sequence == 11
-    assert pending_eleven.acknowledgment_status == "pending"
-    assert pending_eleven.introduced_family_ids == ()
-    assert (
-        pending_eleven.contract.repository_revision == pending_eleven.receipt.introduction_revision
-    )
-    assert identity.effective.sha256 == pending_eleven.contract.sha256
+    # Sequence 11 lets held-out runs billed to API credits decide, and adds no family.
+    acknowledged_eleven = identity.amendments[10]
+    assert acknowledged_eleven.sequence == 11
+    assert acknowledged_eleven.acknowledgment_status == "acknowledged"
+    assert acknowledged_eleven.introduced_family_ids == ()
+    assert acknowledged_eleven.contract.repository_revision == SEQUENCE_ELEVEN_ACKNOWLEDGED_REVISION
+    assert identity.effective.sha256 == acknowledged_eleven.contract.sha256
     assert identity.pending_amendments == (
         pending_two,
         pending_four,
         pending_five,
         pending_seven,
         pending_eight,
-        pending_eleven,
     )
     assert identity.withheld_family_ids == frozenset(
         SEQUENCE_TWO_FAMILIES

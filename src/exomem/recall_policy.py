@@ -12,6 +12,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Iterable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -232,7 +233,8 @@ def _admitted_relative(
 
     `proven_directories` holds the directories whose ancestry one pass has
     already proven (see `admitted_relative_paths`); None proves every ancestor.
-    `held` is the pass's `read.served_lookup`; None asks the store for this path alone.
+    `held` is the pass's `read.served_lookup`; None takes the batch pass's lookup
+    (`admitted_among`) when one is installed, else asks the store for this path alone.
     """
     from .foreground_activity import checkpoint
 
@@ -245,9 +247,11 @@ def _admitted_relative(
     # A page that the store serves is a row, not a file. Its projection may lag, be absent or be a
     # link to another page, and none of that changes what the store holds, so the row admits it and
     # the file checks below do not apply. The store never owns a Records or Planning path.
+    if held is None:
+        held = _HELD_PASS.get()
     stored = _stored_page(root, rel) if held is None else held(rel)
     if stored is not None:
-        return rel if stored and access.is_indexable(root, rel) else None
+        return rel if _stored_admits(root, rel, stored) else None
     # Validate the spelling we were handed before asking the OS to expand it.
     # That preserves the no-follow/reparse boundary while still allowing the
     # post-validation canonicalization below to catch Windows 8.3 aliases that
@@ -266,7 +270,7 @@ def _admitted_relative(
         # case-insensitive filesystem they can reach the same Records bytes.
         if not _is_collection_manifest(parts):
             return None
-        if not access.is_indexable(root, rel):
+        if not _indexable(root, rel):
             return None
         try:
             data, _guard = vault.read_bounded_guarded_bytes(
@@ -275,7 +279,7 @@ def _admitted_relative(
         except (UnicodeError, ValueError, OSError, vault.PathGuardError):
             return None
         return rel if admits_markdown_content(root, rel, data) else None
-    if not access.is_indexable(root, rel):
+    if not _indexable(root, rel):
         return None
     return rel
 
@@ -359,6 +363,70 @@ def iter_admitted_relative(vault_root: Path, paths: Iterable[Path]) -> Iterator[
             yield path, rel
 
 
+def admitted_among(vault_root: Path, rels: Iterable[str]) -> frozenset[str]:
+    """The vault-relative paths among ``rels`` that `is_recall_candidate` admits, decided in one
+    pass: the pages that the store serves take one keyed store read, not one read each.
+
+    Held canonical identities take the same stored-page branch as ``is_recall_candidate``.
+    Every other identity keeps the full predicate, including structured manifests and aliases.
+    """
+    root = Path(vault_root)
+    wanted = list(dict.fromkeys(rels))
+    from .vault_store import read
+
+    _fingerprint, predicate = access.indexable_filter(root)
+    queried = dict.fromkeys(wanted)
+    for rel in wanted:
+        if not _canonical_relative(rel):
+            normalized = _vault_relative(root, root / rel)
+            if normalized is not None:
+                queried[normalized] = None
+    held = read.held_lookup(root, queried)
+    token = _HELD_PASS.set(held)
+    policy_token = _INDEXABLE_PASS.set(predicate or (lambda _rel: True))
+    try:
+        return frozenset(
+            rel for rel in wanted if (
+                # Store keys have a canonical relative spelling. Do not let an alias skip validation.
+                _stored_admits(root, rel, True) if held(rel) and _canonical_relative(rel)
+                else is_recall_candidate(root, root / rel)
+            )
+        )
+    finally:
+        _INDEXABLE_PASS.reset(policy_token)
+        _HELD_PASS.reset(token)
+
+
+def _canonical_relative(rel: str) -> bool:
+    """Whether joining this identity to a root preserves its exact relative spelling."""
+    return (
+        bool(rel) and not rel.startswith("/") and "\\" not in rel and "\x00" not in rel
+        and all(part not in {"", ".", ".."} for part in rel.split("/"))
+    )
+
+
+def _stored_admits(root: Path, rel: str, stored: bool) -> bool:
+    """The stored-page branch shared by scalar and set admission."""
+    return stored and _indexable(root, rel)
+
+
+#: The pass-wide "does the store hold this page?" that ``admitted_among`` installs: one keyed
+#: read proves held identities; every unheld identity keeps ``is_recall_candidate``'s full rule.
+_HELD_PASS: ContextVar[Callable[[str], bool | None] | None] = ContextVar(
+    "recall_policy_held_pass", default=None
+)
+
+# The same policy decision as access.is_indexable, bound once for an admission batch.
+_INDEXABLE_PASS: ContextVar[Callable[[str], bool] | None] = ContextVar(
+    "recall_policy_indexable_pass", default=None,
+)
+
+
+def _indexable(root: Path, rel: str) -> bool:
+    predicate = _INDEXABLE_PASS.get()
+    return predicate(rel) if predicate is not None else access.is_indexable(root, rel)
+
+
 def _held_pages(root: Path) -> Callable[[str], bool | None]:
     """One pass's answer to "does the store hold this page?", so a pass makes one query."""
     from .vault_store import read
@@ -391,7 +459,7 @@ def _vault_relative(root: Path, path: Path | str) -> str | None:
         rel = vault.relative_posix(candidate, root)
     except ValueError:
         return None
-    if any(part in {"", ".", ".."} for part in rel.split("/")):
+    if not _canonical_relative(rel):
         return None
     return rel
 

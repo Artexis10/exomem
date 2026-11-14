@@ -49,7 +49,7 @@ def scan(vault_root: Path) -> ActivationScan:
     Each page is admitted through RAW before it is counted, as the audit's
     page walk is, so a protected capture counts for the owner only.
     """
-    from . import semantic_index
+    from . import find_corpus, semantic_index
     from .governance import egress
     from .governance.principal import effective_principal
 
@@ -72,17 +72,15 @@ def scan(vault_root: Path) -> ActivationScan:
     }
 
     kb = kb_root(vault_root)
-    if not kb.is_dir():
+    if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return ActivationScan(findings=findings, coverage=coverage)
 
-    for path in find_module._walk_md(kb):
-        if not egress.content_permits(vault_root, path.relative_to(vault_root).as_posix(), who):
-            continue
-        try:
-            page = find_module._parse_page(path, path.stat().st_mtime, vault_root)
-        except OSError:
-            continue
-        if page is None or not is_eligible_governed_page(
+    for page in find_corpus.corpus_pages(
+        vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
+        lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
+        keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content),
+    ):
+        if not is_eligible_governed_page(
             vault_root, page, status_basis=status_basis, type_basis=type_basis
         ):
             continue

@@ -10,7 +10,6 @@ contract (placeholder projects/paths); adapt `project-keys.yaml` to your own.
 from __future__ import annotations
 
 import hashlib
-import shutil
 from pathlib import Path
 
 from . import indexes
@@ -79,6 +78,23 @@ def shipped_schema_sources() -> list[Path]:
     return found
 
 
+def _shipped_text(src: Path) -> str:
+    """Scaffold file text as deployed to a vault: release placeholders filled."""
+    text = src.read_text(encoding="utf-8")
+    if src.suffix == ".md":
+        from . import package_skills
+
+        text = package_skills.render_shipped_markdown(text)
+    return text
+
+
+def _shipped_bytes(src: Path) -> bytes:
+    """Scaffold file bytes as deployed to a vault store."""
+    if src.suffix == ".md":
+        return _shipped_text(src).encode("utf-8")
+    return src.read_bytes()
+
+
 def refresh_shipped_schema(vault_root: Path) -> list[str]:
     """Re-deploy the product-owned governance docs into an existing vault.
 
@@ -107,9 +123,10 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
         # moves out of the note namespace (#488).
         relative = src.relative_to(_SCAFFOLD).as_posix().split("/", 1)[1]
         dest = shipped_schema_target(vault_root) / relative
+        text = _shipped_text(src)
         try:
             current, guard = read_guarded_text(vault_root, dest)
-            if current == src.read_text(encoding="utf-8"):
+            if current == text:
                 continue
         except FileNotFoundError:
             try:
@@ -124,7 +141,7 @@ def refresh_shipped_schema(vault_root: Path) -> list[str]:
             raise workflow_contracts.WorkflowContractError(
                 "WORKFLOW_CONTRACT_MIGRATION_INDETERMINATE"
             ) from error
-        writes.append(PlannedWrite(dest, src.read_text(encoding="utf-8"), guard=guard))
+        writes.append(PlannedWrite(dest, text, guard=guard))
         refreshed.append(dest.relative_to(vault_root).as_posix())
     if writes:
         try:
@@ -234,7 +251,7 @@ def _overlay_in_store(vault_root: Path) -> dict:
         current = view.bodies(pages)
         puts: dict[str, bytes] = {}
         for rel, src in pages.items():
-            data = src.read_bytes()
+            data = _shipped_bytes(src)
             if (rel == entity_index and rel in current) or current.get(rel) == data:
                 continue
             puts[rel] = data
@@ -277,11 +294,13 @@ def _overlay_in_store(vault_root: Path) -> dict:
         )
 
     def write_files() -> None:
+        from . import package_skills
+
         for folder in folders:
             folder.mkdir(parents=True, exist_ok=True)
         for src, dest in copies:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dest)
+            package_skills.copy_shipped_file(src, dest)
             created.append(dest.relative_to(vault_root).as_posix())
         for folder in _FOLDERS:
             (kb / folder).mkdir(parents=True, exist_ok=True)
@@ -325,7 +344,7 @@ def init_vault(
         )
 
     created: list[str] = []
-    from . import workflow_contracts
+    from . import package_skills, workflow_contracts
 
     workflow_contracts.ensure_migration_marker(vault_root)
     folders, files = _scaffold_plan(vault_root)
@@ -335,7 +354,7 @@ def init_vault(
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and (not force or dest == kb / "Entities" / "index.md"):
             continue
-        shutil.copy2(src, dest)
+        package_skills.copy_shipped_file(src, dest)
         created.append(dest.relative_to(vault_root).as_posix())
 
     for folder in _FOLDERS:
@@ -455,8 +474,9 @@ def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
 
     The preview and the apply compare the stored bytes with the deployed copy, so a preview names
     exactly what the apply removes. The apply deletes the equal pages in one commit as the offline
-    owner, each bound to the bytes it compared; the projector removes their files, and the folders
-    that empties are left for it.
+    owner, each bound to the bytes it compared, and names every folder under the overlay: the
+    projector removes the pages' files and then each of those folders that is empty, as file mode
+    removes them.
     """
     from .vault_store import read, write
 
@@ -503,11 +523,22 @@ def _reclaim_in_store(vault_root: Path, *, apply: bool) -> dict:
         )
         if not apply or not expect:
             return None
+        # File mode then removes each folder under the overlay that is empty; the projector does
+        # the same once the deleted pages' files are gone.
+        legacy_root = vault_root / legacy
+        folders = tuple(
+            sorted(
+                path.relative_to(vault_root).as_posix()
+                for path in legacy_root.rglob("*")
+                if path.is_dir() and not path.is_symlink()
+            )
+        )
         return write.StoreChange(
             write.Origin.GOVERNED,
             "exomem reclaim-schema --apply",
             deletes=tuple(write.PageDelete(rel) for rel in expect),
             expect=expect,
+            vacated_folders=folders,
         )
 
     if apply:

@@ -141,6 +141,7 @@ def apply_route(vault_root: Path, *, export_to: Path, why: str, export_held: boo
             root, session, token, writer, destination=destination, why=why, export_held=export_held
         ),
     )
+    migrate.refresh_review_advice(root, result)
     # What the replica says once the hand-back ran: "store" here means the republish is still owed.
     return {**result, "vault_marker": marker.read_replica(root).state}
 

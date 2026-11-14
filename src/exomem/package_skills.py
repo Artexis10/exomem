@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tomllib
 import zipfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
@@ -26,6 +27,50 @@ from . import workflow_skills
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 _HOOKS_SRC = Path(__file__).parent / "_hooks"
+
+#: Wherever a shipped doc shows an install line it writes this placeholder instead
+#: of a version: every deployment fills the release it ships, so no copy advises a
+#: mutable install (`exomem@latest`, unversioned `uvx exomem`, `pip install
+#: exomem`) and every example command names an immutable one. Unrendered, it still
+#: reads as an ordinary fill-in like the docs' other `<...>` placeholders.
+RELEASE_PLACEHOLDER = "<exomem-release>"
+
+
+def release_version() -> str:
+    """The release a packaged install command pins to.
+
+    In a checkout the pin reads ``pyproject.toml`` so committed artifacts depend
+    on the tree alone; from an installed package it is the package's own
+    release. With neither resolvable the placeholder is left for the agent.
+    """
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    try:
+        project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        project = {}
+    if project.get("name") == "exomem" and project.get("version"):
+        return str(project["version"])
+    try:
+        return version("exomem")
+    except PackageNotFoundError:
+        return RELEASE_PLACEHOLDER
+
+
+def render_shipped_markdown(text: str) -> str:
+    """Fill the release placeholder in shipped skill markdown."""
+    return text.replace(RELEASE_PLACEHOLDER, release_version())
+
+
+def copy_shipped_file(src: Path, dest: Path) -> None:
+    """Copy one scaffold file, filling release placeholders in markdown."""
+    if src.suffix == ".md":
+        dest.write_text(
+            render_shipped_markdown(src.read_text(encoding="utf-8")),
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        shutil.copy2(src, dest)
 
 # Bundled alongside the core SKILL.md so the uploaded skill carries its own
 # reference material; the web clients cannot reach the repo to resolve links.
@@ -104,11 +149,15 @@ def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
 def _core_payload(vault: Path | None) -> dict[str, str]:
     """Files for the core `exomem` skill archive, keyed by archive-relative path."""
     workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
-    payload: dict[str, str] = {"SKILL.md": (_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8")}
+    payload: dict[str, str] = {
+        "SKILL.md": render_shipped_markdown((_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8"))
+    }
 
     for folder in _CORE_EXTRAS:
         for ref in sorted((_SKILL_SRC / folder).glob("*.md")):
-            payload[f"{folder}/{ref.name}"] = ref.read_text(encoding="utf-8")
+            payload[f"{folder}/{ref.name}"] = render_shipped_markdown(
+                ref.read_text(encoding="utf-8")
+            )
 
     for name in _CORE_FILES:
         # Overlay the real registry when a vault is given, so a personal upload
@@ -135,9 +184,13 @@ def _core_payload(vault: Path | None) -> dict[str, str]:
 def _workflow_payload(name: str) -> dict[str, str]:
     source = workflow_skills.source_dir(name)
     workflow_skills.validate_contract_projection(name, source)
-    payload = {"SKILL.md": (source / "SKILL.md").read_text(encoding="utf-8")}
+    payload = {
+        "SKILL.md": render_shipped_markdown((source / "SKILL.md").read_text(encoding="utf-8"))
+    }
     for reference in sorted((_SKILL_SRC / "references").glob("*.md")):
-        payload[f"references/{reference.name}"] = reference.read_text(encoding="utf-8")
+        payload[f"references/{reference.name}"] = render_shipped_markdown(
+            reference.read_text(encoding="utf-8")
+        )
     return payload
 
 
@@ -303,6 +356,14 @@ def sync_plugin(plugin_root: Path) -> dict:
         skills_dir / "exomem",
         ignore=shutil.ignore_patterns("workflow-skills", "__pycache__", "relation-reviews"),
     )
+    # The copytree ships the scaffold byte-for-byte except release placeholders,
+    # which pin the release this plugin was synced from.
+    for document in (skills_dir / "exomem").rglob("*.md"):
+        document.write_text(
+            render_shipped_markdown(document.read_text(encoding="utf-8")),
+            encoding="utf-8",
+            newline="\n",
+        )
     names = ["exomem"]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])

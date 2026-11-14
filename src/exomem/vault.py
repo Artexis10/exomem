@@ -13,10 +13,12 @@ import contextlib
 import errno
 import functools
 import hashlib
+import io
 import json
 import logging
 import operator
 import os
+import posixpath
 import re
 import secrets
 import stat
@@ -1400,6 +1402,19 @@ class PathGuard:
     expected_content_size: int | None = field(default=None, init=False)
     expected_generation: tuple[int, int, int] | None = field(default=None, init=False)
 
+    @property
+    def expects_absence(self) -> bool:
+        """Whether this guard binds a missing leaf in its canonical backend."""
+        return self.leaf_policy == "absent" or (
+            self.leaf_policy == "store" and self.expected_content_hash is None
+        )
+
+    @property
+    def binds_bytes(self) -> bool:
+        """Whether this guard binds existing bytes by their canonical SHA-256."""
+        # nosemgrep: ep-word-membership -- PathGuard defines these two hash-bearing leaf policies.
+        return self.leaf_policy in ("content", "store") and self.expected_content_hash is not None
+
     @classmethod
     def capture_store(cls, vault_root: Path, target: str) -> PathGuard:
         """Guard a path that the store serves: bind its stored hash, or its absence there."""
@@ -1455,6 +1470,24 @@ class PathGuard:
                 "PATH_GUARD_INVALID", "content size requires a content leaf policy"
             )
         root = Path(vault_root)
+        from .vault_store import read
+
+        if read.serves(root, target):
+            with read.snapshot(root) as view:
+                stored = view.page_meta(target)
+            if leaf_policy == "absent" and stored is not None:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must be absent")
+            if leaf_policy != "absent" and stored is None:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must exist")
+            if leaf_policy == "generation":
+                # A filesystem stat cannot witness a stored page; its hash guards the canonical bytes.
+                raise PathGuardError("PATH_GUARD_INVALID", "use a content guard for a stored page")
+            if stored is not None and leaf_policy == "content" and (
+                stored.sha256 != expected_content_hash
+                or expected_content_size is not None and stored.size != expected_content_size
+            ):
+                raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+            return _store_guard(target, stored.sha256 if stored is not None else None)
         try:
             root_info = root.lstat()
         except OSError as error:
@@ -6814,8 +6847,12 @@ def canonical_vault_rel(vault_root: Path, rel: str) -> str:
     """
     try:
         root = Path(vault_root)
+        from .vault_store import read
+
+        if read.serves(root, rel):
+            return resolve_under_vault(root, rel)[1]
         canonical = (root / rel).resolve().relative_to(root.resolve()).as_posix()
-    except (OSError, ValueError):
+    except (OSError, ValueError, VaultPathError):
         return rel
     if not canonical or canonical == ".":
         return rel
@@ -7065,9 +7102,14 @@ def admit_write_target(vault_root: Path, lexical: str, resolved: Path | None = N
     forms = {lexical}
     try:
         if resolved is None:
-            resolved = (vault_root / lexical).resolve()
+            from .vault_store import read
+
+            resolved = (
+                resolve_under_vault(vault_root, lexical)[0] if read.serves(vault_root, lexical)
+                else (vault_root / lexical).resolve()
+            )
         forms.add(_canonical_kb_segment(resolved.relative_to(vault_root.resolve()).as_posix()))
-    except (ValueError, OSError):
+    except (ValueError, OSError, VaultPathError):
         pass
     try:
         for form in forms:
@@ -7094,6 +7136,9 @@ def resolve_under_vault(
     same containment resolution. The ordinary relative form remains lexical
     across symlinks so downstream no-follow guards still see the path the
     caller supplied.
+
+    In store mode, a stored leaf never follows its projection. The tuple names
+    its store key; details retain both the caller's spelling and that key.
 
     `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
     `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
@@ -7136,16 +7181,38 @@ def resolve_under_vault(
         if first.casefold() != kb_dirname().casefold() and first != "..":
             rel = f"{kb_dirname()}/{rel}"
 
-    candidate = vault_root / rel
+    normalized = posixpath.normpath(rel)
+    if normalized == ".." or normalized.startswith("../"):
+        raise VaultPathError(code="INVALID_PATH", reason=f"path escapes vault root: {raw!r}")
+    candidate = vault_root / normalized
     try:
-        resolved = candidate.resolve()
         vault_resolved = vault_root.resolve()
-        resolved.relative_to(vault_resolved)
+        parent = candidate.parent.resolve() if normalized != "." else vault_resolved
+        parent.relative_to(vault_resolved)
     except (ValueError, OSError) as e:
         raise VaultPathError(
-            code="INVALID_PATH",
-            reason=f"path escapes vault root: {raw!r} ({e})",
+            code="INVALID_PATH", reason=f"path escapes vault root: {raw!r} ({e})",
         ) from None
+    from .vault_store import read as store_read
+
+    # Classify only a contained spelling; a stored leaf's projection cannot redirect its key.
+    stored = store_read.serves(vault_root, normalized)
+    try:
+        resolved = parent / candidate.name if stored else (vault_root / rel).resolve()
+        resolved.relative_to(vault_resolved)
+        if stored and not store_read.serves(
+            vault_root, resolved.relative_to(vault_resolved).as_posix()
+        ):
+            stored = False
+            resolved = (vault_root / rel).resolve()
+            resolved.relative_to(vault_resolved)
+    except (ValueError, OSError) as e:
+        raise VaultPathError(
+            code="INVALID_PATH", reason=f"path escapes vault root: {raw!r} ({e})",
+        ) from None
+
+    if not stored:
+        candidate = vault_root / rel
 
     if must_be_under_kb:
         kb_resolved = (vault_root / kb_dirname()).resolve()
@@ -7162,17 +7229,28 @@ def resolve_under_vault(
 
     if refuse_withheld:
         admit_write_target(vault_root, rel, resolved)
+    if stored and (must_exist or must_be_file or must_be_dir):
+        key = resolved.relative_to(vault_resolved).as_posix()
+        with store_read.snapshot(vault_root) as view:
+            metadata = view.page_meta(key) or view.binary_records((key,)).get(key)
+            is_file = metadata is not None
+            is_dir = not is_file and view.holds_below(key)
+        exists = is_file or is_dir
     if must_exist and (
-        not candidate.exists()
+        not (exists if stored else candidate.exists())
         or (refuse_withheld and _write_target_withheld(vault_root, resolved, vault_resolved))
     ):
         raise VaultPathError(code="NOT_FOUND", reason=missing_path_reason(rel))
-    if must_be_file and candidate.exists() and not candidate.is_file():
+    if must_be_file and (exists if stored else candidate.exists()) and not (
+        is_file if stored else candidate.is_file()
+    ):
         raise VaultPathError(
             code="NOT_A_FILE",
             reason=f"path is not a regular file: {rel}",
         )
-    if must_be_dir and candidate.exists() and not candidate.is_dir():
+    if must_be_dir and (exists if stored else candidate.exists()) and not (
+        is_dir if stored else candidate.is_dir()
+    ):
         raise VaultPathError(
             code="NOT_A_DIR",
             reason=f"path is not a directory: {rel}",
@@ -7205,7 +7283,7 @@ def resolve_under_vault(
             resolved=resolved,
             resolved_relative=resolved_rel,
         )
-    return candidate, rel
+    return (resolved, resolved_rel) if stored else (candidate, rel)
 
 
 def in_curated_tree(rel_path: str) -> str | None:
@@ -7862,10 +7940,7 @@ def _plan_inbound_edit(
         except (OSError, UnicodeDecodeError, PathGuardError):
             gone.add(rel)
             continue
-        reread[rel] = [
-            (lineno, context, raw, _inbound_bucket_key(raw))
-            for lineno, context, raw in _scan_wikilinks(text)
-        ]
+        reread[rel] = inbound_rows(rel, text)[1]
         source_hashes[rel] = content_hash(text)
         if before == after:  # bytes changed while read: apply them, never vouch for them
             applied[rel] = after
@@ -7903,6 +7978,8 @@ def inbound_recovery_available(vault_root: Path) -> bool:
     process, or event-maintained indexes disabled) nothing would ever recover
     the index, so such a caller keeps the synchronous lookup.
     """
+    if _store_inbound_mode(vault_root):
+        return False  # the store's rows need no recovery: a read is complete at its snapshot
     state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
     return state is not None and state.owned and freshness.event_indexes_enabled()
 
@@ -7925,6 +8002,19 @@ def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
     return out
 
 
+def inbound_rows(rel: str, text: str) -> tuple[str, list[tuple[int, str, str, str]]]:
+    """The basename that the page at ``rel`` counts toward, and each of its links as
+    ``(line_number, context, raw_target, bucket_key)``, in scan order.
+
+    The one rule of what the inbound-link index holds for a page: the file-mode build and patch and
+    the store's ``inbound_links`` rows all take it, so the two modes cannot drift.
+    """
+    return PurePosixPath(rel).stem, [
+        (lineno, context, raw, _inbound_bucket_key(raw))
+        for lineno, context, raw in _scan_wikilinks(text)
+    ]
+
+
 def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     from . import foreground_priority
 
@@ -7939,11 +8029,11 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
             text, _guard = read_guarded_text(vault_root, md)
         except (OSError, UnicodeDecodeError, PathGuardError, ValueError):
             continue
-        stem_counts[md.stem] = stem_counts.get(md.stem, 0) + 1
+        stem, links = inbound_rows(md_rel, text)
+        stem_counts[stem] = stem_counts.get(stem, 0) + 1
         sources[md_rel] = content_hash(text)
         keys: list[str] = []
-        for lineno, context, raw in _scan_wikilinks(text):
-            normalized = _inbound_bucket_key(raw)
+        for lineno, context, raw, normalized in links:
             buckets.setdefault(normalized, []).append(
                 _InboundEntry(
                     seq=seq,
@@ -8081,6 +8171,8 @@ def inbound_rebuild_needed(vault_root: Path) -> bool:
     completed by the patch the watcher is about to run, so a rebuild would repeat
     work the patch does for the cost of the change.
     """
+    if _store_inbound_mode(vault_root):
+        return False  # a commit writes the store's rows: nothing builds them
     with _INBOUND_INDEX_LOCK:
         cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
     return cached is None or cached[1].checkpoint is None
@@ -8092,6 +8184,8 @@ def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
     At most one pass builds a vault's index at a time: a caller that finds
     another pass running returns False, because that pass restores the index.
     """
+    if _store_inbound_mode(vault_root):
+        return False  # the store's rows are read where they are: a walk would read every page
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.get(root)
@@ -8266,6 +8360,217 @@ def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _Inbound
     )
 
 
+# ---------------- inbound-link rows (store mode) ----------------
+# A store-mode vault holds the index as two derived tables that each commit writes for its pages
+# by `inbound_rows`, so a read is a lookup at the request's snapshot: no walk, no cache, no proof.
+# The owners' DDL lives here, beside the scan rule; migration creates and fills the tables, and a
+# store opened by an older build gets them through the registry pass (`vault_store.rederive`).
+
+
+def create_inbound_schema(conn) -> None:
+    """Create the store's inbound-link tables and their indexes, if they do not exist."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS inbound_links ("
+        "source_path TEXT NOT NULL, seq INTEGER NOT NULL, line INTEGER NOT NULL, "
+        "context TEXT NOT NULL, raw_target TEXT NOT NULL, bucket_key TEXT NOT NULL, "
+        "PRIMARY KEY (source_path, seq))"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS inbound_links_by_bucket "
+        "ON inbound_links(bucket_key, source_path, seq)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS inbound_sources (path TEXT PRIMARY KEY, stem TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS inbound_sources_by_stem ON inbound_sources(stem, path)"
+    )
+
+
+def replace_inbound_rows(conn, rel: str, raw: bytes | None) -> None:
+    """Replace the inbound rows of the page at ``rel`` with the ones its bytes give, or drop them.
+
+    A page counts toward its basename even with no link, as the file build counts every page it
+    reads; bytes that are not UTF-8 give no rows, as the file build skips such a file.
+    """
+    conn.execute("DELETE FROM inbound_links WHERE source_path = ?", (rel,))
+    conn.execute("DELETE FROM inbound_sources WHERE path = ?", (rel,))
+    if raw is None:
+        return
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return
+    stem, links = inbound_rows(rel, text)
+    conn.execute("INSERT INTO inbound_sources(path, stem) VALUES (?, ?)", (rel, stem))
+    conn.executemany(
+        "INSERT INTO inbound_links(source_path, seq, line, context, raw_target, bucket_key) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [(rel, seq, *link) for seq, link in enumerate(links)],
+    )
+
+
+def derive_inbound_rows(
+    vault_root: Path, conn, *, include: Callable[[str], bool] | None = None
+) -> None:
+    """Fill the inbound tables from the files that the vault walk reaches, never from the store.
+
+    Migration and its verification call it for every file; a store that gains the tables derives
+    only the files it does not own (``include``), whose bytes the disk holds. A commit derives its
+    own pages' rows instead.
+    """
+    root = Path(vault_root)
+    for md in walk_vault_md(root):
+        rel = md.relative_to(root).as_posix()
+        if include is not None and not include(rel):
+            continue
+        try:
+            raw = read_disk_bytes_without_pinning(md)
+        except OSError:
+            continue
+        replace_inbound_rows(conn, rel, raw)
+
+
+def store_inbound_wikilinks(
+    conn, targets: Iterable[str], visible: Callable[[str], bool] | None = None
+) -> dict[str, list[InboundLink]]:
+    """`find_inbound_wikilinks` for each target, from the inbound rows that ``conn`` sees.
+
+    Two keyed reads per chunk of targets: the link rows of the targets' three forms, and the pages
+    that share their basenames. The selection rule is the file index's own. The links come in
+    path order, then scan order, which is deterministic across runs. A store that an older build
+    set up raises ``VAULT_STORE_DERIVED_BEHIND`` until its pass has derived every page's rows: a
+    partial or empty answer would say that fewer pages, or none, link to the page.
+    """
+    from .vault_store import read as store_read
+
+    wanted = list(dict.fromkeys(targets))
+    if not wanted:
+        return {}
+    store_read.require_link_rows(conn)
+    forms = {target: _inbound_target_forms(target) for target in wanted}
+    keys = list(dict.fromkeys(key for form in forms.values() for key in form[1:]))
+    stems = list(dict.fromkeys(form[3] for form in forms.values()))
+    rows: list[tuple] = []
+    for start in range(0, len(keys), store_read.KEYS_PER_QUERY):
+        chunk = keys[start : start + store_read.KEYS_PER_QUERY]
+        rows.extend(conn.execute(
+            "SELECT source_path, seq, line, context, raw_target, bucket_key FROM inbound_links "
+            f"WHERE bucket_key IN ({', '.join('?' * len(chunk))})",
+            chunk,
+        ))
+    sources: dict[str, str] = {}
+    for start in range(0, len(stems), store_read.KEYS_PER_QUERY):
+        chunk = stems[start : start + store_read.KEYS_PER_QUERY]
+        sources.update((path, "") for path, in conn.execute(
+            f"SELECT path FROM inbound_sources WHERE stem IN ({', '.join('?' * len(chunk))})",
+            chunk,
+        ))
+    buckets: dict[str, list[_InboundEntry]] = {}
+    for order, (path, _seq, line, context, raw, key) in enumerate(
+        sorted(rows, key=lambda row: (row[0], row[1]))
+    ):
+        buckets.setdefault(key, []).append(_InboundEntry(order, path, line, context, raw))
+    stem_counts: dict[str, int] = {}
+    for path in sources:
+        stem = PurePosixPath(path).stem
+        stem_counts[stem] = stem_counts.get(stem, 0) + 1
+    data = _InboundIndexData(buckets=buckets, stem_counts=stem_counts, sources=sources)
+    found: dict[str, list[InboundLink]] = {}
+    for target in wanted:
+        selected = _select_inbound_wikilinks(data, target, visible)
+        if not target.endswith(".md"):
+            # An extensioned link `[[diagram.bin]]` lands in the file's basename bucket, which the
+            # page rule only opens for a unique stem: a page stem is `.md`, so a file's stem count
+            # is never one and its links would drop. The extension names the file unambiguously,
+            # so a store-mode read counts each raw that is exactly the filename, as the graph's
+            # recorded link targets did before these tables.
+            _target, full, stripped, basename = _inbound_target_forms(target)
+            if basename not in (full, stripped):
+                self_keys = (full, stripped)
+                seen = {(link.path, link.line_number) for link in selected}
+                selected.extend(
+                    InboundLink(
+                        path=e.path,
+                        line_number=e.line_number,
+                        context=e.context,
+                        raw_target=e.raw_target,
+                    )
+                    for e in sorted(data.buckets.get(basename, ()), key=lambda e: e.seq)
+                    if e.raw_target.split("#", 1)[0].rstrip() == basename
+                    and e.path.removesuffix(".md") not in self_keys
+                    and (e.path, e.line_number) not in seen
+                    and (visible is None or visible(e.path))
+                )
+        found[target] = selected
+    return found
+
+
+def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
+    """The paths among ``rels`` that the store holds inbound rows for, read in a few keyed queries."""
+    from .vault_store import read as store_read
+
+    wanted = list(dict.fromkeys(rels))
+    found: set[str] = set()
+    for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
+        chunk = wanted[start : start + store_read.KEYS_PER_QUERY]
+        found.update(path for path, in conn.execute(
+            f"SELECT path FROM inbound_sources WHERE path IN ({', '.join('?' * len(chunk))})",
+            chunk,
+        ))
+    return frozenset(found)
+
+
+def _store_inbound(
+    vault_root: Path, targets: Iterable[str], visible: Callable[[str], bool] | None
+) -> dict[str, list[InboundLink]] | None:
+    """`store_inbound_wikilinks` at this request's snapshot, or None when the vault reads files."""
+    return _at_store_snapshot(
+        vault_root, lambda conn: store_inbound_wikilinks(conn, targets, visible)
+    )
+
+
+def store_pages_named(vault_root: Path, stem: str) -> list[str] | None:
+    """The pages that the store's link rows count under the basename ``stem``, in path order: what
+    a bare ``[[stem]]`` can name. None when the vault reads files."""
+
+    def named(conn) -> list[str]:
+        from .vault_store import read as store_read
+
+        store_read.require_link_rows(conn)
+        return [path for path, in conn.execute(
+            "SELECT path FROM inbound_sources WHERE stem = ? ORDER BY path", (stem,)
+        )]
+
+    return _at_store_snapshot(vault_root, named)
+
+
+def _at_store_snapshot(vault_root: Path, read_rows: Callable[[Any], Any]) -> Any:
+    """``read_rows(connection)`` at this request's store snapshot, or None when the vault reads
+    files (or its records stopped saying store mode, so the file index decides)."""
+    from .collection_store import connection
+    from .vault_store import mode as store_mode
+    from .vault_store import read as store_read
+
+    root = Path(vault_root)
+    if not store_mode.store_mode_for_reads(root):
+        return None
+    try:
+        with store_read.snapshot(root) as view:
+            return read_rows(view.connection)
+    except connection.CollectionStoreError as error:
+        if error.code != store_read.NOT_ACTIVE:
+            raise
+        return None
+
+
+def _store_inbound_mode(vault_root: Path) -> bool:
+    """Whether the vault's inbound links are the store's rows, so the file index is not used."""
+    from .vault_store import mode as store_mode
+
+    return store_mode.store_mode_for_reads(Path(vault_root))
+
+
 def find_inbound_wikilinks(
     vault_root: Path,
     target_rel_path: str,
@@ -8297,7 +8602,13 @@ def find_inbound_wikilinks(
     `target_has_no_file` says the target is a page that the vault holds but has no file yet (a
     store page that the projector has not written): the basename count includes it, so a bare
     `[[foo]]` still resolves to it when no other file is named `foo`.
+
+    A store-mode vault answers from its inbound rows at the request's snapshot. There every stored
+    page counts toward its basename whether or not it has a file, so `target_has_no_file` is moot.
     """
+    stored = _store_inbound(vault_root, (target_rel_path,), visible)
+    if stored is not None:
+        return stored[target_rel_path]
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
@@ -8314,7 +8625,12 @@ def find_inbound_wikilinks_many(
     `held` says that the vault holds every target, as a store holds a page that may have no file
     yet: a target that the index did not read counts toward its basename, as `target_has_no_file`
     does for one target, and the index answers which ones those are without a look at the disk.
+    A store-mode vault answers from its inbound rows, where `held` is moot.
     """
+    targets = list(targets)
+    stored = _store_inbound(vault_root, targets, None)
+    if stored is not None:
+        return stored
     data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshots = {target: _snapshot_inbound(data, target) for target in targets}
@@ -8340,7 +8656,13 @@ def cached_inbound_wikilinks(
     For a reader other than the owner (`visible` given), data that lags the
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
+
+    A store-mode vault's rows are current at the request's snapshot, so the
+    answer is the complete read, never `None`.
     """
+    stored = _store_inbound(vault_root, (target_rel_path,), visible)
+    if stored is not None:
+        return stored[target_rel_path]
     from .governance import egress
     from .published_admission import admission_of
 
@@ -9763,12 +10085,13 @@ def plan_log_entries(
     """
     log_file = kb_root(vault_root) / "log.md"
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     if not required and not connector_boundary.effect_admission(vault_root)(log_file):
         # A restricted writer's entry is skipped like every effect outside its ceiling, so the
         # plan neither reads the log nor reports a rotation that would not happen.
         return LogWritePlan(())
-    if not log_file.is_file():
+    if not store_read.holds_file(vault_root, relative_posix(log_file, vault_root)):
         return LogWritePlan((), warning=f"{kb_prefix()}log.md missing; skipped log entry")
     current, live_guard = read_guarded_text(vault_root, log_file)
     updated = current
@@ -9825,8 +10148,25 @@ def plan_log_writes(
 def _operation_log_paths(vault_root: Path) -> list[Path]:
     """The live log, then the rotated archives oldest first."""
     root = kb_root(vault_root)
+    from .vault_store import ownership
+    from .vault_store import read as store_read
+
     # Rotation owns this fixed filename protocol; no page vocabulary is selected here.
-    return [root / "log.md", *sorted((root / "_archive" / "logs").glob("log-*.md"))]
+    archives = set((root / "_archive" / "logs").glob("log-*.md"))
+    live = root / "log.md"
+    if store_read.serves(vault_root, relative_posix(live, vault_root)):
+        archives = {
+            path for path in archives
+            if ownership.classify(relative_posix(path, vault_root)) is not ownership.Ownership.PAGE
+        }
+        prefix = f"{kb_prefix()}_archive/logs/"
+        with store_read.snapshot(vault_root) as view:
+            archives.update(
+                vault_root / meta.path for meta in view.pages(prefix)
+                if "/" not in meta.path[len(prefix):]
+                and Path(meta.path).match("log-*.md")
+            )
+    return [live, *sorted(archives)]
 
 
 def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]]:
@@ -9861,14 +10201,28 @@ def _operation_log_entries(text: str, parser: MarkdownIt) -> list[dict[str, Any]
 
 def read_operation_log(vault_root: Path) -> dict[str, Any]:
     """Read activity sections and structured provenance from live and rotated logs."""
+    from .vault_store import read as store_read
+
     paths = _operation_log_paths(vault_root)
+    def stored_bodies():
+        with store_read.snapshot(vault_root) as view:
+            return view.bodies(relative_posix(path, vault_root) for path in paths)
+
+    bodies = store_read.from_store(vault_root, relative_posix(paths[0], vault_root), stored_bodies)
     entries: list[dict[str, Any]] = []
     failed = 0
     read = 0
     parser = MarkdownIt("commonmark")
     for path in paths:
         try:
-            text, _guard = read_guarded_text(vault_root, path)
+            rel = relative_posix(path, vault_root)
+            if bodies is not None and store_read.serves(vault_root, rel):
+                raw = bodies.get(rel)
+                if raw is None:
+                    raise FileNotFoundError(rel)
+                text = raw.decode("utf-8")
+            else:
+                text, _guard = read_guarded_text(vault_root, path)
         except (OSError, UnicodeError, ValueError):
             failed += 1
             continue
@@ -9876,7 +10230,7 @@ def read_operation_log(vault_root: Path) -> dict[str, Any]:
         entries.extend(_operation_log_entries(text, parser))
     return {
         "entries": entries,
-        "live_log_present": paths[0].is_file(),
+        "live_log_present": store_read.holds_file(vault_root, relative_posix(paths[0], vault_root)),
         "files_read": read,
         "files_unreadable": failed,
     }
@@ -10060,6 +10414,8 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
     surfacing history is best-effort. Each entry is
     ``{"date": "2026-06-23", "op": "edit", "summary": "<rationale + what changed>"}``.
     """
+    from .vault_store import read as store_read
+
     title = rel_path_no_ext
     if title.endswith(".md"):
         title = title[: -len(".md")]
@@ -10067,9 +10423,14 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
         title = title[len(kb_prefix()) :]
 
     log_file = kb_root(vault_root) / "log.md"
-    if not log_file.exists():
+    if not store_read.page_exists(vault_root, relative_posix(log_file, vault_root)):
         return []
-    text = log_file.read_text(encoding="utf-8")
+    raw = store_read.owned_bytes(vault_root, relative_posix(log_file, vault_root))
+    # Preserve Path.read_text's universal-newline handling for stored log bytes.
+    text = (
+        io.StringIO(raw.decode("utf-8"), newline=None).read()
+        if raw is not None else log_file.read_text(encoding="utf-8")
+    )
 
     matches = list(_LOG_ENTRY_HEADER_RE.finditer(text))
     entries: list[dict[str, str]] = []

@@ -204,8 +204,12 @@ def repair_is_safe(original: str, repaired: str) -> bool:
 def iter_media_sidecars(vault_root: Path):
     """Yield every `<binary>.md` sidecar under the governed Evidence tree."""
     root = Path(vault_root)
+    from . import find_corpus
+
     evidence_prefix = f"{kb_dirname()}/Evidence/"
-    for entry in walk_vault_md(root):
+    for entry in find_corpus.corpus_paths(
+        root, "vault", lambda **walk: walk_vault_md(root, **walk)
+    ):
         try:
             relative = entry.relative_to(root).as_posix()
         except ValueError:

@@ -245,7 +245,8 @@ checked.
    `rejected`, or a `billing_error` for a credit balance that cannot pay — so it stops the whole
    run at once, with
    no retry and no further cell, matter or session. The command prints one line that says the run
-   waits for room, and scores no loss. With `--jobs` above 1, a session already running ends when
+   waits for room, and scores no loss. Exhausted credits require funding before resuming; they have no reset time.
+   With `--jobs` above 1, a session already running ends when
    it meets the same rejection. The unit that hit the limit has no result, so the run is
    incomplete (rule 6).
 5. A held-out report says the decision is void after a second voided CL-Bench run, or after more
@@ -298,6 +299,9 @@ Run them from the repository root with `PYTHONPATH=benchmarks:src`, as `python -
 6. Run a decision: `membench outcome run lab --split heldout --run-id h1`.
 
 A run spends subscription quota or API credits. State the cost before starting one.
+Optionally add `--estimated-cost-usd 2.50` to record your estimate in `outcome.json` and print it before actors launch.
+The value must be finite and nonnegative. It is an owner estimate, not an automatic calculation or approval gate.
+A resume keeps the estimate unless you supply a replacement. The run's billing declaration remains unchanged.
 
 ## Billing
 

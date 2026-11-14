@@ -1525,7 +1525,7 @@ def _read_stored_generic(
         raise ReservedPathLeafError("MISSING") from error
     if page is None:
         return None
-    return GenericFileSnapshot(page.body, None, page.meta.mtime_ns / 1e9)
+    return GenericFileSnapshot(page.body, None, page.meta.mtime)
 
 
 def _read_generic_bytes_held(
@@ -2661,7 +2661,7 @@ def _list_stored_tree(
                 continue
             entries.append(
                 GenericTreeEntry(
-                    name, "file", None, page.meta.size, page.meta.mtime_ns / 1e9,
+                    name, "file", None, page.meta.size, page.meta.mtime,
                     # A file extension is a closed set that the format fixes: it names the format.
                     page.body if name.casefold().endswith(".md") else None,
                 )

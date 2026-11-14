@@ -58,7 +58,13 @@ async def test_capture_packs_and_persistence(vault: Path):
         await pilot.press("ctrl+s")
         await _settle(app, pilot)
         sources = list((vault / "Knowledge Base" / "Sources").rglob("*.md"))
-        assert any("sample-dogfood-thought" in p.name for p in sources), sources
+        # On failure: the screen, its save receipt (saving or saved, with the path) and the
+        # recovery panel's head (a failed save) name the cause (#2770).
+        assert any("sample-dogfood-thought" in p.name for p in sources), (
+            [type(app.screen).__name__]
+            + [str(widget.render()) for widget in app.screen.query("#capture-receipt, #recovery-head")],
+            sources,
+        )
 
         # Enable two packs; the manifest persists in the vault.
         app.goto("packs")

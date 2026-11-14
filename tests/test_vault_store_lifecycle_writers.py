@@ -38,6 +38,7 @@ from exomem import delete_directory, delete_file, move_file, recover_from_trash,
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
+from exomem.governance import receipts
 from exomem.governance.principal import (
     library_scope,
     most_restrictive_principal,
@@ -245,6 +246,35 @@ def test_the_rows_of_a_move_equal_a_cold_derivation_from_the_files(served, tmp_p
     assert differences_from_a_cold_build(served, tmp_path) == []
 
 
+@pytest.mark.parametrize("removal", ["delete", "move"])
+def test_a_typed_link_to_a_page_that_a_commit_removes_lands_as_a_cold_derivation_lands_it(
+    served, tmp_path, removal
+):
+    """A commit that removes a page while its file waits for the projector, and re-derives a page
+    that links to it against that file: the link stays a link to a file after the file goes."""
+    claim = "Knowledge Base/Notes/Tide Claim.md"
+    claim_text = (
+        "---\ntitle: Tide Claim\ntype: note\n---\n# Tide Claim\n\n"
+        "- supports [[Knowledge Base/Notes/Gamma]]\n"
+    )
+    store_gamma(served)
+    vault_module.batch_atomic_write(
+        [planned(served, claim, claim_text, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    project_by_hand(served)
+
+    if removal == "delete":
+        delete_file.delete_file(served, path=GAMMA, confirm=True, force_orphan=True)
+    else:
+        move_file.move_file(served, old_path=GAMMA, new_path=MOVED, update_wikilinks=False)
+    assert (served / GAMMA).is_file(), "the removed page's file waits for the projector"
+    (served / GAMMA).unlink()  # the projector's step for the page that the commit removed
+
+    assert differences_from_a_cold_build(served, tmp_path) == []
+
+
 def test_a_moves_store_reads_do_not_grow_with_its_linking_pages(served, monkeypatch):
     """A move that opens a store snapshot per linking page: its cost grows with the page's links,
     and its reads may mix revisions in one plan."""
@@ -325,19 +355,21 @@ def test_a_validated_move_names_the_hashes_that_its_commit_then_writes(served):
     assert renamed[GAMMA] == {"path": GAMMA, "absent": True}
 
 
-def test_a_validated_and_a_committed_move_of_a_governed_page_refuse_alike(served):
-    """A validation that passes a move that its commit then refuses: a caller plans on it."""
+def test_a_governed_page_moves_through_the_store_with_no_tombstone_or_receipt(served):
+    """A move of a governed page that refuses as the vault-wide policy check did, or that writes
+    the tombstone and receipt that only a trash or a recovery writes, in file mode as here."""
     store_gamma(served)
     govern(served, GAMMA)
     start = revision(served)
 
-    for validate_only in (True, False):
-        with pytest.raises(OpError) as refused:
-            move_file.move_file(served, old_path=GAMMA, new_path=MOVED, validate_only=validate_only)
-        assert refused.value.code == availability.WRITER_UNROUTED, validate_only
-
+    move_file.move_file(served, old_path=GAMMA, new_path=MOVED, validate_only=True)
     assert revision(served) == start
-    assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+    move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
+
+    assert read.owned_bytes(served, MOVED) == GAMMA_TEXT.encode()
+    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
+    assert not list((served / "Knowledge Base/_Governance").rglob("*.json"))
+    assert receipts.event_records(served) == []
 
 
 @pytest.mark.parametrize(

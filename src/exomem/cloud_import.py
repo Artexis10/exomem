@@ -145,12 +145,13 @@ def free_bytes(path: Path) -> int:
 
 def _fsync_file(path: str) -> None:
     # A walked tree can hold entries this call did not write. Only regular files are flushed, opened
-    # read-only (fsync needs no write access), never through a link, and without blocking on a
-    # swapped-in pipe. A gone or unreadable entry is settled already — os.sync never failed either.
+    # read-only on POSIX, never through a link, and without blocking on a swapped-in pipe.
+    # Windows fsync requires write access. A gone or unreadable entry is skipped.
     try:
         if not stat.S_ISREG(os.lstat(path).st_mode):
             return
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        access = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+        descriptor = os.open(path, access | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except (FileNotFoundError, PermissionError):
         return
     try:
@@ -551,7 +552,7 @@ def _write_file(
 def _set_mtime(path: Path, mtime: float) -> None:
     try:
         os.utime(path, (mtime, mtime), follow_symlinks=False)
-    except (OSError, OverflowError, ValueError):
+    except (OSError, OverflowError, ValueError, NotImplementedError):
         pass  # a timestamp is metadata; never a reason to fail an import
 
 

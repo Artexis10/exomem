@@ -14,7 +14,9 @@ import os
 import signal
 import sqlite3
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from contextvars import copy_context
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -71,6 +73,108 @@ def rows(root, sql, *arguments):
 
 def stored_body(root, rel):
     return rows(root, "SELECT body FROM store_pages WHERE path = ?", rel)[0][0]
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_inherited_worker_snapshot_cannot_mix_revisions(stored, writer, committed):
+    """A worker may join only the request's revision; a raced worker tells the caller to retry."""
+    with read.request_snapshot(stored):
+        def body():
+            with read.snapshot(stored) as view:
+                return view.revision, view.page(ALPHA).body
+
+        pinned = body()
+        if committed:
+            write.commit(writer, put(ALPHA, EDITED))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(copy_context().run, body)
+            if committed:
+                with pytest.raises(connection.CollectionStoreError) as refused:
+                    future.result()
+                assert refused.value.code == "VAULT_STORE_SNAPSHOT_CHANGED"
+                assert "retry the request" in str(refused.value)
+                assert body() == pinned  # The original request still holds its pinned bytes and revision.
+            else:
+                assert future.result() == pinned
+    if committed:
+        assert body() == (pinned[0] + 1, EDITED)
+
+
+def test_path_resolution_uses_stored_files_and_folders_without_probing_projections(
+    stored, writer, monkeypatch
+):
+    """A missing or symlinked projection must not change existence, kind or containment refusals."""
+    folder = "Knowledge Base/_Schema/virtual"
+    write.commit(writer, put(f"{folder}/settings.md", b"# Settings\n"))
+    (stored / ALPHA).unlink()
+    (stored / ALPHA).symlink_to(stored.parent / "outside.md")
+    alias = "Knowledge Base/note-alias"
+    (stored / alias).symlink_to(stored / "Knowledge Base/Notes", target_is_directory=True)
+    real_stat = os.stat
+    real_lstat = os.lstat
+
+    def watching(real):
+        def watched(path, *args, **kwargs):
+            assert str(path) != str(stored / ALPHA), "stored leaf reached the filesystem"
+            return real(path, *args, **kwargs)
+        return watched
+
+    monkeypatch.setattr(os, "stat", watching(real_stat))
+    monkeypatch.setattr(os, "lstat", watching(real_lstat))
+    with read.request_snapshot(stored):
+        assert vault_module.resolve_under_vault(stored, ".", must_be_dir=True)[0] == stored
+        resolution = vault_module.resolve_under_vault(
+            stored, ALPHA, must_exist=True, must_be_file=True, return_details=True,
+        )
+        assert resolution.resolved_relative == ALPHA
+        assert vault_module.resolve_under_vault(stored, f"{alias}/Alpha.md")[1] == ALPHA
+        assert vault_module.resolve_under_vault(
+            stored, "Knowledge Base/Notes/../Notes/Alpha.md", must_exist=True,
+        )[1] == ALPHA
+        assert vault_module.resolve_under_vault(
+            stored, folder, must_exist=True, must_be_dir=True,
+        )[1] == folder
+        with pytest.raises(vault_module.VaultPathError) as wrong_kind:
+            vault_module.resolve_under_vault(stored, ALPHA, must_be_dir=True)
+        assert wrong_kind.value.code == "NOT_A_DIR"
+        with pytest.raises(vault_module.VaultPathError) as wrong_kind:
+            vault_module.resolve_under_vault(stored, folder, must_be_file=True)
+        assert wrong_kind.value.code == "NOT_A_FILE"
+        with pytest.raises(vault_module.VaultPathError) as absent:
+            vault_module.resolve_under_vault(stored, NEW, must_exist=True)
+        assert absent.value.code == "NOT_FOUND"
+        with pytest.raises(vault_module.VaultPathError) as escape:
+            vault_module.resolve_under_vault(stored, "../outside.md", must_exist=True)
+        assert escape.value.code == "INVALID_PATH"
+
+
+@pytest.mark.parametrize("projection", ["missing", "stale"])
+def test_creation_guards_an_unguarded_stored_auxiliary(stored, writer, projection):
+    """Creation must bind canonical auxiliary bytes with either a missing or stale projection."""
+    from test_relation_review import _ID_B, _PAGE_B, _source
+
+    from exomem import relation_review
+    from exomem.collection_store import preview
+
+    auxiliary = "Knowledge Base/nav.md"
+    write.commit(writer, put(auxiliary, b"# Earlier navigation\n"))
+    source = _source(_ID_B)
+    with preview.preview_store(stored, writer.handle):
+        validation = relation_review.validate_creation_draft(
+            stored, path=_PAGE_B, source=source, draft_id=_ID_B, operation="create",
+        )
+        if projection == "stale":
+            (stored / auxiliary).write_bytes(b"# Projection decoy\n")
+        else:
+            (stored / auxiliary).unlink(missing_ok=True)
+        relation_review.commit_creation_draft(
+            stored, path=_PAGE_B, source=source, draft_id=_ID_B, operation="create",
+            relation_disposition="reviewed_none", relation_review_hash=validation.draft_hash,
+            relation_review_reason="No matching relation in this draft",
+            auxiliary_writes=(vault_module.PlannedWrite(stored / auxiliary, "# Current navigation\n"),),
+        )
+    assert stored_body(stored, auxiliary) == b"# Current navigation\n"
+    assert stored_body(stored, _PAGE_B) == source.encode("utf-8")
 
 
 def test_a_file_mode_vault_refuses_a_snapshot_instead_of_reading_empty(vault):  # noqa: F811
@@ -487,6 +591,36 @@ def test_a_path_the_store_does_not_own_is_refused_before_anything_is_written(sto
         with pytest.raises(OpError, match=write.NOT_OWNED):
             write.commit(writer, put(rel, b"x"))
     assert read.current_revision(stored) == revision
+
+
+def test_a_refresh_of_a_page_path_the_store_holds_no_row_for_derives_the_files_rows(
+    stored, writer
+):
+    """A refresh refused for every page path: a file at a page path that no ``store_pages`` row
+    holds is disk-owned, so its refresh derives rows from the file as an unowned file's does. Once
+    a governed write holds the page, a refresh for it is refused again."""
+    loose = "Knowledge Base/Notes/Loose.md"
+    (stored / loose).write_bytes(b"# Loose\n\nA page file the store never took, citing [[Alpha]].\n")
+    write.commit(
+        writer,
+        write.StoreChange(
+            write.Origin.OUTSIDE_EDITOR,
+            "an outside change to a file that the store does not own",
+            refresh=(loose,),
+        ),
+    )
+    assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", loose) == []
+    assert rows(stored, "SELECT path FROM pages WHERE path = ?", loose) != []
+    assert rows(
+        stored, "SELECT raw_target FROM inbound_links WHERE source_path = ?", loose
+    ) == [("Alpha",)]
+
+    write.commit(writer, put(loose, b"# Loose\n\nOwned now, citing nobody.\n"))
+    with pytest.raises(OpError, match=write.NOT_OWNED):
+        write.commit(
+            writer,
+            write.StoreChange(write.Origin.OUTSIDE_EDITOR, "same", refresh=(loose,)),
+        )
 
 
 def test_a_path_that_spells_a_parent_a_backslash_or_an_empty_folder_is_refused_before_a_write(

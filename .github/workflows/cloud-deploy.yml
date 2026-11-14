@@ -5,18 +5,16 @@ name: cloud-deploy
 # barrier stops it, then wait until the canary runs it. The logic and its tests
 # are in infra/scripts/cloud_deploy.py and tests/test_cloud_deploy.py.
 #
-# - It runs when release-please completes on a release tag (head_branch v*), and
-#   on a dispatch on main, which the platform upgrade ends with.
+# - It runs on a dispatch on main. The release workflow's tag run ends with that
+#   dispatch, and so does the platform upgrade. A workflow_run trigger never
+#   fired: the tag run starts from a github.token dispatch, and such a run's
+#   completion starts no other workflow (v0.172.0-v0.174.0 started none).
 # - The `cloud-deploy` environment holds EXOMEM_DEPLOY_TOKEN and the alert
 #   capability, and admits only main (docs/runbooks/cloud-platform-deploy.md).
 #   Without the token, the run does nothing and succeeds.
 # - It holds no cluster credential and calls Substrate over HTTPS only. The log
 #   is public, so the script prints only codes and counts.
 on:
-  workflow_run:
-    workflows: [release-please]
-    types: [completed]
-    branches: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -34,9 +32,7 @@ concurrency:
 jobs:
   deploy:
     name: Set the release's cell image
-    if: >-
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
-      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     environment: cloud-deploy
