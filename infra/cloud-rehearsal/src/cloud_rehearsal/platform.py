@@ -103,6 +103,17 @@ class Platform:
     cell_class: str = ""
 
 
+def upgrade_default_range(backup_window: str) -> tuple[int, int]:
+    """The `cellctl.upgradeWindow` default range complementary to a backup window
+    "start-end": every hour the backup does not cover. cellctl refuses to start
+    when the two overlap, and the rehearsal moves the backup window per run."""
+    start_text, _, end_text = backup_window.partition("-")
+    start, end = int(start_text), int(end_text)
+    if not (0 <= start < 24 and 0 <= end < 24) or start == end:
+        raise ValueError(f"backup window {backup_window!r} leaves no upgrade default hours")
+    return end, start
+
+
 def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[str, Any]:
     """The chart's `cellctl` values for a rehearsal stack: its image, the S3
     double as B2, and the control database's one address."""
@@ -135,8 +146,13 @@ def cell_data_values(stack: Stack) -> dict[str, Any]:
 
 def _render(stack: Stack, config: PlatformConfig) -> Platform:
     pg_cidr = f"{stack.postgres.ip}/32"
+    cellctl = cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository)
+    # The chart's static default range cannot know where this run's backup
+    # window lands, so the render carries the complement.
+    upgrade_start, upgrade_end = upgrade_default_range(config.backup_window)
+    cellctl["upgradeWindow"] = {"defaultHourStart": upgrade_start, "defaultHourEnd": upgrade_end}
     values = {
-        "cellctl": cellctl_values(stack, image=config.cellctl_image, cell_repository=config.cell_repository),
+        "cellctl": cellctl,
         "cellData": cell_data_values(stack),
         "capacity": {"attachmentsLimitFallback": config.attachments_limit_fallback},
         "cells": {

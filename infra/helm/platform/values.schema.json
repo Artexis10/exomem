@@ -90,7 +90,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "upgradeWindow", "exportDeadlineMinutes", "exportPauseCopyFloorMiB", "exportConcurrencyPerNode", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "upgradeConcurrencyPerNode", "upgradePrepareEnabled", "upgradeWindow", "exportDeadlineMinutes", "exportPauseCopyFloorMiB", "exportConcurrencyPerNode", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "accessRecord": {
           "type": "object", "additionalProperties": false,
@@ -262,6 +262,16 @@
           "minimum": 5,
           "maximum": 120,
           "description": "Minutes cellctl waits for an upgraded cell to become ready before it restores the pre-upgrade snapshot and pauses the rollout. Below 5, a normal first start (image pull, migration, catalogue rebuild) misses it and rolls back a healthy image. Above 120, a broken image keeps the canary cell down for hours before the automatic restore."
+        },
+        "upgradeConcurrencyPerNode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "description": "After the canary runs the target, at most this many cells per node carry an upgrade hold. Above 8, a node's drain and snapshot contention during a rollout outweigh the shorter stop."
+        },
+        "upgradePrepareEnabled": {
+          "type": "boolean",
+          "description": "Run the pull-only prepare Job, one per node per target image, before the node's first upgrade window for it. Off leaves the first pull inside each stop."
         },
         "exportDeadlineMinutes": {"type": "integer", "minimum": 1},
         "exportPauseCopyFloorMiB": {"type": "integer", "minimum": 1},

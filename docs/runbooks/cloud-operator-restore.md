@@ -49,6 +49,21 @@ A snapshot holds what cellctl's backup Job covers: `BACKUP_PATHS` in `infra/cell
 
 The prior contents of both paths stay in `/data/.restore-prior-<run ID>` on the cell's volume. A backup never includes that directory.
 
+## cellctl's own restore after a failed upgrade
+
+A cell on local storage (`exomem-cloud-local`) keeps a restore point through its upgrade attempt, recorded on the cell's StatefulSet:
+
+- `exomem.io/pre-upgrade-volume-snapshot` — the CSI `VolumeSnapshot` taken after the stop, before the target applied.
+- `exomem.io/pre-upgrade-snapshot` — the restic snapshot the attempt's own backup Job reported, copied from the snapshot's read-only clone.
+
+If the upgraded cell misses its readiness deadline, cellctl restores in this order and never starts an image on an unrestored volume:
+
+1. **From the attempt's clone.** A restore Job on the cell's node mounts the clone read-only and replaces `/data/vault` and `/data/host` with the snapshot's copies. Files the target created under those paths go with them; the volume root, including `lost+found`, is untouched.
+2. **From the attempt's restic snapshot.** Only when the clone is already gone does the Job fall back to `pre-upgrade-snapshot`. Never substitute `last_backup_snapshot`: that row column may name an older nightly snapshot, not this attempt's.
+3. **`RESTORE_FAILED`.** With neither restore point left, cellctl records `RESTORE_FAILED`, pauses the rollout and keeps the cell stopped at zero replicas until the owner looks.
+
+A `forward-only-held` cell (upgrade phase `exomem.io/upgrade-phase: forward-only-held`) keeps the attempt's VolumeSnapshot and clone until the rollout resumes; clearing the pause releases them before the next attempt asks for its clone. After a successful clone restore, cellctl deletes the clone and the VolumeSnapshot while the restore hold still owns them.
+
 ## How the script runs
 
 Both tools run on the K3s server, the node that holds `/etc/rancher/k3s/k3s.yaml`, as root, from a checkout of the reviewed release. The script refuses to start on any other node. It mints break-glass with that admin kubeconfig, and it removes the scratch namespace with it even after break-glass expires. They use break-glass ([cloud operator access](cloud-operator-access.md#break-glass-mint-a-one-hour-identity)), because they read the cell's Secret and exec into cell and scratch pods, which the everyday identity cannot do. The script mints its own one-hour identity, and mints a new one when less than 20 minutes remain.

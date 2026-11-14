@@ -319,6 +319,10 @@ spec:
               value: {{ .Values.cellctl.initDeadlineMinutes | quote }}
             - name: CELLCTL_UPGRADE_READY_DEADLINE_MINUTES
               value: {{ .Values.cellctl.upgradeReadyDeadlineMinutes | quote }}
+            - name: CELLCTL_UPGRADE_CONCURRENCY_PER_NODE
+              value: {{ .Values.cellctl.upgradeConcurrencyPerNode | quote }}
+            - name: CELLCTL_UPGRADE_PREPARE_ENABLED
+              value: {{ .Values.cellctl.upgradePrepareEnabled | quote }}
             # automate-cloud-releases D4: each cell's upgrade window.
             - name: CELLCTL_UPGRADE_WINDOW_ENABLED
               value: {{ .Values.cellctl.upgradeWindow.enabled | toString | quote }}
@@ -873,6 +877,22 @@ spec:
     {{- end }}
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
+        {{- /* automate-cloud-releases D9: a prepare Job's nodeName is its whole placement; it carries no selector, toleration or affinity, so it warms one node and nothing else. */}}
+        (request.resource.resource == 'jobs' &&
+          variables.target.metadata.name.matches('^cell-prepare-[0-9a-f]{16}$') &&
+          has(variables.target.spec.template.metadata.labels) &&
+          'exomem.io/cell-job' in variables.target.spec.template.metadata.labels &&
+          variables.target.spec.template.metadata.labels['exomem.io/cell-job'] == 'prepare' &&
+          (!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0) &&
+          (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&
+          variables.podSpec.containers.all(c,
+            has(c.command) && c.command == ['true'] && !has(c.lifecycle) &&
+            !has(c.startupProbe) && !has(c.livenessProbe) && !has(c.readinessProbe)) &&
+          has(variables.podSpec.nodeName) &&
+          !has(variables.podSpec.nodeSelector) && !has(variables.podSpec.tolerations) &&
+          !has(variables.podSpec.affinity) &&
+          !has(variables.podSpec.runtimeClassName) && !has(variables.podSpec.priorityClassName) &&
+          !has(variables.podSpec.hostAliases)) ||
         (!has(variables.podSpec.nodeName) && !has(variables.podSpec.runtimeClassName) &&
           !has(variables.podSpec.priorityClassName) && !has(variables.podSpec.hostAliases) &&
           ((!has(variables.podSpec.tolerations) && !has(variables.podSpec.nodeSelector)) ||
@@ -932,7 +952,7 @@ spec:
                   {'batch.kubernetes.io/job-name': variables.target.metadata.name.substring(0, 39) + '-upload'}))) &&
           (request.resource.resource != 'statefulsets' || !has(variables.target.spec.volumeClaimTemplates) ||
             size(variables.target.spec.volumeClaimTemplates) == 0))
-      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, without nodeName, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates, and without affinity but an export pack's to its own upload's node.
+      message: cellctl may use only exact operator-selected dedicated or qualified shared placement{{ if $local }}, or a Job's toleration of its node's cordon{{ end }}, or a cell-prepare Job's nodeName pin alone, otherwise without nodeName, runtimeClassName, priorityClassName, hostAliases or volumeClaimTemplates, and without affinity but an export pack's to its own upload's node.
     # 5. Every Service cellctl creates or updates must be ClusterIP with no
     # externalIPs.
     - expression: >-
@@ -1119,9 +1139,11 @@ spec:
           variables.np.podSelector.matchExpressions[0].operator == 'Exists' &&
           variables.np.podSelector.matchExpressions[1].key == 'exomem.io/cell-job' &&
           variables.np.podSelector.matchExpressions[1].operator == 'NotIn' &&
-          size(variables.np.podSelector.matchExpressions[1].values) == 2 &&
+          {{- /* automate-cloud-releases D9: the pull-only prepare Job needs no egress either; the kubelet pulls its image. */}}
+          size(variables.np.podSelector.matchExpressions[1].values) == 3 &&
           'export-pack' in variables.np.podSelector.matchExpressions[1].values &&
           'export-pause' in variables.np.podSelector.matchExpressions[1].values &&
+          'prepare' in variables.np.podSelector.matchExpressions[1].values &&
           (!has(variables.np.ingress) || size(variables.np.ingress) == 0) &&
           {{- if .Values.mediaEdge.enabled }}
           {{- /* collect-released-media D3: a collecting cell's Jobs may also reach the edge port; the edge's own ingress admits only backup Jobs. */}}
@@ -1149,7 +1171,7 @@ spec:
           !has(variables.np.egress[1].to[0].podSelector.matchExpressions) &&
           size(variables.np.egress[1].ports) == 2 &&
           variables.np.egress[1].ports.all(p, p.protocol in ['UDP', 'TCP'] && p.port == 53 && !has(p.endPort)))
-      message: cellctl may write job-egress only as egress for every Job but the export pause and pack to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
+      message: cellctl may write job-egress only as egress for every Job but the export pause and pack and the pull-only prepare Job to TCP 443 outside the excepted ranges, plus kube-dns{{ if .Values.mediaEdge.enabled }} and the media edge on TCP 8769{{ end }}.
     {{- if $relocation }}
     # 11. move-cloud-cells-to-local-storage D4: cellctl's one PV write sets a
     # cell volume's reclaim policy to Retain before relocation deletes its

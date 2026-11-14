@@ -17,7 +17,7 @@ import pytest
 
 from cellctl.decide import ReconcileConfig, decide, nightly_backup_due
 from cellctl.manifests import STORAGE_CLASS
-from cellctl.rollout import select_upgrade_candidate
+from cellctl.rollout import select_upgrade_candidates
 from cellctl.state import (
     BACKUP_FAILED,
     IDENTITY_CONFLICT,
@@ -493,12 +493,12 @@ def test_nightly_backup_starts_a_hold_only_when_selected_by_the_caller() -> None
     assert selected.row_updates["hold_kind"] == "backup"
 
 
-def test_nightly_backup_due_respects_the_window_the_interval_and_the_backoff() -> None:
+def test_nightly_backup_due_respects_the_window_occurrence_and_the_backoff() -> None:
     due_row = row(last_backup_at=NOW - timedelta(hours=21))
     assert nightly_backup_due(due_row, obs(), NOW, CONFIG) is True
     outside_window = NOW.replace(hour=12)
     assert nightly_backup_due(due_row, obs(), outside_window, CONFIG) is False
-    not_yet_due = row(last_backup_at=NOW - timedelta(hours=5))
+    not_yet_due = row(last_backup_at=NOW - timedelta(minutes=55))
     assert nightly_backup_due(not_yet_due, obs(), NOW, CONFIG) is False
     backed_off = obs(statefulset_backup_retry_after=NOW + timedelta(minutes=10))
     assert nightly_backup_due(due_row, backed_off, NOW, CONFIG) is False
@@ -1585,34 +1585,35 @@ def test_deletion_mid_upgrade_clears_the_hold_columns_even_with_a_nightly_snapsh
 # --- Upgrade candidate selection (canary first) -----------------------------
 
 
-def test_select_upgrade_candidate_picks_lowest_rollout_priority() -> None:
+def test_select_upgrade_candidates_picks_lowest_rollout_priority() -> None:
     rows = [
         row(cell_id="bbbbbbbbbbbbbbbb", rollout_priority=2, observed_image=IMAGE_A, ready=True),
         row(cell_id="aaaaaaaaaaaaaaaa", rollout_priority=1, observed_image=IMAGE_A, ready=True),
     ]
     observations = {r.cell_id: obs(statefulset_image=IMAGE_A, pod_ready=True) for r in rows}
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1
     )
-    assert winner == "aaaaaaaaaaaaaaaa"
+    assert winner == {"aaaaaaaaaaaaaaaa"}
 
 
-def test_select_upgrade_candidate_none_when_another_cell_already_upgrading() -> None:
+def test_select_upgrade_candidates_none_when_another_cell_already_upgrading() -> None:
     rows = [row(observed_image=IMAGE_A, ready=True)]
     observations = {rows[0].cell_id: obs(statefulset_image=IMAGE_A)}
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=True
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(), IMAGE_B, now=NOW, restore_active=False,
+        upgrading_per_node={None: 1}, concurrency_per_node=1
     )
-    assert winner is None
+    assert winner == set()
 
 
-def test_select_upgrade_candidate_none_while_paused() -> None:
+def test_select_upgrade_candidates_none_while_paused() -> None:
     rows = [row(observed_image=IMAGE_A, ready=True)]
     observations = {rows[0].cell_id: obs(statefulset_image=IMAGE_A)}
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(paused=True), IMAGE_B, now=NOW, any_cell_already_upgrading=False
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(paused=True), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1
     )
-    assert winner is None
+    assert winner == set()
 
 
 def test_owner_transiently_ineligible_makes_the_fleet_wait_not_skip_to_a_friend() -> None:
@@ -1627,10 +1628,10 @@ def test_owner_transiently_ineligible_makes_the_fleet_wait_not_skip_to_a_friend(
             statefulset_exists=True,statefulset_image=IMAGE_A, statefulset_hold_kind="backup"),
         friend.cell_id: obs(statefulset_image=IMAGE_A),
     }
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1
     )
-    assert winner is None
+    assert winner == set()
 
 
 def test_owner_up_to_date_lets_the_next_priority_candidate_go() -> None:
@@ -1641,10 +1642,10 @@ def test_owner_up_to_date_lets_the_next_priority_candidate_go() -> None:
         owner.cell_id: obs(statefulset_image=IMAGE_B, pod_ready=True),  # already on the target
         friend.cell_id: obs(statefulset_image=IMAGE_A, pod_ready=True),
     }
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1
     )
-    assert winner == friend.cell_id
+    assert winner == {friend.cell_id}
 
 
 def test_after_the_owner_an_ineligible_non_owner_candidate_is_skipped_not_waited_for() -> None:
@@ -1658,10 +1659,10 @@ def test_after_the_owner_an_ineligible_non_owner_candidate_is_skipped_not_waited
             statefulset_exists=True,statefulset_image=IMAGE_A, statefulset_hold_kind="backup"),
         third.cell_id: obs(statefulset_image=IMAGE_A, pod_ready=True),
     }
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1
     )
-    assert winner == third.cell_id
+    assert winner == {third.cell_id}
 
 
 def test_candidate_inside_a_backup_backoff_window_is_not_eligible() -> None:
@@ -1670,10 +1671,10 @@ def test_candidate_inside_a_backup_backoff_window_is_not_eligible() -> None:
     observations = {
         candidate.cell_id: obs(statefulset_image=IMAGE_A, statefulset_backup_retry_after=NOW + timedelta(minutes=5)),
     }
-    winner = select_upgrade_candidate(
-        rows, observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False
+    winner = select_upgrade_candidates(
+        rows, observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1
     )
-    assert winner is None
+    assert winner == set()
 
 
 # --- Deletion (D10) -----------------------------------------------------------
@@ -1928,8 +1929,8 @@ def test_a_stopped_canary_off_the_target_holds_the_rollout() -> None:
         owner.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=0),
         tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True),
     }
-    pick = select_upgrade_candidate([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False)
-    assert pick is None
+    pick = select_upgrade_candidates([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1)
+    assert pick == set()
 
 
 def test_a_stopped_canary_already_on_the_target_lets_the_tenants_go() -> None:
@@ -1939,8 +1940,8 @@ def test_a_stopped_canary_already_on_the_target_lets_the_tenants_go() -> None:
         owner.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_B, statefulset_replicas=0),
         tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True),
     }
-    pick = select_upgrade_candidate([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False)
-    assert pick == tenant.cell_id
+    pick = select_upgrade_candidates([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1)
+    assert pick == {tenant.cell_id}
 
 
 def test_a_canary_not_yet_provisioned_holds_the_rollout() -> None:
@@ -1950,8 +1951,8 @@ def test_a_canary_not_yet_provisioned_holds_the_rollout() -> None:
         owner.cell_id: obs(),
         tenant.cell_id: obs(statefulset_exists=True, statefulset_image=IMAGE_A, statefulset_replicas=1, pod_ready=True),
     }
-    pick = select_upgrade_candidate([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, any_cell_already_upgrading=False)
-    assert pick is None
+    pick = select_upgrade_candidates([owner, tenant], observations, rollout(), IMAGE_B, now=NOW, restore_active=False, concurrency_per_node=1)
+    assert pick == set()
 
 
 def test_a_backup_snapshot_id_with_a_trailing_newline_is_a_failed_backup() -> None:
@@ -2077,3 +2078,15 @@ def test_a_restore_hold_without_a_snapshot_pauses_the_rollout_once_so_a_resume_s
     )
     assert after_resume.hold_kind == "restore"
     assert after_resume.rollout_updates == {}
+
+
+@pytest.mark.parametrize(("window", "now", "last_backup", "due"), [
+    ((2, 5), datetime(2026, 1, 2, 2, 10, tzinfo=UTC), datetime(2026, 1, 1, 19, 57, tzinfo=UTC), True),
+    ((2, 5), datetime(2026, 1, 2, 3, tzinfo=UTC), datetime(2026, 1, 2, 2, 5, tzinfo=UTC), False),
+    ((2, 5), datetime(2026, 1, 2, 3, tzinfo=UTC), datetime(2026, 1, 2, 2, tzinfo=UTC), False),
+    ((22, 3), datetime(2026, 1, 2, 2, 10, tzinfo=UTC), datetime(2026, 1, 1, 19, 57, tzinfo=UTC), True),
+    ((22, 3), datetime(2026, 1, 2, 2, 10, tzinfo=UTC), datetime(2026, 1, 1, 22, 5, tzinfo=UTC), False),
+    ((22, 3), datetime(2026, 1, 1, 23, tzinfo=UTC), datetime(2026, 1, 1, 22, tzinfo=UTC), False),
+])
+def test_a_backup_is_due_once_per_window_occurrence(window, now, last_backup, due) -> None:
+    assert nightly_backup_due(row(last_backup_at=last_backup), obs(), now, ReconcileConfig(backup_window=window)) is due

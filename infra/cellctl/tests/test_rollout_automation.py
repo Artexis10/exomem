@@ -9,6 +9,7 @@ test_reconcile.py, whose helpers these reuse.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
@@ -762,6 +763,11 @@ async def test_a_pass_that_cannot_observe_a_cell_sends_no_rollout_transition(cel
 
 async def test_a_backward_move_needs_known_releases(cell_db: CellDatabase) -> None:
     # The image history read failing (the table missing) starts no attempt at all.
+    owner = await asyncpg.connect(cell_db.dsn(role="substrate_owner"))
+    try:
+        await owner.execute("DROP TABLE exomem_cloud_image_history")
+    finally:
+        await owner.close()
     fleet = await Fleet.start(cell_db, config=ReconcileConfig(upgrade_barriers=ONE_WAY_CELL))
     try:
         await _set_cell_image(cell_db, IMAGE_B)
@@ -770,5 +776,27 @@ async def test_a_backward_move_needs_known_releases(cell_db: CellDatabase) -> No
 
         assert "exomem.io/hold" not in _annotations(fleet.cluster, OWNER)
         assert not (await fleet.rollout()).paused
+    finally:
+        await fleet.close()
+
+
+async def test_a_backward_crossing_pauses_before_any_sibling_starts(cell_db: CellDatabase) -> None:
+    fleet = await Fleet.start(cell_db, TENANT, TENANT_2,
+                              config=ReconcileConfig(upgrade_barriers=ONE_WAY_CELL))
+    try:
+        await _history_table(fleet.admin, {IMAGE_A: "v1.5.0", IMAGE_B: "v1.4.0", IMAGE_C: "v1.3.0"})
+        await _set_cell_image(cell_db, IMAGE_B)
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_A, OWNER)
+        _statefulset(fleet.cluster, TENANT_2)["spec"]["template"]["spec"]["containers"][0]["image"] = IMAGE_C
+        _observe(fleet.cluster, TENANT_2)
+        for cell, node in ((TENANT, "agent-1"), (TENANT_2, "agent-2")):
+            fleet.cluster.observations[cell] = replace(fleet.cluster.observations[cell], pv_node=node)
+
+        await fleet.run(NOON)
+
+        assert (await fleet.rollout()).error_code == "UPGRADE_BACKWARD_CROSSING"
+        for cell in (TENANT, TENANT_2):
+            assert "exomem.io/hold" not in _annotations(fleet.cluster, cell)
+            assert _statefulset(fleet.cluster, cell)["spec"]["replicas"] == 1
     finally:
         await fleet.close()
