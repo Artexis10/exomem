@@ -3301,6 +3301,18 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     prepare = render_prepare_job(spec, node="selected-agent", image=spec.image)
     result = create(prepare)
     assert result.returncode == 0, result.stderr
+    for secret_field in (
+        {"containers": [{**prepare["spec"]["template"]["spec"]["containers"][0],
+                         "env": [{"name": "FETCH_SECRET", "valueFrom": {
+                             "secretKeyRef": {"name": "cell-object-store-key", "key": "key"}}}]}]},
+        {"containers": [{**prepare["spec"]["template"]["spec"]["containers"][0],
+                         "envFrom": [{"secretRef": {"name": "cell-object-store-key"}}]}]},
+        {"imagePullSecrets": [{"name": "cell-object-store-key"}]},
+    ):
+        with_secret = copy.deepcopy(prepare)
+        with_secret["spec"]["template"]["spec"].update(secret_field)
+        result = create(with_secret)
+        assert result.returncode != 0 and "cellctl may use only exact operator-selected" in result.stderr, result.stderr
     with_init = copy.deepcopy(prepare)
     init = copy.deepcopy(with_init["spec"]["template"]["spec"]["containers"][0])
     init.update(name="extra-init", command=["sh", "-c", "echo arbitrary-code"])

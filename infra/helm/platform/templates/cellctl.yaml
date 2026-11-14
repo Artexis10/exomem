@@ -885,8 +885,11 @@ spec:
           variables.target.spec.template.metadata.labels['exomem.io/cell-job'] == 'prepare' &&
           (!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0) &&
           (!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0) &&
+          {{- /* A compromised cellctl must not make a chosen node's kubelet fetch a cell secret. */}}
+          !has(variables.podSpec.imagePullSecrets) &&
           variables.podSpec.containers.all(c,
             has(c.command) && c.command == ['true'] && !has(c.lifecycle) &&
+            !has(c.envFrom) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))) &&
             !has(c.startupProbe) && !has(c.livenessProbe) && !has(c.readinessProbe)) &&
           has(variables.podSpec.nodeName) &&
           !has(variables.podSpec.nodeSelector) && !has(variables.podSpec.tolerations) &&

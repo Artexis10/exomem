@@ -1920,6 +1920,9 @@ def test_the_scope_policy_admits_the_prepare_job_and_its_no_egress_label() -> No
     assert "!has(variables.podSpec.volumes) || size(variables.podSpec.volumes) == 0" in prepare
     # Hostile templates run through this rendered rule in the K3s local-storage admission test.
     assert "!has(variables.podSpec.initContainers) || size(variables.podSpec.initContainers) == 0" in prepare
+    assert "!has(variables.podSpec.imagePullSecrets)" in prepare
+    assert "!has(c.envFrom)" in prepare
+    assert "!has(c.env) || c.env.all(e, !has(e.valueFrom))" in prepare
     assert "c.command == ['true']" in prepare
     assert "!has(c.lifecycle)" in prepare
     assert "!has(c.startupProbe) && !has(c.livenessProbe) && !has(c.readinessProbe)" in prepare

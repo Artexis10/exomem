@@ -116,6 +116,52 @@ def test_the_attempt_restic_snapshot_is_recorded_before_the_upgrade_finishes() -
     assert decision.row_updates["last_backup_snapshot"] == RESTIC
 
 
+@pytest.mark.parametrize(("desired_state", "exit_replicas"), [("stopped", 0), ("read_only", 1)])
+def test_a_stop_at_ready_keeps_the_attempts_pre_target_restore_points(desired_state: str, exit_replicas: int) -> None:
+    stopped = _row(desired_state=desired_state, hold_kind="upgrade", hold_started_at=STARTED)
+    capture = _step(_upgrade(statefulset_replicas=0, pod_exists=False))
+    assert (capture.create_snapshot, capture.pre_upgrade_volume_snapshot) == (True, VOL_NAME)
+    observation = _upgrade(
+        statefulset_replicas=0, pod_exists=False, statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
+        snapshot_exists=True, snapshot_ready=True)
+    applied = _step(observation)
+    assert (applied.replicas, applied.target_applied_at) == (1, NOW)
+
+    # The owner stops at Ready, while the attempt still owns its backup.
+    observation = replace(
+        observation, statefulset_image=IMAGE_B, statefulset_replicas=1, pod_exists=True,
+        pod_ready=True, ready_pod_image=IMAGE_B, statefulset_target_applied_at=NOW,
+        clone_exists=True, clone_bound=True, backup_job_running=True)
+    ready = _step(observation, stopped)
+    assert (ready.hold_kind, ready.replicas, ready.create_snapshot) == ("upgrade", 1, False)
+    assert ready.read_only is (desired_state == "read_only")
+    recorded = replace(observation, backup_job_running=False, backup_job_succeeded=True,
+                       backup_job_snapshot_id=RESTIC)
+    cleanup = _step(recorded, stopped)
+    assert (cleanup.replicas, cleanup.delete_snapshot_backup, cleanup.create_snapshot) == (1, True, False)
+    assert (cleanup.pre_upgrade_volume_snapshot, cleanup.pre_upgrade_snapshot) == (VOL_NAME, RESTIC)
+    gone = replace(recorded, snapshot_exists=False, clone_exists=False,
+                   statefulset_pre_upgrade_snapshot=RESTIC)
+    exit_hold = _step(gone, stopped)
+    assert (exit_hold.hold_kind, exit_hold.replicas, exit_hold.create_snapshot) == (None, exit_replicas, False)
+
+    # A stale zero-replica observation from the old Ready step cannot reapply
+    # the target or capture its changed volume, even after cleanup removed the pair.
+    terminating = replace(observation, statefulset_replicas=0, pod_ready=False, pod_terminating=True)
+    pair_gone = replace(gone, statefulset_replicas=0, pod_exists=False, pod_ready=False)
+    for transient in (terminating, pair_gone, replace(pair_gone, snapshot_exists=True, snapshot_ready=True)):
+        waiting = _step(transient, stopped)
+        assert (waiting.hold_kind, waiting.replicas, waiting.create_snapshot) == ("upgrade", 0, False)
+        assert waiting.target_applied_at == NOW
+        assert waiting.pre_upgrade_volume_snapshot == VOL_NAME
+    missed = _step(pair_gone, stopped, now=NOW + timedelta(minutes=45))
+    assert (missed.hold_kind, missed.replicas, missed.create_snapshot) == ("restore", 0, False)
+    assert (missed.pre_upgrade_volume_snapshot, missed.pre_upgrade_snapshot) == (VOL_NAME, RESTIC)
+    restore = _step(replace(pair_gone, statefulset_hold_kind="restore"),
+                    replace(stopped, hold_kind="restore"))
+    assert (restore.run_restore_job_snapshot, restore.create_clone, restore.create_snapshot) == (RESTIC, False, False)
+
+
 def test_a_ready_miss_restores_from_the_clone_before_the_restic_snapshot() -> None:
     late = STARTED + timedelta(minutes=45)  # past the readiness deadline
     missed = _step(_upgrade(statefulset_replicas=1, statefulset_image=IMAGE_B, pod_ready=False,
@@ -175,21 +221,26 @@ def test_a_forward_only_hold_keeps_and_resume_releases_the_attempts_snapshot_and
     assert resuming.delete_snapshot_backup is True  # the attempt's pair goes first
 
 
-def test_a_pause_mid_attempt_releases_the_clone_and_snapshot() -> None:
+@pytest.mark.parametrize("desired_state", ["running", "stopped", "read_only"])
+def test_a_pause_mid_attempt_releases_the_clone_and_snapshot(desired_state: str) -> None:
+    row = _row(desired_state=desired_state, generation=2, hold_kind="upgrade", hold_started_at=STARTED)
     decision = _step(_upgrade(statefulset_replicas=0, pod_exists=False,
                               statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
                               snapshot_exists=True, clone_exists=True),
-                     _row(generation=2, hold_kind="upgrade", hold_started_at=STARTED),
+                     row,
                      rollout=RolloutRow(paused=True))
     assert decision.delete_snapshot_backup is True
     assert decision.hold_kind == "upgrade"  # held until the pair is gone
+    assert decision.replicas == 0  # cleanup finishes before the desired replicas apply
+    assert decision.read_only is (desired_state == "read_only")
     # Once both are observed gone the attempt ends without a failure record.
     done = _step(_upgrade(statefulset_replicas=0, pod_exists=False,
                           statefulset_pre_upgrade_volume_snapshot=VOL_NAME),
-                 _row(generation=2, hold_kind="upgrade", hold_started_at=STARTED),
+                 row,
                  rollout=RolloutRow(paused=True))
     assert done.row_updates["hold_kind"] is None
     assert done.row_updates["last_error_code"] is None
+    assert done.replicas == (0 if desired_state == "stopped" else 1)
 
 
 # --- 3.2: no forget --prune on the stopped Hetzner backup --------------------
@@ -313,33 +364,49 @@ def test_the_hourly_backup_never_starts_while_an_upgrade_hold_owns_the_clone() -
 
 
 @pytest.mark.parametrize("restic_snapshot", [RESTIC, None])
-def test_a_finished_clone_restore_restarts_the_previous_image_and_releases_the_pair(restic_snapshot: str | None) -> None:
-    hold_row = _row(hold_kind="restore", hold_started_at=STARTED)
+@pytest.mark.parametrize("desired_state", ["running", "stopped", "read_only"])
+def test_a_finished_clone_restore_restarts_the_previous_image_and_releases_the_pair(
+    restic_snapshot: str | None, desired_state: str,
+) -> None:
+    hold_row = _row(desired_state=desired_state, hold_kind="restore", hold_started_at=STARTED)
     base = dict(
         statefulset_hold_kind="restore", statefulset_image=IMAGE_B, statefulset_replicas=0,
         statefulset_pre_upgrade_snapshot=restic_snapshot, statefulset_pre_upgrade_volume_snapshot=VOL_NAME,
         snapshot_exists=True, clone_exists=True, clone_bound=True)
 
+    for pending in (_upgrade(**base, pod_uses_volume=True),
+                    _upgrade(**{**base, "clone_bound": False}), _upgrade(**base)):
+        decision = _step(pending, hold_row)
+        assert (decision.hold_kind, decision.replicas) == ("restore", 0)
+        assert decision.read_only is (desired_state == "read_only")
+
     # The Job reported success: the pass records which restore point ran,
     # so a Job lost to its TTL is never run again.
     recorded = _step(_upgrade(**base, restore_job_succeeded=True), hold_row)
-    assert recorded.restored_snapshot == VOL_NAME
+    assert (recorded.restored_snapshot, recorded.replicas) == (VOL_NAME, 0)
 
     # Restart resume: the marker alone says the restore ran; the cell starts
     # on its previous image and the pair goes once the cell is provisioning.
     restarting = _step(_upgrade(**base, statefulset_restored_snapshot=VOL_NAME), hold_row)
     assert (restarting.replicas, restarting.image, restarting.restored_snapshot) == (1, IMAGE_A, VOL_NAME)
+    assert restarting.read_only is (desired_state == "read_only")
+
+    waiting = _step(_upgrade(**{**base, "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
+                                "pod_ready": False}, statefulset_restored_snapshot=VOL_NAME), hold_row)
+    assert (waiting.hold_kind, waiting.replicas, waiting.delete_snapshot_backup) == ("restore", 1, False)
 
     running = _step(_upgrade(**{**base, "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
                                 "pod_ready": True, "ready_pod_image": IMAGE_A},
                              statefulset_restored_snapshot=VOL_NAME), hold_row)
     assert running.delete_snapshot_backup is True
+    assert running.replicas == 1
 
     gone = _step(_upgrade(**{**base, "snapshot_exists": False, "clone_exists": False,
                              "statefulset_image": IMAGE_A, "statefulset_replicas": 1,
                              "pod_ready": True, "ready_pod_image": IMAGE_A},
                           statefulset_restored_snapshot=VOL_NAME), hold_row)
     assert gone.row_updates["hold_kind"] is None
+    assert gone.replicas == (0 if desired_state == "stopped" else 1)
 
 
 def test_a_restart_resumes_each_step_from_the_annotations() -> None:

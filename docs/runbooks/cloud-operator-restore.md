@@ -59,8 +59,9 @@ A cell on local storage (`exomem-cloud-local`) keeps a restore point through its
 If the upgraded cell misses its readiness deadline, cellctl restores in this order and never starts an image on an unrestored volume:
 
 1. **From the attempt's clone.** A restore Job on the cell's node mounts the clone read-only and replaces `/data/vault` and `/data/host` with the snapshot's copies. Files the target created under those paths go with them; the volume root, including `lost+found`, is untouched.
-2. **From the attempt's restic snapshot.** Only when the clone is already gone does the Job fall back to `pre-upgrade-snapshot`. Never substitute `last_backup_snapshot`: that row column may name an older nightly snapshot, not this attempt's.
-3. **`RESTORE_FAILED`.** With neither restore point left, cellctl records `RESTORE_FAILED`, pauses the rollout and keeps the cell stopped at zero replicas until the owner looks.
+2. **From the attempt's surviving snapshot.** If the clone is gone but the pre-upgrade VolumeSnapshot remains ready, cellctl rebuilds the clone. It waits for the clone to bind, then runs the clone restore Job.
+3. **From the attempt's restic snapshot.** When neither a clone nor a ready VolumeSnapshot remains, the Job falls back to `pre-upgrade-snapshot`. Never substitute `last_backup_snapshot`: that row column may name an older nightly snapshot, not this attempt's.
+4. **`RESTORE_FAILED`.** With neither restore point left, cellctl records `RESTORE_FAILED`, pauses the rollout and keeps the cell stopped at zero replicas until the owner looks.
 
 A `forward-only-held` cell (upgrade phase `exomem.io/upgrade-phase: forward-only-held`) keeps the attempt's VolumeSnapshot and clone until the rollout resumes; clearing the pause releases them before the next attempt asks for its clone. After a successful clone restore, cellctl deletes the clone and the VolumeSnapshot while the restore hold still owns them.
 
