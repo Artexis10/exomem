@@ -438,8 +438,8 @@ class Arm:
         finally:
             await self.stop()
 
-    async def start(self, *, quiescence_limit: float) -> dict[str, float]:
-        """Start the coordinator and the worker, join the worker as a local client and wait for quiet."""
+    async def start(self, *, quiescence_limit: float | None) -> dict[str, float | None]:
+        """Start the worker and client; a route with its own readiness phase can defer quiet."""
         import httpx2 as httpx
         from fastmcp import Client
         from fastmcp.client.transports import StreamableHttpTransport
@@ -483,8 +483,10 @@ class Arm:
                                                      httpx_client_factory=factory), timeout=120)
         await self.client.__aenter__()
         progress(f"arm-ready arm={self.name} ready_s={ready:.0f}")
-        quiescent = await self.quiesce(limit=quiescence_limit)
-        progress(f"arm-quiet arm={self.name} quiescent_s={quiescent:.0f}")
+        quiescent = None
+        if quiescence_limit is not None:
+            quiescent = await self.quiesce(limit=quiescence_limit)
+            progress(f"arm-quiet arm={self.name} quiescent_s={quiescent:.0f}")
         return {"ready_s": ready, "quiescent_s": quiescent}
 
     @staticmethod

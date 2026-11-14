@@ -46,7 +46,7 @@ class CloudArm(Arm):
             return self.env["EXOMEM_CLOUD_CELL_TOKEN"]
         return super().run_python(code, *arguments)
 
-    async def start(self, *, quiescence_limit: float) -> dict:
+    async def start(self, *, quiescence_limit: float | None) -> dict:
         previous = mcp_read_latency_gate.WORKER_GUARD
         # The existing launch guard is the narrow seam that runs inside the actual worker.
         mcp_read_latency_gate.WORKER_GUARD = (
@@ -1103,8 +1103,10 @@ async def inventory_measure(root: Path, baseline: Path, profile: dict, *, plan_o
         arm.env.update(PASSAGE_WORKER_RECEIPT=str(root / "worker-launch.json"),
                        INVENTORY_CALL_OBSERVATIONS=str(work_path),
                        INVENTORY_EXPECTED_SOURCES=str(root / "expected-sources.json"))
-        deadline = time.monotonic() + profile["warmup_timeout_seconds"]
-        startup = await asyncio.wait_for(arm.start(quiescence_limit=180), timeout=max(0, deadline - time.monotonic()))
+        cold_started = time.monotonic()
+        deadline = cold_started + profile["warmup_timeout_seconds"]
+        # The declared exact inventory traversal establishes readiness before the separate quiet gate.
+        startup = await asyncio.wait_for(arm.start(quiescence_limit=None), timeout=max(0, deadline - time.monotonic()))
         worker = json.loads((root / "worker-launch.json").read_text())
         if (worker["pid"] != arm.worker.pid or worker["executable"] != arm.python or worker["source"] != frozen
                 or worker["runtime"]["dependencies"] != controller_runtime["dependencies"]
@@ -1138,6 +1140,9 @@ async def inventory_measure(root: Path, baseline: Path, profile: dict, *, plan_o
         write_json(root / "warmup-traversal.json", traversal)
         if not traversal["complete"]:
             raise RuntimeError("inventory warm-up did not complete the generated cursor-linked traversal")
+        startup["inventory_readiness_s"] = time.monotonic() - cold_started
+        startup["quiescent_s"] = await arm.quiesce(limit=180, phase="inventory-readiness")
+        startup["timing_ready_s"] = time.monotonic() - cold_started
         arm.require_timeable()
         write_json(root / "resources-before-timing.json", resource_observation())
         with (root / "terminals.jsonl").open("a") as terminals, (root / "samples-enriched.jsonl").open("a") as output:

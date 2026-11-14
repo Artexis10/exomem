@@ -24,6 +24,9 @@ Warm-up traverses every limit-200 page, waiting for exact indexed items before a
 Retain the successful traversal receipt with 20,000 distinct generated identities and all warm-up responses separately.
 The bounded 3,600-second readiness window allocates 1,000 seconds for the drain's minimum wake cadence,
 2,000 seconds for canonical reads and exact SQL checks, and 600 seconds for publication and startup.
+After that traversal, the unchanged 180-second quiet gate must pass before timing begins.
+The report retains client readiness, full inventory readiness and total time until timing can begin.
+It does not require global background quiet before the route can establish its declared readiness.
 Readiness never injects proof into a timed request.
 All scheduled attempts count, including pending, failed, missing and unattempted calls; no call is retried or excluded.
 Every timed call must finish and satisfy its expected response before qualification.
