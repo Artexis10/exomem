@@ -48,6 +48,14 @@ class DependencyLatch(BaseModel):
         return "present" if self.first_publication is not None else "uncertain" if self.uncertain else "clear"
 
 
+class ProducerBirth(BaseModel):
+    """A producer's durable checkpoint before a fresh incarnation's generated output."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    catalogue_id: _Opaque
+    birth_epoch: Annotated[int, Field(gt=0)]
+
+
 class Publication(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     version: Literal[1] = 1
@@ -68,6 +76,7 @@ class Manifest(BaseModel):
     publication: Literal["allocated", "published"] = "allocated"
     dependency: DependencyLatch = Field(default_factory=DependencyLatch)
     coverage_complete: bool = False
+    generated_birth: ProducerBirth | None = None
     owners: Annotated[dict[str, OwnerLocator], Field(max_length=MAX_OWNER_FAMILIES)] = Field(default_factory=dict)
     reservations: Annotated[dict[str, Publication], Field(max_length=MAX_OWNER_FAMILIES)] = Field(default_factory=dict)
     retirement: RetirementFence | None = None

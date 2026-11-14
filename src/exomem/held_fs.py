@@ -6,6 +6,7 @@ first acquires a root anchor, then works through retained parent handles.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import re
@@ -510,11 +511,15 @@ def install_temporary(
     leaf: str,
     *,
     expected_identity: StableIdentity,
+    expected_version: FileVersion | None = None,
+    expected_destination: FileVersion | None = None,
 ) -> HeldResult[StableIdentity]:
-    """Link a temporary that the caller already wrote and verified into place, with no replace.
+    """Install a temporary that the caller already wrote and verified, without copying its bytes.
 
     `temporary` must still be the file of `expected_identity`, so a swapped temporary is
     refused. The caller owns the temporary until this succeeds; afterwards its name is gone.
+    A replacement requires the destination's exact retained version. The caller holds its
+    writer boundary and binds a completed content verification to both supplied versions.
     """
 
     def publication_error(error: HeldFsError | None) -> HeldResult[StableIdentity]:
@@ -523,22 +528,59 @@ def install_temporary(
         bounded.destination_leaf = leaf
         return HeldResult(error=bounded)
 
-    current = filesystem.file(parent, leaf)
-    if current.ok:
-        current.require().close()
-        return HeldResult(error=HeldFsError("DESTINATION_EXISTS", "destination already exists"))
-    if current.error is None or current.error.code != "MISSING":
-        return HeldResult(error=current.error or HeldFsError("IO_REFUSED", "publish refused"))
-    mutable = filesystem.file(parent, temporary, access="mutate")
-    if not mutable.ok:
-        return HeldResult(error=mutable.error)
-    with mutable.require() as staged:
-        if staged.identity != expected_identity:
-            return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "held filesystem identity changed"))
-        failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
-        if failure is not None:
-            return failure
-    return _published_identity(filesystem, parent, leaf)
+    if temporary == leaf:
+        return HeldResult(error=HeldFsError("INVALID_INPUT", "temporary and destination must differ"))
+    if expected_version is not None and expected_version.identity != expected_identity:
+        return HeldResult(error=HeldFsError("INVALID_INPUT", "temporary version names a different identity"))
+    existing: HeldFile | None = None
+    try:
+        current = filesystem.file(parent, leaf)
+        if expected_destination is None:
+            if current.ok:
+                current.require().close()
+                return HeldResult(error=HeldFsError("DESTINATION_EXISTS", "destination already exists"))
+            if current.error is None or current.error.code != "MISSING":
+                return HeldResult(error=current.error or HeldFsError("IO_REFUSED", "publish refused"))
+        else:
+            if expected_version is None:
+                if current.ok:
+                    current.require().close()
+                return HeldResult(error=HeldFsError("INVALID_INPUT", "replacement requires a verified temporary version"))
+            if not current.ok:
+                return HeldResult(error=current.error)
+            existing = current.require()
+            if existing.version() != expected_destination or existing.identity.link_count != 1:
+                return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "destination version changed"))
+        mutable = filesystem.file(parent, temporary, access="mutate")
+        if not mutable.ok:
+            return HeldResult(error=mutable.error)
+        with mutable.require() as staged:
+            if staged.identity != expected_identity or (expected_version is not None and staged.version() != expected_version):
+                return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "temporary version changed"))
+            if expected_destination is None:
+                failure = _link_without_replace(filesystem, parent, staged, leaf, publication_error)
+                if failure is not None:
+                    return failure
+            else:
+                assert existing is not None
+                if existing.version() != expected_destination:
+                    return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "destination version changed"))
+                named = filesystem.file(parent, leaf)
+                if not named.ok:
+                    return HeldResult(error=named.error)
+                with named.require() as destination:
+                    if destination.version() != expected_destination or staged.identity.link_count != 1:
+                        return HeldResult(error=HeldFsError("IDENTITY_CHANGED", "destination version changed"))
+                replaced = filesystem.rename(staged, parent, leaf, replace=True)
+                if not replaced.ok:
+                    return publication_error(replaced.error)
+        return _published_identity(filesystem, parent, leaf)
+    except OSError as error:
+        code = "IDENTITY_CHANGED" if error.errno == errno.ESTALE else "IO_REFUSED"
+        return publication_error(HeldFsError(code, "temporary installation was refused", cause=error))
+    finally:
+        if existing is not None:
+            existing.close()
 
 
 def publish_bytes(

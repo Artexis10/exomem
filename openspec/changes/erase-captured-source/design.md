@@ -68,6 +68,39 @@ An invocation-local commit generation cannot qualify canonical dependency covera
 Store reconciliation binds its checkpoint to the physical store instance and canonical revision.
 No new global ledger, scheduler or cell-wide refusal is added.
 
+### D2a. Keep generated ownership durable and its lookup derived
+
+Reuse guarded canonical metadata writes, the existing fragment representation and SQLite for indexed local lookup.
+Those mechanisms already supply persistence and indexing; none records exact generated-image and native-copy ownership today.
+Add one producer-owned catalogue rather than a general dependency graph or a second Source inventory.
+Its maintenance cost is one metadata format, bounded reconciliation and exact publication hooks at each surviving-copy boundary.
+The architecture applies the stable-interface principle in [Managed Agents](https://www.anthropic.com/research/managed-agents): durable producer custody survives execution replacement.
+
+Persist bounded canonical image records and copy reservations under the generated-output owner.
+One image map binds exact bytes; byte-identical stage, history and rotation copies reuse its image identifier.
+Copy reservations bind the image, actual owner, origin ledger, opaque locator and expected version before bytes survive.
+The private owner retains native paths and filesystem identities; canonical locators expose neither.
+Keep only one generated-owner locator in each Source manifest, rather than rewriting every Source manifest for every shared image.
+
+Qualify the derived SQLite membership index against the canonical catalogue identity and ordered checkpoint.
+Advance canonical evidence before changing tracked ownership or publishing bytes; interrupted publication remains unresolved.
+Reconciliation is bounded and resumable. A cold or inconsistent index reports its missing coverage instead of scanning history during erasure.
+Warm lookup batches the target's image and copy obligations with an indexed uncertainty query.
+Work grows with returned obligations, rather than unrelated Sources or one SQL request per fragment.
+
+A freshly allocated Source can receive `generated_birth={catalogue_id,birth_epoch}` only before any generated output can survive.
+Issuance requires participation by every relevant managed producer and native-copy hook; configuration alone is insufficient.
+Replay or legacy adoption cannot manufacture a fresh birth witness.
+Each exact image carries `unknown_through_epoch`: ownership may be unknown for Sources born at or before that checkpoint.
+A matching catalogue and a later Source birth can prove target ownership despite unattributed legacy bytes in the same image.
+Exact copies and slices preserve that horizon; joins take the greatest input horizon; tracked insertions preserve it.
+
+Missing maps, hash drift or unexplained publication raise the affected horizon to the current canonical checkpoint.
+Retain earlier positive membership as uncertain until its copies resolve or retire.
+An indexed query includes every retained image whose horizon reaches the target birth, even when its fragment membership disappeared.
+Global historical uncertainty remains visible, but does not become a permanent refusal for every later Source.
+Do not infer coverage by matching renderer diagnostic strings or inspecting prose.
+
 ### D3. Use one dependency latch instead of a reverse history graph
 
 Track `clear`, `present` or `uncertain`, coverage completeness and the first producer commit witness for each Source reference.

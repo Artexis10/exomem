@@ -323,6 +323,85 @@ def test_retained_directory_name_survives_its_own_child_creation(
 
 
 @_requires_native_route
+def test_verified_temporary_replaces_exact_destination_without_recopied_bytes(tmp_path, monkeypatch):
+    """Finishing a bounded rewrite must not reread or copy an arbitrarily large image."""
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+            fs.write(current, b"before").require()
+            destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"after").require()
+            verified = stage.version()
+        with monkeypatch.context() as patch:
+            patch.setattr(fs, "read", lambda *a, **k: pytest.fail("installation reread completed content"))
+            patch.setattr(fs, "write", lambda *a, **k: pytest.fail("installation copied completed content"))
+            installed = held_fs.install_temporary(
+                fs, parent, "rewritten.tmp", "current.md",
+                expected_identity=verified.identity, expected_version=verified,
+                expected_destination=destination,
+            )
+        assert installed.ok
+        assert not (tmp_path / "rewritten.tmp").exists()
+        assert (tmp_path / "current.md").read_bytes() == b"after"
+
+
+@_requires_native_route
+@pytest.mark.parametrize("changed", ["temporary", "destination"])
+def test_verified_temporary_refuses_content_drift_at_same_file_identity(tmp_path, changed):
+    """A stale rewrite must not install changed staged bytes or overwrite a newer destination."""
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+            fs.write(current, b"before").require()
+            destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"after").require()
+            verified = stage.version()
+        name = "rewritten.tmp" if changed == "temporary" else "current.md"
+        (tmp_path / name).write_bytes(b"changed")
+        installed = held_fs.install_temporary(
+            fs, parent, "rewritten.tmp", "current.md",
+            expected_identity=verified.identity, expected_version=verified,
+            expected_destination=destination,
+        )
+        assert not installed.ok and installed.error.code == "IDENTITY_CHANGED"
+        assert (tmp_path / "rewritten.tmp").read_bytes() == (b"changed" if changed == "temporary" else b"after")
+        assert (tmp_path / "current.md").read_bytes() == (b"changed" if changed == "destination" else b"before")
+
+
+@_requires_native_route
+def test_verified_temporary_preserves_a_replacement_that_arrives_during_install(tmp_path, monkeypatch):
+    """Holding the old destination does not prove that its name still identifies that file."""
+    held_fs = _module()
+    with held_fs.acquire(tmp_path).require() as fs, fs.parent(".").require() as parent:
+        with fs.file(parent, "current.md", access="write", create=True, exclusive=True).require() as current:
+            fs.write(current, b"before").require()
+            destination = current.version()
+        with fs.file(parent, "rewritten.tmp", access="write", create=True, exclusive=True).require() as stage:
+            fs.write(stage, b"after").require()
+            verified = stage.version()
+        original = fs.file
+
+        def replace_destination(held_parent, name, **options):
+            if name == "rewritten.tmp":
+                replacement = tmp_path / "newer.tmp"
+                replacement.write_bytes(b"newer")
+                replacement.replace(tmp_path / "current.md")
+            return original(held_parent, name, **options)
+
+        monkeypatch.setattr(fs, "file", replace_destination)
+        installed = held_fs.install_temporary(
+            fs, parent, "rewritten.tmp", "current.md",
+            expected_identity=verified.identity, expected_version=verified,
+            expected_destination=destination,
+        )
+        assert not installed.ok and installed.error.code == "IDENTITY_CHANGED"
+        assert (tmp_path / "rewritten.tmp").read_bytes() == b"after"
+        assert (tmp_path / "current.md").read_bytes() == b"newer"
+
+
+@_requires_native_route
 def test_publish_bytes_is_no_replace_or_expected_identity_replace(tmp_path: Path) -> None:
     held_fs = _module()
     with held_fs.acquire(tmp_path).require() as filesystem:

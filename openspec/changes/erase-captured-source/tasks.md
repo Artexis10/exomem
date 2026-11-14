@@ -4,6 +4,7 @@
 - [ ] 1.2 Bind attempt artifacts before surviving bytes and new Source references before full Source staging; distinguish reused observations.
 - [ ] 1.3 Reserve and resolve the dependency latch at semantic, origin-binding, history and collection publication seams, including skipped back-references.
 - [ ] 1.4 Add bounded legacy coverage reconciliation and invalidate unexplained external changes through the existing watcher.
+- [ ] 1.5 Persist generated images and exact copy reservations; qualify indexed lookup with producer checkpoints, fresh births and uncertainty horizons.
 
 ## 2. Incarnation-scoped cleanup
 

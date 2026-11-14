@@ -69,6 +69,16 @@ Complete retirement SHALL include canonical data, owned originals and staging, i
 - **WHEN** another Source's entry contains an owned excerpt from the target's earlier activity
 - **THEN** cleanup removes that target fragment from every managed version while preserving the other Source's record
 
+#### Scenario: A tracked Source follows unattributed legacy activity
+- **WHEN** a fresh Source has a qualified producer birth after a retained image's uncertainty horizon
+- **THEN** exact image and copy evidence can prove that Source's ownership while preserving unattributed legacy bytes
+- **AND** the older Sources retain their explicit unknown coverage
+
+#### Scenario: An ownership map disappears after publication
+- **WHEN** a retained image loses its ownership evidence or its bytes no longer match the bound map
+- **THEN** its uncertainty horizon includes existing Source births and its earlier positive associations remain unresolved
+- **AND** lookup includes that image without relying only on surviving fragment membership
+
 #### Scenario: Store audit retains the target's earlier paths
 - **WHEN** target projection and vector cleanup have finished for an incarnation with exact move lineage
 - **THEN** cleanup redacts its identifying audit fields while retaining sequence, revision and operation facts
