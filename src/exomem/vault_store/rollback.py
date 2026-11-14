@@ -139,9 +139,18 @@ def _page(rel: str) -> bool:
 
 
 def _disk_sha256(vault_root: Path, rel: str) -> str | None:
-    """The hash of the file at ``rel``, streamed, or None when no file is there."""
+    """The hash of the page file at ``rel``, or None when no file is there.
+
+    On POSIX the file is streamed: a rename over an open file is always allowed, so the open
+    blocks no writer. Windows refuses a replacement of a file that ``open`` holds, so there the
+    page is read whole without pinning it (``vault.read_disk_bytes_without_pinning``); only pages
+    come here.
+    """
+    path = vault_root / rel
     try:
-        with vault.open_disk_file_without_pinning(vault_root / rel) as stream:
+        if os.name == "nt":  # the two platforms whose open differs, as in `vault`
+            return hashlib.sha256(vault.read_disk_bytes_without_pinning(path)).hexdigest()
+        with path.open("rb") as stream:
             return hashlib.file_digest(stream, "sha256").hexdigest()
     except FileNotFoundError:
         return None
