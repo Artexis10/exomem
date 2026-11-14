@@ -744,9 +744,8 @@ def add(
         adoption_receipt=adoption_receipt,
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
+        passages=passages,
         extra_lines=(*(episode_lines or ()), *(
-            ("passage_keys: " + yaml_flow_list(p["key"] for p in passages),) if passages is not None else ()
-        ), *(
             (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
         )),
     )
@@ -1552,6 +1551,7 @@ def _render_source(
     adoption_receipt: Mapping[str, object] | None = None,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    passages: list[source_capture.DeclaredPassage] | None = None,
     extra_lines: Sequence[str] = (),
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
@@ -1580,6 +1580,8 @@ def _render_source(
 
         lines.append("source_identity: " + json.dumps(source_identity))
         lines.append(f"capture_input_digest: {yaml_scalar(capture_input_digest)}")
+    if passages is not None:
+        lines.append(f"declared_passages: {len(passages)}")
     lines.extend(extra_lines)
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
@@ -1620,6 +1622,11 @@ def _render_source(
         # Single-line blockquote at top, per page-types.md shape.
         for paragraph in why_captured.strip().splitlines():
             lines.append(f"> {paragraph}")
+        lines.append("")
+    if passages is not None:
+        from .passage_evidence import render_key_block
+
+        lines.append(render_key_block([passage["key"] for passage in passages]).rstrip("\n"))
         lines.append("")
     lines.append(CAPTURE_HEADING)
     lines.append("")

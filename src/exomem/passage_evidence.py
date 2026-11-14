@@ -5,14 +5,71 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from . import embeddings, memory_refs, recall_space, structured_filters
-from .add import CAPTURE_HEADING
+from . import (
+    embeddings,
+    memory_refs,
+    note_types,
+    recall_space,
+    runtime_resources,
+    structured_filters,
+)
 from .find_types import ParsedPage
+from .source_coverage import CAPTURE_HEADING
+
+# This heading and fence are the fixed declaration format, never a vocabulary of key meanings.
+_KEY_BLOCK_START = "## Passage keys\n\n```json\n"
+_KEY_BLOCK_END = "\n```\n\n"
+
+
+@dataclass(frozen=True)
+class KeyBlock:
+    start: int
+    end: int
+    keys: tuple[str, ...] | None
+
+
+def render_key_block(keys: list[str]) -> str:
+    """Keep even newlines, quotes and fences in opaque keys on one JSON line."""
+    return _KEY_BLOCK_START + json.dumps(keys) + _KEY_BLOCK_END
+
+
+def parse_key_block(body: str, *, decode_keys: bool = True) -> KeyBlock | None:
+    """Parse only the declaration before Capture; retain its span even when JSON is invalid."""
+    head, capture, _text = body.partition(CAPTURE_HEADING + "\n\n")
+    start = head.find(_KEY_BLOCK_START)
+    if start < 0 or (start and head[start - 1] != "\n"):
+        return None
+    keys = None
+    if decode_keys and capture and head.endswith(_KEY_BLOCK_END):
+        try:
+            value = json.loads(head[start + len(_KEY_BLOCK_START) : -len(_KEY_BLOCK_END)])
+        except ValueError:
+            pass
+        else:
+            if isinstance(value, list) and all(isinstance(key, str) for key in value):
+                keys = tuple(value)
+    return KeyBlock(start, len(head), keys)
+
+
+def has_declaration(frontmatter: Mapping[str, Any], vault_root: Path | None) -> bool:
+    return "declared_passages" in frontmatter and note_types.Basis(vault_root).selects(
+        frontmatter.get("type"), note_types.captured_source
+    )
+
+
+def without_passage_keys(body: str, frontmatter: Mapping[str, Any], vault_root: Path | None) -> str:
+    """Withhold a declared Source's key block from every search field."""
+    if not has_declaration(frontmatter, vault_root):
+        return body
+    block = parse_key_block(body, decode_keys=False)
+    return body[: block.start] + body[block.end :] if block is not None else body
 
 
 @dataclass(frozen=True)
@@ -27,19 +84,22 @@ class PassageChunk:
 
 def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
     """The single declared-passage cut, cached on this immutable parsed page."""
-    if "passage_keys" not in page.frontmatter:
+    if not has_declaration(page.frontmatter, page.vault_root):
         return None
     if "_declared_passage_chunks" in page.__dict__:
         return page.__dict__["_declared_passage_chunks"]
-    keys = page.frontmatter["passage_keys"]
+    count = page.frontmatter["declared_passages"]
+    block = parse_key_block(page.body)
+    keys = block.keys if block is not None else None
     marker = CAPTURE_HEADING + "\n\n"
     head, found, capture = page.body.partition(marker)
     texts = capture.removesuffix("\n").split("\n\n") if found else []
     chunks: list[PassageChunk] = []
     if (
-        isinstance(keys, list)
-        and len(keys) == len(texts)
-        and all(isinstance(key, str) for key in keys)
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and keys is not None
+        and count == len(keys) == len(texts)
     ):
         offset = len(head) + len(marker)
         title = page.title.strip()
@@ -123,32 +183,40 @@ def search_memory(vault_root: Path, request: Mapping[str, Any]) -> dict:
         )
 
 
-def _has_declaration(vault_root: Path, rel: str, types) -> bool:
-    """Read only canonical frontmatter before ranking, never hydrate a candidate body."""
-    from . import note_types, reserved_paths, runtime_resources, vault
-    from .vault_store import read
+_DECLARED_SOURCES: OrderedDict[Path, tuple[tuple, tuple, frozenset[str]]] = OrderedDict()
+_DECLARED_SOURCES_LOCK = threading.Lock()
 
-    meta = read.owned_meta(vault_root, rel)
-    if meta is not None:
-        frontmatter = json.loads(meta.frontmatter_json or "{}")
-    else:
-        with reserved_paths.open_generic_binary(vault_root, rel, physical=True) as source:
-            header = vault.read_frontmatter_header(
-                source.stream,
-                runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
-            )
-        frontmatter, _body, _raw = vault.parse_frontmatter(header.decode("utf-8"))
-    return (
-        isinstance(frontmatter, dict)
-        and "passage_keys" in frontmatter
-        and types.selects(frontmatter.get("type"), note_types.captured_source)
-    )
+
+def declared_sources(vault_root: Path) -> frozenset[str]:
+    """Project already-parsed metadata once per published semantic corpus state."""
+    from . import semantic_contract
+
+    corpus, census = semantic_contract._build_corpus_context_with_census(vault_root)
+    types = note_types.Basis(vault_root)
+    dependency = types.dependency
+    root = vault_root.resolve()
+    with _DECLARED_SOURCES_LOCK:
+        cached = _DECLARED_SOURCES.get(root)
+        if census is not None and cached is not None and cached[:2] == (census, dependency):
+            _DECLARED_SOURCES.move_to_end(root)
+            return cached[2]
+        paths = frozenset(
+            path
+            for path, page in corpus.pages.items()
+            if "declared_passages" in page.frontmatter
+            and types.selects(page.page_type, note_types.captured_source)
+        )
+        if census is not None:
+            _DECLARED_SOURCES[root] = (census, dependency, paths)
+            # Match the corpus cache's retention bound without retaining page bodies here.
+            while len(_DECLARED_SOURCES) > semantic_contract._CORPUS_CONTEXT_CACHE_MAX_VAULTS:
+                _DECLARED_SOURCES.popitem(last=False)
+        return paths
 
 
 def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     """Resolve eligibility first, select chunks once, then verify their byte binding."""
     from . import find as find_module
-    from . import note_types
 
     limit = request["limit"]
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
@@ -193,18 +261,14 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     )
     if relations is not None:
         eligible = set(relations) if eligible is None else eligible & relations
-    types = note_types.Basis(vault_root)
-    allowed: set[str] = set()
-    # Eligibility reads frontmatter only; full page reads are bounded by the selected chunks.
-    for candidate_path in find_module._corpus_walk(vault_root, walk_scope):
-        rel = candidate_path.relative_to(vault_root).as_posix()
-        if (eligible is not None and rel not in eligible) or (admit is not None and not admit(rel)):
-            continue
-        if _has_declaration(vault_root, rel, types):
-            allowed.add(rel)
+    allowed = set(declared_sources(vault_root) & snapshot.recall_paths(walk_scope))
+    if eligible is not None:
+        allowed.intersection_update(eligible)
+    if admit is not None:
+        allowed = {path for path in allowed if admit(path)}
     index = embeddings.get_embedding_index(vault_root)
     identity = index.identity
-    with recall_space.encoding_for(index):
+    with runtime_resources.model_execution(wait=False), recall_space.encoding_for(index):
         query_vector = embeddings.embed_texts([query], is_query=True)[0]
     recall_space.require_same_space(index, identity, query_vector)
     selected = index.select_chunks(query_vector, limit, allowed_paths=allowed, encoded_for=identity)

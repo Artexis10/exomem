@@ -4,18 +4,34 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from uuid import uuid4
 
 import numpy as np
 import pytest
 from fastmcp import Client
 from test_vault_store_embeddings import install_encoder
 
-from exomem import embeddings, memory_refs, readiness, server
+from exomem import (
+    commands,
+    embeddings,
+    find_corpus,
+    memory_refs,
+    readiness,
+    reserved_paths,
+    runtime_resources,
+    schema,
+    semantic_contract,
+    server,
+)
 from exomem import vault as vault_module
 
 
 @pytest.fixture
 def passage_tools(vault, monkeypatch):
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
     encoder = install_encoder(monkeypatch)
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     mcp = server.build_server(require_auth=False)
@@ -75,7 +91,8 @@ def test_two_records_of_one_source_rank_with_verifiable_hashes_and_spans(vault, 
         vault, vault / memory_refs.resolve_identifier_read_only(vault, hits[0]["ref"])
     )[0]
     fields, body, _ = vault_module.parse_frontmatter(page)
-    assert fields["passage_keys"] == ["r/42", "r/43"]
+    assert fields["declared_passages"] == 2
+    assert "passage_keys" not in fields
     for hit in hits:
         passage = passages[hit["passage_ordinal"] - 1]
         assert hit["source_identity"] == identity
@@ -166,6 +183,13 @@ def test_keys_have_no_indexed_text_vector_or_score_signal(vault, passage_tools):
     two, _ = index.stored_text_vectors(
         memory_refs.resolve_identifier_read_only(vault, second["ref"])
     )
+    pages = [
+        find_corpus.CACHE.get(
+            vault / memory_refs.resolve_identifier_read_only(vault, hit["ref"]), vault
+        )
+        for hit in (first, second)
+    ]
+    assert pages[0].search_body == pages[1].search_body
     assert one.keys() == two.keys()
     for text, vector in one.items():
         assert np.array_equal(vector, two[text])
@@ -389,7 +413,7 @@ def test_ordinary_source_chunks_remain_unchanged(vault, passage_tools):
 
 
 def test_maximum_declaration_keeps_every_128_byte_key(vault, passage_tools):
-    """A frontmatter budget or YAML round trip must not truncate a legal declaration."""
+    """A body declaration must preserve every legal key without a frontmatter budget cost."""
     call, _encoder = passage_tools
     passages = [
         {"key": "é" * 62 + f"{number:04}", "text": f"record {number}"} for number in range(2000)
@@ -412,8 +436,193 @@ def test_maximum_declaration_keeps_every_128_byte_key(vault, passage_tools):
     assert "error" not in reply, reply
     assert len(reply["hits"]) == 200
     path = memory_refs.resolve_identifier_read_only(vault, reply["hits"][0]["ref"])
-    fields, _body, _marker = vault_module.parse_frontmatter(
+    fields, body, _marker = vault_module.parse_frontmatter(
         vault_module.read_guarded_text(vault, vault / path)[0]
     )
-    assert fields["passage_keys"] == [passage["key"] for passage in passages]
+    assert fields["declared_passages"] == 2000
+    assert "passage_keys" not in fields
+    assert json.dumps([passage["key"] for passage in passages]) in body
     assert all(len(hit["passage_key"].encode()) == 128 for hit in reply["hits"])
+
+
+def test_frontmatter_size_is_independent_of_declaration_and_capture_text_is_exact(
+    vault, passage_tools, monkeypatch
+):
+    """Keys in metadata slow unrelated readers; keys after Capture corrupt existing text readers."""
+    from exomem import temporal
+
+    instant = temporal.now()
+    monkeypatch.setattr(temporal, "now", lambda: instant)
+    call, _encoder = passage_tools
+    frontmatters = []
+    for count in (3, 300):
+        keys = [f'opaque/{number}\n```\n## Capture\n["\\é' for number in range(count)]
+        texts = [f"The lantern record {number}." for number in range(count)]
+        saved = commands.op_capture_source(
+            vault,
+            schema.load_source_schema(vault),
+            title="Counted records",
+            source_kind="session",
+            passages=[dict(key=key, text=text) for key, text in zip(keys, texts, strict=True)],
+        )
+        assert "error" not in saved, saved
+        page = find_corpus.CACHE.get(vault / saved["source"]["path"], vault)
+        fields = dict(page.frontmatter)
+        fields.pop("exomem_id")  # Each capture has its own immutable identity.
+        assert fields.pop("declared_passages") == count
+        assert "passage_keys" not in fields
+        frontmatters.append(fields)
+        assert page.body.split("## Capture\n\n", 1)[1] == "\n\n".join(texts) + "\n"
+        from exomem.passage_evidence import declared_chunks
+
+        assert [chunk.key for chunk in declared_chunks(page)] == keys
+    assert frontmatters[0] == frontmatters[1]
+
+
+def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
+    """A format-based global strip would erase authored text in an ordinary note."""
+    from exomem.find_types import ParsedPage
+
+    body = (
+        '# Authored\n\n## Passage keys\n\n```json\n["visible-marker"]\n```\n\n## Capture\n\nwords\n'
+    )
+    page = ParsedPage(
+        vault / "note.md", "note.md", {"type": "insight"}, body, "Authored", 0, vault_root=vault
+    )
+    assert page.search_body == body
+
+
+@pytest.mark.parametrize("mismatch", ["count", "keys", "texts"])
+def test_inconsistent_declaration_is_withheld_and_counted(vault, passage_tools, mismatch):
+    """A count or body mismatch must not bind an indexed vector to the wrong caller record."""
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault,
+        schema.load_source_schema(vault),
+        title="Broken declaration",
+        source_kind="session",
+        passages=[{"key": "first", "text": "lantern oil"}, {"key": "second", "text": "keeper oil"}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    path = vault / saved["source"]["path"]
+    source = path.read_text()
+    assert "declared_passages: 2" in source
+    if mismatch == "count":
+        source = source.replace("declared_passages: 2", "declared_passages: 3")
+    elif mismatch == "keys":
+        source = source.replace(json.dumps(["first", "second"]), json.dumps(["first"]))
+    else:
+        source = source.removesuffix("keeper oil\n")
+    path.write_text(source)
+    reply = call(
+        "search_memory", {"query": "oil", "limit": 2, "options": {"result_level": "passage"}}
+    )
+    assert "error" not in reply, reply
+    assert reply["hits"] == []
+    assert reply["withheld_chunks"] == 2
+
+
+def test_passage_request_reads_only_selected_sources_and_observes_new_capture(
+    vault, passage_tools, monkeypatch, record_property
+):
+    """A per-request header scan costs the whole vault; a stale set hides the next capture."""
+    from exomem.governance.principal import owner_principal, request_scope
+
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault,
+        schema.load_source_schema(vault),
+        title="Reference records",
+        source_kind="session",
+        passages=[{"key": "old", "text": "lantern oil"}],
+    )
+    assert "error" not in saved, saved
+    first = vault / saved["source"]["path"]
+    template = first.read_text()
+    identity = vault_module.parse_frontmatter(template)[0]["exomem_id"]
+    for number in range(1, 200):
+        (first.parent / f"reference-{number}.md").write_text(
+            template.replace(identity, str(uuid4()))
+        )
+    embeddings.index_incremental(vault)
+    semantic_contract.build_corpus_context(vault)
+    warm = call(
+        "search_memory", {"query": "lantern", "limit": 5, "options": {"result_level": "passage"}}
+    )
+    assert len(warm["hits"]) == 5, warm
+    reads = []
+    read_bytes, open_binary = reserved_paths.read_generic_bytes, reserved_paths.open_generic_binary
+
+    def count_read(root, path, **kwargs):
+        if str(path).startswith(first.parent.relative_to(vault).as_posix() + "/"):
+            reads.append(str(path))
+        return read_bytes(root, path, **kwargs)
+
+    def count_header(root, path, **kwargs):
+        if str(path).startswith(first.parent.relative_to(vault).as_posix() + "/"):
+            reads.append(str(path))
+        return open_binary(root, path, **kwargs)
+
+    with monkeypatch.context() as patch, request_scope(owner_principal()):
+        patch.setattr(reserved_paths, "read_generic_bytes", count_read)
+        patch.setattr(reserved_paths, "open_generic_binary", count_header)
+        reply = commands.op_ask_memory(
+            vault,
+            query="lantern",
+            limit=5,
+            result_level="passage",
+        )
+    assert len(reply["hits"]) == 5, reply
+    record_property("declared_sources", 200)
+    record_property("source_reads", len(reads))
+    assert len(reads) <= 5, reads
+    assert set(reads) <= {hit["path"] for hit in reply["hits"]}
+    new = call(
+        "save_source",
+        {
+            "title": "Meridian",
+            "source_kind": "session",
+            "options": {"passages": [{"key": "new", "text": "meridian"}]},
+        },
+    )
+    assert "error" not in new, new
+    embeddings.index_incremental(vault)
+    reads.clear()
+    with monkeypatch.context() as patch, request_scope(owner_principal()):
+        patch.setattr(reserved_paths, "read_generic_bytes", count_read)
+        patch.setattr(reserved_paths, "open_generic_binary", count_header)
+        reply = commands.op_ask_memory(vault, query="meridian", limit=1, result_level="passage")
+    assert [hit["passage_key"] for hit in reply["hits"]] == ["new"], reply
+    assert len(reads) <= 1, reads
+    assert set(reads) <= {hit["path"] for hit in reply["hits"]}
+    record_property("source_reads_after_capture", len(reads))
+
+
+def test_full_model_admission_refuses_passage_request_without_encoding(passage_tools, monkeypatch):
+    """A full cell must return MODEL_BUSY with a retry hint before it queues or encodes."""
+    call, encoder = passage_tools
+    gate = runtime_resources.ModelAdmissionGate(1)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    ready, release = threading.Event(), threading.Event()
+
+    def occupy():
+        with gate.admission():
+            ready.set()
+            assert release.wait(10)
+
+    before = len(encoder.texts)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(occupy)
+        assert ready.wait(5)
+        try:
+            request = pool.submit(
+                call, "search_memory", {"query": "lantern", "options": {"result_level": "passage"}}
+            )
+            refused = request.result(timeout=5)
+            assert "MODEL_BUSY" in str(refused), refused
+            assert "retry" in str(refused).lower(), refused
+            assert len(encoder.texts) == before
+        finally:
+            release.set()
+        holder.result()
