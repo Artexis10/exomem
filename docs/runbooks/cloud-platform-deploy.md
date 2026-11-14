@@ -511,6 +511,39 @@ Each release that succeeds on its tag starts the `cloud-deploy` workflow
 Substrate's `cell_image` with the deploy token. cellctl then rolls the canary at once, and every other cell in its
 own upgrade window. The workflow never clears a pause and never sends an older release. Its log prints codes only.
 
+### Build a catalogue before the cell stops
+
+`cellctl.cataloguePrewarm` defaults to `false`. With this flag off, cellctl schedules no catalogue build Jobs and keeps ordinary upgrade timing.
+Release the cell image with the narrow builder and boot adoption before enabling scheduling. Rehearsal and rollout remain separate acceptance work.
+
+When enabled, cellctl starts a build Job from the target image when a running candidate's upgrade window opens.
+The scheduler places it beside the serving pod with required pod affinity. Each cell gets one extra quota slot; each node admits one build at a time.
+`cellctl.catalogueBuildResources` requests and limits default to 2 CPU and 3 GiB, the conservative estimate from the serving limits.
+`cellctl.catalogueBuildTimeoutSeconds` defaults to 1800 seconds. Rehearsal must measure the peak and set the real timeout before rollout.
+
+A running build includes image pull after the scheduler binds its pod. A pod waiting for node capacity does not defer an idle attempt.
+Build activity defers the idle stop before the final force minutes, which still default to 10.
+The canary and disabled-window rules remain unchanged; an immediate attempt may have no build opportunity.
+Build activity reduces attempts per window hour while attempts remain fleet-serial.
+
+Cellctl cancels unfinished builds on timeout, pause, target change, window closure or flag disable.
+When an attempt becomes due, cellctl starts its existing hold clock and deletes the build Job with foreground propagation.
+It waits until the Job and all its pods disappear before stopping the serving pod. The attempt records the build outcome in `exomem.io/catalogue-build-outcome`.
+Cellctl records `exomem.io/catalogue-build-job` before Job creation and clears it only after the Job and its pods disappear.
+A disabled controller reads build inventory only while this current Job record remains; historical outcomes add no upgrade dependency.
+The backup and stall deadlines remain unchanged. An unavailable, cancelled or invalid staged copy keeps the cold-rebuild fallback.
+
+Tenant-locked cells skip the build, including while unlocked. The build never joins the custody key channel.
+The skip reads the custody mode, not the current unlock state. Non-running cells also skip it.
+The narrow builder exits successfully in store mode; store-mode cells keep their existing boot path.
+
+The build holds one stable lock while it removes superseded staged copies and builds its target.
+At boot, the replacement validates staged copies read-only and installs a match through the existing whole-set SQLite publication path.
+Ordinary restart reconcile handles subsequent vault edits. Boot removes every unadopted staged copy, including matching duplicates.
+Because cellctl ended the build pods before the stop, released temporary-file locks suffice for boot cleanup without an age delay.
+Every restic backup excludes staged and temporary catalogue families, with SQLite sidecars, only under the external state directory.
+Vault notes and the live catalogue stay in the backup.
+
 ### Enable the workflow
 
 Do these steps once, after Substrate has shipped the image history and you have run its seed again

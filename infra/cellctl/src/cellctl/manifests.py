@@ -123,6 +123,14 @@ JOB_KIND_LABEL = "exomem.io/cell-job"
 JOB_KIND_EXPORT = "export"
 JOB_KIND_EXPORT_PAUSE = "export-pause"
 JOB_KIND_EXPORT_PACK = "export-pack"
+# Closed Job kind and name protocol for warm-cell-catalogue.
+JOB_KIND_CATALOGUE_BUILD = "catalogue-build"
+CATALOGUE_BUILD_APP_LABEL = "exomem-catalogue-build"
+CATALOGUE_BUILD_PREFIX = "catalogue-build-"
+CATALOGUE_BUILD_NAME_RE = re.compile(re.escape(CATALOGUE_BUILD_PREFIX) + r"[0-9a-f]{16}")
+CATALOGUE_BUILD_NODE_ANNOTATION = "exomem.io/catalogue-build-node"
+CATALOGUE_BUILD_OUTCOME_ANNOTATION = "exomem.io/catalogue-build-outcome"
+CATALOGUE_BUILD_JOB_ANNOTATION = "exomem.io/catalogue-build-job"
 NO_PUBLIC_EGRESS_JOB_KINDS = (JOB_KIND_EXPORT_PACK, JOB_KIND_EXPORT_PAUSE)
 JOB_EGRESS_POLICY = "job-egress"
 EXPORT_STAGING_DIR = "/staging"
@@ -281,6 +289,7 @@ class CellManifestSpec:
     # claim, storage_gib for a Hetzner one (reconcile.py).
     storage_gib: int = 10
     resources: ResourceSettings = field(default_factory=ResourceSettings)
+    catalogue_build_resources: ResourceSettings | None = None
     model_env: dict[str, str] = field(default_factory=dict)
     dedicated_node: bool = False
     placement: dict = field(default_factory=dict)
@@ -517,6 +526,13 @@ def render_resource_quota(spec: CellManifestSpec) -> dict:
         "limits.cpu": _cpu(_cpu_millicores(r.cpu_limit) + jobs * _cpu_millicores(JOB_CPU_LIMIT)),
         "limits.memory": _quota_memory_limit(r.memory_limit, jobs),
     })
+    if spec.catalogue_build_resources is not None:
+        build = spec.catalogue_build_resources
+        hard["pods"] = str(int(hard["pods"]) + 1)
+        hard["requests.cpu"] = _cpu(_cpu_millicores(hard["requests.cpu"]) + _cpu_millicores(build.cpu_request))
+        hard["limits.cpu"] = _cpu(_cpu_millicores(hard["limits.cpu"]) + _cpu_millicores(build.cpu_limit))
+        hard["requests.memory"] = _memory(_memory_mib(hard["requests.memory"]) + _memory_mib(build.memory_request))
+        hard["limits.memory"] = _memory(_memory_mib(hard["limits.memory"]) + _memory_mib(build.memory_limit))
     return {
         "apiVersion": "v1",
         "kind": "ResourceQuota",
@@ -622,7 +638,7 @@ def render_network_policies(spec: CellManifestSpec) -> list[dict]:
             # only the peers runtime-ingress names, the media edge among them.
             "podSelector": {"matchExpressions": [
                 {"key": JOB_KIND_LABEL, "operator": "Exists"},
-                {"key": JOB_KIND_LABEL, "operator": "NotIn", "values": list(NO_PUBLIC_EGRESS_JOB_KINDS)},
+                {"key": JOB_KIND_LABEL, "operator": "NotIn", "values": [*NO_PUBLIC_EGRESS_JOB_KINDS, *([JOB_KIND_CATALOGUE_BUILD] if spec.catalogue_build_resources else [])]},
             ]},
             "policyTypes": ["Egress"],
             "egress": [
@@ -1242,6 +1258,14 @@ HOURLY_RETENTION_ARGS = ["--keep-hourly", "24", *RETENTION_ARGS]
 # D8: what a backup covers and a restore rewrites. The volume root, including
 # lost+found, is never in scope.
 BACKUP_PATHS = ("/data/vault", "/data/host")
+# Closed SQLite runtime names, anchored outside the vault; no note can match them.
+# Mirrors reserved_paths' families: cellctl is a separate package; test_catalogue_build pins this boundary.
+CATALOGUE_BACKUP_EXCLUDES = tuple(
+    f"/data/host/.local/state/exomem/state/*/{name}{suffix}"
+    for name in (".lexical-staged-*.sqlite", ".lexical.sqlite.rebuild-*.tmp")
+    for suffix in ("", "-wal", "-shm", "-journal")
+)
+
 
 # move-cloud-cells-to-local-storage D10: the backed-up filesystem's used and
 # total bytes, appended to the termination message after the snapshot id. Every
@@ -1451,6 +1475,50 @@ def _with_media_collector(pod_spec: dict, spec: CellManifestSpec) -> dict:
     return pod_spec
 
 
+def catalogue_build_name(image: str) -> str:
+    return CATALOGUE_BUILD_PREFIX + hashlib.sha256(image.encode()).hexdigest()[:16]
+
+
+def render_catalogue_build_job(spec: CellManifestSpec, *, deadline_seconds: int, node: str) -> dict:
+    """Run only the narrow builder, beside this cell's serving pod, without credentials or egress."""
+    resources = spec.catalogue_build_resources
+    if resources is None:
+        raise ValueError("catalogue build resources are required when prewarm is enabled")
+    labels = {**_labels(spec), "app.kubernetes.io/name": CATALOGUE_BUILD_APP_LABEL,
+              JOB_KIND_LABEL: JOB_KIND_CATALOGUE_BUILD}
+    pod = {
+        **_dedicated_placement(spec),
+        "restartPolicy": "Never",
+        "automountServiceAccountToken": False,
+        "securityContext": _pod_security_context(),
+        "affinity": {"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{
+            "labelSelector": {"matchLabels": {"statefulset.kubernetes.io/pod-name": "cell-0"}},
+            "topologyKey": "kubernetes.io/hostname",
+        }]}},
+        "containers": [{
+            "name": JOB_KIND_CATALOGUE_BUILD,
+            "image": spec.image,
+            "imagePullPolicy": "IfNotPresent",
+            "command": _cell_command(["python", "-m", "exomem.catalogue_prewarm", "--vault", CELL_VAULT_PATH], scratch=False),
+            "env": [{"name": "TMPDIR", "value": "/data/scratch/tmp"}],
+            "securityContext": _container_security_context(),
+            "resources": {
+                "requests": {"cpu": resources.cpu_request, "memory": resources.memory_request},
+                "limits": {"cpu": resources.cpu_limit, "memory": resources.memory_limit},
+            },
+            "volumeMounts": [{"name": "data", "mountPath": "/data", "readOnly": False},
+                             {"name": "tmp", "mountPath": "/tmp"}],
+        }],
+        "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": spec.pvc_name, "readOnly": False}},
+                    {"name": "tmp", "emptyDir": {}}],
+    }
+    return {"apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": catalogue_build_name(spec.image), "namespace": spec.namespace, "labels": labels,
+                         "annotations": {CATALOGUE_BUILD_NODE_ANNOTATION: node}},
+            "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline_seconds,
+                     "template": {"metadata": {"labels": labels}, "spec": pod}}}
+
+
 def render_backup_job(
     spec: CellManifestSpec,
     *,
@@ -1497,7 +1565,8 @@ def render_backup_job(
         *([media_manifest_command()] if collects else []),
         "restic snapshots || restic init",
         # Without --host restic records the Job pod's random hostname.
-        f"restic backup --json --host {shlex.quote(spec.cell_id)} {' '.join(backed_up)} "
+        f"restic backup --json --host {shlex.quote(spec.cell_id)}"
+        f"{''.join(' --exclude ' + shlex.quote(pattern) for pattern in CATALOGUE_BACKUP_EXCLUDES)} {' '.join(backed_up)} "
         "> /tmp/backup.json || exit 1",
         (
             "SNAPSHOT_ID=$(grep -o '\"snapshot_id\":\"[a-f0-9]\\{64\\}\"' /tmp/backup.json "

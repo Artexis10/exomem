@@ -111,6 +111,12 @@ class FakeClusterGateway:
             self.events.append(("delete_cell_secrets", namespace))
         return removed
 
+    def observe_catalogue_builds(self):
+        return {}
+
+    def delete_catalogue_build_job(self, namespace: str, name: str) -> None:
+        self.events.append(("delete_catalogue_build_job", namespace, name))
+
     def delete_job(self, namespace: str, name: str) -> None:
         self.events.append(("delete_job", namespace, name))
 
@@ -1103,6 +1109,8 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_row_generation=int(annotations[ROW_GENERATION_ANNOTATION])
         if ROW_GENERATION_ANNOTATION in annotations
         else None,
+        catalogue_build_job=annotations.get("exomem.io/catalogue-build-job"),
+        catalogue_build_outcome=annotations.get("exomem.io/catalogue-build-outcome"),
         statefulset_upgrade_target=annotations.get(UPGRADE_TARGET_ANNOTATION),
         statefulset_upgrade_phase=annotations.get(UPGRADE_PHASE_ANNOTATION),
         statefulset_upgrade_window=annotations.get(UPGRADE_WINDOW_ANNOTATION),

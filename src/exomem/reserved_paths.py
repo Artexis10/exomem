@@ -55,6 +55,11 @@ _LEXICAL_REBUILD_RE = re.compile(
     r"^\.lexical\.sqlite\.rebuild-[0-9a-f]{32}\.tmp(?:-(?:wal|shm|journal))?$",
     re.ASCII,
 )
+# Closed runtime filenames, not vocabulary or content classifiers.
+LEXICAL_STAGED_LOCK = ".lexical-staged-build.lock"
+_LEXICAL_STAGED_RE = re.compile(
+    r"^\.lexical-staged-[0-9a-f]{16}\.sqlite(?:-(?:wal|shm|journal))?$", re.ASCII
+)
 _LEXICAL_QUARANTINE_RE = re.compile(
     r"^\.lexical\.sqlite(?:-(?:wal|shm))?\.quarantine-[0-9a-f]{32}$",
     re.ASCII,
@@ -631,6 +636,18 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         patterns=(_LEXICAL_REBUILD_RE,),
         migrates_from_vault=True,
+    ),
+    InternalStateDescriptor(
+        "lexical-staged",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        patterns=(_LEXICAL_STAGED_RE,),
+    ),
+    InternalStateDescriptor(
+        "lexical-staged-lock",
+        "lexstore",
+        StatePlacement.EXTERNAL_STATE,
+        exact=(LEXICAL_STAGED_LOCK,),
     ),
     InternalStateDescriptor(
         "lexical-quarantine",

@@ -42,6 +42,8 @@ from .manifests import (
     BACKUP_RETRY_AFTER_ANNOTATION,
     BACKUP_RETRY_MINUTES_ANNOTATION,
     CANDIDATE_SINCE_ANNOTATION,
+    CATALOGUE_BUILD_JOB_ANNOTATION,
+    CATALOGUE_BUILD_OUTCOME_ANNOTATION,
     CLONE_CLAIM_NAME,
     GATEWAY_NAMESPACE,
     GROW_STORAGE_ANNOTATION,
@@ -478,6 +480,66 @@ class ClusterClient:
                          created_at=_parse_timestamp(job.metadata.creation_timestamp) if job is not None else None,
                          running_at=min(started, default=None))
 
+    def observe_catalogue_builds(self):
+        """Two fleet lists; orphan and terminating pods still prevent the serving stop."""
+        from .catalogue_build import BuildJob
+        from .manifests import (
+            CATALOGUE_BUILD_NAME_RE,
+            CATALOGUE_BUILD_NODE_ANNOTATION,
+            JOB_KIND_CATALOGUE_BUILD,
+        )
+
+        selector = f"{JOB_KIND_LABEL}={JOB_KIND_CATALOGUE_BUILD}"
+        def pages(list_resources):
+            continuation = None
+            while True:
+                response = list_resources(label_selector=selector, limit=500, _continue=continuation)
+                yield from response.items
+                continuation = response.metadata._continue if response.metadata else None
+                if not continuation:
+                    return
+
+        jobs = pages(self._batch.list_job_for_all_namespaces)
+        pods = pages(self._core.list_pod_for_all_namespaces)
+        grouped = {}
+        for job in jobs:
+            if not CATALOGUE_BUILD_NAME_RE.fullmatch(job.metadata.name):
+                continue
+            grouped[(job.metadata.namespace, job.metadata.name)] = (job, [])
+        for pod in pods:
+            name = (pod.metadata.labels or {}).get("batch.kubernetes.io/job-name", "")
+            # This is the renderer's closed runtime name protocol, never a content classifier.
+            if not CATALOGUE_BUILD_NAME_RE.fullmatch(name):
+                continue
+            grouped.setdefault((pod.metadata.namespace, name), (None, []))[1].append(pod)
+        observed = {}
+        for (namespace, name), (job, family) in grouped.items():
+            spec = job.spec.template.spec if job is not None else family[0].spec
+            annotations = (job.metadata.annotations or {}) if job is not None else {}
+            node = next((p.spec.node_name for p in family if p.spec.node_name),
+                        annotations.get(CATALOGUE_BUILD_NODE_ANNOTATION))
+            # Bound image pulls count as activity; Pending without a node is capacity waiting.
+            running = any(p.spec.node_name and p.status.phase in ("Pending", "Running")
+                          and p.metadata.deletion_timestamp is None for p in family)
+            status = job.status if job is not None else None
+            observed.setdefault(namespace, []).append(BuildJob(
+                name, spec.containers[0].image, node,
+                _parse_timestamp(job.metadata.creation_timestamp) if job is not None else None,
+                running=running, succeeded=bool(status and status.succeeded),
+                failed=bool(status and (status.failed or any(c.type == "Failed" and c.status == "True"
+                                                           for c in (status.conditions or [])))),
+                pods_exist=bool(family),
+            ))
+        return {namespace: tuple(family) for namespace, family in observed.items()}
+
+    def delete_catalogue_build_job(self, namespace: str, name: str) -> None:
+        """Foreground deletion keeps the Job observable until its dependent pods end."""
+        try:
+            self._batch.delete_namespaced_job(name, namespace, propagation_policy="Foreground")
+        except ApiException as error:
+            if not _not_found(error):
+                raise
+
     def delete_job(self, namespace: str, name: str) -> None:
         # Background propagation removes the Job's pods too; a batch/v1 Job
         # deleted without a policy orphans them.
@@ -816,6 +878,8 @@ class ClusterClient:
             secret_referenced = (None if family_secret_references is None or local is None else
                                  (local.reservation_namespace, name) in family_secret_references)
         return ClusterObservation(
+            catalogue_build_job=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_JOB_ANNOTATION) if statefulset else None,
+            catalogue_build_outcome=(statefulset.metadata.annotations or {}).get(CATALOGUE_BUILD_OUTCOME_ANNOTATION) if statefulset else None,
             namespace_exists=True,
             namespace_cell_label=namespace_cell_label,
             namespace_media_edge_access=namespace_labels.get(MEDIA_EDGE_ACCESS_LABEL) == "true",

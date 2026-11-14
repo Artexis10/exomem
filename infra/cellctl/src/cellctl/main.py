@@ -294,6 +294,19 @@ def build_media_listing() -> B2ObjectStorage | None:
     )
 
 
+def build_catalogue_prewarm():
+    """The chart owns the conservative profile and bounded timeout; absent selects the old path."""
+    from .catalogue_build import BuildConfig
+
+    if os.environ.get("CELLCTL_CATALOGUE_PREWARM", "false") != "true":
+        return None
+    profile = json.loads(_required_env("CELLCTL_CATALOGUE_BUILD_RESOURCES"))
+    return BuildConfig(ResourceSettings(
+        cpu_request=profile["requests"]["cpu"], cpu_limit=profile["limits"]["cpu"],
+        memory_request=profile["requests"]["memory"], memory_limit=profile["limits"]["memory"],
+    ), _positive_integer_env("CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS"))
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -339,6 +352,7 @@ def build_cluster_config() -> ClusterConfig:
     # A bad chart value fails cellctl at startup, not on every render.
     check_model_env(model_env)
     return ClusterConfig(
+        catalogue_prewarm=build_catalogue_prewarm(),
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
         cell_data_backup_bucket=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME"],

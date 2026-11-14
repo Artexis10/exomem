@@ -5903,7 +5903,7 @@ class LexicalStore:
         finally:
             conn.close()
 
-    def _sweep_orphan_rebuild_temps(self) -> list[Path]:
+    def _sweep_orphan_rebuild_temps(self, *, boot: bool = False) -> list[Path]:
         """Remove rebuild temps a killed build left beside the live sidecar.
 
         Each temp is a whole catalogue, and a catalogue version bump sends
@@ -5931,14 +5931,14 @@ class LexicalStore:
             if _RebuildTempLock(base).held():
                 continue
             try:
-                if any(
+                if not boot and any(
                     now - member.stat().st_mtime < _ORPHAN_REBUILD_TEMP_AGE_SECONDS
                     for member in members
                 ):
                     continue
             except OSError:
                 continue
-            if base in members and self._rebuild_temp_in_use(base):
+            if not boot and base in members and self._rebuild_temp_in_use(base):
                 continue
             for member in (base, *self._wal_shm_paths(base), base.with_name(f"{base.name}-journal")):
                 try:
@@ -6305,7 +6305,9 @@ class LexicalStore:
             conn.close()
         return False
 
-    def _publish_over_quarantined_set(self, temp_path: Path) -> bool:
+    def _publish_over_quarantined_set(
+        self, temp_path: Path, *, source_owner: str = "lexical-rebuild"
+    ) -> bool:
         """Recover a missing-main-with-orphans or proven-fatal live set by moving
         the ENTIRE live-name set aside, then installing the validated temp.
 
@@ -6332,7 +6334,7 @@ class LexicalStore:
                 reserved_paths._move_owner_file(
                     self.vault_root,
                     temp_path,
-                    "lexical-rebuild",
+                    source_owner,
                     self.path,
                     "lexical-store",
                     replace=False,
@@ -9172,7 +9174,9 @@ class LexicalStore:
                 reparsed += 1
         return reparsed, removed, inserted, unchanged
 
-    def _replace_live_catalog(self, temp_path: Path) -> bool:
+    def _replace_live_catalog(
+        self, temp_path: Path, *, source_owner: str = "lexical-rebuild"
+    ) -> bool:
         """Install a folded temp catalogue over the live set.
 
         The caller holds the publication barrier and has already decided the
@@ -9183,11 +9187,11 @@ class LexicalStore:
             # setup together so none opens the new main between those steps.
             with reserved_paths._identity_coordination_scope(
                 self.vault_root,
-                descriptor_ids=("lexical-store", "lexical-rebuild", "lexical-quarantine"),
+                descriptor_ids=("lexical-store", source_owner, "lexical-quarantine"),
             ):
                 # A missing or fatal main with sidecars must move as one set.
                 if self._live_set_disposition() == "quarantine":
-                    if not self._publish_over_quarantined_set(temp_path):
+                    if not self._publish_over_quarantined_set(temp_path, source_owner=source_owner):
                         return self._decline_rebuild("publish_conflict")
                 else:
                     if not self._quiesce_live_wal():
@@ -9196,7 +9200,7 @@ class LexicalStore:
                     reserved_paths._move_owner_file(
                         self.vault_root,
                         temp_path,
-                        "lexical-rebuild",
+                        source_owner,
                         self.path,
                         "lexical-store",
                         replace=True,

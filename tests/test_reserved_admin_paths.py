@@ -280,6 +280,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-quarantine",
         "lexical-rebuild",
         "lexical-store",
+        "lexical-staged",
+        "lexical-staged-lock",
         "maintenance-jobs-store",
         "media-jobs-store",
         "procedure-approval-key",

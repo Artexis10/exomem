@@ -3400,3 +3400,59 @@ def test_topolvm_node_agent_writes_only_its_own_node_and_volumes(k3s: K3sCluster
     assert other_node.returncode != 0 and "exomem-topolvm-node-self" in other_node.stderr, other_node.stderr
     relabel = as_agent_on(node, "label", "node", node, "node-restriction.kubernetes.io/exomem-local-storage=true")
     assert relabel.returncode != 0 and "exomem-topolvm-node-self" in relabel.stderr, relabel.stderr
+
+
+def test_catalogue_build_admission_denies_placement_and_volume_forgery(k3s: K3sCluster) -> None:
+    """A genuine build is admitted; a stolen controller token cannot widen its placement or mounts."""
+    from cellctl.manifests import (
+        CellManifestSpec,
+        ResourceSettings,
+        render_catalogue_build_job,
+        render_namespace,
+        render_network_policies,
+        render_resource_quota,
+    )
+
+    image = STANDIN_REPOSITORY + "@sha256:" + "a" * 64
+    documents = _render_platform("templates/cellctl.yaml", settings=(
+        "--set", "cellctl.cataloguePrewarm=true",
+        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+    ))
+    _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
+    spec = CellManifestSpec(_cell_id(), image, 1, False,
+                            catalogue_build_resources=ResourceSettings("2", "2", "3Gi", "3Gi"))
+    _apply_server_side(k3s.name, [render_namespace(spec), *render_network_policies(spec)])
+    build = render_catalogue_build_job(spec, deadline_seconds=1800, node=k3s.name)
+    controller = "--as=system:serviceaccount:exomem-cloud:cellctl"
+
+    def dry_run(document):
+        return _kubectl(k3s.name, ["create", "--dry-run=server", "--filename=-", controller],
+                        documents=[document], check=False)
+
+    def policy_settled():
+        policy = json.loads(_kubectl(k3s.name, ["get", "validatingadmissionpolicy",
+                                              "exomem-cellctl-scope", "-o=json"]).stdout)
+        status = policy.get("status", {})
+        if status.get("observedGeneration") != policy["metadata"]["generation"]:
+            return False
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        return dry_run(build).returncode == 0
+
+    _wait_for(policy_settled, timeout=60, description="admission to admit the catalogue build")
+    for document in (build, render_resource_quota(spec)):
+        admitted = dry_run(document)
+        assert admitted.returncode == 0, admitted.stderr
+    for described, mutate in (
+        ("nodeName", lambda pod: pod.update(nodeName=k3s.name)),
+        ("priorityClassName", lambda pod: pod.update(priorityClassName="system-cluster-critical")),
+        ("extra volume", lambda pod: pod["volumes"].append({"name": "extra", "emptyDir": {}})),
+        ("arbitrary affinity", lambda pod: pod.update(affinity={"podAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [{"topologyKey": "kubernetes.io/hostname",
+                                                                  "labelSelector": {"matchLabels": {"app": "other"}}}]}})),
+        ("missing affinity", lambda pod: pod.pop("affinity")),
+        ("arbitrary entrypoint", lambda pod: pod["containers"][0].update(command=["sleep", "600"])),
+    ):
+        attack = copy.deepcopy(build)
+        mutate(attack["spec"]["template"]["spec"])
+        denied = dry_run(attack)
+        assert denied.returncode != 0 and "exomem-cellctl-scope" in denied.stderr, (described, denied.stderr)

@@ -9,6 +9,10 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .catalogue_build import BuildJob
 
 DESIRED_STATES = ("running", "read_only", "stopped", "deleted")
 TERMINAL_OBSERVED_STATES = frozenset({"running", "read_only", "stopped", "deleted", "failed"})
@@ -165,6 +169,15 @@ class CellRow:
     import_limits: dict | None = None
 
     @property
+    def tenant_locked(self) -> bool:
+        """The custody mode survives unlocking; prewarm never joins the custody channel."""
+        import json
+
+        observation = json.loads(self.custody_observation or "{}")
+        # The mode statement's closed protocol value, fixed by contain-cloud-controller-compromise D8.
+        return isinstance(observation, dict) and observation.get("mode") == "tenant-locked"
+
+    @property
     def size_gib(self) -> int:
         """D10: the cell's size, the larger of what Substrate asked for and
         what cellctl grew it to. A local cell's claim and quota render at this,
@@ -313,6 +326,10 @@ class ClusterObservation:
     init_rerun: bool = False
     init_started_at: datetime | None = None
     init_error_code: str | None = None
+
+    catalogue_builds: tuple[BuildJob, ...] | None = ()
+    catalogue_build_outcome: str | None = None
+    catalogue_build_job: str | None = None
 
     backup_job_running: bool = False
     backup_job_started_at: datetime | None = None
