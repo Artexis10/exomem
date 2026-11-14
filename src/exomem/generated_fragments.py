@@ -87,6 +87,8 @@ class FragmentPlan(BaseModel):
     after: FragmentMap
     coverage_complete: bool
     unknown: tuple[str, ...] = ()
+    # Missing provenance stays unknown; only a bound producer supplies a catalogue epoch.
+    unknown_through_epoch: Annotated[int, Field(ge=0)] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,10 +102,14 @@ class _Span:
 class _Image:
     """Renderer-local slices and splices; offsets in retained maps are UTF-8 bytes."""
 
-    def __init__(self, text: str, spans: Iterable[_Span] = (), unknown: Iterable[str] = ()):
+    def __init__(self, text: str, spans: Iterable[_Span] = (), unknown: Iterable[str] = (), *,
+                 unknown_through_epoch: int | None = 0):
         self.text = text
         self.spans = tuple(spans)
         self.unknown = tuple(dict.fromkeys(unknown))
+        if unknown_through_epoch is not None and (type(unknown_through_epoch) is not int or unknown_through_epoch < 0):
+            raise ValueError("fragment_uncertainty_horizon_invalid")
+        self.unknown_through_epoch = unknown_through_epoch
 
     @classmethod
     def before(
@@ -111,23 +117,28 @@ class _Image:
         text: str,
         mapping: FragmentMap | FragmentPlan | None,
         expected_hash: str | None,
+        *,
+        unknown_through_epoch: int | None = None,
+        current_epoch: int | None = None,
     ) -> _Image:
         data = text.encode("utf-8")
         unknown = mapping.unknown if isinstance(mapping, FragmentPlan) else ()
         if isinstance(mapping, FragmentPlan):
+            if mapping.unknown_through_epoch is not None:
+                unknown_through_epoch = max(mapping.unknown_through_epoch, unknown_through_epoch or 0)
             if not mapping.coverage_complete and not unknown:
                 unknown = ("fragment_coverage_incomplete",)
             mapping = mapping.after
         if expected_hash != _hash(data):
-            return cls(text, unknown=("fragment_before_guard_mismatch",))
+            return cls(text, unknown=("fragment_before_guard_mismatch",), unknown_through_epoch=current_epoch)
         if mapping is None:
-            return cls(text, unknown=("fragment_map_missing",))
+            return cls(text, unknown=("fragment_map_missing",), unknown_through_epoch=current_epoch)
         try:
             mapping.validate_image(data)
         except UnicodeDecodeError:
-            return cls(text, unknown=("fragment_range_utf8_invalid",))
+            return cls(text, unknown=("fragment_range_utf8_invalid",), unknown_through_epoch=current_epoch)
         except ValueError as error:
-            return cls(text, unknown=(str(error),))
+            return cls(text, unknown=(str(error),), unknown_through_epoch=current_epoch)
         return cls(
             text,
             (
@@ -135,6 +146,7 @@ class _Image:
                 for f in mapping.fragments
             ),
             unknown,
+            unknown_through_epoch=unknown_through_epoch,
         )
 
     def slice(self, start: int = 0, end: int | None = None) -> _Image:
@@ -148,11 +160,13 @@ class _Image:
                 if f.start < right and f.end > left
             ),
             self.unknown,
+            unknown_through_epoch=self.unknown_through_epoch,
         )
 
     @classmethod
     def join(cls, parts: Iterable[_Image]) -> _Image:
         text, spans, unknown, offset = [], [], [], 0
+        horizon: int | None = 0
         for part in parts:
             text.append(part.text)
             spans.extend(
@@ -161,7 +175,8 @@ class _Image:
             )
             unknown.extend(part.unknown)
             offset += len(part.text.encode("utf-8"))
-        return cls("".join(text), spans, unknown)
+            horizon = None if horizon is None or part.unknown_through_epoch is None else max(horizon, part.unknown_through_epoch)
+        return cls("".join(text), spans, unknown, unknown_through_epoch=horizon)
 
     def own(self, source_ref: SourceRef, *, identity: str | None = None) -> _Image:
         if self.text:
@@ -203,6 +218,10 @@ class _Image:
         self.text = self.text[:start] + replacement.text + self.text[end:]
         self.spans = tuple(spans)
         self.unknown = tuple(dict.fromkeys((*self.unknown, *replacement.unknown)))
+        self.unknown_through_epoch = (
+            None if self.unknown_through_epoch is None or replacement.unknown_through_epoch is None
+            else max(self.unknown_through_epoch, replacement.unknown_through_epoch)
+        )
 
     def normalize_newlines(self) -> None:
         data = self.text.encode("utf-8")
@@ -220,6 +239,21 @@ class _Image:
             for f in self.spans
         )
         self.text = self.text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def restore_newlines(self, newline: str) -> None:
+        """Restore a document's known newline format without losing byte ranges."""
+        self.normalize_newlines()
+        if newline == "\r\n":
+            positions = [offset for offset, byte in enumerate(self.text.encode("utf-8")) if byte == 10]
+            self.spans = tuple(
+                _Span(f.identity, f.source_ref,
+                      f.start + bisect_right(positions, f.start - 1),
+                      f.end + bisect_right(positions, f.end - 1))
+                for f in self.spans
+            )
+        elif newline not in ("\n", "\r"):  # document_newline fixes the supported newline protocol.
+            raise ValueError("fragment_newline_format_invalid")
+        self.text = self.text.replace("\n", newline)
 
     def lines(self, start: int, end: int) -> list[_Image]:
         parts, offset = [], start
@@ -250,6 +284,7 @@ class _Image:
             after=mapping,
             coverage_complete=not self.unknown,
             unknown=self.unknown,
+            unknown_through_epoch=self.unknown_through_epoch,
         )
 
 

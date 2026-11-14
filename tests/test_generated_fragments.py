@@ -18,6 +18,84 @@ def _reference(number: int) -> fragments.SourceRef:
     return fragments.SourceRef(f"exomem://memory/{uuid.UUID(int=number)}")
 
 
+@pytest.mark.parametrize("epoch", [None, 7])
+def test_copied_legacy_uncertainty_survives_slicing_wrapping_and_fresh_entry_join(epoch):
+    text = "Café 🧭 retained\r\n"
+    legacy = fragments._Image.before(text, None, _hash(text), current_epoch=epoch)
+    legacy.normalize_newlines()
+    excerpt = legacy.slice(0, 6).wrap_excerpt("[", "]")
+    current = fragments._Image("fresh entry").own(_reference(1))
+    joined = fragments._Image.join((current, fragments._Image("\n"), excerpt))
+    joined.splice(0, 5, fragments._Image("new"))
+    plan = fragments.FragmentPlan.model_validate_json(joined.plan(_hash(text)).model_dump_json())
+    assert plan.unknown_through_epoch == epoch
+    assert {item.source_ref for item in plan.after.fragments} == {_reference(1).value}
+    rebound = fragments._Image.before(joined.text, plan, _hash(joined.text))
+    assert rebound.unknown_through_epoch == epoch
+
+
+def test_lost_or_mismatched_before_map_raises_uncertainty_to_current_checkpoint():
+    text = "retained bytes"
+    valid = fragments._Image(text).plan(_hash(text))
+    lost = fragments._Image.before(text, None, _hash(text), unknown_through_epoch=0, current_epoch=11)
+    changed = fragments._Image.before(text, valid, _hash("different"), current_epoch=13)
+    assert lost.plan(_hash(text)).unknown_through_epoch == 11
+    assert changed.plan(_hash(text)).unknown_through_epoch == 13
+    assert not lost.spans and not changed.spans
+
+
+@pytest.mark.parametrize("kind", ["top", "notes", "entities"])
+def test_count_refresh_keeps_source_owned_unicode_prose_and_crlf_byte_ranges(kind):
+    reference = _reference(8)
+    excerpt = fragments._Image("retained Café 🧭").own(reference)
+    if kind == "top":
+        image = fragments._Image.join((
+            fragments._Image("# Index\r\n\r\n## Recent activity\r\n\r\n- "), excerpt,
+            fragments._Image("\r\n\r\n## Counts\r\n\r\n- Notes (research): 1\r\n- Entities (person): 1\r\n"),
+        ))
+
+        def refresh(text):
+            return indexes._rewrite_top_index_notes_and_entities_counts(
+                text, notes_counts={"research": 2}, entities_counts={"person": 3}, _tracking=image,
+            )
+    elif kind == "notes":
+        image = fragments._Image.join((
+            fragments._Image("# Notes\r\n\r\n## By type\r\n\r\n### Research — "), excerpt,
+            fragments._Image(" (1)\r\n- [[Notes/Research/Demo/|Demo]] (1) — "), excerpt,
+            fragments._Image("\r\n"),
+        ))
+
+        def refresh(text):
+            return indexes._refresh_notes_subindex_text(
+                text, counts_by_type={"research": 2}, counts_by_subfolder={"Research": {"Demo": 2}}, _tracking=image,
+            )
+    else:
+        image = fragments._Image.join((
+            fragments._Image("# Entities\r\n\r\n## By type\r\n\r\n- [[Entities/People/|People]] (1) — "),
+            excerpt, fragments._Image("\r\n"),
+        ))
+
+        def refresh(text):
+            return indexes._refresh_entities_subindex_text(text, counts_by_type={"person": 3}, _tracking=image)
+
+    before = _hash(image.text)
+    image.unknown_through_epoch = 7
+    rendered = indexes._rewritten_in_place(image.text, refresh, _tracking=image)
+    assert "retained Café 🧭" in rendered
+    assert "\n" not in rendered.replace("\r\n", "")
+    plan = image.plan(before)
+    assert plan.unknown_through_epoch == 7
+    stripped, after = fragments.remove_source_fragments(rendered, plan, reference)
+    assert "retained Café 🧭" not in stripped
+    assert after.unknown_through_epoch == 7
+    if kind == "top":
+        assert "- Notes: 2" in stripped and "- Entities: 3" in stripped
+    elif kind == "notes":
+        assert "### Research —  (2)" in stripped and "[[Notes/Research/Demo/|Demo]] (2)" in stripped
+    else:
+        assert "[[Entities/People/|People]] (3)" in stripped
+
+
 def _seed(root: Path) -> dict[str, fragments.FragmentMap | fragments.FragmentPlan]:
     contents = {
         "Knowledge Base/Sources/index.md": "# Sources\n\n## By type\n\n## Recent captures\n\n",

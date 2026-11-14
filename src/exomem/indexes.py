@@ -51,7 +51,8 @@ def sources_index_path(vault_root: Path) -> Path:
     return kb_root(vault_root) / "Sources" / "index.md"
 
 
-def _rewritten_in_place(text: str, rewrite: Callable[[str], str]) -> str:
+def _rewritten_in_place(text: str, rewrite: Callable[[str], str], *,
+                        _tracking: generated_fragments._Image | None = None) -> str:
     r"""Run an LF-only section rewriter without changing the document's endings.
 
     Every splice in this module is written against LF: `find("\n## ")`,
@@ -70,10 +71,40 @@ def _rewritten_in_place(text: str, rewrite: Callable[[str], str]) -> str:
     mean anything.
     """
     newline = document_newline(text)
+    if _tracking is not None:
+        if _tracking.text != text:
+            raise ValueError("fragment_renderer_image_changed")
+        _tracking.normalize_newlines()
     rewritten = rewrite(text.replace("\r\n", "\n").replace("\r", "\n"))
+    if _tracking is not None:
+        if _tracking.text != rewritten:
+            raise ValueError("fragment_renderer_image_changed")
+        _tracking.restore_newlines(newline)
+        return _tracking.text
     if newline == "\n":
         return rewritten
     return rewritten.replace("\n", newline)
+
+
+def _rewrite_generated_matches(
+    text: str, pattern: re.Pattern[str], rewrite: Callable[[re.Match[str]], generated_fragments._Image],
+    tracking: generated_fragments._Image | None,
+) -> str:
+    """Apply exact spans from the existing generated-row format, without a text diff."""
+    replacements = [(match.start(), match.end(), rewrite(match)) for match in pattern.finditer(text)]
+    for start, end, replacement in reversed(replacements):
+        if tracking is not None:
+            tracking.splice(start, end, replacement)
+        text = text[:start] + replacement.text + text[end:]
+    return text
+
+
+def _matched_image(match: re.Match[str], group: str | int,
+                   tracking: generated_fragments._Image | None) -> generated_fragments._Image:
+    start, end = match.span(group)
+    if start == -1:
+        return generated_fragments._Image("")
+    return tracking.slice(start, end) if tracking is not None else generated_fragments._Image(match.group(group))
 
 
 @dataclass
@@ -202,7 +233,8 @@ def compute_updates(
         if trim_fragments:
             trim = trim_fragments[0]
             escaped = generated_fragments._Image(
-                escape_wikilinks_for_log(trim.text), unknown=trim.unknown
+                escape_wikilinks_for_log(trim.text), unknown=trim.unknown,
+                unknown_through_epoch=trim.unknown_through_epoch,
             )
             for fragment in trim.spans:
                 if fragment.start == 0 and fragment.end == len(trim.text.encode("utf-8")):
@@ -842,41 +874,52 @@ def _rewrite_top_index_notes_and_entities_counts(
     *,
     notes_counts: dict[str, int],
     entities_counts: dict[str, int],
+    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Rewrite per-type rows and ensure true Notes/Entities total rows."""
-    def _replace_notes(m: re.Match[str]) -> str:
+    def _replace_notes(m: re.Match[str]) -> generated_fragments._Image:
         type_key = m.group(2)
         actual = notes_counts.get(type_key)
         if actual is None:
-            return m.group(0)  # unknown type; leave alone
-        return f"{m.group(1)}{type_key}{m.group(3)}{actual}"
+            return _matched_image(m, 0, _tracking)
+        return generated_fragments._Image.join((
+            _matched_image(m, 1, _tracking), _matched_image(m, 2, _tracking),
+            _matched_image(m, 3, _tracking), generated_fragments._Image(str(actual)),
+        ))
 
-    def _replace_entities(m: re.Match[str]) -> str:
+    def _replace_entities(m: re.Match[str]) -> generated_fragments._Image:
         type_key = m.group(2)
         actual = entities_counts.get(type_key)
         if actual is None:
-            return m.group(0)
-        return f"{m.group(1)}{type_key}{m.group(3)}{actual}"
+            return _matched_image(m, 0, _tracking)
+        return generated_fragments._Image.join((
+            _matched_image(m, 1, _tracking), _matched_image(m, 2, _tracking),
+            _matched_image(m, 3, _tracking), generated_fragments._Image(str(actual)),
+        ))
 
-    text = _NOTES_COUNT_LINE.sub(_replace_notes, text)
-    text = _ENTITIES_COUNT_LINE.sub(_replace_entities, text)
+    text = _rewrite_generated_matches(text, _NOTES_COUNT_LINE, _replace_notes, _tracking)
+    text = _rewrite_generated_matches(text, _ENTITIES_COUNT_LINE, _replace_entities, _tracking)
     text = _rewrite_or_insert_total_count(
-        text, label="Notes", total=sum(notes_counts.values()), pattern=_NOTES_TOTAL_LINE
+        text, label="Notes", total=sum(notes_counts.values()), pattern=_NOTES_TOTAL_LINE, _tracking=_tracking,
     )
     text = _rewrite_or_insert_total_count(
         text,
         label="Entities",
         total=sum(entities_counts.values()),
         pattern=_ENTITIES_TOTAL_LINE,
+        _tracking=_tracking,
     )
     return text
 
 
 def _rewrite_or_insert_total_count(
-    text: str, *, label: str, total: int, pattern: re.Pattern[str]
+    text: str, *, label: str, total: int, pattern: re.Pattern[str],
+    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     line = f"- {label}: {total}"
-    if pattern.search(text):
+    if match := pattern.search(text):
+        if _tracking is not None:
+            _tracking.splice(match.start(), match.end(), generated_fragments._Image(line))
         return pattern.sub(line, text, count=1)
     counts_idx = text.find(INDEX_COUNTS_HEADER)
     if counts_idx == -1:
@@ -886,6 +929,8 @@ def _rewrite_or_insert_total_count(
         section_end = len(text)
     prefix = text[:section_end].rstrip("\n")
     suffix = text[section_end:]
+    if _tracking is not None:
+        _tracking.splice(len(prefix), section_end, generated_fragments._Image(f"\n{line}\n"))
     return f"{prefix}\n{line}\n{suffix}"
 
 
@@ -1032,6 +1077,7 @@ def _refresh_notes_subindex_text(
     counts_by_type: dict[str, int],
     counts_by_subfolder: dict[str, dict[str, int]],
     owners: tuple[_NotesOwner, ...] | None = None,
+    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Rewrite count numbers in `Notes/index.md` without touching descriptions.
 
@@ -1051,30 +1097,33 @@ def _refresh_notes_subindex_text(
             (owner for owner in owners if folded in {title.casefold() for title in owner.titles}), None
         )
 
-    def _h3(m: re.Match[str]) -> str:
+    def _h3(m: re.Match[str]) -> generated_fragments._Image:
         owner = _owner_titled(m.group("name"))
         actual = counts_by_type.get(owner.token) if owner is not None else None
         if actual is None:
-            return m.group(0)
-        prefix = m.group(1)  # `### Research`
-        desc = m.group(3) or ""  # ` — description`
-        return f"{prefix}{desc} ({actual})"
+            return _matched_image(m, 0, _tracking)
+        return generated_fragments._Image.join((
+            _matched_image(m, 1, _tracking), _matched_image(m, 3, _tracking),
+            generated_fragments._Image(f" ({actual})"),
+        ))
 
-    def _bullet(m: re.Match[str]) -> str:
+    def _bullet(m: re.Match[str]) -> generated_fragments._Image:
         type_folder = m.group("typef")
         sub = m.group("sub")
-        rest = m.group("rest") or ""
         # `Research`-style: sub is the project folder (`Project Alpha`, `Work`).
         # For flat types where the bullet might not have a sub, we leave alone.
         per_type = counts_by_subfolder.get(type_folder, {})
         actual = per_type.get(sub)
         if actual is None:
-            return m.group(0)
-        return f"{m.group(1)} ({actual}){rest}"
+            return _matched_image(m, 0, _tracking)
+        return generated_fragments._Image.join((
+            _matched_image(m, 1, _tracking), generated_fragments._Image(f" ({actual})"),
+            _matched_image(m, "rest", _tracking),
+        ))
 
-    text = _NOTES_H3_COUNT.sub(_h3, text)
-    text = _add_home_sections(text, owners, counts_by_type, _owner_titled)
-    text = _notes_subfolder_bullet_re(kb_prefix()).sub(_bullet, text)
+    text = _rewrite_generated_matches(text, _NOTES_H3_COUNT, _h3, _tracking)
+    text = _add_home_sections(text, owners, counts_by_type, _owner_titled, _tracking=_tracking)
+    text = _rewrite_generated_matches(text, _notes_subfolder_bullet_re(kb_prefix()), _bullet, _tracking)
     return text
 
 
@@ -1083,6 +1132,8 @@ def _add_home_sections(
     owners: tuple[_NotesOwner, ...],
     counts_by_type: dict[str, int],
     owner_titled: Callable[[str], _NotesOwner | None],
+    *,
+    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Give each home that has no section one, at the end of `## By type`."""
     lines = text.splitlines(keepends=True)
@@ -1120,6 +1171,10 @@ def _add_home_sections(
     end = sum(len(line) for line in lines[:end_line])
     head, tail = text[:end].rstrip("\n"), text[end:].lstrip("\n")
     joined = head + "\n\n" + "\n\n".join(sections) + "\n"
+    if _tracking is not None:
+        removed = len(text[end:]) - len(tail)
+        replacement = "\n\n" + "\n\n".join(sections) + "\n" + ("\n" if tail else "")
+        _tracking.splice(len(head), end + removed, generated_fragments._Image(replacement))
     return joined + ("\n" + tail if tail else "")
 
 
@@ -1128,6 +1183,7 @@ def _refresh_entities_subindex_text(
     *,
     counts_by_type: dict[str, int],
     registry: EntityTypeRegistry | None = None,
+    _tracking: generated_fragments._Image | None = None,
 ) -> str:
     """Refresh registered entity rows while preserving hand-authored prose."""
     registry = registry or core_registry()
@@ -1138,16 +1194,18 @@ def _refresh_entities_subindex_text(
         tuple(item.folder for item in registry.active_definitions),
     )
 
-    def _bullet(m: re.Match[str]) -> str:
+    def _bullet(m: re.Match[str]) -> generated_fragments._Image:
         folder = m.group("folder")
         definition = registry.by_folder.get(folder.casefold())
         if definition is None:
-            return m.group(0)
+            return _matched_image(m, 0, _tracking)
         actual = counts_by_type.get(definition.id, 0)
-        rest = m.group("rest") or ""
-        return f"{m.group(1)} ({actual}){rest}"
+        return generated_fragments._Image.join((
+            _matched_image(m, 1, _tracking), generated_fragments._Image(f" ({actual})"),
+            _matched_image(m, "rest", _tracking),
+        ))
 
-    refreshed = pattern.sub(_bullet, text)
+    refreshed = _rewrite_generated_matches(text, pattern, _bullet, _tracking)
     present = {match.group("folder").casefold() for match in pattern.finditer(refreshed)}
     missing = [
         definition
@@ -1174,6 +1232,10 @@ def _refresh_entities_subindex_text(
     joined = f"{prefix}\n" + "\n".join(rows) + "\n"
     if suffix:
         joined += f"\n{suffix}"
+    if _tracking is not None:
+        removed = len(refreshed[section_end:]) - len(suffix)
+        replacement = "\n" + "\n".join(rows) + "\n" + ("\n" if suffix else "")
+        _tracking.splice(len(prefix), section_end + removed, generated_fragments._Image(replacement))
     return joined
 
 
