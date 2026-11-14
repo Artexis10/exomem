@@ -4788,6 +4788,7 @@ def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> Lexical
     A catalogue that is missing, at an older schema or built under another semantic identity is rebuilt from
     canonical pages in the background (`rebuild_atomic`) and reads as None until that lands: the rebuild is
     O(vault) and a storing door asks under its mutation boundary (D5), so the door stores unchecked meanwhile.
+    In store mode the owner's bounded background pass repairs old rows, without a file-catalogue rebuild.
     A store flagged by a failed `record_payload_commit` is reconciled inline, which costs one pass over the
     pages and never rebuilds whole, because the identity was proved first. `verify` reconciles the catalogue
     against the pages even when nothing flags it, because the audit counts every row and a row lost to a failed
@@ -4800,7 +4801,8 @@ def _duplicate_index_store(vault_root: Path, *, verify: bool = False) -> Lexical
     if store._failed:
         return None
     if not store.catalogue_current():
-        _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
+        if not store._reads_store():
+            _schedule_repair(vault_root, cause=RepairCause.DUPLICATE_INDEX_NOT_CURRENT)
         return None
     if store._payload_stale or verify:
         try:
@@ -11677,13 +11679,17 @@ class LexicalStore:
             return dict.fromkeys(rel_paths, None)
 
     def catalogue_current(self) -> bool:
-        """Whether the sidecar exists at the current schema, shape and semantic identity. Read-only, no DDL.
+        """Whether derived rows are current for duplicate lookup. Read-only, no DDL.
 
-        A catalogue that fails any of these is one that `ensure_fresh` rebuilds whole, so a caller that must not
-        wait for that (the duplicate lookup) treats it as absent.
+        A file catalogue must match this build's schema, shape and semantic identity.
+        Store rows must finish their owner-version pass before the index can answer.
         """
         if self._reads_store():
-            return True  # the store derives each page's rows in its commit
+            from .vault_store import rederive
+
+            # Old store rows stay incomplete until the owner's background pass finishes.
+            with self._store_connection() as conn:
+                return conn is not None and not rederive.owner_schema_behind(conn)
         from .vocabulary.registry import RegistryError
 
         if self._sidecar_unreadable():
