@@ -595,7 +595,9 @@ def prepare_inventory(arm: Arm, root: Path, profile: dict) -> dict:
         raise RuntimeError("inventory preparation requires the existing pinned served artifact; no acquisition")
     artifact = embedding_backend.artifact_dir(embeddings.MODEL_NAME, served)
     digest = embedding_backend.artifact_sha256(artifact, served.files)
-    encoder_profile = dataclasses.replace(embedding_backend.read_profile(embeddings.MODEL_NAME), artifact_digest=digest)
+    # The runtime's digest representation identifies the space; the full hash remains provenance.
+    _onnx_path, runtime_digest = embedding_backend.ensure_artifact(embeddings.MODEL_NAME, served)
+    encoder_profile = dataclasses.replace(embedding_backend.read_profile(embeddings.MODEL_NAME), artifact_digest=runtime_digest)
     identity = recall_space.SpaceIdentity(embeddings.MODEL_NAME, encoder_profile.fingerprint(), recall_space.current_dim())
     truth = []
     with library_scope():

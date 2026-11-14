@@ -509,6 +509,9 @@ class Arm:
         A worker that re-embeds or rebuilds after startup stays busy and is refused here.
         """
         def cpu_seconds() -> float:
+            # An exited worker can retain a flat zombie CPU counter; it cannot qualify as quiet.
+            if self.worker is None or self.worker.poll() is not None:
+                raise MeasurementRefused("arm-worker-exited", phase=phase)
             fields = Path(f"/proc/{self.worker.pid}/stat").read_text().rsplit(")", 1)[1].split()
             return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 
