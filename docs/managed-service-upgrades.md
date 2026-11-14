@@ -189,7 +189,12 @@ whether a repair runs. Install the release only when all four pass:
 
 - `handoff.ready_after_ms` is under 120000 (two minutes).
 - `/health/ready` stays ready for 45 minutes after the switch.
-- Every full lexical repair in that window publishes.
+- Full lexical repairs recover before the fixed window ends. A declined pass
+  may recover through existing bounded retries and catch-up. The target must
+  publish a replacement and restore authoritative current-catalogue admission;
+  these can happen in separate repair steps. The final in-window health
+  observation must report retrieval ready and admitted, and repair idle, with
+  no observed target recovery left unresolved.
 - During each repair in that window, one MCP read and one MCP write succeed,
   and neither returns `MUTATION_BUSY` or `VAULT_LOCK_TIMEOUT`.
 
@@ -199,6 +204,19 @@ and write in the live install window; there, use a write that is safe to repeat
 and that the vault accepts, such as recording an episode.
 `ready_after_ms` counts from the old worker's stop, so it includes the state
 migrator when `handoff.migration.state` is `ran`.
+
+Start the fixed observation window after both the handoff completes and the
+target reports ready.
+
+Preserve every declined attempt, error, unmatched event and unknown attribution.
+Failed or unproved recovery still holds installation. Repair idle alone proves
+neither currentness nor an empty internal queue. Use authoritative admission
+and the final in-window readiness proof to establish the recovered state.
+
+Keep an earlier report and its verdict when an authorized criterion changes.
+Write a separate assessment against the revised criterion. Reuse evidence only
+while its relevant artifact, runtime, workload and conditions match; refresh
+the affected proof when they change.
 
 The copy needs disk for the vault and the state directory, plus one release
 environment. The throwaway service needs memory for two workers during the
@@ -377,8 +395,10 @@ candidate stages under `/tmp/xr/releases`, never under the live service root.
 The log is JSON lines. Read these events and messages after the noted time:
 
 - A `lexical_repair_started` event with `fields.kind` `full` starts a full
-  repair. Its `lexical_repair_finished` event must report `result` `published`.
-  `targeted` and `catch_up` are the usual delta repairs.
+  repair. Preserve its finish result, including a declined attempt. A later
+  full repair can publish and a `targeted` or `catch_up` step can restore
+  authoritative admission. Check the recovery criterion above within the same
+  fixed window. A `published` result alone does not prove admission.
 - `standby built a detached lexical catalogue` and `adopted retrieval catalog
   healed=` show that promotion adopted the standby's catalog.
 - `managed retrieval catalog delegated to background repair` or `maintained
