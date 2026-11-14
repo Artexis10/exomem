@@ -47,6 +47,8 @@ class _Passes:
         self.delay = 0.0
         self.fail = False
         self.fail_in_worker = False
+        #: When each whole review audit of the refresh worker failed, in monotonic seconds.
+        self.failed_passes: list[float] = []
 
     def background(self) -> list[tuple[str, float, float, str]]:
         """The whole review audits that the refresh worker ran."""
@@ -67,6 +69,8 @@ def passes(monkeypatch: pytest.MonkeyPatch) -> _Passes:
                 record.fail_in_worker and threading.current_thread().name == "exomem-review-pass"
             ):
                 record.failures += 1
+                if kind == "audit" and threading.current_thread().name == "exomem-review-pass":
+                    record.failed_passes.append(time.monotonic())
                 raise RuntimeError("a check failed")
             time.sleep(record.delay)
             result = real(*args, **kwargs)
@@ -464,23 +468,48 @@ def test_two_background_passes_keep_the_minimum_gap(
     assert second_start - first_end >= review_pass.gap_factor() * (first_end - first_start)
 
 
-def test_a_failed_background_pass_keeps_the_held_pass(
+def test_after_a_failed_pass_a_stale_listing_runs_its_own_audit(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
 ) -> None:
     monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_GAP_FACTOR", "0.05")
     edited = _unlinked_notes(vault, 3)[0]
     _serve(vault, warm_managed_cell)
     _hold(vault)
+    passes.fail_in_worker = True
     with request_scope(OWNER):
-        before = _list(vault)
-        passes.fail = True
         _edit(vault, edited)
-        _list(vault)
-        _wait_for(lambda: passes.failures >= 1)
+        stale = _list(vault)
+        _wait_for(lambda: passes.failed_passes)
+        # The refresh failed, so nothing will replace the stale pass: the listing answers as
+        # it did with no pass held, and the edited item can be decided.
         after = _list(vault)
+        decided = _dismiss(vault, _item(after, edited)["id"])
+        passes.fail_in_worker = False
+        _wait_for(lambda: _from_held(_list(vault)))
 
-    assert after["as_of"] == before["as_of"]
-    assert _paths(after) == _paths(before)
+    assert _item(stale, edited)["page_changed"] is True
+    assert not _from_held(after)
+    assert "page_changed" not in _item(after, edited)
+    assert decided["state"] == "dismissed"
+
+
+def test_each_failure_in_a_row_doubles_the_gap(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, passes: _Passes
+) -> None:
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_QUIET_SECONDS", "0.1")
+    monkeypatch.setenv("EXOMEM_REVIEW_PASS_GAP_FACTOR", "0.05")
+    _unlinked_notes(vault, 3)
+    _serve(vault, warm_managed_cell)
+    passes.fail_in_worker = True
+    review_pass.start(vault)
+    with request_scope(OWNER):
+        # Each listing asks for a pass, so only the gap spaces the attempts.
+        _wait_for(lambda: _list(vault, mode="relation-debt") and len(passes.failed_passes) == 6)
+
+    fifth, sixth = passes.failed_passes[4:6]
+    # A failed pass counts as one second long: the gap after five failures is 0.05 * 2**5 s.
+    assert sixth - fifth >= 0.05 * 2**5
 
 
 def test_a_failing_check_fails_only_the_queues_that_run_it(

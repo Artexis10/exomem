@@ -21,6 +21,8 @@ The held pass holds findings and their coverage only. Everything that decides wh
 - A read of a stale pass answers at once, and asks the worker for one refresh. The stale answer
   drops a finding whose page is gone and a due finding that the due-state projection no longer
   holds, and it names the pages that changed.
+- When the last pass failed, nothing will replace a stale pass soon. A read of it then keeps the
+  request path, until a pass succeeds.
 - The worker runs a pass when a read asks for one. It also runs the first pass of the process
   once the vault has been quiet. Nothing else starts a pass: a pass that nobody reads is not
   renewed, and a failed pass is not tried again until a read asks.
@@ -171,6 +173,7 @@ def view(
     with _LOCK:
         held = _HELD.get(key)
         worker = _WORKERS.get(key[0])
+        last = _LAST.get(key)
     if worker is None or not worker.serving():
         # Nothing keeps a pass current in this process.
         return None
@@ -179,6 +182,9 @@ def view(
         return None
     if not _current(held, generation):
         _ask(worker, key)
+        if last is not None and last[2]:
+            # The last pass failed, so this one would stay stale: answer as before.
+            return None
     wanted = None if categories is None else frozenset(categories)
     return _view(vault_root, key, held, wanted, generation)
 
@@ -255,12 +261,8 @@ def _projected(vault_root: Path, findings: list[AuditFinding]) -> frozenset[tupl
     """`(category, path)` of each due finding that the due-state projection holds now."""
     from . import due_state
 
-    return frozenset(
-        (f.category, f.path)
-        for f in findings
-        if f.category in due_state.PROJECTION_CATEGORIES
-        and due_state.projected(vault_root, f.category, f.path)
-    )
+    due = {(f.category, f.path) for f in findings if f.category in due_state.PROJECTION_CATEGORIES}
+    return (due_state.projected(vault_root, due) if due else None) or frozenset()
 
 
 def _hold(key: tuple, fresh: _Pass) -> None:
@@ -321,15 +323,14 @@ def _still_true(
     now = dict(zip(rels, live, strict=True))
     gone = {rel for rel in rels if now[rel] is None}
     changed = {rel for rel in rels if now[rel] is not None and now[rel] != held.pages[rel][1]}
+    watched = {(f.category, f.path) for f in findings} & held.projected
+    # One read of the projection for the listing. None: it cannot be read, so it resolves nothing.
+    still = due_state.projected(vault_root, watched) if watched else None
     kept = [
         f
         for f in findings
         if not any(rel in gone for rel in (f.path, *(f.paths or ())))
-        and (
-            (f.category, f.path) not in held.projected
-            # None: the projection cannot be read, so it resolves nothing.
-            or due_state.projected(vault_root, f.category, f.path) is not False
-        )
+        and (still is None or (f.category, f.path) not in watched or (f.category, f.path) in still)
     ]
     return kept, changed
 

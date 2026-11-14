@@ -60,7 +60,7 @@ Only the background worker of the serving runtime SHALL run a pass. A request SH
 
 A read of a stale pass SHALL answer from it and ask for one background refresh. The stale answer SHALL drop the items of a page that no longer exists and the due items that the due-state projection no longer holds, and it SHALL mark with `page_changed` the items of a page that changed after the pass. When the due-state projection cannot be read, the stale answer SHALL keep the due items. The listing reply SHALL carry the pass time as `as_of` and SHALL say in `refreshing` whether a pass is due or running.
 
-The worker SHALL run a pass when a read asks for one, and SHALL run the first pass of the process once the service has been quiet. Nothing else SHALL start a pass. Two passes SHALL start at least a set multiple of the last pass's duration apart, and that gap SHALL double with each failure in a row. A failed pass SHALL leave the held pass in place.
+The worker SHALL run a pass when a read asks for one, and SHALL run the first pass of the process once the service has been quiet. Nothing else SHALL start a pass. Two passes SHALL start at least a set multiple of the last pass's duration apart, and that gap SHALL double with each failure in a row. A failed pass SHALL replace nothing. After a failed pass, a read of a stale pass SHALL keep the request path until a pass succeeds.
 
 A decision on an item whose page changed after the pass SHALL be refused with `REVIEW_ITEM_CHANGED`.
 
@@ -108,6 +108,12 @@ A decision that binds an id from the review queues SHALL read each queue whole a
 - **WHEN** the worker's pass fails and no listing arrives
 - **THEN** the worker runs no further pass
 - **AND** it runs one after a listing asks, once the gap has passed
+
+#### Scenario: A stale pass is not read after a failed pass
+
+- **WHEN** a held pass is stale and the worker's last pass failed
+- **THEN** a listing runs its own audit, as with no pass held
+- **AND** a listing reads a held pass again after a pass succeeds
 
 #### Scenario: A decision on a changed item is refused
 
